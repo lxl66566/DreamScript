@@ -1,46 +1,46 @@
-# DreamScript — design charter
+# DreamScript — 设计章程
 
-This file is the global charter for the DreamScript language design. The working record of all decisions is `docs/en/design-decisions.md`. `design/` is a frozen archive (Phase 1-3 research and decision catalogs, plus `design/author_say.md`). Do not read `design/*` frequently unless necessary, because the articles are too long.
+本文件是 DreamScript 语言设计的全局章程。所有决策的权威记录是 `docs/en/design-decisions.md`。`design/` 是冻结归档。非必要不阅读 `design/*`，因为文章都太长。
 
-## Mission
+## 期望
 
-A general-purpose, interpreted programming language with static linear typing, immutable-by-default bindings, and performance approaching compiled languages. The compiler produces an internal IR (bytecode at minimum, optional JIT tiers). The sweet spot being targeted: scripting-language ergonomics with systems-language performance guarantees.
+一门通用、解释执行的编程语言，具有静态线性类型、默认不可变绑定，以及接近编译语言的性能。编译器生成内部 IR（至少是字节码，可选 JIT 分层）。目标最佳平衡点：脚本语言的易用性，加上系统语言的性能保证。
 
-## Hard requirements (author's fixed inputs)
+1. 解释执行。允许并预期使用内部 IR/字节码。在值得的地方允许 JIT。
+2. 静态线性（或仿射）类型，在编译期强制。
+3. 超高性能。编译语言在原始代码生成之外所做的一切，这里也必须发生：保证尾调用优化、拆箱、逃逸分析、适用处的内联缓存、合法特化。JIT 按层可选。
+4. 语法糖预算：不多于 Kotlin 的全部语法糖。正交性优于表面特性。
+5. 绑定默认不可变；可变是显式且局部可见的选择。
+6. 所有权是开放问题。优先选择学习成本低、错误率低且保留性能收益的设计。
+7. 代数效应是可选项。认真评估；只有在其复杂性值得时才采用。
 
-1. Interpreted execution. Internal IR/bytecode is allowed and expected. JIT is allowed where it pays for itself.
-2. Static linear (or affine) typing, enforced at compile time.
-3. Ultra-high performance. Everything a compiled language does beyond raw codegen must also happen here: guaranteed tail-call optimization, unboxing, escape analysis, inline caching where applicable, legal specialization. JIT optional per tier.
-4. Syntax sugar budget: at most Kotlin's total sugar surface. Orthogonality beats surface features.
-5. Bindings immutable by default; mutation is an explicit, locally-visible choice.
-6. Ownership is an open question. Prefer designs with low learning cost and low error rate that keep the performance benefits.
-7. Algebraic effects are optional. Evaluate them seriously; adopt only if they earn their complexity.
+## 设计哲学
 
-## Design philosophy (author's essays, distilled)
+提炼于作者博客 C:/programs/me/lxl66566.github.io/src/coding/philosophy_of_PL.md / C:/programs/me/lxl66566.github.io/src/coding/index.md 等文章。
 
-- Decoupling first. Every feature is an orthogonal, composable piece, following the LSP/RISC model. Reject entangled features: function-coloring entangles every function with its scheduling; C++ specialization entangles generics with ad-hoc priority rules; inheritance entangles data, behavior and identity.
-- Set-theoretic types. Types are sets; union and intersection are natural; generic instances must not overlap, which removes the need for specialization matching.
-- Monadic extraction over default parameters. Optional/erroneous values are wrappers with flexible, composable extraction (`unwrap_or_else` style), never evaluated-out-of-order default arguments.
-- Composition over inheritance; trait-like relationships over interface hierarchies.
-- Compile-time errors over runtime errors. Invalid states should fail to typecheck; prefer enums and types over stringly-typed runtime checks.
-- Explainability budget. Every feature must pay for itself in power; the language must remain fully explainable in a short tutorial.
+- 解耦优先。每个特性都是正交、可组合的部件，遵循 LSP/RISC 模型。拒绝纠缠特性：函数着色把每个函数与其调度纠缠；C++ 特化把泛型与临时优先级规则纠缠；继承把数据、行为和身份纠缠。
+- 集合论类型。类型即集合；并集和交集是自然的；泛型实例不得重叠，从而消除特化匹配的需要。
+- 单子式提取优于默认参数。可选/错误值是包装器，具有灵活、可组合的提取方式（`unwrap_or_else` 风格），绝不是乱序求值的默认参数。
+- 组合优于继承；类 trait 关系优于接口层级。
+- 编译期错误优于运行时错误。无效状态应无法通过类型检查；优先使用枚举和类型，而非字符串化类型的运行时检查。
+- 可解释性预算。每个特性都必须以能力回报自身；语言必须仍能在一篇简短教程中完全解释清楚。
 
-## Author taste calibration
+## 作者品味校准
 
-- Primary background: Rust, TS, Python, Lua, Java, C++; TS+bun ergonomics are loved; Go and Lua are disliked.
-- Appreciates: Koka's UFCS and effect rows, Vale's memory-design writing, Roc's pragmatism, MoonBit's momentum, monadic `Option`/`Result`.
-- Dislikes: specialization, `#include`-style modules, Python's module granularity, steep builtin-function learning curves with poor docs.
+- 主要背景：Rust、TS、Python、Lua、Java、C++；喜爱 TS+bun 的人体工学；不喜欢 Go 和 Lua。
+- 欣赏：Koka 的 UFCS 和效应行、Vale 的内存设计文章、Roc 的务实、MoonBit 的势头、单子式 `Option`/`Result`。
+- 不喜欢：特化、`#include` 风格模块、Python 的模块粒度、内置函数学习曲线陡峭且文档差。
 
-## Documentation conventions
+## 文档约定
 
-- Language: English, no emoji. Every markdown paragraph is a single line (no hard wrapping, no width limit).
-- `docs/en/design-decisions.md` is the authoritative working record of every language decision (all 42 decision points, author supplements included). Implementation and further design work read this file; it is sufficient without the archive. `docs/zh/design-decisions.md` is its Chinese mirror; the English file is authoritative when the two diverge.
-- `design/` is a read-only archive, kept for reference only: never modify files under `design/`, and do not read it unless the working record is genuinely insufficient on a point (then treat it as background, still never edit it). It contains the Phase 1-3 research notes (`design/en/research/`), decision catalogs and decision record (`design/en/design/`), Chinese mirrors (`design/zh/`), and `design/author_say.md` (author supplements, already incorporated into the working record). The English archive files are authoritative when the English and Chinese mirrors diverge.
-- Files are strictly disjoint per contributor; no git commits unless the author asks.
+- 语言：无 emoji。每个 Markdown 段落为单行（不硬换行，不限宽度）。
+- `docs/en/design-decisions.md` 是每个语言决策的权威工作记录（全部 42 个决策点，包含作者补充）。实现和进一步设计工作阅读此文件。
+- `design/` 是只读归档，仅供参照：绝不修改 `design/` 下的文件，且除非工作记录在某点上确实不足，否则不要阅读它（此时将其视为背景，仍然绝不编辑它）。它包含阶段 1-3 研究笔记（`design/en/research/`）、决策目录与决策记录（`design/en/design/`）、以及 `design/author_say.md`（作者补充，已并入工作记录）。英文与中文镜像分歧时，以英文归档文件为准。
+- `docs/en/implementation-plan.md` 是实施计划，需要查看。
 
-## Status
+## 其他约束
 
-- Phase 1 (research): done. Archived under `design/en/research/`.
-- Phase 2 (option catalogs): done. Archived under `design/en/design/`; `design/en/design/00-decision-map.md` is the master worksheet.
-- Phase 3 (author decisions): done 2026-11-08. Every decision point resolved; extracted in full into `docs/en/design-decisions.md` (decisions, staging, resolved open questions, seed test corpus).
-- Phase 4 (implementation): current. Work from `docs/en/design-decisions.md` (staging section); the seed test corpus is listed there.
+1. 需求化提交，每次提交后需要根据本次优化的经验，更新进度、踩坑、下一步计划等等到 docs/ 里；不要有废话，已经搞完没问题/踩过坑排除的方向可以移除，有新的改进项可以记录
+2. 文档和代码都不要过于长，如果不断迭代加长，记得拆。（不要盲目拆，只有明确边界才拆；单测不算入代码长度）。
+   - 如果代码也有明确边界，也拆成 workspace 和多 crates
+3. 讲究效率，不钻牛角尖
