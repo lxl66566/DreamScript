@@ -1,0 +1,64 @@
+// source: docs/en/design-decisions.md section 13.5 (generics: coherent traits)
+// purpose: ~Copyable generic stack, disjoint instance heads plus rejection, derive + comptime schema, evidence dispatch
+// items:
+// stack: stage: typecheck
+// push: stage: typecheck
+// pop: stage: typecheck
+// ord: stage: typecheck
+// json: stage: typecheck
+// impl-json-int: stage: typecheck
+// impl-json-bool: stage: typecheck
+// impl-json-list: stage: typecheck
+// impl-json-int-bool: stage: reject instance head int | bool intersects the int and bool heads; witness int [B6]
+// point: stage: m6
+// schema: stage: m6
+// p1: stage: m6
+// p2: stage: m6
+// p: stage: m6
+// js: stage: m6
+
+// 1. polymorphic container API over affine elements [C1, D2]
+struct stack[t] { items: list[t] }
+const push = [t: ~Copyable] (s: stack[t], x: t) -> stack[t] {
+  stack { items: cons(x, s.items) }
+}
+const pop = [t: ~Copyable] (s: stack[t]) -> (stack[t], t?) {
+  (stack { items: s.items.tail() }, s.items.head())
+}
+
+// 2. traits with disjoint instance heads [B6]
+trait ord {
+  const compare = (self: self, other: self) -> int
+}
+trait json {
+  const to_json = (self: self) -> string
+}
+impl json for int {
+  const to_json = (self: self) -> string { str(self) }
+}
+impl json for bool {
+  const to_json = (self: self) -> string { str(self) }
+}
+impl[t: json] json for list[t] {
+  const to_json = (self: self) -> string { "[" + self.map((x) => x.to_json()).join(",") + "]" }
+}
+impl json for int | bool {
+  const to_json = (self: self) -> string { str(self) }
+}
+
+// 3. derive + comptime reflection [G1, G2]
+#[derive(hash, show, to_json, ord)]
+struct point { x: int, y: int }
+const schema = (comptime t: type) -> string {
+  var s = "{"
+  for f in fields(t) {
+    s += f.name + ": " + type_name(f.type) + ", "
+  }
+  s + "}"
+}
+
+// 4. execution: one body per generic fn + evidence words [H3]
+const p1 = point { x: 1, y: 2 }
+const p2 = point { x: 3, y: 4 }
+const p = max(p1, p2)
+const js = p.to_json()

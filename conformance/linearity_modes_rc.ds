@@ -1,0 +1,39 @@
+// source: docs/en/design-decisions.md section 13.2 (linearity: modes and RC)
+// purpose: linear file with deinit, mut parameter windows, affine buffer move, COW split, fused map chain
+// items:
+// raw_fd: stage: typecheck
+// io_error: stage: typecheck
+// file: stage: typecheck
+// read_u32: stage: run
+// sum_file: stage: run
+// words: stage: run
+// lens: stage: run
+// total: stage: run
+
+type raw_fd = int
+tag io_error
+
+struct file: ~Copyable {
+  fd: raw_fd
+  deinit { close(self.fd) }
+}
+
+const read_u32 = (f: mut file) -> u32 | io_error {
+  const b = f.read_exact(4)?
+  b.to_u32_le()
+}
+
+const sum_file = (path: string) -> u32 | io_error {
+  const f = open(path)
+  var total: u32 = 0
+  var n: u32 = 0
+  while n < 1000 {
+    total += read_u32(f)?
+    n += 1
+  }
+  total
+}
+
+const words = "alpha beta gamma".split(' ')
+const lens = words.map((w) => w.len()).collect()
+const total = (sum_file("metrics.bin") or 0) + lens.len()

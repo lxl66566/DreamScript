@@ -1,0 +1,23 @@
+[package]
+name         = "ds-mod"
+description  = "dsmod module format: writer, validating reader, mmap loader, and cache path layout for DreamScript"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3.workspace    = true
+memmap2.workspace   = true
+thiserror.workspace = true
+ds-abi  = { path = "../ds-abi" }
+ds-diag = { path = "../ds-diag" }
+
+[dev-dependencies]
+arbitrary.workspace = true

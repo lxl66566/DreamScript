@@ -1,0 +1,24 @@
+[package]
+name         = "ds-vm"
+description  = "Tier-1 VM for DreamScript: executes the ds-abi uop contract from its canonical 32-bit encoding with pooled immediates and the slot-overlay call ABI"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ds-abi = { path = "../ds-abi" }
+ds-mod = { path = "../ds-mod" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name    = "vm"
+harness = false

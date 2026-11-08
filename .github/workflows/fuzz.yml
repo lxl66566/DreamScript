@@ -1,0 +1,25 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC; no push trigger by design
+
+env:
+  CARGO_TERM_COLOR: always
+  # Raised iteration count for the scheduled run; unused until ds-mod's
+  # fuzz mirror reads the knob, so the job stays green either way.
+  FUZZ_RUNS: "50000"
+
+jobs:
+  ds-mod-reader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo nextest run -p ds-mod --test fuzz_read

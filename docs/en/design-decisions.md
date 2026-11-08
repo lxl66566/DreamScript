@@ -227,6 +227,10 @@ Interpolation `$x` (bare identifier) and `${expr}` (expressions), with an explic
 
 Against Kotlin's 38 features / 74-76 cost-unit ceiling; headroom reserved: 16 features / 40-42 units. Included rows: newline-terminated statements (S1); interpolation `$x`/`${e}` (S1); raw strings `r#"..."#` (S1); postfix `?` (S2); `or` extraction + `or return/break/continue` (S2); `is` narrowing (S2); `.err(h)`/`.ok(h)` difference-typed handlers (S2); match/if expressions with exhaustive-union diagnostics (S2); match guards (S1); or-patterns (S1); destructuring (S2); named + literal-only default arguments (S2); trailing lambda, last argument only (S2); UFCS (S2); type aliases (S1); sum-type declaration `tag`/enum (S2); derive attribute `#[derive(...)]` with auto `==` (S2); ranges `..`/`..=` + `in` (S1); numeric suffixes + separators (S1); `const`/`var` split (S1); operator-overload traits, fixed set and precedence (S2); `T?` alias (S2). Deferred-additive rows (in headroom order of likelihood): `|>` (S1), anonymous record literals (S2), `@` binders (S1), vararg/spread (S1), labeled break/continue (S1), lambda shorthand `it` (S1). Kotlin features deleted wholesale by set typing and UFCS: `?.`, elvis, `!!` (replaced by `is`/`or` + none-typing), smart casts (`is` narrowing), infix functions and extension functions/properties (UFCS), data-class synthesis (derives + structural `==`), sealed hierarchies (closed unions), receiver-lambda DSLs, primary constructors, reified type parameters, backtick identifiers, `tailrec` (TCO is guaranteed), context parameters (capability parameters). Excluded from user surface permanently: free operator overloading and custom operators, Deref coercions, convention-based privacy.
 
+### 6.1 Implementation-normalized surface spellings (corpus-adopted; to be locked at M2)
+
+Spellings the seed corpus (`conformance/`) uses where the record under-specifies the surface; adopted for implementation, locked or revised at M2 checking: trait member signatures spell the receiver as an ordinary leading parameter `(self: self, ...)` per C2 modes (no `&Self`/`&mut self`); derives are attributes `#[derive(hash, show, ord)]` per F7's derive row; generic value declarations use `struct stack[t]` with functional `push/pop` returning updated values per D2 (in-place field assignment is undecided); generic clauses on functions are spelled `[t: c]`; empty mutable collections construct as `list[page]()` (final stdlib spelling owned at M3); a v2 `with handler` block is out of v1 scope per E1 and stays commented in the corpus.
+
 ## 7. Polymorphism and metaprogramming
 
 ### B6 — coherent set-theoretic traits with pairwise-disjoint instance heads
@@ -312,7 +316,7 @@ script = "build.ds"         # sees #OUT#, #TMP#, #ARCH#
 **Five mandatory tooling commitments, binding from day one.** (1) Compiler-as-query-library: the compiler is a library (`ds-check`) of memoized queries — parse, block_index, resolve, type_of, effects_of, linearity_check, lower — consumed by LSP, REPL, and hot reload alike; invalidation at `///|` block grain plus package grain (the second reason package cycles are banned). (2) `ds fmt` with zero options, implemented as a compiler component; the block-aware formatter formats blocks independently and is also the LSP's on-type-formatting path. (3) Structured diagnostics with two-span linear errors — machine-readable suggestions, `--error-format=json`, spans computed at typed-AST level; the linear diagnostic class renders "moved here / used again here" pairs:
 
 ```text
-error[DS2001]: value `h` was consumed here
+error[DS3001]: value `h` was consumed here
   --> src/pipeline.ds:41:15
    |  41 |  let rows = Csv.read(h)     ^ `h` moved (file is ~Copyable)
    |  42 |  Log.write(h.path)          used again here after move

@@ -18,6 +18,10 @@ blake3     = "1"
 memmap2    = "0.9"
 log        = "0.4"
 arbitrary  = "1"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+# default-features off: rayon/plotters only serve report generation
+criterion  = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.clippy]
 all                     = { level = "warn", priority = -1 }

@@ -1,0 +1,17 @@
+[package]
+name         = "ds-query"
+description  = "Memoized query engine with block-grain invalidation: the single path to compiler data for every DreamScript consumer"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+ds-diag = { path = "../ds-diag" }

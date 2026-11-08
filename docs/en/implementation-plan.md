@@ -110,7 +110,7 @@ Work items:
 - Bidirectional checking [B2]: required top-level and public signatures anchoring the set algebra; locals, lambdas, and match arms inferred; monotone flow refinement through `is` tests, none tests, and match arms, resetting only at assignment; `?` propagation as set containment against the written return union; `T?` in every annotation position [B4]; the numeric table — trapping defaults, wrapping `+%`/`-%`/`*%`, explicit conversions only [B7]; string typing with the checked slice API [B8]; structural `==` with the five carve-outs [B9].
 - Traits and generics [B6]: instance environment; union-head decomposition into per-branch instances; pairwise disjointness checked at declaration and again over the final instance environment at link time; overlap errors naming both heads and a witness value type; the structural cycle check rejecting self-satisfying conditional instances; no orphan rule.
 - Affine checking and DI [C1, C5]: last-use/definite-initialization as a single intraprocedural forward pass; moved-binding liveness; `~Copyable` subtraction; deinit well-formedness (exactly once, all paths).
-- Structured diagnostics [H6 item 3]: the DS2001-class two-span linear errors ("moved here / used again here"), machine-readable suggestions, `--error-format=json`, spans computed at typed-AST level.
+- Structured diagnostics [H6 item 3]: the DS3001-class two-span linear errors ("moved here / used again here"), machine-readable suggestions, `--error-format=json`, spans computed at typed-AST level.
 
 Acceptance: conformance files typecheck (runtime-free parts); the negative suite renders golden diagnostics — `impl Json for int | bool` rejected with witness, moved-then-used pairs, non-exhaustive match printing the set difference ("missing: NotFound | Locked"), inference failure without any `any` fallback; `ds-check` runs head-less as a library with no I/O beyond query-context file reads.
 
@@ -260,13 +260,21 @@ Permanently out or out of 1.0, enforced at review: no import-time execution; no 
 
 | Milestone | Scope | Status |
 |---|---|---|
-| M0 | Contracts and bootstrap (ds-abi, ds-mod, ds-diag, ds-vm skeleton) | not started |
-| M1 | Front end (ds-parse, ds-query skeleton, ds-fmt, conformance corpus) | not started |
-| M2 | Checker core (ds-check, diagnostics, negative suite) | not started |
-| M3 | Lowering and tier-1 VM (ds-lower, ds-vm, `ds run`) | not started |
+| M0 | Contracts and bootstrap (ds-abi, ds-mod, ds-diag, ds-vm skeleton) | done 2026-11-09 |
+| M1 | Front end (ds-parse, ds-query skeleton, ds-fmt, conformance corpus) | in progress (corpus, ds-query engine landed; ds-parse in flight) |
+| M2 | Checker core (ds-check, diagnostics, negative suite) | in progress (type core B1, trait instance env B6 landed; checker awaits ds-parse) |
+| M3 | Lowering and tier-1 VM (ds-lower, ds-vm, `ds run`) | prep landed (uop set contract in ds-abi, dsmod blocks payload, bench harness; VM uop migration in flight) |
 | M4 | Memory (ds-rt: arenas, Perceus RC, reuse, deinit) | not started |
 | M5 | Concurrency (fibers, nursery, cancellation, fork-join) | not started |
 | M6 | Derives, comptime, reflection (ds-meta) | not started |
 | M7 | Modules, packages, FFI, tooling (ds-pkg, ds-ffi, REPL, hot reload, LSP) | not started |
 | M8 | Tier 2 copy-and-patch and tier 3 (ds-jit, SSA, differential tiers) | not started |
 | M9 | Hardening and 1.0 (fuzz gates, perf gates, tutorial) | not started |
+
+## Progress log
+
+2026-11-09, M0 done in one round: workspace bootstrap (glob members `crates/*`, shared lints/profiles, CI on windows+ubuntu: nightly fmt, stable clippy+nextest), then ds-diag (spans, 24-code DS registry, human+JSON renderers), ds-abi (locked frame layout, CALLT slide plan with memmove-safe direction, two-word entry descriptors with CAS flip, tail-chain counters), ds-mod (G3.5 format: strict-canonical reader, byte-stable writer, blake3-128 checked hash, mmap loader, dormant collector hooks; cargo-fuzz target ran 30k execs clean), ds-vm skeleton (provisional 13-op set, two-slot module registry with retiring-slot liveness, CALLT per the locked ABI: mutual even/odd at depth 10^7 holds a 7-word constant stack). M1 partially landed in parallel: conformance corpus (sections 13.1-13.6, 59 items, 1 unresolved v2 handler kept as comment) and the ds-query engine (red-green renewal gives block-grain invalidation; placeholder computes await ds-parse wiring). Pitfalls recorded: rustfmt.toml unstable options force nightly fmt (CI fmt job pinned to nightly); clippy's cargo lint group demands full package metadata, so every crate must inherit workspace.package fields; parallel-agent protocol that produced zero merge conflicts: per-agent git worktrees + branches, additive-only root Cargo.toml edits, shared CARGO_TARGET_DIR, Cargo.lock conflicts on rebase resolved by delete + `cargo check` regen. Record addendum 6.1 pins the corpus surface normalizations; the linear two-span error example code moved to DS3001 to match the shipped registry's class partition.
+
+2026-11-09 (later), contracts hardened and M2/M3 prep landed: a read-only cross-crate audit caught a P0 in ds-vm's CALLT (wide-callee params slid through caller body_len — a 3-param callee read (10, 0, 20)); fix 10e2ad8 pins owner-relative word mapping (callee param i at fp+1+i), now also stated in ds-abi's locked docs with a CALL/CALLT identity table. Audit P1/P2s all fixed: dsmod header commits BL-7's max_call_depth + ir_checksum fields (format v2, values pending until M3), reader is strictly canonical (gapless section tiling), ds-diag pins the full 27-code snapshot table, weekly CI fuzz cron runs the ds-mod mirror (FUZZ_RUNS knob). Contracts grew: ds-abi now defines the BL-5 uop set (39 ops, canonical 32-bit encoding, BIAS_J=0x8000, XOR-negated comparisons, slot-effect/purity tables; 13.7 programs encode exactly), ds-mod defines the blocks payload v1 over uop words + FrameLayouts (every code word validated by decode at read), ds-check landed the B1 type core (canonical atom-set solving, exhaustive small-universe law tests vs a bitset oracle) and the B6 instance environment (union-head decomposition, witness-carrying overlap errors at declare and link, DFS condition-cycle rejection, no orphan rule). Discipline that worked: ErrorCode additions update the code-table snapshot in the same commit; coordinator rebases agent branches whose base moved. Still open: ds-parse is the long pole gating the M1/M2 wiring wave.
+
+

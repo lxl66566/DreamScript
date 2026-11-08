@@ -1,0 +1,631 @@
+//! Instance-environment behavior over the shapes of
+//! `conformance/generics_coherent_traits.ds` [B6]: union-head decomposition,
+//! disjoint-head rejection with witness, head normalization, conditional
+//! instances with the structural cycle check, per-package versus link-time
+//! checking, and lookup — plus one exhaustive small-universe pass mirroring
+//! `algebra.rs`.
+
+use ds_check::{Condition, Error, InstanceDecl, InstanceEnv, TraitId, TypeExpr, TypeId, Universe};
+use ds_diag::ErrorCode;
+
+struct Fixture {
+    universe: Universe,
+    env: InstanceEnv,
+    json: TraitId,
+    show: TraitId,
+    eq: TraitId,
+    copyable: TraitId,
+    int: TypeId,
+    boolean: TypeId,
+    string: TypeId,
+}
+
+fn fixture() -> Fixture {
+    let mut universe = Universe::new();
+    let int = universe.declare_tag("int").unwrap();
+    let boolean = universe.declare_tag("bool").unwrap();
+    let string = universe.declare_tag("string").unwrap();
+    let json = universe.declare_trait("json").unwrap();
+    let show = universe.declare_trait("show").unwrap();
+    let eq = universe.declare_trait("eq").unwrap();
+    let copyable = universe.declare_trait("copyable").unwrap();
+    Fixture {
+        universe,
+        env: InstanceEnv::new(),
+        json,
+        show,
+        eq,
+        copyable,
+        int,
+        boolean,
+        string,
+    }
+}
+
+impl Fixture {
+    fn ty(&mut self, id: TypeId) -> ds_check::Ty {
+        self.universe.atom_ty(id).unwrap()
+    }
+
+    fn declare(
+        &mut self,
+        trait_id: TraitId,
+        head: TypeExpr,
+    ) -> Result<Vec<ds_check::InstanceId>, Error> {
+        self.env
+            .declare(&mut self.universe, &InstanceDecl::new(trait_id, head))
+    }
+
+    fn declare_conditional(
+        &mut self,
+        trait_id: TraitId,
+        head: TypeExpr,
+        conditions: Vec<Condition<TypeExpr>>,
+    ) -> Result<Vec<ds_check::InstanceId>, Error> {
+        self.env.declare(
+            &mut self.universe,
+            &InstanceDecl::new(trait_id, head).with_conditions(conditions),
+        )
+    }
+}
+
+#[test]
+fn union_heads_decompose_into_per_branch_instances() {
+    let mut f = fixture();
+    let union = TypeExpr::atom(f.int).union(f.boolean.into());
+    let ids = f.declare(f.json, union).unwrap();
+    assert_eq!(ids.len(), 2, "one instance per union branch");
+    assert_eq!(f.env.len(), 2);
+    assert_eq!(f.universe.render(f.env.head(ids[0]).unwrap()), "int");
+    assert_eq!(f.universe.render(f.env.head(ids[1]).unwrap()), "bool");
+    assert_eq!(f.env.trait_of(ids[0]).unwrap(), f.json);
+
+    // Nested unions flatten fully, still one branch per member atom.
+    let nested = TypeExpr::atom(f.int)
+        .union(f.boolean.into())
+        .union(f.string.into());
+    let ids = f.declare(f.show, nested).unwrap();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(f.env.len(), 5);
+
+    // Duplicate branches of one declaration overlap each other.
+    let dup = TypeExpr::atom(f.int).union(f.int.into());
+    let err = f.declare(f.eq, dup).unwrap_err();
+    assert!(matches!(err, Error::InstanceOverlap { .. }));
+    assert_eq!(f.env.len(), 5, "failed declarations insert nothing");
+}
+
+#[test]
+fn corpus_disjoint_head_rejection_names_witness() {
+    // conformance/generics_coherent_traits.ds impl-json-int-bool: the union
+    // head must be rejected against impl-json-int and impl-json-bool with
+    // witness `int` [B6].
+    let mut f = fixture();
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    f.declare(f.json, TypeExpr::atom(f.boolean)).unwrap();
+    let union = TypeExpr::atom(f.int).union(f.boolean.into());
+    let err = f.declare(f.json, union).unwrap_err();
+    let Error::InstanceOverlap {
+        head_a,
+        head_b,
+        witness,
+        ..
+    } = &err
+    else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    // Decomposition precedes the check, so the named heads are per-branch.
+    assert_eq!(f.universe.render(*head_a), "int");
+    assert_eq!(f.universe.render(*head_b), "int");
+    assert_eq!(f.universe.render_witness(witness), "int");
+    assert_eq!(err.code(), ErrorCode::InstanceOverlap);
+    assert_eq!(f.env.len(), 2, "failed declarations insert nothing");
+}
+
+#[test]
+fn disjointness_is_per_trait_and_duplicates_are_overlaps() {
+    let mut f = fixture();
+    // Different traits may share a head: no orphan rule, no cross-trait rule.
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    f.declare(f.show, TypeExpr::atom(f.int)).unwrap();
+    assert_eq!(f.env.len(), 2);
+
+    // Re-declaring the same head for the same trait is an overlap.
+    let err = f.declare(f.json, TypeExpr::atom(f.int)).unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "int");
+    // Atomic rollback across branches: the bool branch passes, int fails,
+    // nothing is inserted.
+    let union = TypeExpr::atom(f.boolean).union(f.int.into());
+    assert!(matches!(
+        f.declare(f.json, union),
+        Err(Error::InstanceOverlap { .. })
+    ));
+    assert_eq!(f.env.len(), 2);
+}
+
+#[test]
+fn unconditional_instances_record_trait_members_conditionals_do_not() {
+    let mut f = fixture();
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    f.declare(f.json, TypeExpr::atom(f.boolean)).unwrap();
+    // A trait used as a type solves over unconditional members only.
+    let (int_ty, bool_ty, string_ty) = (f.ty(f.int), f.ty(f.boolean), f.ty(f.string));
+    let json_ty = f.universe.solve(&TypeExpr::trait_ref(f.json)).unwrap();
+    assert!(f.universe.contains(json_ty, int_ty));
+    assert!(f.universe.contains(json_ty, bool_ty));
+    assert!(!f.universe.contains(json_ty, string_ty));
+
+    let cond = Condition::new(f.eq, TypeExpr::atom(f.int));
+    f.declare_conditional(f.show, TypeExpr::atom(f.string), vec![cond])
+        .unwrap();
+    let show_ty = f.universe.solve(&TypeExpr::trait_ref(f.show)).unwrap();
+    assert!(
+        !f.universe.contains(show_ty, string_ty),
+        "conditional instances add no members"
+    );
+    let conds = f.env.conditions(ds_check::InstanceId::from_raw(2)).unwrap();
+    assert_eq!(conds.len(), 1);
+    assert_eq!(conds[0].trait_id, f.eq);
+    assert_eq!(f.universe.render(conds[0].ty), "int");
+}
+
+#[test]
+fn non_atom_heads_normalize_or_reject() {
+    let mut f = fixture();
+    // (int | bool) - bool is not a written union: one branch, normalized to
+    // the singleton int by solving.
+    let diff = TypeExpr::atom(f.int)
+        .union(f.boolean.into())
+        .diff(f.boolean.into());
+    let ids = f.declare(f.json, diff).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.universe.render(f.env.head(ids[0]).unwrap()), "int");
+
+    // The normalized head feeds coherence: json for int now overlaps it.
+    let err = f.declare(f.json, TypeExpr::atom(f.int)).unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "int");
+
+    // An intersection of distinct atoms solves to empty and is rejected.
+    let inter = TypeExpr::atom(f.int).inter(f.boolean.into());
+    let err = f.declare(f.show, inter).unwrap_err();
+    assert!(matches!(err, Error::EmptyInstanceHead(_)));
+    assert_eq!(err.code(), ErrorCode::EmptyInstanceHead);
+
+    // A negated-constraint head stays one multi-atom head and participates
+    // in coherence as a set.
+    let draw = f.universe.declare_trait("draw").unwrap();
+    f.declare(f.copyable, TypeExpr::atom(f.int)).unwrap();
+    let not_copyable = TypeExpr::not(f.copyable);
+    let ids = f.declare(draw, not_copyable).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        f.universe.render(f.env.head(ids[0]).unwrap()),
+        "none | bool | string"
+    );
+    let err = f.declare(draw, TypeExpr::atom(f.boolean)).unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "bool");
+}
+
+#[test]
+fn direct_self_condition_rejected_with_rollback() {
+    let mut f = fixture();
+    let json_t = f.universe.declare_tag("json_t").unwrap();
+    // show for json_t if show[json_t]: the condition resolves to the
+    // instance itself.
+    let cond = Condition::new(f.show, TypeExpr::atom(json_t));
+    let err = f
+        .declare_conditional(f.show, TypeExpr::atom(json_t), vec![cond])
+        .unwrap_err();
+    let Error::ConditionCycle { cycle } = &err else {
+        panic!("expected ConditionCycle, got {err:?}");
+    };
+    assert_eq!(cycle, &[
+        ds_check::InstanceId::from_raw(0),
+        ds_check::InstanceId::from_raw(0)
+    ]);
+    assert_eq!(err.code(), ErrorCode::ConditionCycle);
+    assert_eq!(f.env.len(), 0, "rollback removes the instance");
+    // The environment stays usable after rollback.
+    f.declare(f.show, TypeExpr::atom(json_t)).unwrap();
+    assert_eq!(f.env.len(), 1);
+}
+
+#[test]
+fn mutual_two_instance_cycle_rejected() {
+    let mut f = fixture();
+    let a = f.universe.declare_tag("a").unwrap();
+    let b = f.universe.declare_tag("b").unwrap();
+    f.declare_conditional(f.show, TypeExpr::atom(a), vec![Condition::new(
+        f.eq,
+        TypeExpr::atom(b),
+    )])
+    .unwrap();
+    let err = f
+        .declare_conditional(f.eq, TypeExpr::atom(b), vec![Condition::new(
+            f.show,
+            TypeExpr::atom(a),
+        )])
+        .unwrap_err();
+    let Error::ConditionCycle { cycle } = &err else {
+        panic!("expected ConditionCycle, got {err:?}");
+    };
+    assert_eq!(cycle, &[
+        ds_check::InstanceId::from_raw(1),
+        ds_check::InstanceId::from_raw(0),
+        ds_check::InstanceId::from_raw(1)
+    ]);
+    assert_eq!(f.env.len(), 1, "only the first instance stays");
+}
+
+#[test]
+fn transitive_three_instance_cycle_rejected() {
+    let mut f = fixture();
+    let a = f.universe.declare_tag("a").unwrap();
+    let b = f.universe.declare_tag("b").unwrap();
+    let c = f.universe.declare_tag("c").unwrap();
+    let draw = f.universe.declare_trait("draw").unwrap();
+    f.declare_conditional(f.show, TypeExpr::atom(a), vec![Condition::new(
+        draw,
+        TypeExpr::atom(b),
+    )])
+    .unwrap();
+    f.declare_conditional(draw, TypeExpr::atom(b), vec![Condition::new(
+        f.eq,
+        TypeExpr::atom(c),
+    )])
+    .unwrap();
+    let err = f
+        .declare_conditional(f.eq, TypeExpr::atom(c), vec![Condition::new(
+            f.show,
+            TypeExpr::atom(a),
+        )])
+        .unwrap_err();
+    let Error::ConditionCycle { cycle } = &err else {
+        panic!("expected ConditionCycle, got {err:?}");
+    };
+    assert_eq!(cycle, &[
+        ds_check::InstanceId::from_raw(2),
+        ds_check::InstanceId::from_raw(0),
+        ds_check::InstanceId::from_raw(1),
+        ds_check::InstanceId::from_raw(2)
+    ]);
+}
+
+#[test]
+fn benign_chains_are_not_rejected() {
+    let mut f = fixture();
+    let a = f.universe.declare_tag("a").unwrap();
+    let b = f.universe.declare_tag("b").unwrap();
+    let c = f.universe.declare_tag("c").unwrap();
+    let draw = f.universe.declare_trait("draw").unwrap();
+
+    // A condition satisfied by an unconditional instance is a chain, not a
+    // cycle: json[int] resolves to the json-for-int instance, which has no
+    // conditions.
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    f.declare_conditional(f.show, TypeExpr::atom(a), vec![Condition::new(
+        f.json,
+        TypeExpr::atom(f.int),
+    )])
+    .unwrap();
+
+    // A longer chain of conditionals ending at an unconditional instance.
+    f.declare(draw, TypeExpr::atom(c)).unwrap();
+    f.declare_conditional(f.eq, TypeExpr::atom(b), vec![Condition::new(
+        draw,
+        TypeExpr::atom(c),
+    )])
+    .unwrap();
+    f.declare_conditional(f.show, TypeExpr::atom(b), vec![Condition::new(
+        f.eq,
+        TypeExpr::atom(b),
+    )])
+    .unwrap();
+
+    f.env.check_all(&mut f.universe).unwrap();
+    assert_eq!(f.env.len(), 5);
+}
+
+#[test]
+fn link_time_check_catches_cross_batch_overlap() {
+    // Two packages, each coherent alone; the overlap is only visible in the
+    // merged environment [G3, B6].
+    let mut f = fixture();
+    let mut package_a = InstanceEnv::new();
+    package_a
+        .declare(
+            &mut f.universe,
+            &InstanceDecl::new(f.json, TypeExpr::atom(f.int)),
+        )
+        .unwrap();
+    package_a.check_all(&mut f.universe).unwrap();
+
+    let mut package_b = InstanceEnv::new();
+    let union = TypeExpr::atom(f.int).union(f.boolean.into());
+    package_b
+        .declare(&mut f.universe, &InstanceDecl::new(f.json, union))
+        .unwrap();
+    package_b.check_all(&mut f.universe).unwrap();
+
+    package_a.merge(package_b);
+    assert_eq!(package_a.len(), 3);
+    let err = package_a.check_all(&mut f.universe).unwrap_err();
+    let Error::InstanceOverlap {
+        head_a,
+        head_b,
+        witness,
+        ..
+    } = &err
+    else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render(*head_a), "int");
+    assert_eq!(f.universe.render(*head_b), "int");
+    assert_eq!(f.universe.render_witness(witness), "int");
+}
+
+#[test]
+fn link_time_check_re_solves_heads_after_membership_growth() {
+    // Stored heads are declaration-time snapshots: `json for copyable`
+    // (trait as type) solves over copyable's members at declaration ({int}),
+    // and the later `copyable for bool` widens the real head to {int, bool}.
+    // The second batch's `json for bool` passes the incremental check (the
+    // snapshot still looks disjoint); the link pass must re-solve against
+    // the grown universe to catch the overlap.
+    let mut f = fixture();
+    f.declare(f.copyable, TypeExpr::atom(f.int)).unwrap();
+    f.declare(f.json, TypeExpr::trait_ref(f.copyable)).unwrap();
+    // Membership growth between the two declaration batches.
+    f.declare(f.copyable, TypeExpr::atom(f.boolean)).unwrap();
+    // Accepted at declaration: the stored json head snapshot is still {int}.
+    f.declare(f.json, TypeExpr::atom(f.boolean)).unwrap();
+    assert_eq!(f.env.len(), 4, "both batches declare cleanly");
+    let err = f.env.check_all(&mut f.universe).unwrap_err();
+    let Error::InstanceOverlap {
+        head_a,
+        head_b,
+        witness,
+        ..
+    } = &err
+    else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render(*head_a), "int | bool");
+    assert_eq!(f.universe.render(*head_b), "bool");
+    assert_eq!(f.universe.render_witness(witness), "bool");
+}
+
+#[test]
+fn link_time_check_catches_cross_batch_cycle() {
+    // The self-satisfying pair only closes across the merge [section 10
+    // item 7].
+    let mut f = fixture();
+    let a = f.universe.declare_tag("a").unwrap();
+    let b = f.universe.declare_tag("b").unwrap();
+    let draw = f.universe.declare_trait("draw").unwrap();
+
+    let mut package_a = InstanceEnv::new();
+    package_a
+        .declare(
+            &mut f.universe,
+            &InstanceDecl::new(f.show, TypeExpr::atom(a))
+                .with_conditions(vec![Condition::new(draw, TypeExpr::atom(b))]),
+        )
+        .unwrap();
+    package_a.check_all(&mut f.universe).unwrap();
+
+    let mut package_b = InstanceEnv::new();
+    package_b
+        .declare(
+            &mut f.universe,
+            &InstanceDecl::new(draw, TypeExpr::atom(b))
+                .with_conditions(vec![Condition::new(f.show, TypeExpr::atom(a))]),
+        )
+        .unwrap();
+    package_b.check_all(&mut f.universe).unwrap();
+
+    package_a.merge(package_b);
+    let err = package_a.check_all(&mut f.universe).unwrap_err();
+    let Error::ConditionCycle { cycle } = &err else {
+        panic!("expected ConditionCycle, got {err:?}");
+    };
+    assert_eq!(cycle, &[
+        ds_check::InstanceId::from_raw(0),
+        ds_check::InstanceId::from_raw(1),
+        ds_check::InstanceId::from_raw(0)
+    ]);
+}
+
+#[test]
+fn resolve_is_exact_containment_and_lookup_only() {
+    let mut f = fixture();
+    let int_ty = f.ty(f.int);
+    let bool_ty = f.ty(f.boolean);
+
+    let unconditional = f.declare(f.eq, TypeExpr::atom(f.int)).unwrap()[0];
+    // The conditional's own condition never filters lookup [B6].
+    let conditional = f
+        .declare_conditional(f.show, TypeExpr::atom(f.int), vec![Condition::new(
+            f.eq,
+            TypeExpr::atom(f.int),
+        )])
+        .unwrap()[0];
+
+    assert_eq!(f.env.resolve(&f.universe, f.eq, int_ty), vec![
+        unconditional
+    ]);
+    assert_eq!(f.env.resolve(&f.universe, f.show, int_ty), vec![
+        conditional
+    ]);
+    assert_eq!(f.env.resolve(&f.universe, f.show, bool_ty), Vec::new());
+    // A query wider than any head matches nothing: containment is exact.
+    let both = f.universe.union(int_ty, bool_ty);
+    assert_eq!(f.env.resolve(&f.universe, f.show, both), Vec::new());
+    // Unknown traits simply have no instances.
+    assert_eq!(
+        f.env
+            .resolve(&f.universe, TraitId::from_raw(99), int_ty)
+            .len(),
+        0
+    );
+
+    assert_eq!(
+        f.env.resolve_unique(&f.universe, f.show, int_ty).unwrap(),
+        Some(conditional)
+    );
+    assert_eq!(
+        f.env.resolve_unique(&f.universe, f.show, bool_ty).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn declare_and_accessors_reject_bad_ids() {
+    let mut f = fixture();
+    assert!(matches!(
+        f.declare(TraitId::from_raw(99), TypeExpr::atom(f.int)),
+        Err(Error::UnknownTrait(_))
+    ));
+    assert!(matches!(
+        f.declare(f.json, TypeExpr::atom(TypeId::from_raw(99))),
+        Err(Error::UnknownAtom(_))
+    ));
+    let cond = Condition::new(TraitId::from_raw(99), TypeExpr::atom(f.int));
+    assert!(matches!(
+        f.declare_conditional(f.json, TypeExpr::atom(f.int), vec![cond]),
+        Err(Error::UnknownTrait(_))
+    ));
+    let bad = ds_check::InstanceId::from_raw(0);
+    assert!(matches!(
+        f.env.head(bad),
+        Err(Error::UnknownInstance(bad_id)) if bad_id == bad
+    ));
+    assert_eq!(
+        f.env.head(bad).unwrap_err().code(),
+        ErrorCode::UnresolvedName
+    );
+}
+
+/// Exhaustive pass over a 5-atom universe (32 solved types), mirroring the
+/// `algebra.rs` oracle style: with coherent heads, lookup is unique for
+/// every non-empty query, and same-trait heads stay pairwise disjoint.
+#[test]
+fn exhaustive_lookup_unique_for_non_empty_queries() {
+    let mut u = Universe::new();
+    let atoms: Vec<TypeId> = [TypeId::NONE]
+        .into_iter()
+        .chain(
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|name| u.declare_tag(name).unwrap()),
+        )
+        .collect();
+    assert_eq!(atoms.len(), 5);
+    let marker = u.declare_trait("marker").unwrap();
+    let ord = u.declare_trait("ord").unwrap();
+
+    let mut env = InstanceEnv::new();
+    let marker_ids = env
+        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[1])))
+        .unwrap();
+    assert_eq!(marker_ids.len(), 1);
+    let marker_ids_b = env
+        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[2])))
+        .unwrap();
+    assert_eq!(marker_ids_b.len(), 1);
+
+    // ord heads: the singleton a, and the multi-atom complement of marker.
+    env.declare(&mut u, &InstanceDecl::new(ord, TypeExpr::atom(atoms[1])))
+        .unwrap();
+    env.declare(&mut u, &InstanceDecl::new(ord, TypeExpr::not(marker)))
+        .unwrap();
+
+    let singletons: Vec<_> = atoms.iter().map(|id| u.atom_ty(*id).unwrap()).collect();
+    let mut all = vec![u.empty_ty()];
+    for bits in 1u64..=31 {
+        let mut t = all[0];
+        for (i, singleton) in singletons.iter().enumerate() {
+            if bits & (1 << i) != 0 {
+                t = u.union(t, *singleton);
+            }
+        }
+        all.push(t);
+    }
+    assert_eq!(all.len(), 32);
+
+    let id_of = |i: usize| ds_check::InstanceId::from_raw(u32::try_from(i).unwrap());
+    let bits_of = |t: ds_check::Ty| -> u64 {
+        u.members(t)
+            .iter()
+            .map(|id| 1 << atoms.iter().position(|a| a == id).unwrap())
+            .fold(0, |acc, b| acc | b)
+    };
+    let head_bits: Vec<(TraitId, u64)> = (0..env.len())
+        .map(|i| {
+            let id = id_of(i);
+            (env.trait_of(id).unwrap(), bits_of(env.head(id).unwrap()))
+        })
+        .collect();
+
+    // Same-trait heads stay pairwise disjoint (declared in this order:
+    // marker a, marker b, ord a, ord ~marker over {none, a, b, c, d}).
+    let full = (1u64 << atoms.len()) - 1;
+    let expected_heads = vec![
+        (marker, 1 << 1),
+        (marker, 1 << 2),
+        (ord, 1 << 1),
+        (ord, full & !((1 << 1) | (1 << 2))),
+    ];
+    assert_eq!(head_bits, expected_heads);
+    for (i, &(ta, ba)) in head_bits.iter().enumerate() {
+        for &(tb, bb) in head_bits.iter().skip(i + 1) {
+            if ta == tb {
+                assert_eq!(ba & bb, 0, "same-trait heads must be disjoint");
+            }
+        }
+    }
+
+    // Lookup over every solved type: candidates are exactly the same-trait
+    // heads containing the query; non-empty queries are unambiguous.
+    for (index, &query) in all.iter().enumerate() {
+        for trait_id in [marker, ord] {
+            let expected: Vec<_> = (0..env.len())
+                .filter(|&i| {
+                    let id = id_of(i);
+                    env.trait_of(id).unwrap() == trait_id
+                        && bits_of(env.head(id).unwrap()) & index as u64 == index as u64
+                })
+                .map(id_of)
+                .collect();
+            let got = env.resolve(&u, trait_id, query);
+            assert_eq!(got, expected, "query bits {index} for trait {trait_id:?}");
+            let unique = env.resolve_unique(&u, trait_id, query);
+            match got.len() {
+                0 => assert_eq!(unique.unwrap(), None),
+                1 => assert_eq!(unique.unwrap(), got.first().copied()),
+                _ => {
+                    assert_eq!(index, 0, "ambiguity is only possible for the empty query");
+                    let Err(Error::AmbiguousResolution {
+                        trait_id: t,
+                        candidates,
+                        ..
+                    }) = unique
+                    else {
+                        panic!("expected AmbiguousResolution");
+                    };
+                    assert_eq!(t, trait_id);
+                    assert_eq!(candidates, got);
+                },
+            }
+        }
+    }
+}

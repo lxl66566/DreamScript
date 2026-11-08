@@ -1,0 +1,19 @@
+[package]
+name = "dreamscript-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ds-mod = { path = "../crates/ds-mod" }
+
+[[bin]]
+name = "fuzz_read_dsmod"
+path = "fuzz_targets/fuzz_read_dsmod.rs"
+test = false
+doc = false
+bench = false

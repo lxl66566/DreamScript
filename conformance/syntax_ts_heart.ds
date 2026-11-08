@@ -1,0 +1,54 @@
+// source: docs/en/design-decisions.md section 13.4 (syntax: TS-heart)
+// purpose: the full surface program: guards, or-return, ?, .err, interpolation, destructuring, tuple match
+// items:
+// parse_error: stage: typecheck
+// io_error: stage: typecheck
+// user: stage: typecheck
+// parse_age: stage: run
+// parse_user: stage: run
+// main: stage: run
+
+type parse_error = bad_number(string) | missing_field(string)
+type io_error = not_found | permission_denied
+
+struct user {
+  name: string,
+  age: int,
+}
+
+const parse_age = (s: string) -> int | parse_error {
+  match s.trim().parse_int() {
+    e if e is parse_error => bad_number(s),
+    n                     => n,
+  }
+}
+
+const parse_user = (row: row) -> user | parse_error {
+  const name = row.get("name") or return missing_field("name")
+  const age = row.get("age") or return missing_field("age")
+  user { name, age: parse_age(age)? }
+}
+
+const main = () -> () | io_error {
+  const rows = load_rows("users.csv")?
+  const cfg = read_config("app.cfg").err((e) => {
+    println("config failed: ${str(e)}")
+    default_config()
+  })
+  const (users, errors) = rows.map(parse_user).partition((r) => r is parse_error)
+
+  const total = users
+    .filter((u) => u.age >= 18)
+    .map((u) => u.age * 2)
+    .reduce(0, (a, b) => a + b)
+
+  for u in users {
+    println("user ${u.name} age ${str(u.age)}")
+  }
+
+  match (total, errors.first()) {
+    (_, e) if e is parse_error => println("warning: ${str(e)}"),
+    (0, _)                     => println("no valid users"),
+    (t, _)                     => println("total score: ${str(t)}"),
+  }
+}

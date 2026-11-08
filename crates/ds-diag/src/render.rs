@@ -1,0 +1,244 @@
+//! Human-readable diagnostic rendering: plain text, no color, no UI
+//! dependencies.
+//!
+//! Shape:
+//!
+//! ```text
+//! error[DS3001]: value `h` is no longer usable
+//!  --> main.ds:2:5
+//!   |
+//! 1 | const rows = read(h)
+//!   |                    - moved here
+//!   |
+//! 2 | log(h.path)
+//!   |     ^ used again here after move
+//!   |
+//!   = note: `h` is `~Copyable` and was consumed
+//!   = help: replace with `h2`
+//! ```
+
+pub mod json;
+
+use std::fmt::Write as _;
+
+pub use json::{JsonDiagnostic, JsonLoc, JsonSpan, JsonSuggestion, to_json};
+
+use crate::{
+    diagnostic::{Diagnostic, LabelStyle, Suggestion},
+    files::{FileId, Files, char_distance},
+};
+
+/// `write_fmt` into a `String`; formatting into a String cannot fail.
+macro_rules! emit {
+    ($out:expr, $($arg:tt)*) => {
+        $out.write_fmt(format_args!($($arg)*)).expect("formatting into a String cannot fail")
+    };
+}
+
+/// Renders `diagnostic` against `files` as plain text.
+///
+/// The header points at the first primary label (the first label when
+/// none is primary). Each label gets one excerpt block; a label spanning
+/// multiple lines gets one caret line per line, with the label text on
+/// the first. Notes and suggestion helps follow under `= note:` /
+/// `= help:`.
+#[must_use]
+pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
+    let mut out = String::new();
+    emit!(
+        out,
+        "{}[{}]: {}\n",
+        diagnostic.severity,
+        diagnostic.code,
+        diagnostic.message
+    );
+
+    let focus = diagnostic
+        .labels
+        .iter()
+        .find(|l| l.style == LabelStyle::Primary)
+        .or_else(|| diagnostic.labels.first());
+    if let Some(label) = focus {
+        let loc = files.location(label.span.file, label.span.start);
+        emit!(
+            out,
+            " --> {}:{}:{}\n",
+            files.name(label.span.file),
+            loc.line,
+            loc.col
+        );
+    }
+
+    let width = gutter_width(diagnostic, files);
+    for label in &diagnostic.labels {
+        emit!(out, "{:>width$} |\n", "");
+        let span = label.span;
+        let first_line = files.location(span.file, span.start).line;
+        let last_off = if span.is_empty() { span.start } else { span.end - 1 };
+        let last_line = files.location(span.file, last_off).line;
+        let caret = match label.style {
+            LabelStyle::Primary => "^",
+            LabelStyle::Secondary => "-",
+        };
+        for line in first_line..=last_line {
+            let text = line_text(files, span.file, line);
+            emit!(out, "{line:>width$} |");
+            if !text.is_empty() {
+                emit!(out, " {text}");
+            }
+            out.push('\n');
+            let range = files.line_span(span.file, line);
+            let clip_start = span.start.max(range.start);
+            let clip_end = span.end.min(range.end).max(clip_start);
+            let source = files.source(span.file);
+            let pad = char_distance(source, range.start, clip_start);
+            let carets = char_distance(source, clip_start, clip_end).max(1);
+            emit!(
+                out,
+                "{:>width$} | {}{}",
+                "",
+                " ".repeat(pad),
+                caret.repeat(carets)
+            );
+            if line == first_line && !label.label.is_empty() {
+                emit!(out, " {}", label.label);
+            }
+            out.push('\n');
+        }
+    }
+
+    if !diagnostic.notes.is_empty() || !diagnostic.suggestions.is_empty() {
+        emit!(out, "{:>width$} |\n", "");
+        for note in &diagnostic.notes {
+            emit!(out, "{:>width$} = note: {note}\n", "");
+        }
+        for suggestion in &diagnostic.suggestions {
+            emit!(
+                out,
+                "{:>width$} = help: {}\n",
+                "",
+                suggestion_help(suggestion)
+            );
+        }
+    }
+    out
+}
+
+/// Decimal width of the largest line number any label shows, minimum 1.
+fn gutter_width(diagnostic: &Diagnostic, files: &Files) -> usize {
+    let mut max_line = 0;
+    for label in &diagnostic.labels {
+        let span = label.span;
+        let last_off = if span.is_empty() { span.start } else { span.end - 1 };
+        max_line = max_line
+            .max(files.location(span.file, span.start).line)
+            .max(files.location(span.file, last_off).line);
+    }
+    max_line.to_string().len().max(1)
+}
+
+/// Line text without its terminator.
+fn line_text(files: &Files, file: FileId, line: u32) -> &str {
+    let range = files.line_span(file, line);
+    &files.source(file)[range.start as usize..range.end as usize]
+}
+
+/// One-line human phrasing of a suggestion.
+fn suggestion_help(suggestion: &Suggestion) -> String {
+    match suggestion {
+        Suggestion::Replace { with, .. } => format!("replace with `{with}`"),
+        Suggestion::Insert { text, .. } => format!("insert `{text}`"),
+        Suggestion::Remove { .. } => "remove this".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{code::ErrorCode, diagnostic::Severity, files::Span};
+
+    /// The classic two-span linear error: secondary at the move, primary at
+    /// the later use.
+    #[test]
+    fn two_span_linear_error_golden() {
+        let mut files = Files::new();
+        let file = files.add_source("main.ds", "const rows = read(h)\nlog(h.path)\n");
+        let diag = Diagnostic::error(ErrorCode::MovedThenUsed, "value `h` is no longer usable")
+            .with_secondary(Span::new(file, 18, 19), "moved here")
+            .with_primary(Span::new(file, 25, 26), "used again here after move")
+            .with_note("`h` is `~Copyable` and was consumed")
+            .with_suggestion(Suggestion::Replace {
+                span: Span::new(file, 25, 26),
+                with: "h2".to_owned(),
+            });
+        let expected = "\
+error[DS3001]: value `h` is no longer usable
+ --> main.ds:2:5
+  |
+1 | const rows = read(h)
+  |                   - moved here
+  |
+2 | log(h.path)
+  |     ^ used again here after move
+  |
+  = note: `h` is `~Copyable` and was consumed
+  = help: replace with `h2`
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    #[test]
+    fn multi_line_span_gets_one_caret_line_per_line() {
+        let mut files = Files::new();
+        let src = "fn f() {\n  foo(\n    1,\n  )\n}\n";
+        let file = files.add_source("t.ds", src);
+        let start = u32::try_from(src.find("foo").unwrap()).unwrap();
+        let end = u32::try_from(src.rfind(')').unwrap() + 1).unwrap();
+        let diag = Diagnostic::error(ErrorCode::UnexpectedToken, "multi-line span rendering")
+            .with_primary(Span::new(file, start, end), "multi-line expression");
+        let expected = "\
+error[DS1001]: multi-line span rendering
+ --> t.ds:2:3
+  |
+2 |   foo(
+  |   ^^^^ multi-line expression
+3 |     1,
+  | ^^^^^^
+4 |   )
+  | ^^^
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    /// Empty file, zero-width span at EOF: line 1 col 1, empty source line.
+    #[test]
+    fn empty_file_eof_span_golden() {
+        let mut files = Files::new();
+        let file = files.add_source("empty.ds", "");
+        let diag = Diagnostic::error(ErrorCode::UnexpectedEof, "unexpected end of file")
+            .with_primary(Span::new(file, 0, 0), "here");
+        let expected = "\
+error[DS1002]: unexpected end of file
+ --> empty.ds:1:1
+  |
+1 |
+  | ^ here
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    /// No labels: no arrow, no excerpt; minimum-1 gutter for notes.
+    #[test]
+    fn labelless_diagnostic_golden() {
+        let files = Files::new();
+        let diag = Diagnostic::warning(ErrorCode::UnterminatedString, "quote me")
+            .with_note("no spans attached");
+        let expected = "\
+warning[DS1004]: quote me
+  |
+  = note: no spans attached
+";
+        assert_eq!(human(&diag, &files), expected);
+        assert_eq!(diag.severity, Severity::Warning);
+    }
+}
