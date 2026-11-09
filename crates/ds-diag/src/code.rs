@@ -96,6 +96,18 @@ error_codes! {
     InvalidEscape => "DS1005", Parse,
     /// Character not valid in any token.
     InvalidChar => "DS1006", Parse,
+    /// String interpolation hole malformed: `$` not followed by a name or `{`.
+    InvalidInterpolation => "DS1007", Parse,
+    /// Bracketing delimiter unclosed, closed by the wrong partner, or stray.
+    UnbalancedDelimiter => "DS1008", Parse,
+    /// Source nests deeper than the parser's fixed limit.
+    NestingTooDeep => "DS1009", Parse,
+    /// An impl member is neither a `fn` nor a const-arrow lambda.
+    InvalidImplMember => "DS1010", Parse,
+    /// One call passes two values for the same named argument.
+    DuplicateArgument => "DS1011", Parse,
+    /// A default argument value is not a literal [F7].
+    NonLiteralDefault => "DS1012", Parse,
 
     /// Value's type is not contained in the expected type.
     TypeMismatch => "DS2001", Type,
@@ -119,6 +131,12 @@ error_codes! {
     AmbiguousInstance => "DS2010", Type,
     /// An instance head denotes the empty type.
     EmptyInstanceHead => "DS2011", Type,
+    /// A tuple distribution would mint more atom combinations than the solver's cap.
+    TupleDistributionCap => "DS2012", Type,
+    /// A trait constraint has no instance for the type; the message names the trait and the type.
+    UnsatisfiedConstraint => "DS2013", Type,
+    /// Several trait instances match one dot-call; the message names the competing heads.
+    AmbiguousCall => "DS2014", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -166,6 +184,12 @@ mod tests {
             ("UnterminatedString", "DS1004", ErrorClass::Parse),
             ("InvalidEscape", "DS1005", ErrorClass::Parse),
             ("InvalidChar", "DS1006", ErrorClass::Parse),
+            ("InvalidInterpolation", "DS1007", ErrorClass::Parse),
+            ("UnbalancedDelimiter", "DS1008", ErrorClass::Parse),
+            ("NestingTooDeep", "DS1009", ErrorClass::Parse),
+            ("InvalidImplMember", "DS1010", ErrorClass::Parse),
+            ("DuplicateArgument", "DS1011", ErrorClass::Parse),
+            ("NonLiteralDefault", "DS1012", ErrorClass::Parse),
             ("TypeMismatch", "DS2001", ErrorClass::Type),
             ("InferenceFailed", "DS2002", ErrorClass::Type),
             ("NonExhaustiveMatch", "DS2003", ErrorClass::Type),
@@ -177,6 +201,9 @@ mod tests {
             ("ConditionCycle", "DS2009", ErrorClass::Type),
             ("AmbiguousInstance", "DS2010", ErrorClass::Type),
             ("EmptyInstanceHead", "DS2011", ErrorClass::Type),
+            ("TupleDistributionCap", "DS2012", ErrorClass::Type),
+            ("UnsatisfiedConstraint", "DS2013", ErrorClass::Type),
+            ("AmbiguousCall", "DS2014", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

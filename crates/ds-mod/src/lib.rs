@@ -17,7 +17,7 @@
 //! ```text
 //! offset  size  field
 //! 0       4     magic "\0DSM"
-//! 4       1     format version (currently 2)
+//! 4       1     format version (currently 3)
 //! 5       1     target class: 0 = bytecode, 1 = wasm, 2 = triple
 //! 6       1     flags bitset: bit0 STRIP, bit1 FFI_USED, bit2 HAS_JIT_METADATA
 //! 7       1     collector flags (reserved; bit 0 = two-hook interface active)
@@ -35,6 +35,13 @@
 //!               byte, uleb offset from file start, uleb length
 //! ...           section payloads, addressed only through the directory
 //! ```
+//!
+//! Constants-pool entries share one locked encoding everywhere they appear
+//! (the module-level constants section and every per-function pool): a tag
+//! byte then the value — 0 = i64 (8 bytes LE), 1 = f64 (8 bytes LE, bit
+//! pattern), 2 = bool (1 byte), 3 = UTF-8 string (uleb length + bytes),
+//! 4 = FuncRef (uleb-length module name, empty for the enclosing module,
+//! then a uleb function index within that module's blocks payload).
 //!
 //! Section payloads tile the region after the directory exactly, in
 //! directory order: no gaps, no overlaps, no trailing bytes. This is the
@@ -125,5 +132,8 @@ pub const MAGIC: [u8; 4] = *b"\0DSM";
 ///
 /// Version 2 commits the BL-7 module-level scalars (max call depth at
 /// offset 24, IR-version checksum at offset 28) in the fixed header
-/// prefix; version 1 files are rejected.
-pub const FORMAT_VERSION: u8 = 2;
+/// prefix. Version 3 adds the FuncRef constants-pool kind (tag 4) for
+/// qualified callees; the constants payload is locked and carries no
+/// payload version of its own, so any change visible in it bumps this
+/// version. Files of older versions are rejected.
+pub const FORMAT_VERSION: u8 = 3;

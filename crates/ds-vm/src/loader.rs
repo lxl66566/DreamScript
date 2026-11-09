@@ -7,15 +7,15 @@
 //!   index it"), and this VM's [`FunctionDef`] matches that granularity. ds-abi's uop module doc
 //!   says "one pool per module [BL-7]" — the two locked contracts disagree, and the executable
 //!   model follows the payload that files actually carry.
-//! - Callees. ds-mod's `Constant` has no function-reference kind (i64/f64/bool/str only), so a
-//!   qualified callee rides a `Str` entry spelled `"module.function"`. The loader resolves the name
-//!   at install time into the pool [`Const::FuncRef`] the uop contract expects: a same-module name
-//!   resolves against this module's own table order, a foreign name against the target's currently
-//!   installed version (so cross-module references require dependencies to be installed first). The
-//!   resolved FuncRef carries the target module's name, and calls re-resolve through the target's
-//!   current slot at issue time, which is what the two-slot retirement semantics require [H6 item
-//!   5]. A dedicated FuncRef payload kind would remove the string convention; reported as ds-mod
-//!   friction.
+//! - Callees. A payload [`ds_mod::Constant::FuncRef`] names the callee's module (empty, or the
+//!   enclosing module's own name, means same-module) and its function index in that module's blocks
+//!   payload. The loader validates it at install time — a same-module index against this module's
+//!   own table, a foreign one against the target's currently installed version (so cross-module
+//!   references require dependencies to be installed first) — and stores it as the pool
+//!   [`Const::FuncRef`] the uop contract expects. Calls re-resolve through the target's current
+//!   slot at issue time, which is what the two-slot retirement semantics require [H6 item 5].
+//! - Strings. A `Str` entry is a genuine string constant; this VM has no string value kind yet, so
+//!   the entry rides the pool inert and any uop loading it fails the pool-kind check at load.
 //! - Entry descriptors. The blocks payload stores a two-word zero placeholder per function; the
 //!   in-memory `ds_mod::Function` record does not carry it, and the fill happens here: install
 //!   writes word 0 (the tier-1 prologue pointer, the function's table index by the M3 convention)
@@ -31,81 +31,76 @@ use crate::{
 /// Why a dsmod module cannot be installed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoadError {
-    /// A `Str` pool entry used as a callee is not a qualified
-    /// `"module.function"` path.
-    BadFuncRef {
-        /// The function whose pool holds the entry.
-        func: String,
-        /// The raw string.
-        raw: String,
-    },
-    /// A qualified callee resolved to no function: not in this module, and
-    /// the target module is not installed (dependencies install first).
-    Unresolved {
+    /// A FuncRef names no function: a same-module index past the module's
+    /// own table, or a foreign module that is not installed (dependencies
+    /// install first) or whose current version has no such index.
+    UnresolvedCallee {
         /// The function whose pool holds the reference.
         func: String,
-        /// The qualified path.
-        path: String,
+        /// The callee's module name.
+        module: String,
+        /// The callee's function index.
+        index: u32,
     },
     /// The mapped version failed this VM's load checks (decode canonicity,
     /// FUNCF-vs-layout agreement, pool kinds).
     Build(ModuleBuildError),
 }
 
-/// Resolves a qualified `"module.function"` path to a (target module,
-/// table index) pair: same-module names against `local_names` (the module's
-/// table order), foreign names against the registry's current slot for that
-/// module.
-fn resolve_path(
+/// Validates a payload FuncRef and maps it to the pool kind: an empty module
+/// or the enclosing module's own name is a same-module reference (validated
+/// against the table under construction); anything else resolves through the
+/// target module's currently installed version.
+fn resolve_funcref(
     registry: &ModuleRegistry,
     own_module: &str,
-    local_names: &[&str],
-    path: &str,
-) -> Option<(String, u32)> {
-    let (module, func) = path.split_once('.')?;
-    if module == own_module {
-        let index = local_names.iter().position(|&n| n == func)?;
-        return Some((
-            own_module.to_owned(),
-            u32::try_from(index).expect("function table exceeds u32"),
-        ));
+    local_len: usize,
+    module: &str,
+    index: u32,
+) -> Result<(String, u32), ()> {
+    if module.is_empty() || module == own_module {
+        if (index as usize) < local_len {
+            return Ok((own_module.to_owned(), index));
+        }
+        return Err(());
     }
-    registry
-        .resolve(module, func)
-        .map(|(_, func_id)| (module.to_owned(), func_id))
+    match registry.resolve_indexed(module, index) {
+        Some(_) => Ok((module.to_owned(), index)),
+        None => Err(()),
+    }
 }
 
 /// Maps one dsmod function record to a [`FunctionDef`]: its pool constants
-/// (with `Str` callees resolved into [`Const::FuncRef`]) and its body
+/// (FuncRefs validated and normalized to their target module) and its body
 /// re-encoded to the canonical word stream.
 fn map_function(
     registry: &ModuleRegistry,
     own_module: &str,
-    local_names: &[&str],
+    local_len: usize,
     function: &ds_mod::Function,
 ) -> Result<FunctionDef, LoadError> {
+    let unresolved = |module: &str, index: u32| LoadError::UnresolvedCallee {
+        func: function.name().to_owned(),
+        module: module.to_owned(),
+        index,
+    };
     let mut pool = Vec::with_capacity(function.constants().len());
     for entry in function.constants() {
         let mapped = match entry {
             ds_mod::Constant::I64(v) => Const::I64(*v),
             ds_mod::Constant::F64(v) => Const::F64(*v),
             ds_mod::Constant::Bool(v) => Const::Bool(*v),
-            ds_mod::Constant::Str(raw) => {
-                let (module, func) = resolve_path(registry, own_module, local_names, raw)
-                    .ok_or_else(|| {
-                        if raw.contains('.') {
-                            LoadError::Unresolved {
-                                func: function.name().to_owned(),
-                                path: raw.clone(),
-                            }
-                        } else {
-                            LoadError::BadFuncRef {
-                                func: function.name().to_owned(),
-                                raw: raw.clone(),
-                            }
-                        }
-                    })?;
-                Const::FuncRef { module, func }
+            // inert in this VM until strings become values (pool-kind
+            // checked at load if any uop tries to load it)
+            ds_mod::Constant::Str(raw) => Const::Str(raw.clone()),
+            ds_mod::Constant::FuncRef { module, func } => {
+                let (module, index) =
+                    resolve_funcref(registry, own_module, local_len, module, *func)
+                        .map_err(|()| unresolved(module, *func))?;
+                Const::FuncRef {
+                    module,
+                    func: index,
+                }
             },
         };
         pool.push(mapped);
@@ -128,21 +123,17 @@ fn map_function(
 ///
 /// # Errors
 ///
-/// Returns [`LoadError`] for unqualified or unresolved callee strings and
-/// for bodies failing this VM's load checks.
+/// Returns [`LoadError`] for FuncRefs naming no function and for bodies
+/// failing this VM's load checks.
 pub fn install(
     registry: &mut ModuleRegistry,
     module: &ds_mod::Module,
 ) -> Result<Arc<ModuleVersion>, LoadError> {
-    let local_names: Vec<&str> = module
-        .functions()
-        .iter()
-        .map(ds_mod::Function::name)
-        .collect();
+    let local_len = module.functions().len();
     let defs = module
         .functions()
         .iter()
-        .map(|f| map_function(registry, module.name(), &local_names, f))
+        .map(|f| map_function(registry, module.name(), local_len, f))
         .collect::<Result<Vec<_>, _>>()?;
     let version = ModuleVersion::new(module.name(), defs).map_err(LoadError::Build)?;
     Ok(registry.install(version))
@@ -153,14 +144,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_resolution_splits_on_the_first_dot() {
+    fn funcref_validation_accepts_same_module_and_installed_foreign() {
         let registry = ModuleRegistry::new();
+        // same-module: empty name and own name both mean local
         assert_eq!(
-            resolve_path(&registry, "m", &["a", "b"], "m.b"),
-            Some(("m".to_owned(), 1))
+            resolve_funcref(&registry, "m", 2, "", 1),
+            Ok(("m".to_owned(), 1))
         );
-        assert_eq!(resolve_path(&registry, "m", &["a"], "m.zz"), None);
-        assert_eq!(resolve_path(&registry, "m", &["a"], "n.a"), None);
-        assert_eq!(resolve_path(&registry, "m", &["a"], "no_dots"), None);
+        assert_eq!(
+            resolve_funcref(&registry, "m", 2, "m", 0),
+            Ok(("m".to_owned(), 0))
+        );
+        assert_eq!(resolve_funcref(&registry, "m", 2, "", 2), Err(()));
+        // foreign: nothing is installed
+        assert_eq!(resolve_funcref(&registry, "m", 2, "other", 0), Err(()));
     }
 }

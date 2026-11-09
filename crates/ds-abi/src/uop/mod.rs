@@ -63,7 +63,11 @@
 //! any other constant (f64, bool, reference, unit), and CALL/CALLT reference
 //! callees as pool entries (a FuncRef: module index + function index for
 //! fully-qualified cross-module calls [H6 item 5], the entry hot reload
-//! swaps). Pool indices are u16, one pool per module [BL-7].
+//! swaps). The uop contract fixes only the index shape: pool indices are u16
+//! ([`ConstIdx`]); the pool CONTAINER is a dsmod-format concern, not part of
+//! the ISA — the shipped format carries one pool per function [BL-7], and a
+//! module-level pool remains representable at the format layer if a future
+//! revision chooses it.
 //!
 //! # Biased jump offsets [BL-1]
 //!
@@ -126,9 +130,11 @@ pub const BIAS_J: u16 = 0x8000;
 /// above it are rejected by encode and decode with a typed error.
 pub const MAX_FRAME_SLOTS: u16 = 256;
 
-/// Index into a module's constant pool [BL-7]. Pool entries are: i64 (KIMM),
-/// any other constant word (KCONST: f64, bool, reference, unit), or a FuncRef
-/// (CALL/CALLT: module index + function index [H6 item 5]).
+/// Index into a constant pool. The uop contract fixes the index shape (u16),
+/// not the container: the dsmod format carries one pool per function [BL-7].
+/// Pool entries are: i64 (KIMM), any other constant word (KCONST: f64, bool,
+/// reference, unit), or a FuncRef (CALL/CALLT: module index + function index
+/// [H6 item 5]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConstIdx(pub u16);
 

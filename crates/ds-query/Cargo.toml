@@ -8,6 +8,7 @@ license.workspace      = true
 repository.workspace   = true
 keywords.workspace     = true
 categories.workspace   = true
+readme.workspace       = true
 
 [lints]
 workspace = true
@@ -15,3 +16,5 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 ds-diag = { path = "../ds-diag" }
+ds-parse = { path = "../ds-parse" }
+ds-check = { path = "../ds-check" }

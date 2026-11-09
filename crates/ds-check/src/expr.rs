@@ -2,7 +2,8 @@
 //!
 //! Expressions are the durable written form (field signatures, annotations).
 //! [`crate::Universe::solve`] evaluates them into canonical solved types;
-//! difference and negation nodes never survive solving.
+//! difference and negation nodes never survive solving, and tuple products
+//! distribute over unions element-wise [B3].
 
 use crate::atom::{TraitId, TypeId};
 
@@ -24,6 +25,10 @@ pub enum TypeExpr {
     Inter(Box<Self>, Box<Self>),
     /// Difference `a & ~b`; erases at solving [B1].
     Diff(Box<Self>, Box<Self>),
+    /// An anonymous tuple `(t0, t1, ...)` [B3]. Solving distributes the
+    /// product over union elements into one structural atom per combination,
+    /// so `(a | b, c)` solves to `(a, c) | (b, c)`.
+    Tuple(Vec<Self>),
 }
 
 impl TypeExpr {
@@ -61,6 +66,12 @@ impl TypeExpr {
     #[must_use]
     pub fn diff(self, other: Self) -> Self {
         Self::Diff(Box::new(self), Box::new(other))
+    }
+
+    /// An anonymous tuple of the given elements [B3].
+    #[must_use]
+    pub fn tuple(elements: Vec<Self>) -> Self {
+        Self::Tuple(elements)
     }
 }
 

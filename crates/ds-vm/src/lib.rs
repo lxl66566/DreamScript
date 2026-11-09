@@ -25,8 +25,8 @@
 //! - Callee addressing. The contract's FuncRef is "module index + function index"; this registry is
 //!   name-keyed until the ds-mod link table assigns module indices, so a pool FuncRef carries the
 //!   target module's name plus the function-table index (entry word 0), resolved through the
-//!   target's current slot [H6 item 5]. The dsmod loader resolves qualified `"module.function"`
-//!   string entries into these at install (see `loader`'s module docs).
+//!   target's current slot [H6 item 5]. The dsmod loader maps the payload's `FuncRef` constant kind
+//!   onto these at install (see `loader`'s module docs).
 //! - Non-tail `CALL` pushes a frame through the call word: the callee's metadata word is written
 //!   into the caller's call word, so the callee's parameter slots overlay the caller's
 //!   outgoing-argument area with zero argument copying, and the stack grows by exactly the callee's

@@ -81,9 +81,26 @@ struct SourceFile {
 /// Lines are terminated by `\n`; a `\r` directly before it is treated as
 /// part of the terminator (CRLF). A trailing newline opens one final empty
 /// line, and an empty file has exactly one empty line.
+///
+/// Spans are byte offsets into a file's CURRENT content: after
+/// [`Files::set_source`] the line index, lengths, and every offset-derived
+/// location refer to the new content, so spans derived before the swap
+/// must be re-derived against it.
 #[derive(Clone, Debug, Default)]
 pub struct Files {
     files: Vec<SourceFile>,
+}
+
+/// Byte offset at which each 1-based line starts: offset 0 plus the offset
+/// after every `\n`.
+fn line_starts_of(source: &str) -> Vec<u32> {
+    let mut line_starts = vec![0];
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(u32::try_from(i + 1).expect("source overflows u32 byte offsets"));
+        }
+    }
+    line_starts
 }
 
 impl Files {
@@ -100,20 +117,38 @@ impl Files {
     /// Panics if the source is longer than `u32` byte offsets (4 GiB).
     pub fn add_source(&mut self, name: impl Into<String>, source: &str) -> FileId {
         let file = FileId::new(u32::try_from(self.files.len()).expect("file count overflows u32"));
-        let len = u32::try_from(source.len()).expect("source overflows u32 byte offsets");
-        let mut line_starts = vec![0];
-        for (i, b) in source.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(u32::try_from(i + 1).expect("source overflows u32 byte offsets"));
-            }
-        }
         self.files.push(SourceFile {
             name: name.into(),
+            len: u32::try_from(source.len()).expect("source overflows u32 byte offsets"),
+            line_starts: line_starts_of(source),
             source: source.to_owned(),
-            len,
-            line_starts,
         });
         file
+    }
+
+    /// Replaces the content of one registered file in place: the file id
+    /// and every other file are untouched, and the line index is rebuilt
+    /// for the new content only. The old content is not returned; read
+    /// [`Files::source`] first if you need it.
+    ///
+    /// Spans held across this call address the file's previous content and
+    /// must be re-derived against the new content (see the type docs).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `file` was never registered, or if the new source is
+    /// longer than `u32` byte offsets (4 GiB).
+    pub fn set_source(&mut self, file: FileId, source: &str) {
+        let f = self
+            .files
+            .get_mut(file.as_u32() as usize)
+            .unwrap_or_else(|| panic!("unknown FileId {}", file.as_u32()));
+        f.len = u32::try_from(source.len()).expect("source overflows u32 byte offsets");
+        f.line_starts = line_starts_of(source);
+        // Reuse the existing allocation when the edit fits; the LSP edit
+        // path calls this per keystroke.
+        f.source.clear();
+        f.source.push_str(source);
     }
 
     fn get(&self, file: FileId) -> &SourceFile {
@@ -279,5 +314,44 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(files.name(a), "a.ds");
         assert_eq!(files.name(b), "b.ds");
+    }
+
+    #[test]
+    fn set_source_keeps_ids_rebuilds_the_line_index_and_leaves_others() {
+        let mut files = Files::new();
+        let a = files.add_source("a.ds", "one\ntwo");
+        let b = files.add_source("b.ds", "x\ny\n");
+        files.set_source(a, "alpha\r\nbeta\ngamma");
+        assert_eq!(files.name(a), "a.ds");
+        assert_eq!(files.source(a), "alpha\r\nbeta\ngamma");
+        assert_eq!(files.line_starts(a), &[0, 7, 12]);
+        assert_eq!(files.line_count(a), 3);
+        assert_eq!(files.location(a, 0), Location { line: 1, col: 1 });
+        assert_eq!(files.line_span(a, 1), 0..5);
+        assert_eq!(files.location(a, 12), Location { line: 3, col: 1 });
+        // The untouched file keeps its own content and index.
+        assert_eq!(files.source(b), "x\ny\n");
+        assert_eq!(files.line_starts(b), &[0, 2, 4]);
+        assert_eq!(files.location(b, 2), Location { line: 2, col: 1 });
+    }
+
+    #[test]
+    fn set_source_swaps_to_empty_and_back() {
+        let mut files = Files::new();
+        let f = files.add_source("a.ds", "a\nb\n");
+        files.set_source(f, "");
+        assert_eq!(files.line_count(f), 1);
+        assert_eq!(files.location(f, 0), Location { line: 1, col: 1 });
+        assert_eq!(files.line_span(f, 1), 0..0);
+        files.set_source(f, "aa\nbb\ncc");
+        assert_eq!(files.line_starts(f), &[0, 3, 6]);
+        assert_eq!(files.location(f, 6), Location { line: 3, col: 1 });
+        assert_eq!(files.line_span(f, 3), 6..8);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown FileId 7")]
+    fn set_source_of_unknown_file_panics() {
+        Files::new().set_source(FileId::new(7), "text");
     }
 }

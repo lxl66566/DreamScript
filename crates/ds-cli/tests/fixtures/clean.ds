@@ -1,0 +1,8 @@
+// The `ds check` clean fixture: a valid single-file package — every name
+// it uses it declares. Nothing to report: exit 0, no output.
+
+tag int
+tag string
+const greet = (name: string) -> string {
+  "hello " + name
+}

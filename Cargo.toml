@@ -11,6 +11,7 @@ license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/lxl66566/DreamScript"
 keywords    = ["dreamscript", "language", "compiler"]
 categories  = ["compilers"]
+readme      = "../../README.md"
 
 [workspace.dependencies]
 thiserror  = "2"
@@ -18,10 +19,20 @@ blake3     = "1"
 memmap2    = "0.9"
 log        = "0.4"
 arbitrary  = "1"
+pest       = "2"
+pest_derive = "2"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 # default-features off: rayon/plotters only serve report generation
 criterion  = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+anyhow     = "1"
+clap       = { version = "4", features = ["derive"] }
+# in-workspace crates, so consumers write `name.workspace = true`
+ds-diag    = { path = "crates/ds-diag" }
+ds-check   = { path = "crates/ds-check" }
+ds-query   = { path = "crates/ds-query" }
+ds-mod     = { path = "crates/ds-mod" }
+ds-vm      = { path = "crates/ds-vm" }
 
 [workspace.lints.clippy]
 all                     = { level = "warn", priority = -1 }

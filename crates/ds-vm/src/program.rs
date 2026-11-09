@@ -13,6 +13,9 @@ pub enum ConstKind {
     Bool,
     /// A callee reference loaded by CALL/CALLT.
     FuncRef,
+    /// A string constant: inert in this VM until strings become values, so
+    /// no uop accepts loading it.
+    Str,
 }
 
 /// One constant-pool entry [BL-1]: the single immediate channel. KIMM loads
@@ -39,6 +42,8 @@ pub enum Const {
         /// The callee's function-table index.
         func: u32,
     },
+    /// A string constant riding the pool; no uop loads it yet.
+    Str(String),
 }
 
 impl Const {
@@ -50,6 +55,7 @@ impl Const {
             Self::F64(_) => ConstKind::F64,
             Self::Bool(_) => ConstKind::Bool,
             Self::FuncRef { .. } => ConstKind::FuncRef,
+            Self::Str(_) => ConstKind::Str,
         }
     }
 }

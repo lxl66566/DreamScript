@@ -95,6 +95,9 @@ impl Fixture {
             TypeExpr::Union(a, b) => self.eval(a) | self.eval(b),
             TypeExpr::Inter(a, b) => self.eval(a) & self.eval(b),
             TypeExpr::Diff(a, b) => self.eval(a) & !self.eval(b),
+            // This fixture's family expresses no tuples; `tuples.rs` owns the
+            // tuple-bearing oracle.
+            TypeExpr::Tuple(_) => unreachable!("tuple expressions are covered by tuples.rs"),
         }
     }
 

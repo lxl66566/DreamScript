@@ -74,6 +74,21 @@ pub enum Error {
     /// An instance branch head solved to the empty type.
     #[error("instance head {0:?} is empty")]
     EmptyInstanceHead(Ty),
+    /// A tuple distribution whose combination count exceeds the solver's
+    /// cap [B3]; names the tuple and each element position's member count.
+    /// Checked before any atom is minted, so an adversarial product is this
+    /// error, never an out-of-memory abort.
+    #[error(
+        "tuple {tuple} distributes into more than {cap} combinations (element sizes {sizes:?})"
+    )]
+    TupleDistributionCap {
+        /// The tuple type, rendered element-wise.
+        tuple: String,
+        /// Solved member count per element position.
+        sizes: Vec<usize>,
+        /// The solver's combination cap.
+        cap: usize,
+    },
 }
 
 impl Error {
@@ -93,6 +108,7 @@ impl Error {
             Self::ConditionCycle { .. } => ErrorCode::ConditionCycle,
             Self::AmbiguousResolution { .. } => ErrorCode::AmbiguousInstance,
             Self::EmptyInstanceHead(_) => ErrorCode::EmptyInstanceHead,
+            Self::TupleDistributionCap { .. } => ErrorCode::TupleDistributionCap,
         }
     }
 }

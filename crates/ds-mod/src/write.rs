@@ -247,6 +247,11 @@ fn put_constant(out: &mut Vec<u8>, constant: &Constant) {
             out.push(3);
             put_str(out, s);
         },
+        Constant::FuncRef { module, func } => {
+            out.push(4);
+            put_str(out, module);
+            put_uleb(out, u64::from(*func));
+        },
     }
 }
 

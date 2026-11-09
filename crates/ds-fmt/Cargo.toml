@@ -1,0 +1,18 @@
+[package]
+name         = "ds-fmt"
+description  = "Block-aware zero-option formatter over the parse: the ds fmt and LSP on-type-formatting component"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ds-diag  = { path = "../ds-diag" }
+ds-parse = { path = "../ds-parse" }

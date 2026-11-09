@@ -22,9 +22,9 @@ fn layout(slots: &[SlotType], params: usize, args: usize) -> FrameLayout {
 }
 
 /// The corrected executable even/odd pair (the canonical fixture shape):
-/// slots [n, t, scratch, staged], bools via the pool, callee as a qualified
-/// `Str` path — the convention the loader resolves into a pool FuncRef,
-/// because ds-mod's constant kind has no function-reference variant.
+/// slots [n, t, scratch, staged], bools via the pool, callees as real
+/// same-module FuncRefs (empty module names the enclosing module; the odd
+/// direction also exercises the own-name spelling).
 fn parity_module(depth: i64) -> Module {
     let even = Function::new(
         "even",
@@ -33,7 +33,10 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(0),
             Constant::I64(1),
             Constant::Bool(true),
-            Constant::Str("mut.odd".into()),
+            Constant::FuncRef {
+                module: String::new(), // enclosing module: odd, table index 1
+                func: 1,
+            },
         ],
         vec![
             Uop::Funcf { frame_slots: 4 },
@@ -66,7 +69,10 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(0),
             Constant::I64(1),
             Constant::Bool(false),
-            Constant::Str("mut.even".into()),
+            Constant::FuncRef {
+                module: "mut".into(), // the own name also means same-module
+                func: 0,
+            },
         ],
         vec![
             Uop::Funcf { frame_slots: 4 },
@@ -95,7 +101,10 @@ fn parity_module(depth: i64) -> Module {
     let main = Function::new(
         "main",
         layout(&[I64], 0, 1),
-        vec![Constant::I64(depth), Constant::Str("mut.even".into())],
+        vec![Constant::I64(depth), Constant::FuncRef {
+            module: String::new(),
+            func: 0,
+        }],
         vec![
             Uop::Funcf { frame_slots: 1 },
             Uop::Kimm { dst: 0, kidx: k(0) }, // stage the depth
@@ -160,29 +169,36 @@ fn dsmod_round_trip_installs_and_runs_at_constant_stack() {
 }
 
 #[test]
-fn loader_reports_unqualified_and_unresolved_callees() {
+fn loader_reports_unresolved_funcrefs() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    // no dot: not a qualified path
+    // a same-module index past the module's own table
     let bad = Function::new(
         "bad",
         layout(&[I64], 0, 0),
-        vec![Constant::Str("notqualified".into())],
+        vec![Constant::FuncRef {
+            module: String::new(),
+            func: 9,
+        }],
         vec![Uop::Funcf { frame_slots: 1 }],
     )
     .expect("valid function");
     let module = Module::new("m", TargetClass::Bytecode, Hash128::compute(b"m")).with_function(bad);
     assert_eq!(
         vm.install_dsmod(&module).unwrap_err(),
-        ds_vm::LoadError::BadFuncRef {
+        ds_vm::LoadError::UnresolvedCallee {
             func: "bad".into(),
-            raw: "notqualified".into(),
+            module: String::new(),
+            index: 9,
         }
     );
-    // qualified, but the target module is not installed (deps install first)
+    // a foreign module that is not installed (dependencies install first)
     let foreign = Function::new(
         "foreign",
         layout(&[I64], 0, 0),
-        vec![Constant::Str("other.fn".into())],
+        vec![Constant::FuncRef {
+            module: "other".into(),
+            func: 0,
+        }],
         vec![Uop::Funcf { frame_slots: 1 }],
     )
     .expect("valid function");
@@ -190,11 +206,79 @@ fn loader_reports_unqualified_and_unresolved_callees() {
         Module::new("m2", TargetClass::Bytecode, Hash128::compute(b"m2")).with_function(foreign);
     assert_eq!(
         vm.install_dsmod(&module).unwrap_err(),
-        ds_vm::LoadError::Unresolved {
+        ds_vm::LoadError::UnresolvedCallee {
             func: "foreign".into(),
-            path: "other.fn".into(),
+            module: "other".into(),
+            index: 0,
         }
     );
+}
+
+/// Cross-module FuncRefs: the caller's pool names a foreign module; the call
+/// resolves through the target's current slot, so installing a new version
+/// of the target redirects the next call [H6 item 5].
+#[test]
+fn cross_module_funcref_resolves_through_the_current_slot() {
+    // std v1: double(n) = n + n; std v2: triple(n) = n + n + n. The
+    // accumulator lives in a local slot so the parameter is never clobbered
+    let arith = |rounds: usize| {
+        let mut code = vec![Uop::Funcf { frame_slots: 2 }];
+        code.push(Uop::AddI64 {
+            dst: 1,
+            lhs: 0,
+            rhs: 0,
+        }); // acc = n + n
+        for _ in 1..rounds {
+            code.push(Uop::AddI64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 0,
+            }); // acc += n
+        }
+        code.push(Uop::Ret { src: 1 });
+        code
+    };
+    let std_version = |rounds: usize| {
+        let f = Function::new(
+            "apply",
+            layout(&[I64, I64], 1, 0),
+            Vec::new(),
+            arith(rounds),
+        )
+        .expect("valid function");
+        Module::new("std", TargetClass::Bytecode, Hash128::compute(b"std")).with_function(f)
+    };
+    // caller: main stages 5 and CALLs std.apply through a foreign FuncRef
+    let main = Function::new(
+        "main",
+        layout(&[I64], 0, 1),
+        vec![Constant::I64(5), Constant::FuncRef {
+            module: "std".into(),
+            func: 0,
+        }],
+        vec![
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Kimm { dst: 0, kidx: k(0) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 1,
+            },
+            Uop::Halt { slot: 0 },
+        ],
+    )
+    .expect("valid function");
+    let bytes = write(
+        &Module::new("app", TargetClass::Bytecode, Hash128::compute(b"app")).with_function(main),
+    );
+    let app = read(&bytes).expect("parses");
+
+    let mut vm = Vm::new(ModuleRegistry::new());
+    vm.install_dsmod(&std_version(1)).expect("std v1 installs");
+    vm.install_dsmod(&app).expect("app installs");
+    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(10)));
+    // swapping std's slot redirects the SAME FuncRef to the new version
+    vm.install_dsmod(&std_version(2)).expect("std v2 swaps in");
+    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(15)));
 }
 
 #[test]

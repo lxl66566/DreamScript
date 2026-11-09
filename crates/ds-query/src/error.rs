@@ -3,7 +3,7 @@
 use ds_diag::FileId;
 use thiserror::Error;
 
-use crate::key::{BlockId, QueryKey};
+use crate::key::{BlockId, DefId, QueryKey};
 
 /// Everything the engine can fail with. Query computes that fail for
 /// language reasons report `ds-diag` diagnostics through their values
@@ -32,6 +32,10 @@ pub enum QueryError {
     /// [`Db::set_compute`](crate::Db::set_compute).
     #[error("no compute registered for {0:?}")]
     Unavailable(QueryKey),
+    /// The id names no definition of the package, or the definition is a
+    /// type-level declaration, which carries no effect row [B1].
+    #[error("no effect row for definition {}", .0.as_u32())]
+    NoEffectRow(DefId),
     /// A value of the wrong kind was produced for the key: an internal
     /// contract break between a compute function and its typed accessor.
     #[error("value kind does not match {0:?}")]

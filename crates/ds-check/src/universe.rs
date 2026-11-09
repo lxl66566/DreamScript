@@ -22,6 +22,15 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Ty(u32);
 
+/// Cap on the combinations one tuple distribution may mint. Each combination
+/// mints a named structural atom plus a hash-cons index entry (hundreds of
+/// bytes), so the cap bounds an adversarial distribution (e.g. eight
+/// 1000-member element sets, a 10^24-atom product) to a few hundred KiB
+/// while admitting any honest one — the corpus's largest is four
+/// combinations. Over the cap, [`Universe::solve`] fails with a typed error
+/// before any atom exists.
+pub(crate) const MAX_TUPLE_COMBINATIONS: usize = 4096;
+
 /// An atom and trait registry plus the hash-consed solved types over it.
 ///
 /// Solved forms are snapshots of the universe state they were solved against:
@@ -29,6 +38,10 @@ pub struct Ty(u32);
 /// type solves to, so consumers re-solve after declarations change (the
 /// memoized query layer owns that invalidation). Minted handles stay valid
 /// and immutable forever.
+///
+/// Nominal atoms come from declarations; anonymous tuple atoms are minted
+/// structurally on demand ([`Universe::solve`] on [`TypeExpr::Tuple`]) and
+/// hash-consed on their element-atom lists [B3].
 pub struct Universe {
     atoms: Vec<AtomDecl>,
     traits: Vec<TraitDecl>,
@@ -36,6 +49,9 @@ pub struct Universe {
     trait_names: HashMap<String, TraitId>,
     sets: Vec<Box<[TypeId]>>,
     index: HashMap<Box<[TypeId]>, u32>,
+    tuple_index: HashMap<Box<[TypeId]>, TypeId>,
+    apply_index: HashMap<(TypeId, Box<[Ty]>), TypeId>,
+    fn_index: HashMap<(Box<[Ty]>, Ty), TypeId>,
 }
 
 impl Universe {
@@ -55,6 +71,9 @@ impl Universe {
             trait_names: HashMap::new(),
             sets: Vec::new(),
             index: HashMap::new(),
+            tuple_index: HashMap::new(),
+            apply_index: HashMap::new(),
+            fn_index: HashMap::new(),
         }
     }
 
@@ -99,7 +118,10 @@ impl Universe {
                 Ok(())
             },
             AtomKind::Struct(_) => Err(Error::ShapeAlreadySet(id)),
-            AtomKind::Unit | AtomKind::Enum(_) => Err(Error::WrongAtomKind(id)),
+            AtomKind::Unit | AtomKind::Enum(_) | AtomKind::Tuple(_) => {
+                Err(Error::WrongAtomKind(id))
+            },
+            AtomKind::Apply(..) | AtomKind::FnSig(..) => Err(Error::WrongAtomKind(id)),
         }
     }
 
@@ -111,7 +133,10 @@ impl Universe {
                 Ok(())
             },
             AtomKind::Enum(_) => Err(Error::ShapeAlreadySet(id)),
-            AtomKind::Unit | AtomKind::Struct(_) => Err(Error::WrongAtomKind(id)),
+            AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Tuple(_) => {
+                Err(Error::WrongAtomKind(id))
+            },
+            AtomKind::Apply(..) | AtomKind::FnSig(..) => Err(Error::WrongAtomKind(id)),
         }
     }
 
@@ -178,11 +203,15 @@ impl Universe {
 
     /// Solves an expression into its canonical form over the current universe
     /// state: the sorted, deduplicated set of atoms it denotes. Difference
-    /// and negation nodes erase here [B1].
+    /// and negation nodes erase here [B1], and tuple products distribute over
+    /// unions element-wise into structural atoms [B3].
     ///
     /// Solving is one structural fold over the finite expression tree; every
     /// step is a finite set operation over the universe's atoms, so the
-    /// procedure always terminates (crate-root termination argument).
+    /// procedure always terminates (crate-root termination argument). A tuple
+    /// mints one atom per element combination — at most the product of the
+    /// element set sizes, each an existing atom, and never more than
+    /// [`MAX_TUPLE_COMBINATIONS`] (past that, a typed cap error).
     pub fn solve(&mut self, expr: &TypeExpr) -> Result<Ty, Error> {
         match expr {
             TypeExpr::Atom(id) => self.atom_ty(*id),
@@ -210,6 +239,120 @@ impl Universe {
                 let (x, y) = (self.solve(a)?, self.solve(b)?);
                 Ok(self.diff(x, y))
             },
+            TypeExpr::Tuple(elements) => self.tuple_solve(elements),
+        }
+    }
+
+    /// Solves a tuple by distributing the product over the elements' solved
+    /// sets [B3]; the combinations themselves are [`Universe::product`],
+    /// which enforces the distribution cap.
+    fn tuple_solve(&mut self, elements: &[TypeExpr]) -> Result<Ty, Error> {
+        let mut solved = Vec::with_capacity(elements.len());
+        for expr in elements {
+            solved.push(self.solve(expr)?);
+        }
+        self.product(&solved)
+    }
+
+    /// The structural atom of one element-atom list, minting it if absent
+    /// [B3]. Hash-consed on the list, so tuple atom identity is structural
+    /// equality: same arity and same atoms position-wise. Elements must
+    /// already be declared atoms (each a single atom by construction, since
+    /// only [`Universe::tuple_solve`] mints tuples).
+    fn tuple_atom(&mut self, elements: &[TypeId]) -> Result<TypeId, Error> {
+        if let Some(&id) = self.tuple_index.get(elements) {
+            return Ok(id);
+        }
+        for &element in elements {
+            self.atom_decl(element)?;
+        }
+        let name = self.tuple_name(elements);
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atoms.push(AtomDecl {
+            name,
+            kind: AtomKind::Tuple(elements.to_vec()),
+        });
+        self.tuple_index.insert(elements.into(), id);
+        Ok(id)
+    }
+
+    /// A tuple atom's structural name: `(t0, t1, ...)`, `()` at arity 0.
+    fn tuple_name(&self, elements: &[TypeId]) -> String {
+        let parts: Vec<&str> = elements
+            .iter()
+            .map(|id| {
+                self.atom_decl(*id)
+                    .map_or("<unknown>", |decl| decl.name.as_str())
+            })
+            .collect();
+        format!("({})", parts.join(", "))
+    }
+
+    /// The structural atom of one generic application: a declared
+    /// constructor plus its argument types as solved sets [B3]. Hash-consed
+    /// on `(constructor, arguments)`, so application identity is structural
+    /// equality. Unlike tuples, applications stay opaque to the set algebra
+    /// — a container does not distribute over a union argument — which is
+    /// what keeps distinct applications disjoint by construction.
+    pub fn apply_atom(&mut self, ctor: TypeId, args: &[Ty]) -> Result<TypeId, Error> {
+        if let Some(&id) = self.apply_index.get(&(ctor, args.into())) {
+            return Ok(id);
+        }
+        self.atom_decl(ctor)?;
+        for arg in args {
+            let _ = self.members(*arg);
+        }
+        let name = self.apply_name(ctor, args);
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atoms.push(AtomDecl {
+            name,
+            kind: AtomKind::Apply(ctor, args.into()),
+        });
+        self.apply_index.insert((ctor, args.into()), id);
+        Ok(id)
+    }
+
+    /// An application atom's structural name: `list[int | bool]`.
+    fn apply_name(&self, ctor: TypeId, args: &[Ty]) -> String {
+        let ctor_name = self
+            .atom_decl(ctor)
+            .map_or("<unknown>", |decl| decl.name.as_str());
+        let parts: Vec<String> = args.iter().map(|ty| self.render(*ty)).collect();
+        format!("{}[{}]", ctor_name, parts.join(", "))
+    }
+
+    /// The structural atom of one function type: solved parameter types plus
+    /// the solved return type [F2]. Hash-consed on the signature, so two
+    /// written forms of one signature mint one atom — the identity the
+    /// checker decomposes at call sites and lambda checks.
+    pub fn fn_atom(&mut self, params: &[Ty], ret: Ty) -> Result<TypeId, Error> {
+        let key = (params.to_vec().into(), ret);
+        if let Some(&id) = self.fn_index.get(&key) {
+            return Ok(id);
+        }
+        let name = self.fn_name(&key.0, key.1);
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atoms.push(AtomDecl {
+            name,
+            kind: AtomKind::FnSig(key.0.clone(), key.1),
+        });
+        self.fn_index.insert(key, id);
+        Ok(id)
+    }
+
+    /// A function signature atom's structural name: `fn(int, int) -> string`.
+    fn fn_name(&self, params: &[Ty], ret: Ty) -> String {
+        let parts: Vec<String> = params.iter().map(|ty| self.render(*ty)).collect();
+        format!("fn({}) -> {}", parts.join(", "), self.render(ret))
+    }
+
+    /// The signature of a function-type atom, if it is one; the checker's
+    /// decomposition point for indirect calls and lambda expectations.
+    #[must_use]
+    pub fn fn_sig(&self, id: TypeId) -> Option<(&[Ty], Ty)> {
+        match self.atom_decl(id).ok()?.kind {
+            AtomKind::FnSig(ref params, ret) => Some((params.as_ref(), ret)),
+            _ => None,
         }
     }
 
@@ -270,6 +413,48 @@ impl Universe {
     pub fn optional(&mut self, t: Ty) -> Ty {
         let with_none = union_slices(self.members(t), &[TypeId::NONE]);
         self.intern(with_none)
+    }
+
+    /// The tuple product of solved element types: one minted structural
+    /// atom per element-atom combination, unioned [B3] — `(a | b, c)` is
+    /// `(a, c) | (b, c)`. The empty list of elements is the unit atom
+    /// `()`, the arity-0 product with exactly one combination.
+    pub fn product(&mut self, elements: &[Ty]) -> Result<Ty, Error> {
+        let sizes: Vec<usize> = elements.iter().map(|&t| self.members(t).len()).collect();
+        let product = sizes.iter().try_fold(1_usize, |acc, &n| acc.checked_mul(n));
+        if product.is_none_or(|p| p > MAX_TUPLE_COMBINATIONS) {
+            let rendered: Vec<String> = elements.iter().map(|&t| self.render(t)).collect();
+            return Err(Error::TupleDistributionCap {
+                tuple: format!("({})", rendered.join(", ")),
+                sizes,
+                cap: MAX_TUPLE_COMBINATIONS,
+            });
+        }
+        let mut combinations: Vec<Vec<TypeId>> = vec![Vec::new()];
+        for ty in elements {
+            let members: Vec<TypeId> = self.members(*ty).to_vec();
+            let mut next = Vec::new();
+            for prefix in &combinations {
+                for atom in &members {
+                    let mut combo = prefix.clone();
+                    combo.push(*atom);
+                    next.push(combo);
+                }
+            }
+            combinations = next;
+        }
+        let mut atoms = Vec::with_capacity(combinations.len());
+        for combo in &combinations {
+            atoms.push(self.tuple_atom(combo)?);
+        }
+        Ok(self.intern(atoms))
+    }
+
+    /// The unit type `()`: the arity-0 tuple atom, a sibling of `none`
+    /// with exactly one inhabitant [B3].
+    pub fn unit_ty(&mut self) -> Ty {
+        self.product(&[])
+            .unwrap_or_else(|_| self.intern(Vec::new()))
     }
 
     // ---- decision procedures ------------------------------------------------

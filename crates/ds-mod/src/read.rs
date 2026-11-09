@@ -341,6 +341,13 @@ fn parse_constant(p: &mut Cursor<'_>) -> Result<Constant, ReadError> {
             _ => Err(malformed(at, "invalid bool constant byte")),
         },
         3 => Ok(Constant::Str(p.utf8()?.to_owned())),
+        4 => {
+            let module = p.utf8()?.to_owned();
+            let func = p.uleb()?;
+            let func = u32::try_from(func)
+                .map_err(|_| malformed(at, "FuncRef function index exceeds u32"))?;
+            Ok(Constant::FuncRef { module, func })
+        },
         _ => Err(malformed(at, "unknown constant tag")),
     }
 }

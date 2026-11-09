@@ -1,0 +1,27 @@
+// The `ds check` negative fixture: one overlap rejection [B6] and one
+// moved-then-used pair [C1]. No `// items:` header, so every diagnostic
+// is fatal and the command exits 1.
+
+tag int
+tag bool
+tag string
+trait Copyable { }
+
+trait enc {
+  const encode = (self: self) -> string
+}
+impl enc for int {
+  const encode = (self: self) -> string { "" }
+}
+impl enc for int | bool {
+  const encode = (self: self) -> string { "" }
+}
+
+struct conn: ~Copyable { path: string }
+extern fn open_conn (p: string) -> conn
+extern fn send (move c: conn) -> ()
+const use_twice = (p: string) -> () {
+  const c = open_conn(p)
+  send(c)
+  send(c)
+}

@@ -3,8 +3,10 @@
 use ds_diag::FileId;
 
 /// Placeholder identifier of one definition, to be replaced by the real id
-/// type when the checker lands (M2). Carried today only by the placeholder
-/// [`QueryKey`] variants so consumers can handle the key space ahead of time.
+/// type when the definition table lands. Carried by the [`QueryKey`]
+/// def-keyed variants; the M2 `linearity_check` compute reads it as the
+/// packed pair `(file << 8) | block`, so a definition is its `///|` block
+/// until real identity arrives.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DefId(u32);
 
@@ -23,8 +25,8 @@ impl DefId {
 }
 
 /// Placeholder identifier of one package: the key grain of the `resolve`
-/// query (M2) and the package-grain invalidation input (M7). Replaced by the
-/// real manifest identity when `ds.pkg` loading lands.
+/// query (a later milestone) and the package-grain invalidation input (M7).
+/// Replaced by the real manifest identity when `ds.pkg` loading lands.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PackageId(u32);
 
@@ -54,12 +56,11 @@ pub struct BlockId {
 
 /// Key of one memoized compiler query [H6 item 1].
 ///
-/// The enum is [`non_exhaustive`]: variants for the M2+ queries
-/// (`Resolve`, `TypeOf`, `EffectsOf`, `LinearityCheck`, `Lower`) are
-/// placeholders documented as such; asking the engine to compute one before
-/// its milestone yields [`QueryError::Unavailable`](crate::QueryError::Unavailable).
-/// Their key payloads are placeholder ids swapped for the real checker ids
-/// when those crates land.
+/// The enum is [`non_exhaustive`]: `Lower` is the remaining placeholder,
+/// documented as such; asking the engine to compute it before its
+/// milestone yields [`QueryError::Unavailable`](crate::QueryError::Unavailable).
+/// Every other variant is a real M2 query: `Resolve`, `TypeOf`,
+/// `LinearityCheck`, and `EffectsOf`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
 pub enum QueryKey {
@@ -70,13 +71,22 @@ pub enum QueryKey {
     /// The source text of one block; the seam downstream block-keyed queries
     /// depend on so file edits invalidate at block grain.
     BlockSource(BlockId),
-    /// Placeholder: name resolution for one package (M2).
+    /// Name resolution for one package [G3]: collection and resolution of
+    /// every registered file. The `PackageId` is the package grain; M2
+    /// has one package — every registered file — so the id is always 0
+    /// until M7's package loading mints real package identity.
     Resolve(PackageId),
-    /// Placeholder: type of one definition (M2).
+    /// The type story of one definition (M2): the ds-check bidirectional
+    /// pass over the package, sliced to the definition's block — the
+    /// declaration and body diagnostics whose primary labels address it,
+    /// plus the solved type of each binding it holds. `DefId` packs
+    /// `(file << 8) | block` like [`QueryKey::LinearityCheck`].
     TypeOf(DefId),
-    /// Placeholder: effect row of one definition (M2).
+    /// Effect row of one definition [E1]: the ds-check effects pass over
+    /// the registered files, keyed by the definition's package index.
     EffectsOf(DefId),
-    /// Placeholder: linearity check of one definition (M2).
+    /// The linearity check of one definition (M2): the affine pass over
+    /// the definition's file, sliced to the definition's block [C1, C5].
     LinearityCheck(DefId),
     /// Placeholder: lowering of one block (M3).
     Lower(BlockId),

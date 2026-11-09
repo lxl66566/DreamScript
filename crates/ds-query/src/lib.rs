@@ -22,15 +22,16 @@
 //!
 //! # Block grain and the ds-parse seam
 //!
-//! [`QueryKey::BlockSource`] is the seam: it returns one block's source
-//! text, derived from [`QueryKey::ParseFile`] and [`QueryKey::BlockIndex`].
-//! Downstream block-keyed queries (the M2+ resolve/type_of family) depend on
-//! it instead of on the file, so editing block 3 of 7 leaves the other six
-//! blocks' dependents valid: their dependency's value — the block text —
-//! recomputes to an equal value and renews. The placeholder computes
-//! registered by [`Db::new`] model this pipeline textually (see the
-//! `placeholder` module docs for the exact contract the real `ds-parse`
-//! wiring must satisfy).
+//! [`QueryKey::ParseFile`] runs `ds-parse` and returns tree plus diagnostics
+//! as one value — syntax errors are data, not engine errors, so a broken
+//! file does not poison dependents. [`QueryKey::BlockIndex`] maps the tree's
+//! block spans to block ids (degrading to a `///|` text scan when the parse
+//! failed). [`QueryKey::BlockSource`] is the renewal seam: it returns one
+//! block's source text, and downstream block-keyed queries (the M2+
+//! resolve/type_of family) depend on it instead of on the file — so editing
+//! block 3 of 7 leaves the other six blocks' dependents valid: their
+//! dependency's value — the block text — recomputes to an equal value and
+//! renews. See the `queries` module docs for the exact dependency shape.
 //!
 //! # Cycle policy
 //!
@@ -53,24 +54,27 @@
 //! # Example
 //!
 //! ```
-//! use ds_query::{BlockIndex, BlockSource, Db};
+//! use ds_query::{BlockIndex, BlockSource, Db, ParseFile};
 //!
 //! let mut db = Db::new();
-//! let file = db.add_file("main.ds", "let a = 1\n///|\nlet b = 2\n");
+//! let file = db.add_file("main.ds", "const a = 1\n///|\nconst b = 2\n");
+//!
+//! let parse = db.get::<ParseFile>(file).unwrap();
+//! assert!(parse.ast.is_some());
 //!
 //! let blocks = db.get::<BlockIndex>(file).unwrap();
 //! assert_eq!(blocks.blocks.len(), 2);
-//!
 //! let second = db.get::<BlockSource>(blocks.blocks[1].id).unwrap();
-//! assert_eq!(&*second, "let b = 2\n");
+//! // Tree spans include the separator line's terminating newline.
+//! assert_eq!(&*second, "\nconst b = 2\n");
 //!
 //! // Editing the first block re-derives the file's parse and index, but the
 //! // second block's source renews and its readers never recompute.
-//! db.set_file_content(file, "let a = 3\n///|\nlet b = 2\n")
+//! db.set_file_content(file, "const a = 3\n///|\nconst b = 2\n")
 //!     .unwrap();
 //! assert_eq!(
 //!     &*db.get::<BlockSource>(blocks.blocks[1].id).unwrap(),
-//!     "let b = 2\n"
+//!     "\nconst b = 2\n"
 //! );
 //! ```
 //!
@@ -81,12 +85,18 @@
 mod db;
 mod error;
 mod key;
-mod placeholder;
+mod queries;
 mod query;
 mod value;
 
 pub use db::{ComputeFn, Ctx, Db, Revision};
+pub use ds_check::{Effect, EffectRow};
 pub use error::QueryError;
 pub use key::{BlockId, DefId, Dependency, InputKey, PackageId, QueryKey, QueryKind};
-pub use query::{BlockIndex, BlockSource, ParseFile, Query};
-pub use value::{BlockIndexOutput, BlockInfo, ParseOutput, QueryValue};
+pub use query::{
+    BlockIndex, BlockSource, EffectsOf, LinearityCheck, ParseFile, Query, Resolve, TypeOf,
+};
+pub use value::{
+    BlockIndexOutput, BlockInfo, LinearityOutput, ParseOutput, QueryValue, ResolveOutput,
+    TypeOfOutput,
+};

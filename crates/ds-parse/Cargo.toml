@@ -1,0 +1,19 @@
+[package]
+name         = "ds-parse"
+description  = "Lexer, pest grammar, and spanned AST for the DreamScript decided surface"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pest.workspace        = true
+pest_derive.workspace = true
+ds-diag = { path = "../ds-diag" }

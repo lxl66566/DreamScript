@@ -1,16 +1,22 @@
-//! Nominal atoms and declaration data [B1, B3].
+//! Nominal atoms and declaration data [B1, B3], plus structural atoms —
+//! anonymous tuples and generic applications [B3].
 //!
 //! Declarations are modeled as data; resolution from AST is later work. Every
 //! tag, struct, and enum gets one [`TypeId`] when declared. Structs carry
 //! field signatures, enums carry case signatures, unit tags carry nothing.
+//! Anonymous tuples and generic applications are not declared: the universe
+//! mints one structural atom per distinct shape on demand.
 
 use std::collections::BTreeSet;
 
-use crate::expr::TypeExpr;
+use crate::{expr::TypeExpr, universe::Ty};
 
-/// Identity of a nominal atom (tag, struct, or enum) inside one
-/// [`crate::Universe`]. Distinct atoms denote disjoint value sets [B1];
-/// [`TypeId::NONE`] is the distinguished `none` unit atom [B4].
+/// Identity of an atom (a nominal tag, struct, or enum, or a structural
+/// tuple minted by the universe) inside one [`crate::Universe`]. Distinct
+/// atoms denote disjoint value sets [B1] — for tuples because solving
+/// distributes products over unions element-wise (crate root), so distinct
+/// tuple atoms differ in some element atom; [`TypeId::NONE`] is the
+/// distinguished `none` unit atom [B4].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TypeId(u32);
 
@@ -113,6 +119,30 @@ pub enum AtomKind {
     Struct(Vec<Field>),
     /// A nominal enum carrying case signatures; tuple-enums allowed [B3].
     Enum(Vec<Case>),
+    /// An anonymous tuple's structural shape [B3]: the element atoms, one per
+    /// position. Each element is a single atom because solving distributes
+    /// tuple products over unions element-wise (crate root), so equality of
+    /// tuple atoms is structural: the universe hash-conses on the element
+    /// list, and two tuple atoms are equal exactly when their elements match
+    /// position-wise. The empty tuple `()` is the arity-0 atom with exactly
+    /// one inhabitant — a sibling of `none`, not an alias: the two are
+    /// distinct atoms and never equal values.
+    Tuple(Vec<TypeId>),
+    /// A generic application's structural shape: a declared constructor atom
+    /// plus its argument types as solved sets (`list[int | bool]`). Unlike
+    /// tuple atoms, applications are OPAQUE to the set algebra — a container
+    /// does not distribute over a union argument — so equality is structural
+    /// on `(constructor, arguments)` and distinct application atoms denote
+    /// distinct value sets by construction. Inhabited, but with no value
+    /// shape the type core can show; witnesses render the structural name.
+    Apply(TypeId, Box<[Ty]>),
+    /// A function type's structural shape: parameter types plus the return
+    /// type (`fn(int) -> string`) [F2 "functions are values"]. Opaque to the
+    /// set algebra exactly like applications: equality is structural, one
+    /// atom per distinct signature, and a function value is never a member
+    /// of any data atom. The checker decomposes the signature at call sites
+    /// and lambda checks; the core only carries the identity.
+    FnSig(Box<[Ty]>, Ty),
 }
 
 /// A declared atom: name plus shape.

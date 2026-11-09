@@ -129,11 +129,15 @@ fn random_module(u: &mut Unstructured) -> Module {
 }
 
 fn random_constant(u: &mut Unstructured) -> Constant {
-    match u8::arbitrary(u).unwrap_or(0) % 4 {
+    match u8::arbitrary(u).unwrap_or(0) % 5 {
         0 => Constant::I64(i64::arbitrary(u).unwrap_or(0)),
         1 => Constant::F64(f64::from_bits(u64::arbitrary(u).unwrap_or(0))),
         2 => Constant::Bool(bool::arbitrary(u).unwrap_or(false)),
-        _ => Constant::Str(random_string(u, 16)),
+        3 => Constant::Str(random_string(u, 16)),
+        _ => Constant::FuncRef {
+            module: random_string(u, 8),
+            func: u32::arbitrary(u).unwrap_or(0),
+        },
     }
 }
 

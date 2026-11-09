@@ -8,8 +8,8 @@ use crate::{
     header::{CollectorHooks, Dep, Flags, TargetClass},
 };
 
-/// One entry of the locked constants payload: an i64, f64, bool, or UTF-8
-/// string [G3.5].
+/// One entry of the locked constants payload: an i64, f64, bool, UTF-8
+/// string, or function reference [G3.5].
 ///
 /// f64 values are stored and restored by bit pattern, so NaN payloads
 /// survive a round trip unchanged.
@@ -23,6 +23,16 @@ pub enum Constant {
     Bool(bool),
     /// UTF-8 string bytes.
     Str(String),
+    /// A qualified callee reference for CALL/CALLT pool operands: the
+    /// callee's module name and its function index within that module.
+    /// An empty `module` names the enclosing module itself (a same-module
+    /// ref). The loader resolves names to slots at install time.
+    FuncRef {
+        /// Callee module name; empty for the enclosing module.
+        module: String,
+        /// Callee function index within `module`'s blocks payload.
+        func: u32,
+    },
 }
 
 /// A half-open byte-offset span `[start, end)` into the module source,

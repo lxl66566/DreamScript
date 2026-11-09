@@ -53,11 +53,17 @@ fn bad_version_rejected() {
     let error = read(&bytes).expect_err("bad version");
     assert_eq!(error, ReadError::UnsupportedVersion { found: 9 });
     assert_diagnostic(&error, ErrorCode::ModuleVersionUnsupported);
-    // Format version 1 (pre BL-7 header fields) is rejected too.
+    // Format version 1 (pre BL-7 header fields) and 2 (pre FuncRef
+    // constants kind) are rejected too.
     bytes[4] = 1;
     assert_eq!(
         read(&bytes).expect_err("version 1 rejected"),
         ReadError::UnsupportedVersion { found: 1 }
+    );
+    bytes[4] = 2;
+    assert_eq!(
+        read(&bytes).expect_err("version 2 rejected"),
+        ReadError::UnsupportedVersion { found: 2 }
     );
     // A bare magic runs out of bytes at the version position.
     assert!(matches!(

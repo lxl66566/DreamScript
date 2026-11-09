@@ -18,7 +18,9 @@ pub struct WitnessField {
 /// A concrete value-type witness describing one inhabitant of a non-empty
 /// type: an atom plus one level of field/case shape. Field types are shown,
 /// not recursively expanded, so recursive shapes terminate; B6 overlap errors
-/// name both heads plus one of these.
+/// name both heads plus one of these. Tuple witnesses carry the element
+/// witnesses themselves [B3]: element atoms are minted strictly before their
+/// tuple, so the recursion terminates.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Witness {
     /// A unit tag (including `none`): the tag is the witness [B1].
@@ -41,6 +43,14 @@ pub enum Witness {
         case: usize,
         /// One entry per case field, in declaration order.
         fields: Vec<WitnessField>,
+    },
+    /// An anonymous tuple [B3]: the atom plus one witness per element, in
+    /// position order. `()` carries no elements.
+    Tuple {
+        /// The witnessed atom.
+        atom: TypeId,
+        /// One witness per tuple element, in position order.
+        elements: Vec<Witness>,
     },
 }
 
@@ -79,6 +89,25 @@ impl Universe {
                         }
                     }
                 },
+                // Applications and function signatures are inhabited but
+                // opaque to the core: the witness names the type, with no
+                // value shape to show.
+                AtomKind::Apply(..) | AtomKind::FnSig(..) => {
+                    return Ok(Witness::Unit { atom });
+                },
+                AtomKind::Tuple(elements) => {
+                    // Recursion terminates: element atoms are minted
+                    // strictly before the tuple that names them.
+                    let mut witnessed = Vec::with_capacity(elements.len());
+                    for element in elements {
+                        let ty = self.atom_ty(element)?;
+                        witnessed.push(self.witness(ty)?);
+                    }
+                    return Ok(Witness::Tuple {
+                        atom,
+                        elements: witnessed,
+                    });
+                },
             }
         }
         Err(Error::WitnessOfEmpty(t))
@@ -99,8 +128,8 @@ impl Universe {
         Ok(Some(out))
     }
 
-    /// Renders a witness as `atom`, `atom{f: t, ...}`, or `atom.case{t, ...}`
-    /// for diagnostics.
+    /// Renders a witness as `atom`, `atom{f: t, ...}`, `atom.case{t, ...}`,
+    /// or `(w0, w1, ...)` for tuples [B3], for diagnostics.
     #[must_use]
     pub fn render_witness(&self, witness: &Witness) -> String {
         match witness {
@@ -118,7 +147,12 @@ impl Universe {
                     .ok()
                     .and_then(|decl| match &decl.kind {
                         AtomKind::Enum(cases) => cases.get(*case).map(|c| c.name.as_str()),
-                        AtomKind::Unit | AtomKind::Reserved | AtomKind::Struct(_) => None,
+                        AtomKind::Unit
+                        | AtomKind::Reserved
+                        | AtomKind::Struct(_)
+                        | AtomKind::Tuple(_)
+                        | AtomKind::Apply(..)
+                        | AtomKind::FnSig(..) => None,
                     })
                     .unwrap_or("<unknown>");
                 if fields.is_empty() {
@@ -139,6 +173,13 @@ impl Universe {
                         self.render_fields(fields)
                     )
                 }
+            },
+            Witness::Tuple { elements, .. } => {
+                let parts: Vec<String> = elements
+                    .iter()
+                    .map(|witness| self.render_witness(witness))
+                    .collect();
+                format!("({})", parts.join(", "))
             },
         }
     }

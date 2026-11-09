@@ -25,6 +25,10 @@ fn sample_module() -> Module {
     .with_constant(Constant::Bool(true))
     .with_constant(Constant::Bool(false))
     .with_constant(Constant::Str("h\u{e9}llo \u{0} world".to_owned()))
+    .with_constant(Constant::FuncRef {
+        module: "csv".to_owned(),
+        func: 2,
+    })
     .with_debug_span(0, 24)
     .with_debug_span(24, 25)
 }
@@ -57,7 +61,7 @@ fn round_trip_preserves_every_field() {
         Hash128::compute(b"csv package content")
     );
     assert_eq!(module.source_hash(), Hash128::compute(SOURCE));
-    assert_eq!(module.constants().len(), 6);
+    assert_eq!(module.constants().len(), 7);
     assert_eq!(module.constants()[0], Constant::I64(-42));
     assert_eq!(module.constants()[2], Constant::F64(3.25));
     assert_eq!(module.constants()[3], Constant::Bool(true));
@@ -66,6 +70,10 @@ fn round_trip_preserves_every_field() {
         module.constants()[5],
         Constant::Str("h\u{e9}llo \u{0} world".to_owned())
     );
+    assert_eq!(module.constants()[6], Constant::FuncRef {
+        module: "csv".to_owned(),
+        func: 2
+    });
     // NaN payloads survive bit-exactly (NaN != NaN under derived equality).
     match &module.constants()[1] {
         Constant::F64(value) => assert_eq!(value.to_bits(), 0x7ff8_0000_dead_beef),
@@ -215,9 +223,8 @@ fn tempfile_dir() -> ScratchDir {
 // public). Slots: r0 = n, r1 = compare bool, r2 = constant scratch, r3 =
 // the outgoing argument (the slide source the ABI derives as the arg-area
 // slot). Pool: k0 = 0i64, k1 = 1i64, k2 = the result bool, k3 = the
-// callee; the callee slot holds a string standing in for the FuncRef
-// entry, which lands with the M3 loader (indices are validated for
-// decodability, not pool semantics).
+// callee as a same-module FuncRef (empty module name, function index
+// within this module's blocks payload).
 fn even_code() -> Vec<Uop> {
     vec![
         Uop::Funcf { frame_slots: 4 }, // 0
@@ -306,7 +313,10 @@ fn even_odd_two_function_module_round_trips() {
                     Constant::I64(0),
                     Constant::I64(1),
                     Constant::Bool(true),
-                    Constant::Str("odd".to_owned()),
+                    Constant::FuncRef {
+                        module: String::new(),
+                        func: 1,
+                    },
                 ],
                 even_code(),
             )
@@ -320,7 +330,10 @@ fn even_odd_two_function_module_round_trips() {
                     Constant::I64(0),
                     Constant::I64(1),
                     Constant::Bool(false),
-                    Constant::Str("even".to_owned()),
+                    Constant::FuncRef {
+                        module: String::new(),
+                        func: 0,
+                    },
                 ],
                 odd_code(),
             )
@@ -338,7 +351,10 @@ fn even_odd_two_function_module_round_trips() {
     assert_eq!(odd.code(), odd_code().as_slice());
     assert_eq!(even.layout(), &even_odd_layout());
     assert_eq!(even.constants()[0], Constant::I64(0));
-    assert_eq!(even.constants()[3], Constant::Str("odd".to_owned()));
+    assert_eq!(even.constants()[3], Constant::FuncRef {
+        module: String::new(),
+        func: 1
+    });
     assert_eq!(odd.constants()[2], Constant::Bool(false));
     // The tail-call word survived: CALLT with nargs 1 and pool index 3.
     assert!(even.code().contains(&Uop::Callt {
@@ -387,4 +403,60 @@ fn builder_rejects_jump_escaping_the_body() {
         Uop::Jmp { target: 1 },
     ])
     .expect("in-body target validates");
+}
+
+#[test]
+fn cross_module_funcref_round_trips() {
+    // A function whose pool mixes a cross-module ref (qualified callee in
+    // the "utils" dependency) and a same-module ref (empty module name);
+    // the module-level constants section carries one too.
+    let module = Module::new("app", TargetClass::Bytecode, Hash128::ZERO)
+        .with_constant(Constant::FuncRef {
+            module: "std".to_owned(),
+            func: 0,
+        })
+        .with_function(
+            Function::new(
+                "main",
+                FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 1).expect("layout"),
+                vec![
+                    Constant::FuncRef {
+                        module: "utils".to_owned(),
+                        func: 4,
+                    },
+                    Constant::FuncRef {
+                        module: String::new(),
+                        func: 0,
+                    },
+                ],
+                vec![
+                    Uop::Funcf { frame_slots: 2 },
+                    Uop::Kconst {
+                        dst: 1,
+                        kidx: ConstIdx(0),
+                    },
+                    Uop::Call {
+                        callee: ConstIdx(0),
+                        nargs: 0,
+                    },
+                    Uop::Ret { src: 0 },
+                ],
+            )
+            .expect("funcref pool validates"),
+        );
+    let bytes = write(&module);
+    let read_back = read(&bytes).expect("funcref module reads");
+    assert_eq!(write(&read_back), bytes);
+    assert_eq!(read_back.constants()[0], Constant::FuncRef {
+        module: "std".to_owned(),
+        func: 0
+    });
+    assert_eq!(read_back.functions()[0].constants()[0], Constant::FuncRef {
+        module: "utils".to_owned(),
+        func: 4
+    });
+    assert_eq!(read_back.functions()[0].constants()[1], Constant::FuncRef {
+        module: String::new(),
+        func: 0
+    });
 }

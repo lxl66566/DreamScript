@@ -9,11 +9,20 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ds-diag = { path = "../crates/ds-diag" }
 ds-mod = { path = "../crates/ds-mod" }
+ds-query = { path = "../crates/ds-query" }
 
 [[bin]]
 name = "fuzz_read_dsmod"
 path = "fuzz_targets/fuzz_read_dsmod.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_query_engine"
+path = "fuzz_targets/fuzz_query_engine.rs"
 test = false
 doc = false
 bench = false

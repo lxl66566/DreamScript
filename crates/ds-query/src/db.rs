@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use ds_diag::FileId;
+use ds_diag::{FileId, Files};
 
 use crate::{
     error::QueryError,
@@ -29,16 +29,11 @@ impl Revision {
 }
 
 /// Compute function of one query kind: a pure function of the context (which
-/// exposes inputs and other queries) and its key.
+/// exposes inputs and other queries) and its key. Computes run synchronously
+/// on the caller's thread; queries that need a bigger stack (the parse
+/// grammar runs its recursive descent on a dedicated 8 MiB stack thread
+/// internally) arrange it themselves.
 pub type ComputeFn = fn(&mut Ctx<'_>, QueryKey) -> Result<QueryValue, QueryError>;
-
-/// One registered input, with the revision it last changed at.
-#[derive(Clone, Debug)]
-struct InputEntry {
-    name: String,
-    content: Arc<str>,
-    changed_at: Revision,
-}
 
 /// One memoized query result. `dirty` means some dependency may have changed
 /// since `verified_at`; a dirty memo is deep-verified on the next read and
@@ -63,13 +58,22 @@ struct Frame {
 /// to compiler data for every consumer (CLI, LSP, REPL, hot reload,
 /// formatter) [H6 item 1].
 ///
+/// File inputs live in a [`Files`] registry whose ids are the engine's
+/// `FileId`s, so every span produced by a query addresses this registry
+/// (retrieve it with [`Db::files`] to render diagnostics). Editing a file
+/// swaps that file's content in place via [`Files::set_source`]; ids stay
+/// stable and other files are untouched, so edits stay cheap as the LSP
+/// hammers this path.
+///
 /// Determinism: computes are pure functions of inputs, so the same inputs
 /// yield the same results; whether a value comes from a memo hit or a fresh
 /// compute is never observable in returned values.
 #[derive(Clone, Debug, Default)]
 pub struct Db {
     revision: Revision,
-    inputs: HashMap<FileId, InputEntry>,
+    files: Files,
+    /// Per-file revision of the last content change, indexed by file id.
+    changed_at: Vec<Revision>,
     memos: HashMap<QueryKey, Memo>,
     /// Reverse dependency edges: dependency -> keys whose memos read it.
     reverse: HashMap<Dependency, HashSet<QueryKey>>,
@@ -78,16 +82,27 @@ pub struct Db {
 }
 
 impl Db {
-    /// Creates an empty database with the placeholder computes for
-    /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`], and
-    /// [`QueryKey::BlockSource`] registered (see the crate docs for the
-    /// `ds-parse` seam they model).
+    /// Creates an empty database with the computes for
+    /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`],
+    /// [`QueryKey::BlockSource`], [`QueryKey::Resolve`],
+    /// [`QueryKey::TypeOf`], [`QueryKey::LinearityCheck`], and
+    /// [`QueryKey::EffectsOf`] registered: `ds-parse` for the tree and
+    /// diagnostics, the tree's block spans for the index, the block-text
+    /// seam for sources, the ds-check collection and resolution passes
+    /// over the registered files [G3], the bidirectional check sliced per
+    /// definition [B2], the M2 affine pass [C1, C5] per definition, and
+    /// the ds-check effects pass over the registered files [E1] (see the
+    /// crate docs).
     #[must_use]
     pub fn new() -> Self {
         let mut db = Self::default();
-        db.set_compute(QueryKind::ParseFile, crate::placeholder::parse);
-        db.set_compute(QueryKind::BlockIndex, crate::placeholder::block_index);
-        db.set_compute(QueryKind::BlockSource, crate::placeholder::block_source);
+        db.set_compute(QueryKind::ParseFile, crate::queries::parse);
+        db.set_compute(QueryKind::BlockIndex, crate::queries::block_index);
+        db.set_compute(QueryKind::BlockSource, crate::queries::block_source);
+        db.set_compute(QueryKind::Resolve, crate::queries::resolve);
+        db.set_compute(QueryKind::TypeOf, crate::queries::type_of);
+        db.set_compute(QueryKind::LinearityCheck, crate::queries::linearity_check);
+        db.set_compute(QueryKind::EffectsOf, crate::queries::effects_of);
         db
     }
 
@@ -98,12 +113,8 @@ impl Db {
     ///
     /// Panics if the file count overflows `u32`.
     pub fn add_file(&mut self, name: impl Into<String>, content: &str) -> FileId {
-        let file = FileId::new(u32::try_from(self.inputs.len()).expect("file count overflows u32"));
-        self.inputs.insert(file, InputEntry {
-            name: name.into(),
-            content: Arc::from(content),
-            changed_at: self.revision,
-        });
+        let file = self.files.add_source(name, content);
+        self.changed_at.push(self.revision);
         file
     }
 
@@ -117,16 +128,16 @@ impl Db {
     ///
     /// [`QueryError::UnknownFile`] if no such file was registered.
     pub fn set_file_content(&mut self, file: FileId, content: &str) -> Result<(), QueryError> {
-        let Some(entry) = self.inputs.get_mut(&file) else {
+        if !self.is_registered(file) {
             return Err(QueryError::UnknownFile(file));
-        };
-        if entry.content.as_ref() == content {
+        }
+        if self.files.source(file) == content {
             return Ok(());
         }
         self.revision = Revision(self.revision.as_u64() + 1);
         let revision = self.revision;
-        entry.content = Arc::from(content);
-        entry.changed_at = revision;
+        self.changed_at[file.as_u32() as usize] = revision;
+        self.files.set_source(file, content);
 
         // Transitive invalidation: mark every memo reachable from the
         // changed input through the reverse edges. Marking is conservative
@@ -168,21 +179,27 @@ impl Db {
         self.revision
     }
 
+    /// The source registry all query spans address; hand this to diagnostic
+    /// renderers.
+    #[must_use]
+    pub fn files(&self) -> &Files {
+        &self.files
+    }
+
     /// The registered content of `file`, if any.
     #[must_use]
     pub fn file_content(&self, file: FileId) -> Option<&str> {
-        self.inputs.get(&file).map(|e| e.content.as_ref())
+        self.is_registered(file).then(|| self.files.source(file))
     }
 
     /// The name `file` was registered under, if it exists.
     #[must_use]
     pub fn file_name(&self, file: FileId) -> Option<&str> {
-        self.inputs.get(&file).map(|e| e.name.as_str())
+        self.is_registered(file).then(|| self.files.name(file))
     }
 
-    /// Replaces the compute function of a query kind. This is the seam the
-    /// `ds-parse` follow-up uses to install the real parse pipeline, and the
-    /// hook tests and embedders use to model not-yet-landed queries.
+    /// Replaces the compute function of a query kind: the hook tests and
+    /// embedders use to model not-yet-landed queries.
     pub fn set_compute(&mut self, kind: QueryKind, compute: ComputeFn) {
         self.computes.insert(kind, compute);
     }
@@ -201,14 +218,13 @@ impl Db {
         self.memos.get(key).is_some_and(|memo| !memo.dirty)
     }
 
+    fn is_registered(&self, file: FileId) -> bool {
+        (file.as_u32() as usize) < self.changed_at.len()
+    }
+
     fn input_changed_at(&self, input: InputKey) -> Revision {
         match input {
-            InputKey::FileContent(file) => {
-                self.inputs
-                    .get(&file)
-                    .expect("input deps only reference registered files")
-                    .changed_at
-            },
+            InputKey::FileContent(file) => self.changed_at[file.as_u32() as usize],
         }
     }
 }
@@ -227,10 +243,10 @@ impl Ctx<'_> {
     ///
     /// [`QueryError::UnknownFile`] if no such file was registered.
     pub fn file_content(&mut self, file: FileId) -> Result<Arc<str>, QueryError> {
-        let Some(entry) = self.db.inputs.get(&file) else {
+        if !self.db.is_registered(file) {
             return Err(QueryError::UnknownFile(file));
-        };
-        let content = Arc::clone(&entry.content);
+        }
+        let content = Arc::from(self.db.files.source(file));
         self.record(Dependency::Input(InputKey::FileContent(file)));
         Ok(content)
     }
@@ -246,6 +262,20 @@ impl Ctx<'_> {
         let value = ensure(self.db, query_key, &mut *self.frames)?;
         self.record(Dependency::Query(query_key));
         Q::extract(value).ok_or(QueryError::KindMismatch(query_key))
+    }
+
+    /// The number of registered files: the package grain of the M2
+    /// checker queries [G3].
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.db.changed_at.len()
+    }
+
+    /// The source registry all query spans address (the parse compute hands
+    /// it to `ds-parse`; renderers get theirs from [`Db::files`]).
+    #[must_use]
+    pub fn files(&self) -> &Files {
+        &self.db.files
     }
 
     /// The current global revision.

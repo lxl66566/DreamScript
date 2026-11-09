@@ -1,0 +1,389 @@
+// DreamScript grammar — the M1 decided surface (docs/en/design-decisions.md
+// F1-F7, B3, B4, B7, G3). Newline sensitivity: statements are terminated by
+// newlines (or by the enclosing `}`), binary operators must sit on the same
+// line as their left operand, and only `.`-continuation may open on the next
+// line. `expr_nos` variants ban struct literals and trailing lambda blocks in
+// control headers (`if`/`while`/`match`/`for`), where a following `{` belongs
+// to the construct, not to a literal.
+
+// ===== spacing, comments, newlines =====
+
+nl = _{ "\r\n" | "\n" }
+// `///|` is the block separator, never a comment (checked before "//" so
+// separator lines survive spacing rules that eat comments).
+line_comment = @{ !("///|") ~ "//" ~ (!nl ~ ANY)* }
+block_comment = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+comment = _{ line_comment | block_comment }
+// Horizontal spacing: never crosses a newline (a line comment does not
+// consume its terminating newline, so an operator after it is "next line").
+h = _{ (" " | "\t" | block_comment | line_comment)* }
+// Any spacing, crossing newlines.
+sp = _{ (h ~ nl)* ~ h }
+// At least one newline, plus surrounding comments.
+nlreq = _{ (h ~ nl)+ ~ h }
+
+// ===== identifiers and keywords =====
+
+ident_start = { ASCII_ALPHA | "_" }
+ident_cont = { ASCII_ALPHANUMERIC | "_" }
+
+kw_const    = @{ "const" ~ !ident_cont }
+kw_var      = @{ "var" ~ !ident_cont }
+kw_fn       = @{ "fn" ~ !ident_cont }
+kw_if       = @{ "if" ~ !ident_cont }
+kw_else     = @{ "else" ~ !ident_cont }
+kw_match    = @{ "match" ~ !ident_cont }
+kw_while    = @{ "while" ~ !ident_cont }
+kw_for      = @{ "for" ~ !ident_cont }
+kw_in       = @{ "in" ~ !ident_cont }
+kw_break    = @{ "break" ~ !ident_cont }
+kw_continue = @{ "continue" ~ !ident_cont }
+kw_return   = @{ "return" ~ !ident_cont }
+kw_or       = @{ "or" ~ !ident_cont }
+kw_is       = @{ "is" ~ !ident_cont }
+kw_struct   = @{ "struct" ~ !ident_cont }
+kw_enum     = @{ "enum" ~ !ident_cont }
+kw_tag      = @{ "tag" ~ !ident_cont }
+kw_type     = @{ "type" ~ !ident_cont }
+kw_trait    = @{ "trait" ~ !ident_cont }
+kw_impl     = @{ "impl" ~ !ident_cont }
+kw_import   = @{ "import" ~ !ident_cont }
+kw_pub      = @{ "pub" ~ !ident_cont }
+kw_extern   = @{ "extern" ~ !ident_cont }
+kw_mut      = @{ "mut" ~ !ident_cont }
+kw_nursery  = @{ "nursery" ~ !ident_cont }
+kw_spawn    = @{ "spawn" ~ !ident_cont }
+kw_defer    = @{ "defer" ~ !ident_cont }
+kw_true     = @{ "true" ~ !ident_cont }
+kw_false    = @{ "false" ~ !ident_cont }
+
+keyword = _{ kw_const | kw_var | kw_fn | kw_if | kw_else | kw_match | kw_while
+           | kw_for | kw_in | kw_break | kw_continue | kw_return | kw_or | kw_is
+           | kw_struct | kw_enum | kw_tag | kw_type | kw_trait | kw_impl
+           | kw_import | kw_pub | kw_extern | kw_mut | kw_nursery | kw_spawn
+           | kw_defer | kw_true | kw_false }
+
+ident = @{ !keyword ~ ident_start ~ ident_cont* }
+// Parameter modes: `mut` is reserved; `move`/`comptime` are contextual.
+param_mode = @{ (kw_mut | ("move" ~ !ident_cont) | ("comptime" ~ !ident_cont)) }
+
+path = { ident ~ ("::" ~ h ~ ident)* }
+field_name = { ident | keyword }
+
+// ===== literals =====
+
+digit = { ASCII_DIGIT }
+digits = _{ digit ~ ("_"? ~ digit)* }
+hex_digit = _{ ASCII_DIGIT | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" }
+hex_digits = _{ hex_digit ~ ("_"? ~ hex_digit)* }
+bin_digits = _{ ("0" | "1") ~ ("_"? ~ ("0" | "1"))* }
+oct_digit = _{ "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" }
+oct_digits = _{ oct_digit ~ ("_"? ~ oct_digit)* }
+
+int_suffix = { "i128" | "i64" | "i32" | "i16" | "i8" | "isize"
+             | "u128" | "u64" | "u32" | "u16" | "u8" | "usize" }
+fsuffix = { "f64" | "f32" }
+exp_part = @{ ("e" | "E") ~ ("+" | "-")? ~ digits }
+
+// B7: separators between digits, radix prefixes, width/float suffixes.
+radix_int = @{ ("0x" ~ hex_digits | "0o" ~ oct_digits | "0b" ~ bin_digits) ~ int_suffix? }
+dec_int = @{ digits ~ int_suffix? }
+int_lit = @{ radix_int | dec_int }
+
+// A float needs a fraction, an exponent, or an f-suffix (`1` stays an int).
+float_rest = { ("." ~ digits) ~ exp_part? ~ fsuffix? | exp_part ~ fsuffix? | fsuffix }
+float_lit = @{ digits ~ float_rest }
+
+esc = @{ "\\" ~ ( "n" | "t" | "r" | "0" | "\\" | "\"" | "$" | "'"
+        | "u" ~ "{" ~ hex_digit{1,6} ~ "}" ) }
+
+// F6: `$x` and `${expr}` interpolation holes are structured pairs, not
+// lexer-concatenated text. Ordinary strings are single-line [6.1], so a
+// hole's spacing is `h` (same line only): a hole cannot carry the string
+// across a newline.
+str_text = @{ (!("\"" | "$" | "\\" | nl) ~ ANY)+ }
+interp_simple = @{ "$" ~ ident }
+interp_brace = { "$" ~ "{" ~ h ~ expr ~ h ~ "}" }
+string_lit = ${ "\"" ~ str_chunk* ~ "\"" }
+str_chunk = _{ str_text | esc | interp_brace | interp_simple }
+
+// Raw strings: no escapes, no interpolation. Hash-counted to any depth.
+// A hashed raw body ends at the first `"` followed by `#`s (escalate the
+// count to embed quote+hash text); a plain raw body ends at the first `"`.
+raw_hashed = @{ "r" ~ PUSH("#"+) ~ "\"" ~ raw_hash_body ~ "\"" ~ POP }
+raw_hash_body = @{ (!("\"" ~ POP) ~ ANY)* }
+raw_zero = @{ "r" ~ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+raw_string = _{ raw_hashed | raw_zero }
+
+char_single = @{ !("'" | "\\" | nl) ~ ANY }
+char_lit = ${ "'" ~ (esc | char_single) ~ "'" }
+byte_lit = ${ "b" ~ "'" ~ (esc | char_single) ~ "'" }
+
+// ===== types =====
+
+type_expr = { type_union }
+type_union = { type_inter ~ (sp ~ "|" ~ sp ~ type_inter)* }
+type_inter = { type_diff ~ (sp ~ "&" ~ sp ~ type_diff)* }
+type_diff = { type_postfix ~ (sp ~ "-" ~ sp ~ type_postfix)* }
+type_postfix = { type_unary ~ (h ~ opt_mark)* }
+opt_mark = @{ "?" }
+neg_prefix = @{ "~" }
+type_unary = { (neg_prefix ~ sp)* ~ type_atom }
+
+type_atom = _{ fn_type | ptr_type | tuple_type | case_type | path_type | type_kw }
+type_kw = { kw_type }
+fn_type = { kw_fn ~ h ~ params ~ ret_ann? }
+ptr_type = { "*" ~ h ~ ("const" ~ !ident_cont | kw_mut) ~ sp ~ type_unary }
+// `()`, `(t)`, and `(a, b)` — unit, parenthesized, and tuple types [B3].
+tuple_type = { "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
+case_type = { path ~ h ~ "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
+path_type = { type_path ~ type_args? }
+type_path = { ident ~ (path_sep ~ h ~ ident)* }
+path_sep = _{ "::" | "." }
+// Generic application takes bracketed arguments (`list[int]`, the corpus and
+// record spelling); angle arguments are accepted as a legacy alias of the
+// C2 example text and flagged for M2 canonicalization.
+type_args = _{ type_args_bracket | type_args_angle }
+type_args_bracket = { "[" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ "]" }
+type_args_angle = { "<" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ ">" }
+// A type argument is a type, or a string literal naming an opaque foreign
+// type (`c["sqlite3"]`, the extern surface of section 13.6) [H5].
+type_arg = _{ type_expr | foreign_name }
+foreign_name = _{ string_lit | raw_hashed | raw_zero }
+
+ret_ann = { h ~ "->" ~ sp ~ type_expr }
+
+// ===== patterns =====
+
+pattern = { pat_or }
+pat_or = { pat_single ~ (sp ~ "|" ~ sp ~ pat_single)* }
+pat_single = _{ pat_literal | pat_struct | pat_call | pat_wild | tuple_pattern | pat_ident }
+
+pat_wild = { "_" ~ !ident_cont }
+pat_ident = { ident }
+pat_neg = @{ "-" }
+pat_literal = { pat_neg? ~ (float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false) }
+pat_call = { path ~ h ~ "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ sp ~ ","?)? ~ sp ~ ")" }
+pat_struct = { path ~ h ~ "{" ~ sp ~ (pat_field ~ (sp ~ "," ~ sp ~ pat_field)* ~ sp ~ ","?)? ~ sp ~ "}" }
+pat_field = { ident ~ (h ~ ":" ~ sp ~ pattern)? }
+tuple_pattern = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ pt_trail?)? ~ sp ~ ")" }
+
+// ===== expressions: precedence chain (loose to tight) =====
+// assign > or-extraction > range > || > && > is > | > ^ > & > comparison
+// (+ `in`, F5's C-family table) > shifts > additive > multiplicative >
+// unary > postfix > primary
+
+expr = { assign_lvl }
+
+// Compound `*=` `/=` `%=` `<<=` `>>=` are kept as adopted laxity over the F5
+// table (which lists plain assignment only): the conformance corpus's
+// arithmetic demos use them, and they cost no new precedence slot.
+assign_op = { "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "=" }
+assign_lvl = { or_lvl ~ (h ~ assign_op ~ sp ~ or_lvl)* }
+
+or_lvl = { range_lvl ~ (h ~ kw_or ~ sp ~ range_lvl)* }
+
+range_op = { "..=" | ".." }
+range_lvl = { logor_lvl ~ (h ~ range_op ~ sp ~ logor_lvl)? }
+
+logor_lvl = { logand_lvl ~ (h ~ "||" ~ sp ~ logand_lvl)* }
+logand_lvl = { isin_lvl ~ (h ~ "&&" ~ sp ~ isin_lvl)* }
+isin_lvl = { bitor_lvl ~ isin_tail* }
+// `is` binds between `&&` and bitwise-or; its right side is a type.
+isin_tail = _{ h ~ kw_is ~ sp ~ type_expr }
+bitor_lvl = { bitxor_lvl ~ (h ~ "|" ~ sp ~ bitxor_lvl)* }
+bitxor_lvl = { bitand_lvl ~ (h ~ "^" ~ sp ~ bitand_lvl)* }
+bitand_lvl = { cmp_lvl ~ (h ~ "&" ~ sp ~ cmp_lvl)* }
+cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+// `in` sits at comparison level per F5 (tighter than `&&` and the bitwise
+// levels), so `x in xs && flag` reads `(x in xs) && flag`. Its right side
+// still admits one bare range (`x in a..b`), with range-shift-level ends.
+cmp_lvl = { shift_lvl ~ cmp_tail* }
+cmp_tail = _{ (h ~ cmp_op ~ sp ~ shift_lvl) | (h ~ kw_in ~ sp ~ in_rhs) }
+in_rhs = { shift_lvl ~ (h ~ range_op ~ sp ~ shift_lvl)? }
+shift_op = { "<<" | ">>" }
+shift_lvl = { add_lvl ~ (h ~ shift_op ~ sp ~ add_lvl)* }
+add_op = { "+%" | "-%" | "+" | "-" }
+add_lvl = { mul_lvl ~ (h ~ add_op ~ sp ~ mul_lvl)* }
+mul_op = { "*%" | "*" | "/" | "%" }
+mul_lvl = { unary_lvl ~ (h ~ mul_op ~ sp ~ unary_lvl)* }
+
+neg_op = { "-%" | "-" | "!" }
+unary_lvl = { (neg_op ~ sp)* ~ postfix_lvl }
+
+// Postfix: `.`-access may open on the next line (method chains); a call, an
+// index, or `?` must open on the same line as their operand. A call may take
+// one trailing block, which becomes its final zero-argument lambda.
+postfix_lvl = { primary ~ postfix_op* }
+postfix_op = _{ postfix_call | postfix_lambda | postfix_index | postfix_try | postfix_dot }
+postfix_call = { h ~ "(" ~ sp ~ args ~ sp ~ ")" }
+postfix_lambda = { h ~ block_expr }
+postfix_index = { h ~ "[" ~ sp ~ expr ~ sp ~ "]" }
+postfix_try = { h ~ "?" }
+postfix_dot = { sp ~ "." ~ h ~ field_name }
+// A keyword is a legal field name after `.` (the record uses `f.type`).
+
+// F7: call arguments are positional or named (`f(x: 1)`); named arguments
+// follow positional ones. Duplicate names and positional-after-named are
+// conversion diagnostics, not grammar failures.
+args = { (arg ~ (sp ~ "," ~ sp ~ arg)* ~ h ~ ","?)? }
+arg = { arg_named | expr }
+arg_named = { ident ~ h ~ ":" ~ sp ~ expr }
+
+// Struct literals: path directly followed by `{` on the same line.
+struct_lit = { path ~ h ~ "{" ~ sp ~ (field_init ~ (sp ~ "," ~ sp ~ field_init)* ~ sp ~ ","?)? ~ sp ~ "}" }
+field_init = { ident ~ (h ~ ":" ~ sp ~ expr)? }
+
+paren_tuple = { "(" ~ sp ~ (pt_item ~ (sp ~ "," ~ sp ~ pt_item)* ~ pt_trail?)? ~ sp ~ ")" }
+pt_item = { expr }
+pt_trail = { h ~ "," }
+
+block_expr = { "{" ~ sp ~ stmt_list? ~ sp ~ "}" }
+stmt_list = { stmt ~ (nlreq ~ stmt)* ~ nlreq? }
+stmt = { local | expr }
+
+local = { local_kw ~ sp ~ local_pat ~ h ~ "=" ~ sp ~ expr }
+local_kw = { kw_const | kw_var }
+local_pat = { pattern ~ (h ~ ":" ~ sp ~ type_expr)? }
+
+lambda = { lambda_paren | lambda_bare }
+// Generic lambdas carry the bracketed clause before the parameters
+// (`[t: ~Copyable] (s: stack[t], x: t) -> stack[t] { ... }`).
+lambda_paren = { (generics ~ sp)? ~ params ~ ( (h ~ "->" ~ sp ~ type_expr ~ sp ~ block_expr)
+                         | (h ~ "=>" ~ sp ~ lambda_rhs) ) }
+lambda_bare = { ident ~ h ~ "=>" ~ sp ~ lambda_rhs }
+lambda_rhs = { block_expr | expr }
+
+params = { "(" ~ sp ~ (param ~ (sp ~ "," ~ sp ~ param)* ~ h ~ ","?)? ~ sp ~ ")" }
+// F7: parameters take literal-only defaults (`x: int = 0`); the grammar is
+// total (any expression parses) and conversion rejects non-literal defaults.
+param = { param_mode? ~ h ~ ident
+         ~ (h ~ ":" ~ sp ~ param_mode? ~ sp ~ type_expr ~ param_default?)? }
+param_default = { h ~ "=" ~ sp ~ expr }
+
+control = _{ if_expr | match_expr | while_expr | for_expr | return_expr
+           | break_expr | continue_expr | nursery_expr | spawn_expr | defer_expr }
+
+if_expr = { kw_if ~ sp ~ expr_nos ~ sp ~ block_expr ~ (sp ~ kw_else ~ sp ~ (if_expr | block_expr))? }
+match_expr = { kw_match ~ sp ~ expr_nos ~ sp ~ "{" ~ sp ~ arm_list? ~ sp ~ "}" }
+// Arms are comma-separated [F4]; a newline additionally separates arms of
+// any body shape — 6.1 rules newline separation canonical for match arms.
+arm_list = { arm ~ arm_sep* ~ h ~ ","? }
+arm_sep = _{ (sp ~ "," ~ sp ~ arm) | (nlreq ~ arm) }
+arm = { arm_pat ~ guard? ~ h ~ "=>" ~ sp ~ arm_body }
+arm_pat = { pattern ~ (h ~ ":" ~ sp ~ type_expr)? }
+guard = { h ~ kw_if ~ sp ~ expr }
+arm_body = { block_expr | expr }
+
+while_expr = { kw_while ~ sp ~ expr_nos ~ sp ~ block_expr }
+for_expr = { kw_for ~ sp ~ (for_paren | for_plain) }
+for_plain = { pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ block_expr }
+for_paren = { "(" ~ sp ~ pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ ")" ~ sp ~ for_body }
+for_body = { block_expr | expr_nos }
+
+return_expr = { kw_return ~ (h ~ expr)? }
+break_expr = { kw_break }
+continue_expr = { kw_continue }
+nursery_expr = { kw_nursery ~ sp ~ block_expr }
+spawn_expr = { kw_spawn ~ sp ~ block_expr }
+defer_expr = { kw_defer ~ sp ~ block_expr }
+
+literal = _{ float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false }
+
+primary = { struct_lit | lambda | paren_tuple | control | literal | block_expr | path_atom }
+path_atom = { path }
+
+// `expr_nos`: same chain with struct literals and trailing lambda blocks
+// banned at every operand head, for `if`/`while`/`match`/`for` headers.
+expr_nos = { nos_assign }
+
+nos_assign = { nos_or ~ (h ~ assign_op ~ sp ~ nos_or)* }
+nos_or = { nos_range ~ (h ~ kw_or ~ sp ~ nos_range)* }
+nos_range = { nos_logor ~ (h ~ range_op ~ sp ~ nos_logor)? }
+nos_logor = { nos_logand ~ (h ~ "||" ~ sp ~ nos_logand)* }
+nos_logand = { nos_isin ~ (h ~ "&&" ~ sp ~ nos_isin)* }
+nos_isin = { nos_bitor ~ nos_isin_tail* }
+nos_isin_tail = _{ h ~ kw_is ~ sp ~ type_expr }
+nos_bitor = { nos_bitxor ~ (h ~ "|" ~ sp ~ nos_bitxor)* }
+nos_bitxor = { nos_bitand ~ (h ~ "^" ~ sp ~ nos_bitand)* }
+nos_bitand = { nos_cmp ~ (h ~ "&" ~ sp ~ nos_cmp)* }
+nos_cmp = { nos_shift ~ nos_cmp_tail* }
+nos_cmp_tail = _{ (h ~ cmp_op ~ sp ~ nos_shift) | (h ~ kw_in ~ sp ~ nos_in_rhs) }
+nos_in_rhs = { nos_shift ~ (h ~ range_op ~ sp ~ nos_shift)? }
+nos_shift = { nos_add ~ (h ~ shift_op ~ sp ~ nos_add)* }
+nos_add = { nos_mul ~ (h ~ add_op ~ sp ~ nos_mul)* }
+nos_mul = { nos_unary ~ (h ~ mul_op ~ sp ~ nos_unary)* }
+nos_unary = { (neg_op ~ sp)* ~ nos_postfix }
+nos_postfix = { primary_nos ~ nos_postfix_op* }
+nos_postfix_op = _{ postfix_call | postfix_index | postfix_try | postfix_dot }
+primary_nos = { lambda | paren_tuple | control | literal | block_expr | path_atom }
+
+// ===== items and file structure =====
+
+item = { (attr ~ sp)* ~ vis? ~ h ~ item_kind }
+
+attr = { "#" ~ "[" ~ sp ~ ident ~ attr_args? ~ sp ~ "]" }
+attr_args = { "(" ~ sp ~ (attr_arg ~ (sp ~ "," ~ sp ~ attr_arg)* ~ sp ~ ","?)? ~ sp ~ ")" }
+attr_arg = { path }
+
+vis = { kw_pub ~ ("(" ~ h ~ "pkg" ~ !ident_cont ~ h ~ ")")? }
+
+item_kind = _{ import_item | local | fn_item | extern_fn_item | struct_item
+             | enum_item | tag_item | type_item | trait_item | impl_item }
+
+import_item = { kw_import ~ sp ~ import_path ~ (sp ~ import_select)? ~ (sp ~ import_alias)? ~ (sp ~ import_cond)? }
+import_path = { "@"? ~ ident ~ ("/" ~ h? ~ ident)* }
+import_select = { "(" ~ sp ~ (sel_item ~ (sp ~ "," ~ sp ~ sel_item)* ~ h ~ ","?)? ~ sp ~ ")" }
+sel_item = { ident ~ (h ~ "as" ~ !ident_cont ~ sp ~ ident)? }
+import_alias = { "as" ~ !ident_cont ~ sp ~ ident }
+import_cond = { kw_if ~ sp ~ expr_nos }
+
+generics = { "[" ~ sp ~ (gparam ~ (sp ~ "," ~ sp ~ gparam)* ~ sp ~ ","?)? ~ sp ~ "]" }
+gparam = { ident ~ (h ~ ":" ~ sp ~ type_expr)? }
+
+fn_item = { kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? ~ (sp ~ block_expr)? }
+extern_fn_item = { kw_extern ~ h ~ kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? }
+
+super_list = { type_expr ~ (sp ~ "," ~ sp ~ type_expr)* }
+struct_item = { kw_struct ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ (sp ~ struct_body)? }
+struct_body = { "{" ~ sp ~ (struct_member ~ (decl_sep ~ struct_member)* ~ decl_sep?)? ~ sp ~ "}" }
+// Declaration members separate by comma or newline (both styles appear in
+// the conformance corpus); the record's comma form is canonical.
+decl_sep = _{ (sp ~ "," ~ sp) | nlreq }
+struct_member = _{ deinit_member | field_member }
+field_member = { ident ~ h ~ ":" ~ sp ~ type_expr }
+deinit_member = { "deinit" ~ !ident_cont ~ sp ~ block_expr }
+
+enum_item = { kw_enum ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ sp ~ "{" ~ sp ~ (enum_case ~ (decl_sep ~ enum_case)* ~ decl_sep?)? ~ sp ~ "}" }
+enum_case = { ident ~ case_payload? }
+case_payload = _{ case_tuple | case_struct }
+case_tuple = { h ~ "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
+case_struct = { h ~ "{" ~ sp ~ (field_member ~ (sp ~ "," ~ sp ~ field_member)* ~ sp ~ ","?)? ~ sp ~ "}" }
+
+tag_item = { kw_tag ~ sp ~ ident }
+type_item = { kw_type ~ sp ~ ident ~ generics? ~ h ~ "=" ~ sp ~ type_expr }
+
+trait_item = { kw_trait ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ sp ~ "{" ~ sp ~ member_list? ~ sp ~ "}" }
+// Member lists separate by comma or newline with an optional trailing
+// comma (`decl_sep`, like struct/enum bodies); newline is canonical [6.1].
+member_list = { trait_member ~ (decl_sep ~ trait_member)* ~ decl_sep? }
+// Members may be `fn` declarations or const-arrow declarations; a trait
+// signature may end at its return type with no body (the corpus spelling).
+trait_member = _{ assoc_type | fn_item | member_const }
+member_const = { kw_const ~ sp ~ ident ~ h ~ "=" ~ sp ~ (lambda | member_sig) }
+member_sig = { params ~ ret_ann }
+assoc_type = { kw_type ~ sp ~ ident }
+
+impl_item = { kw_impl ~ sp ~ generics? ~ sp ~ (impl_trait ~ h ~ "for" ~ !ident_cont ~ sp)? ~ type_expr ~ sp ~ impl_body }
+impl_trait = { path ~ type_args? }
+impl_member = _{ fn_item | local }
+// Like trait member lists: comma or newline separators, trailing comma OK.
+impl_body = { "{" ~ sp ~ (impl_member ~ (decl_sep ~ impl_member)* ~ decl_sep?)? ~ sp ~ "}" }
+
+// G3: a file is `///|`-separated blocks; a file without separators is one
+// block. The rest of a separator line is separator text.
+file = { SOI ~ sp ~ file_blocks? ~ sp ~ EOI }
+file_blocks = { file_block ~ (sep_unit ~ file_block)* ~ sep_unit? }
+file_block = { item? ~ (nlreq ~ item)* ~ nlreq? }
+sep_unit = _{ sp ~ block_sep ~ &(nl | EOI) }
+block_sep = @{ "///|" ~ (!nl ~ ANY)* }
