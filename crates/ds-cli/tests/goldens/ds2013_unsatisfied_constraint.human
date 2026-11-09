@@ -1,0 +1,5 @@
+error[DS2013]: no instance of `show` for `int`
+ --> tests/fixtures/negative/ds2013_unsatisfied_constraint.ds:7:29
+  |
+7 | const f = (x: int) -> int { x.text() }
+  |                             ^^^^^^^^ unimplemented trait

@@ -73,6 +73,8 @@ parses! {
     separator_with_text => "tag a\n///| section: types\ntag b\n",
     trailing_separator => "tag a\n///|\n",
     consecutive_separators => "///|\n///|\ntag a\n",
+    leading_separator_then_item => "///|\nconst b = 2\n",
+    separator_wrapped_file => "///|\ntag a\n///|\ntag b\n///|\n",
 }
 
 #[test]
@@ -611,6 +613,18 @@ fn separators_split_blocks() {
     for (i, block) in ast.blocks.iter().enumerate() {
         assert_eq!(block.items.len(), 1, "block {i}");
     }
+}
+
+#[test]
+fn leading_and_trailing_separators_are_empty_edge_blocks() {
+    // A leading separator opens block 0 as an empty block; a trailing
+    // separator closes the file with an empty block.
+    let ast = ok("///|\ntag a\n///|\ntag b\n///|\n");
+    assert_eq!(ast.blocks.len(), 4);
+    assert!(ast.blocks[0].items.is_empty());
+    assert_eq!(ast.blocks[1].items.len(), 1);
+    assert_eq!(ast.blocks[2].items.len(), 1);
+    assert!(ast.blocks[3].items.is_empty());
 }
 
 #[test]

@@ -1,0 +1,1 @@
+{"code":"DS2013","severity":"error","message":"no instance of `show` for `int`","spans":[{"file":"tests/fixtures/negative/ds2013_unsatisfied_constraint.ds","start_line":7,"start_col":29,"end_line":7,"end_col":37,"label":"unimplemented trait","primary":true}],"notes":[],"suggestions":[]}

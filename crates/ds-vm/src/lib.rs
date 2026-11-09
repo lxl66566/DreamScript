@@ -46,6 +46,29 @@
 //! - Backtraces. On a trap, [`Vm::backtrace`] reports each real frame plus its tail-chain elided
 //!   count [H2]; lazy materialization of elided frames from per-elision records is deferred to
 //!   per-fiber debug recording.
+//! - Strings and the heap. String constants ride the pool and load through KSTR as raw `Ref` words
+//!   into a VM-owned object store ([`crate::object::Objects`]); STRCAT concatenates (fresh objects,
+//!   never interned), EQSTR/NEQSTR compare contents, not identity. No reclamation happens in M3 —
+//!   objects live for the VM's lifetime; M4's Perceus placement pass inserts dup/drop uops and
+//!   precise RC over this same table.
+//! - Builtins. `println`, `print`, and the typed `str` conversions are native (Rust) functions in
+//!   one reserved `builtin` module ([`crate::native::BUILTIN_MODULE`]) that every VM installs into
+//!   its registry. A pool `FuncRef { module: "builtin", func: i }` resolves through the same path
+//!   as any uop callee, so `CALL` is the only call mechanism. A native call never pushes a frame:
+//!   it reads the caller's staged overlay words and overlays its result on argument slot 0 where a
+//!   RET would. Chosen over a dedicated uop per builtin because CALL already is the ISA's
+//!   function-call mechanism — a uop per builtin grows the locked opcode set for every stdlib
+//!   addition, while the native-module route adds builtins as table entries with arity and typing
+//!   checks in one place. The file-IO natives (`read_file`, `write_file`, `file_exists`, `fs_list`,
+//!   `file_size`) are the first `world`-effect platform surface: the fallible ones answer with a
+//!   two-word tag+payload span over the caller's overlay slots, with the result-span and platform
+//!   tag-id conventions documented in `native`'s module docs.
+//! - Multi-word values. BL-2 values (payloaded unions, structs) span consecutive slots. RETSPAN
+//!   returns such a span: the words land on the caller's outgoing-argument slots `0..n`, whose
+//!   width the lowering must size for the widest callee result it calls (the VM re-checks). Frames
+//!   whose overlay words carry more than one call shape — staged arguments of one type, then a
+//!   result span of another — declare those slots `SlotType::Raw`: every write accepts, every read
+//!   checks the value's concrete type, and call sites check the staged value words.
 
 // Bracketed decision IDs ([H2], [BL-6], ...) cite the design record in
 // docs/en/design-decisions.md; they are references, not doc links.
@@ -53,6 +76,9 @@
 
 pub mod loader;
 pub mod module;
+pub mod native;
+mod net;
+pub mod object;
 pub mod program;
 pub mod value;
 pub mod vm;
@@ -61,6 +87,7 @@ pub mod vm;
 pub use ds_abi as abi;
 pub use loader::{LoadError, install as install_dsmod};
 pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion};
+pub use native::{NativeFunction, NativeResult, OutputSink};
 pub use program::{Const, ConstKind, FunctionDef, assemble};
 pub use value::{Value, Word};
 pub use vm::{BacktraceFrame, Trap, Vm};

@@ -19,12 +19,14 @@
 use std::sync::Arc;
 
 use ds_abi::{
-    CodePc, ConstIdx, FrameLayout, FrameMetadata, SlideDirection, SlotType, TailChain,
+    CodePc, ConstIdx, FrameLayout, FrameMetadata, SlideDirection, SlideError, SlotType, TailChain,
     uop::{DecodeError, Uop},
 };
 
 use crate::{
     module::{ModuleRegistry, ModuleVersion},
+    native::{NativeFunction, NativeResult, OutputSink},
+    object::Objects,
     program::{Const, ConstKind},
     value::{Value, Word},
 };
@@ -92,7 +94,7 @@ pub enum Trap {
         frame_slots: usize,
     },
     /// The ABI's own call-site layout check rejected the call pair.
-    CallLayout(ds_abi::SlideError),
+    CallLayout(SlideError),
     /// Control left the function's code stream.
     InvalidPc {
         /// The offending instruction index.
@@ -142,6 +144,28 @@ pub enum Trap {
         /// The frame base whose metadata word is wrong.
         fp: usize,
     },
+    /// A Ref word named no object (out of range, or the object is not the
+    /// required kind — a non-string read as a string, a non-list read as
+    /// a list): hand-assembled code or a host argument carried a bogus
+    /// reference.
+    UnknownObject {
+        /// The bogus object-table index.
+        obj: u32,
+    },
+    /// A result span (RETSPAN's, or a fallible native's tag+payload
+    /// span) is wider than the caller's outgoing-argument area, so the
+    /// caller could never receive it whole.
+    RetSpanTooWide {
+        /// The span's word count.
+        span: u16,
+        /// The caller's outgoing-argument slot count.
+        caller_area: u16,
+    },
+    /// A print/println write failed at the output sink.
+    OutputWrite {
+        /// The class of the underlying io failure.
+        kind: std::io::ErrorKind,
+    },
 }
 
 /// One entry of the call-info stack: the frame base plus the module version
@@ -165,6 +189,21 @@ struct Active {
 struct Transfer {
     version: Arc<ModuleVersion>,
     func: u32,
+}
+
+/// A resolved pool FuncRef: a uop function (resolved through its module's
+/// current slot) or a native one (the VM-resident builtin tables).
+#[derive(Debug)]
+enum Callee<'a> {
+    /// Enter the callee's encoded body.
+    Uop {
+        /// The callee's module version.
+        version: Arc<ModuleVersion>,
+        /// The callee's function-table index.
+        func: u32,
+    },
+    /// Invoke the native in the caller's frame (no frame push).
+    Native(&'a NativeFunction),
 }
 
 /// The outcome of a `RET`.
@@ -206,18 +245,21 @@ impl StackState<'_> {
         Ok(())
     }
 
-    /// Resolves a pool FuncRef through the current module slot, then through
-    /// its entry descriptor's `resolve()` (word 1 when compiled, word 0
-    /// otherwise; word 0 is immutable after load [H2]). The pool belongs to
-    /// the CALLER's module version: instruction stream and pool are
-    /// version-stable, callee resolution follows the target's current slot
-    /// [H6 item 5].
-    fn resolve_callee(
+    /// Resolves a pool FuncRef: uop modules first (the hot path — one
+    /// registry lookup), then the native tables (the builtin mechanism —
+    /// arity against the native's parameter list); a uop module installed
+    /// under a native table's name shadows the natives. Uop resolution
+    /// goes through the current module slot and the entry descriptor's
+    /// `resolve()` (word 1 when compiled, word 0 otherwise; word 0 is
+    /// immutable after load [H2]). The pool belongs to the CALLER's module
+    /// version: instruction stream and pool are version-stable, callee
+    /// resolution follows the target's current slot [H6 item 5].
+    fn resolve_callee<'r>(
         pool: &[Const],
-        registry: &ModuleRegistry,
+        registry: &'r ModuleRegistry,
         kidx: ConstIdx,
         nargs: u8,
-    ) -> Result<(Arc<ModuleVersion>, u32), Trap> {
+    ) -> Result<Callee<'r>, Trap> {
         let found = pool
             .get(usize::from(kidx.0))
             .ok_or(Trap::PoolIndex { kidx: kidx.0 })?;
@@ -228,28 +270,70 @@ impl StackState<'_> {
                 found: found.kind(),
             });
         };
-        let (version, func_id) =
-            registry
-                .resolve_indexed(module, *func)
-                .ok_or(Trap::UnknownCallee {
-                    module: module.clone(),
-                    func: *func,
-                })?;
-        let target = &version.functions()[func_id as usize];
-        let entry = target.entry.resolve();
-        if entry != func_id as usize {
-            return Err(Trap::EntryWordMismatch {
-                resolved: entry,
-                expected: func_id as usize,
+        if let Some((version, func_id)) = registry.resolve_indexed(module, *func) {
+            let target = &version.functions()[func_id as usize];
+            let entry = target.entry.resolve();
+            if entry != func_id as usize {
+                return Err(Trap::EntryWordMismatch {
+                    resolved: entry,
+                    expected: func_id as usize,
+                });
+            }
+            if usize::from(nargs) != target.layout.params_len() {
+                return Err(Trap::ArityMismatch {
+                    expected: target.layout.params_len(),
+                    given: usize::from(nargs),
+                });
+            }
+            return Ok(Callee::Uop {
+                version,
+                func: func_id,
             });
         }
-        if usize::from(nargs) != target.layout.params_len() {
+        let native = registry
+            .resolve_native(module, *func)
+            .ok_or(Trap::UnknownCallee {
+                module: module.clone(),
+                func: *func,
+            })?;
+        if usize::from(nargs) != native.params.len() {
             return Err(Trap::ArityMismatch {
-                expected: target.layout.params_len(),
+                expected: native.params.len(),
                 given: usize::from(nargs),
             });
         }
-        Ok((version, func_id))
+        Ok(Callee::Native(native))
+    }
+
+    /// The per-call-site check for `Raw`-staged arguments: they carry no
+    /// static type, so the staged value words are checked against the
+    /// callee's parameter types here (concrete staging was already proved
+    /// by [`ds_abi::slide_plan`]).
+    fn check_raw_staged(
+        stack: &[Word],
+        target_params: &[SlotType],
+        caller: &FrameLayout,
+        fp: usize,
+    ) -> Result<(), Trap> {
+        let body_len = caller.slots().len() - caller.arg_area_len();
+        let start = caller.arg_area().start;
+        for (index, (param, &staged_ty)) in target_params.iter().zip(caller.arg_types()).enumerate()
+        {
+            if staged_ty != SlotType::Raw {
+                continue;
+            }
+            let slot = u8::try_from(start + index).expect("slot index fits u8");
+            let value = read_value(stack, fp, slot, caller.slots(), body_len)?;
+            let staged = value.slot_type();
+            if staged != *param {
+                return Err(Trap::CallLayout(SlideError::TypeMismatch {
+                    index,
+                    staged,
+                    expected: *param,
+                }));
+            }
+        }
+        Ok(())
     }
 
     /// Non-tail `CALL`: the callee's metadata word lands in the caller's
@@ -258,18 +342,16 @@ impl StackState<'_> {
     /// [BL-6, H2].
     fn call(
         &mut self,
-        registry: &ModuleRegistry,
-        pool: &[Const],
-        kidx: ConstIdx,
-        nargs: u8,
+        version: Arc<ModuleVersion>,
+        func_id: u32,
         caller: &FrameLayout,
         fp: usize,
         return_pc: u32,
     ) -> Result<Transfer, Trap> {
-        let (version, func_id) = Self::resolve_callee(pool, registry, kidx, nargs)?;
         let target = &version.functions()[func_id as usize];
         // The ABI's own overlay fact, re-checked at this call site.
         ds_abi::slide_plan(caller, &target.layout).map_err(Trap::CallLayout)?;
+        Self::check_raw_staged(self.stack, target.layout.params(), caller, fp)?;
         let callee_fp = fp + 1 + caller.arg_area().start;
         self.grow(callee_fp + target.layout.frame_size() as usize)?;
         self.stack[callee_fp] = Word::Meta(FrameMetadata {
@@ -298,16 +380,14 @@ impl StackState<'_> {
     /// callee frame, not by call depth.
     fn tail_call(
         &mut self,
-        registry: &ModuleRegistry,
-        pool: &[Const],
-        kidx: ConstIdx,
-        nargs: u8,
+        version: Arc<ModuleVersion>,
+        func_id: u32,
         caller: &FrameLayout,
         fp: usize,
     ) -> Result<Transfer, Trap> {
-        let (version, func_id) = Self::resolve_callee(pool, registry, kidx, nargs)?;
         let target = &version.functions()[func_id as usize];
         let plan = ds_abi::slide_plan(caller, &target.layout).map_err(Trap::CallLayout)?;
+        Self::check_raw_staged(self.stack, target.layout.params(), caller, fp)?;
         // The O(delta) slide, per the plan's direction. Two different slot
         // mappings meet here: the source slots are the CALLER's staged
         // arguments, which sit caller-relative (above the caller's call
@@ -489,6 +569,19 @@ fn read_tag(
     }
 }
 
+fn read_ref(
+    stack: &[Word],
+    fp: usize,
+    slot: u8,
+    slots: &[SlotType],
+    body_len: usize,
+) -> Result<u32, Trap> {
+    match read_typed(stack, fp, slot, slots, body_len, SlotType::Ref)? {
+        Value::Ref(v) => Ok(v),
+        _ => unreachable!("slot_type agrees with the variant"),
+    }
+}
+
 /// Writes a value into a slot, checking it against the slot's static type:
 /// hand-assembled code that mis-stages a value traps here.
 fn write_slot(
@@ -506,7 +599,7 @@ fn write_slot(
             frame_slots: slots.len(),
         });
     }
-    if slots[i] != value.slot_type() {
+    if slots[i] != value.slot_type() && slots[i] != SlotType::Raw {
         return Err(Trap::SlotTypeMismatch {
             slot,
             expected: slots[i],
@@ -535,6 +628,101 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     x.checked_rem(y).ok_or(Trap::IntegerOverflow)
 }
 
+/// Runs a native in the caller's frame: reads the staged overlay words
+/// as arguments (type-checked against the native's parameter list, the
+/// same discipline a uop callee's layout gets) and invokes the body. The
+/// CALL site then places the result on the caller's overlay words
+/// ([`overlay_native`]); the CALLT site returns it from the tail
+/// position. No frame is pushed and no metadata word moves. A free
+/// function over the disjoint state the dispatcher hands it (stack, heap,
+/// sink), so the registry borrow the callee came from stays alive.
+fn invoke_native(
+    nf: &NativeFunction,
+    stack: &mut [Word],
+    objects: &mut Objects,
+    out: &mut OutputSink,
+    caller: &FrameLayout,
+    fp: usize,
+) -> Result<NativeResult, Trap> {
+    let body_len = caller.slots().len() - caller.arg_area_len();
+    if nf.params.len() > caller.arg_area_len() {
+        return Err(Trap::CallLayout(SlideError::StagingTooSmall {
+            available: caller.arg_area_len(),
+            needed: nf.params.len(),
+        }));
+    }
+    let start = caller.arg_area().start;
+    let mut args = Vec::with_capacity(nf.params.len());
+    for i in 0..nf.params.len() {
+        let slot = u8::try_from(start + i).expect("slot index fits u8");
+        args.push(read_value(stack, fp, slot, caller.slots(), body_len)?);
+    }
+    for (index, (&value, &want)) in args.iter().zip(nf.params).enumerate() {
+        let staged = value.slot_type();
+        if staged != want {
+            return Err(Trap::CallLayout(SlideError::TypeMismatch {
+                index,
+                staged,
+                expected: want,
+            }));
+        }
+    }
+    (nf.func)(objects, out, &args)
+}
+
+/// Places a native's result on the caller's outgoing-argument overlay:
+/// one word on argument slot 0, or a fallible native's two-word
+/// tag+payload span [BL-2] on argument slots 0 and 1. Like a RET's write,
+/// this bypasses slot typing: the overlay words belong to the call ABI,
+/// and reading them as typed slots is the lowering's discipline (mixed
+/// shapes declare the slots `Raw`). The call site pre-checks the width,
+/// so both writes stay in range by construction.
+fn overlay_native(result: NativeResult, stack: &mut [Word], caller: &FrameLayout, fp: usize) {
+    let body_len = caller.slots().len() - caller.arg_area_len();
+    let start = caller.arg_area().start;
+    match result {
+        NativeResult::Word(value) => {
+            stack[word_of(fp, start, body_len)] = Word::Slot(value);
+        },
+        NativeResult::Tag { tag, payload } => {
+            debug_assert!(caller.arg_area_len() >= 2, "width pre-checked");
+            stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
+            stack[word_of(fp, start + 1, body_len)] = Word::Slot(payload);
+        },
+    }
+}
+
+/// The pre-invocation width check for a native call: the callee's result
+/// must fit the overlay area that receives it. For a CALL that is the
+/// caller's staging area; for a CALLT the span lands on the ORIGINAL
+/// caller's overlay words (the tail frame's slots alias them), so the
+/// frame below supplies the area. Checked before the native runs — a
+/// world-effect side effect must not happen only for the call to trap
+/// on the result width.
+fn check_native_overlay(area: usize, nf: &NativeFunction) -> Result<(), Trap> {
+    if usize::from(nf.result_words) > area {
+        return Err(Trap::RetSpanTooWide {
+            span: u16::from(nf.result_words),
+            caller_area: u16::try_from(area).expect("argument areas fit u16"),
+        });
+    }
+    Ok(())
+}
+
+/// The pre-invocation checks for a native CALL, in trap order: the staged
+/// arguments must fit the overlay area (the same StagingTooSmall a uop
+/// callee's layout yields), then the result width must fit it too.
+fn check_native_call_site(caller: &FrameLayout, nf: &NativeFunction) -> Result<(), Trap> {
+    let area = caller.arg_area_len();
+    if nf.params.len() > area {
+        return Err(Trap::CallLayout(SlideError::StagingTooSmall {
+            available: area,
+            needed: nf.params.len(),
+        }));
+    }
+    check_native_overlay(area, nf)
+}
+
 /// One backtrace entry: a real frame plus its tail chain's elided count [H2].
 #[derive(Clone, Debug, PartialEq)]
 pub struct BacktraceFrame {
@@ -551,10 +739,14 @@ pub struct BacktraceFrame {
 }
 
 /// The tier-1 VM. Construct with a [`ModuleRegistry`], then run encoded
-/// entry functions.
+/// entry functions. Every VM owns its heap object store and output sink,
+/// and installs its builtin native module ([`crate::native::BUILTIN_MODULE`])
+/// into the registry at construction.
 #[derive(Debug)]
 pub struct Vm {
     registry: ModuleRegistry,
+    objects: Objects,
+    out: OutputSink,
     stack: Vec<Word>,
     callinfo: Vec<CallInfo>,
     limit: usize,
@@ -569,17 +761,62 @@ impl Vm {
         Self::with_limit(registry, DEFAULT_STACK_LIMIT)
     }
 
-    /// A VM with an explicit value-stack word limit.
+    /// A VM with an explicit value-stack word limit. Installs the builtin
+    /// native module (a same-named prior native table is replaced).
     #[must_use]
-    pub fn with_limit(registry: ModuleRegistry, limit: usize) -> Self {
+    pub fn with_limit(mut registry: ModuleRegistry, limit: usize) -> Self {
+        registry.install_native(
+            crate::native::BUILTIN_MODULE,
+            crate::native::builtin_module(),
+        );
         Self {
             registry,
+            objects: Objects::new(),
+            out: OutputSink::default(),
             stack: Vec::new(),
             callinfo: Vec::new(),
             limit,
             max_stack_len: 0,
             trap_pc: None,
         }
+    }
+
+    /// Interns a string into the heap and hands back its reference word:
+    /// the host-facing way to stage string arguments into `run` (and the
+    /// discipline KSTR follows for pool constants).
+    #[must_use = "the reference is the handle; dropping it never frees (M3 placeholder)"]
+    pub fn intern_str(&mut self, text: &str) -> Value {
+        Value::Ref(self.objects.intern(text))
+    }
+
+    /// Switches the output sink to an in-memory buffer: print/println
+    /// write there until the next [`Vm::run`] or forever. Callers read the
+    /// bytes with [`Vm::captured_output`].
+    pub fn capture_output(&mut self) {
+        self.out = OutputSink::Captured(Vec::new());
+    }
+
+    /// The bytes captured so far ([`Vm::capture_output`]).
+    #[must_use]
+    pub fn captured_output(&self) -> &[u8] {
+        match &self.out {
+            OutputSink::Captured(buf) => buf,
+            OutputSink::Stdout => &[],
+        }
+    }
+
+    /// The heap object store: hosts and tests inspect run results (string
+    /// content, list elements) by the `Ref` word a run returned.
+    #[must_use]
+    pub fn objects(&self) -> &Objects {
+        &self.objects
+    }
+
+    /// Bounds every blocking net native's wait (connect, read, write):
+    /// the default is 3 seconds; a hostile host yields `net_err`, never a
+    /// hung interpreter.
+    pub fn set_net_timeout(&mut self, timeout: std::time::Duration) {
+        self.objects.set_net_timeout(timeout);
     }
 
     /// Installs a module version into its two-slot table (hot reload swap).
@@ -641,7 +878,7 @@ impl Vm {
             });
         }
         for (i, (&arg, &ty)) in args.iter().zip(target.layout.params()).enumerate() {
-            if arg.slot_type() != ty {
+            if arg.slot_type() != ty && ty != SlotType::Raw {
                 return Err(Trap::SlotTypeMismatch {
                     slot: u8::try_from(i).expect("argument index exceeds u8"),
                     expected: ty,
@@ -780,6 +1017,24 @@ impl Vm {
                         None => return Err((Trap::PoolIndex { kidx: kidx.0 }, pc)),
                     };
                     write_slot(&mut self.stack, fp, dst, slots, body_len, v)
+                        .map_err(|e| (e, pc))?;
+                    pc.0 += 1;
+                },
+                Uop::Kstr { dst, kidx } => {
+                    let text = match pool.get(usize::from(kidx.0)) {
+                        Some(Const::Str(text)) => text.as_str(),
+                        Some(found) => {
+                            let e = Trap::PoolKind {
+                                kidx: kidx.0,
+                                expected: ConstKind::Str,
+                                found: found.kind(),
+                            };
+                            return Err((e, pc));
+                        },
+                        None => return Err((Trap::PoolIndex { kidx: kidx.0 }, pc)),
+                    };
+                    let obj = self.objects.intern(text);
+                    write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Ref(obj))
                         .map_err(|e| (e, pc))?;
                     pc.0 += 1;
                 },
@@ -1091,6 +1346,38 @@ impl Vm {
                     .map_err(|e| (e, pc))?;
                     pc.0 += 1;
                 },
+                Uop::EqStr { dst, lhs, rhs } => {
+                    let (x, y) = (
+                        read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                        read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                    );
+                    let eq = self.objects.str_at(x).map_err(|e| (e, pc))?
+                        == self.objects.str_at(y).map_err(|e| (e, pc))?;
+                    write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(eq))
+                        .map_err(|e| (e, pc))?;
+                    pc.0 += 1;
+                },
+                Uop::NeqStr { dst, lhs, rhs } => {
+                    let (x, y) = (
+                        read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                        read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                    );
+                    let neq = self.objects.str_at(x).map_err(|e| (e, pc))?
+                        != self.objects.str_at(y).map_err(|e| (e, pc))?;
+                    write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(neq))
+                        .map_err(|e| (e, pc))?;
+                    pc.0 += 1;
+                },
+                Uop::StrCat { dst, lhs, rhs } => {
+                    let (x, y) = (
+                        read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                        read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                    );
+                    let obj = self.objects.concat(x, y).map_err(|e| (e, pc))?;
+                    write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Ref(obj))
+                        .map_err(|e| (e, pc))?;
+                    pc.0 += 1;
+                },
                 Uop::TagTest { dst, src, tag } => {
                     let v = read_tag(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                     write_slot(
@@ -1169,30 +1456,173 @@ impl Vm {
                 },
                 Uop::Jmp { target } => jump!(target),
                 Uop::Call { callee, nargs } => {
-                    let mut st = stack_state!();
-                    let t = st
-                        .call(&self.registry, pool, callee, nargs, &f.layout, fp, pc.0 + 1)
+                    let resolved = StackState::resolve_callee(pool, &self.registry, callee, nargs)
                         .map_err(|e| (e, pc))?;
-                    active = Active {
-                        version: t.version,
-                        func: t.func,
-                    };
-                    pc = CodePc(0);
+                    match resolved {
+                        Callee::Uop { version, func } => {
+                            let mut st = stack_state!();
+                            let t = st
+                                .call(version, func, &f.layout, fp, pc.0 + 1)
+                                .map_err(|e| (e, pc))?;
+                            active = Active {
+                                version: t.version,
+                                func: t.func,
+                            };
+                            pc = CodePc(0);
+                        },
+                        // A native call stays in the caller's frame: the
+                        // staged words are read as arguments and the result
+                        // overlays argument slot 0 exactly where a RET
+                        // would put it (a fallible native's span overlays
+                        // slots 0 and 1).
+                        Callee::Native(nf) => {
+                            check_native_call_site(&f.layout, nf).map_err(|e| (e, pc))?;
+                            let result = invoke_native(
+                                nf,
+                                &mut self.stack,
+                                &mut self.objects,
+                                &mut self.out,
+                                &f.layout,
+                                fp,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            overlay_native(result, &mut self.stack, &f.layout, fp);
+                            pc.0 += 1;
+                        },
+                    }
                 },
                 Uop::Callt { callee, nargs } => {
-                    let mut st = stack_state!();
-                    let t = st
-                        .tail_call(&self.registry, pool, callee, nargs, &f.layout, fp)
+                    let resolved = StackState::resolve_callee(pool, &self.registry, callee, nargs)
                         .map_err(|e| (e, pc))?;
-                    active = Active {
-                        version: t.version,
-                        func: t.func,
-                    };
-                    pc = CodePc(0);
+                    match resolved {
+                        Callee::Uop { version, func } => {
+                            let mut st = stack_state!();
+                            let t = st
+                                .tail_call(version, func, &f.layout, fp)
+                                .map_err(|e| (e, pc))?;
+                            active = Active {
+                                version: t.version,
+                                func: t.func,
+                            };
+                            pc = CodePc(0);
+                        },
+                        // Tail-calling a native runs it, then returns its
+                        // result from the current frame: the value the
+                        // native produced is the tail position's value.
+                        // A span result rides the reused frame back to
+                        // the ORIGINAL caller: this frame's slot 0
+                        // already aliases the caller's overlay word 0
+                        // (the RET below writes the tag there), and
+                        // overlay word 1 is the physical word fp+2. At
+                        // the root frame only the head word survives,
+                        // the same root rule RETSPAN returns by.
+                        Callee::Native(nf) => {
+                            if self.callinfo.len() > 1 {
+                                let caller = self.callinfo[self.callinfo.len() - 2].clone();
+                                let caller_fn = &caller.module.functions()[caller.func as usize];
+                                check_native_overlay(caller_fn.layout.arg_area_len(), nf)
+                                    .map_err(|e| (e, pc))?;
+                            }
+                            let result = invoke_native(
+                                nf,
+                                &mut self.stack,
+                                &mut self.objects,
+                                &mut self.out,
+                                &f.layout,
+                                fp,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            let value = match result {
+                                NativeResult::Word(value) => value,
+                                NativeResult::Tag { tag, payload } => {
+                                    if self.callinfo.len() > 1 {
+                                        self.stack[fp + 2] = Word::Slot(payload);
+                                    }
+                                    Value::Tag(tag)
+                                },
+                            };
+                            let mut st = stack_state!();
+                            match st.ret(value, fp).map_err(|e| (e, pc))? {
+                                RetOutcome::Root(v) => return Ok(v),
+                                RetOutcome::Resume {
+                                    version,
+                                    func,
+                                    pc: at,
+                                } => {
+                                    active = Active { version, func };
+                                    pc = at;
+                                },
+                            }
+                        },
+                    }
                 },
                 Uop::Ret { src } => {
                     let value =
                         read_value(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
+                    let mut st = stack_state!();
+                    match st.ret(value, fp).map_err(|e| (e, pc))? {
+                        RetOutcome::Root(v) => return Ok(v),
+                        RetOutcome::Resume {
+                            version,
+                            func,
+                            pc: at,
+                        } => {
+                            active = Active { version, func };
+                            pc = at;
+                        },
+                    }
+                },
+                Uop::RetSpan { src, n } => {
+                    // the span must fit inside this frame's own slots (a
+                    // load-time fact, re-checked defensively)
+                    if usize::from(src) + usize::from(n) > frame_slots {
+                        return Err((
+                            Trap::SlotOutOfRange {
+                                slot: src,
+                                frame_slots,
+                            },
+                            pc,
+                        ));
+                    }
+                    // the caller's overlay area must be wide enough to
+                    // receive the whole span (cross-function, so runtime)
+                    if self.callinfo.len() > 1 {
+                        let caller = &self.callinfo[self.callinfo.len() - 2];
+                        let caller_fn = &caller.module.functions()[caller.func as usize];
+                        let area = caller_fn.layout.arg_area_len();
+                        if usize::from(n) > area {
+                            return Err((
+                                Trap::RetSpanTooWide {
+                                    span: u16::from(n),
+                                    caller_area: u16::try_from(area)
+                                        .expect("argument areas fit u16"),
+                                },
+                                pc,
+                            ));
+                        }
+                    }
+                    // place the span at overlay words 0..n. The
+                    // destination `fp+1+i` is the caller's
+                    // outgoing-argument word i for every i below the
+                    // caller's area (the callee's own slots alias those
+                    // words); words at or past the callee's call word are
+                    // dead at this point, so writing over them is safe.
+                    // Ascending is overlap-safe: the destination sits
+                    // below the source for src > 0, and src == 0 is an
+                    // identity copy.
+                    for i in 0..usize::from(n) {
+                        let slot = u8::try_from(usize::from(src) + i)
+                            .expect("span stays inside the u8 slot range");
+                        let value = read_value(&self.stack, fp, slot, slots, body_len)
+                            .map_err(|e| (e, pc))?;
+                        self.stack[fp + 1 + i] = Word::Slot(value);
+                    }
+                    let value = match self.stack[fp + 1] {
+                        Word::Slot(v) => v,
+                        Word::Meta(_) => {
+                            return Err((Trap::MetaWordCorrupt { fp }, pc));
+                        },
+                    };
                     let mut st = stack_state!();
                     match st.ret(value, fp).map_err(|e| (e, pc))? {
                         RetOutcome::Root(v) => return Ok(v),

@@ -97,6 +97,19 @@ pub enum SlotType {
     /// following slots, typed structurally by the same [`FrameLayout`]; a
     /// unit tag carries no payload slots.
     Tag,
+    /// An untyped raw word: the overlay region's staging slots when one
+    /// frame stages more than one call shape, or receives a callee's
+    /// result span whose types differ from the staged arguments on the
+    /// same slots (both are ordinary — the overlay words are reused). A
+    /// `Raw` slot accepts every write and every read checks the value's
+    /// concrete type; `slide_plan` accepts `Raw` staging against any
+    /// callee parameter shape, and the tier-1 VM re-checks the staged
+    /// value words at the call site. This is the one slot type the locked
+    /// frame rules needed added to admit heterogeneous call sites within a
+    /// single frame: no frame layout can otherwise type one overlay word
+    /// that carries a `Tag` argument, then a `Ref` result, then an `I64`
+    /// argument over its lifetime.
+    Raw,
 }
 
 /// Invariant violation in a [`FrameLayout`] construction.

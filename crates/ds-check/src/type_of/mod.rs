@@ -57,6 +57,7 @@ use crate::{
     TypeExpr,
     atom::{AtomKind, TraitId, TypeId},
     decls::{self, Decls, FnSig, GenericParam},
+    error::Error,
     resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
     universe::Ty,
 };
@@ -101,6 +102,12 @@ pub struct Checked {
     /// pass consumes this; top-level bindings derive theirs from
     /// `def_types` directly.
     pub binders: HashMap<Span, crate::linearity::BinderFact>,
+    /// The checked `Val` of every expression, keyed by its span: the solved
+    /// type AT THAT USE SITE (flow-refined inside `is` tests and match arms
+    /// [B2]) plus the early-exit flag. The lowering pass [M3] consumes this
+    /// side table instead of re-deriving types; entries are recorded in
+    /// walk order and a re-walk overwrites them.
+    pub expr_types: HashMap<Span, Val>,
 }
 
 mod ops;
@@ -112,7 +119,7 @@ mod pattern;
 /// supplies source text for machine-readable suggestions.
 #[must_use]
 pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
-    run(files, asts).3
+    analyze(files, asts).checked
 }
 
 /// The typed result of one resolved package: the full bidirectional check
@@ -127,6 +134,30 @@ pub struct TypedPackage {
     /// The solved type of every top-level const/var binding, keyed by its
     /// package definition id.
     pub type_names: HashMap<DefId, String>,
+}
+
+/// The full bidirectional check bundled with the tables later passes read:
+/// the package namespace, per-file resolutions, declaration tables, and
+/// the typed result. Every `Ty` inside `Checked` was minted by
+/// `decls.universe`, so consumers must pass the bundle along unchanged —
+/// a second pass over the same sources mints an unrelated universe. The
+/// affine pass [C1] and the lowering pass [M3] consume exactly these.
+pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
+    let (package, resolutions, mut diags) = crate::resolve_package(asts);
+    let (decls, checked) = check_bodies(files, asts, &package, &resolutions);
+    diags.extend(checked.diags);
+    let checked = Checked {
+        diags,
+        def_types: checked.def_types,
+        binders: checked.binders,
+        expr_types: checked.expr_types,
+    };
+    Analyzed {
+        package,
+        resolutions,
+        decls,
+        checked,
+    }
 }
 
 /// Checks a resolved package [B2]: builds the declaration tables and
@@ -177,6 +208,7 @@ where
     let (mut decls, mut diags) = decls::build(package, &trees, resolutions);
     let mut def_types = HashMap::new();
     let mut binders = HashMap::new();
+    let mut expr_types = HashMap::new();
     let mut counter = 0u32;
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies::new(
@@ -186,6 +218,7 @@ where
             &mut decls,
             &mut def_types,
             &mut binders,
+            &mut expr_types,
             &mut counter,
         );
         bodies.file(ast);
@@ -195,22 +228,22 @@ where
         diags,
         def_types,
         binders,
+        expr_types,
     })
 }
 
-/// The full bidirectional check, exposing the tables later passes read:
-/// the package namespace, per-file resolutions, declaration tables, and
-/// the typed result. The affine pass [C1] consumes exactly these.
-pub(crate) fn run(files: &Files, asts: &[Ast]) -> (Package, Vec<Resolutions>, Decls, Checked) {
-    let (package, resolutions, mut diags) = crate::resolve_package(asts);
-    let (decls, checked) = check_bodies(files, asts, &package, &resolutions);
-    diags.extend(checked.diags);
-    let checked = Checked {
-        diags,
-        def_types: checked.def_types,
-        binders: checked.binders,
-    };
-    (package, resolutions, decls, checked)
+/// The tables of one analyzed package; see [`analyze`].
+#[must_use]
+pub struct Analyzed {
+    /// The package namespace: definitions, name tables, method registry.
+    pub package: Package,
+    /// Per-file name resolutions, indexed by file id.
+    pub resolutions: Vec<Resolutions>,
+    /// The declaration tables, owning the universe that minted every `Ty`.
+    pub decls: Decls,
+    /// The typed result: diagnostics, top-level types, binder facts,
+    /// per-expression types.
+    pub checked: Checked,
 }
 
 /// The body checker over one file.
@@ -221,6 +254,7 @@ struct Bodies<'a> {
     decls: &'a mut Decls,
     def_types: &'a mut HashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
+    expr_types: &'a mut HashMap<Span, Val>,
     counter: &'a mut u32,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
@@ -242,6 +276,10 @@ struct Bodies<'a> {
     loop_depth: usize,
     /// Cycle guard for order-independent top-level typing [G3].
     visiting: Vec<DefId>,
+    /// Whether the failed solve just below already reported the tuple
+    /// distribution cap precisely; the generic fallbacks around
+    /// `solve_here` consume it so DS2012 never layers under another code.
+    solve_reported: bool,
 }
 
 impl<'a> Bodies<'a> {
@@ -252,6 +290,7 @@ impl<'a> Bodies<'a> {
         decls: &'a mut Decls,
         def_types: &'a mut HashMap<DefId, Ty>,
         binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
+        expr_types: &'a mut HashMap<Span, Val>,
         counter: &'a mut u32,
     ) -> Self {
         Self {
@@ -261,6 +300,7 @@ impl<'a> Bodies<'a> {
             decls,
             def_types,
             binders,
+            expr_types,
             counter,
             diags: Vec::new(),
             linear_vars: HashMap::new(),
@@ -272,6 +312,7 @@ impl<'a> Bodies<'a> {
             ret: None,
             loop_depth: 0,
             visiting: Vec::new(),
+            solve_reported: false,
         }
     }
 
@@ -335,15 +376,17 @@ impl<'a> Bodies<'a> {
         self.push_generics(&generics);
         let target = self.solve_here(&imp.target);
         let Some(target) = target else {
-            self.error(
-                ErrorCode::TypeMismatch,
-                format!(
-                    "impl target `{}` does not solve against the package declarations",
-                    decls::render_type(&imp.target)
-                ),
-                imp.target.span(),
-                "unsolvable target",
-            );
+            if !self.take_solve_reported() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "impl target `{}` does not solve against the package declarations",
+                        decls::render_type(&imp.target)
+                    ),
+                    imp.target.span(),
+                    "unsolvable target",
+                );
+            }
             self.pop_generics();
             return;
         };
@@ -395,7 +438,7 @@ impl<'a> Bodies<'a> {
             if let Some(expected) = self.solve_here(ann) {
                 self.expect_contains(val, expected, local.init.span(), "annotated binding");
                 val.ty = expected;
-            } else {
+            } else if !self.take_solve_reported() {
                 self.error(
                     ErrorCode::TypeMismatch,
                     format!(
@@ -437,15 +480,17 @@ impl<'a> Bodies<'a> {
                     mutable: param_is_mut(param),
                 });
             } else {
-                self.error(
-                    ErrorCode::InferenceFailed,
-                    format!(
-                        "parameter `{}` needs a type annotation at this boundary [B2]",
-                        param.name.name
-                    ),
-                    param.name.span,
-                    "unannotated boundary parameter",
-                );
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!(
+                            "parameter `{}` needs a type annotation at this boundary [B2]",
+                            param.name.name
+                        ),
+                        param.name.span,
+                        "unannotated boundary parameter",
+                    );
+                }
                 let empty = self.empty();
                 self.bind_local(param.name.span, Binding {
                     ty: empty,
@@ -455,15 +500,17 @@ impl<'a> Bodies<'a> {
         }
         let ret = f.ret.as_ref().and_then(|r| self.solve_here(r)).or_else(|| {
             f.ret.as_ref().map(|r| {
-                self.error(
-                    ErrorCode::TypeMismatch,
-                    format!(
-                        "return type `{}` does not solve against the package declarations",
-                        decls::render_type(r)
-                    ),
-                    r.span(),
-                    "unsolvable return type",
-                );
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "return type `{}` does not solve against the package declarations",
+                            decls::render_type(r)
+                        ),
+                        r.span(),
+                        "unsolvable return type",
+                    );
+                }
                 self.empty()
             })
         });
@@ -520,7 +567,7 @@ impl<'a> Bodies<'a> {
             if let Some(expected) = self.solve_here(ann) {
                 self.expect_contains(val, expected, local.init.span(), "annotated binding");
                 val.ty = expected;
-            } else {
+            } else if !self.take_solve_reported() {
                 self.error(
                     ErrorCode::TypeMismatch,
                     format!(
@@ -532,7 +579,7 @@ impl<'a> Bodies<'a> {
                 );
             }
         }
-        if self.decls.universe.is_empty(val.ty) && !val.diverges {
+        if self.decls.universe.is_empty(val.ty) && !val.diverges && !self.take_solve_reported() {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the initializer's type is empty; inference found no inhabitant [B1]".to_owned(),
@@ -546,6 +593,12 @@ impl<'a> Bodies<'a> {
     // ---- expressions ----------------------------------------------------------
 
     fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
+        let val = self.expr_inner(e, expected);
+        self.expr_types.insert(e.span(), val);
+        val
+    }
+
+    fn expr_inner(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
         match e {
             Expr::Literal { span, lit } => self.literal(*span, lit),
             Expr::Str { span, parts } => self.string_expr(*span, parts),
@@ -565,11 +618,24 @@ impl<'a> Bodies<'a> {
                 for item in items {
                     elements.push(self.expr(item, None).ty);
                 }
-                let ty = self
-                    .decls
-                    .universe
-                    .product(&elements)
-                    .unwrap_or_else(|_| self.empty());
+                let ty = match self.decls.universe.product(&elements) {
+                    Ok(ty) => ty,
+                    Err(err) => {
+                        // The distribution cap is a real rejection, not an
+                        // inference fallback: render DS2012 instead of
+                        // degrading the whole expression to the empty type.
+                        self.error(
+                            ErrorCode::TupleDistributionCap,
+                            err.to_string(),
+                            e.span(),
+                            "tuple distribution cap",
+                        );
+                        // Downstream empty-type fallbacks must not re-report
+                        // this rejection as an inference hole.
+                        self.solve_reported = true;
+                        self.empty()
+                    },
+                };
                 Val {
                     ty,
                     diverges: false,
@@ -594,7 +660,7 @@ impl<'a> Bodies<'a> {
             Expr::Unary { op, expr, span } => self.unary(*op, expr, *span),
             Expr::Is { expr, ty, .. } => {
                 let _ = self.expr(expr, None);
-                if self.solve_here(ty).is_none() {
+                if self.solve_here(ty).is_none() && !self.take_solve_reported() {
                     self.error(
                         ErrorCode::TypeMismatch,
                         format!(
@@ -995,15 +1061,17 @@ impl<'a> Bodies<'a> {
                         .and_then(|(ps, _)| ps.get(index).copied())
                 });
             let Some(solved) = solved else {
-                self.error(
-                    ErrorCode::InferenceFailed,
-                    format!(
-                        "parameter `{}` has no expected type to infer from; annotate it [B2]",
-                        param.name.name
-                    ),
-                    param.name.span,
-                    "uninferable parameter",
-                );
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!(
+                            "parameter `{}` has no expected type to infer from; annotate it [B2]",
+                            param.name.name
+                        ),
+                        param.name.span,
+                        "uninferable parameter",
+                    );
+                }
                 let empty = self.empty();
                 param_tys.push(empty);
                 self.bind_local(param.name.span, Binding {
@@ -1136,12 +1204,14 @@ impl<'a> Bodies<'a> {
             written[index] = true;
             let field_ty = self.solve_here(&shape.fields[index].ty);
             let Some(field_ty) = field_ty else {
-                self.error(
-                    ErrorCode::TypeMismatch,
-                    format!("field `{}` of `{}` does not solve", name.name, only.name),
-                    name.span,
-                    "unsolvable field type",
-                );
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("field `{}` of `{}` does not solve", name.name, only.name),
+                        name.span,
+                        "unsolvable field type",
+                    );
+                }
                 continue;
             };
             match value {
@@ -1355,12 +1425,14 @@ impl<'a> Bodies<'a> {
                 if let Some(solved) = param.ty.as_ref().and_then(|t| self.solve_here(t)) {
                     param_tys.push(Some(solved));
                 } else {
-                    self.error(
-                        ErrorCode::InferenceFailed,
-                        "a parameter type does not solve; annotate it [B2]".to_owned(),
-                        span,
-                        "unannotated parameter",
-                    );
+                    if !self.take_solve_reported() {
+                        self.error(
+                            ErrorCode::InferenceFailed,
+                            "a parameter type does not solve; annotate it [B2]".to_owned(),
+                            span,
+                            "unannotated parameter",
+                        );
+                    }
                     param_tys.push(None);
                 }
             }
@@ -2040,12 +2112,14 @@ impl<'a> Bodies<'a> {
                 diverges: false,
             }
         } else {
-            self.error(
-                ErrorCode::TypeMismatch,
-                format!("field `{}` does not solve", name.name),
-                name.span,
-                "unsolvable field type",
-            );
+            if !self.take_solve_reported() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!("field `{}` does not solve", name.name),
+                    name.span,
+                    "unsolvable field type",
+                );
+            }
             Val {
                 ty: self.empty(),
                 diverges: false,
@@ -2600,7 +2674,15 @@ impl<'a> Bodies<'a> {
     /// Solves a written type in the current scopes: type variables
     /// innermost-first, then package atoms, aliases, and traits.
     fn solve_here(&mut self, ty: &Type) -> Option<Ty> {
+        self.solve_reported = false;
         self.solve_with(ty, &HashMap::new(), &[])
+    }
+
+    /// Whether the solve that just failed already reported its precise
+    /// diagnostic (the tuple distribution cap); a generic fallback then
+    /// stays silent so the golden carries one code, not two.
+    fn take_solve_reported(&mut self) -> bool {
+        std::mem::take(&mut self.solve_reported)
     }
 
     fn solve_with(
@@ -2710,7 +2792,20 @@ impl<'a> Bodies<'a> {
                 for item in items {
                     elements.push(self.solve_with(item, subst, generics)?);
                 }
-                self.decls.universe.product(&elements).ok()
+                match self.decls.universe.product(&elements) {
+                    Ok(ty) => Some(ty),
+                    Err(err @ Error::TupleDistributionCap { .. }) => {
+                        self.error(
+                            ErrorCode::TupleDistributionCap,
+                            err.to_string(),
+                            ty.span(),
+                            "tuple distribution cap",
+                        );
+                        self.solve_reported = true;
+                        None
+                    },
+                    Err(_) => None,
+                }
             },
             Type::Unit(_) => Some(self.unit()),
             Type::Fn { params, ret, .. } => {

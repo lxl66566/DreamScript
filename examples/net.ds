@@ -1,0 +1,22 @@
+// A minimal TCP client flow: net_connect, net_send, net_recv, net_close
+// against 127.0.0.1 on the port staged with --args. Without a staged port
+// the run prints instructions and exits 0 (no local test server assumed);
+// with one, a listener answers and the run prints its reply. Failures
+// print through the unhandled-failure handler. The hermetic proof lives
+// in the ds-vm net_io fixtures plus the CLI integration test, which
+// spins an in-process listener.
+
+const some = (v: int) -> int? { v }
+
+const main = (port: int?) -> () {
+  if port is none {
+    println("skipped: no local test server")
+    println("  start a TCP listener, then run: ds run examples/net.ds --args <port>")
+  } else {
+    const conn = net_connect("127.0.0.1", port)
+    net_send(conn, "ping from DreamScript")
+    const reply = net_recv(conn, 64)
+    net_close(conn)
+    println("server replied: ${reply}")
+  }
+}

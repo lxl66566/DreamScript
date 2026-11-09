@@ -7,10 +7,11 @@
 //! the ds-diag renderers; the exit code is 0 when nothing fatal was
 //! reported.
 //!
-//! The package is exactly the files given [G3]: the stdlib vocabulary a
-//! source needs arrives with the package as a file, not hidden inside
-//! the driver — the M3 stdlib replaces those stub packages with the real
-//! module surface.
+//! The package is the stdlib ambient plus the files given [G3]: the M3
+//! ambient (ds-stdlib) registers as a package member before the user's
+//! files, so corpus sources check clean as-is. `--no-ambient` checks the
+//! files alone — for self-contained packages whose declarations would
+//! collide with the ambient's single namespace.
 //!
 //! Fatality scoping mirrors the conformance gate
 //! ([`ds_check::corpus`]): in a file carrying the corpus `// items:`
@@ -36,6 +37,9 @@ use ds_query::{
 pub struct CheckArgs {
     /// One .ds source file of the package; the files share one namespace [G3]
     files: Vec<PathBuf>,
+    /// Check the files alone, without the stdlib ambient package member
+    #[arg(long)]
+    no_ambient: bool,
     /// How diagnostics render
     #[arg(long, value_enum, default_value = "human")]
     error_format: ErrorFormat,
@@ -58,8 +62,19 @@ struct Report {
 /// Checks one package: registers the sources, runs every M2 query over
 /// them, prints the diagnostics, and reports fatality as the exit code.
 pub fn check(args: &CheckArgs) -> Result<ExitCode> {
-    let mut db = Db::new();
-    let mut files = Vec::with_capacity(args.files.len());
+    let mut db = if args.no_ambient {
+        Db::new()
+    } else {
+        // The ambient's effect rows [E1] ride the database's table; a
+        // package without the ambient gets the pure default.
+        Db::with_declared_rows(ds_stdlib::declared_rows())
+    };
+    let mut files = Vec::with_capacity(args.files.len() + 1);
+    if !args.no_ambient {
+        // The ambient is the package's first member: one namespace [G3],
+        // its declarations before the user's in collection order.
+        files.push(db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE));
+    }
     for path in &args.files {
         let source =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;

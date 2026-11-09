@@ -1,5 +1,5 @@
 // source: negative regression items for the affine pass (record C1, C5; corpus README stage vocabulary)
-// purpose: moved-then-used pairs, use-after-move across a match join and inside a re-executing loop, deinit outside ~Copyable
+// purpose: moved-then-used pairs, move-mode parameters, projection transfers, use-after-move across a match join and inside a re-executing loop, deinit outside ~Copyable
 // items:
 // bool: stage: typecheck
 // ready: stage: typecheck
@@ -12,6 +12,10 @@
 // moved-across-arms: stage: reject the `ready` arm moves `h` and the tail expression uses it after the match (DS3001) [C1]
 // moved-in-loop: stage: reject `h` is moved again on every iteration of the while loop (DS3001) [C1]
 // plain: stage: reject deinit on a struct without the `~Copyable` marker (DS3004) [C5]
+// slot: stage: typecheck
+// open-slot: stage: typecheck
+// param-moved-then-used: stage: reject a `move`-mode parameter is consumed by the first close_handle and used again by the second (DS3001) [C1, C2]
+// projection-moved-then-used: stage: reject the first `s.inner` projection consumes `s` and the second uses it again (DS3001) [C1]
 
 tag bool
 
@@ -58,4 +62,22 @@ const moved_in_loop = (p: string) -> int {
 struct plain {
   data: int
   deinit { drop_handle(self.data) }
+}
+
+struct slot: ~Copyable {
+  inner: handle
+}
+
+extern fn open_slot (p: string) -> slot
+
+const param_moved_then_used = (move h: handle) -> () {
+  close_handle(h)
+  close_handle(h)
+}
+
+const projection_moved_then_used = (p: string) -> () {
+  const s = open_slot(p)
+  const i = s.inner
+  close_handle(i)
+  const j = s.inner
 }

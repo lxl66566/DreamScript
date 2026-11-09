@@ -1,0 +1,7 @@
+error[DS2006]: instance head `int | bool` intersects the `int` instance; witness value type `int`
+ --> tests/fixtures/negative/ds2006_instance_overlap.ds:11:14
+   |
+11 | impl enc for int | bool {
+   |              ^^^^^^^^^^ overlapping head
+   |
+   = note: the earlier instance's head covers `int`; two instances of one trait must be pairwise disjoint [B6]

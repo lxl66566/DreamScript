@@ -1,0 +1,17 @@
+// The scalar-to-string conversions and the interpolation chain: every
+// hole is string-typed, non-strings wrap through the str_* natives.
+
+extern fn str_int (v: int) -> string
+extern fn str_float (v: float) -> string
+extern fn str_bool (v: bool) -> string
+
+const main = () -> () {
+  const name = "DreamScript"
+  const count = 42
+  const ratio = 2.5
+  const ok = true
+  println("int: ${str_int(count)}")
+  println("float: ${str_float(ratio)}")
+  println("bool: ${str_bool(ok)}")
+  println("greeting: hello, ${name}")
+}

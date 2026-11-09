@@ -1,8 +1,9 @@
 //! The effects-of query [E1]: the ds-check compute registered by
 //! [`Db::new`] over the real parse — memoization, package-grain
-//! invalidation, graceful degradation on broken files, and the
-//! out-of-range id error.
+//! invalidation, graceful degradation on broken files, the out-of-range
+//! id error, and the declared-rows table the database carries.
 
+use ds_check::{DeclaredRows, EffectRow};
 use ds_query::{Db, DefId, Effect, EffectsOf, QueryError, QueryKey};
 
 #[test]
@@ -54,6 +55,37 @@ fn propagation_contributes_error_through_the_query() {
     let row = db.get::<EffectsOf>(DefId::new(1)).expect("f's row");
     assert!(row.contains(Effect::Error));
     assert_eq!(row.render(), "error");
+}
+
+/// The database's declared-row table [E1] is a lower bound on the computed
+/// row: a world-touching ambient name carries its row into every caller.
+#[test]
+fn declared_rows_flow_through_the_database() {
+    let rows = DeclaredRows::new().with(
+        "read",
+        EffectRow::of(Effect::World) | EffectRow::of(Effect::Error),
+    );
+    let mut db = Db::with_declared_rows(rows);
+    db.add_file(
+        "a.ds",
+        concat!(
+            "extern fn read (x: int) -> int\n",
+            "const g = (x: int) -> int { read(x) }\n",
+        ),
+    );
+    let row = db.get::<EffectsOf>(DefId::new(1)).expect("g's row");
+    assert_eq!(row.render(), "error | world");
+
+    // The default database declares nothing: every ambient name is pure.
+    let mut plain = Db::new();
+    plain.add_file(
+        "a.ds",
+        concat!(
+            "extern fn read (x: int) -> int\n",
+            "const g = (x: int) -> int { read(x) }\n",
+        ),
+    );
+    assert!(plain.get::<EffectsOf>(DefId::new(1)).unwrap().is_pure());
 }
 
 #[test]

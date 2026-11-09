@@ -6,8 +6,9 @@
 //! construction [BL-5]), and the bytecode-to-SSA lowering [H1]. The tier-1
 //! reachable core is complete here by construction: constants, typed
 //! arithmetic, typed comparisons, control flow, calls, frame protocol, slot
-//! moves, and ADT tag words. There are no dynamic "V" variants — every
-//! operand's type is a compile-time fact [BL-1].
+//! moves, ADT tag words, heap string loads and data ops, and multi-word
+//! returns. There are no dynamic "V" variants — every operand's type is a
+//! compile-time fact [BL-1].
 //!
 //! # Encoding: 32-bit fixed format [BL-1]
 //!
@@ -20,7 +21,7 @@
 //! ```
 //!
 //! - The opcode byte [31:24] is a major/minor pair: major [31:28] selects the operation class
-//!   (operand shape), minor [27:24] the variant within it. [`Major`] lists the assigned majors; 13
+//!   (operand shape), minor [27:24] the variant within it. [`Major`] lists the assigned majors; 14
 //!   of 16 are used, the rest are reserved growth budget (the M4 RC ops will take one).
 //! - `a` [23:16] is the primary slot operand: destination for data ops, the condition for
 //!   conditional jumps, the argument count for calls.
@@ -35,20 +36,21 @@
 //!
 //! | class (major)        | variants                | a        | b          | c          | d
 //! |----------------------|-------------------------|----------|------------|------------|----------
-//! | Const (0x0)          | KIMM, KCONST            | dst slot | —          | —          | const idx
+//! | Const (0x0)          | KIMM, KCONST, KSTR     | dst slot | —          | —          | const idx
 //! | IntArith (0x1)       | ADDI64 .. MODI64        | dst slot | lhs slot   | rhs slot   | —
 //! | FloatArith (0x2)     | ADDF64 .. DIVF64        | dst slot | lhs slot   | rhs slot   | —
 //! | IntCmp (0x3)         | EQI64 .. GTI64          | dst slot | lhs slot   | rhs slot   | —
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
 //! | BoolCmp (0x5)        | EQBOOL, NEQBOOL         | dst slot | lhs slot   | rhs slot   | —
+//! | Ref (0xD)            | EQSTR, NEQSTR, STRCAT   | dst slot | lhs slot   | rhs slot   | —
 //! | Tag (0x6)            | TAG_TEST(_NOT), TAG_NEW | dst slot | src slot   | tag id     | —
 //! |                      |                         |          | (TEST) or  | (TEST only)|
 //! |                      |                         |          | tag (NEW)  |            |
 //! | Cvt (0x7)            | CVTI2F, CVTF2I          | dst slot | src slot   | —          | —
 //! | Mov (0x8)            | MOV                     | dst slot | src slot   | —          | —
 //! | Ctl (0x9)            | JMPIF, JMPIF_NOT, JMP   | cond / — | —          | —          | jump bias
-//! | Call (0xA)           | CALL, CALLT, RET        | nargs /  | —          | —          | const idx
-//! |                      |                         | ret slot |            |            |
+//! | Call (0xA)           | CALL, CALLT, RET,       | nargs /  | —          | span       | const idx
+//! |                      | RETSPAN                 | src slot |            | (RETSPAN) |            |
 //! | Frame (0xB)          | FUNCF                   | —        | —          | —          | frame slots
 //! | Halt (0xC)           | HALT                    | slot     | —          | —          | —
 //!
@@ -60,7 +62,8 @@
 //! two representations (inline small, pooled large), so no immediate fits
 //! inline except by compromising the domain. Per BL-1 the constant pool is
 //! the single immediate channel: KIMM loads an i64 pool entry, KCONST loads
-//! any other constant (f64, bool, reference, unit), and CALL/CALLT reference
+//! any other constant (f64, bool, reference, unit), KSTR materializes a pool
+//! string as a heap string reference, and CALL/CALLT reference
 //! callees as pool entries (a FuncRef: module index + function index for
 //! fully-qualified cross-module calls [H6 item 5], the entry hot reload
 //! swaps). The uop contract fixes only the index shape: pool indices are u16
@@ -149,6 +152,13 @@ pub enum Uop {
     /// `0x0.1` — `slots[dst] =` the constant at pool entry `kidx` (f64, bool,
     /// reference, or unit).
     Kconst { dst: u8, kidx: ConstIdx },
+    /// `0x0.2` — `slots[dst] =` a heap string reference materialized from
+    /// the pool `Str` entry `kidx`. Interned: one object per distinct
+    /// constant content, so a constant string is one heap object however
+    /// often it loads. M3 extension, justified: KCONST is a pure constant
+    /// load while string materialization is a heap-interning effect — a
+    /// separate opcode keeps KCONST's purity-table entry true.
+    Kstr { dst: u8, kidx: ConstIdx },
     /// `0x1.0` — `slots[dst] = slots[lhs] + slots[rhs]`, i64, traps on
     /// overflow [B7].
     AddI64 { dst: u8, lhs: u8, rhs: u8 },
@@ -203,6 +213,21 @@ pub enum Uop {
     EqBool { dst: u8, lhs: u8, rhs: u8 },
     /// `0x5.1` — `slots[dst] = slots[lhs] != slots[rhs]`, bool.
     NeqBool { dst: u8, lhs: u8, rhs: u8 },
+    /// `0xD.0` — `slots[dst] =` `slots[lhs] ==` `slots[rhs]`, strings:
+    /// structural byte equality of the referenced contents, not object
+    /// identity; `0xD.0 ^ 1 == 0xD.1` (NEQSTR). M3 extension, justified:
+    /// string equality is content equality, which no existing comparison
+    /// expresses (EQI64 compares the reference words).
+    EqStr { dst: u8, lhs: u8, rhs: u8 },
+    /// `0xD.1` — `slots[dst] =` `slots[lhs] !=` `slots[rhs]`, strings.
+    NeqStr { dst: u8, lhs: u8, rhs: u8 },
+    /// `0xD.2` — `slots[dst] =` a fresh heap string
+    /// `concat(slots[lhs], slots[rhs])`. Allocating, so impure for the
+    /// same reason as KSTR: reordering or duplicating an allocation breaks
+    /// M4's dup/drop placement. M3 extension, justified: concatenation is
+    /// the primitive interpolation lowers onto [F6], and no existing uop
+    /// builds a new string.
+    StrCat { dst: u8, lhs: u8, rhs: u8 },
     /// `0x6.0` — `slots[dst] = (slots[src] == tag)`, unboxed bool: reads the
     /// tag word of a tag+payload union [BL-2] and compares its discriminant
     /// against immediate tag id `tag` (in the `c` field). `0x6.0 ^ 1 ==
@@ -247,6 +272,18 @@ pub enum Uop {
     /// `0xA.2` — return `slots[src]`; the word overlays slot 0 of the
     /// caller's outgoing-argument area [H2].
     Ret { src: u8 },
+    /// `0xA.3` — return the `n` consecutive slots starting at `src`: the
+    /// span is placed at overlay words `0..n` (the caller's
+    /// outgoing-argument slots, which the callee's own slots already alias
+    /// below its call word), then the frame returns exactly like RET with
+    /// the span's head as the single-word result. The caller's
+    /// outgoing-argument area must be at least `n` wide (the VM checks;
+    /// the lowering sizes it). M3 extension, justified: RET moves one word
+    /// while BL-2 values (payloaded unions, structs) span consecutive
+    /// slots, and moves cannot carry a span across the popped frame
+    /// boundary — the callee's words above the caller's frame are
+    /// truncated at the pop.
+    RetSpan { src: u8, n: u8 },
     /// `0xB.0` — function entry: declares `frame_slots` value slots, at most
     /// [`MAX_FRAME_SLOTS`] (encode and decode reject larger counts with a
     /// typed error); the VM cross-checks it against the function's

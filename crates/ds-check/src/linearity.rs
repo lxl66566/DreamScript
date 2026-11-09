@@ -72,6 +72,9 @@
 //! * Candidate method calls (`Res::Dot(DotRes::Methods)`) consume their receiver only when every
 //!   candidate's first parameter is `move`; their non-receiver arguments walk as borrows until
 //!   candidate selection is exposed to this pass.
+//! * A lambda body walks once at its source position, so a call re-executing a body whose capture
+//!   an earlier call already consumed goes unaudited. Closure call cardinality is a later surface
+//!   decision (an Fn-vs-once contract); until it lands, the M4 runtime rc check owns that seam.
 
 use std::collections::{HashMap, HashSet};
 
@@ -155,14 +158,19 @@ pub struct Linearity {
 /// affine pass [C1, C5]. Callers wanting every diagnostic read both lists.
 #[must_use]
 pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
-    let (package, resolutions, decls, checked) = crate::type_of::run(files, asts);
+    let crate::type_of::Analyzed {
+        package,
+        resolutions,
+        decls,
+        checked,
+    } = crate::type_of::analyze(files, asts);
     let lin = linearity_check(asts, &package, &resolutions, &decls, &checked);
     (checked, lin)
 }
 
 /// Runs the affine pass over a package whose bidirectional check already
 /// ran: `checked` supplies binder facts and top-level types, the tables
-/// come from the same walk (see `type_of::run`).
+/// come from the same walk (see `type_of::analyze`).
 #[must_use]
 pub fn linearity_check(
     asts: &[Ast],
@@ -856,10 +864,13 @@ impl<'a> Lin<'a> {
             return false;
         };
         self.scopes.push(Vec::new());
+        // Parameters bind inside the capture boundary: they are locals of
+        // this frame, so their uses in the body are not captures [C1];
+        // a nested lambda entered later still captures them.
+        self.epoch += 1;
         for param in params {
             self.bind_param(param);
         }
-        self.epoch += 1;
         let diverges = self.expr(body, true);
         self.epoch -= 1;
         self.drop_scope(*span);
@@ -1326,5 +1337,68 @@ fn peel(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren { inner, .. } => peel(inner),
         _ => expr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! No M2 surface form defers initialization (every binding carries an
+    //! initializer and the resolver binds in flow order), so the
+    //! uninitialized lattice base has no source-level test. This exercises
+    //! it directly: when a future surface form (a `var x: t` declaration
+    //! without an initializer, still undecided in the record) reaches the
+    //! walk, DS3002 fires and this stays green as the semantic floor.
+
+    use super::*;
+
+    #[test]
+    fn an_uninitialized_read_reports_ds3002() {
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("t.ds", "tag int\nconst go = (p: int) -> int { p }\n");
+        let ast = ds_parse::parse(&files, file).expect("parses");
+        let crate::type_of::Analyzed {
+            package,
+            resolutions,
+            decls,
+            checked,
+        } = crate::type_of::analyze(&files, &[ast]);
+        let [(&binder, &BinderFact { copyable, .. })] =
+            checked.binders.iter().collect::<Vec<_>>()[..]
+        else {
+            panic!("one parameter binder, got {:#?}", checked.binders);
+        };
+        let place = Place::Local(binder);
+        let mut lin = Lin {
+            package: &package,
+            decls: &decls,
+            facts: &checked.binders,
+            def_types: &checked.def_types,
+            res: resolutions.first(),
+            out: Linearity::default(),
+            state: HashMap::from([(place, State::Uninit)]),
+            info: HashMap::from([(place, Info {
+                name: "p",
+                copyable,
+                owned: true,
+                epoch: 0,
+            })]),
+            scopes: vec![Vec::new()],
+            audit: false,
+            reported: HashSet::new(),
+            last_use: HashMap::new(),
+            epoch: 0,
+        };
+        lin.read(place, binder, false);
+        let [diag] = lin.out.diags.as_slice() else {
+            panic!("one uninit diagnostic, got {:#?}", lin.out.diags);
+        };
+        assert_eq!(diag.code.as_str(), "DS3002");
+        assert_eq!(
+            diag.message,
+            "binding `p` may not be initialized on this path"
+        );
+        assert_eq!(diag.labels[0].label, "may be uninitialized here");
+        assert_eq!(diag.labels[1].label, "bound here");
+        assert_eq!(diag.labels[1].span, binder);
     }
 }

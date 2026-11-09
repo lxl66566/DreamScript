@@ -384,6 +384,30 @@ fn empty_function_round_trips() {
 }
 
 #[test]
+fn raw_overlay_slots_round_trip() {
+    // A frame whose outgoing-argument area stages more than one call shape
+    // declares Raw overlay slots; wire tag 6 carries them.
+    let module = Module::new("overlay", TargetClass::Bytecode, Hash128::ZERO).with_function(
+        Function::new(
+            "main",
+            FrameLayout::new(vec![SlotType::Raw, SlotType::Raw, SlotType::Raw], 0, 3)
+                .expect("layout"),
+            Vec::new(),
+            vec![Uop::Funcf { frame_slots: 3 }, Uop::Ret { src: 0 }],
+        )
+        .expect("valid function"),
+    );
+    let bytes = write(&module);
+    let read_back = read(&bytes).expect("round trips");
+    assert_eq!(read_back.functions()[0].layout().slots(), &[
+        SlotType::Raw,
+        SlotType::Raw,
+        SlotType::Raw
+    ]);
+    assert_eq!(write(&read_back), bytes, "byte-stable across the read");
+}
+
+#[test]
 fn builder_rejects_jump_escaping_the_body() {
     let layout = FrameLayout::new(vec![SlotType::I64], 1, 0).expect("layout");
     // A Jmp at pc 1 targeting 2 in a two-word body: one past the end.

@@ -1,0 +1,30 @@
+// purpose: the fallible builtin natives' lowering — non-tail calls test
+// the two-word platform span's discriminant, extract the success payload
+// word, and a failure routes through the print-and-halt handler (the M3
+// stand-in for the unhandled-failure top level). The path arrives staged
+// by the run entry.
+
+tag int
+tag string
+tag bool
+
+extern fn println (s: string) -> ()
+extern fn str_int (v: int) -> string
+extern fn str_bool (v: bool) -> string
+extern fn read_file (path: string) -> string
+extern fn write_file (path: string, contents: string) -> ()
+extern fn file_exists (path: string) -> bool
+extern fn file_size (path: string) -> int
+
+const main = (path: string) -> bool {
+  write_file(path, "probe bytes")
+  const back = read_file(path)
+  const exists = file_exists(path)
+  const size = file_size(path)
+  println("size ${str_int(size)}")
+  exists && size == 11 && back == "probe bytes"
+}
+
+const fail_read = (path: string) -> () {
+  println(read_file(path))
+}

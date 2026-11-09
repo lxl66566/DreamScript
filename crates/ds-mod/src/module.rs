@@ -160,7 +160,9 @@ pub(crate) fn jump_target_of(uop: Uop) -> Option<u32> {
 }
 
 /// The compact wire byte for one [`SlotType`]: I32=0, I64=1, F64=2, Bool=3,
-/// Ref=4, Tag=5.
+/// Ref=4, Tag=5, Raw=6. Tag 6 is an additive payload-v1 extension: readers
+/// that predate it reject the byte as an unknown slot type, so no payload
+/// version bump is needed and existing writers stay byte-stable.
 pub(crate) const fn slot_tag(slot: SlotType) -> u8 {
     match slot {
         SlotType::I32 => 0,
@@ -169,6 +171,7 @@ pub(crate) const fn slot_tag(slot: SlotType) -> u8 {
         SlotType::Bool => 3,
         SlotType::Ref => 4,
         SlotType::Tag => 5,
+        SlotType::Raw => 6,
     }
 }
 
@@ -181,6 +184,7 @@ pub(crate) const fn slot_from_tag(tag: u8) -> Option<SlotType> {
         3 => Some(SlotType::Bool),
         4 => Some(SlotType::Ref),
         5 => Some(SlotType::Tag),
+        6 => Some(SlotType::Raw),
         _ => None,
     }
 }

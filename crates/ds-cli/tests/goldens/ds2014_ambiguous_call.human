@@ -1,0 +1,5 @@
+error[DS2014]: dot-call `text` is truly ambiguous between `show` and `render`; qualify with `Trait::text` [F3]
+ --> tests/fixtures/negative/ds2014_ambiguous_call.ds:12:29
+   |
+12 | const f = (x: int) -> int { x.text() }
+   |                             ^^^^^^^^ ambiguous method

@@ -1,0 +1,7 @@
+// A dot-call with no instance for the receiver [B6].
+
+tag int
+trait show {
+  const text = (self: self) -> int
+}
+const f = (x: int) -> int { x.text() }

@@ -74,9 +74,14 @@ pub struct ItemStage {
 /// `None` when the file has no `// items:` header (a plain source file:
 /// nothing is staged) or when header and body disagree (a corrupt header;
 /// callers treat the file as unstaged rather than guess an alignment).
+/// `unresolved` entries are skipped by every runner (their bodies are
+/// comments), so they align with no item.
 #[must_use]
 pub fn item_stages(source: &str, ast: &Ast) -> Option<Vec<ItemStage>> {
-    let stages = stages(source);
+    let stages: Vec<_> = stages(source)
+        .into_iter()
+        .filter(|stage| !stage.stage.starts_with("unresolved"))
+        .collect();
     if stages.is_empty() {
         return None;
     }
@@ -95,4 +100,38 @@ pub fn item_stages(source: &str, ast: &Ast) -> Option<Vec<ItemStage>> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unresolved header entry aligns with no item, so a file carrying
+    /// one still stages its live items (the body keeps the unresolved one
+    /// as comments).
+    #[test]
+    fn unresolved_entries_align_with_no_item() {
+        let source = "// source: x\n// purpose: y\n// items:\n// a: stage: typecheck\n// b: \
+                      stage: unresolved: v2 additive\n// c: stage: run\ntag a\nconst c = a\n";
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("m.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("parses");
+        let staged = item_stages(source, &ast).expect("the live items stage");
+        assert_eq!(staged.len(), 2);
+        assert_eq!(staged[0].id, "a");
+        assert_eq!(staged[0].stage, "typecheck");
+        assert_eq!(staged[1].id, "c");
+        assert_eq!(staged[1].stage, "run");
+    }
+
+    /// Header and body still must agree outside unresolved entries.
+    #[test]
+    fn a_corrupt_header_stages_nothing() {
+        let source = "// source: x\n// purpose: y\n// items:\n// a: stage: typecheck\n// b: \
+                      stage: run\ntag a\n";
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("m.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("parses");
+        assert!(item_stages(source, &ast).is_none());
+    }
 }

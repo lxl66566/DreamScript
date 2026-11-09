@@ -180,7 +180,9 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
         .zip(callee.params())
         .enumerate()
     {
-        if staged != expected {
+        // `Raw` staging carries no static type: the value words are
+        // checked at the call site instead (see SlotType::Raw).
+        if staged != expected && staged != SlotType::Raw {
             return Err(SlideError::TypeMismatch {
                 index,
                 staged,
@@ -204,7 +206,7 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;
-    use crate::layout::SlotType::{Bool, F64, I64, Ref};
+    use crate::layout::SlotType::{Bool, F64, I64, Raw, Ref};
 
     fn layout(slots: Vec<SlotType>, params: usize, args: usize) -> FrameLayout {
         FrameLayout::new(slots, params, args).expect("valid test layout")
@@ -280,6 +282,19 @@ mod tests {
         let mut words = [0, 0, 0, 8];
         plan.apply(&mut words);
         assert_eq!(words, [8, 0, 0, 8]);
+    }
+
+    #[test]
+    fn raw_staging_matches_any_callee_shape() {
+        // one frame calls a [I64, F64, Ref] callee and a [Bool] callee:
+        // only Raw overlay slots admit both shapes
+        let caller = layout(vec![Raw, Raw, Raw], 0, 3);
+        for callee in [
+            layout(vec![I64, F64, Ref, Bool], 3, 1),
+            layout(vec![Bool, I64], 1, 1),
+        ] {
+            slide_plan(&caller, &callee).expect("Raw stages any shape");
+        }
     }
 
     #[test]

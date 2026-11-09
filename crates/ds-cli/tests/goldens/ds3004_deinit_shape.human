@@ -1,0 +1,13 @@
+error[DS3004]: deinit is restricted to `~Copyable` types [C5]
+ --> tests/fixtures/negative/ds3004_deinit_shape.ds:8:3
+  |
+8 |   deinit { 1 }
+  |   ^^^^^^^^^^^^ deinit outside a `~Copyable` declaration
+error[DS3004]: a struct declares at most one `deinit` [C5]
+ --> tests/fixtures/negative/ds3004_deinit_shape.ds:13:3
+   |
+13 |   deinit { 2 }
+   |   ^^^^^^^^^^^^ second `deinit`
+   |
+12 |   deinit { 1 }
+   |   ------------ first `deinit`

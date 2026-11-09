@@ -1,0 +1,71 @@
+// The stdlib ambient: the checked-declaration layer of the M3 stdlib (the
+// runtime half is the ds-vm builtin native module). Registered as a package
+// member before the user's sources; the package namespace is single [G3],
+// so every name carries one meaning and no name here may be redeclared by
+// a corpus file. Per-file types (config, io_err, file, url, net_err, ord,
+// json, the stack API) stay file-owned: failure sets ride the `error`
+// effect row (declared_rows), never a file-owned union.
+
+trait Copyable { }
+
+tag int
+tag float
+tag bool
+tag string
+tag char
+tag bytes
+tag u32
+
+struct list[t]
+struct map[k, v]
+
+struct bad_number[t]
+struct missing_field[t]
+tag not_found
+tag permission_denied
+
+// A text row: keyed lookup over strings (get feeds the first parameter).
+type row = map[string, string]
+
+// The fetch result; body extraction is consume.
+struct response
+
+extern fn get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn cons[t] (x: t, xs: list[t]) -> list[t]
+extern fn head[t] (xs: list[t]) -> t?
+extern fn tail[t] (xs: list[t]) -> list[t]
+extern fn join (parts: list[string], sep: string) -> string
+extern fn len[t] (xs: t) -> int
+extern fn trim (s: string) -> string
+extern fn parse_int (s: string) -> int
+extern fn split (s: string, sep: char) -> list[string]
+extern fn collect[t] (xs: list[t]) -> list[t]
+extern fn first[t] (xs: list[t]) -> t?
+extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn str[t] (v: t) -> string
+extern fn println (msg: string) -> ()
+extern fn print (msg: string) -> ()
+extern fn log (msg: string) -> ()
+extern fn close (fd: int) -> ()
+extern fn to_u32_le (b: bytes) -> u32
+extern fn read_file (path: string) -> string
+extern fn write_file (path: string, contents: string) -> ()
+extern fn file_exists (path: string) -> bool
+extern fn fs_list (dir: string) -> list[string]
+extern fn file_size (path: string) -> int
+extern fn net_connect (host: string, port: int) -> int
+extern fn net_send (conn: int, data: string) -> ()
+extern fn net_recv (conn: int, max_bytes: int) -> string
+extern fn net_close (conn: int) -> ()
+extern fn http_get (url: string) -> string
+extern fn parse_json (text: string) -> string
+extern fn load_rows (path: string) -> list[row]
+extern fn fetch (u: string) -> response
+extern fn consume (r: response) -> string
+extern fn cancel[t] (e: t) -> ()
+extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn die[t] (msg: string) -> t
+extern fn max[t] (a: t, b: t) -> t

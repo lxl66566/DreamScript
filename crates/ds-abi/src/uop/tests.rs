@@ -31,10 +31,16 @@ fn samples() -> Vec<Uop> {
         },
         Kconst { dst: 0, kidx: KMAX },
         Kconst { dst: 255, kidx: K0 },
+        Kstr { dst: 0, kidx: K0 },
+        Kstr {
+            dst: 255,
+            kidx: KMAX,
+        },
     ];
     s.extend(r3_samples![
         AddI64, SubI64, MulI64, DivI64, ModI64, AddF64, SubF64, MulF64, DivF64, EqI64, NeqI64,
         LtI64, GeI64, LeI64, GtI64, EqF64, NeqF64, LtF64, GeF64, LeF64, GtF64, EqBool, NeqBool,
+        EqStr, NeqStr, StrCat,
     ]);
     s.extend([
         TagTest {
@@ -61,6 +67,8 @@ fn samples() -> Vec<Uop> {
         Halt { slot: 0 },
         Ret { src: 0 },
         Ret { src: 255 },
+        RetSpan { src: 0, n: 1 },
+        RetSpan { src: 255, n: 255 },
         Call {
             callee: K0,
             nargs: 0,
@@ -97,13 +105,16 @@ fn round_trip_every_uop_at_boundary_values() {
             let word = match u.encode(pc) {
                 Ok(word) => word,
                 // only a jump can fall outside this pc's bias window, and
-                // every sample FUNCF is at or below the frame cap
+                // every sample FUNCF and RETSPAN is inside its caps
                 Err(EncodeError::JumpOutOfRange { .. }) => {
                     assert!(matches!(u, Jmp { .. } | Jmpif { .. } | JmpifNot { .. }));
                     continue;
                 },
                 Err(EncodeError::FrameSlotsExceedCap { .. }) => {
                     panic!("samples stay at or below the frame cap: {u:?}")
+                },
+                Err(EncodeError::RetSpanEmpty) => {
+                    panic!("samples never encode an empty span: {u:?}")
                 },
             };
             let back = Uop::decode(pc, word).expect("a canonical word decodes");
@@ -117,9 +128,10 @@ fn round_trip_every_uop_at_boundary_values() {
     }
 }
 
-#[test]
-fn opcodes_match_documented_codes_and_are_unique() {
-    let expect: Vec<(Uop, u8)> = vec![
+/// The documented opcode byte for every variant (the doc comments pin them
+/// per variant; this table is the executable cross-check).
+fn documented_opcodes() -> Vec<(Uop, u8)> {
+    vec![
         (Kimm { dst: 0, kidx: K0 }, 0x00),
         (Kconst { dst: 0, kidx: K0 }, 0x01),
         (
@@ -344,16 +356,54 @@ fn opcodes_match_documented_codes_and_are_unique() {
             0xa1,
         ),
         (Ret { src: 0 }, 0xa2),
+        (RetSpan { src: 0, n: 1 }, 0xa3),
         (Funcf { frame_slots: 0 }, 0xb0),
         (Halt { slot: 0 }, 0xc0),
-    ];
+        (Kstr { dst: 0, kidx: K0 }, 0x02),
+        (
+            EqStr {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0xd0,
+        ),
+        (
+            NeqStr {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0xd1,
+        ),
+        (
+            StrCat {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0xd2,
+        ),
+    ]
+}
+
+#[test]
+fn opcodes_match_documented_codes_and_are_unique() {
+    let expect = documented_opcodes();
     for (u, code) in &expect {
         assert_eq!(u.opcode(), *code);
         assert_eq!(u.major() as u8, code >> 4);
     }
     let codes: HashSet<_> = expect.iter().map(|(u, _)| u.opcode()).collect();
     assert_eq!(codes.len(), expect.len(), "opcode assignment is unique");
-    // every sample lands on a documented code
+}
+
+#[test]
+fn every_sample_lands_on_a_documented_code() {
+    let codes: HashSet<_> = documented_opcodes()
+        .iter()
+        .map(|(u, _)| u.opcode())
+        .collect();
     for u in samples() {
         assert!(
             codes.contains(&u.opcode()),
@@ -365,24 +415,24 @@ fn opcodes_match_documented_codes_and_are_unique() {
 
 #[test]
 fn major_from_byte_covers_assigned_and_rejects_reserved() {
-    for byte in 0x0..=0xc {
+    for byte in 0x0..=0xd {
         let m = Major::from_byte(byte).expect("assigned major");
         assert_eq!(m as u8, byte);
     }
-    for byte in 0xd..=0xf {
+    for byte in 0xe..=0xf {
         assert_eq!(Major::from_byte(byte), None, "reserved major {byte:X}");
     }
 }
 
 #[test]
 fn xor_negation_adjacency_holds_for_every_comparison() {
-    // 14 comparison constructors x 3 instances, plus one instance of each
+    // 16 comparison constructors x 3 instances, plus one instance of each
     // tag test: everything negate() accepts must flip exactly one opcode bit
     let comparisons: Vec<_> = samples()
         .into_iter()
         .filter(|u| u.negate().is_some())
         .collect();
-    assert_eq!(comparisons.len(), 14 * 3 + 2);
+    assert_eq!(comparisons.len(), 16 * 3 + 2);
     for u in comparisons {
         let n = u.negate().expect("filtered");
         assert_eq!(n.opcode(), u.opcode() ^ 1, "{u:?}");
@@ -395,7 +445,13 @@ fn xor_negation_adjacency_holds_for_every_comparison() {
     }
     for u in [
         Kimm { dst: 0, kidx: K0 },
+        Kstr { dst: 0, kidx: K0 },
         AddI64 {
+            dst: 0,
+            lhs: 0,
+            rhs: 0,
+        },
+        StrCat {
             dst: 0,
             lhs: 0,
             rhs: 0,
@@ -407,6 +463,7 @@ fn xor_negation_adjacency_holds_for_every_comparison() {
             callee: K0,
             nargs: 0,
         },
+        RetSpan { src: 0, n: 2 },
         Halt { slot: 0 },
     ] {
         assert_eq!(u.negate(), None);
@@ -470,9 +527,9 @@ fn bias_arithmetic_forward_backward_and_edges() {
 fn malformed_encodings_are_rejected() {
     // reserved major
     assert_eq!(
-        Uop::decode(0, 0xd0_00_00_00),
+        Uop::decode(0, 0xe0_00_00_00),
         Err(DecodeError::UnknownOpcode {
-            major: 0xd,
+            major: 0xe,
             minor: 0x0
         })
     );
@@ -507,6 +564,22 @@ fn malformed_encodings_are_rejected() {
             "{word:08X}"
         );
     }
+    // RETSPAN with a zero span or a nonzero reserved b field
+    for word in [0xa3_00_00_00, 0xa3_00_02_01] {
+        assert_eq!(
+            Uop::decode(0, word),
+            Err(DecodeError::ReservedField),
+            "{word:08X}"
+        );
+    }
+    // unassigned minor inside the Ref major
+    assert_eq!(
+        Uop::decode(0, 0xd3_00_00_00),
+        Err(DecodeError::UnknownOpcode {
+            major: 0xd,
+            minor: 0x3
+        })
+    );
     // biased field 0x0000 at pc 0 points below the code stream
     assert_eq!(
         Uop::decode(0, 0x90_00_00_00),
@@ -542,17 +615,30 @@ fn funcf_frame_slot_cap_is_enforced_at_both_edges() {
 }
 
 #[test]
+fn ret_span_requires_at_least_one_word() {
+    assert_eq!(
+        RetSpan { src: 0, n: 0 }.encode(0),
+        Err(EncodeError::RetSpanEmpty)
+    );
+    let one = RetSpan { src: 3, n: 2 };
+    let word = one.encode(0).expect("a nonempty span encodes");
+    assert_eq!(Uop::decode(0, word), Ok(one));
+}
+
+#[test]
 fn effects_are_consistent_with_slot_operands() {
     for u in samples() {
         let operands: Vec<u8> = match u {
-            Kimm { dst, .. } | Kconst { dst, .. } | TagNew { dst, .. } => vec![dst],
+            Kimm { dst, .. } | Kconst { dst, .. } | Kstr { dst, .. } | TagNew { dst, .. } => {
+                vec![dst]
+            },
             CvtI2F { dst, src }
             | CvtF2I { dst, src }
             | Mov { dst, src }
             | TagTest { dst, src, .. }
             | TagTestNot { dst, src, .. } => vec![dst, src],
             Jmpif { cond, .. } | JmpifNot { cond, .. } => vec![cond],
-            Ret { src } => vec![src],
+            Ret { src } | RetSpan { src, .. } => vec![src],
             Halt { slot } => vec![slot],
             Jmp { .. } | Funcf { .. } | Call { .. } | Callt { .. } => vec![],
             AddI64 { dst, lhs, rhs }
@@ -577,7 +663,10 @@ fn effects_are_consistent_with_slot_operands() {
             | LeF64 { dst, lhs, rhs }
             | GtF64 { dst, lhs, rhs }
             | EqBool { dst, lhs, rhs }
-            | NeqBool { dst, lhs, rhs } => vec![dst, lhs, rhs],
+            | NeqBool { dst, lhs, rhs }
+            | EqStr { dst, lhs, rhs }
+            | NeqStr { dst, lhs, rhs }
+            | StrCat { dst, lhs, rhs } => vec![dst, lhs, rhs],
         };
         for i in u.reads().as_slice() {
             assert!(
@@ -605,6 +694,7 @@ fn effects_are_consistent_with_slot_operands() {
                 | Call { .. }
                 | Callt { .. }
                 | Ret { .. }
+                | RetSpan { .. }
                 | Funcf { .. }
                 | Halt { .. }
         );
@@ -628,6 +718,16 @@ fn effect_lists_report_expected_slots() {
     let k = Kimm { dst: 7, kidx: K0 };
     assert!(k.reads().is_empty());
     assert_eq!(k.writes().as_slice(), &[7]);
+    let eq = EqStr {
+        dst: 1,
+        lhs: 2,
+        rhs: 3,
+    };
+    assert_eq!(eq.reads().as_slice(), &[2, 3]);
+    assert_eq!(eq.writes().as_slice(), &[1]);
+    let rs = RetSpan { src: 4, n: 2 };
+    assert_eq!(rs.reads().as_slice(), &[4]);
+    assert!(rs.writes().is_empty());
 }
 
 #[test]
@@ -641,6 +741,9 @@ fn purity_table_is_exact() {
                 | Call { .. }
                 | Callt { .. }
                 | Ret { .. }
+                | RetSpan { .. }
+                | Kstr { .. }
+                | StrCat { .. }
                 | Funcf { .. }
                 | Halt { .. }
         );

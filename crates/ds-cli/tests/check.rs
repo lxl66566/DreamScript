@@ -1,5 +1,6 @@
-//! End-to-end `ds check` through the binary: the conformance corpus with
-//! its ambient stub packages exits clean under the stage scoping, and the
+//! End-to-end `ds check` through the binary: the conformance corpus checks
+//! clean as-is under the stdlib ambient (the M3 checked-declaration layer),
+//! the plain fixtures stay self-contained under `--no-ambient`, and the
 //! negative fixture reports its overlap and moved-then-used pair with
 //! golden renderings.
 
@@ -16,40 +17,86 @@ fn ds_check(args: &[&str]) -> Output {
         .expect("the ds binary builds with the test")
 }
 
-/// The M2 acceptance over the corpus: `ds check` over
-/// conformance/types_hybrid.ds and conformance/generics_coherent_traits.ds
-/// exits 0. Each file is given its valid package — its ambient stdlib
-/// stubs per the corpus README (a package is exactly the files given, so
-/// the vocabulary arrives as a package member) — and the documented noise
-/// (the get_port ordering tension in run items, the intended reject, m6
-/// constructs) is printed but never fatal.
-#[test]
-fn types_hybrid_checks_clean_with_its_ambient_package() {
-    let out = ds_check(&[
-        "check",
-        "tests/fixtures/types_ambient.ds",
-        "../../conformance/types_hybrid.ds",
-    ]);
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(out.stdout, [] as [u8; 0]);
+/// One corpus file's documented noise: the file checks with the ambient
+/// (exit 0), stdout stays empty, and stderr prints exactly the staged
+/// leftovers the corpus README's stage vocabulary owns — the printed
+/// count is the pin; every diagnostic must name an item staged away from
+/// `typecheck`, or the command would have failed.
+fn assert_corpus_clean(file: &str, noise: usize) {
+    let path = format!("../../conformance/{file}");
+    let out = ds_check(&["check", &path]);
+    assert_eq!(out.status.code(), Some(0), "{file}");
+    assert_eq!(out.stdout, [] as [u8; 0], "{file}");
     let stderr = String::from_utf8(out.stderr).unwrap();
-    // The get_port tension prints as noise; nothing else is fatal.
-    assert_eq!(stderr.matches("error[").count(), 2);
-    assert!(stderr.contains("DS2001"));
+    assert_eq!(
+        stderr.matches("error[").count(),
+        noise,
+        "{file}: staged leftovers changed: {stderr}"
+    );
 }
 
+/// The M3 acceptance: the corpus files check clean as-is, the stdlib
+/// ambient arriving as the package's first member. The documented noise
+/// per file, all confined to items the header stages away from
+/// `typecheck`:
+///
+/// * types_hybrid: the `config` type is the file's own declaration, so `default_config` stays out
+///   of the ambient and the row-typed `read_file`/`parse_json` leave the run items' `?`-propagation
+///   tensions (get_port, load, cfg, same).
+/// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
+///   the derive engine behind `json for point`).
+/// * syntax_ts_heart: run items only — `read_config`/`default_config` absence and the
+///   type-constructor call form of `bad_number`/ `missing_field`.
+/// * linearity_modes_rc: run items only — `open`/`read_exact` absence (the `file` type is the
+///   file's own) and `u32`'s distinct width [B7].
+/// * effects_nursery: run items only — `urls` is an ambient value the M5 run milestone owns, `push`
+///   is the generics file's own stack API, and `list[t]()` construction plus ranges arrive with the
+///   collection M3 work.
 #[test]
-fn generics_checks_clean_with_its_ambient_package() {
-    let out = ds_check(&[
-        "check",
-        "tests/fixtures/generics_ambient.ds",
-        "../../conformance/generics_coherent_traits.ds",
-    ]);
+fn the_corpus_checks_clean_under_the_stdlib_ambient() {
+    assert_corpus_clean("types_hybrid.ds", 12);
+    assert_corpus_clean("generics_coherent_traits.ds", 8);
+    assert_corpus_clean("syntax_ts_heart.ds", 12);
+    assert_corpus_clean("linearity_modes_rc.ds", 10);
+    assert_corpus_clean("effects_nursery.ds", 9);
+}
+
+/// The intended rejection prints as noise under the ambient and pins its
+/// golden rendering: the overlap diagnostic the corpus header expects.
+#[test]
+fn the_generics_reject_item_prints_its_overlap() {
+    let out = ds_check(&["check", "../../conformance/generics_coherent_traits.ds"]);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(out.stdout, [] as [u8; 0]);
-    // The reject item's intended overlap prints as noise, along with the
-    // m6-item diagnostics; none is fatal.
-    assert!(String::from_utf8(out.stderr).unwrap().contains("DS2006"));
+    assert!(String::from_utf8(out.stderr).unwrap().contains(
+        "error[DS2006]: instance head `int | bool` intersects the `int` instance; witness value \
+         type `int`"
+    ));
+}
+
+/// Without the ambient the corpus's stdlib names do not resolve: the
+/// ambient is what makes the corpus check clean.
+#[test]
+fn without_the_ambient_the_corpus_names_stay_unresolved() {
+    let out = ds_check(&["check", "--no-ambient", "../../conformance/types_hybrid.ds"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("unknown name `read_file`")
+    );
+}
+
+/// A self-contained package under the ambient collides with the shared
+/// namespace [G3]: the file's own `tag int` redefines the ambient's.
+#[test]
+fn a_package_redeclaring_an_ambient_name_reports_the_duplicate() {
+    let out = ds_check(&["check", "tests/fixtures/clean.ds"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("`int` is already defined")
+    );
 }
 
 /// A valid single-file package that declares every name it uses: nothing
@@ -57,7 +104,13 @@ fn generics_checks_clean_with_its_ambient_package() {
 #[test]
 fn a_clean_single_file_package_is_silent() {
     for format in ["human", "json"] {
-        let out = ds_check(&["check", "--error-format", format, "tests/fixtures/clean.ds"]);
+        let out = ds_check(&[
+            "check",
+            "--no-ambient",
+            "--error-format",
+            format,
+            "tests/fixtures/clean.ds",
+        ]);
         assert_eq!(out.status.code(), Some(0), "format {format}");
         assert_eq!(out.stdout, [] as [u8; 0], "format {format}");
         assert_eq!(out.stderr, [] as [u8; 0], "format {format}");
@@ -68,7 +121,7 @@ fn a_clean_single_file_package_is_silent() {
 /// moved-then-used pair [C1] are fatal and render golden in both formats.
 #[test]
 fn the_negative_fixture_renders_golden_human_diagnostics() {
-    let out = ds_check(&["check", "tests/fixtures/moved_overlap.ds"]);
+    let out = ds_check(&["check", "--no-ambient", "tests/fixtures/moved_overlap.ds"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(out.stdout, [] as [u8; 0]);
     assert_eq!(
@@ -100,6 +153,7 @@ error[DS3001]: value `c` is no longer usable
 fn the_negative_fixture_renders_golden_json_diagnostics() {
     let out = ds_check(&[
         "check",
+        "--no-ambient",
         "--error-format",
         "json",
         "tests/fixtures/moved_overlap.ds",

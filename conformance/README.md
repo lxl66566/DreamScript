@@ -12,7 +12,7 @@ The DreamScript conformance corpus: the seed programs of the authoritative desig
 | syntax_ts_heart.ds | 13.4 | M3 | full surface: guards, `or return`, `?`, `.err`, interpolation, destructuring |
 | generics_coherent_traits.ds | 13.5 | M2 (check), M6 (comptime) | `~Copyable` stack, disjoint heads, `#[derive]` + comptime schema |
 | modules_hash_core.ds | 13.6 | M7 | ds.pkg manifest, selective imports, linear sqlite handle |
-| linearity_negative.ds | C1, C5 | M2 (check) | reject items: moved-then-used, moves across match arms and loops, deinit outside `~Copyable` |
+| linearity_negative.ds | C1, C5 | M2 (check) | reject items: moved-then-used, move-mode parameters, projection transfers, moves across match arms and loops, deinit outside `~Copyable` |
 
 ## Header format
 

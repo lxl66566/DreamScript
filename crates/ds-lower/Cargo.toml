@@ -1,0 +1,25 @@
+[package]
+name         = "ds-lower"
+description  = "M3 lowering: checked programs to frame layouts, uop bodies, and dsmod modules for the tier-1 VM"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace       = true
+repository.workspace   = true
+keywords.workspace      = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+ds-abi   = { path = "../ds-abi" }
+ds-check = { path = "../ds-check" }
+ds-diag  = { path = "../ds-diag" }
+ds-mod   = { path = "../ds-mod" }
+ds-parse = { path = "../ds-parse" }
+
+[dev-dependencies]
+ds-vm = { path = "../ds-vm" }

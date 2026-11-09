@@ -1,0 +1,19 @@
+// Naive recursion beside its tail-recursive variant. The 10^6-deep tail
+// run completes on the constant stack the CALLT slide guarantees [H2];
+// a and b start at 0 so every intermediate stays inside i64 range.
+
+extern fn str_int (v: int) -> string
+
+const fib = (n: int) -> int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+const fib_tail = (n: int, a: int, b: int) -> int {
+  if n == 0 { a } else { fib_tail(n - 1, b, a + b) }
+}
+
+const main = () -> () {
+  println("fib(10) = ${str_int(fib(10))}")
+  println("fib_tail(90, 0, 1) = ${str_int(fib_tail(90, 0, 1))}")
+  println("fib_tail(1000000, 0, 0) = ${str_int(fib_tail(1000000, 0, 0))}")
+}

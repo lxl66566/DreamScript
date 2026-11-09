@@ -165,6 +165,8 @@ error_codes! {
     ModuleBadTargetClass => "DS4007", Module,
     /// dsmod section directory broken: unknown kind, duplicate or missing section, or a range outside the file.
     ModuleSectionMalformed => "DS4008", Module,
+    /// A checked construct the lowering contract does not cover.
+    LowerUnsupported => "DS4009", Module,
 }
 
 #[cfg(test)]
@@ -217,6 +219,7 @@ mod tests {
             ("MissingDependency", "DS4006", ErrorClass::Module),
             ("ModuleBadTargetClass", "DS4007", ErrorClass::Module),
             ("ModuleSectionMalformed", "DS4008", ErrorClass::Module),
+            ("LowerUnsupported", "DS4009", ErrorClass::Module),
         ];
         assert_eq!(
             ErrorCode::ALL.len(),
@@ -254,6 +257,6 @@ mod tests {
             assert!(n > prev, "{code} ({n}) breaks ascending order after {prev}");
             prev = n;
         }
-        assert_eq!(prev, 4008, "the table's highest code is DS4008");
+        assert_eq!(prev, 4009, "the table's highest code is DS4009");
     }
 }

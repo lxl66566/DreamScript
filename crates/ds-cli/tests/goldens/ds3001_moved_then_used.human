@@ -1,0 +1,10 @@
+error[DS3001]: value `l` is no longer usable
+ --> tests/fixtures/negative/ds3001_moved_then_used.ds:10:14
+   |
+ 9 |   close_link(l)
+   |              - moved here
+   |
+10 |   close_link(l)
+   |              ^ used again here after move
+   |
+   = note: `l` is `~Copyable` and was consumed

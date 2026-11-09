@@ -1,0 +1,19 @@
+[package]
+name         = "ds-stdlib"
+description  = "The DreamScript stdlib ambient: the checked-declaration layer a ds check package registers before user sources"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ds-check = { path = "../ds-check" }
+ds-diag  = { path = "../ds-diag" }
+ds-parse = { path = "../ds-parse" }

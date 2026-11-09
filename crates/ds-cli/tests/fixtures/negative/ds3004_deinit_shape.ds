@@ -1,0 +1,14 @@
+// Deinit shape rules [C5]: a `deinit` outside a `~Copyable`
+// declaration, and a second `deinit` on one struct.
+
+tag int
+trait Copyable { }
+struct plain {
+  data: int
+  deinit { 1 }
+}
+struct twice: ~Copyable {
+  data: int
+  deinit { 1 }
+  deinit { 2 }
+}

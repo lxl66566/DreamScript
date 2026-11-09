@@ -3,8 +3,9 @@
 use ds_abi::SlotType;
 
 /// A raw unboxed scalar in one frame slot [BL-2]: no NaN-boxing, no per-slot
-/// tags, no boxed scalars. Covers every scalar kind the uop set operates on
-/// [BL-5]; references join with the M4 memory work.
+/// tags, no boxed scalars. Covers every kind the uop set operates on
+/// [BL-5]: the scalars, union tag words, and the reference word into the
+/// VM's heap object store (M3: string objects; [`crate::object::Objects`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     /// A 64-bit integer, the `int` default [B7].
@@ -16,6 +17,10 @@ pub enum Value {
     /// The tag word of an unboxed tag+payload union [BL-2]: a bare
     /// discriminant in one slot; payload words are the following slots.
     Tag(u8),
+    /// A raw reference to a heap object: the index into the VM's object
+    /// table. `Ref` slots hold only these words, so no null niche is spent
+    /// and `T | none` packing stays a legal later pass [B4].
+    Ref(u32),
 }
 
 impl Value {
@@ -27,6 +32,7 @@ impl Value {
             Self::F64(_) => SlotType::F64,
             Self::Bool(_) => SlotType::Bool,
             Self::Tag(_) => SlotType::Tag,
+            Self::Ref(_) => SlotType::Ref,
         }
     }
 }

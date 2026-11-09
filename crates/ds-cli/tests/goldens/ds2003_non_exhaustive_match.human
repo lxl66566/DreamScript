@@ -1,0 +1,9 @@
+error[DS2003]: match on `a | b | c` is not exhaustive: missing: `b | c`
+ --> tests/fixtures/negative/ds2003_non_exhaustive_match.ds:8:3
+   |
+ 8 |   match x {
+   |   ^^^^^^^^^ missing members
+ 9 |     y: a => 1,
+   | ^^^^^^^^^^^^^^
+10 |   }
+   | ^^^

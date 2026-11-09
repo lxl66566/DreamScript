@@ -164,7 +164,7 @@ pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue,
         return Err(QueryError::KindMismatch(key));
     };
     let asts = package_asts(ctx)?;
-    let effects = ds_check::effects_of(&asts, &ds_check::DeclaredRows::new());
+    let effects = ds_check::effects_of(&asts, ctx.declared_rows());
     effects
         .of(ds_check::DefId::from_raw(def.as_u32()))
         .map(QueryValue::EffectRow)
@@ -603,6 +603,50 @@ mod tests {
     fn empty_file_is_one_empty_block() {
         let spans = spans(FileId::new(0), "");
         assert_eq!(spans, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn scan_mirrors_tree_block_indices() {
+        // A file that later fails to parse degrades to the scan, so the
+        // scan must number blocks exactly like the tree it replaces:
+        // same count, and every item of tree block i lands in scan block i.
+        let sources = [
+            "///|\n",
+            "///|",
+            "const a = 1\n",
+            "///|\nconst b = 2\n",
+            "const a = 1\n///|\n",
+            "///|\nconst a = 1\n///|\nconst b = 2\n///|\n",
+            "///|\n///|\ntag a\n",
+            "const a = 1 ///|\nconst b = 2\n",
+            "// c\n///|\nconst b = 2\n",
+            "const a = 1\n  ///|  \nconst b = 2\n",
+            "///| one\nconst b = 2\n///| two\nconst c = 3\n",
+        ];
+        for src in sources {
+            let mut files = ds_diag::Files::new();
+            let file = files.add_source("m.ds", src);
+            let ast = ds_parse::parse(&files, file)
+                .unwrap_or_else(|d| panic!("{src:?} fails to parse: {d:?}"));
+            let scan = split_blocks(file, src);
+            assert_eq!(scan.len(), ast.blocks.len(), "block count for {src:?}");
+            for (i, block) in ast.blocks.iter().enumerate() {
+                for item in &block.items {
+                    let hit = scan
+                        .iter()
+                        .position(|b| {
+                            b.span.start <= item.span.start && item.span.start < b.span.end
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("no scan block covers offset {} in {src:?}", item.span.start)
+                        });
+                    assert_eq!(
+                        hit, i,
+                        "item of tree block {i} in scan block {hit}: {src:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

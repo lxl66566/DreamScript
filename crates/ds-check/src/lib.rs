@@ -163,6 +163,6 @@ pub use resolve::{
     Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
     resolve_package,
 };
-pub use type_of::{Checked, TypedPackage, Val, check_resolved, type_check};
+pub use type_of::{Analyzed, Checked, TypedPackage, Val, analyze, check_resolved, type_check};
 pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};

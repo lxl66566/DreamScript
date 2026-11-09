@@ -383,3 +383,342 @@ fn last_use_positions_report_borrowed_and_consuming_final_uses() {
     assert_eq!(h_use.at, moved.at, "the consuming use is the last use");
     assert!(lin.last_uses.iter().any(|u| u.borrowed), "p borrows");
 }
+
+// ---- consume-mode parameters ---------------------------------------------------
+
+#[test]
+fn consume_mode_parameter_double_consume_renders_the_two_span_golden() {
+    // A `move` parameter is an initialized-affine binding of the entry
+    // state [C2]: the first consuming call moves it, the second is a
+    // use-after-move with the same golden as locals.
+    let source = format!(
+        "{PRELUDE}const twice = (move h: handle) -> int {{\n  take_handle(h)\n  \
+         take_handle(h)\n}}\n"
+    );
+    let (checked, lin) = check(&source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
+    assert_eq!(diag.labels.len(), 2);
+    assert_eq!(diag.labels[0].label, "moved here");
+    assert_eq!(diag.labels[1].label, "used again here after move");
+    assert_eq!(diag.notes, ["`h` is `~Copyable` and was consumed"]);
+    assert_eq!(lin.moves.len(), 1, "only the first call is a move");
+
+    let mut files = Files::new();
+    files.add_source("t.ds", &source);
+    let expected = "error[DS3001]: value `h` is no longer usable
+ --> t.ds:16:15
+   |
+15 |   take_handle(h)
+   |               - moved here
+   |
+16 |   take_handle(h)
+   |               ^ used again here after move
+   |
+   = note: `h` is `~Copyable` and was consumed
+";
+    assert_eq!(ds_diag::render::human(diag, &files), expected);
+}
+
+#[test]
+fn consume_mode_parameter_moved_once_owes_no_drop() {
+    // The consuming call transfers the parameter's deinit responsibility,
+    // so the function end records neither a move nor a drop.
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle) -> int {\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.moves.len(), 1);
+    assert!(lin.drops.is_empty(), "the consumed parameter owes no drop");
+}
+
+#[test]
+fn consume_mode_parameter_left_live_drops_at_the_body_end() {
+    let (_, lin) = case(concat!(
+        "  const peek = (move h: handle) -> int {\n",
+        "    share_handle(h)\n",
+        "  }\n",
+        "  peek(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(
+        lin.moves.is_empty(),
+        "borrowing uses of the parameter never move"
+    );
+    assert_eq!(
+        lin.drops.len(),
+        1,
+        "the live owned parameter dies at scope end"
+    );
+}
+
+#[test]
+fn borrow_mode_parameter_stays_non_moving_across_consuming_calls() {
+    // C2: a borrow-mode parameter is a caller-retained window, so its
+    // consuming call-argument uses never move it statically; the M4
+    // runtime rc==1 uniqueness check owns this seam.
+    let (_, lin) = case(concat!(
+        "  const twice = (h: handle) -> int {\n",
+        "    take_handle(h)\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(lin.moves.is_empty(), "windows never move");
+    assert!(
+        lin.drops.is_empty(),
+        "the caller retains the value, so the callee owes no drop"
+    );
+}
+
+#[test]
+fn a_borrow_use_after_a_consume_of_a_parameter_fires() {
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle) -> int {\n",
+        "    take_handle(h)\n",
+        "    share_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
+}
+
+#[test]
+fn a_parameter_captured_by_a_lambda_is_moved_before_its_body_use() {
+    // The capture at the lambda's use of the parameter is the move [C1];
+    // the body's later consuming use reads the dead binding.
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle) -> int {\n",
+        "    const peek = () => take_handle(h)\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+}
+
+#[test]
+fn a_parameter_used_by_a_spawn_body_is_moved_before_its_body_use() {
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle) -> int {\n",
+        "    spawn { take_handle(h) }\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+}
+
+#[test]
+fn every_match_arm_moving_a_parameter_kills_it_for_the_tail_use() {
+    // Each arm runs once, so its own move is fine; the join keeps the
+    // binding dead, and the use after the match is a use-after-move.
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle, k: int) -> int {\n",
+        "    match k {\n",
+        "      0 => {\n        take_handle(h)\n        1\n      },\n",
+        "      _ => {\n        take_handle(h)\n        2\n      },\n",
+        "    }\n",
+        "    h.fd\n",
+        "  }\n",
+        "  twice(open_handle(p), 0)\n",
+    ));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
+}
+
+#[test]
+fn every_match_arm_moving_a_parameter_once_passes_without_a_tail_use() {
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle, k: int) -> int {\n",
+        "    match k {\n",
+        "      0 => {\n        take_handle(h)\n        1\n      },\n",
+        "      _ => {\n        take_handle(h)\n        2\n      },\n",
+        "    }\n",
+        "  }\n",
+        "  twice(open_handle(p), 0)\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.moves.len(), 2, "each arm's call is one move");
+    assert!(lin.drops.is_empty(), "the consumed parameter owes no drop");
+}
+
+// ---- field projections and destructuring re-binds ---------------------------------
+
+#[test]
+fn projecting_a_linear_field_kills_the_receiver_binding() {
+    // `const inner = w.h` transfers w; a later projection reads the dead
+    // receiver, not just the extracted field.
+    let source = format!(
+        "{PRELUDE}struct holder {{
+  h: handle
+}}
+extern fn open_holder (p: string) -> holder
+const go = (p: string) -> int {{
+  const w = open_holder(p)
+  const inner = w.h
+  take_handle(inner)
+  take_handle(w.h)
+  0
+}}
+"
+    );
+    let (_, lin) = check(&source);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `w` is no longer usable");
+    assert_eq!(
+        lin.moves.len(),
+        2,
+        "w.h projects out twice: first is a move"
+    );
+}
+
+#[test]
+fn projecting_a_copyable_field_keeps_the_receiver_usable() {
+    let (_, lin) = case(concat!(
+        "  const h = open_handle(p)\n",
+        "  const fd = h.fd\n",
+        "  take_handle(h)\n",
+        "  fd\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.moves.len(), 1, "only the consuming call moves h");
+}
+
+#[test]
+fn destructuring_after_a_projection_move_fires_on_the_source() {
+    let source = format!(
+        "{PRELUDE}struct pair {{
+  a: handle
+  b: handle
+}}
+extern fn open_pair (p: string) -> pair
+const go = (p: string) -> int {{
+  const q = open_pair(p)
+  take_handle(q.a)
+  const pair {{ a, b }} = q
+  take_handle(b)
+  0
+}}
+"
+    );
+    let (_, lin) = check(&source);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `q` is no longer usable");
+}
+
+#[test]
+fn destructuring_moves_the_source_into_its_pattern_binders() {
+    let source = format!(
+        "{PRELUDE}struct pair {{
+  a: handle
+  b: handle
+}}
+extern fn open_pair (p: string) -> pair
+const go = (p: string) -> int {{
+  const q = open_pair(p)
+  const pair {{ a, b }} = q
+  take_handle(a)
+  take_handle(b)
+  0
+}}
+"
+    );
+    let (_, lin) = check(&source);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    // The destructure moves q; each field binder is consumed once, so no
+    // drop is owed at scope end.
+    assert_eq!(lin.moves.len(), 3, "q into the pattern, a and b out");
+    assert!(lin.drops.is_empty(), "every moved-out binder was consumed");
+}
+
+#[test]
+fn a_lambda_parameter_is_a_local_not_a_capture_of_itself() {
+    // Parameters bind inside the lambda's capture boundary, so a
+    // borrowing use followed by a consuming use of one `move` parameter
+    // is clean, and the parameter left live dies at the body end.
+    let (_, lin) = case(concat!(
+        "  const use = (move h: handle) -> int {\n",
+        "    share_handle(h)\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  use(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.moves.len(), 1, "only the consuming call moves h");
+    assert!(lin.drops.is_empty(), "the consumed parameter owes no drop");
+
+    let (_, lin) = case(concat!(
+        "  const peek = (move h: handle) -> int {\n",
+        "    share_handle(h)\n",
+        "  }\n",
+        "  peek(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(
+        lin.moves.is_empty(),
+        "a borrowing use of the parameter never moves"
+    );
+    assert_eq!(lin.drops.len(), 1, "a live parameter dies at the body end");
+}
+
+#[test]
+fn a_parameter_still_captures_across_nested_lambdas() {
+    // The capture rule keeps its outer direction: an fn parameter moved
+    // into the body of a lambda inside a lambda is one capture move.
+    let (_, lin) = case(concat!(
+        "  const twice = (move h: handle) -> int {\n",
+        "    const g = () => () => take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  twice(open_handle(p))\n",
+    ));
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.moves.len(), 1, "the innermost body use is the capture");
+}
+
+#[test]
+fn calling_a_consumed_capture_closure_twice_is_currently_unaudited() {
+    // Closure call cardinality is an open surface decision (an Fn-vs-once
+    // contract): the body walks once at its source position, so the
+    // capture move happens there and re-executing the body through a
+    // second call is unaudited. This pins that behavior; the decision
+    // lands as a diff against it, not as a discovery.
+    let (checked, lin) = case(concat!(
+        "  const h = open_handle(p)\n",
+        "  const c = (x: int) -> int { take_handle(h) }\n",
+        "  c(0)\n",
+        "  c(0)\n",
+        "  0\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(
+        lin.moves.len(),
+        1,
+        "the capture moves once, at the lambda body"
+    );
+    assert!(
+        lin.drops.is_empty(),
+        "the captured binding is dead, not dropped"
+    );
+}

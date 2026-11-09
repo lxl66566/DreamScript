@@ -10,13 +10,14 @@ use super::{
     ConstIdx, MAX_FRAME_SLOTS,
     Major::{
         self, BoolCmp, Call, Const, Ctl, Cvt, FloatArith, FloatCmp, Frame, Halt, IntArith, IntCmp,
-        Mov, Tag,
+        Mov, Ref, Tag,
     },
     Uop::{
         self, AddF64, AddI64, Call as UCall, Callt, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64,
-        EqI64, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot,
-        Kconst as UKconst, Kimm as UKimm, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64,
-        MulI64, NeqBool, NeqF64, NeqI64, Ret, SubF64, SubI64, TagNew, TagTest, TagTestNot,
+        EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot,
+        Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64, ModI64,
+        Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64,
+        SubI64, TagNew, TagTest, TagTestNot,
     },
 };
 
@@ -29,6 +30,10 @@ pub enum EncodeError {
     /// FUNCF declares more than [`super::MAX_FRAME_SLOTS`] slots: slot
     /// operands are u8, so higher counts are unaddressable.
     FrameSlotsExceedCap { frame_slots: u16 },
+    /// RETSPAN declares a zero-word span. A span return moves at least the
+    /// head word; a unit return is the single-word RET (whose word the
+    /// caller of a unit callee never reads).
+    RetSpanEmpty,
 }
 
 /// Why a 32-bit word cannot be decoded at a pc.
@@ -96,6 +101,10 @@ impl Uop {
                     dst: a,
                     kidx: ConstIdx(d),
                 }),
+                2 => Ok(UKstr {
+                    dst: a,
+                    kidx: ConstIdx(d),
+                }),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             IntArith => match minor {
@@ -134,6 +143,12 @@ impl Uop {
             BoolCmp => match minor {
                 0 => r3!(EqBool),
                 1 => r3!(NeqBool),
+                _ => Err(DecodeError::UnknownOpcode { major, minor }),
+            },
+            Ref => match minor {
+                0 => r3!(EqStr),
+                1 => r3!(NeqStr),
+                2 => r3!(StrCat),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Tag => match minor {
@@ -202,6 +217,13 @@ impl Uop {
                     cx(d == 0)?;
                     Ok(Ret { src: a })
                 },
+                3 => {
+                    // a = src, c = span length, b reserved zero; n = 0 is
+                    // not canonical (encode rejects it), so decode must too
+                    cx(b == 0)?;
+                    cx(c != 0)?;
+                    Ok(RetSpan { src: a, n: c })
+                },
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Frame => {
@@ -230,6 +252,7 @@ impl Uop {
             | EqI64 { .. }
             | EqF64 { .. }
             | EqBool { .. }
+            | EqStr { .. }
             | TagTest { .. }
             | CvtI2F { .. }
             | UMov { .. }
@@ -243,6 +266,7 @@ impl Uop {
             | NeqI64 { .. }
             | NeqF64 { .. }
             | NeqBool { .. }
+            | NeqStr { .. }
             | TagTestNot { .. }
             | CvtF2I { .. }
             | JmpifNot { .. }
@@ -251,10 +275,12 @@ impl Uop {
             | MulF64 { .. }
             | LtI64 { .. }
             | LtF64 { .. }
+            | UKstr { .. }
+            | StrCat { .. }
             | TagNew { .. }
             | Jmp { .. }
             | Ret { .. } => 2,
-            DivI64 { .. } | DivF64 { .. } | GeI64 { .. } | GeF64 { .. } => 3,
+            DivI64 { .. } | DivF64 { .. } | GeI64 { .. } | GeF64 { .. } | RetSpan { .. } => 3,
             ModI64 { .. } | LeI64 { .. } | LeF64 { .. } => 4,
             GtI64 { .. } | GtF64 { .. } => 5,
         }
@@ -287,6 +313,10 @@ impl Uop {
             | GtF64 { dst, .. }
             | EqBool { dst, .. }
             | NeqBool { dst, .. }
+            | EqStr { dst, .. }
+            | NeqStr { dst, .. }
+            | StrCat { dst, .. }
+            | UKstr { dst, .. }
             | TagTest { dst, .. }
             | TagTestNot { dst, .. }
             | TagNew { dst, .. }
@@ -295,7 +325,7 @@ impl Uop {
             | UMov { dst, .. } => dst,
             Jmpif { cond, .. } | JmpifNot { cond, .. } => cond,
             UCall { nargs, .. } | Callt { nargs, .. } => nargs,
-            Ret { src } => src,
+            Ret { src } | RetSpan { src, .. } => src,
             UHalt { slot } => slot,
             Jmp { .. } | Funcf { .. } => 0,
         }
@@ -303,7 +333,7 @@ impl Uop {
 
     fn bc_field(self, pc: u32) -> Result<Bc, EncodeError> {
         Ok(match self {
-            UKimm { kidx, .. } | UKconst { kidx, .. } => Bc::Wide(kidx.0),
+            UKimm { kidx, .. } | UKconst { kidx, .. } | UKstr { kidx, .. } => Bc::Wide(kidx.0),
             UCall { callee, .. } | Callt { callee, .. } => Bc::Wide(callee.0),
             Funcf { frame_slots } => {
                 if frame_slots > MAX_FRAME_SLOTS {
@@ -313,6 +343,12 @@ impl Uop {
             },
             Jmp { target } | Jmpif { target, .. } | JmpifNot { target, .. } => {
                 Bc::Wide(super::jump_field(target, pc)?)
+            },
+            RetSpan { n, .. } => {
+                if n == 0 {
+                    return Err(EncodeError::RetSpanEmpty);
+                }
+                Bc::Reg { b: 0, c: n }
             },
             TagNew { tag, .. } => Bc::Reg { b: tag, c: 0 },
             TagTest { src, tag, .. } | TagTestNot { src, tag, .. } => Bc::Reg { b: src, c: tag },
@@ -339,7 +375,10 @@ impl Uop {
             | LeF64 { lhs, rhs, .. }
             | GtF64 { lhs, rhs, .. }
             | EqBool { lhs, rhs, .. }
-            | NeqBool { lhs, rhs, .. } => Bc::Reg { b: lhs, c: rhs },
+            | NeqBool { lhs, rhs, .. }
+            | EqStr { lhs, rhs, .. }
+            | NeqStr { lhs, rhs, .. }
+            | StrCat { lhs, rhs, .. } => Bc::Reg { b: lhs, c: rhs },
             Ret { .. } | UHalt { .. } => Bc::Wide(0),
         })
     }

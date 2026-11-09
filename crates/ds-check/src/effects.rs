@@ -199,7 +199,7 @@ impl std::ops::BitOrAssign for EffectRow {
 /// `platform "..." provides <...>` declaration is its source. Applied by
 /// name; a declared row is a lower bound on the computed row. Absent names
 /// carry [`EffectRow::PURE`].
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DeclaredRows {
     rows: HashMap<String, EffectRow>,
 }

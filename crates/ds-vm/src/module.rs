@@ -8,7 +8,10 @@ use ds_abi::{
     uop::{DecodeError, Uop},
 };
 
-use crate::program::{Const, ConstKind, FunctionDef};
+use crate::{
+    native::NativeFunction,
+    program::{Const, ConstKind, FunctionDef},
+};
 
 /// Why a module version cannot be loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +55,19 @@ pub enum ModuleBuildError {
         expected: ConstKind,
         /// The kind the entry holds.
         found: ConstKind,
+    },
+    /// A RETSPAN addresses slots past its function's frame: the span must
+    /// fit inside the callee's own slots (`src + n <= slots`), which is a
+    /// static layout fact.
+    RetSpanLayout {
+        /// The function whose body carries the op.
+        func: String,
+        /// The span's first slot.
+        src: u8,
+        /// The span's word count.
+        span: u8,
+        /// The function's slot count.
+        slots: usize,
     },
 }
 
@@ -160,13 +176,26 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
                 });
             }
         }
+        // the RETSPAN span is a static frame-layout fact: it must fit
+        // inside the callee's own slots
+        if let Uop::RetSpan { src, n } = op {
+            if usize::from(src) + usize::from(n) > def.layout.slots().len() {
+                return Err(ModuleBuildError::RetSpanLayout {
+                    func: def.name.clone(),
+                    src,
+                    span: n,
+                    slots: def.layout.slots().len(),
+                });
+            }
+        }
         // which pool kinds each loading opcode accepts, and the primary
         // kind its trap names: KIMM loads i64 entries, KCONST the non-i64
-        // constant words (this VM executes f64 and bool), CALL/CALLT the
-        // function references
+        // constant words (this VM executes f64 and bool), KSTR the string
+        // entries, CALL/CALLT the function references
         let (kidx, accepts, expected): (_, &[_], _) = match op {
             Uop::Kimm { kidx, .. } => (kidx, &[ConstKind::I64], ConstKind::I64),
             Uop::Kconst { kidx, .. } => (kidx, &[ConstKind::F64, ConstKind::Bool], ConstKind::F64),
+            Uop::Kstr { kidx, .. } => (kidx, &[ConstKind::Str], ConstKind::Str),
             Uop::Call { callee, .. } | Uop::Callt { callee, .. } => {
                 (callee, &[ConstKind::FuncRef], ConstKind::FuncRef)
             },
@@ -211,14 +240,19 @@ impl ModuleSlots {
     }
 }
 
-/// The module registry: every loaded module's two slots. The VM owns one and
-/// resolves every call through the current slot, so a swap changes the
-/// destination of subsequent calls immediately; frames already running a
-/// retiring version keep their code and pool until they return (their frames
-/// hold an `Arc` to the version they entered) [H6 item 5].
+/// The module registry: every loaded module's two slots, plus the native
+/// modules. The VM owns one and resolves every call through the current
+/// slot, so a swap changes the destination of subsequent calls immediately;
+/// frames already running a retiring version keep their code and pool until
+/// they return (their frames hold an `Arc` to the version they entered)
+/// [H6 item 5]. Native modules ([`NativeFunction`] tables, the builtin
+/// mechanism) live in the same name space: a pool FuncRef resolves through
+/// the uop tables first, the native tables second, so `CALL` has one
+/// resolution path for both callee kinds.
 #[derive(Debug, Default)]
 pub struct ModuleRegistry {
     modules: BTreeMap<String, ModuleSlots>,
+    natives: BTreeMap<String, Arc<Vec<NativeFunction>>>,
 }
 
 impl ModuleRegistry {
@@ -277,6 +311,24 @@ impl ModuleRegistry {
     pub fn slots(&self, module: &str) -> Option<&ModuleSlots> {
         self.modules.get(module)
     }
+
+    /// Installs a native module: a name plus its function table, whose
+    /// indices pool FuncRefs address. A second install under the same name
+    /// replaces the table (the same replacement discipline as a uop
+    /// version's swap, without the retiring slot — native code holds no
+    /// live frames).
+    pub fn install_native(&mut self, name: &str, functions: Vec<NativeFunction>) {
+        self.natives.insert(name.to_owned(), Arc::new(functions));
+    }
+
+    /// Resolves a pool FuncRef against the native modules: the function
+    /// at `func`'s index, if the module is installed and the index is in
+    /// range.
+    #[must_use]
+    pub fn resolve_native(&self, module: &str, func: u32) -> Option<&NativeFunction> {
+        let fns = self.natives.get(module)?;
+        (usize::try_from(func).is_ok_and(|i| i < fns.len())).then(|| &fns[func as usize])
+    }
 }
 
 #[cfg(test)]
@@ -318,16 +370,16 @@ mod tests {
 
     #[test]
     fn non_canonical_body_words_are_rejected_at_load() {
-        // reserved major 0xD: decode fails, so the loader refuses the stream
+        // reserved major 0xE: decode fails, so the loader refuses the stream
         let mut def = empty_def("bad");
-        def.code = vec![0xd0_00_00_00];
+        def.code = vec![0xe0_00_00_00];
         assert_eq!(
             ModuleVersion::new("m", vec![def]).unwrap_err(),
             ModuleBuildError::BodyDecode {
                 func: "bad".into(),
                 pc: 0,
                 cause: DecodeError::UnknownOpcode {
-                    major: 0xd,
+                    major: 0xe,
                     minor: 0
                 },
             }

@@ -1,0 +1,95 @@
+// source: conformance/types_hybrid.ds (13.1), trimmed to the M3 runtime contract
+// purpose: config-parser flow (probe union standing in for the map/string ambient,
+//          or-return, ?, .err, structural ==, interpolation, tail recursion) lowered
+//          by ds-lower and executed on the tier-1 VM
+// items:
+// io_err: stage: run
+// missing: stage: run
+// bad_port: stage: run
+// cfg_err: stage: run
+// probe: stage: run
+// config: stage: run
+// find_num: stage: run
+// get_port: stage: run
+// load: stage: run
+// default_config: stage: run
+// main: stage: run
+// probe_same: stage: run
+// report: stage: run
+// count: stage: run
+
+// primitive atoms, ambient per conformance/README.md (no predeclared universe)
+tag int
+tag float
+tag string
+tag bool
+
+// the types_hybrid error surface
+tag io_err
+tag missing
+struct bad_port { got: int }
+type cfg_err = io_err | missing | bad_port
+
+// the probe union: the fixture's stand-in for the `j.fields.get("port")`
+// ambient, hand-modeled by the golden ds-vm fixtures
+tag p_none
+struct p_num { value: int }
+struct p_str { text: string }
+type probe = p_none | p_num | p_str
+
+struct config { host: string, port: int, retries: int }
+
+// builtin natives, addressed by ds-lower as pool FuncRefs into the
+// reserved `builtin` module
+extern fn println (s: string) -> ()
+extern fn print (s: string) -> ()
+extern fn str_int (v: int) -> string
+extern fn str_float (v: float) -> string
+extern fn str_bool (v: bool) -> string
+
+const find_num = (p: probe) -> int | none {
+  if p is p_num { p.value } else { none }
+}
+
+const get_port = (p: probe) -> int | missing | bad_port {
+  const pv = find_num(p) or return missing
+  if pv >= 1 && pv <= 65535 { pv } else { bad_port { got: -1 } }
+}
+
+const load = (p: probe) -> config | cfg_err {
+  const port = get_port(p)?
+  const a = "local"
+  const b = "host"
+  config { host: "${a}${b}", port, retries: 3 }
+}
+
+const default_config = () -> config {
+  config { host: "localhost", port: 8080, retries: 3 }
+}
+
+const main = (p: probe) -> bool {
+  const cfg = load(p).err((e) => {
+    match e {
+      bad_port { got } => println("bad port ${str_int(got)}"),
+      _ => println("config read failed"),
+    }
+    default_config()
+  })
+  const same = cfg == default_config()
+  println("same ${str_bool(same)}")
+  same
+}
+
+const probe_same = (a: probe, b: probe) -> bool {
+  a == b
+}
+
+const report = (x: float) -> float {
+  print("value: ")
+  println("${str_float(x)}")
+  x
+}
+
+const count = (n: int, acc: int) -> int {
+  if n == 0 { acc } else { count(n - 1, acc + 1) }
+}

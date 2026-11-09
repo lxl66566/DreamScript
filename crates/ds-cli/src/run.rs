@@ -1,18 +1,27 @@
-//! The `ds run` subcommand: mmap-read a dsmod module file with full
-//! validation, install it into a fresh VM, and execute one entry function.
+//! The `ds run` subcommand: execute one module — a validated mmap-read
+//! dsmod file, or a .ds source compiled in-process through the source
+//! pipeline (parse, check, lower, install) — resolving one entry
+//! function and reporting its result.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Context, Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
 use ds_mod::{LoadError as ModLoadError, Module, ReadError, read_mmap};
-use ds_vm::{LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap, Value, Vm};
+use ds_vm::{
+    LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap, Value, Vm,
+    abi::SlotType,
+    native::{BUILTIN_IO_ERR, BUILTIN_NET_ERR},
+};
 
-/// The `ds run` surface: one module file, one entry name, i64 arguments.
+use crate::source;
+
+/// The `ds run` surface: one module or source file, one entry name, i64
+/// arguments.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Path to the .dsmod module file
+    /// Path to the .dsmod module file or the .ds source file
     file: PathBuf,
     /// Entry function to execute
     #[arg(long, default_value = "main")]
@@ -20,40 +29,191 @@ pub struct RunArgs {
     /// i64 arguments staged into the entry's parameter slots
     #[arg(long, num_args = 0.., value_name = "I64")]
     args: Vec<i64>,
+    /// Compile without the stdlib ambient package member (source files only)
+    #[arg(long)]
+    no_ambient: bool,
 }
 
-/// Runs one module: validated mmap read, install, entry execution.
+/// Runs one module: the dsmod path mmaps and installs; the source path
+/// compiles in-process first. Both then resolve one entry and run it.
 pub fn run(args: &RunArgs) -> Result<()> {
+    let mut prepared = match source_or_module(&args.file)? {
+        FileKind::Dsmod => read_dsmod(args)?,
+        FileKind::Source => compile_source(args)?,
+    };
+    resolve_and_run(&mut prepared, &args.entry)
+}
+
+/// The extension as UTF-8, when it is.
+fn ds_std_ext(ext: &std::ffi::OsStr) -> Option<&str> {
+    ext.to_str()
+}
+
+/// The file kinds `ds run` executes.
+enum FileKind {
+    /// A compiled dsmod module.
+    Dsmod,
+    /// A .ds source file, compiled in-process.
+    Source,
+}
+
+/// The file's kind, by extension.
+fn source_or_module(path: &Path) -> Result<FileKind> {
+    match path.extension().and_then(ds_std_ext).unwrap_or("") {
+        "dsmod" => Ok(FileKind::Dsmod),
+        "ds" => Ok(FileKind::Source),
+        other => Err(anyhow!(
+            "`{}` has extension `{other}`; ds run executes .ds sources and .dsmod modules",
+            path.display()
+        )),
+    }
+}
+
+/// One run prepared for execution: the VM holding the installed module,
+/// the staged entry arguments, and the module's name and function names.
+struct PreparedRun {
+    vm: Vm,
+    staged: Vec<Value>,
+    name: String,
+    functions: Vec<String>,
+}
+
+/// The existing dsmod path: validated mmap read and install.
+fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let module = read_mmap(&args.file).map_err(|error| open_error(&args.file, &error))?;
     let name = module.module().name().to_owned();
     let mut vm = Vm::new(ModuleRegistry::new());
     vm.install_dsmod(module.module())
         .map_err(|error| install_error(module.module(), &error))?;
-    if vm.registry().resolve(&name, &args.entry).is_none() {
-        let names: Vec<&str> = module
+    Ok(PreparedRun {
+        staged: args.args.iter().map(|&value| Value::I64(value)).collect(),
+        functions: module
             .module()
             .functions()
             .iter()
-            .map(ds_mod::Function::name)
-            .collect();
+            .map(|function| function.name().to_owned())
+            .collect(),
+        name,
+        vm,
+    })
+}
+
+/// The source path: compile, install, and stage the entry's arguments per
+/// the entry parameters' checked types.
+fn compile_source(args: &RunArgs) -> Result<PreparedRun> {
+    let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
+    let mut vm = Vm::new(ModuleRegistry::new());
+    vm.install_dsmod(compiled.lowered.module())
+        .map_err(|error| install_error(compiled.lowered.module(), &error))?;
+    Ok(PreparedRun {
+        staged: stage_source_args(&compiled, &args.args)?,
+        functions: compiled.lowered.functions().to_vec(),
+        name: compiled.name,
+        vm,
+    })
+}
+
+/// Resolves the entry, runs it, and reports the result: a platform
+/// failure tag is a failed run (the lowered unhandled-failure handler
+/// already printed the message), everything else prints like the dsmod
+/// path always did.
+fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
+    if prepared
+        .vm
+        .registry()
+        .resolve(&prepared.name, entry)
+        .is_none()
+    {
         return Err(anyhow!(
-            "module `{name}` has no function `{}` (available: {})",
-            args.entry,
-            names.join(", ")
+            "module `{}` has no function `{entry}` (available: {})",
+            prepared.name,
+            prepared.functions.join(", ")
         ));
     }
-    let staged = args
-        .args
-        .iter()
-        .map(|&value| Value::I64(value))
-        .collect::<Vec<_>>();
-    match vm.run(&name, &args.entry, &staged) {
-        Ok(value) => {
-            print_value(&value);
-            Ok(())
+    match prepared.vm.run(&prepared.name, entry, &prepared.staged) {
+        Ok(value) => match value {
+            Value::Tag(tag) if tag == BUILTIN_IO_ERR => Err(anyhow!(
+                "the run halted on an unhandled io failure (the message is on stdout)"
+            )),
+            Value::Tag(tag) if tag == BUILTIN_NET_ERR => Err(anyhow!(
+                "the run halted on an unhandled net failure (the message is on stdout)"
+            )),
+            value => {
+                print_value(&value);
+                Ok(())
+            },
         },
-        Err(trap) => Err(trap_error(&vm, &trap)),
+        Err(trap) => Err(trap_error(&prepared.vm, &trap)),
     }
+}
+
+/// Stages `--args` onto the entry's parameter words per the parameters'
+/// checked types (the source pipeline's plan): the scalar atoms stage
+/// their word, an `int | none` parameter stages its two-word union span —
+/// a staged value presenting the int member, an absent value presenting
+/// none. Without a plan (the entry is not a source function) every value
+/// stages as its own i64 word, the dsmod rule.
+// the i64->f64 staging of --args is a lossy host conversion by design
+#[allow(clippy::cast_precision_loss)]
+fn stage_source_args(compiled: &source::CompiledSource, raw: &[i64]) -> Result<Vec<Value>> {
+    let Some(plans) = &compiled.entry_args else {
+        return Ok(raw.iter().map(|&value| Value::I64(value)).collect());
+    };
+    if raw.len() > plans.len() {
+        return Err(anyhow!(
+            "--args stages {} value(s) but entry `{}` takes {} parameter(s)",
+            raw.len(),
+            compiled.name,
+            plans.len()
+        ));
+    }
+    let mut staged = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        let value = raw.get(index).copied();
+        match plan {
+            source::ArgPlan::Word(slot) => {
+                let Some(value) = value else {
+                    return Err(anyhow!(
+                        "entry `{}` parameter {} expects an --args value",
+                        compiled.name,
+                        index + 1
+                    ));
+                };
+                staged.push(match *slot {
+                    SlotType::I64 => Value::I64(value),
+                    SlotType::F64 => Value::F64(value as f64),
+                    SlotType::Bool => Value::Bool(value != 0),
+                    other => return Err(anyhow!("--args stages no {other:?} word")),
+                });
+            },
+            source::ArgPlan::OptionalInt => {
+                let member = |name: &str| {
+                    compiled.lowered.tag(name).with_context(|| {
+                        format!(
+                            "the `{name}` member has no module tag id; construct an \\
+                                 int|none somewhere so lowering assigns one"
+                        )
+                    })
+                };
+                if let Some(value) = value {
+                    staged.push(Value::Tag(member("int")?));
+                    staged.push(Value::I64(value));
+                } else {
+                    staged.push(Value::Tag(member("none")?));
+                    staged.push(Value::I64(0));
+                }
+            },
+            source::ArgPlan::Foreign => {
+                return Err(anyhow!(
+                    "--args cannot stage entry `{}`'s parameter {} (int, float, bool, and \\
+                     int|none parameters stage)",
+                    compiled.name,
+                    index + 1
+                ));
+            },
+        }
+    }
+    Ok(staged)
 }
 
 /// Missing files get one line; format failures get the structured ds-diag
@@ -138,17 +298,27 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
         } => {
             format!("pool entry {kidx} in `{func}` is {found:?}, the uop requires {expected:?}")
         },
+        ModuleBuildError::RetSpanLayout {
+            func,
+            src,
+            span,
+            slots,
+        } => {
+            format!("RETSPAN at slot {src} spans {span} words, past `{func}`'s {slots} slots")
+        },
     }
 }
 
-/// Prints the run result to stdout. The VM has no unit value yet; when one
-/// exists it will print nothing.
+/// Prints the run result to stdout. Unit-result entries halt on the inert
+/// unit word (`I64(0)`), so nothing distinguishes them; a heap reference
+/// prints as its object-table index (the object kind is a VM concern).
 fn print_value(value: &Value) {
     match value {
         Value::I64(v) => println!("{v}"),
         Value::F64(v) => println!("{v:?}"),
         Value::Bool(v) => println!("{v}"),
         Value::Tag(v) => println!("{v}"),
+        Value::Ref(v) => println!("<object {v}>"),
     }
 }
 
@@ -220,6 +390,13 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::BadEncoding { pc, cause } => {
             format!("word at pc {pc} does not decode ({cause:?})")
         },
+        Trap::UnknownObject { obj } => {
+            format!("reference {obj} names no heap object")
+        },
+        Trap::RetSpanTooWide { span, caller_area } => format!(
+            "span return of {span} words exceeds the caller's {caller_area}-slot argument area"
+        ),
+        Trap::OutputWrite { kind } => format!("output write failed: {kind:?}"),
         Trap::MetaWordCorrupt { fp } => {
             format!("frame metadata word corrupt at stack index {fp}")
         },

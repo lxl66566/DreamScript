@@ -1,0 +1,8 @@
+error[DS1008]: unclosed `(`
+ --> tests/fixtures/negative/ds1008_unclosed_delimiter.ds:3:14
+  |
+3 | const pair = (1
+  |              ^ `(` opens here
+  |
+4 |
+  | - input ended here

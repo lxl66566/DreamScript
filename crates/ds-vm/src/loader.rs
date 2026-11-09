@@ -14,8 +14,10 @@
 //!   references require dependencies to be installed first) — and stores it as the pool
 //!   [`Const::FuncRef`] the uop contract expects. Calls re-resolve through the target's current
 //!   slot at issue time, which is what the two-slot retirement semantics require [H6 item 5].
-//! - Strings. A `Str` entry is a genuine string constant; this VM has no string value kind yet, so
-//!   the entry rides the pool inert and any uop loading it fails the pool-kind check at load.
+//! - Strings. A `Str` entry is a genuine string constant; KSTR loads it as an interned heap string
+//!   reference (the pool-kind check admits it for KSTR only).
+//! - Natives. A payload FuncRef may name the VM's builtin native module (every VM installs it, so
+//!   builtins resolve like any installed dependency).
 //! - Entry descriptors. The blocks payload stores a two-word zero placeholder per function; the
 //!   in-memory `ds_mod::Function` record does not carry it, and the fill happens here: install
 //!   writes word 0 (the tier-1 prologue pointer, the function's table index by the M3 convention)
@@ -64,10 +66,11 @@ fn resolve_funcref(
         }
         return Err(());
     }
-    match registry.resolve_indexed(module, index) {
-        Some(_) => Ok((module.to_owned(), index)),
-        None => Err(()),
-    }
+    // the registry's native tables answer too: the builtin module is
+    // installed in every VM, so builtins resolve like any dependency
+    let resolved = registry.resolve_native(module, index).is_some()
+        || registry.resolve_indexed(module, index).is_some();
+    if resolved { Ok((module.to_owned(), index)) } else { Err(()) }
 }
 
 /// Maps one dsmod function record to a [`FunctionDef`]: its pool constants

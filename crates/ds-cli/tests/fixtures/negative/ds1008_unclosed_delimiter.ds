@@ -1,0 +1,3 @@
+// A delimiter left open until end of input: the two-span parse shape.
+
+const pair = (1

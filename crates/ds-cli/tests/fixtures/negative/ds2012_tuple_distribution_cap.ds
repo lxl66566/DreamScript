@@ -1,0 +1,12 @@
+// The tuple distribution cap [B3]: both surface routes into the tuple
+// solver render DS2012, not silent inference fallbacks.
+
+tag a
+tag b
+tag c
+tag d
+tag int
+type u = a | b | c | d
+const v: u = a
+const big = (v, v, v, v, v, v, v)
+const f = (t: (u, u, u, u, u, u, u)) -> int { 1 }

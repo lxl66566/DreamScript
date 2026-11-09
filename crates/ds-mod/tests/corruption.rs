@@ -235,7 +235,7 @@ fn bad_code_word_rejected() {
         .windows(4)
         .position(|w| w == needle)
         .expect("code word present");
-    bytes[pos] = 0xd0; // reserved major: no uop decodes
+    bytes[pos] = 0xe0; // reserved major: no uop decodes
     let error = read(&bytes).expect_err("bad code word");
     assert!(matches!(error, ReadError::Malformed {
         reason: "code word does not decode to a uop",

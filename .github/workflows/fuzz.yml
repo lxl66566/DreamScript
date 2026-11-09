@@ -6,8 +6,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Raised iteration count for the scheduled run; unused until ds-mod's
-  # fuzz mirror reads the knob, so the job stays green either way.
+  # Raised iteration count for the scheduled run; both fuzz-mirror tests
+  # read the knob, their local defaults keep ordinary runs cheap.
   FUZZ_RUNS: "50000"
 
 jobs:
@@ -23,3 +23,14 @@ jobs:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
       - run: cargo nextest run -p ds-mod --test fuzz_read
+
+  ds-check-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo nextest run -p ds-check --test fuzz_check

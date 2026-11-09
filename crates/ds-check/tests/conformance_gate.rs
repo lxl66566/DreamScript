@@ -360,7 +360,7 @@ fn linearity_negative_rejects_render_recorded_shapes() {
     };
     assert_eq!(
         rejects.len(),
-        4,
+        6,
         "every reject item carries exactly its affine diagnostic"
     );
     for (id, _, diag) in &rejects {
@@ -400,6 +400,26 @@ fn linearity_negative_rejects_render_recorded_shapes() {
         diag.message,
         "deinit is restricted to `~Copyable` types [C5]"
     );
+
+    let (id, what, diag) = by_id("param-moved-then-used");
+    assert!(what.contains("DS3001"), "{id}: {what}");
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
+    assert_eq!(
+        diag.labels.len(),
+        2,
+        "the consumed parameter's pair is two spans"
+    );
+    assert_eq!(diag.labels[0].label, "moved here");
+    assert_eq!(diag.labels[1].label, "used again here after move");
+
+    let (id, what, diag) = by_id("projection-moved-then-used");
+    assert!(what.contains("DS3001"), "{id}: {what}");
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `s` is no longer usable");
+    assert_eq!(diag.labels.len(), 2, "the transfer's pair is two spans");
+    assert_eq!(diag.labels[0].label, "moved here");
+    assert_eq!(diag.labels[1].label, "used again here after move");
 }
 
 /// No affine diagnostic may land outside `reject` items (whose text names

@@ -1,0 +1,241 @@
+//! End-to-end: the trimmed types_hybrid fixture source parses, checks
+//! clean, lowers to a ds-mod module, round-trips through the writer and
+//! reader, installs into the VM's registry, and runs with the exact
+//! golden stdout of the hand-assembled fixtures in
+//! `crates/ds-vm/tests/types_hybrid.rs`.
+
+use ds_abi::SlotType::{self, I64, Raw, Tag};
+use ds_check::analyze;
+use ds_diag::Files;
+use ds_lower::{Lowered, lower};
+use ds_mod::{Hash128, read_checked, write};
+use ds_parse::parse;
+use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+
+/// Builds the module once per test VM: parse -> check -> lower -> write
+/// -> read back -> install.
+fn build_vm() -> (Vm, Lowered) {
+    let source = include_str!("fixtures/types_hybrid_probe.ds");
+    let mut files = Files::new();
+    let id = files.add_source("types_hybrid_probe.ds", source);
+    let asts = [parse(&files, id).expect("the fixture parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the fixture checks clean"
+    );
+    let lowered = lower(
+        "types_hybrid",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the fixture lowers");
+    let bytes = write(lowered.module());
+    let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    // the loader validates pool FuncRefs at install time, so the builtin
+    // native table must be present first (`Vm::new` would install it too
+    // late for the ds-mod path)
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    (Vm::new(registry), lowered)
+}
+
+/// A staged `p_num` probe: [Tag, I64, dead Ref].
+fn probe_num(vm: &mut Vm, lowered: &Lowered, value: i64) -> Vec<Value> {
+    vec![
+        Value::Tag(lowered.tag("p_num").expect("p_num has a tag")),
+        Value::I64(value),
+        vm.intern_str("probe"),
+    ]
+}
+
+fn probe_str(vm: &mut Vm, lowered: &Lowered, text: &str) -> Vec<Value> {
+    vec![
+        Value::Tag(lowered.tag("p_str").expect("p_str has a tag")),
+        Value::I64(0),
+        vm.intern_str(text),
+    ]
+}
+
+fn probe_none(vm: &mut Vm, lowered: &Lowered) -> Vec<Value> {
+    vec![
+        Value::Tag(lowered.tag("p_none").expect("p_none has a tag")),
+        Value::I64(0),
+        vm.intern_str("probe"),
+    ]
+}
+
+/// Runs `main` over one probe and asserts the golden stdout plus the
+/// `same` result word.
+fn run_main(probe: fn(&mut Vm, &Lowered) -> Vec<Value>, stdout: &str, same: bool) {
+    let (mut vm, lowered) = build_vm();
+    vm.capture_output();
+    let args = probe(&mut vm, &lowered);
+    assert_eq!(
+        vm.run("types_hybrid", "main", &args),
+        Ok(Value::Bool(same)),
+        "the run result is the `same` comparison"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        stdout.as_bytes(),
+        "the golden stdout of the types_hybrid flow"
+    );
+}
+
+#[test]
+fn ok_path_runs_the_config_to_the_same_true_golden() {
+    // a valid port: no handler line, the concatenated host equals the
+    // interned one by content (EQSTR across distinct objects)
+    run_main(|vm, l| probe_num(vm, l, 8080), "same true\n", true);
+}
+
+#[test]
+fn bad_port_prints_the_interpolated_handler_message() {
+    // port 0 and 70000 both fail the range check: `bad_port { got: -1 }`
+    // propagates, the handler prints the interpolation chain
+    run_main(
+        |vm, l| probe_num(vm, l, 0),
+        "bad port -1\nsame true\n",
+        true,
+    );
+    run_main(
+        |vm, l| probe_num(vm, l, 70000),
+        "bad port -1\nsame true\n",
+        true,
+    );
+}
+
+#[test]
+fn missing_and_none_print_the_fallback_handler_line() {
+    // `p_none` and `p_str` both miss `p_num`: find_num answers none, the
+    // `or return missing` fires, the fallback arm prints
+    run_main(probe_none, "config read failed\nsame true\n", true);
+    run_main(
+        |vm, l| probe_str(vm, l, "oops"),
+        "config read failed\nsame true\n",
+        true,
+    );
+}
+
+#[test]
+fn structural_eq_fails_on_a_differing_payload() {
+    // port 9999 passes the range check but differs from the default
+    run_main(|vm, l| probe_num(vm, l, 9999), "same false\n", false);
+}
+
+#[test]
+fn structural_eq_across_unions_covers_members_and_payloads() {
+    let case = |a: fn(&mut Vm, &Lowered) -> Vec<Value>,
+                b: fn(&mut Vm, &Lowered) -> Vec<Value>|
+     -> Result<Value, ds_vm::Trap> {
+        let (mut vm, lowered) = build_vm();
+        let mut args = a(&mut vm, &lowered);
+        args.extend(b(&mut vm, &lowered));
+        vm.run("types_hybrid", "probe_same", &args)
+    };
+    // same member, same payload
+    assert_eq!(
+        case(|v, l| probe_num(v, l, 8080), |v, l| probe_num(v, l, 8080)),
+        Ok(Value::Bool(true))
+    );
+    // differing i64 payload
+    assert_eq!(
+        case(|v, l| probe_num(v, l, 8080), |v, l| probe_num(v, l, 80)),
+        Ok(Value::Bool(false))
+    );
+    // member mismatch: p_num against p_str
+    assert_eq!(
+        case(|v, l| probe_num(v, l, 8080), |v, l| probe_str(v, l, "8080")),
+        Ok(Value::Bool(false))
+    );
+    // string payloads compare by content
+    assert_eq!(
+        case(|v, l| probe_str(v, l, "ab"), |v, l| probe_str(v, l, "ab")),
+        Ok(Value::Bool(true))
+    );
+    assert_eq!(
+        case(|v, l| probe_str(v, l, "ab"), |v, l| probe_str(v, l, "cd")),
+        Ok(Value::Bool(false))
+    );
+    // unit members
+    assert_eq!(case(probe_none, probe_none), Ok(Value::Bool(true)));
+}
+
+#[test]
+fn interpolation_chain_uses_print_and_the_float_conversion() {
+    let (mut vm, _) = build_vm();
+    vm.capture_output();
+    assert_eq!(
+        vm.run("types_hybrid", "report", &[Value::F64(2.5)]),
+        Ok(Value::F64(2.5))
+    );
+    assert_eq!(vm.captured_output(), b"value: 2.5\n");
+}
+
+#[test]
+fn tail_recursion_runs_a_million_deep_at_constant_stack() {
+    // a non-tail call at this depth would need ~9M stack words against
+    // the VM's 1MiB-word limit, so completing at all proves the CALLT
+    // slide kept the stack constant [H2]
+    let (mut vm, _) = build_vm();
+    assert_eq!(
+        vm.run("types_hybrid", "count", &[
+            Value::I64(1_000_000),
+            Value::I64(0)
+        ]),
+        Ok(Value::I64(1_000_000))
+    );
+    assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");
+}
+
+/// The layout of one lowered function, read back from the module bytes.
+fn fn_layout<'m>(
+    module: &'m ds_mod::Module,
+    lowered: &Lowered,
+    name: &str,
+) -> &'m ds_abi::FrameLayout {
+    module.functions()[lowered.function_index(name).expect("planned") as usize].layout()
+}
+
+#[test]
+fn frame_layouts_follow_the_locked_slot_rules() {
+    // the trimmed probe union has three members; per BL-6 the parameter
+    // frames start at the incoming overlay words with true per-word
+    // types: [Tag, I64(got|value|port), Ref(host|text)]
+    let (_, lowered) = build_vm();
+    let bytes = write(lowered.module());
+    let source = include_str!("fixtures/types_hybrid_probe.ds");
+    let module = read_checked(&bytes, source.as_bytes())
+        .map_err(|e| format!("{e:?}"))
+        .expect("reads");
+    assert_eq!(
+        &fn_layout(&module, &lowered, "find_num").params()[..3],
+        [Tag, I64, SlotType::Ref],
+        "the union parameter claims the incoming overlay words with true types"
+    );
+    assert_eq!(fn_layout(&module, &lowered, "find_num").arg_area_len(), 0);
+    // count tail-calls with two I64 overlay words: max of staged and result
+    assert_eq!(fn_layout(&module, &lowered, "count").arg_area_len(), 2);
+    assert_eq!(
+        &fn_layout(&module, &lowered, "count").slots()[..2],
+        &[I64, I64],
+        "agreed shapes stay typed"
+    );
+    // load stages a probe (Tag, I64, Ref) for get_port whose result
+    // spans two words: the own result span (width 4) counts against the
+    // callers' overlays, not against its own
+    assert_eq!(fn_layout(&module, &lowered, "load").arg_area_len(), 3);
+    assert_eq!(fn_layout(&module, &lowered, "main").arg_area_len(), 4);
+    // main mixes Tag, Bool, I64 and Ref staging in its first overlay
+    // word: the per-word rule widens it to Raw [H1]
+    assert_eq!(
+        &fn_layout(&module, &lowered, "main").slots()[35..39],
+        // word 0 mixes Tag/Ref staging, word 2 mixes Ref/I64 results:
+        // both widen to Raw, the agreeing words stay typed
+        [Raw, I64, Raw, I64],
+        "main's four overlay words"
+    );
+}

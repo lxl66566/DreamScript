@@ -13,8 +13,8 @@ pub enum ConstKind {
     Bool,
     /// A callee reference loaded by CALL/CALLT.
     FuncRef,
-    /// A string constant: inert in this VM until strings become values, so
-    /// no uop accepts loading it.
+    /// A string constant loaded by KSTR: the VM materializes it as an
+    /// interned heap string reference.
     Str,
 }
 
@@ -42,7 +42,8 @@ pub enum Const {
         /// The callee's function-table index.
         func: u32,
     },
-    /// A string constant riding the pool; no uop loads it yet.
+    /// A string constant riding the pool; KSTR loads it as an interned
+    /// heap string reference.
     Str(String),
 }
 

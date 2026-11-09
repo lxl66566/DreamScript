@@ -1,0 +1,12 @@
+// Two traits, both satisfied: the dot-call is truly ambiguous [F3].
+
+tag int
+trait show {
+  const text = (self: self) -> int
+}
+trait render {
+  const text = (self: self) -> int
+}
+impl show for int { }
+impl render for int { }
+const f = (x: int) -> int { x.text() }

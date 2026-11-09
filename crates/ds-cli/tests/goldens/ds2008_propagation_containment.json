@@ -1,0 +1,1 @@
+{"code":"DS2008","severity":"error","message":"`?` propagates `wire_err`, which the return union `()` does not contain [E4]","spans":[{"file":"tests/fixtures/negative/ds2008_propagation_containment.ds","start_line":7,"start_col":42,"end_line":7,"end_col":59,"label":"not contained","primary":true}],"notes":[],"suggestions":[]}
