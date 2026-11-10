@@ -9,7 +9,8 @@
 //! [`RcOp::decode`] over its counted heap blocks. The streams never
 //! renumber (the majors below 0xE are untouched).
 //!
-//! Semantics (C4, over `ds_rt::Heap` blocks):
+//! Semantics (C4, over the counted heap blocks of `ds-vm/src/object.rs`,
+//! the consumed implementation):
 //!
 //! - `Inc { src }` — `rc_inc`: the reference in `slots[src]` gains one owner. Placed at every
 //!   duplication edge (a copy into a second slot, a call staging the caller keeps alive).

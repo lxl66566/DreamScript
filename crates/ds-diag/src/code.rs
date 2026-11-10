@@ -147,6 +147,8 @@ error_codes! {
     LowercaseSelfType => "DS2015", Type,
     /// The receiver parameter carries an annotation; spell it `self` or `mut self`.
     AnnotatedReceiver => "DS2016", Type,
+    /// `in` right-hand side is not a range; collection membership is not ruled yet.
+    NonRangeIn => "DS2017", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -158,6 +160,8 @@ error_codes! {
     DeinitIllFormed => "DS3004", Linearity,
     /// Call-scoped borrow escaped its call.
     BorrowEscapes => "DS3005", Linearity,
+    /// A `mut` window parameter receives a `const` binding; spell the binder `var`.
+    MutWindowConstReceiver => "DS3006", Linearity,
 
     /// Stored source hash does not match the module's source.
     ModuleHashMismatch => "DS4001", Module,
@@ -221,11 +225,13 @@ mod tests {
             ("AmbiguousCall", "DS2014", ErrorClass::Type),
             ("LowercaseSelfType", "DS2015", ErrorClass::Type),
             ("AnnotatedReceiver", "DS2016", ErrorClass::Type),
+            ("NonRangeIn", "DS2017", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
             ("DeinitIllFormed", "DS3004", ErrorClass::Linearity),
             ("BorrowEscapes", "DS3005", ErrorClass::Linearity),
+            ("MutWindowConstReceiver", "DS3006", ErrorClass::Linearity),
             ("ModuleHashMismatch", "DS4001", ErrorClass::Module),
             ("ModuleBadMagic", "DS4002", ErrorClass::Module),
             ("ModuleVersionUnsupported", "DS4003", ErrorClass::Module),

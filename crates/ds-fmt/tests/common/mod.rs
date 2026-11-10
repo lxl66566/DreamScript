@@ -85,6 +85,7 @@ pub const POSITIVE: &[&str] = &[
     "fn f() {\nfor u in us { g(u) }\nfor i in 0..n { g(i) }\nfor i in 0..=n { g(i) }\n}\n",
     "fn f() {\nfor (u in us) println(\"u ${u.n}\")\n}\n",
     "fn f() { with_file(p, f) { body(f) }\n}\n",
+    "fn f() { g() { 42 }\n}\n",
     "fn with_file(p: string, body: fn(mut file) -> int) -> int { body }\n",
     // F3: UFCS and paths
     "fn f() { ord::compare(a, b)\n}\n",
@@ -646,6 +647,17 @@ fn norm_expr(e: &mut Expr) {
             z(span);
             norm_expr(recv);
             norm_expr(index);
+        },
+        Expr::MapApply {
+            span,
+            head,
+            key,
+            value,
+        } => {
+            z(span);
+            norm_ident(head);
+            norm_expr(key);
+            norm_expr(value);
         },
         Expr::Try { span, expr } | Expr::Unary { span, expr, .. } => {
             z(span);

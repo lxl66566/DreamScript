@@ -64,6 +64,6 @@ pub use layout::{FrameLayout, LayoutError, SlotType};
 pub use meta::{CodePc, ElisionRecord, FrameMetadata, FuncId, TailChain};
 pub use tailcall::{SlideDirection, SlideError, SlidePlan, slide_plan};
 pub use uop::{
-    BIAS_J, ConstIdx, DecodeError, EncodeError, Inst, InstDecodeError, Major, RC_MAJOR,
-    RcDecodeError, RcOp, SlotList, Uop,
+    BIAS_J, BuiltinInstance, ConstIdx, DecodeError, EncodeError, Inst, InstDecodeError, Major,
+    RC_MAJOR, RcDecodeError, RcOp, SlotList, Uop,
 };

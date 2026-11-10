@@ -4,16 +4,18 @@
 //!
 //! # Model
 //!
-//! Inputs are typed ([`InputKey`], today file contents; package config at
-//! M7) and stamped with a global [`Revision`] when they change. Queries are
+//! Inputs are typed ([`InputKey`], today file contents and the registered
+//! file set; package config at M7) and stamped with a global [`Revision`]
+//! when they change. Queries are
 //! keyed by the [`non_exhaustive`] [`QueryKey`] enum and
 //! memoized: each memo stores its value, the dependency edges recorded while
 //! computing (reading an input or another query creates an edge), and the
 //! revisions it was verified and last changed at.
 //!
-//! When an input changes, [`Db::set_file_content`] bumps the revision and
-//! walks the reverse dependency edges to mark every transitive dependent
-//! memo dirty. Dirty memos are re-examined lazily on the next read: a memo
+//! When an input changes — a file edit through [`Db::set_file_content`] or
+//! a registration through [`Db::add_file`] — the revision bumps and the
+//! reverse dependency edges mark every transitive dependent memo dirty.
+//! Dirty memos are re-examined lazily on the next read: a memo
 //! is deep-verified dependency by dependency and recomputed only if some
 //! dependency's change-revision moved past the memo's verify-revision. A
 //! recomputed value equal to the old one renews the memo — its

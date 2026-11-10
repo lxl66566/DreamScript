@@ -78,6 +78,115 @@ fn analyze_and_type_check_share_one_universe() {
     }
 }
 
+/// A generic-call fixture with its own declarations: the ambient's own
+/// `len` shape, called over both receiver kinds in both spellings.
+const GENERIC_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "extern fn len[t] (xs: t) -> int\n",
+    "fn over(s: string, xs: list[int]) -> () {\n",
+    "  len(s)\n",
+    "  len(xs)\n",
+    "  s.len()\n",
+    "  ()\n",
+    "}\n",
+);
+
+fn call_spans(ast: &Ast) -> Vec<ds_diag::Span> {
+    fn expr(e: &Expr, out: &mut Vec<ds_diag::Span>) {
+        if let Expr::Call {
+            span, callee, args, ..
+        } = e
+        {
+            out.push(*span);
+            expr(callee, out);
+            for arg in args {
+                expr(&arg.value, out);
+            }
+            return;
+        }
+        if let Expr::Field { recv, .. } = e {
+            expr(recv, out);
+        }
+    }
+    fn block(b: &ds_parse::BlockExpr, out: &mut Vec<ds_diag::Span>) {
+        for stmt in &b.stmts {
+            if let ds_parse::StmtKind::Expr(e) = &stmt.kind {
+                expr(e, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for item in ast.blocks.iter().flat_map(|b| b.items.iter()) {
+        if let ds_parse::ItemKind::Local(l) = &item.kind {
+            if let Expr::Lambda {
+                body: lambda_body, ..
+            } = &l.init
+            {
+                if let Expr::Block(b) = &**lambda_body {
+                    block(b, &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The checker records every generic call's full instantiation at the
+/// call's own span [H3], in the declaration's parameter order — the
+/// side table the lowering pass mints CALLG evidence words from. The
+/// UFCS spelling records through the same entry.
+#[test]
+fn generic_calls_record_the_solved_instantiation() {
+    let mut files = Files::new();
+    let id = files.add_source("generic.ds", GENERIC_SOURCE);
+    let ast = parse(&files, id).expect("parses");
+    let analyzed = analyze(&files, std::slice::from_ref(&ast));
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the generic fixture checks clean"
+    );
+    let universe = &analyzed.decls.universe;
+    let mut recorded: Vec<String> = Vec::new();
+    for span in call_spans(&ast) {
+        if let Some(types) = analyzed.checked.generic_calls.get(&span) {
+            let rendered: Vec<String> = types.iter().map(|ty| universe.render(*ty)).collect();
+            recorded.push(rendered.join(","));
+        }
+    }
+    // three generic calls, one instantiation word each: string,
+    // list[int], and the UFCS spelling's string again
+    assert_eq!(recorded, ["string", "list[int]", "string"]);
+}
+
+/// A call whose generic parameter cannot solve from any argument reports
+/// the inference failure and records no partially-solved entry — no
+/// silent `any` fallback rides the side table [B1].
+#[test]
+fn unsolved_generic_calls_record_nothing() {
+    let source = concat!(
+        "tag int\n",
+        "fn broken[t](flag: bool) -> t { flag }\n",
+        "fn call_it() -> () {\n",
+        "  broken(true)\n",
+        "  ()\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("unsolved.ds", source);
+    let ast = parse(&files, id).expect("parses");
+    let analyzed = analyze(&files, std::slice::from_ref(&ast));
+    assert!(
+        !analyzed.checked.diags.is_empty(),
+        "the unsolved call reports its inference failure"
+    );
+    assert!(
+        analyzed.checked.generic_calls.is_empty(),
+        "no instantiation is recorded for the unsolved call"
+    );
+}
+
 fn field_recv(ast: &Ast) -> Option<ds_diag::Span> {
     fn expr(e: &Expr, out: &mut Option<ds_diag::Span>) {
         if let Expr::Field { recv, name, .. } = e {

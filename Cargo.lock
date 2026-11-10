@@ -287,6 +287,7 @@ version = "0.1.0"
 dependencies = [
  "ds-diag",
  "ds-parse",
+ "ds-stdlib",
  "thiserror",
 ]
 
@@ -298,6 +299,7 @@ dependencies = [
  "clap",
  "ds-check",
  "ds-diag",
+ "ds-fmt",
  "ds-lower",
  "ds-mod",
  "ds-parse",

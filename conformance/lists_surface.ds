@@ -32,7 +32,8 @@ fn words_report() -> string {
 
 fn empty_pages() -> int {
   const pages = list[page]()
-  list_len(pages)
+  const n = list_len(pages)
+  n
 }
 
 fn fresh_ints() -> list[int] {

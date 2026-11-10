@@ -479,7 +479,7 @@ impl Package {
                 let id = self.declare(&t.name, DefKind::Trait, diags);
                 for member in &t.members {
                     if let TraitMember::Fn(f) = member {
-                        self.register_method(&f.name, MethodOwner::Trait(id));
+                        self.register_method(&f.name, MethodOwner::Trait(id), diags);
                     }
                 }
             },
@@ -488,7 +488,7 @@ impl Package {
                 // already provide the candidate names.
                 if imp.trait_ref.is_none() {
                     for f in &imp.fns {
-                        self.register_method(&f.name, MethodOwner::Inherent);
+                        self.register_method(&f.name, MethodOwner::Inherent, diags);
                     }
                 }
             },
@@ -499,31 +499,61 @@ impl Package {
     /// WITHIN that namespace reports both spans and keeps the first
     /// definition — the same name in the other namespace coexists.
     fn declare(&mut self, name: &Ident, kind: DefKind, diags: &mut Vec<Diagnostic>) -> DefId {
+        self.declare_name(&name.name, name.span, kind, diags)
+    }
+
+    fn declare_name(
+        &mut self,
+        name: &str,
+        span: Span,
+        kind: DefKind,
+        diags: &mut Vec<Diagnostic>,
+    ) -> DefId {
         let names =
             if kind.in_type_namespace() { &mut self.type_names } else { &mut self.value_names };
-        if let Some(&first) = names.get(&name.name) {
+        if let Some(&first) = names.get(name) {
             let first_span = self.defs[first.index() as usize].span;
             diags.push(
                 Diagnostic::error(
                     ErrorCode::DuplicateDefinition,
-                    format!("`{}` is already defined", name.name),
+                    format!("`{name}` is already defined"),
                 )
                 .with_secondary(first_span, "first defined here")
-                .with_primary(name.span, "redefined here"),
+                .with_primary(span, "redefined here"),
             );
             return first;
         }
         let id = DefId::from_raw(u32::try_from(self.defs.len()).expect("table index fits u32"));
         self.defs.push(Def {
-            name: name.name.clone(),
+            name: name.to_owned(),
             kind,
-            span: name.span,
+            span,
         });
-        names.insert(name.name.clone(), id);
+        names.insert(name.to_owned(), id);
         id
     }
 
-    fn register_method(&mut self, name: &Ident, owner: MethodOwner) {
+    /// Registers one method name; a same-name same-owner registration is a
+    /// duplicate (two inherent impls, or one trait declaring a member
+    /// twice) that reports both spans and keeps the first — the discipline
+    /// of [`Self::declare`]. Two traits may share a method name; call
+    /// sites disambiguate by receiver [F3].
+    fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) {
+        if let Some(&id) = self.method_index.get(&name.name).and_then(|ids| {
+            ids.iter()
+                .find(|&&id| self.methods[id.index() as usize].owner == owner)
+        }) {
+            let first_span = self.methods[id.index() as usize].span;
+            diags.push(
+                Diagnostic::error(
+                    ErrorCode::DuplicateDefinition,
+                    format!("method `{}` is already defined", name.name),
+                )
+                .with_secondary(first_span, "first defined here")
+                .with_primary(name.span, "redefined here"),
+            );
+            return;
+        }
         let id =
             MethodId::from_raw(u32::try_from(self.methods.len()).expect("table index fits u32"));
         self.method_index
@@ -537,30 +567,12 @@ impl Package {
         });
     }
 
-    /// Top-level binding patterns declare one def per bound name.
+    /// Top-level binding patterns declare one def per bound name, through
+    /// the shared binder walker so pun fields and case sub-patterns
+    /// declare like any other binder shape.
     fn collect_pattern_defs(&mut self, pat: &Pattern, kind: DefKind, diags: &mut Vec<Diagnostic>) {
-        match pat {
-            Pattern::Binding { name, .. } => {
-                self.declare(name, kind, diags);
-            },
-            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
-                for sub in pats {
-                    self.collect_pattern_defs(sub, kind, diags);
-                }
-            },
-            Pattern::Struct { fields, .. } => {
-                for (_, field) in fields {
-                    if let Some(sub) = field {
-                        self.collect_pattern_defs(sub, kind, diags);
-                    }
-                }
-            },
-            Pattern::Wildcard(_)
-            | Pattern::Literal { .. }
-            | Pattern::Str { .. }
-            | Pattern::RawStr { .. }
-            | Pattern::Path { .. }
-            | Pattern::Call { .. } => {},
+        for (span, name) in crate::pattern::pattern_binders(pat) {
+            self.declare_name(name, span, kind, diags);
         }
     }
 }
@@ -837,6 +849,9 @@ impl FileResolver<'_> {
                         self.call_name_use(&path.segments[0]);
                     },
                     Expr::Index { recv, index, .. } => self.ctor_apply_use(recv, index),
+                    Expr::MapApply {
+                        head, key, value, ..
+                    } => self.map_apply_use(head, key, value),
                     _ => self.expr(callee),
                 }
                 for arg in args {
@@ -854,6 +869,9 @@ impl FileResolver<'_> {
                 self.expr(recv);
                 self.expr(index);
             },
+            Expr::MapApply {
+                head, key, value, ..
+            } => self.map_apply_use(head, key, value),
             Expr::Try { expr, .. } | Expr::Unary { expr, .. } => self.expr(expr),
             Expr::Is { expr, ty, .. } => {
                 self.expr(expr);
@@ -1013,6 +1031,15 @@ impl FileResolver<'_> {
             self.expr(recv);
             self.expr(index);
         }
+    }
+
+    /// The map constructor's type application `map[k, v]` [F9, B3]: the
+    /// head is a type use and the two bracketed arguments are type uses,
+    /// the list application's own convention.
+    fn map_apply_use(&mut self, head: &Ident, key: &Expr, value: &Expr) {
+        self.type_name_use(head);
+        self.ctor_type_arg(key);
+        self.ctor_type_arg(value);
     }
 
     /// One bracketed constructor argument: a type spelled in expression

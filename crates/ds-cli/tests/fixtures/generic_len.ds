@@ -1,0 +1,10 @@
+// The generic `len[t]` through the `ds` binary in source mode: the same
+// ambient generic called over a string and a list receiver, free-call and
+// UFCS spellings, distinct outputs from the one dispatched body.
+
+fn main() -> () {
+  const words = ["alpha", "beta", "gamma"]
+  const name = "DreamScript"
+  println("string ${len(name)} ${name.len()}")
+  println("list ${len(words)} ${words.len()}")
+}

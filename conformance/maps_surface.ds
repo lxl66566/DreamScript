@@ -1,0 +1,44 @@
+// source: the record's construction story (B3, F7) and D2's COW collections — the map literal rides the anonymous-record-literal reservation, builder calls interim
+// purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, and the entry count
+// items:
+// build_report: stage: run
+// overwritten: stage: run
+// counted: stage: run
+// get_spelling: stage: typecheck
+// reject-ctor-args: stage: reject the empty-map constructor takes no value arguments (DS2001)
+
+fn build_report() -> string {
+  var m = map[string, string]()
+  map_set(m, "host", "localhost")
+  map_set(m, "port", "8080")
+  const host = map_get(m, "host")
+  const user = map_get(m, "user")
+  host.ok((s: string) => s).err((_: none) => "?") + ":" + user.ok((s: string) => s).err((_: none) => "?")
+}
+
+fn overwritten() -> string {
+  var m = map[string, string]()
+  map_set(m, "host", "localhost")
+  map_set(m, "host", "example")
+  const host = map_get(m, "host")
+  host.ok((s: string) => s).err((_: none) => "?")
+}
+
+fn counted() -> int {
+  var m = map[int, string]()
+  map_set(m, 1, "one")
+  map_set(m, 2, "two")
+  const n = map_len(m)
+  n
+}
+
+fn get_spelling() -> string {
+  var m = map[string, string]()
+  map_set(m, "host", "localhost")
+  const host = get(m, "host")
+  host.ok((s: string) => s).err((_: none) => "?")
+}
+
+fn reject_ctor_args() -> map[string, string] {
+  map[string, string]("seed")
+}

@@ -75,7 +75,9 @@
 //!   uleb               params_len
 //!   uleb               arg_area_len
 //!   uleb               slot count, then one compact type byte per slot:
-//!                      I32=0, I64=1, F64=2, Bool=3, Ref=4, Tag=5
+//!                      I32=0, I64=1, F64=2, Bool=3, Ref=4, Tag=5, Raw=6,
+//!                      Fn=7 (tags 6 and 7 are additive payload-v1
+//!                      extensions; no version bump)
 //!   uleb               constant count, then entries in the locked
 //!                      constants-pool encoding (the function's own pool;
 //!                      uop ConstIdx operands index it)

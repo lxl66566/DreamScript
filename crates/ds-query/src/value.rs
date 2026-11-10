@@ -20,10 +20,13 @@ use crate::key::BlockId;
 /// being poisoned by an error.
 ///
 /// [`Ast`] implements neither `PartialEq` nor `Eq`, so [`ParseOutput`]
-/// defines equality by source text: parsing is a pure function of the
-/// source, so equal sources yield identical values and renewal never misses
-/// a change. (By construction `ParseFile` only recomputes when the source
-/// changed, so its change-revision always advances on recompute anyway.)
+/// defines equality by source text. That is sound only because the parse
+/// compute (`queries::parse`) is a pure function of exactly one input —
+/// the file's `FileContent`, nothing else in [`Ctx`](crate::Ctx) — so
+/// equal sources yield identical trees and diagnostics and renewal never
+/// misses a change. The two facts are one contract split across two files:
+/// if the parse compute ever reads more than the source, this equality
+/// must widen with it.
 #[derive(Clone, Debug)]
 pub struct ParseOutput {
     /// The parsed tree, or `None` when the source had syntax errors.
@@ -35,6 +38,8 @@ pub struct ParseOutput {
 }
 
 impl PartialEq for ParseOutput {
+    // Source equality stands in for whole-value equality; see the type docs
+    // for the purity contract this leans on.
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source
     }
@@ -72,8 +77,9 @@ pub struct BlockIndexOutput {
 /// use even when its first use was passed a value from elsewhere.
 #[derive(Clone, Debug)]
 pub struct LinearityOutput {
-    /// Linearity diagnostics addressing this definition.
-    pub diags: Box<[Diagnostic]>,
+    /// Linearity diagnostics addressing this definition. Shared like the
+    /// parse payload: memo hits clone the arc, not the diagnostics.
+    pub diags: Arc<[Diagnostic]>,
     /// Consuming uses of owned non-copyable bindings in this definition.
     pub moves: Box<[Move]>,
     /// Scope-exit deaths in this definition where deinit must run.
@@ -120,8 +126,9 @@ pub struct ResolveOutput {
     /// (parseable ones only; a file whose parse failed contributes no
     /// declarations and no uses).
     pub resolutions: Arc<[Resolutions]>,
-    /// Duplicate-definition and unknown-name diagnostics.
-    pub diags: Box<[Diagnostic]>,
+    /// Duplicate-definition and unknown-name diagnostics. Shared like the
+    /// parse payload: memo hits clone the arc, not the diagnostics.
+    pub diags: Arc<[Diagnostic]>,
 }
 
 /// Result of the [`TypeOf`](crate::QueryKey::TypeOf) query: one
@@ -138,7 +145,9 @@ pub struct TypeOfOutput {
     /// holds: (definition name, type name).
     pub types: Box<[(String, String)]>,
     /// Declaration and body diagnostics addressing this definition.
-    pub diags: Box<[Diagnostic]>,
+    /// Shared like the parse payload: memo hits clone the arc, not the
+    /// diagnostics.
+    pub diags: Arc<[Diagnostic]>,
 }
 
 /// Computed value of one query, stored in the memo table.

@@ -17,3 +17,10 @@ workspace = true
 thiserror.workspace = true
 ds-diag = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
+
+[dev-dependencies]
+ds-stdlib.workspace = true
+
+[[bench]]
+name    = "check_perf"
+harness = false

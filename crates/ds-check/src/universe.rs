@@ -399,13 +399,16 @@ impl Universe {
         self.intern(rest)
     }
 
-    /// Complement over the universe's current atoms: `~t`.
+    /// Complement over the universe's current atoms: `~t`. Member slices
+    /// are sorted (see [`Universe::intern`]), so membership tests binary
+    /// search instead of scanning.
     pub fn complement(&mut self, t: Ty) -> Ty {
-        let members: Vec<TypeId> = (0..narrow(self.atoms.len()))
+        let members = self.members(t);
+        let rest: Vec<TypeId> = (0..narrow(self.atoms.len()))
             .map(TypeId::from_raw)
-            .filter(|atom| !self.members(t).contains(atom))
+            .filter(|atom| members.binary_search(atom).is_err())
             .collect();
-        self.intern(members)
+        self.intern(rest)
     }
 
     /// `T?` is exactly `T | none` [B4]; optionals, error unions, and enums

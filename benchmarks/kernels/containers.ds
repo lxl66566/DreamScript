@@ -1,0 +1,39 @@
+// Kernel: the container closes — cons/head/tail/collect/first/max over
+// ints (the CALLG builtin 32-37 surface). A cons ladder builds a
+// 15000-element list (each cons copies the whole predecessor, ~N^2/2 =
+// 112M element words), then a head/tail drain walks it down one element
+// per iteration keeping a running max (tail copies the remainder each
+// step, another 112M words, with one head and one max call per element),
+// then 150 collect copies re-read the full list (2.25M words plus one
+// len per copy), and first pins the checked head of the full list. The
+// checked reads answer int | none, extracted with the .ok/.err handler
+// chain. Every integer intermediate stays non-negative below 2^47.
+
+fn main() -> () {
+  var xs: list[int] = list[int]()
+  var i: int = 0
+  while i < 15000 {
+    xs = cons((i * 37) % 900 + 100, xs)
+    i += 1
+  }
+  var m: int = 0
+  var rest = xs
+  var c: int = 0
+  while c < 15000 {
+    const h = head(rest)
+    const v = h.ok((x: int) => x).err((_: none) => -1)
+    m = max(m, v)
+    rest = tail(rest)
+    c += 1
+  }
+  var total: int = 0
+  var r: int = 0
+  while r < 150 {
+    const ys = collect(xs)
+    total += len(ys)
+    r += 1
+  }
+  const f0 = first(xs)
+  const first_v = f0.ok((x: int) => x).err((_: none) => -1)
+  println("result: ${len(xs)} ${m} ${total} ${first_v}")
+}

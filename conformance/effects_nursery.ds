@@ -3,9 +3,6 @@
 // items:
 // url: stage: typecheck
 // page: stage: typecheck
-// timeout: stage: typecheck
-// refused: stage: typecheck
-// net_err: stage: typecheck
 // fetch_body: stage: run
 // fetch_all: stage: run
 // with_retry: stage: run
@@ -14,9 +11,6 @@
 
 type url = string
 struct page { url: url, body: string }
-tag timeout
-tag refused
-type net_err = timeout | refused
 
 fn fetch_body(url: url) -> page | net_err {
   const resp = fetch(url)?
@@ -29,8 +23,9 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
     for url in urls {
       spawn {
         match fetch_body(url) {
-          p => pages.push(p),
-          e => cancel(e),
+          timeout => cancel(timeout),
+          refused => cancel(refused),
+          p       => pages.list_push(p),
         }
       }
     }
@@ -43,12 +38,15 @@ fn with_retry(n: int, url: url) -> page | net_err {
   var done: page? = none
   for i in 0..n {
     match fetch_body(url) {
+      timeout => {
+        last = timeout
+      }
+      refused => {
+        last = refused
+      }
       p => {
         done = p
         break
-      }
-      e => {
-        last = e
       }
     }
   }

@@ -9,10 +9,12 @@
 //!
 //! Three stages per package:
 //!
-//! 1. **Planning** collects the lowerable top-level functions: monomorphic const-arrow lambdas
-//!    only. Generic functions and comptime items are exempt — nothing is emitted for them, and a
-//!    call into one is a [`LowerError::Unsupported`] naming the M6 `CALL_GENERIC` seam. A `main`
-//!    entry must exist.
+//! 1. **Planning** collects the lowerable top-level functions: monomorphic const-arrow lambdas only
+//!    (plus the synthesized functions lambda values register mid-lowering, F2). Generic functions
+//!    and comptime items are exempt — nothing is emitted for their bodies, and a call into one
+//!    outside the covered generic builtins is a [`LowerError::Unsupported`] naming the M6
+//!    `CALL_GENERIC` seam (the ambient `len` routes through CALLG, carrying its instantiated type
+//!    as the evidence word the one builtin body dispatches on). A `main` entry must exist.
 //! 2. **Shapes** map every solved type onto its slot representation ([`shape` module docs]):
 //!    scalars are one word, bare structs are field spans, unions are tag+payload spans with
 //!    per-member payload offsets. Tag ids are module-wide, assigned in first-use order.
@@ -147,6 +149,7 @@ pub fn lower(
     for ast in asts {
         for block in &ast.blocks {
             for item in &block.items {
+                refuse_derive(item)?;
                 plan_item(item, &mut plan, analyzed);
             }
         }
@@ -163,7 +166,7 @@ pub fn lower(
         &analyzed.decls,
         &analyzed.checked,
     );
-    let (functions, placed, shapes) = lower_all(&plan, analyzed, &lin)?;
+    let (functions, placed, shapes) = lower_all(&mut plan, analyzed, &lin)?;
     let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
     for function in functions {
         module = module.with_function(function);
@@ -176,10 +179,27 @@ pub fn lower(
     })
 }
 
+/// A `#[derive(...)]` attribute refuses at lowering: the derive engine
+/// is M6's (G1) work, so the attribute generates no behavior yet, and
+/// the refusal reports that at the attribute's own span. Parse, check,
+/// and fmt still accept attributed declarations; only lowering stops.
+fn refuse_derive(item: &Item) -> Result<(), LowerError> {
+    for attr in &item.attrs {
+        if attr.name.name == "derive" {
+            return Err(LowerError::unsupported(
+                attr.span,
+                "a derive attribute",
+                "the M6 derive engine owns it; until it lands the attribute generates no behavior",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Collects one top-level item into the plan when it is a lowerable
 /// monomorphic const-arrow function. Everything else is skipped; generic
 /// functions and comptime items are the documented M6 exemption.
-fn plan_item<'a>(item: &'a Item, plan: &mut Plan<'a>, analyzed: &Analyzed) {
+fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     let ItemKind::Local(local) = &item.kind else {
         return;
     };
@@ -208,21 +228,25 @@ fn plan_item<'a>(item: &'a Item, plan: &mut Plan<'a>, analyzed: &Analyzed) {
 /// each function's placed op sequence, and the shared shape tables.
 type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
 
-/// Lowers every planned function; each one's resolutions come from its
-/// own file (the bundle is keyed by file id).
+/// Lowers the planned functions as a worklist: a body may register
+/// synthesized lambda functions as it lowers (F2), and every registered
+/// function lowers in turn. Each one's resolutions come from its own
+/// file (the bundle is keyed by file id).
 fn lower_all<'b>(
-    plan: &Plan<'_>,
+    plan: &mut Plan,
     analyzed: &'b Analyzed,
     lin: &ds_check::Linearity,
 ) -> Result<LowerAll<'b>, LowerError> {
     let mut shapes = Shapes::new(analyzed);
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
-    for planned in plan.functions() {
-        let res = &analyzed.resolutions[planned.local.span.file.as_u32() as usize];
-        let (function, ops) = FnLower::lower(analyzed, res, plan, &mut shapes, lin, planned)?;
+    let mut index = 0;
+    while let Some(planned) = plan.function(index).cloned() {
+        let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
+        let (function, ops) = FnLower::lower(analyzed, res, plan, &mut shapes, lin, &planned)?;
         functions.push(function);
         placed.push(ops);
+        index += 1;
     }
     Ok((functions, placed, shapes))
 }

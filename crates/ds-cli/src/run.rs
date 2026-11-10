@@ -12,7 +12,10 @@ use ds_mod::{LoadError as ModLoadError, Module, ReadError, read_mmap};
 use ds_vm::{
     LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap, Value, Vm,
     abi::SlotType,
-    native::{PLATFORM_IO_ERR, PLATFORM_NET_ERR, STD_PLATFORM_MODULE, std_platform_module},
+    native::{
+        PLATFORM_IO_ERR, PLATFORM_NET_ERR, PLATFORM_NONE, PLATFORM_PARSE_ERR, STD_PLATFORM_MODULE,
+        std_platform_module,
+    },
 };
 
 use crate::source;
@@ -128,9 +131,10 @@ fn compile_source(args: &RunArgs) -> Result<PreparedRun> {
 }
 
 /// Resolves the entry, runs it, and reports the result: a platform
-/// failure tag is a failed run (the lowered unhandled-failure handler
-/// already printed the message), everything else prints like the dsmod
-/// path always did.
+/// failure tag (io, net, parse) is a failed run — the lowered
+/// unhandled-failure handler already printed the message — the `none`
+/// member of a checked read prints by name, and everything else prints
+/// like the dsmod path always did.
 fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
     if prepared
         .vm
@@ -152,6 +156,15 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
             Value::Tag(tag) if tag == PLATFORM_NET_ERR => Err(anyhow!(
                 "the run halted on an unhandled net failure (the message is on stdout)"
             )),
+            Value::Tag(tag) if tag == PLATFORM_PARSE_ERR => Err(anyhow!(
+                "the run halted on an unhandled parse failure (the message is on stdout)"
+            )),
+            // The `none` member of a checked read is a plain result: print
+            // its name, not the platform reservation's raw id.
+            Value::Tag(tag) if tag == PLATFORM_NONE => {
+                println!("none");
+                Ok(())
+            },
             value => {
                 print_value(&value);
                 Ok(())
@@ -291,6 +304,9 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
         ModuleBuildError::PoolTooLarge { func, len } => {
             format!("function `{func}`'s pool ({len} entries) exceeds the u16 index space")
         },
+        ModuleBuildError::FrameTooWide { func, slots } => {
+            format!("function `{func}`'s frame ({slots} slots) exceeds the u8 slot space")
+        },
         ModuleBuildError::BodyDecode { func, pc, cause } => {
             format!("word at pc {pc} in `{func}` does not decode ({cause:?})")
         },
@@ -333,6 +349,7 @@ fn print_value(value: &Value) {
         Value::Bool(v) => println!("{v}"),
         Value::Tag(v) => println!("{v}"),
         Value::Ref(v) => println!("<object {v}>"),
+        Value::Fn(f) => println!("<fn {}:{}>", f.module(), f.func()),
     }
 }
 
@@ -372,6 +389,9 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::UnknownCallee { module, func } => {
             format!("call into module `{module}` function index {func}, which is not installed")
         },
+        Trap::UnknownModule { module } => {
+            format!("callable word names module id {module}, which is not installed")
+        },
         Trap::ArityMismatch { expected, given } => {
             format!("callee expects {expected} argument(s), {given} staged")
         },
@@ -386,6 +406,9 @@ fn describe_trap(trap: &Trap) -> String {
             format!("uop addresses slot {slot} outside the {frame_slots}-slot frame")
         },
         Trap::CallLayout(error) => format!("call-site layout rejected by the ABI: {error:?}"),
+        Trap::UnknownInstance { evidence } => {
+            format!("generic evidence word {evidence} names no builtin instance")
+        },
         Trap::InvalidPc { pc, code_len } => {
             format!("control left the code stream: pc {pc} of {code_len}")
         },
@@ -414,5 +437,8 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::MetaWordCorrupt { fp } => {
             format!("frame metadata word corrupt at stack index {fp}")
         },
+        Trap::ReentrancyRefused => "a native container call's lambda ended its fiber (HALT, fiber \
+                                    switch, or yield under nesting) instead of returning"
+            .to_owned(),
     }
 }

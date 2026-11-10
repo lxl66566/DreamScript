@@ -1,0 +1,62 @@
+// Kernel: the closure surface — capturing closures built and called in
+// hot loops. Four shapes: a named factory whose tail lambda captures its
+// int parameter (CLOSURE_NEW per call, the closure called once and
+// dropped per iteration), a value-position factory ((a) => (b) => ...
+// capturing through two levels), a const closure over an immutable
+// local with the accumulator threaded through every call, and a string
+// factory (a Ref capture — the store-acquires counting rides every
+// build and call). Captures stay immutable: captures copy by value, and
+// the peer languages capture by reference, so a mutated capture would
+// diverge; the mutable-counter shape is excluded for that reason, and
+// with it closure-into-fn-slot uses (map/filter/reduce over capturing
+// lambdas refuse at lowering). Every intermediate stays non-negative
+// below 2^47.
+
+fn make_adder(k: int) -> fn(int) -> int {
+  (y: int) => y + k
+}
+
+fn make_suffix(s: string) -> fn(string) -> string {
+  (w: string) => concat(w, s)
+}
+
+fn main() -> () {
+  // named factory: one closure built and called per iteration
+  var sum1: int = 0
+  var i: int = 0
+  while i < 800000 {
+    const add = make_adder(i % 97)
+    sum1 += add(i % 1000)
+    i += 1
+  }
+  // const closure over an immutable local, accumulator threaded
+  // through every call
+  const k: int = 3
+  const step = (acc: int, x: int) => acc + x * k
+  var acc: int = 0
+  var j: int = 0
+  while j < 800000 {
+    acc = step(acc, j % 13)
+    j += 1
+  }
+  // value-position factory: the outer lambda answers a fresh closure
+  // per call
+  const mk = (a: int) => (b: int) => a * b + a
+  var sum2: int = 0
+  var q: int = 0
+  while q < 800000 {
+    const g = mk(q % 53)
+    sum2 += g(q % 71)
+    q += 1
+  }
+  // string factory: the Ref capture rides every build and call
+  var lensum: int = 0
+  var w: int = 0
+  while w < 400000 {
+    const bang = make_suffix("-${w % 89}")
+    const tagged = bang("t${w % 17}")
+    lensum += len(tagged)
+    w += 1
+  }
+  println("result: ${sum1} ${acc} ${sum2} ${lensum}")
+}

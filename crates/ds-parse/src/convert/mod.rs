@@ -35,12 +35,25 @@ pub(crate) const MAX_CHAIN_TERMS: usize = 128;
 /// while converting (value-level errors the pair tree alone cannot express).
 /// Under script mode (`script`), top-level statements collect into
 /// `script_stmts` for the synthesized `main` body.
-pub(crate) struct Ctx<'a> {
+pub(crate) struct Ctx {
     file: FileId,
-    src: &'a str,
+    /// Byte offset at which each 1-based line starts; entry 0 is always 0.
+    line_starts: Vec<u32>,
     diags: Vec<Diagnostic>,
     script: bool,
     script_stmts: Vec<Stmt>,
+}
+
+/// Byte offset at which each 1-based line starts: 0 plus the offset after
+/// every `\n`.
+fn line_starts_of(src: &str) -> Vec<u32> {
+    let mut line_starts = vec![0];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i as u32 + 1);
+        }
+    }
+    line_starts
 }
 
 /// Converts the `file` pair into an [`Ast`]; `script` folds the entry file's
@@ -54,7 +67,7 @@ pub(crate) fn convert(
 ) -> Result<Ast, Vec<Diagnostic>> {
     let mut ctx = Ctx {
         file,
-        src,
+        line_starts: line_starts_of(src),
         diags: Vec::new(),
         script,
         script_stmts: Vec::new(),
@@ -137,11 +150,7 @@ fn script_stmt_of(item: Item) -> Result<Stmt, Item> {
 /// A top-level expression statement: script mode collects it for the
 /// synthesized `main`; library mode rejects it (G3's pure-declaration
 /// rule holds everywhere but the entry file).
-fn script_stmt_expr(
-    ctx: &mut Ctx<'_>,
-    c: Pair<'_, Rule>,
-    pending: &mut Vec<Trivia>,
-) -> Option<Stmt> {
+fn script_stmt_expr(ctx: &mut Ctx, c: Pair<'_, Rule>, pending: &mut Vec<Trivia>) -> Option<Stmt> {
     let span = ctx.span(&c);
     if !ctx.script {
         ctx.err(
@@ -175,7 +184,7 @@ fn is_main_decl(item: &Item) -> bool {
     }
 }
 
-impl Ctx<'_> {
+impl Ctx {
     fn span(&self, p: &Pair<'_, Rule>) -> Span {
         let s = p.as_span();
         Span::new(self.file, s.start() as u32, s.end() as u32)
@@ -441,10 +450,9 @@ impl Ctx<'_> {
 
     /// 1-based line number of a byte offset.
     fn line(&self, offset: u32) -> u32 {
-        1 + self.src[..offset as usize]
-            .bytes()
-            .filter(|&b| b == b'\n')
-            .count() as u32
+        // The count of line starts at or below the offset is the 1-based
+        // line number.
+        self.line_starts.partition_point(|&s| s <= offset) as u32
     }
 
     fn trivia(&self, p: &Pair<'_, Rule>) -> Trivia {

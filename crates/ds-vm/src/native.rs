@@ -44,7 +44,7 @@
 //! | 7     | reserved         | `file_exists (path: string) -> bool` |
 //! | 8     | reserved         | `fs_list (dir: string) -> list[string] \| io_err` |
 //! | 9     | reserved         | `file_size (path: string) -> int \| io_err` |
-//! | 10    | `len (s: string) -> int` | reserved |
+//! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) | reserved |
 //! | 11    | `substring (s, start, end: int) -> string` | reserved |
 //! | 12    | `concat (a, b: string) -> string` | reserved |
 //! | 13    | `to_upper (s: string) -> string` | reserved |
@@ -55,13 +55,27 @@
 //! | 18    | `char_at (s: string, i: int) -> string` | reserved |
 //! | 19    | reserved (the string block's spare slot) | reserved |
 //! | 20    | `list_new () -> list` | `net_connect (host: string, port: int) -> int \| net_err` |
-//! | 21    | `list_len (list) -> int` | `net_send (conn: int, data: string) -> unit \| net_err` |
-//! | 22    | `list_get (list, i: int) -> t \| none` | `net_recv (conn, max_bytes: int) -> string \| net_err` |
-//! | 23    | `list_concat (a, b: list) -> list` | `net_close (conn: int) -> unit \| net_err` |
+//! | 21    | `list_len[t] (list) -> int` (generic; CALLG) | `net_send (conn: int, data: string) -> unit \| net_err` |
+//! | 22    | `list_get[t] (list, i: int) -> t \| none` (generic; CALLG) | `net_recv (conn, max_bytes: int) -> string \| net_err` |
+//! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) | `net_close (conn: int) -> unit \| net_err` |
 //! | 24    | `fiber_yield (value: int) -> int` | `http_get (url: string) -> string \| net_err` |
 //! | 25    | `fiber_resume (fiber, value: int) -> int` | reserved |
 //! | 26    | `nursery_join (nursery: int) -> int` | reserved |
 //! | 27    | `list_push (xs: list, x: value) -> unit` | reserved |
+//! | 28    | `map_new () -> map` | reserved |
+//! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) | reserved |
+//! | 30    | `map_get[k, v] (map, key: value) -> v \| none` (generic; CALLG) | reserved |
+//! | 31    | `map_set (map, key, value) -> unit` | reserved |
+
+//! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) | reserved |
+//! | 33    | `head[t] (xs: list) -> t \| none` (generic; CALLG) | reserved |
+//! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) | reserved |
+//! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) | reserved |
+//! | 36    | `first[t] (xs: list) -> t \| none` (generic; CALLG) | reserved |
+//! | 37    | `max[t] (a, b: value) -> value` (generic; CALLG) | reserved |
+//! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) | reserved |
+//! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) | reserved |
+//! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) | reserved |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -102,11 +116,15 @@
 //! needs its own cross-module tag, reserved one step below `io_err` in
 //! the countdown.
 //!
-//! # The string natives (indices 10-18)
+//! # The string natives (indices 11-18; `len` is generic at 10)
 //!
 //! The pure string surface, char-indexed: `len` counts unicode scalar
 //! values, and `substring`/`char_at` index chars, never bytes, so
-//! multi-byte text never cuts a code point. Out-of-range access stays
+//! multi-byte text never cuts a code point. Char positions resolve
+//! through the string object's lazily built boundary map (one
+//! O(length) pass per string object, never per call), so `substring`
+//! and `char_at` answer in O(range) once the bounds are clamped.
+//! Out-of-range access stays
 //! total: `substring` clamps both bounds to the string and answers the
 //! empty string when the clamped range is empty or inverted, and
 //! `char_at` answers the empty string past either end.
@@ -141,6 +159,23 @@
 //! windows, and growth is the backing buffer's amortized doubling
 //! (`list_concat` reserves the joined length up front).
 //!
+//! # The map natives (indices 28-31)
+//!
+//! The map surface over the builder-call interim [B3]: a map is one RC'd
+//! heap object behind one `Ref` word — an association vector of key-value
+//! pairs, string keys matching by content and every other word by
+//! identity (see [`crate::object::Object::Map`]; no ordering or iteration
+//! promise). `map_new` constructs the empty map — the `map[k, v]()`
+//! constructor's runtime half — `map_len` counts entries, and `map_get`
+//! is the checked read in exactly `list_get`'s span shape: in range is
+//! [`PLATFORM_IO_OK`] with the value, a miss is [`PLATFORM_NONE`] with
+//! the probe key as the payload (no new platform tag id: the map reuses
+//! the checked-read reservation). `map_set` is the one mutation, through
+//! the checker's exclusive `mut` window; it stores fresh pairs by
+//! acquiring one count per `Ref` word and drops the overwritten value's
+//! count, so a dying map frees with one dec per stored `Ref` word —
+//! the same retain contract the list carries.
+//!
 //! `list_get` is the checked read, and its bounds behavior follows the
 //! crate's checked-API convention — the same two-word span `parse_int`
 //! answers: in range is [`PLATFORM_IO_OK`] with the element, out of
@@ -149,6 +184,38 @@
 //! (there is no empty value of every `t`), and a trap would deny the
 //! caller the `t | none` extraction, so the span is the one shape both
 //! the caller and the checker can see.
+//!
+//! # The generic container closes (indices 32-37)
+//!
+//! The six generic container natives the ambient declares past the map
+//! block, CALLG-addressed like the container reads above them: `cons`,
+//! `tail`, and `collect` are producers — fresh lists over the source's
+//! element words, construction copying per the D2 ruling, the copy
+//! acquiring one count per `Ref` element it adopts; `head` and `first`
+//! are two spellings of one checked first-element body, both answering
+//! `list_get`'s two-word span (the hit is [`PLATFORM_IO_OK`] with the
+//! element handed out under its own count, an empty list the
+//! [`PLATFORM_NONE`] member with the inert unit word as payload —
+//! there is no rejected index to carry); `max` answers the greater of
+//! two numeric words, int in i64's total order and float IEEE (a NaN
+//! operand answers the other side), any other word kind refusing like
+//! a comparison against a mismatched slot. Their table slots stay
+//! reserved trap entries like every generic builtin's.
+//!
+//! # The reentrant combinators (indices 38-40)
+//!
+//! The lambda-taking container combinators — `map`, `filter`,
+//! `reduce` — are the first generic bodies that call user code: the
+//! staged lambda parameter is a `Fn` word (the callable-word
+//! classification, F2) naming a planned function, and the body runs it
+//! per element through the VM's reentrancy seam (a synthetic reentry
+//! frame driven to its return; see `vm::Vm::call_hosted`). `map`
+//! collects each answered word into a fresh list, `filter` keeps the
+//! elements whose lambda answers true (a non-bool answer refuses like
+//! a mismatched slot), and `reduce` left-folds with the borrowed init
+//! as the seed — an empty list answers the init under its own count.
+//! A drive that ends the fiber or parks at the host instead of
+//! returning refuses honestly: a Rust-side loop cannot suspend.
 //!
 //! # The fiber control natives (indices 24-26)
 //!
@@ -174,7 +241,11 @@ use std::{io::Write, path::Path};
 
 use ds_abi::SlotType;
 
-use crate::{object::Objects, value::Value, vm::Trap};
+use crate::{
+    object::Objects,
+    value::Value,
+    vm::{Trap, Vm},
+};
 
 /// The reserved core native module every VM pre-installs: the pure,
 /// irreducible primitives (the `str_*` conversions and the string ops).
@@ -192,7 +263,10 @@ pub const BUILTIN_STR_INT: u32 = 2;
 pub const BUILTIN_STR_FLOAT: u32 = 3;
 /// `str_bool(x: bool) -> string`.
 pub const BUILTIN_STR_BOOL: u32 = 4;
-/// `len(s: string) -> int` (the string instance of the ambient's generic `len`).
+/// The generic `len[t] (xs: t) -> int`: CALLG-addressed with one evidence
+/// word, its one body dispatches on the instance ([`GENERIC_FUNCTIONS`]);
+/// the table slot itself stays reserved, so a plain CALL cannot reach a
+/// monomorphic instance.
 pub const BUILTIN_LEN: u32 = 10;
 /// `substring(s: string, start, end: int) -> string` (char-indexed, clamped).
 pub const BUILTIN_SUBSTRING: u32 = 11;
@@ -212,12 +286,16 @@ pub const BUILTIN_SPLIT: u32 = 17;
 pub const BUILTIN_CHAR_AT: u32 = 18;
 /// `list_new() -> list` (the empty list object).
 pub const BUILTIN_LIST_NEW: u32 = 20;
-/// `list_len(list) -> int`.
+/// `list_len[t](list) -> int` (generic; the ONE body lives in
+/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_LIST_LEN: u32 = 21;
-/// `list_get(list, i: int) -> t | none` (the checked read; out of range
-/// answers the `none` span member, never a trap).
+/// `list_get[t](list, i: int) -> t | none` (generic; the checked read,
+/// out of range answers the `none` span member, never a trap; the ONE
+/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_LIST_GET: u32 = 22;
-/// `list_concat(a, b: list) -> list` (a fresh list over both element runs).
+/// `list_concat[t](a, b: list) -> list` (generic; a fresh list over
+/// both element runs; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
 pub const BUILTIN_LIST_CONCAT: u32 = 23;
 /// `fiber_yield(value: int) -> int` — the fiber substrate's debug yield
 /// [E2]: parks the current fiber, control returns to its resumer with
@@ -248,6 +326,69 @@ pub const BUILTIN_NURSERY_JOIN: u32 = 26;
 /// whose argument kind varies by call site, so it accepts every kind. A
 /// non-list first argument traps; the unit result is the inert unit word.
 pub const BUILTIN_LIST_PUSH: u32 = 27;
+/// `map_new() -> map` (the empty map object; the `map[k, v]()`
+/// constructor's runtime half).
+pub const BUILTIN_MAP_NEW: u32 = 28;
+/// `map_len[k, v](map) -> int` (generic; the entry count; the ONE body
+/// lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_MAP_LEN: u32 = 29;
+/// `map_get[k, v](map, key: value) -> v | none` (generic; the checked
+/// read in `list_get`'s span shape, a miss answers the `none` span
+/// member with the probe key as the payload, never a trap; the ONE body
+/// lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_MAP_GET: u32 = 30;
+/// `map_set(map, key, value: value) -> unit` — the one mutation, through
+/// the checker's exclusive `mut` window. The key and value parameters
+/// are `Raw`, their kinds varying by call site like `list_push`'s
+/// element. A non-map first argument traps; the unit result is the inert
+/// unit word.
+pub const BUILTIN_MAP_SET: u32 = 31;
+
+/// `cons[t](x: value, xs: list) -> list` (generic; the one-element
+/// prepend, a fresh list over `x` then `xs`'s element words —
+/// construction copies, the copy acquiring one count per `Ref` element
+/// it adopts; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_CONS: u32 = 32;
+/// `head[t](xs: list) -> t | none` (generic; the checked first element
+/// in `list_get`'s span shape — an empty list answers the `none` span
+/// member, never a trap; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_HEAD: u32 = 33;
+/// `tail[t](xs: list) -> list` (generic; a fresh list over the elements
+/// after the first — construction copies; an empty list answers the
+/// empty list; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_TAIL: u32 = 34;
+/// `collect[t](xs: list) -> list` (generic; the pipeline closer, a plain
+/// fresh copy of its list; the ONE body lives in
+/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_COLLECT: u32 = 35;
+/// `first[t](xs: list) -> t | none` (generic; the checked first element
+/// under the corpus's other spelling — `head`'s one shared body; the
+/// ONE body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_FIRST: u32 = 36;
+/// `max[t](a, b: value) -> value` (generic; the greater of the two
+/// numeric words — int compares in i64's total order, float follows
+/// IEEE and never traps; any other word kind refuses like a comparison
+/// against a mismatched slot; the ONE body lives in
+/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_MAX: u32 = 37;
+/// `map[t, r](xs: list, f: fn) -> list` (generic; the one body reenters
+/// the dispatcher per element through the VM's hosted-call seam,
+/// running the staged lambda word over each element — the reentrant
+/// CALLG seam; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_MAP: u32 = 38;
+/// `filter[t](xs: list, f: fn) -> list` (generic; the predicate keeps
+/// or drops each element through the same reentrant per-element call;
+/// the ONE body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_FILTER: u32 = 39;
+/// `reduce[t](xs: list, init: value, f: fn) -> value` (generic; the
+/// left fold over the same reentrant per-element call, the borrowed
+/// init seeding the accumulator and an empty list answering it; the ONE
+/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_REDUCE: u32 = 40;
 pub const STD_PRINTLN: u32 = 0;
 /// `print(msg: string) -> unit`.
 pub const STD_PRINT: u32 = 1;
@@ -377,40 +518,23 @@ pub struct NativeFunction {
     pub func: NativeFn,
 }
 
-fn len_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    // char count, never bytes: multi-byte text measures its scalar values
-    let n = i64::try_from(text.chars().count()).expect("string length fits i64");
-    Ok(NativeResult::Word(Value::I64(n)))
-}
-
 fn substring_fn(
     objects: &mut Objects,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    let n = i64::try_from(text.chars().count()).expect("string length fits i64");
+    let id = ref_arg(args, 0)?;
+    let n = i64::try_from(objects.char_count(id)?).expect("string length fits i64");
     // clamped to [0, n], so the narrowed index is a valid char position
     let start = usize::try_from(i64_arg(args, 1)?.clamp(0, n)).expect("index fits usize");
     let end = usize::try_from(i64_arg(args, 2)?.clamp(0, n)).expect("index fits usize");
-    let slice = if start >= end {
-        ""
-    } else {
-        // both offsets sit on char boundaries, so the slice cannot cut a code point
-        let begin = text
-            .char_indices()
-            .nth(start)
-            .map_or(text.len(), |(o, _)| o);
-        let stop = text.char_indices().nth(end).map_or(text.len(), |(o, _)| o);
-        &text[begin..stop]
-    };
+    if start >= end {
+        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+    }
+    // both offsets sit on char boundaries, so the slice cannot cut a code point
+    let (begin, stop) = objects.char_byte_range(id, start, end)?;
     Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_str(slice.to_owned()),
+        objects.alloc_substr(id, begin, stop)?,
     )))
 }
 
@@ -502,17 +626,19 @@ fn char_at_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
+    let id = ref_arg(args, 0)?;
     let index = i64_arg(args, 1)?;
     // out of range by either side: the empty string, never a trap
-    let part = if index < 0 {
-        None
-    } else {
-        text.chars()
-            .nth(usize::try_from(index).expect("checked index fits usize"))
-    };
+    if index < 0 {
+        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+    }
+    let i = usize::try_from(index).expect("checked index fits usize");
+    if i >= objects.char_count(id)? {
+        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+    }
+    let (begin, stop) = objects.char_byte_range(id, i, i + 1)?;
     Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_str(part.map_or_else(String::new, String::from)),
+        objects.alloc_substr(id, begin, stop)?,
     )))
 }
 
@@ -594,6 +720,166 @@ fn list_push_fn(
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
+// total: the Result is the calling convention every native shares, not
+// this body's
+#[allow(clippy::unnecessary_wraps)]
+fn map_new_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Ok(NativeResult::Word(Value::Ref(objects.alloc_map())))
+}
+
+fn map_len_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let n =
+        i64::try_from(objects.map_pairs(ref_arg(args, 0)?)?.len()).expect("map length fits i64");
+    Ok(NativeResult::Word(Value::I64(n)))
+}
+
+fn map_get_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let map = ref_arg(args, 0)?;
+    let hit = objects.map_at(map, args[1])?;
+    Ok(match hit {
+        Some(value) => {
+            // the read hands the value word out: a Ref value gains a
+            // count for the reader, the map keeps its own (C4)
+            if let Value::Ref(id) = value {
+                objects.inc(id)?;
+            }
+            NativeResult::Tag {
+                tag: PLATFORM_IO_OK,
+                payload: value,
+            }
+        },
+        // a miss answers the `none` span member with the probe key, the
+        // same checked-read shape `list_get` answers with the index
+        None => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: args[1],
+        },
+    })
+}
+
+fn map_set_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    objects.set_map(ref_arg(args, 0)?, args[1], args[2])?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// Acquires one count per `Ref` word of `words` (the producer retain
+/// contract): a fresh list adopting the words owns its element words,
+/// the sources keep their own (C4).
+fn retain_copied(objects: &mut Objects, words: &[Value]) -> Result<(), Trap> {
+    for &value in words {
+        if let Value::Ref(id) = value {
+            objects.inc(id)?;
+        }
+    }
+    Ok(())
+}
+
+fn cons_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let head = args[0];
+    let rest: Vec<Value> = objects.list_at(ref_arg(args, 1)?)?.to_vec();
+    let mut elems = Vec::with_capacity(rest.len() + 1);
+    elems.push(head);
+    elems.extend(rest);
+    retain_copied(objects, &elems)?;
+    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(elems))))
+}
+
+fn tail_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // an empty list skips nothing and answers the empty list
+    let rest: Vec<Value> = objects
+        .list_at(ref_arg(args, 0)?)?
+        .iter()
+        .skip(1)
+        .copied()
+        .collect();
+    retain_copied(objects, &rest)?;
+    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(rest))))
+}
+
+fn collect_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let words: Vec<Value> = objects.list_at(ref_arg(args, 0)?)?.to_vec();
+    retain_copied(objects, &words)?;
+    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(words))))
+}
+
+/// `head`'s and `first`'s one body: the checked first element in
+/// `list_get`'s span shape. The hit hands the element word out — a
+/// `Ref` element gains a count for the reader, the list keeps its own
+/// (C4) — and an empty list answers the `none` span member, never a
+/// trap. The miss payload is the inert unit word: there is no rejected
+/// index to carry, and callers read the payload only on the hit.
+fn first_element_fn(
+    objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let elems = objects.list_at(ref_arg(args, 0)?)?;
+    Ok(match elems.first() {
+        Some(&value) => {
+            if let Value::Ref(id) = value {
+                objects.inc(id)?;
+            }
+            NativeResult::Tag {
+                tag: PLATFORM_IO_OK,
+                payload: value,
+            }
+        },
+        None => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(0),
+        },
+    })
+}
+
+/// The greater of two numeric words: int compares in i64's total order;
+/// float follows IEEE and never traps, a NaN operand answering the other
+/// side. Any other word kind refuses like a comparison against a
+/// mismatched slot — the call site's own trap shape.
+fn max_fn(
+    _objects: &mut Objects,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    match args {
+        [Value::I64(a), Value::I64(b)] => Ok(NativeResult::Word(Value::I64((*a).max(*b)))),
+        [Value::F64(a), Value::F64(b)] => Ok(NativeResult::Word(Value::F64((*a).max(*b)))),
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::I64,
+            actual: args.first().map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
 /// The shared body of the control natives: a `CALL` site never reaches it
 /// (the dispatcher intercepts and switches), so the only reachable call is
 /// a `CALLT`, where no switch is possible — the bounce answer.
@@ -610,6 +896,424 @@ fn fiber_control_bounce_fn(
 /// like an uninstalled one (`UnknownCallee` naming the module and index).
 /// The lowering never emits these indices; each module's table keeps them
 /// so the historical index run stays positionally stable.
+/// One generic builtin body [H3, phase 1]: the ONE body a CALLG site
+/// dispatches, addressed by the pool FuncRef (module, native index) the
+/// same way a CALL addresses a native. `params` are the real argument
+/// words (checked against the staged words like any native's), and
+/// `evidence` is the count of evidence words the dispatch reads from the
+/// overlay after them — the constraint list travels with the callee, so
+/// the uop carries no count of its own.
+pub struct GenericFunction {
+    /// The call name, for diagnostics.
+    pub name: &'static str,
+    /// The real arguments' expected word kinds.
+    pub params: &'static [SlotType],
+    /// How many evidence words follow the staged arguments.
+    pub evidence: u8,
+    /// Result span width on the caller's overlay.
+    pub result_words: u8,
+    /// The one body: `(evidence, args)`.
+    pub func: GenericFn,
+}
+
+/// The body shape of a generic builtin: the whole VM, the evidence
+/// words, then the real arguments. The whole-VM signature is the
+/// reentrancy seam — the lambda-taking combinators call user code back
+/// through [`Vm::call_hosted`] mid-body — while the pure bodies split
+/// the heap and sink off themselves ([`Vm::split`]) and never touch the
+/// rest.
+pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Trap>;
+
+/// The generic builtin vocabulary, keyed by the (module, native index)
+/// FuncRef address [H3]. `len[t]`'s one body dispatches on the single
+/// evidence word and answers the string char count or the list element
+/// count. The container reads and counts (`list_len`, `list_get`,
+/// `list_concat`, `map_len`, `map_get`) share the same discipline with
+/// element-agnostic bodies: the container word is one `Ref` whatever the
+/// element, so the evidence words (one per constraint-list entry, each
+/// naming the receiver's container instance) carry no dispatch — they
+/// record the instance for the future registry. No monomorphic instance
+/// exists at runtime, and the table slots the entries address stay
+/// reserved, so a plain CALL never reaches a monomorphic fallback. The
+/// container closes past the map block — `cons`, `tail`, `collect`,
+/// `max` — join them with element-agnostic bodies, and `head`/`first`
+/// share the one first-element body; `max` dispatches on the numeric
+/// instance its evidence word names. The lambda-taking combinators —
+/// `map`, `filter`, `reduce` — append past the closes with reentrant
+/// bodies that call the staged `Fn` word per element through the VM's
+/// hosted-call seam; their evidence words record the receiver's list
+/// instance like every element-agnostic body's.
+pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
+    (BUILTIN_MODULE, BUILTIN_LEN, GenericFunction {
+        name: "len",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: len_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_LIST_LEN, GenericFunction {
+        name: "list_len",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: list_len_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_LIST_GET, GenericFunction {
+        name: "list_get",
+        params: &[SlotType::Ref, SlotType::I64],
+        evidence: 1,
+        result_words: 2,
+        func: list_get_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_LIST_CONCAT, GenericFunction {
+        name: "list_concat",
+        params: &[SlotType::Ref, SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: list_concat_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_MAP_LEN, GenericFunction {
+        name: "map_len",
+        params: &[SlotType::Ref],
+        evidence: 2,
+        result_words: 1,
+        func: map_len_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_MAP_GET, GenericFunction {
+        name: "map_get",
+        params: &[SlotType::Ref, SlotType::Raw],
+        evidence: 2,
+        result_words: 2,
+        func: map_get_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_CONS, GenericFunction {
+        name: "cons",
+        params: &[SlotType::Raw, SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: cons_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_HEAD, GenericFunction {
+        name: "head",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 2,
+        func: head_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_TAIL, GenericFunction {
+        name: "tail",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: tail_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_COLLECT, GenericFunction {
+        name: "collect",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 1,
+        func: collect_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_FIRST, GenericFunction {
+        name: "first",
+        params: &[SlotType::Ref],
+        evidence: 1,
+        result_words: 2,
+        func: head_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_MAX, GenericFunction {
+        name: "max",
+        params: &[SlotType::Raw, SlotType::Raw],
+        evidence: 1,
+        result_words: 1,
+        func: max_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_MAP, GenericFunction {
+        name: "map",
+        params: &[SlotType::Ref, SlotType::Fn],
+        evidence: 2,
+        result_words: 1,
+        func: map_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_FILTER, GenericFunction {
+        name: "filter",
+        params: &[SlotType::Ref, SlotType::Fn],
+        evidence: 1,
+        result_words: 1,
+        func: filter_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_REDUCE, GenericFunction {
+        name: "reduce",
+        params: &[SlotType::Ref, SlotType::Raw, SlotType::Fn],
+        evidence: 1,
+        result_words: 1,
+        func: reduce_generic_fn,
+    }),
+];
+
+/// Resolves the generic builtin a CALLG FuncRef addresses, if any.
+#[must_use]
+pub fn resolve_generic(module: &str, index: u32) -> Option<&'static GenericFunction> {
+    GENERIC_FUNCTIONS
+        .iter()
+        .find(|(m, i, _)| *m == module && *i == index)
+        .map(|(_, _, g)| g)
+}
+
+/// The one `len` body: dispatch on the call's evidence word, the
+/// statically-resolved builtin instance of the instantiated type
+/// ([`ds_abi::BuiltinInstance`]). The string instance counts unicode
+/// scalar values; the list instance counts elements.
+fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let (objects, _out) = vm.split();
+    let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
+    match instance {
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Str as i64 => {
+            // char count, never bytes: multi-byte text measures its scalar values
+            let n = i64::try_from(objects.char_count(ref_arg(args, 0)?)?)
+                .expect("string length fits i64");
+            Ok(NativeResult::Word(Value::I64(n)))
+        },
+        Value::I64(id) if id == ds_abi::BuiltinInstance::List as i64 => {
+            let elems = objects.list_at(ref_arg(args, 0)?)?;
+            let n = i64::try_from(elems.len()).expect("list length fits i64");
+            Ok(NativeResult::Word(Value::I64(n)))
+        },
+        staged => Err(Trap::UnknownInstance {
+            evidence: match staged {
+                Value::I64(id) => id,
+                _ => -1,
+            },
+        }),
+    }
+}
+
+// The container reads and counts' one bodies [H3, phase 2]:
+// element-agnostic — the container word is one `Ref` whatever the
+// element, so each adapter drops the evidence words (they record the
+// receiver's container instance for the dispatch registry) and runs the
+// same body a native's signature would.
+fn list_len_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    list_len_fn(objects, out, args)
+}
+
+fn list_get_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    list_get_fn(objects, out, args)
+}
+
+fn list_concat_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    list_concat_fn(objects, out, args)
+}
+
+fn map_len_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    map_len_fn(objects, out, args)
+}
+
+fn map_get_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    map_get_fn(objects, out, args)
+}
+
+fn cons_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    cons_fn(objects, out, args)
+}
+
+fn head_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    first_element_fn(objects, out, args)
+}
+
+fn tail_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    tail_fn(objects, out, args)
+}
+
+fn collect_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (objects, out) = vm.split();
+    collect_fn(objects, out, args)
+}
+
+/// `max`'s one body: dispatch on the call's evidence word like `len`'s —
+/// the numeric instances the body orders. The value-kind match inside
+/// the shared scalar body stays the defense: a corrupted stream staging
+/// a non-numeric word refuses there instead of misreading it.
+fn max_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
+    match instance {
+        Value::I64(id)
+            if id == ds_abi::BuiltinInstance::Int as i64
+                || id == ds_abi::BuiltinInstance::Float as i64 =>
+        {
+            let (objects, out) = vm.split();
+            max_fn(objects, out, args)
+        },
+        staged => Err(Trap::UnknownInstance {
+            evidence: match staged {
+                Value::I64(id) => id,
+                _ => -1,
+            },
+        }),
+    }
+}
+
+// The lambda-taking container combinators: the one bodies reenter the
+// dispatcher per element through `Vm::call_hosted` — the staged lambda
+// word is callable-defaulted (a scalar FuncRef or a closure object's
+// Ref word), and its answer word arrives under the
+// RET transfer count, which the body owns. The evidence words record
+// the receiver's container instance like every element-agnostic
+// body's; a mid-loop trap leaks the partial result's birth count, the
+// same single-leak class the producer bodies' traps leave.
+
+/// The staged lambda word: callable-defaulted (F2) — the scalar FuncRef
+/// of a non-capturing lambda or named function, or a closure object's
+/// `Ref` word. The hosted call resolves either kind; every other word
+/// kind refuses like a mismatched slot.
+fn fn_arg(args: &[Value], index: usize) -> Result<Value, Trap> {
+    match args.get(index) {
+        Some(word @ (Value::Fn(_) | Value::Ref(_))) => Ok(*word),
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: u8::try_from(index).expect("slot index fits u8"),
+            expected: SlotType::Fn,
+            actual: args.get(index).map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
+/// `map`'s one body: each element runs through the staged lambda, and
+/// the answered word — transfer count and all — pushes onto the fresh
+/// result list (the push acquires the list's own count per `Ref`
+/// word); the body then drops the transferred count it still holds.
+fn map_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let f = fn_arg(args, 1)?;
+    let elems = {
+        let (objects, _) = vm.split();
+        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+    };
+    let res = {
+        let (objects, _) = vm.split();
+        objects.alloc_list(Vec::new())
+    };
+    for x in elems {
+        let mapped = vm.call_hosted(f, &[x])?;
+        let (objects, _) = vm.split();
+        objects.push_list(res, mapped)?;
+        if let Value::Ref(id) = mapped {
+            objects.dec(id)?;
+        }
+    }
+    Ok(NativeResult::Word(Value::Ref(res)))
+}
+
+/// `filter`'s one body: each element's predicate answer keeps or drops
+/// it. A non-bool answer refuses like a mismatched slot — the declared
+/// predicate's word is the contract. Keeping pushes the element onto
+/// the fresh result list (the push acquires the list's own count; the
+/// source list keeps its own), so no element-side count moves at all.
+fn filter_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let f = fn_arg(args, 1)?;
+    let elems = {
+        let (objects, _) = vm.split();
+        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+    };
+    let res = {
+        let (objects, _) = vm.split();
+        objects.alloc_list(Vec::new())
+    };
+    for x in elems {
+        let keep = vm.call_hosted(f, &[x])?;
+        match keep {
+            Value::Bool(true) => {
+                let (objects, _) = vm.split();
+                objects.push_list(res, x)?;
+            },
+            Value::Bool(false) => {},
+            other => {
+                return Err(Trap::SlotTypeMismatch {
+                    slot: 0,
+                    expected: SlotType::Bool,
+                    actual: other.slot_type(),
+                })
+            },
+        }
+    }
+    Ok(NativeResult::Word(Value::Ref(res)))
+}
+
+/// `reduce`'s one body: the accumulator starts as the borrowed init
+/// word (native arguments are a transient borrow window), each step
+/// hands the accumulator and element to the staged lambda under the
+/// hosted call's one-count-per-Ref hand-off (the lambda's exit drops
+/// or returns them), and the answer's transfer count replaces the
+/// owned one — the first step's old value is the borrowed init and is
+/// never dropped. An empty list answers the init handed out under its
+/// own count (the `list_get` discipline); otherwise the final owned
+/// count transfers to the caller with the word.
+fn reduce_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let f = fn_arg(args, 2)?;
+    let elems = {
+        let (objects, _) = vm.split();
+        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+    };
+    let mut acc = args[1];
+    let mut owned = false;
+    for x in elems {
+        let next = vm.call_hosted(f, &[acc, x])?;
+        if owned {
+            if let Value::Ref(id) = acc {
+                let (objects, _) = vm.split();
+                objects.dec(id)?;
+            }
+        }
+        acc = next;
+        owned = true;
+    }
+    if !owned {
+        if let Value::Ref(id) = acc {
+            let (objects, _) = vm.split();
+            objects.inc(id)?;
+        }
+    }
+    Ok(NativeResult::Word(acc))
+}
+
 macro_rules! reserved {
     ($name:ident in $module:ident at $index:literal) => {
         fn $name(
@@ -633,6 +1337,21 @@ reserved!(builtin_reserved_7 in BUILTIN_MODULE at 7); // was file_exists
 reserved!(builtin_reserved_8 in BUILTIN_MODULE at 8); // was fs_list
 reserved!(builtin_reserved_9 in BUILTIN_MODULE at 9); // was file_size
 reserved!(builtin_reserved_19 in BUILTIN_MODULE at 19); // the spare slot
+reserved!(builtin_reserved_21 in BUILTIN_MODULE at 21); // was the monomorphic list_len; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_22 in BUILTIN_MODULE at 22); // was list_get; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_23 in BUILTIN_MODULE at 23); // was list_concat; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_29 in BUILTIN_MODULE at 29); // was the monomorphic map_len; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_30 in BUILTIN_MODULE at 30); // was map_get; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_10 in BUILTIN_MODULE at 10); // was the string-only len; the generic len body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_32 in BUILTIN_MODULE at 32); // cons; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_33 in BUILTIN_MODULE at 33); // head; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_34 in BUILTIN_MODULE at 34); // tail; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_35 in BUILTIN_MODULE at 35); // collect; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_36 in BUILTIN_MODULE at 36); // first; shares head's generic body in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_37 in BUILTIN_MODULE at 37); // max; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_38 in BUILTIN_MODULE at 38); // map; the reentrant generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_39 in BUILTIN_MODULE at 39); // filter; the reentrant generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_40 in BUILTIN_MODULE at 40); // reduce; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(std_reserved_2 in STD_PLATFORM_MODULE at 2); // was str_int
 reserved!(std_reserved_3 in STD_PLATFORM_MODULE at 3); // was str_float
 reserved!(std_reserved_4 in STD_PLATFORM_MODULE at 4); // was str_bool
@@ -661,14 +1380,19 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 
 /// The core native table every VM installs as [`BUILTIN_MODULE`]: the
 /// pure, irreducible primitives — the typed `str_*` conversions (2-4),
-/// the string ops (10-18), and the list constructors/reads (20-23) —
-/// pure with no world effects. The historical world-surface indices
-/// (0-1, 5-9) and the string block's spare slot (19) stay as reserved
-/// trap entries; the list block appends past the historical run (indices
-/// freeze at M7), the fiber substrate's control pair
+/// the string ops (11-18), and the list and map construction and
+/// mutation surfaces — pure with no world effects. The historical
+/// world-surface indices (0-1, 5-9), the string block's spare slot (19),
+/// and every generic builtin's slot (10, 21-23, 29-30, 32-37 — their ONE
+/// bodies live in [`GENERIC_FUNCTIONS`], CALLG-addressed) stay as
+/// reserved trap entries; the list block appends past the historical
+/// run (indices freeze at M7), the fiber substrate's control pair
 /// ([`BUILTIN_FIBER_YIELD`], [`BUILTIN_FIBER_RESUME`]) appends past the
 /// list block, and the nursery boundary's debug join
-/// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair.
+/// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair, the generic
+/// container closes (`cons`, `head`, `tail`, `collect`, `first`,
+/// `max`) append past the map block, and the reentrant combinators
+/// (`map`, `filter`, `reduce`) append past the closes.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
     vec![
@@ -700,13 +1424,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_7),
         reserved_entry(builtin_reserved_8),
         reserved_entry(builtin_reserved_9),
-        NativeFunction {
-            name: "len",
-            params: &[SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: len_fn,
-        },
+        reserved_entry(builtin_reserved_10),
         NativeFunction {
             name: "substring",
             params: &[SlotType::Ref, SlotType::I64, SlotType::I64],
@@ -771,27 +1489,9 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             control: None,
             func: list_new_fn,
         },
-        NativeFunction {
-            name: "list_len",
-            params: &[SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: list_len_fn,
-        },
-        NativeFunction {
-            name: "list_get",
-            params: &[SlotType::Ref, SlotType::I64],
-            result_words: 2,
-            control: None,
-            func: list_get_fn,
-        },
-        NativeFunction {
-            name: "list_concat",
-            params: &[SlotType::Ref, SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: list_concat_fn,
-        },
+        reserved_entry(builtin_reserved_21),
+        reserved_entry(builtin_reserved_22),
+        reserved_entry(builtin_reserved_23),
         NativeFunction {
             name: "fiber_yield",
             params: &[SlotType::I64],
@@ -820,6 +1520,31 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             control: None,
             func: list_push_fn,
         },
+        NativeFunction {
+            name: "map_new",
+            params: &[],
+            result_words: 1,
+            control: None,
+            func: map_new_fn,
+        },
+        reserved_entry(builtin_reserved_29),
+        reserved_entry(builtin_reserved_30),
+        NativeFunction {
+            name: "map_set",
+            params: &[SlotType::Ref, SlotType::Raw, SlotType::Raw],
+            result_words: 1,
+            control: None,
+            func: map_set_fn,
+        },
+        reserved_entry(builtin_reserved_32),
+        reserved_entry(builtin_reserved_33),
+        reserved_entry(builtin_reserved_34),
+        reserved_entry(builtin_reserved_35),
+        reserved_entry(builtin_reserved_36),
+        reserved_entry(builtin_reserved_37),
+        reserved_entry(builtin_reserved_38),
+        reserved_entry(builtin_reserved_39),
+        reserved_entry(builtin_reserved_40),
     ]
 }
 
@@ -1172,7 +1897,33 @@ mod tests {
         assert_eq!(fns[BUILTIN_STR_INT as usize].name, "str_int");
         assert_eq!(fns[BUILTIN_STR_FLOAT as usize].name, "str_float");
         assert_eq!(fns[BUILTIN_STR_BOOL as usize].name, "str_bool");
-        assert_eq!(fns[BUILTIN_LEN as usize].name, "len");
+        // the generic builtins' table slots stay reserved (a plain CALL
+        // must not reach a monomorphic instance), and the ONE bodies live
+        // in the generic table keyed by the same FuncRef
+        for (index, name, evidence, words) in [
+            (BUILTIN_LEN, "len", 1, 1),
+            (BUILTIN_LIST_LEN, "list_len", 1, 1),
+            (BUILTIN_LIST_GET, "list_get", 1, 2),
+            (BUILTIN_LIST_CONCAT, "list_concat", 1, 1),
+            (BUILTIN_MAP_LEN, "map_len", 2, 1),
+            (BUILTIN_MAP_GET, "map_get", 2, 2),
+            (BUILTIN_CONS, "cons", 1, 1),
+            (BUILTIN_HEAD, "head", 1, 2),
+            (BUILTIN_TAIL, "tail", 1, 1),
+            (BUILTIN_COLLECT, "collect", 1, 1),
+            (BUILTIN_FIRST, "first", 1, 2),
+            (BUILTIN_MAX, "max", 1, 1),
+            (BUILTIN_MAP, "map", 2, 1),
+            (BUILTIN_FILTER, "filter", 1, 1),
+            (BUILTIN_REDUCE, "reduce", 1, 1),
+        ] {
+            assert_eq!(fns[index as usize].name, "reserved", "{name}'s slot");
+            let body = resolve_generic(BUILTIN_MODULE, index)
+                .unwrap_or_else(|| panic!("the generic {name} body resolves"));
+            assert_eq!(body.name, name);
+            assert_eq!(body.evidence, evidence);
+            assert_eq!(body.result_words, words);
+        }
         assert_eq!(fns[BUILTIN_SUBSTRING as usize].name, "substring");
         assert_eq!(fns[BUILTIN_CONCAT as usize].name, "concat");
         assert_eq!(fns[BUILTIN_TO_UPPER as usize].name, "to_upper");
@@ -1182,16 +1933,18 @@ mod tests {
         assert_eq!(fns[BUILTIN_SPLIT as usize].name, "split");
         assert_eq!(fns[BUILTIN_CHAR_AT as usize].name, "char_at");
         assert_eq!(fns[BUILTIN_LIST_NEW as usize].name, "list_new");
-        assert_eq!(fns[BUILTIN_LIST_LEN as usize].name, "list_len");
-        assert_eq!(fns[BUILTIN_LIST_GET as usize].name, "list_get");
-        assert_eq!(fns[BUILTIN_LIST_CONCAT as usize].name, "list_concat");
         assert_eq!(fns[BUILTIN_FIBER_YIELD as usize].name, "fiber_yield");
         assert_eq!(fns[BUILTIN_FIBER_RESUME as usize].name, "fiber_resume");
         assert_eq!(fns[BUILTIN_NURSERY_JOIN as usize].name, "nursery_join");
         assert_eq!(fns[BUILTIN_LIST_PUSH as usize].name, "list_push");
-        assert_eq!(fns.len(), 28);
-        // every world index and the spare slot stays a reserved trap
-        for index in [0u32, 1, 5, 6, 7, 8, 9, 19] {
+        assert_eq!(fns[BUILTIN_MAP_NEW as usize].name, "map_new");
+        assert_eq!(fns[BUILTIN_MAP_SET as usize].name, "map_set");
+        assert_eq!(fns.len(), 41);
+        // every world index, the spare slot, and the generic builtins'
+        // slots stay a reserved trap
+        for index in [
+            0u32, 1, 5, 6, 7, 8, 9, 10, 19, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }
         // the fallible ones need a two-word overlay; the rest one word
@@ -1199,7 +1952,6 @@ mod tests {
             (BUILTIN_STR_INT, 1),
             (BUILTIN_STR_FLOAT, 1),
             (BUILTIN_STR_BOOL, 1),
-            (BUILTIN_LEN, 1),
             (BUILTIN_SUBSTRING, 1),
             (BUILTIN_CONCAT, 1),
             (BUILTIN_TO_UPPER, 1),
@@ -1209,12 +1961,11 @@ mod tests {
             (BUILTIN_SPLIT, 1),
             (BUILTIN_CHAR_AT, 1),
             (BUILTIN_LIST_NEW, 1),
-            (BUILTIN_LIST_LEN, 1),
-            (BUILTIN_LIST_GET, 2),
-            (BUILTIN_LIST_CONCAT, 1),
             (BUILTIN_FIBER_YIELD, 1),
             (BUILTIN_FIBER_RESUME, 1),
             (BUILTIN_NURSERY_JOIN, 1),
+            (BUILTIN_MAP_NEW, 1),
+            (BUILTIN_MAP_SET, 1),
         ] {
             assert_eq!(fns[index as usize].result_words, want);
         }

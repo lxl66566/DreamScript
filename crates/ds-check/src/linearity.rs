@@ -76,7 +76,10 @@
 //!   an earlier call already consumed goes unaudited. Closure call cardinality is a later surface
 //!   decision (an Fn-vs-once contract); until it lands, the M4 runtime rc check owns that seam.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
@@ -194,9 +197,19 @@ pub fn linearity_check(
         last_use: HashMap::new(),
         epoch: 0,
     };
+    // Two package-wide passes [G3]: every file's top-level binder
+    // patterns come live before any initializer or body walks — bodied
+    // top-level `fn`s are const-of-lambda Local items, so bodies walk in
+    // the same pass as plain initializers, and a per-file interleave
+    // would silently skip the move check whenever the consuming file is
+    // processed before the declaring one.
     for (ast, res) in asts.iter().zip(resolutions.iter()) {
         lin.res = Some(res);
-        lin.file(ast);
+        lin.register_top_bindings(ast);
+    }
+    for (ast, res) in asts.iter().zip(resolutions.iter()) {
+        lin.res = Some(res);
+        lin.top_level_and_bodies(ast);
     }
     let mut last_uses: Vec<LastUse> = lin
         .last_use
@@ -282,6 +295,15 @@ fn atom_copyable(
                     .is_some_and(|def| struct_linear(decls, *def))
         },
     }
+}
+
+/// The shared empty bound table for copyability probes outside generic
+/// scopes (field projections): one static map, never a fresh table per
+/// call.
+fn no_linear_vars() -> &'static HashMap<TypeId, bool> {
+    static NONE: std::sync::LazyLock<HashMap<TypeId, bool>> =
+        std::sync::LazyLock::new(HashMap::new);
+    &NONE
 }
 
 fn field_copyable(
@@ -402,20 +424,31 @@ struct Lin<'a> {
 }
 
 impl<'a> Lin<'a> {
-    fn file(&mut self, ast: &'a Ast) {
-        // First pass: top-level bindings, in source order [G3].
+    /// First pass: one file's top-level binder patterns come live [G3].
+    /// Every file registers before any walk pass.
+    fn register_top_bindings(&mut self, ast: &'a Ast) {
         for block in &ast.blocks {
             for item in &block.items {
                 if let ItemKind::Local(local) = &item.kind {
-                    self.top_local(local);
+                    self.bind_pattern_defs(&local.pat);
                 }
             }
         }
-        // Second pass: bodies and declaration shapes.
+    }
+
+    /// Second pass: one file's top-level initializers (a bodied `fn` is
+    /// one, through its lambda), bodies, and declaration shapes.
+    fn top_level_and_bodies(&mut self, ast: &'a Ast) {
         for block in &ast.blocks {
             for item in &block.items {
-                if !matches!(&item.kind, ItemKind::Local(_)) {
-                    self.item(item);
+                match &item.kind {
+                    // The initializer walks alone: the pattern's
+                    // definitions are live since the first pass, and
+                    // re-binding would mask a move the initializer made.
+                    ItemKind::Local(local) => {
+                        self.expr(&local.init, true);
+                    },
+                    _ => self.item(item),
                 }
             }
         }
@@ -467,14 +500,6 @@ impl<'a> Lin<'a> {
             self.block(body);
         }
         self.drop_scope(f.body.as_ref().map_or(f.name.span, |b| b.span));
-    }
-
-    /// One top-level binding: the initializer walks first (the resolver
-    /// binds the pattern after it), then the pattern's definitions come
-    /// live. Module-lifetime bindings have no scope-exit death [G3].
-    fn top_local(&mut self, local: &'a LocalDecl) {
-        self.expr(&local.init, true);
-        self.bind_pattern_defs(&local.pat);
     }
 
     /// The declarative deinit checks [C5]: `deinit` lives on `~Copyable`
@@ -571,54 +596,10 @@ impl<'a> Lin<'a> {
         }
     }
 
-    /// One pattern's binder (name span, name) pairs, in walk order.
+    /// One pattern's binder (name span, name) pairs, in walk order — the
+    /// shared binder walker.
     fn pattern_binders(pat: &'a Pattern) -> Vec<(Span, &'a str)> {
-        let mut out = Vec::new();
-        Self::pattern_binders_into(pat, &mut out);
-        out
-    }
-
-    fn pattern_binders_into<'x>(pat: &'x Pattern, out: &mut Vec<(Span, &'x str)>) {
-        match pat {
-            Pattern::Binding { span, name } => out.push((*span, name.name.as_str())),
-            Pattern::Struct { fields, .. } => {
-                for (name, sub) in fields {
-                    match sub {
-                        Some(sub) => Self::pattern_binders_into(sub, out),
-                        // Punning binds the field name.
-                        None => out.push((name.span, name.name.as_str())),
-                    }
-                }
-            },
-            Pattern::Tuple {
-                pats,
-                trailing_comma,
-                ..
-            } => {
-                if pats.len() == 1 && !trailing_comma {
-                    Self::pattern_binders_into(&pats[0], out);
-                } else {
-                    for sub in pats {
-                        Self::pattern_binders_into(sub, out);
-                    }
-                }
-            },
-            Pattern::Call { args, .. } => {
-                for sub in args {
-                    Self::pattern_binders_into(sub, out);
-                }
-            },
-            Pattern::Or { pats, .. } => {
-                for sub in pats {
-                    Self::pattern_binders_into(sub, out);
-                }
-            },
-            Pattern::Wildcard(_)
-            | Pattern::Literal { .. }
-            | Pattern::Str { .. }
-            | Pattern::RawStr { .. }
-            | Pattern::Path { .. } => {},
-        }
+        crate::pattern::pattern_binders(pat)
     }
 
     /// Records the scope-exit deaths of one scope's live owned
@@ -775,6 +756,14 @@ impl<'a> Lin<'a> {
             Expr::Index { recv, index, .. } => {
                 self.expr(recv, consuming);
                 self.expr(index, true);
+                false
+            },
+            // The map application's bracketed arguments are type spellings
+            // [F9]; a type-name path is no binding use, so the walk only
+            // keeps the arm total.
+            Expr::MapApply { key, value, .. } => {
+                self.expr(key, consuming);
+                self.expr(value, consuming);
                 false
             },
             // The operand's value flows into the split; the failing path
@@ -961,14 +950,16 @@ impl<'a> Lin<'a> {
             }
             match &decl.kind {
                 AtomKind::Struct(fields) => {
-                    let Some(field) = fields.iter().find(|f| f.name == Some(name.name.clone()))
+                    let Some(field) = fields
+                        .iter()
+                        .find(|f| f.name.as_deref() == Some(name.name.as_str()))
                     else {
                         // A member without the field makes the projection
                         // ill-typed; let the type walk report it.
                         continue;
                     };
                     all_copy &=
-                        expr_copyable(self.decls, &field.ty, &HashMap::new(), &mut Vec::new());
+                        expr_copyable(self.decls, &field.ty, no_linear_vars(), &mut Vec::new());
                 },
                 // Unions of shapes, generic applications, enums: the
                 // projected type is not decidable here.
@@ -1185,7 +1176,7 @@ impl<'a> Lin<'a> {
                 }
             },
             Res::Dot(DotRes::Methods { candidates }) => {
-                let sigs: Vec<FnSig> = candidates
+                let sigs: Vec<Arc<FnSig>> = candidates
                     .iter()
                     .filter_map(|id| self.member_sig(*id))
                     .collect();
@@ -1215,7 +1206,7 @@ impl<'a> Lin<'a> {
         }
     }
 
-    fn member_sig(&self, method: MethodId) -> Option<FnSig> {
+    fn member_sig(&self, method: MethodId) -> Option<Arc<FnSig>> {
         self.decls
             .members
             .get(&method)

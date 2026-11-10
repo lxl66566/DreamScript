@@ -5,10 +5,10 @@
 use super::{
     Uop,
     Uop::{
-        AddF64, AddI64, Call, Callt, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr,
-        Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr, LeF64,
-        LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret,
-        RetSpan, StrCat, SubF64, SubI64, TagNew, TagTest, TagTestNot,
+        AddF64, AddI64, Call, Callg, Calls, Callt, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64,
+        EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot,
+        Kconst, Kimm, Kstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool,
+        NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew, TagTest, TagTestNot,
     },
 };
 
@@ -33,7 +33,8 @@ pub enum Major {
     FloatCmp = 0x4,
     /// 0x5 — bool comparisons: EQBOOL, NEQBOOL (XOR-negated pair).
     BoolCmp = 0x5,
-    /// 0xD — heap-string data ops: EQSTR, NEQSTR (XOR-negated pair), STRCAT.
+    /// 0xD — heap-reference data ops: EQSTR, NEQSTR (XOR-negated pair),
+    /// STRCAT over string contents, CLOSURE_NEW building a closure object.
     Ref = 0xd,
     /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
@@ -44,7 +45,9 @@ pub enum Major {
     /// 0x9 — control: JMPIF, JMPIF_NOT, JMP (biased offsets; the two
     /// conditional jumps are the XOR-adjacent minor pair 0/1).
     Ctl = 0x9,
-    /// 0xA — calls: CALL, CALLT, RET.
+    /// 0xA — calls: CALL, CALLT, RET, RETSPAN, CALLG (CALLTG, minor 5,
+    /// reserved for the generic tail call), CALLS (minor 6, the frame-slot
+    /// callee form).
     Call = 0xa,
     /// 0xB — frame protocol: FUNCF.
     Frame = 0xb,
@@ -153,12 +156,17 @@ impl Uop {
             | LeF64 { .. }
             | GtF64 { .. } => Major::FloatCmp,
             EqBool { .. } | NeqBool { .. } => Major::BoolCmp,
-            EqStr { .. } | NeqStr { .. } | StrCat { .. } => Major::Ref,
+            EqStr { .. } | NeqStr { .. } | StrCat { .. } | ClosureNew { .. } => Major::Ref,
             TagTest { .. } | TagTestNot { .. } | TagNew { .. } => Major::Tag,
             CvtI2F { .. } | CvtF2I { .. } => Major::Cvt,
             Mov { .. } => Major::Mov,
             Jmp { .. } | Jmpif { .. } | JmpifNot { .. } => Major::Ctl,
-            Call { .. } | Callt { .. } | Ret { .. } | RetSpan { .. } => Major::Call,
+            Call { .. }
+            | Callg { .. }
+            | Calls { .. }
+            | Callt { .. }
+            | Ret { .. }
+            | RetSpan { .. } => Major::Call,
             Funcf { .. } => Major::Frame,
             Halt { .. } => Major::Halt,
         }
@@ -176,9 +184,14 @@ impl Uop {
             | Jmp { .. }
             | Funcf { .. }
             | Call { .. }
+            | Callg { .. }
             | Callt { .. }
             | Halt { .. } => SlotList::none(),
             Jmpif { cond, .. } | JmpifNot { cond, .. } => SlotList::new(*cond, &[]),
+            Calls { callee_slot, .. } => SlotList::new(*callee_slot, &[]),
+            // the capture span reads overlay positions 0..n, a
+            // layout-relative effect documented in the module docs
+            ClosureNew { func, .. } => SlotList::new(*func, &[]),
             CvtI2F { src, .. }
             | CvtF2I { src, .. }
             | Mov { src, .. }
@@ -254,11 +267,14 @@ impl Uop {
             | TagNew { dst, .. }
             | CvtI2F { dst, .. }
             | CvtF2I { dst, .. }
+            | ClosureNew { dst, .. }
             | Mov { dst, .. } => SlotList::new(*dst, &[]),
             Jmp { .. }
             | Jmpif { .. }
             | JmpifNot { .. }
             | Call { .. }
+            | Callg { .. }
+            | Calls { .. }
             | Callt { .. }
             | Ret { .. }
             | RetSpan { .. }
@@ -273,8 +289,9 @@ impl Uop {
     /// semantics (BL-4). Pure uops may still trap — the B7 cold overflow
     /// edge — and traps compose under fusion. Calls, jumps, returns, the
     /// FUNCF entry protocol, and HALT are impure. So are the allocating
-    /// ops (KSTR, STRCAT): reordering or duplicating an allocation breaks
-    /// M4's dup/drop balance, and interning touches shared heap state.
+    /// ops (KSTR, STRCAT, CLOSURE_NEW): reordering or duplicating an
+    /// allocation breaks M4's dup/drop balance, and interning touches
+    /// shared heap state.
     #[must_use]
     pub fn is_pure(&self) -> bool {
         !matches!(
@@ -283,11 +300,14 @@ impl Uop {
                 | Jmpif { .. }
                 | JmpifNot { .. }
                 | Call { .. }
+                | Callg { .. }
+                | Calls { .. }
                 | Callt { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }
                 | StrCat { .. }
+                | ClosureNew { .. }
                 | Funcf { .. }
                 | Halt { .. }
         )

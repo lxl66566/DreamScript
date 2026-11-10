@@ -296,7 +296,15 @@ defer_expr = { kw_defer ~ sp ~ block_expr }
 
 literal = _{ float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false }
 
-primary = { struct_lit | lambda | list_lit | paren_tuple | control | literal | block_expr | path_atom }
+// The map constructor's two-argument type application `map[k, v]` [F9,
+// B3]: pinned to the head spelled `map`, so no other expression head takes
+// a two-element bracket — arbitrary two-parameter type application stays
+// out of call position. The bracketed arguments are type spellings parsed
+// as expressions, the list application's `[t]` convention.
+map_apply = { map_head ~ h ~ "[" ~ sp ~ expr ~ sp ~ "," ~ sp ~ expr ~ sp ~ ","? ~ sp ~ "]" }
+map_head = @{ "map" ~ !ident_cont }
+
+primary = { struct_lit | lambda | list_lit | paren_tuple | control | literal | block_expr | map_apply | path_atom }
 path_atom = { path }
 
 // `expr_nos`: same chain with struct literals and trailing lambda blocks

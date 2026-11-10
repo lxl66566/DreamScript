@@ -1,0 +1,37 @@
+// source: tutorial verification pass (R9) — call-site staging [F7, BL-6]
+// purpose: literal parameter defaults stage at the call site; an argument whose words disagree with the callee's parameter span refuses at lowering instead of trapping in the VM's slide validation
+// items:
+// connect: stage: run
+// ready: stage: typecheck
+// failed: stage: typecheck
+// grade: stage: typecheck
+// outcome: stage: typecheck
+// speak: stage: run
+// inline_tag_refuses: stage: typecheck
+// inline_case_refuses: stage: typecheck
+
+fn connect(host: string, port: int = 8080) -> int { port }
+
+tag ready
+tag failed
+enum grade { scored(int) }
+type outcome = ready | failed | grade
+
+fn speak(o: outcome) -> string {
+  match o {
+    ready => "ready",
+    failed => "failed",
+    scored => "scored",
+  }
+}
+
+// the checker proves containment, so these check clean; the argument's
+// words refuse at the lowering seam (BL-6 argument widening) instead of
+// trapping in the VM
+fn inline_tag_refuses() -> string {
+  speak(ready)
+}
+
+fn inline_case_refuses() -> string {
+  speak(scored(3))
+}

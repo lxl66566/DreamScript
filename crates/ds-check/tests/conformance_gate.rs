@@ -19,15 +19,19 @@ use ds_diag::{Files, Span};
 use ds_parse::{Ast, Item, ItemKind, parse};
 
 /// Ambient stdlib stubs per conformance/README.md's types_hybrid list:
-/// signatures only (extern), the M3 stdlib owns the bodies.
+/// signatures only (extern), the M3 stdlib owns the bodies. The failure
+/// taxonomy (io_err) and the config type mirror the shared ambient's
+/// ownership of them.
 const TYPES_AMBIENT: &str = concat!(
     "tag int\n",
     "tag float\n",
     "tag string\n",
     "tag bool\n",
+    "tag io_err\n",
     "trait Copyable { }\n",
     "struct list[t]\n",
     "struct map[k, v]\n",
+    "struct config { host: string, port: int?, retries: int }\n",
     "extern fn read_file (path: string) -> string | io_err\n",
     "extern fn parse_json (text: string) -> json | io_err\n",
     "extern fn str[t] (v: t) -> string\n",
@@ -89,14 +93,21 @@ const GENERICS_AMBIENT: &str = concat!(
     "extern fn str[t] (v: t) -> string\n",
 );
 
-/// Ambient for pattern_dispatch: the primitives, println, and the record's
-/// row-typed read_file against the file's own error taxonomy.
+/// Ambient for pattern_dispatch: the primitives, println, and the
+/// success-typed read_file against the ambient-owned failure taxonomy
+/// (the net cases feed the file's or-pattern demo).
 const PATTERN_DISPATCH_AMBIENT: &str = concat!(
     "tag int\n",
     "tag string\n",
     "tag bool\n",
+    "tag io_err\n",
+    "enum net_err {\n",
+    "  timeout\n",
+    "  refused\n",
+    "}\n",
     "trait Copyable { }\n",
-    "extern fn read_file (path: string) -> string | io_error\n",
+    "struct config { host: string, port: int?, retries: int }\n",
+    "extern fn read_file (path: string) -> string | io_err\n",
     "extern fn println (msg: string) -> ()\n",
 );
 
@@ -112,6 +123,10 @@ const TUPLES_AMBIENT: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
 );
 
+/// Ambient stdlib stubs for closures_surface: the primitives alone; the
+/// items carry their own fn-typed parameters and lambdas.
+const CLOSURES_AMBIENT: &str = concat!("tag int\n", "tag string\n", "trait Copyable { }\n");
+
 /// Ambient stdlib stubs per the lists_surface list: the checked list
 /// reads the literal and the constructor build against.
 const LISTS_AMBIENT: &str = concat!(
@@ -124,6 +139,41 @@ const LISTS_AMBIENT: &str = concat!(
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
     "extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs per the maps_surface list: the checked map reads
+/// the constructor and builder calls build against (the `get` spelling is
+/// the record's own tutorial-facing lookup).
+const MAPS_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "trait Copyable { }\n",
+    "struct map[k, v]\n",
+    "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+    "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
+    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
+);
+/// Ambient for extraction_family: the primitives, the collection reads,
+/// the family's own extern spellings, and the ambient-owned config the
+/// b14 spellings extract over.
+const EXTRACTION_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "tag char\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "struct map[k, v]\n",
+    "struct config { host: string, port: int?, retries: int }\n",
+    "extern fn println (msg: string) -> ()\n",
+    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
+    "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
+    "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
+    "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
 );
 
 fn items_of(ast: &Ast) -> Vec<&Item> {
@@ -226,6 +276,23 @@ fn pattern_dispatch_items_check_clean() {
             .map(|d| format!("{} {}", d.code.as_str(), d.message))
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// The extraction-family round [E4]: the typecheck-stage items (the
+/// b14/b15 spellings over the struct field and the row read included)
+/// and every run item check clean under the family ambient; the one
+/// rejection is the file's own reject item.
+#[test]
+fn extraction_family_items_check_clean() {
+    let rejects = gate("../../conformance/extraction_family.ds", EXTRACTION_AMBIENT);
+    assert_eq!(rejects.len(), 1);
+    assert_eq!(rejects[0].0, "plain_receiver");
+    assert!(
+        rejects[0]
+            .2
+            .message
+            .contains("`unwrap_or` extracts a `t | none` receiver; `int` carries no `none` member")
     );
 }
 
@@ -533,6 +600,51 @@ fn lists_surface_items_check_with_the_mixed_rejection() {
     }
 }
 
+/// maps_surface.ds: the map constructor round — every typecheck and run
+/// item checks clean under the map ambient stubs (the `get` spelling item
+/// typechecks; its generic dispatch waits for the M6 seam), and the reject
+/// item reports exactly its constructor-arguments error.
+#[test]
+fn maps_surface_items_check_with_the_constructor_rejection() {
+    let rejects = gate("../../conformance/maps_surface.ds", MAPS_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "reject-ctor-args");
+    assert!(what.contains("DS2001"), "the reject text names the code");
+    assert_eq!(diag.code.as_str(), "DS2001");
+    assert!(
+        diag.message
+            .contains("empty-map constructor takes no arguments"),
+        "the constructor-arguments rejection: {}",
+        diag.message
+    );
+
+    // every other item checks clean under the same stubs
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/maps_surface.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", MAPS_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
+}
+
 /// tuples_surface.ds: the anonymous-tuple round — every typecheck and
 /// run item checks clean under the tuple ambient stubs, and the reject
 /// item reports exactly its unproven-member rejection: a declaration
@@ -678,4 +790,18 @@ fn item_declares(item: &Item) -> Option<String> {
         ItemKind::Impl(_) | ItemKind::Import(_) => return None,
     };
     Some(name.clone())
+}
+
+/// closures_surface.ds: lambda values in every argument shape —
+/// fn-typed parameters, trailing block and parenthesized arguments,
+/// let-stored and passed lambdas, a capturing lambda — all check clean
+/// [F2, F7]; the non-capturing shapes lower through CALLS, and the
+/// capturing shape waits on the closure-object round.
+#[test]
+fn closures_surface_items_check_clean() {
+    let rejects = gate("../../conformance/closures_surface.ds", CLOSURES_AMBIENT);
+    assert!(
+        rejects.is_empty(),
+        "the closures surface declares no reject item"
+    );
 }

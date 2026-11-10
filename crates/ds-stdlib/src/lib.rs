@@ -38,14 +38,12 @@
 //! `fn map[t, r]` coexist: brace and type positions resolve the struct,
 //! the dot position resolves the function. Consequences that remain:
 //!
-//! * Per-file types stay file-owned: `config`, `io_err`/`io_error`, `file`, `raw_fd`, `url`,
-//!   `net_err`, `ord`, `json`, and the stack API (`push`/`pop`) are corpus declarations, and the
-//!   three spellings of the failure union differ per file, so no shared signature can name them.
-//!   World-touching functions therefore return their success type and declare the failure set as
-//!   the `error` row: `read_file` is `(string) -> string` with row `error | world`, standing for
-//!   the record's `string | io_err` once packages own their error taxonomy. `open`, `read_exact`,
-//!   `default_config`, and `read_config` are absent for the same reason (their parameter or return
-//!   types are file-owned); their uses surface as staged run-item noise.
+//! * Per-file types stay file-owned: `file`, `raw_fd`, `url`, `ord`, `json`, and the stack API
+//!   (`push`/`pop`) are corpus declarations. `open` and `read_exact` are absent for that reason
+//!   (their signatures cannot name the caller's own `file` struct); their uses surface as staged
+//!   run-item noise. The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`,
+//!   `parse_err` — the discriminants the platform natives answer), so `read_file`, `parse_int`,
+//!   `load_rows`, `read_config`, and `fetch` return real success unions.
 //! * `max` carries no bound: the `[t: ord]` constraint needs a stdlib-owned `ord` trait, and the
 //!   corpus declares its own. Likewise `u32` is a distinct atom [B7] (mixed-width arithmetic is the
 //!   corpus's staged noise), and `close` takes `int` because `raw_fd` is a file-owned alias of it.
@@ -89,6 +87,7 @@ pub fn declared_rows() -> DeclaredRows {
         .with("net_close", error | world)
         .with("http_get", error | world)
         .with("parse_json", error)
+        .with("read_config", error | world)
         .with("log", world)
         .with("println", world)
         .with("print", world)
@@ -125,10 +124,29 @@ mod tests {
             "list_len",
             "list_get",
             "list_concat",
+            "map_new",
+            "map_set",
+            "map_get",
+            "map_len",
+            "unwrap_or",
+            "unwrap_or_else",
+            "ok_or",
+            "map_err",
         ] {
             assert!(package.lookup_value(name).is_some(), "`{name}` is ambient");
         }
-        for name in ["list", "map", "row", "Copyable", "response"] {
+        for name in [
+            "byte",
+            "list",
+            "map",
+            "row",
+            "config",
+            "io_err",
+            "parse_err",
+            "net_err",
+            "Copyable",
+            "response",
+        ] {
             assert!(package.lookup_type(name).is_some(), "`{name}` is ambient");
         }
         assert_eq!(
@@ -157,6 +175,7 @@ mod tests {
             "net_recv",
             "net_close",
             "http_get",
+            "read_config",
         ] {
             assert_eq!(rows.row(name).render(), "error | world");
         }

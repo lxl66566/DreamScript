@@ -1,19 +1,20 @@
 // The list surface: literals build lists element by element, the
 // `list[t]()` constructor spellings the empty form, and the checked read
-// extracts through the `.ok`/`.err` handler chain.
+// extracts through the `.ok`/`.err` handler chain. `len` is the ambient
+// generic — the same call over string and list receivers.
 
 fn main() -> () {
   const xs = [1, 2, 3]
   const words = ["alpha", "beta", "gamma"]
   const empty = list[int]()
-  println("ints ${sum(xs)} ${list_len(empty)}")
-  println("words ${list_len(words)} ${head_word(words)}")
+  println("ints ${sum(xs)} ${len(empty)}")
+  println("words ${len(words)} ${head_word(words)}")
 }
 
 fn sum(xs: list[int]) -> int {
   var total: int = 0
   var i: int = 0
-  while i < list_len(xs) {
+  while i < len(xs) {
     const cell = list_get(xs, i)
     total += cell.ok((x: int) => x).err((_: none) => 0)
     i += 1

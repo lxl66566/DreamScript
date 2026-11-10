@@ -25,8 +25,15 @@ pub use json::{JsonDiagnostic, JsonLoc, JsonSpan, JsonSuggestion, to_json};
 
 use crate::{
     diagnostic::{Diagnostic, LabelStyle, Suggestion},
-    files::{FileId, Files, char_distance},
+    files::{FileId, Files, Span, char_distance},
 };
+
+/// The last offset inside `span` a location lookup may use: `end - 1` for
+/// non-empty spans (locations are point queries, and `end` is one past the
+/// last byte), the start itself when empty.
+fn last_offset(span: Span) -> u32 {
+    if span.is_empty() { span.start } else { span.end - 1 }
+}
 
 /// `write_fmt` into a `String`; formatting into a String cannot fail.
 macro_rules! emit {
@@ -40,8 +47,10 @@ macro_rules! emit {
 /// The header points at the first primary label (the first label when
 /// none is primary). Each label gets one excerpt block; a label spanning
 /// multiple lines gets one caret line per line, with the label text on
-/// the first. Notes and suggestion helps follow under `= note:` /
-/// `= help:`.
+/// the first. An excerpt in a file other than the one last shown (starting
+/// with the header's) is introduced by its own `-->` location line, so
+/// cross-file diagnostics stay readable. Notes and suggestion helps follow
+/// under `= note:` / `= help:`.
 #[must_use]
 pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
     let mut out = String::new();
@@ -58,24 +67,40 @@ pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
         .iter()
         .find(|l| l.style == LabelStyle::Primary)
         .or_else(|| diagnostic.labels.first());
+    let mut shown_file: Option<FileId> = None;
     if let Some(label) = focus {
-        let loc = files.location(label.span.file, label.span.start);
+        // A span may predate a `set_source` swap; rendering clamps it into
+        // the current bounds instead of panicking.
+        let span = files.clamp_span(label.span);
+        let loc = files.location(span.file, span.start);
         emit!(
             out,
             " --> {}:{}:{}\n",
-            files.name(label.span.file),
+            files.name(span.file),
             loc.line,
             loc.col
         );
+        shown_file = Some(span.file);
     }
 
     let width = gutter_width(diagnostic, files);
     for label in &diagnostic.labels {
         emit!(out, "{:>width$} |\n", "");
-        let span = label.span;
+        let span = files.clamp_span(label.span);
+        if shown_file != Some(span.file) {
+            let loc = files.location(span.file, span.start);
+            emit!(
+                out,
+                "{:>width$} --> {}:{}:{}\n",
+                "",
+                files.name(span.file),
+                loc.line,
+                loc.col
+            );
+        }
+        shown_file = Some(span.file);
         let first_line = files.location(span.file, span.start).line;
-        let last_off = if span.is_empty() { span.start } else { span.end - 1 };
-        let last_line = files.location(span.file, last_off).line;
+        let last_line = files.location(span.file, last_offset(span)).line;
         let caret = match label.style {
             LabelStyle::Primary => "^",
             LabelStyle::Secondary => "-",
@@ -128,11 +153,10 @@ pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
 fn gutter_width(diagnostic: &Diagnostic, files: &Files) -> usize {
     let mut max_line = 0;
     for label in &diagnostic.labels {
-        let span = label.span;
-        let last_off = if span.is_empty() { span.start } else { span.end - 1 };
+        let span = files.clamp_span(label.span);
         max_line = max_line
             .max(files.location(span.file, span.start).line)
-            .max(files.location(span.file, last_off).line);
+            .max(files.location(span.file, last_offset(span)).line);
     }
     max_line.to_string().len().max(1)
 }
@@ -155,7 +179,11 @@ fn suggestion_help(suggestion: &Suggestion) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{code::ErrorCode, diagnostic::Severity, files::Span};
+    use crate::{
+        code::ErrorCode,
+        diagnostic::Severity,
+        files::{FileId, Span},
+    };
 
     /// The classic two-span linear error: secondary at the move, primary at
     /// the later use.
@@ -223,6 +251,68 @@ error[DS1002]: unexpected end of file
   |
 1 |
   | ^ here
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    /// Spans held across a `set_source` swap address the file's previous
+    /// content; rendering clamps them into the current bounds instead of
+    /// panicking in the display layer.
+    #[test]
+    fn stale_span_renders_clamped_without_panicking() {
+        let mut files = Files::new();
+        let file = files.add_source("main.ds", "const rows = read(h)\nlog(h.path)\n");
+        let diag = Diagnostic::error(ErrorCode::MovedThenUsed, "value `h` is no longer usable")
+            .with_secondary(Span::new(file, 18, 19), "moved here")
+            .with_primary(Span::new(file, 25, 26), "used again here after move");
+        files.set_source(file, "short");
+        // Both spans clamp to the end of the new source (offset 5).
+        let expected = "\
+error[DS3001]: value `h` is no longer usable
+ --> main.ds:1:6
+  |
+1 | short
+  |      - moved here
+  |
+1 | short
+  |      ^ used again here after move
+";
+        assert_eq!(human(&diag, &files), expected);
+        assert_eq!(
+            to_json(&diag, &files),
+            r#"{"code":"DS3001","severity":"error","message":"value `h` is no longer usable","spans":[{"file":"main.ds","start_line":1,"start_col":6,"end_line":1,"end_col":6,"label":"moved here","primary":false},{"file":"main.ds","start_line":1,"start_col":6,"end_line":1,"end_col":6,"label":"used again here after move","primary":true}],"notes":[],"suggestions":[]}"#
+        );
+    }
+
+    /// A diagnostic whose labels sit in two files: the header names the
+    /// primary's file, and every excerpt in a different file than the one
+    /// before it carries its own location line (line numbers restart there,
+    /// so the file must be re-announced on every switch).
+    #[test]
+    fn cross_file_excerpt_names_its_file() {
+        let mut files = Files::new();
+        let main = files.add_source("main.ds", "log(h.path)\n");
+        let handle = files.add_source("handle.ds", "const rows = read(h)\nfn take(x: file)\n");
+        let h_at = |file: FileId, off: u32| Span::new(file, off, off + 1);
+        let diag = Diagnostic::error(ErrorCode::MovedThenUsed, "value `h` is no longer usable")
+            .with_secondary(h_at(handle, 18), "moved here")
+            .with_primary(h_at(main, 4), "used again here after move")
+            .with_secondary(h_at(handle, 32), "taken here");
+        let expected = "\
+error[DS3001]: value `h` is no longer usable
+ --> main.ds:1:5
+  |
+  --> handle.ds:1:19
+1 | const rows = read(h)
+  |                   - moved here
+  |
+  --> main.ds:1:5
+1 | log(h.path)
+  |     ^ used again here after move
+  |
+  --> handle.ds:2:12
+2 | fn take(x: file)
+  |            - taken here
 ";
         assert_eq!(human(&diag, &files), expected);
     }

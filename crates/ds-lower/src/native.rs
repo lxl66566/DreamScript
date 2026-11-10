@@ -6,7 +6,7 @@
 //! tables must stay aligned — the drift tests pin the pairing, and the
 //! platform tag id below is pinned against the VM's `PLATFORM_IO_OK`.
 
-use ds_abi::SlotType;
+use ds_abi::{BuiltinInstance, SlotType};
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share.
@@ -54,6 +54,17 @@ pub(crate) enum NativeShape {
     /// — the span re-spans into the call's own `t | none` union, so the
     /// element's word kind comes from the call site, not the table.
     Checked,
+    /// One result word whose kind follows the receiver's numeric builtin
+    /// instance (`max`): Int answers I64 and Float F64. The kind is a
+    /// compile-time fact of the instance the evidence word stages, so
+    /// the table records the keying, not a constant kind.
+    TotalByInstance,
+    /// One result word whose kind is the call's own checked result
+    /// type's (`reduce`): the body folds the element words, so the
+    /// answer's word kind is the folded type's — a per-call-site fact
+    /// the table records as the keying, resolved from the call's result
+    /// type like the instance keying resolves from the evidence.
+    TotalByResultType,
 }
 
 /// One covered native: its call name, module, reserved index, result
@@ -72,16 +83,19 @@ pub(crate) struct Native {
 
 /// The natives the M3 lowering contract routes: the console and scalar
 /// conversions, the pure string ops (the surfaces UFCS chains feed —
-/// `s.trim()`, `s.to_upper()`, `"42".parse_int()` [F3]), the list
-/// surface (one heap-object `Ref` per value, element words opaque to
-/// the natives), the file-IO surface including `fs_list`, and the TCP
-/// surface. `len` stays out on purpose: its ambient spelling is generic
-/// (`len[t]`) — the lowerer routes by name, so a monomorphic-looking
-/// route would misroute non-string receivers; it waits for the M6
-/// CALL_GENERIC seam like every generic callee. Name-routing the list
-/// surface is safe: every list is the one Ref word whatever the element
-/// type, and `list_get`'s element kind comes from the call's checked
-/// type, not the table.
+/// `s.trim()`, `s.to_upper()`, `"42".parse_int()` [F3]), the list and
+/// map construction and mutation surfaces (one heap-object `Ref` per
+/// value, element and pair words opaque to the natives), the file-IO
+/// surface including `fs_list`, and the TCP surface. The ambient's
+/// generic reads and counts (`len`, `list_len`, `list_get`,
+/// `list_concat`, `map_len`, `map_get`) stay out of the monomorphic
+/// table on purpose: their ambient spellings are generic, so a
+/// monomorphic-looking route would misroute receivers — their call
+/// sites route through `GENERIC_NATIVES` and CALLG instead, carrying
+/// the receiver's builtin instance as the evidence words [H3].
+/// Name-routing the constructors and mutators is safe: every list and
+/// map is the one Ref word whatever the element type, and
+/// `list_push`'s element stages as one guarded word.
 pub(crate) const NATIVES: &[Native] = &[
     Native {
         name: "println",
@@ -165,27 +179,21 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
-        name: "list_len",
-        module: NativeModule::Builtin,
-        index: 21,
-        shape: NativeShape::Total(SlotType::I64),
-    },
-    Native {
-        name: "list_get",
-        module: NativeModule::Builtin,
-        index: 22,
-        shape: NativeShape::Checked,
-    },
-    Native {
-        name: "list_concat",
-        module: NativeModule::Builtin,
-        index: 23,
-        shape: NativeShape::Total(SlotType::Ref),
-    },
-    Native {
         name: "list_push",
         module: NativeModule::Builtin,
         index: 27,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        name: "map_new",
+        module: NativeModule::Builtin,
+        index: 28,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "map_set",
+        module: NativeModule::Builtin,
+        index: 31,
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
     Native {
@@ -284,6 +292,215 @@ pub(crate) const NATIVES: &[Native] = &[
 ];
 
 /// The covered native a call name addresses, if any.
+/// A generic builtin the lowering contract covers: the ONE body a
+/// CALLG site dispatches, living in the VM's generic table and addressed
+/// by the same pool FuncRef shape a monomorphic native's is. The call
+/// site stages the instantiated types as evidence words after the real
+/// arguments [H3].
+#[derive(Debug)]
+pub(crate) struct GenericNative {
+    /// The ambient's call name.
+    pub name: &'static str,
+    /// The reserved module the generic's FuncRef addresses.
+    pub module: NativeModule,
+    /// The index in that module the FuncRef names.
+    pub index: u32,
+    /// The evidence-word count the callee's constraint list carries.
+    pub evidence: u8,
+    /// The real arguments' expected word kinds — the VM table's mirror,
+    /// so a staged closure word can be checked against a callable-defaulted
+    /// `Fn` parameter before dispatch.
+    pub params: &'static [SlotType],
+    /// The result shape.
+    pub shape: NativeShape,
+    /// The builtin instances the one body implements: a receiver whose
+    /// instance sits outside the set is a lowering error, never a
+    /// runtime misdispatch. The receiver is the call's first argument —
+    /// the container for the reads and counts, the element for `cons`,
+    /// the operand for `max`.
+    pub instances: &'static [BuiltinInstance],
+}
+
+/// The generic builtins the lowering contract routes [H3, phase 2]:
+/// the ambient `len[t]` (reserved builtin index 10), whose one body
+/// answers the string char count or the list element count on the
+/// evidence word, and the container reads and counts — `list_len`,
+/// `list_get`, `list_concat` (indices 21-23) and `map_len`, `map_get`
+/// (29-30) — whose one bodies are element-agnostic: the evidence words
+/// (one per constraint-list entry) name the receiver's container
+/// instance. The container closes (32-37) join them: `cons`, `tail`,
+/// `collect`, `head`, `first` are element-agnostic over the list
+/// instance, and `max` dispatches on the numeric instance its evidence
+/// word names, its result word keyed to that instance. The
+/// lambda-taking combinators (38-40) join them over the list instance
+/// too: the staged lambda parameter is the callable-defaulted `Fn` word
+/// (the scalar FuncRef or a closure object's `Ref` word), and the VM
+/// body reenters the dispatcher per element. The table
+/// mirrors the VM's generic table exactly (the drift tests pin the
+/// pairing); adding an entry there without one here (or vice versa) is
+/// a contract break.
+pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
+    GenericNative {
+        name: "len",
+        module: NativeModule::Builtin,
+        index: 10,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Total(SlotType::I64),
+        instances: &[BuiltinInstance::Str, BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "list_len",
+        module: NativeModule::Builtin,
+        index: 21,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Total(SlotType::I64),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "list_get",
+        module: NativeModule::Builtin,
+        index: 22,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::I64],
+        shape: NativeShape::Checked,
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "list_concat",
+        module: NativeModule::Builtin,
+        index: 23,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Ref],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "map_len",
+        module: NativeModule::Builtin,
+        index: 29,
+        evidence: 2,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Total(SlotType::I64),
+        instances: &[BuiltinInstance::Map],
+    },
+    GenericNative {
+        name: "map_get",
+        module: NativeModule::Builtin,
+        index: 30,
+        evidence: 2,
+        params: &[SlotType::Ref, SlotType::Raw],
+        shape: NativeShape::Checked,
+        instances: &[BuiltinInstance::Map],
+    },
+    GenericNative {
+        // the receiver is the element: the evidence word names the
+        // element's instance (the constraint list's `t`), and the gate
+        // is the full vocabulary — the body prepends any single word,
+        // and an element type no instance names refuses before staging
+        name: "cons",
+        module: NativeModule::Builtin,
+        index: 32,
+        evidence: 1,
+        params: &[SlotType::Raw, SlotType::Ref],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[
+            BuiltinInstance::Str,
+            BuiltinInstance::List,
+            BuiltinInstance::Map,
+            BuiltinInstance::Int,
+            BuiltinInstance::Float,
+        ],
+    },
+    GenericNative {
+        name: "head",
+        module: NativeModule::Builtin,
+        index: 33,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Checked,
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "tail",
+        module: NativeModule::Builtin,
+        index: 34,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "collect",
+        module: NativeModule::Builtin,
+        index: 35,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "first",
+        module: NativeModule::Builtin,
+        index: 36,
+        evidence: 1,
+        params: &[SlotType::Ref],
+        shape: NativeShape::Checked,
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "max",
+        module: NativeModule::Builtin,
+        index: 37,
+        evidence: 1,
+        params: &[SlotType::Raw, SlotType::Raw],
+        shape: NativeShape::TotalByInstance,
+        instances: &[BuiltinInstance::Int, BuiltinInstance::Float],
+    },
+    GenericNative {
+        // the constraint list is [t, r] — two evidence words recording
+        // the receiver's list instance, the map_len precedent — and the
+        // lambda parameter stages its word into the callable-defaulted
+        // `Fn` slot: the scalar FuncRef or a closure object's `Ref`
+        // word (a borrow-window staging, the hosted call resolving either)
+        name: "map",
+        module: NativeModule::Builtin,
+        index: 38,
+        evidence: 2,
+        params: &[SlotType::Ref, SlotType::Fn],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "filter",
+        module: NativeModule::Builtin,
+        index: 39,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Fn],
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        // the result is the folded element word: its kind is the call's
+        // own result type's, a per-call-site fact (the receiver's list
+        // instance says nothing about the element)
+        name: "reduce",
+        module: NativeModule::Builtin,
+        index: 40,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Raw, SlotType::Fn],
+        shape: NativeShape::TotalByResultType,
+        instances: &[BuiltinInstance::List],
+    },
+];
+
+/// Finds the generic builtin a call name addresses, if the contract
+/// covers one.
+pub(crate) fn lookup_generic(name: &str) -> Option<&'static GenericNative> {
+    GENERIC_NATIVES.iter().find(|g| g.name == name)
+}
+
 pub(crate) fn lookup(name: &str) -> Option<&'static Native> {
     NATIVES.iter().find(|native| native.name == name)
 }
@@ -295,7 +512,9 @@ mod drift {
     /// The mirror stays aligned with the VM's two tables: every entry's
     /// name sits at its reserved index in its own module's table, and the
     /// fallible and checked natives' result spans are two words wide.
-    /// `len` stays deliberately absent (its ambient spelling is generic).
+    /// `len` stays deliberately absent from NATIVES (its ambient spelling
+    /// is generic); it lives in the generic mirror `natives_match` pins
+    /// below.
     #[test]
     fn natives_match_the_vm_native_tables() {
         let core = ds_vm::native::builtin_module();
@@ -315,7 +534,9 @@ mod drift {
                 native.module.name()
             );
             let words = match native.shape {
-                NativeShape::Total(_) => 1,
+                NativeShape::Total(_)
+                | NativeShape::TotalByInstance
+                | NativeShape::TotalByResultType => 1,
                 NativeShape::Fallible { .. } | NativeShape::Checked => 2,
             };
             assert_eq!(
@@ -327,8 +548,60 @@ mod drift {
         }
     }
 
-    /// The module names and the success discriminant the lowering emits
-    /// are the VM's reservations.
+    /// The generic mirror stays aligned with the VM's generic table: the
+    /// FuncRef the lowerer mints resolves to the one body, whose evidence
+    /// arity and result width agree with the lowering contract, and whose
+    /// table slot stays reserved (a plain CALL must not reach a
+    /// monomorphic instance).
+    #[test]
+    fn generic_natives_match_the_vm_generic_table() {
+        let core = ds_vm::native::builtin_module();
+        for g in GENERIC_NATIVES {
+            assert_eq!(
+                g.module,
+                NativeModule::Builtin,
+                "the generic mirror covers builtin-module callees only"
+            );
+            let fns = &core[g.index as usize];
+            assert_eq!(
+                fns.name, "reserved",
+                "{}'s slot must stay reserved in the monomorphic table",
+                g.name
+            );
+            let resolved = ds_vm::native::resolve_generic(ds_vm::native::BUILTIN_MODULE, g.index)
+                .unwrap_or_else(|| panic!("{} resolves no generic body", g.name));
+            assert_eq!(
+                resolved.name, g.name,
+                "{}'s generic body name drifted",
+                g.name
+            );
+            assert_eq!(
+                resolved.evidence, g.evidence,
+                "{}'s evidence arity drifted",
+                g.name
+            );
+            assert_eq!(
+                resolved.params, g.params,
+                "{}'s real-argument word kinds drifted",
+                g.name
+            );
+            let words = match g.shape {
+                NativeShape::Total(_)
+                | NativeShape::TotalByInstance
+                | NativeShape::TotalByResultType => 1,
+                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+            };
+            assert_eq!(
+                usize::from(resolved.result_words),
+                words,
+                "{}'s result span width drifted",
+                g.name
+            );
+        }
+    }
+
+    /// The module names, the success discriminant the lowering emits,
+    /// and the tag-mint ceiling are the VM's reservations.
     #[test]
     fn module_names_and_success_tag_match_the_vm_reservation() {
         assert_eq!(NativeModule::Builtin.name(), ds_vm::native::BUILTIN_MODULE);
@@ -337,5 +610,9 @@ mod drift {
             ds_vm::native::STD_PLATFORM_MODULE
         );
         assert_eq!(PLATFORM_IO_OK, ds_vm::native::PLATFORM_IO_OK);
+        assert_eq!(
+            crate::shape::FIRST_RESERVED_TAG,
+            ds_vm::native::PLATFORM_CANCELLED
+        );
     }
 }

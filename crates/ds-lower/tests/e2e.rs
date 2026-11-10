@@ -262,6 +262,98 @@ fn byte_literal_stays_a_named_lowering_boundary() {
 }
 
 #[test]
+fn list_push_rejects_non_scalar_elements_at_the_lowering_boundary() {
+    // the direct list_push call stages its value argument as one word;
+    // a struct element (multi-word or one field wide) would store its
+    // raw field words as the element — a two-field page traps in the VM
+    // and a one-field struct silently mis-stages — so both call
+    // spellings and both shapes reject here with the reboxing seam named
+    // (cons shares the guard with its element in the receiver position)
+    const LIST_AMBIENT: &str = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "extern fn list_len[t] (xs: list[t]) -> int\n",
+        "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+        "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
+    );
+    for (what, source) in [
+        (
+            "a cons element",
+            format!(
+            "{LIST_AMBIENT}struct page {{ url: string, body: string }}\nfn main() -> int {{\n  \
+             const pages = list[page]()\n  list_len(cons(page {{ url: \"a\", body: \"b\" }}, \
+             pages))\n}}"
+        ),
+        ),
+        (
+            "a list_push element",
+            format!(
+            "{LIST_AMBIENT}struct page {{ url: string, body: string }}\nfn main() -> int {{\n  \
+             var pages = list[page]()\n  pages.list_push(page {{ url: \"a\", body: \"b\" }})\n  \
+             list_len(pages)\n}}"
+        ),
+        ),
+        (
+            "a list_push element",
+            format!(
+            "{LIST_AMBIENT}struct page {{ url: string, body: string }}\nfn main() -> int {{\n  \
+             var pages = list[page]()\n  list_push(pages, page {{ url: \"a\", body: \"b\" }})\n  \
+             list_len(pages)\n}}"
+        ),
+        ),
+        (
+            "a list_push element",
+            format!(
+                "{LIST_AMBIENT}struct wrap {{ x: string }}\nfn main() -> int {{\n  var xs = \
+                 list[wrap]()\n  xs.list_push(wrap {{ x: \"a\" }})\n  list_len(xs)\n}}"
+            ),
+        ),
+        (
+            "a list literal element",
+            format!(
+                "{LIST_AMBIENT}struct wrap {{ x: string }}\nfn main() -> int {{\n  const xs = \
+                 [wrap {{ x: \"a\" }}]\n  list_len(xs)\n}}"
+            ),
+        ),
+    ] {
+        let Err(error) = lower_inline(&source) else {
+            panic!("{what} lowers: {source}")
+        };
+        assert!(
+            error.to_string().contains(what),
+            "the error names the rejection: {error}"
+        );
+        assert!(
+            error.to_string().contains("reboxing"),
+            "the error names the future: {error}"
+        );
+    }
+}
+
+#[test]
+fn trailing_block_arguments_reject_until_block_argument_sugar_lands() {
+    // the block types as the callee's final lambda argument [F7], but
+    // routing it through the callable word is block-argument sugar's own
+    // lowering round; the inline parentheses spelling is the working
+    // form, so the call rejects with that seam
+    let Err(error) = lower_inline(
+        "tag int\ntag string\nextern fn with_box(p: string, f: fn() -> int) -> int\nfn main() -> \
+         int {\n  with_box(\"a\") { 42 }\n}",
+    ) else {
+        panic!("trailing block arguments do not lower: the sugar awaits its round")
+    };
+    assert!(
+        error.to_string().contains("a trailing block argument"),
+        "the error names the seam: {error}"
+    );
+    assert!(
+        error.to_string().contains("inline in parentheses"),
+        "the error names the working spelling: {error}"
+    );
+}
+
+#[test]
 fn integer_compound_remainder_assign_runs() {
     let source = "tag int\nfn main() -> int {\n  var x: int = 7\n  x %= 3\n  x\n}";
     let lowered = lower_inline(source).expect("integer %= lowers");

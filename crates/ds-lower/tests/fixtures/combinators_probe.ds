@@ -1,0 +1,78 @@
+// purpose: the lambda-taking container combinators route through CALLG
+// [the reentrant phase] — map, filter, reduce dispatch one reentrant
+// body per native over the staged `Fn` word (the synthesized lambda,
+// capturing spellings refusing at lowering), and the VM reenters the
+// dispatcher per element: a synthetic reentry frame per hosted call,
+// nesting stack-style for map-in-lambda. The evidence words record the
+// receiver's list instance (map's constraint list [t, r] carries two,
+// the map_len precedent), and the per-element answers ride the usual
+// word kinds — int and string both, the string run pinning the
+// retain contract over Ref elements.
+
+tag int
+tag string
+tag bool
+
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn len[t] (xs: t) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn empty_ints() -> list[int] {
+  []
+}
+
+fn main() -> int {
+  const xs = [1, 2, 3, 4]
+  // the free and UFCS spellings lower the one site shape; untyped
+  // lambda parameters infer from the callee's fn-typed parameter
+  const doubled = map(xs, (x: int) => x * 2)
+  println("doubled ${len(doubled)} ${at(doubled, 0)} ${at(doubled, 3)}")
+  const shifted = xs.map((x) => x + 10)
+  println("shifted ${at(shifted, 0)} ${at(shifted, 3)}")
+  const evens = filter(xs, (x: int) => x % 2 == 0)
+  println("evens ${len(evens)} ${at(evens, 0)} ${at(evens, 1)}")
+  const sum = reduce(xs, 0, (a: int, b: int) => a + b)
+  const product = reduce(xs, 1, (a: int, b: int) => a * b)
+  println("sum ${sum} product ${product}")
+  // the empty list answers the borrowed init under its own count
+  println("empty ${reduce(empty_ints(), 7, (a: int, b: int) => a)}")
+  // a block body with a side effect mid-loop: the hosted calls and the
+  // caller's own output interleave in element order
+  const traced = map([5, 6], (x: int) -> int {
+    println("visiting ${x}")
+    x * 10
+  })
+  println("traced ${at(traced, 0)} ${at(traced, 1)}")
+  // Ref elements: each answered string word transfers a count the body
+  // adopts into the fresh list and drops its own side of — the answers
+  // come off a native call inside the lambda body (the frame-tail
+  // concat), the once-routed-around shape
+  const words = ["alpha", "beta"]
+  const banged = map(words, (w: string) => concat(w, "!"))
+  const first_word = list_get(banged, 0)
+  println("banged ${first_word.ok((w: string) => w).err((_: none) => "?")}")
+  // map-in-lambda: the hosted frames stack on the one chain (the inner
+  // len binds first — a generic call in the lambda's tail position
+  // would be the reserved CALLTG shape)
+  const scaled = map(xs, (x: int) -> int {
+    const tripled = map([x], (y: int) => y * 3)
+    const n = len(tripled)
+    n
+  })
+  println("nested ${at(scaled, 0)} ${at(scaled, 3)}")
+  // the combinators compose: filter feeds map feeds reduce
+  const pipeline = reduce(map(filter(xs, (x: int) => x % 2 == 1), (x: int) => x * x), 0, (a: int, b: int) => a + b)
+  println("pipeline ${pipeline}")
+  0
+}

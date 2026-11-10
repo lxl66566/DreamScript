@@ -1,0 +1,13 @@
+// The tutorial pass shape: an unknown dot-method name reports its root
+// cause alone — the resolution failure — never the empty-intersection
+// cascade the empty result would otherwise trigger downstream.
+
+tag int
+tag string
+
+struct rec { age: string }
+
+fn f(r: rec) -> int {
+  const x = r.age.ok_or("missing")
+  0
+}

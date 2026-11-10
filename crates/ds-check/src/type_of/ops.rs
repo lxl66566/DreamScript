@@ -355,9 +355,21 @@ impl Bodies<'_> {
                     }
                 }
             },
-            In => Val {
-                ty: bool_ty,
-                diverges: false,
+            In => {
+                // Only non-range right sides reach here (`binary` routes
+                // `x in a..b` first); collection membership is not ruled,
+                // so refuse instead of typing bool ahead of a ruling.
+                self.error(
+                    ErrorCode::NonRangeIn,
+                    "`in` ranges over ranges (`x in a..b`); collection membership is not ruled yet"
+                        .to_owned(),
+                    span,
+                    "not a range",
+                );
+                Val {
+                    ty: bool_ty,
+                    diverges: false,
+                }
             },
             And | Or => {
                 for (ty, at) in [(left, left_span), (right, right_span)] {

@@ -11,6 +11,7 @@
 //! broke across lines keep their continuation lines (at base indent + 2),
 //! and there is no wrapping — long lines stay long.
 
+use ds_diag::Span;
 use ds_parse::{
     AssignOp, BinaryOp, BlockExpr, Expr, Ident, Literal, LocalDecl, MatchArm, Param, Pattern, Stmt,
     UnaryOp,
@@ -121,15 +122,34 @@ pub(crate) fn push_elems(ctx: &Ctx, out: &mut String, elems: &[Elem], leading: b
 
 // ===== blocks =====
 
-/// Renders a block; inline iff its span is one source line. Every braced
-/// container decides on its own span, so a one-line body inside a
+/// Renders a block; inline iff its whole body lies on one source line. Every
+/// braced container decides on its own span, so a one-line body inside a
 /// multi-line construct (e.g. a chain-broken header) stays inline.
 pub(crate) fn write_block(ctx: &Ctx, out: &mut String, base: usize, b: &BlockExpr) {
-    if ctx.one_line(b.span) {
+    if block_one_line(ctx, b) {
         write_block_inline(ctx, out, b);
     } else {
         write_block_multi(ctx, out, base, b);
     }
+}
+
+/// The inline probe: the block's span on one source line AND at most one
+/// statement — statements are newline-separated, so a multi-statement body
+/// is never inline regardless of the span. A zero-width block span marks the
+/// synthesized script-entry block (no real node owns one); its empty span
+/// would always read as one line, so the probe falls back to the statements'
+/// own extent.
+fn block_one_line(ctx: &Ctx, b: &BlockExpr) -> bool {
+    if b.stmts.len() > 1 {
+        return false;
+    }
+    if b.span.is_empty()
+        && let Some(s) = b.stmts.first()
+    {
+        let span = Span::new(s.span.file, stmt_span_start(s), stmt_span_end(s));
+        return ctx.one_line(span);
+    }
+    ctx.one_line(b.span)
 }
 
 fn write_block_inline(ctx: &Ctx, out: &mut String, b: &BlockExpr) {
@@ -357,11 +377,9 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             ..
         } => {
             write_expr_min(ctx, out, base, callee, 15);
-            // Trailing-block sugar [F7]: a call whose only "argument" is the
-            // trailing block has no parenthesis pair of its own — the parser
-            // models `with_file(p, f) { ... }` as a nested empty-args call
-            // carrying the block, so re-emitting `()` would grow on every
-            // format.
+            // Trailing-block sugar [F7]: a call whose written argument list
+            // is empty renders no parenthesis pair — the canonical
+            // spelling of the no-parens source form `f { ... }`.
             let sugar = args.is_empty()
                 && trailing
                     .as_deref()
@@ -404,6 +422,16 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             write_expr_min(ctx, out, base, recv, 15);
             out.push('[');
             write_expr(ctx, out, base, index);
+            out.push(']');
+        },
+        Expr::MapApply {
+            head, key, value, ..
+        } => {
+            out.push_str(&head.name);
+            out.push('[');
+            write_expr(ctx, out, base, key);
+            out.push_str(", ");
+            write_expr(ctx, out, base, value);
             out.push(']');
         },
         Expr::Try { expr, .. } => {

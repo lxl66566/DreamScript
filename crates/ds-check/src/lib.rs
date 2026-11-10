@@ -144,8 +144,10 @@ pub mod decls;
 pub mod effects;
 pub mod error;
 pub mod expr;
+pub mod extraction;
 pub mod instance;
 pub mod linearity;
+mod pattern;
 pub mod resolve;
 pub mod type_of;
 pub mod universe;
@@ -157,12 +159,15 @@ pub use decls::{Decls, FnSig, GenericParam};
 pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_of};
 pub use error::Error;
 pub use expr::TypeExpr;
+pub use extraction::Extraction;
 pub use instance::{Condition, InstanceBody, InstanceDecl, InstanceEnv, InstanceId};
 pub use linearity::{BinderFact, DropSite, LastUse, Linearity, Move, check, linearity_check};
 pub use resolve::{
     Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
     resolve_package,
 };
-pub use type_of::{Analyzed, Checked, TypedPackage, Val, analyze, check_resolved, type_check};
+pub use type_of::{
+    Analyzed, Checked, TraitCall, TypedPackage, Val, analyze, check_resolved, type_check,
+};
 pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};

@@ -90,6 +90,41 @@ fn bare_ident_holes_and_the_empty_literal() {
     assert_eq!(stdout, "n is 7\n\ndone\n");
 }
 
+/// An explicit `str(e)` call routes through the same checked-type
+/// conversion the interpolation holes use [F6]: scalars convert through
+/// the str natives, strings pass their Ref word through, and a
+/// tail-position call returns the conversion like any value.
+#[test]
+fn explicit_str_calls_run_the_hole_conversion() {
+    let stdout = run_stdout(concat!(
+        "extern fn str[t] (v: t) -> string
+",
+        "fn text(n: int) -> string {
+",
+        "  str(n)
+",
+        "}
+",
+        "fn main() -> () {
+",
+        "  println(str(42))
+",
+        "  println(str(\"word\"))
+",
+        "  println(text(7))
+",
+        "}
+",
+    ));
+    assert_eq!(
+        stdout,
+        "42
+word
+7
+"
+    );
+}
+
 #[test]
 fn the_pinned_escape_set_cooks_the_literal_parts() {
     let stdout = run_stdout(concat!(

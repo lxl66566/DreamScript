@@ -16,6 +16,9 @@ const AMBIENT: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "trait Copyable { }\n",
+    "struct link: ~Copyable { slot: int }\n",
+    "extern fn tweak (l: mut link) -> ()\n",
 );
 
 /// Type-checks `source` beside the list ambient, rendering every
@@ -113,11 +116,50 @@ fn cross_spellings_reject_per_the_declaration() {
 }
 
 #[test]
-fn list_push_calls_stay_clean_and_type_the_window() {
-    // the ambient list_push declaration checks, and a UFCS call over a
-    // local list borrows the mut window the parameter names [C2]
+fn list_push_rejects_const_receivers() {
+    // the mut window is exclusive by spelling [D2]: a const binding may
+    // alias its shared heap word, so both call spellings reject it
+    const REJECTED: &str =
+        "DS3006 `xs` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]";
     assert_eq!(
         check("fn f() -> int {\n  const xs = [1]\n  xs.list_push(2)\n  list_len(xs)\n}\n"),
+        [REJECTED],
+    );
+    assert_eq!(
+        check("fn f() -> int {\n  const xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n"),
+        [REJECTED],
+    );
+    // a top-level const binding rejects the same way
+    assert_eq!(
+        check("const xs = [1]\nfn f() -> int {\n  xs.list_push(2)\n  list_len(xs)\n}\n"),
+        [REJECTED],
+    );
+}
+
+#[test]
+fn var_and_fresh_receivers_type_the_window() {
+    // a var binding and a mut-window parameter carry the spelling's
+    // exclusivity; a fresh rvalue is uniquely owned by construction [D2]
+    for source in [
+        "fn f() -> int {\n  var xs = [1]\n  xs.list_push(2)\n  list_len(xs)\n}\n",
+        "fn f() -> int {\n  var xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n",
+        "fn fill(xs: mut list[int]) -> () {\n  xs.list_push(1)\n}\n",
+        "fn f() -> () {\n  list_push(list[page](), page { url: \"u\" })\n}\n",
+    ] {
+        assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
+    }
+}
+
+#[test]
+fn linear_const_receivers_keep_their_linearity_proof() {
+    // a `~Copyable` receiver cannot alias (copying is rejected), so a
+    // const binding still feeds the mut window [D2, C1]
+    assert_eq!(
+        check("const l = link { slot: 1 }\nfn f() -> () {\n  tweak(l)\n}\n"),
+        Vec::<String>::new(),
+    );
+    assert_eq!(
+        check("fn f() -> () {\n  const l = link { slot: 1 }\n  tweak(l)\n}\n"),
         Vec::<String>::new(),
     );
 }

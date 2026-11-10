@@ -1,0 +1,26 @@
+// The lambda-taking combinators over CALLG dispatch: map, filter, and
+// reduce stage the lambda as one Fn word (a synthesized function), the
+// VM reenters the dispatcher per element, and the block-body println
+// interleaves in element order.
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5]
+  const doubled = xs.map((x: int) => x * 2)
+  println("doubled ${len(doubled)} ${at(doubled, 0)} ${at(doubled, 4)}")
+  const evens = xs.filter((x: int) => x % 2 == 0)
+  println("evens ${len(evens)} ${at(evens, 0)} ${at(evens, 1)}")
+  const traced = xs.map((x: int) -> int {
+    println("visiting ${x}")
+    x * 10
+  })
+  println("traced ${at(traced, 0)} ${at(traced, 4)}")
+  const sum = reduce(xs, 0, (a: int, b: int) => a + b)
+  const words = ["alpha", "beta"]
+  const joined = reduce(words, "", (a: string, b: string) => "${a}${b}")
+  println("sum ${sum} joined ${joined}")
+}

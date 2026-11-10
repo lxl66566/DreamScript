@@ -1,0 +1,31 @@
+// The call-site staging probe: a literal parameter default [F7] stages
+// at the call site, a same-typed union binding stages its whole span,
+// and a widened var re-store keeps every member's payload through the
+// call slide.
+
+tag int
+tag string
+tag ready
+tag failed
+enum grade { scored(int) }
+type outcome = ready | failed | grade
+
+extern fn println (msg: string) -> ()
+
+fn connect(host: string, port: int = 8080) -> int { port }
+
+fn speak(o: outcome) -> string {
+  match o {
+    ready => "ready",
+    failed => "failed",
+    scored => "scored",
+  }
+}
+
+fn main() -> () {
+  println("default: ${connect("db.local")}")
+  var o: outcome = ready
+  println(speak(o))
+  o = scored(3)
+  println(speak(o))
+}

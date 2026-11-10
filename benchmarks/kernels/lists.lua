@@ -2,10 +2,29 @@
 -- indexed gets, and repeated whole-table joins. Mirrors lists.ds
 -- exactly: 20000 three-digit pieces built through concat (the
 -- empty-string seed), one split, 120 checksum
--- rounds of indexed reads with tonumber parsing, then 32 table copies
+-- rounds of indexed reads with the same char digit fold as strings.lua
+-- (the ds parse native's success-typed union answers no runtime
+-- extraction yet), then 32 table copies
 -- into a fresh table each time and a full sweep of the 660000-element
 -- result. Indexes stay 0-based to mirror ds, converted at the string
 -- and table library's 1-based edges.
+
+local function dv(c)
+  if c == "0" then return 0
+  elseif c == "1" then return 1
+  elseif c == "2" then return 2
+  elseif c == "3" then return 3
+  elseif c == "4" then return 4
+  elseif c == "5" then return 5
+  elseif c == "6" then return 6
+  elseif c == "7" then return 7
+  elseif c == "8" then return 8
+  else return 9 end
+end
+
+local function fold3(w)
+  return dv(string.sub(w, 1, 1)) * 100 + dv(string.sub(w, 2, 2)) * 10 + dv(string.sub(w, 3, 3))
+end
 
 local s = ""
 for gi = 0, 19 do
@@ -36,7 +55,7 @@ end
 local sum = 0
 for _p = 0, 119 do
   for i = 0, 19999 do
-    sum = sum + tonumber(parts[i + 1])
+    sum = sum + fold3(parts[i + 1])
   end
 end
 
@@ -55,7 +74,7 @@ end
 
 local total = 0
 for j = 0, 20000 * 33 - 1 do
-  total = total + tonumber(acc[j + 1])
+  total = total + fold3(acc[j + 1])
 end
 
 print(string.format("result: %d %d %d", sum, total, #acc))

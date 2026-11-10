@@ -157,3 +157,19 @@ fn literals_build_and_read_back_every_element_kind() {
         Ok(Value::I64(2))
     );
 }
+
+#[test]
+fn direct_list_push_runs_every_one_word_element_kind() {
+    // the direct calls (UFCS and free-call spellings) stage their value
+    // argument as the one element word: a string Ref, and an inner
+    // list's Ref in the list-of-list case
+    let mut vm = build_lit_vm();
+    assert_eq!(
+        vm.run("lists_lit_probe", "push_words", &[]),
+        Ok(Value::I64(2))
+    );
+    assert_eq!(
+        vm.run("lists_lit_probe", "push_lists", &[]),
+        Ok(Value::I64(2))
+    );
+}

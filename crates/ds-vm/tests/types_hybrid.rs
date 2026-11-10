@@ -32,11 +32,13 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_CHAR_AT, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_LEN,
-        BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
-        BUILTIN_LIST_PUSH, BUILTIN_NURSERY_JOIN, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT,
-        BUILTIN_STR_INT, STD_HTTP_GET, STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE,
-        STD_PRINT, STD_PRINTLN, std_platform_module,
+        BUILTIN_CHAR_AT, BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD,
+        BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_LEN, BUILTIN_LIST_CONCAT,
+        BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_MAP,
+        BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_SET, BUILTIN_MAX,
+        BUILTIN_NURSERY_JOIN, BUILTIN_REDUCE, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT, BUILTIN_STR_INT,
+        BUILTIN_TAIL, STD_HTTP_GET, STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT,
+        STD_PRINTLN, std_platform_module,
     },
 };
 
@@ -974,9 +976,27 @@ fn both_native_modules_are_installed_and_resolvable() {
             .is_some()
     );
     assert!(reg.resolve_native("builtin", BUILTIN_LIST_PUSH).is_some());
+    // the map block (28-31)
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP_NEW).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP_LEN).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP_GET).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP_SET).is_some());
+    // the generic container closes (32-37) as reserved slots
+    assert!(reg.resolve_native("builtin", BUILTIN_CONS).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_HEAD).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_TAIL).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_COLLECT).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_FIRST).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_MAX).is_some());
+    // the reentrant combinators (38-40) as reserved slots: their ONE
+    // bodies live in the generic table, CALLG-addressed
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_FILTER).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_REDUCE).is_some());
     assert!(
-        reg.resolve_native("builtin", 28).is_none(),
-        "28 table entries: the core's, the list block, the fiber pair, the join, the push"
+        reg.resolve_native("builtin", 41).is_none(),
+        "41 table entries: the core's, the list block, the fiber pair, the join, the push, the \
+         map block, the generic container closes, the reentrant combinators"
     );
     // the std platform module: console, file, net — its own gaps reserved
     assert!(

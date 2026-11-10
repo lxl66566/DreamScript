@@ -17,7 +17,7 @@ pub enum TargetClass {
 }
 
 impl TargetClass {
-    /// Wire tag stored in header byte 4.
+    /// Wire tag stored in header byte 5.
     #[must_use]
     pub const fn tag(&self) -> u8 {
         match self {
@@ -49,7 +49,7 @@ impl fmt::Display for TargetClass {
     }
 }
 
-/// Header flags bitset, byte 5 [G3.5]: STRIP, FFI_USED, HAS_JIT_METADATA.
+/// Header flags bitset, byte 6 [G3.5]: STRIP, FFI_USED, HAS_JIT_METADATA.
 ///
 /// Named methods keep call sites free of raw boolean noise; unknown bits are
 /// rejected at read time because a bit only gains meaning together with a

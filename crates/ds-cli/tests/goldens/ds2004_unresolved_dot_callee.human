@@ -1,0 +1,7 @@
+error[DS2004]: no name `ok_or` behind the dot
+ --> tests/fixtures/negative/ds2004_unresolved_dot_callee.ds:11:19
+   |
+11 |   const x = r.age.ok_or("missing")
+   |                   ^^^^^ not a free function, not a method
+   |
+   = note: tried free functions first, then trait and inherent methods [F3]

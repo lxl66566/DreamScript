@@ -1,0 +1,19 @@
+// The container closes over CALLG dispatch: cons prepends an element,
+// tail drops the first, collect copies, head/first answer the checked
+// first element (the empty list the none member), and max orders the
+// numeric instance the call's evidence names — int and float both.
+
+fn first_int(xs: list[int]) -> int {
+  const cell = head(xs)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn main() -> () {
+  const ints = cons(1, cons(2, list[int]()))
+  const rest = ints.tail()
+  println("cons ${len(ints)} ${first_int(ints)} ${len(rest)} ${first_int(rest)}")
+  const blank = collect(list[int]())
+  const blank_first = first(blank)
+  println("empty ${first_int(blank)} ${blank_first.ok((x: int) => x).err((_: none) => -1)}")
+  println("max ${max(3, 9)} ${max(2.5, 2.25)}")
+}

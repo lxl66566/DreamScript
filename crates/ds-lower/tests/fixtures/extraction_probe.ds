@@ -1,0 +1,124 @@
+// purpose: the E4 extraction family end to end — unwrap_or's eager
+// fallback and unwrap_or_else's inlined lazy one over `t | none`
+// receivers of int, string, and one-field-struct payloads, ok_or's
+// constructed `t | e` union propagated through `?` with unit-tag and
+// two-field-struct error values, and map_err mirroring the `.ok`
+// handler over a named spelling; every Ref payload and error value
+// exercises the reference-count bookkeeping on both arms.
+
+tag int
+tag string
+tag bool
+tag char
+
+struct list[t]
+struct config { host: string, port: int }
+struct point { value: int }
+
+extern fn println (s: string) -> ()
+extern fn split (s: string, sep: char) -> list[string]
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
+extern fn ok_or[t, e] (x: t?, err: e) -> t | e
+extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
+
+tag missing
+tag bad_port
+
+// unwrap_or: the eager fallback picks the payload word or the fallback
+fn port_of(present: bool) -> int {
+  const x = if present {
+    9
+  } else {
+    none
+  }
+  x.unwrap_or(8080)
+}
+
+// a Ref payload moves on the ok arm, the fallback's Ref on the none arm
+fn word_of(x: string?) -> string {
+  x.unwrap_or("?")
+}
+
+// a one-field-struct member: the payload place is the member's own word
+fn point_of(present: bool) -> int {
+  const x = if present {
+    point { value: 9 }
+  } else {
+    none
+  }
+  x.unwrap_or(point { value: 70 }).value
+}
+
+// unwrap_or_else: the fallback lambda inlines on the none side only —
+// the printed line proves the laziness on the ok path
+fn loud_default() -> int {
+  println("lazy fired")
+  7
+}
+
+fn lazy_port(present: bool) -> int {
+  const x = if present {
+    3
+  } else {
+    none
+  }
+  x.unwrap_or_else(() => loud_default())
+}
+
+// ok_or with a unit-tag error: the none side constructs the new member,
+// `?` propagates it through the tail over the contained union
+fn guard(x: string?) -> string | missing {
+  x.ok_or(missing)?
+}
+
+// ok_or with a two-field-struct error: both words of the constructed
+// member move, the string Ref among them
+fn messy(x: string?) -> string {
+  x.ok_or(config { host: "e", port: 0 }).err((_: config) => "e")
+}
+
+// map_err: the handled member maps through the inlined lambda, the
+// remainder flows; the annotated parameter names the handled set
+fn reword(present: bool) -> string | bad_port {
+  const x = if present {
+    "kept"
+  } else {
+    missing
+  }
+  x.map_err((e: missing) => bad_port)
+}
+
+// a tail-position family call: the final expression produces its value
+// through the value walk's ordinary return
+fn tail_port(present: bool) -> int {
+  const x = if present {
+    9
+  } else {
+    none
+  }
+  x.unwrap_or(5)
+}
+
+fn main() -> bool {
+  const hit = port_of(true)
+  const fell_back = port_of(false)
+  const word_hit = word_of(list_get(split("a:b", ':'), 1))
+  const word_miss = word_of(list_get(split("a:b", ':'), 5))
+  const point_hit = point_of(true)
+  const point_back = point_of(false)
+  const lazy_hit = lazy_port(true)
+  const lazy_back = lazy_port(false)
+  const kept = guard(list_get(split("x:y", ':'), 0)).err((_: missing) => "?")
+  const dropped = guard(list_get(split("x:y", ':'), 9)).err((_: missing) => "?")
+  const messy_hit = messy(list_get(split("a:b", ':'), 0))
+  const messy_miss = messy(list_get(split("a:b", ':'), 9))
+  const mapped = reword(false).err((_: bad_port) => "bad")
+  const flowed = reword(true).err((_: bad_port) => "bad")
+  println("hit ${hit} back ${fell_back} point ${point_hit} ${point_back}")
+  println("word ${word_hit} ${word_miss} lazy ${lazy_hit} ${lazy_back}")
+  println("kept ${kept} ${dropped} messy ${messy_hit} ${messy_miss}")
+  println("mapped ${mapped} ${flowed}")
+  hit == 9 && fell_back == 8080 && point_hit == 9 && point_back == 70 && word_hit == "b" && word_miss == "?" && lazy_hit == 3 && lazy_back == 7 && kept == "x" && dropped == "?" && messy_hit == "a" && messy_miss == "e" && mapped == "bad" && flowed == "kept"
+}

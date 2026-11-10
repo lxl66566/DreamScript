@@ -1,0 +1,10 @@
+// One const-receiver rejection [D2, C3]: a `mut` window's exclusivity
+// is by spelling, so the const binding feeding it rejects.
+
+tag int
+struct list[t]
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+fn grow() -> () {
+  const xs = [1]
+  xs.list_push(2)
+}

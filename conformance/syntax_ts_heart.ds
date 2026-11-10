@@ -2,29 +2,27 @@
 // purpose: the full surface program: guards, bare return, ?, .err, interpolation, destructuring, tuple match
 // items:
 // parse_error: stage: typecheck
-// io_error: stage: typecheck
 // user: stage: typecheck
-// sep: stage: parse
+// sep: stage: typecheck
 // parse_age: stage: run
 // parse_user: stage: run
 // main: stage: run
 
 enum parse_error { bad_number(string), missing_field(string) }
-enum io_error { not_found, permission_denied }
 
 struct user {
   name: string,
   age: int,
 }
 
-// F6 byte literal: the record pins `b'x'` as a single byte but names no
-// byte type, so the item parses and stays out of the typecheck gate
+// F6 byte literal: `b'x'` is pinned to the ambient's `tag byte` atom, so
+// the item types with no user declaration
 const sep = b'\n'
 
 fn parse_age(s: string) -> int | parse_error {
   match s.trim().parse_int() {
-    e if e is parse_error => bad_number(s),
-    n                     => n,
+    parse_err => bad_number(s),
+    n         => n,
   }
 }
 
@@ -36,7 +34,7 @@ fn parse_user(row: row) -> user | parse_error {
   user { name, age: parse_age(age)? }
 }
 
-fn main() -> () | io_error {
+fn main() -> () | io_err {
   const rows = load_rows("users.csv")?
   const cfg = read_config("app.cfg").err((e) => {
     println("config failed: ${str(e)}")

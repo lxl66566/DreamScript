@@ -1,0 +1,87 @@
+// purpose: the non-lambda generic container natives route through CALLG
+// [H3, phase 2] — list_len, list_get, list_concat over list[int] and
+// list[string] receivers, map_len, map_get over map[string, int] and
+// map[int, string] — one generic body per native, the receiver's
+// container instance as the evidence words (the UFCS spelling routes the
+// same site), and the checked reads answering their hit and miss
+// members. The container closes [phase 3] join them: cons prepends the
+// element (the evidence word names the element instance), tail drops
+// the first, collect copies, head/first answer the checked first
+// element (the empty list the none member), and max orders the numeric
+// instance its evidence names — int and float both.
+
+tag int
+tag float
+tag string
+
+struct list[t]
+struct map[k, v]
+
+extern fn println (s: string) -> ()
+extern fn list_len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn map_len[k, v] (m: map[k, v]) -> int
+extern fn cons[t] (x: t, xs: list[t]) -> list[t]
+extern fn head[t] (xs: list[t]) -> t?
+extern fn tail[t] (xs: list[t]) -> list[t]
+extern fn collect[t] (xs: list[t]) -> list[t]
+extern fn first[t] (xs: list[t]) -> t?
+extern fn max[t] (a: t, b: t) -> t
+
+fn at_int(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => 0)
+}
+
+fn at_text(xs: list[string], i: int) -> string {
+  const cell = list_get(xs, i)
+  cell.ok((w: string) => w).err((_: none) => "?")
+}
+
+fn port_of(m: map[string, int], key: string) -> int {
+  const cell = map_get(m, key)
+  cell.ok((x: int) => x).err((_: none) => 0)
+}
+
+fn scheme_of(m: map[int, string], port: int) -> string {
+  const cell = map_get(m, port)
+  cell.ok((s: string) => s).err((_: none) => "?")
+}
+
+fn first_int(xs: list[int]) -> int {
+  const cell = head(xs)
+  cell.ok((x: int) => x).err((_: none) => 0)
+}
+
+fn first_text(xs: list[string]) -> string {
+  const cell = first(xs)
+  cell.ok((w: string) => w).err((_: none) => "?")
+}
+
+fn main() -> () {
+  const ints = [1, 2, 3]
+  const texts = ["alpha", "beta"]
+  const doubled = list_concat(ints, ints)
+  const words = list_concat(texts, ["gamma"])
+  println("ints ${ints.list_len()} ${list_len(doubled)} ${at_int(ints, 2)} ${at_int(ints, 9)}")
+  println("texts ${list_len(words)} ${at_text(words, 2)} ${at_text(words, 9)}")
+  var names = map[string, int]()
+  map_set(names, "host", 1)
+  map_set(names, "port", 2)
+  println("names ${map_len(names)} ${port_of(names, "port")} ${port_of(names, "user")}")
+  var schemes = map[int, string]()
+  map_set(schemes, 80, "http")
+  println("schemes ${map_len(schemes)} ${scheme_of(schemes, 80)} ${scheme_of(schemes, 9)}")
+  const closed = cons(7, ints)
+  const headed = cons("delta", words)
+  println("closed ${list_len(closed)} ${first_int(closed)} ${list_len(closed.tail())}")
+  println("headed ${first_text(headed)} ${list_len(tail(headed))}")
+  println("dropped ${first_int(tail(doubled))} ${list_len(collect(words))} ${first_text(collect(words))}")
+  const blank = list[int]()
+  const empty_texts = list[string]()
+  println("blank ${first_int(blank)} ${first_text(empty_texts)}")
+  println("max ${max(3, 9)} ${max(2.5, 2.25)}")
+}

@@ -1,0 +1,46 @@
+// source: F2 "functions are values" and F7's trailing lambda, against the b07 callable-word seam audit 2026-11-10
+// purpose: lambda values in every argument shape typecheck; execution waits on the record's callable-word ruling
+// items:
+// apply: stage: typecheck
+// twice: stage: typecheck
+// call_with_block: stage: typecheck
+// call_with_lambda: stage: typecheck
+// call_one_arg: stage: typecheck
+// call_stored: stage: typecheck
+// call_passed: stage: typecheck
+// capture_over_local: stage: typecheck
+
+fn apply(f: fn() -> int) -> int {
+  f()
+}
+
+fn twice(x: int, f: fn(int) -> int) -> int {
+  f(x) + f(x)
+}
+
+fn call_with_block() -> int {
+  apply() { 42 }
+}
+
+fn call_with_lambda() -> int {
+  apply(() => 42)
+}
+
+fn call_one_arg() -> int {
+  twice(21, (x: int) => x * 2)
+}
+
+fn call_stored() -> int {
+  const g = () => 42
+  g()
+}
+
+fn call_passed() -> int {
+  const g = () => 42
+  apply(g)
+}
+
+fn capture_over_local() -> int {
+  const base = 7
+  apply() { base + 1 }
+}

@@ -48,10 +48,14 @@ struct Memo {
 }
 
 /// One active-stack entry: a key being computed (dependencies accumulate in
-/// `deps`) or being deep-verified (`deps` stays empty).
+/// `deps`) or being deep-verified (`deps` stays empty). `seen` is the set
+/// view of `deps` for duplicate suppression: package-grain computes record
+/// one dependency per registered file, so a linear `contains` went
+/// quadratic in the file count.
 struct Frame {
     key: QueryKey,
     deps: Vec<Dependency>,
+    seen: HashSet<Dependency>,
 }
 
 /// The query database: the only owner of inputs and memos, and the only path
@@ -74,6 +78,9 @@ pub struct Db {
     files: Files,
     /// Per-file revision of the last content change, indexed by file id.
     changed_at: Vec<Revision>,
+    /// Revision of the last change to the registered file set (a file
+    /// registration), read as the [`InputKey::FileSet`] input.
+    file_set_changed_at: Revision,
     memos: HashMap<QueryKey, Memo>,
     /// Reverse dependency edges: dependency -> keys whose memos read it.
     reverse: HashMap<Dependency, HashSet<QueryKey>>,
@@ -124,12 +131,20 @@ impl Db {
     /// Registers `content` under `name` and returns its file id. File ids
     /// are never reused; names are not checked for duplicates.
     ///
+    /// Registration is a change of the file-set input: the revision bumps
+    /// and every memo that read it (the package-grain queries) is marked
+    /// dirty, so a file added after a resolve/type_of memo exists is
+    /// visible on the next read.
+    ///
     /// # Panics
     ///
     /// Panics if the file count overflows `u32`.
     pub fn add_file(&mut self, name: impl Into<String>, content: &str) -> FileId {
         let file = self.files.add_source(name, content);
+        self.revision = Revision(self.revision.as_u64() + 1);
+        self.file_set_changed_at = self.revision;
         self.changed_at.push(self.revision);
+        self.invalidate_from(Dependency::Input(InputKey::FileSet));
         file
     }
 
@@ -153,25 +168,7 @@ impl Db {
         let revision = self.revision;
         self.changed_at[file.as_u32() as usize] = revision;
         self.files.set_source(file, content);
-
-        // Transitive invalidation: mark every memo reachable from the
-        // changed input through the reverse edges. Marking is conservative
-        // (all blocks of the file are reached); the per-block freshness
-        // decision happens later, in deep verification.
-        let mut queue = VecDeque::from([Dependency::Input(InputKey::FileContent(file))]);
-        let mut seen = HashSet::new();
-        while let Some(dep) = queue.pop_front() {
-            let dependents = self.reverse.get(&dep).cloned().unwrap_or_default();
-            for dependent in dependents {
-                if let Some(memo) = self.memos.get_mut(&dependent) {
-                    memo.dirty = true;
-                }
-                let next = Dependency::Query(dependent);
-                if seen.insert(next) {
-                    queue.push_back(next);
-                }
-            }
-        }
+        self.invalidate_from(Dependency::Input(InputKey::FileContent(file)));
         Ok(())
     }
 
@@ -215,8 +212,33 @@ impl Db {
 
     /// Replaces the compute function of a query kind: the hook tests and
     /// embedders use to model not-yet-landed queries.
+    ///
+    /// Existing memos of the kind do not survive the swap: each is dropped
+    /// and its transitive dependents are marked dirty, and the revision
+    /// bumps once when any memo was dropped, so the next read observes the
+    /// new compute instead of a stale memo. Swapping before the first
+    /// query of the kind (the usual shape) changes nothing observable.
     pub fn set_compute(&mut self, kind: QueryKind, compute: ComputeFn) {
         self.computes.insert(kind, compute);
+        let affected: Vec<QueryKey> = self
+            .memos
+            .keys()
+            .filter(|key| key.kind() == kind)
+            .copied()
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+        // Dropping the memos forces a recompute (a dirty memo would
+        // deep-verify against unchanged deps and wrongly renew); the bump
+        // makes every dependent's verification fail, so readers re-derive.
+        self.revision = Revision(self.revision.as_u64() + 1);
+        for key in &affected {
+            self.memos.remove(key);
+        }
+        for key in affected {
+            self.invalidate_from(Dependency::Query(key));
+        }
     }
 
     /// How many times the query's compute function has actually run (debug
@@ -240,6 +262,28 @@ impl Db {
     fn input_changed_at(&self, input: InputKey) -> Revision {
         match input {
             InputKey::FileContent(file) => self.changed_at[file.as_u32() as usize],
+            InputKey::FileSet => self.file_set_changed_at,
+        }
+    }
+
+    /// Transitive invalidation: marks every memo reachable from `dep`
+    /// through the reverse edges dirty. Marking is conservative (all
+    /// blocks of a file are reached); the per-block freshness decision
+    /// happens later, in deep verification.
+    fn invalidate_from(&mut self, dep: Dependency) {
+        let mut queue = VecDeque::from([dep]);
+        let mut seen = HashSet::new();
+        while let Some(dep) = queue.pop_front() {
+            let dependents = self.reverse.get(&dep).cloned().unwrap_or_default();
+            for dependent in dependents {
+                if let Some(memo) = self.memos.get_mut(&dependent) {
+                    memo.dirty = true;
+                }
+                let next = Dependency::Query(dependent);
+                if seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
         }
     }
 }
@@ -279,10 +323,12 @@ impl Ctx<'_> {
         Q::extract(value).ok_or(QueryError::KindMismatch(query_key))
     }
 
-    /// The number of registered files: the package grain of the M2
-    /// checker queries (G3).
-    #[must_use]
-    pub fn file_count(&self) -> usize {
+    /// Reads the file-set input — the number of registered files, the
+    /// package grain of the M2 checker queries (G3) — recording a
+    /// dependency like every input read: registering another file
+    /// invalidates the caller.
+    pub fn file_count(&mut self) -> usize {
+        self.record(Dependency::Input(InputKey::FileSet));
         self.db.changed_at.len()
     }
 
@@ -311,7 +357,7 @@ impl Ctx<'_> {
             .frames
             .last_mut()
             .expect("reads happen only inside a computation");
-        if !frame.deps.contains(&dep) {
+        if frame.seen.insert(dep) {
             frame.deps.push(dep);
         }
     }
@@ -363,6 +409,7 @@ fn ensure(db: &mut Db, key: QueryKey, frames: &mut Vec<Frame>) -> Result<QueryVa
     frames.push(Frame {
         key,
         deps: Vec::new(),
+        seen: HashSet::new(),
     });
     let mut ctx = Ctx { db, frames };
     let result = compute(&mut ctx, key);
@@ -459,6 +506,7 @@ fn verify(
     frames.push(Frame {
         key,
         deps: Vec::new(),
+        seen: HashSet::new(),
     });
     let result = walk(db, deps, verified_at, frames);
     frames.pop();

@@ -1,0 +1,35 @@
+// purpose: the map surface and the `.ok` handler — the `map[k, v]()`
+// constructor builds the map object, `map_set`'s mut window fills it
+// (an overwrite replaces under a content-equal key), the checked read
+// answers a `v | none` union the `.ok`/`.err` handlers extract (hit and
+// miss), and `map_len` counts the entries; a map param rides a local
+// call as one Ref word.
+
+tag int
+tag string
+tag bool
+
+struct map[k, v]
+
+extern fn println (s: string) -> ()
+extern fn map_new () -> map[string, string]
+extern fn map_set (m: mut map[string, string], key: string, value: string) -> ()
+extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn map_len[k, v] (m: map[k, v]) -> int
+
+fn main() -> bool {
+  var m = map[string, string]()
+  map_set(m, "host", "localhost")
+  map_set(m, "host", "example")
+  map_set(m, "port", "8080")
+  const n = map_len(m)
+  const host = lookup(m, "host")
+  const miss = lookup(m, "user")
+  println("n ${n} host ${host} miss ${miss}")
+  n == 2 && host == "example" && miss == "?"
+}
+
+fn lookup(m: map[string, string], key: string) -> string {
+  const cell = map_get(m, key)
+  cell.ok((s: string) => s).err((_: none) => "?")
+}

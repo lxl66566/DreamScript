@@ -10,17 +10,19 @@ use ds_parse::{Ast, parse};
 
 const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 
-/// Ambient stdlib stubs for the corpus file, mirroring conformance/README.md's
-/// types_hybrid ambient list (`read_file`, `parse_json`, `log`,
-/// `default_config`, the `map`/`list` types) plus the primitive type names
-/// and the `get` call the file makes; the M3 stdlib owns their real
-/// spellings.
+/// Ambient stdlib stubs for the corpus file, mirroring the shared
+/// ambient's ownership of the failure taxonomy and the config type plus
+/// the types_hybrid list (`read_file`, `parse_json`, `log`,
+/// `default_config`, the `map`/`list` types) and the `get` call the file
+/// makes; the M3 stdlib owns their real spellings.
 const AMBIENT: &str = concat!(
     "tag int\n",
     "tag float\n",
     "tag string\n",
+    "tag io_err\n",
     "struct list[t]\n",
     "struct map[k, v]\n",
+    "struct config { host: string, port: int?, retries: int }\n",
     "fn read_file(path: string) -> string { \"\" }\n",
     "fn parse_json(text: string) -> string { \"\" }\n",
     "fn log(msg: string) -> () { }\n",
@@ -735,5 +737,41 @@ fn constructor_positions_resolve_against_types() {
         uses.get(span_in(src, file, "page { body } =>", 0, "page")),
         Some(&Res::Def(f.package.lookup_type("page").unwrap())),
         "pattern paths are constructor references"
+    );
+}
+
+#[test]
+fn duplicate_inherent_methods_report_both_spans() {
+    // The method tier registers by name and owner: a second inherent
+    // impl defining the same name reports both spans and keeps the first
+    // registration — the value-namespace duplicate discipline. Two
+    // traits may still share a method name.
+    let f = fixture(&[(
+        "t.ds",
+        concat!(
+            "tag unit_one\n",
+            "impl unit_one { fn m(self) -> unit_one { self } }\n",
+            "impl unit_one { fn m(self) -> unit_one { self } }\n",
+        ),
+    )]);
+    assert_eq!(f.collect.len(), 1);
+    assert_eq!(f.collect[0].code, ErrorCode::DuplicateDefinition);
+    assert_eq!(f.collect[0].labels.len(), 2, "two-span diagnostic");
+    assert_eq!(
+        f.package.method_candidates("m").len(),
+        1,
+        "the first registration wins"
+    );
+
+    let shared = resolve_one(concat!(
+        "tag unit_one\n",
+        "trait a { fn m(self) -> unit_one }\n",
+        "trait b { fn m(self) -> unit_one }\n",
+    ));
+    assert!(shared.collect.is_empty(), "{:?}", shared.collect);
+    assert_eq!(
+        shared.package.method_candidates("m").len(),
+        2,
+        "two traits share the name"
     );
 }

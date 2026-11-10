@@ -6,16 +6,18 @@ use super::*;
 
 impl Bodies<'_> {
     /// One match-arm pattern against a scrutinee type: the atoms it
-    /// covers.
+    /// covers plus its binder tuples `(name, span, ty)` from the same
+    /// walk.
     pub(crate) fn pattern_cover(
         &mut self,
         pat: &Pattern,
         scrut: Ty,
         ann: Option<&Type>,
-    ) -> Vec<TypeId> {
+    ) -> (Vec<TypeId>, Vec<(String, Span, Ty)>) {
         let mut covered = Vec::new();
-        self.pattern_walk(pat, scrut, ann, &mut covered, &mut Vec::new(), 0, true);
-        covered
+        let mut binders = Vec::new();
+        self.pattern_walk(pat, scrut, ann, &mut covered, &mut binders, 0, true);
+        (covered, binders)
     }
 
     /// Binds one declaration pattern's binders into the current scope.
@@ -42,13 +44,6 @@ impl Bodies<'_> {
                 (name, def, ty)
             })
             .collect()
-    }
-
-    pub(crate) fn pattern_def(&self, local: &LocalDecl) -> Option<DefId> {
-        match &local.pat {
-            Pattern::Binding { name, .. } => self.package.lookup_value(&name.name),
-            _ => None,
-        }
     }
 
     /// One pattern walk: coverage accumulates into `covered`, binder

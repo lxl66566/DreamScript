@@ -17,6 +17,16 @@ pub enum ModuleBuildError {
     DuplicateFunction(String),
     /// A function's pool exceeds the u16 index space the encoding addresses.
     PoolTooLarge { func: String, len: usize },
+    /// A function's frame exceeds the u8 slot space the ISA addresses —
+    /// the same width limit the lowerer enforces, caught here so a
+    /// producer bypassing ds-lower fails at load instead of panicking at
+    /// a slot operand.
+    FrameTooWide {
+        /// The function whose layout is too wide.
+        func: String,
+        /// The layout's slot count.
+        slots: usize,
+    },
     /// A body word does not decode: the stream is not canonical.
     BodyDecode {
         /// The function whose body is malformed.
@@ -99,11 +109,12 @@ pub struct ModuleVersion {
 }
 
 impl ModuleVersion {
-    /// Loads a version: rejects duplicate names, decode-checks every body
-    /// word, cross-checks each `FUNCF` against its layout, validates every
-    /// pool access, and assigns function-table indices (which become entry
-    /// descriptor word 0). The tier-2 word stays null; it flips exactly once
-    /// when the JIT compiles the function [H2].
+    /// Loads a version: rejects duplicate names, checks every frame against
+    /// the ISA's u8 slot space, decode-checks every body word, cross-checks
+    /// each `FUNCF` against its layout, validates every pool access, and
+    /// assigns function-table indices (which become entry descriptor word
+    /// 0). The tier-2 word stays null; it flips exactly once when the JIT
+    /// compiles the function [H2].
     pub fn new(name: impl Into<String>, defs: Vec<FunctionDef>) -> Result<Self, ModuleBuildError> {
         let mut functions = Vec::with_capacity(defs.len());
         let mut index = BTreeMap::new();
@@ -157,6 +168,13 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
             len: def.pool.len(),
         });
     }
+    // slot operands are u8-encoded: a wider frame could never be addressed
+    if def.layout.slots().len() > usize::from(u8::MAX) {
+        return Err(ModuleBuildError::FrameTooWide {
+            func: def.name.clone(),
+            slots: def.layout.slots().len(),
+        });
+    }
     for (pc, &word) in def.code.iter().enumerate() {
         let pc = u32::try_from(pc).expect("pc fits u32");
         let inst = Inst::decode(pc, word).map_err(|cause| ModuleBuildError::BodyDecode {
@@ -194,13 +212,17 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
         }
         // which pool kinds each loading opcode accepts, and the primary
         // kind its trap names: KIMM loads i64 entries, KCONST the non-i64
-        // constant words (this VM executes f64 and bool), KSTR the string
-        // entries, CALL/CALLT the function references
+        // constant words (this VM executes f64, bool, and fn words), KSTR
+        // the string entries, CALL/CALLT/CALLG the function references
         let (kidx, accepts, expected): (_, &[_], _) = match op {
             Uop::Kimm { kidx, .. } => (kidx, &[ConstKind::I64], ConstKind::I64),
-            Uop::Kconst { kidx, .. } => (kidx, &[ConstKind::F64, ConstKind::Bool], ConstKind::F64),
+            Uop::Kconst { kidx, .. } => (
+                kidx,
+                &[ConstKind::F64, ConstKind::Bool, ConstKind::FuncRef],
+                ConstKind::F64,
+            ),
             Uop::Kstr { kidx, .. } => (kidx, &[ConstKind::Str], ConstKind::Str),
-            Uop::Call { callee, .. } | Uop::Callt { callee, .. } => {
+            Uop::Call { callee, .. } | Uop::Callt { callee, .. } | Uop::Callg { callee, .. } => {
                 (callee, &[ConstKind::FuncRef], ConstKind::FuncRef)
             },
             _ => continue,
@@ -257,6 +279,12 @@ impl ModuleSlots {
 pub struct ModuleRegistry {
     modules: BTreeMap<String, ModuleSlots>,
     natives: BTreeMap<String, Arc<Vec<NativeFunction>>>,
+    /// The module-id space scalar FuncRef words address (F2): one id per
+    /// module name, assigned at first install and stable across swaps.
+    /// Name-keyed modules are the interim until the ds-mod link table
+    /// assigns module indices, mirroring the pool FuncRef's name-keyed
+    /// interim.
+    id_names: Vec<String>,
 }
 
 impl ModuleRegistry {
@@ -285,7 +313,23 @@ impl ModuleRegistry {
                 });
             },
         }
+        if !self.id_names.iter().any(|n| n == &installed.name) {
+            self.id_names.push(installed.name.clone());
+        }
         installed
+    }
+
+    /// The module id a scalar FuncRef word addresses (F2): assigned at
+    /// first install, kept across hot-reload swaps.
+    #[must_use]
+    pub fn module_id(&self, module: &str) -> Option<u32> {
+        u32::try_from(self.id_names.iter().position(|n| n == module)?).ok()
+    }
+
+    /// The module name an id addresses, for call-time resolution of
+    /// scalar FuncRef words.
+    pub(crate) fn module_name(&self, module: u32) -> Option<&str> {
+        self.id_names.get(module as usize).map(String::as_str)
     }
 
     /// Resolves a function by name through the module's current slot, for
@@ -370,6 +414,27 @@ mod tests {
             ModuleVersion::new("m", vec![empty_def("a"), empty_def("a")]).unwrap_err(),
             ModuleBuildError::DuplicateFunction("a".into())
         );
+    }
+
+    #[test]
+    fn frames_past_the_u8_slot_space_are_rejected_at_load() {
+        // slot operands are u8-encoded: a producer bypassing ds-lower's
+        // width check fails here, never at a runtime slot conversion
+        let mut def = empty_def("wide");
+        def.layout =
+            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::I64; 256], 0, 0).expect("valid layout");
+        assert_eq!(
+            ModuleVersion::new("m", vec![def]).unwrap_err(),
+            ModuleBuildError::FrameTooWide {
+                func: "wide".into(),
+                slots: 256,
+            }
+        );
+        // u8::MAX slots is the widest addressable frame and loads
+        let mut def = empty_def("edge");
+        def.layout =
+            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::I64; 255], 0, 0).expect("valid layout");
+        assert!(ModuleVersion::new("m", vec![def]).is_ok());
     }
 
     #[test]

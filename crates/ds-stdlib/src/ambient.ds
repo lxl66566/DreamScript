@@ -3,10 +3,12 @@
 // std platform natives the host installs). Registered as a package member
 // before the user's sources; the package namespace is two [G3, F9] —
 // types and values — so `struct map` and `fn map` coexist, and a name may
-// be redeclared by a corpus file only in the other namespace. Per-file
-// types (config, io_err, file, url, net_err, ord, json, the stack API)
-// stay file-owned: failure sets ride the `error` effect row
-// (declared_rows), never a file-owned union.
+// be redeclared by a corpus file only in the other namespace. The
+// fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
+// parse_err — the runtime discriminants the platform natives answer), so
+// the five fallible reads return real success unions. Still file-owned:
+// file, url, raw_fd, ord, json, and the stack API — `open`/`read_exact`
+// stay absent because their signatures cannot name the caller's `file`.
 
 trait Copyable { }
 
@@ -15,17 +17,37 @@ tag float
 tag bool
 tag string
 tag char
+// The b'x' literal's atom [F6]: its own u8 width class, outside
+// the int conversion family.
+tag byte
 tag bytes
 tag u32
 
 struct list[t]
 struct map[k, v]
 
+// The failure taxonomy of the fallible natives: the platform tags the
+// runtime discriminants answer (io_err for the file surface, parse_err
+// for the pure readers). net_err keeps the record's own two-case shape.
+tag io_err
+tag parse_err
+enum net_err {
+  timeout
+  refused
+}
+
 // A text row: keyed lookup over strings (get feeds the first parameter).
 type row = map[string, string]
 
+// The config the readers answer and the fallback rebuilds (the optional
+// port is the tutorial's b14 extraction shape; an int constructs in).
+struct config { host: string, port: int?, retries: int }
+
 // The fetch result; body extraction is consume.
 struct response
+
+// The nursery demo's fixed page list.
+const urls = ["https://ds.dev", "https://example.org"]
 
 extern fn get[k, v] (m: map[k, v], key: k) -> v | none
 extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
@@ -37,10 +59,14 @@ extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn map_new[k, v] () -> map[k, v]
+extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn map_len[k, v] (m: map[k, v]) -> int
 extern fn join (parts: list[string], sep: string) -> string
 extern fn len[t] (xs: t) -> int
 extern fn trim (s: string) -> string
-extern fn parse_int (s: string) -> int
+extern fn parse_int (s: string) -> int | parse_err
 extern fn split (s: string, sep: char) -> list[string]
 extern fn substring (s: string, start: int, end: int) -> string
 extern fn concat (a: string, b: string) -> string
@@ -58,7 +84,7 @@ extern fn print (msg: string) -> ()
 extern fn log (msg: string) -> ()
 extern fn close (fd: int) -> ()
 extern fn to_u32_le (b: bytes) -> u32
-extern fn read_file (path: string) -> string
+extern fn read_file (path: string) -> string | io_err
 extern fn write_file (path: string, contents: string) -> ()
 extern fn file_exists (path: string) -> bool
 extern fn fs_list (dir: string) -> list[string]
@@ -69,11 +95,20 @@ extern fn net_recv (conn: int, max_bytes: int) -> string
 extern fn net_close (conn: int) -> ()
 extern fn http_get (url: string) -> string
 extern fn parse_json (text: string) -> string
-extern fn load_rows (path: string) -> list[row]
-extern fn fetch (u: string) -> response
+extern fn load_rows (path: string) -> list[row] | io_err
+extern fn read_config (path: string) -> config | io_err
+extern fn default_config () -> config
+extern fn fetch (u: string) -> response | net_err
 extern fn consume (r: response) -> string
 extern fn cancel[t] (e: t) -> ()
 extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+// The E4 extraction family: calls type locally against the checked
+// receiver (unwrap_or's fallback is eager, unwrap_or_else's lambda runs
+// only on the none side), composed with `?` for early exits.
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
+extern fn ok_or[t, e] (x: t?, err: e) -> t | e
+extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
 extern fn die[t] (msg: string) -> t
 extern fn max[t] (a: t, b: t) -> t

@@ -188,6 +188,61 @@ fn a_shared_call_argument_dups_at_the_call_and_the_callee_drops_at_its_last_use(
     );
 }
 
+const WILD_DISCARD_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+fn main() -> int {
+  const s = \"kept\"
+  const _ = \"dropped\"
+  const _ = s
+  println(s)
+  0
+}";
+
+/// `const _ = e` discards the initializer: the wildcard binds no name,
+/// so a fresh reference dies at the statement (its dec sits right there)
+/// and an aliased one keeps its binder's death untouched. The heap
+/// drains through both.
+#[test]
+fn a_wildcard_const_binding_discards_and_keeps_alias_deaths() {
+    let lowered = lower_inline(WILD_DISCARD_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let ops = rc_ops(placed);
+    // two decs: the discarded literal at its statement, s at its final
+    // use (the println read); the `const _ = s` alias adds none
+    assert_eq!(
+        ops.len(),
+        2,
+        "the wildcard discard owns exactly two decs: {ops:?}"
+    );
+    assert!(ops.iter().all(|op| matches!(op, RcOp::Dec { .. })));
+    // the discard dec precedes the println call (it follows the dropped
+    // literal's own Kstr), the kept dec follows the call
+    let drop_at = placed
+        .iter()
+        .position(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
+        .expect("the discard dec is placed");
+    let call_at = placed
+        .iter()
+        .position(|op| matches!(op, PlacedOp::Uop(Uop::Call { .. })))
+        .expect("the println call is placed");
+    assert!(
+        drop_at < call_at,
+        "the discarded literal dies at its statement, before the use"
+    );
+    assert_eq!(
+        run_main(
+            &lowered,
+            WILD_DISCARD_SOURCE,
+            "kept
+"
+        ),
+        Value::I64(0)
+    );
+}
+
 const REUSE_SOURCE: &str = "
 tag int
 tag string

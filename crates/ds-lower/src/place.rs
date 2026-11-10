@@ -29,7 +29,10 @@
 //!
 //! Branches fork the ownership map per arm and rejoin by intersection: a
 //! word stays owned after the join exactly when every non-diverging arm
-//! kept it, so each runtime path drops each count once. The deinit hook
+//! kept it, and an arm keeping a word the join does not keep decs it at
+//! its own flow end (the balanced join: a count produced or kept on one
+//! arm's path dies inside that arm), so each runtime path drops each
+//! count once. The deinit hook
 //! (C5) rides the drop: when the dying word's concrete type carries a
 //! `deinit`, the drop first stages the word and calls the static deinit
 //! target, then emits the `RCDEC`.
@@ -99,6 +102,10 @@ pub(crate) struct Placement {
     loop_depth: usize,
     /// Staged Ref words a native borrow must drop after its call.
     native_pending: Vec<u8>,
+    /// Whether the walk's current path exited the frame since the last
+    /// fork (an arm that exits never reaches the join, so its state
+    /// must not constrain what the join keeps).
+    diverged: bool,
 }
 
 impl Placement {
@@ -126,6 +133,7 @@ impl Placement {
             forwarded: HashSet::new(),
             loop_depth: 0,
             native_pending: Vec::new(),
+            diverged: false,
         }
     }
 
@@ -295,11 +303,15 @@ impl Placement {
     /// One Ref word staged for a native call: a transient borrow window —
     /// no dup, ever; a dying source drops right after the call returns
     /// (retaining natives acquire their own counts inside the call, so
-    /// the drop never steals a stored copy's count). A tail-position
-    /// native never returns to this frame, so a staged source there is
-    /// abandoned, not dropped (named corner: the dec has no legal
-    /// position — the frame exits next, and a dec would free the object
-    /// the still-running native reads; the count dies with the program).
+    /// the drop never steals a stored copy's count). `tail` marks the
+    /// root frame's tail transfer (CALLT-to-native pops the frame inside
+    /// the instruction, so the dec has no legal position and a pre-call
+    /// dec would free the object the still-running native reads): the
+    /// staged source is abandoned there, and the count dies with the
+    /// program — sound only because that transfer ends the program. Every
+    /// other frame passes `false` even in tail position (the walk lowers
+    /// the call in place and returns), keeping the borrow window
+    /// flushable.
     pub(crate) fn staged_native(&mut self, src: u8, tail: bool) {
         if !self.owned.contains_key(&src) {
             return;
@@ -323,7 +335,7 @@ impl Placement {
     /// The central drop: the deinit hook (C5) stages the word and calls
     /// the static target first when the concrete type carries one, then
     /// the RCDEC consumes the count (a unique death pools the block for
-    /// reuse inside `ds_rt::Heap` — the dec-to-alloc pairing needs no uop).
+    /// reuse inside the `ds-vm/src/object.rs` store — the dec-to-alloc pairing needs no uop).
     fn drop_word(&mut self, code: &mut Vec<Op>, word: u8) {
         let owned = self.owned.remove(&word).unwrap_or(Owned {
             deinit: None,
@@ -356,6 +368,14 @@ impl Placement {
         });
     }
 
+    /// One branch arm's epilogue: every word the join does not keep dies
+    /// inside its arm, deinit hook first like every drop.
+    pub(crate) fn emit_drops(code: &mut Vec<Op>, dying: &[(u8, Owned)]) {
+        for (word, owned) in dying {
+            Self::emit_drop(code, *word, owned.deinit);
+        }
+    }
+
     // ---- loops and branches ----------------------------------------------------------
 
     /// Enters a loop body: uses at the deeper depth never kill productions
@@ -373,14 +393,66 @@ impl Placement {
         self.owned.clone()
     }
 
-    /// Installs a snapshot (an arm's walk mutates from there).
+    /// Installs a snapshot (an arm's walk mutates from there; the arm
+    /// starts on a path that has not exited).
     pub(crate) fn restore(&mut self, state: State) {
         self.owned = state;
+        self.diverged = false;
+    }
+
+    /// Whether the current path exited the frame since the last fork.
+    pub(crate) fn diverged(&self) -> bool {
+        self.diverged
     }
 
     /// Takes the current snapshot (arm end).
     pub(crate) fn take(&mut self) -> State {
         std::mem::take(&mut self.owned)
+    }
+
+    /// The balanced branch join: installs the intersection of the
+    /// non-diverging arms (an arm that exited the frame never reaches
+    /// the join, so it constrains nothing) and returns, per arm, the
+    /// words it owns beyond that intersection. A count kept on one
+    /// arm's path only dies inside that arm, so the caller splices each
+    /// arm's epilogue decs in before its jump to the join point; a
+    /// diverging arm owns nothing (its exit path dropped from its own
+    /// state).
+    pub(crate) fn reconcile(&mut self, arms: &[(State, bool)]) -> Vec<Vec<(u8, Owned)>> {
+        self.diverged = false;
+        let live: Vec<&State> = arms
+            .iter()
+            .filter(|(_, diverged)| !diverged)
+            .map(|(state, _)| state)
+            .collect();
+        let keep: State = match live.first() {
+            Some(first) => first
+                .iter()
+                .filter(|(word, _)| live.iter().all(|arm| arm.contains_key(word)))
+                .map(|(word, owned)| (*word, *owned))
+                .collect(),
+            // every arm exited: no path reaches the join, nothing flows on
+            None => State::new(),
+        };
+        let dying = arms
+            .iter()
+            .map(|(state, diverged)| {
+                if *diverged {
+                    Vec::new()
+                } else {
+                    state
+                        .iter()
+                        .filter(|(word, _)| !keep.contains_key(word))
+                        .map(|(word, owned)| (*word, *owned))
+                        .collect()
+                }
+            })
+            .collect();
+        self.owned = keep;
+        for word in self.owned.keys().copied().collect::<Vec<_>>() {
+            self.recompute_death(word);
+        }
+        dying
     }
 
     /// Rejoins branch arms: a word stays owned exactly when every arm kept
@@ -417,6 +489,7 @@ impl Placement {
             Self::emit_drop(code, word, owned.deinit);
         }
         self.owned.clear();
+        self.diverged = true;
     }
 }
 
@@ -576,5 +649,63 @@ mod tests {
             "exactly one dec for the surviving count"
         );
         assert!(rc.owned.is_empty(), "the frame ended on this path");
+    }
+
+    /// The balanced join: an arm owning a word the join does not keep
+    /// reports it, so its epilogue decs the count its path owns; an arm
+    /// that exited the frame constrains nothing.
+    #[test]
+    fn a_branch_arm_reports_what_it_owns_beyond_the_join() {
+        let mut rc = placement();
+        rc.produced(1, None);
+        let base = rc.save();
+        // arm A also produces 2 and keeps both words
+        rc.produced(2, None);
+        let arm_a = rc.take();
+        rc.restore(base);
+        // arm B keeps only the base word
+        let arm_b = rc.take();
+        let dying = rc.reconcile(&[(arm_a, false), (arm_b, false)]);
+        assert!(rc.owned.contains_key(&1), "the shared word survives");
+        assert!(
+            !rc.owned.contains_key(&2),
+            "the one-arm word leaves the state"
+        );
+        let [a, b] = &dying[..] else {
+            panic!("one dying list per arm: {dying:?}");
+        };
+        let [(word, owned)] = a.as_slice() else {
+            panic!("arm A owns exactly the one-arm word: {a:?}");
+        };
+        assert_eq!(*word, 2, "arm A's epilogue decs the one-arm word");
+        assert!(owned.deinit.is_none());
+        assert!(b.is_empty(), "arm B owns nothing beyond the join");
+        // the epilogue carries the dec for the arm's own count
+        let mut code = Vec::new();
+        Placement::emit_drops(&mut code, a);
+        assert_eq!(
+            code,
+            vec![Op::RcDec { src: Slot::body(2) }],
+            "the arm's epilogue is exactly the dec it owes"
+        );
+
+        // a diverging arm (an exit cleared its state) never constrains
+        // the join: what the surviving arm owns flows past unchanged
+        let mut rc = placement();
+        rc.produced(1, None);
+        let base = rc.save();
+        let mut code = Vec::new();
+        rc.exit(&mut code, &[]);
+        let exit_div = rc.diverged();
+        let arm_exit = rc.take();
+        rc.restore(base);
+        rc.produced(2, None);
+        let arm_live = rc.take();
+        let dying = rc.reconcile(&[(arm_exit, exit_div), (arm_live, false)]);
+        assert!(rc.owned.contains_key(&1) && rc.owned.contains_key(&2));
+        assert!(
+            dying[0].is_empty() && dying[1].is_empty(),
+            "the exiting arm owes nothing and the live arm keeps all"
+        );
     }
 }

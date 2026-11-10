@@ -2,11 +2,17 @@
 
 use ds_diag::FileId;
 
+use crate::error::QueryError;
+
 /// Placeholder identifier of one definition, to be replaced by the real id
 /// type when the definition table lands. Carried by the [`QueryKey`]
-/// def-keyed variants; the M2 `linearity_check` compute reads it as the
-/// packed pair `(file << 8) | block`, so a definition is its `##` block
-/// until real identity arrives.
+/// def-keyed variants in two spellings: the M2 `type_of` and
+/// `linearity_check` computes read it as the packed pair
+/// `(file << 8) | block` — a definition is its `##` block until real
+/// identity arrives, and the pair must be built by [`DefId::from_block`],
+/// which rejects what the 8-bit block field cannot hold (a packed block
+/// 256 would silently alias the next file's block 0) — while `effects_of`
+/// reads it as the definition's package index.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DefId(u32);
 
@@ -15,6 +21,22 @@ impl DefId {
     #[must_use]
     pub const fn new(id: u32) -> Self {
         Self(id)
+    }
+
+    /// Packs one block's `(file << 8) | block` pair: the identity the
+    /// `type_of` and `linearity_check` keys carry. The block field is 8
+    /// bits and the file field 24, so a pair past either bound is rejected
+    /// here rather than packed into the next file's block 0.
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::DefIdOverflow`] when `block.index` exceeds `0xff` or
+    /// the file id exceeds `0xff_ffff`.
+    pub const fn from_block(block: BlockId) -> Result<Self, QueryError> {
+        if block.index > 0xff || block.file.as_u32() > 0xff_ffff {
+            return Err(QueryError::DefIdOverflow(block));
+        }
+        Ok(Self((block.file.as_u32() << 8) | block.index))
     }
 
     /// Returns the raw identifier.
@@ -143,6 +165,10 @@ pub enum QueryKind {
 pub enum InputKey {
     /// The full source text of one file.
     FileContent(FileId),
+    /// The registered file set itself: the package-grain queries read its
+    /// size through [`Ctx::file_count`](crate::Ctx::file_count), so
+    /// registering a file invalidates them like any input change.
+    FileSet,
 }
 
 /// One edge in the dependency graph: a query read an input or another

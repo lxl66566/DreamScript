@@ -638,34 +638,15 @@ impl Walker<'_, '_> {
             .find(|&m| self.package.method(m).owner == MethodOwner::Trait(trait_def))
     }
 
-    /// The package definitions a top-level binding pattern declares.
+    /// The package definitions a top-level binding pattern declares,
+    /// through the shared binder walker.
     fn pattern_defs(&self, pat: &Pattern, out: &mut Vec<DefId>) {
-        match pat {
-            Pattern::Binding { name, .. } => {
-                if let Some(def) = self.package.lookup_value(&name.name) {
-                    if !out.contains(&def) {
-                        out.push(def);
-                    }
+        for (_, name) in crate::pattern::pattern_binders(pat) {
+            if let Some(def) = self.package.lookup_value(name) {
+                if !out.contains(&def) {
+                    out.push(def);
                 }
-            },
-            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
-                for pat in pats {
-                    self.pattern_defs(pat, out);
-                }
-            },
-            Pattern::Struct { fields, .. } => {
-                for (_, field) in fields {
-                    if let Some(pat) = field {
-                        self.pattern_defs(pat, out);
-                    }
-                }
-            },
-            Pattern::Wildcard(_)
-            | Pattern::Literal { .. }
-            | Pattern::Str { .. }
-            | Pattern::RawStr { .. }
-            | Pattern::Path { .. }
-            | Pattern::Call { .. } => {},
+            }
         }
     }
 
@@ -701,6 +682,14 @@ impl Walker<'_, '_> {
             Expr::Index { recv, index, .. } => {
                 self.expr(recv, mask);
                 self.expr(index, mask);
+            },
+            // The map application's bracketed arguments are type spellings
+            // [F9]; they carry no value effects, and the head is a type
+            // name — the list application's walk treats its own head the
+            // same way.
+            Expr::MapApply { key, value, .. } => {
+                self.expr(key, mask);
+                self.expr(value, mask);
             },
             Expr::Try { expr, .. } => {
                 self.intrinsic(Effect::Error);

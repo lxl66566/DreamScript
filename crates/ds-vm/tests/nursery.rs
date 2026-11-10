@@ -11,6 +11,9 @@
 //!   child finishes its in-flight work and lands (`Completed`) under the flag.
 //! - the ledger: a child that trapped under an earlier host drive is unioned out at the join and
 //!   cancels the rest.
+//! - trap attribution: a trap escaping a child's drive (the child resumed a fiber that trapped)
+//!   ledgers the fiber the drive ended on; the parked resumer is bounced back in and lands — under
+//!   the join driver and under a host `resume_fiber` alike.
 //! - bare detach: a bare host spawn routes into the live root nursery; with none live the host is
 //!   the supervisor and the spawn detaches.
 //! - the debug join native: parks the joiner, drives the nursery, answers the failed-children
@@ -579,6 +582,67 @@ fn join_survives_a_child_left_parked_on_a_dead_resumer() {
         vm.join_nursery(n),
         Ok(JoinOutcome::Joined(vec![Value::I64(5), Value::I64(6)]))
     );
+}
+
+#[test]
+fn a_trap_under_a_child_resume_blames_the_trapped_fiber() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    // the resumer is driven first (spawn order): it parks at its resume of
+    // the victim, and the victim traps mid-drive — the trap escapes the
+    // drive attributed to the victim, never to the parked resumer
+    let resumer = vm
+        .spawn_fiber_in(n, "nb", "resume_like", &[Value::I64(2)])
+        .expect("spawn resumer");
+    let victim = vm
+        .spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn victim");
+    assert_eq!((resumer, victim), (FiberId(1), FiberId(2)));
+    // the victim ledgers Trapped (flag up); the innocent resumer is
+    // bounced back in and lands on the none tag — no misattributed kill,
+    // no never-ledgered Running zombie, no drain panic
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![
+            ChildOutcome::Completed(Value::Tag(PLATFORM_NONE)),
+            ChildOutcome::Trapped(Trap::DivideByZero),
+        ]))
+    );
+    assert_eq!(vm.fiber_state(resumer), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(victim), Some(FiberState::Dead));
+    assert_eq!(vm.nursery_cancelled(n), Some(true));
+}
+
+#[test]
+fn a_trap_under_a_host_resume_blames_the_trapped_fiber() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let resumer = vm
+        .spawn_fiber_in(n, "nb", "resume_like", &[Value::I64(2)])
+        .expect("spawn resumer");
+    let victim = vm
+        .spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn victim");
+    // the host drive ends on the victim's trap: the ledger records the
+    // victim (flag up), the request fiber keeps its parked continuation —
+    // it is innocent, not the trapper
+    assert_eq!(
+        vm.resume_fiber(resumer, Value::I64(0)),
+        Err(Trap::DivideByZero)
+    );
+    assert_eq!(vm.fiber_state(resumer), Some(FiberState::Suspended));
+    assert_eq!(vm.fiber_state(victim), Some(FiberState::Running));
+    // the boundary still completes: the parked resumer is bounced in and
+    // lands, the interrupted victim reports trapped
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![
+            ChildOutcome::Completed(Value::Tag(PLATFORM_NONE)),
+            ChildOutcome::Trapped(Trap::DivideByZero),
+        ]))
+    );
+    assert_eq!(vm.fiber_state(resumer), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(victim), Some(FiberState::Dead));
 }
 
 #[test]

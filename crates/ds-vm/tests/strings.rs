@@ -1,6 +1,7 @@
 //! String natives: hand-assembled fixtures over the builtin core native
-//! module's pure string surface (`len`, `substring`, `concat`, `to_upper`,
-//! `to_lower`, `trim`, `parse_int`, `split`, `char_at`). Direct value
+//! module's pure string surface (`substring`, `concat`, `to_upper`,
+//! `to_lower`, `trim`, `parse_int`, `split`, `char_at`, and the generic
+//! `len` through CALLG with its evidence word). Direct value
 //! assertions run each native through `CALL` and read the result word (or
 //! the list object's parts) back through the VM's heap; the golden fixture
 //! prints the composed pipeline byte-exact.
@@ -14,9 +15,9 @@
 //! words stage arguments first.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
-        ConstIdx, FrameLayout, SlotType,
+        ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, I64, Raw, Ref, Tag},
         uop::Uop,
     },
@@ -100,12 +101,15 @@ fn st_registry() -> ModuleRegistry {
     ])
 }
 
-/// `(s: string) -> int`: `len` overlays one word.
+/// `(s: string) -> int`: the generic `len` overlays one word. The call is
+/// a CALLG — the receiver stages at overlay word 0 and the evidence word
+/// (k0, the string instance id) at overlay word 1.
 fn measure() -> FunctionDef {
-    def("measure", &[Ref, I64, Raw], 1, 1, &[
-        Uop::Funcf { frame_slots: 3 },
+    def("measure", &[Ref, I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 4 },
         Uop::Mov { dst: 2, src: 0 },
-        Uop::Call {
+        Uop::Kimm { dst: 3, kidx: k(0) },
+        Uop::Callg {
             callee: k(6),
             nargs: 1,
         },
@@ -304,7 +308,8 @@ fn report() -> FunctionDef {
             nargs: 1,
         },
         Uop::Mov { dst: 4, src: 2 },
-        Uop::Call {
+        Uop::Kimm { dst: 5, kidx: k(0) },
+        Uop::Callg {
             callee: k(6),
             nargs: 1,
         },
@@ -366,6 +371,111 @@ fn len_counts_chars_not_bytes() {
     assert_eq!(vm.run("st", "measure", &ascii), Ok(Value::I64(5)));
     assert_eq!(vm.run("st", "measure", &utf8), Ok(Value::I64(5)));
     assert_eq!(vm.run("st", "measure", &empty), Ok(Value::I64(0)));
+}
+
+/// The generic `len` dispatches its ONE body on the evidence word: the
+/// list instance counts elements where the string instance counts chars,
+/// the same FuncRef addressing both. A standalone module, because the
+/// shared fixture pool has no string separator or instance constants.
+#[test]
+fn len_dispatches_the_one_body_on_the_evidence_word() {
+    let pool = vec![
+        Const::I64(1),          // k0: the list instance id
+        Const::Str(";".into()), // k1: the split separator
+        builtin(BUILTIN_SPLIT), // k2
+        builtin(BUILTIN_LEN),   // k3
+    ];
+    let body = [
+        Uop::Funcf { frame_slots: 3 },
+        // overlay 0 stages the text, overlay 1 the separator
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kstr { dst: 2, kidx: k(1) },
+        Uop::Call {
+            callee: k(2),
+            nargs: 2,
+        },
+        // the split result sits on overlay 0; the evidence word restages
+        // overlay 1 as the list instance
+        Uop::Kimm { dst: 2, kidx: k(0) },
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        },
+        Uop::Ret { src: 1 },
+    ];
+    let def = FunctionDef {
+        name: "count_list".into(),
+        layout: FrameLayout::new(vec![Raw, Raw, Raw], 1, 2).expect("valid fixture layout"),
+        pool,
+        code: assemble(&body).expect("fixture body encodes"),
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.install(ModuleVersion::new("st", vec![def]).expect("valid fixture module"));
+    let mut vm = Vm::new(reg);
+    let args = [string(&mut vm, "alpha;beta;gamma")];
+    assert_eq!(vm.run("st", "count_list", &args), Ok(Value::I64(3)));
+    let args = [string(&mut vm, "solo")];
+    assert_eq!(vm.run("st", "count_list", &args), Ok(Value::I64(1)));
+}
+
+/// A CALLG site must stage the callee's whole constraint list: an overlay
+/// too narrow for the evidence word traps before the body runs, and a
+/// body handed an unknown instance id traps too (lowering only mints the
+/// builtin instance vocabulary).
+#[test]
+fn callg_sites_trap_on_missing_or_unknown_evidence() {
+    // evidence word staged past a one-word overlay area
+    let pool = vec![Const::I64(1), builtin(BUILTIN_LEN)];
+    let body = [
+        Uop::Funcf { frame_slots: 2 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Callg {
+            callee: k(1),
+            nargs: 1,
+        },
+        Uop::Ret { src: 1 },
+    ];
+    let def = FunctionDef {
+        name: "narrow".into(),
+        layout: FrameLayout::new(vec![Raw, Raw], 1, 1).expect("valid fixture layout"),
+        pool,
+        code: assemble(&body).expect("fixture body encodes"),
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.install(ModuleVersion::new("st", vec![def]).expect("valid fixture module"));
+    let mut vm = Vm::new(reg);
+    let args = [string(&mut vm, "hello")];
+    assert!(matches!(
+        vm.run("st", "narrow", &args),
+        Err(Trap::CallLayout(SlideError::StagingTooSmall { .. }))
+    ));
+
+    // an evidence word naming no builtin instance
+    let pool = vec![Const::I64(99), builtin(BUILTIN_LEN)];
+    let body = [
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(0) },
+        Uop::Callg {
+            callee: k(1),
+            nargs: 1,
+        },
+        Uop::Ret { src: 1 },
+    ];
+    let def = FunctionDef {
+        name: "wild".into(),
+        layout: FrameLayout::new(vec![Raw, Raw, Raw], 1, 2).expect("valid fixture layout"),
+        pool,
+        code: assemble(&body).expect("fixture body encodes"),
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.install(ModuleVersion::new("st", vec![def]).expect("valid fixture module"));
+    let mut vm = Vm::new(reg);
+    let args = [string(&mut vm, "hello")];
+    assert!(matches!(
+        vm.run("st", "wild", &args),
+        Err(Trap::UnknownInstance { evidence: 99 })
+    ));
 }
 
 #[test]
@@ -498,4 +608,75 @@ fn the_composed_pipeline_prints_the_golden_stdout() {
         vm.captured_output(),
         b"DreamScript rocks\nDREAMSCRIPT ROCKS\nDre\nD\n17\n",
     );
+}
+
+/// Multi-byte text through the clamped surface: cuts land between
+/// scalars (CJK, emoji, mixed widths) and huge bounds clamp to the char
+/// count, never the byte length.
+#[test]
+fn substring_and_char_at_pin_multi_byte_boundaries_and_huge_indexes() {
+    let mut vm = Vm::new(st_registry());
+    // CJK: three bytes per scalar
+    let args = [string(&mut vm, "漢字語言夢"), Value::I64(1), Value::I64(3)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "字語");
+    let args = [string(&mut vm, "漢字語言夢"), Value::I64(0), Value::I64(5)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "漢字語言夢");
+    // four-byte emoji scalars mixed with ASCII
+    let args = [string(&mut vm, "a👍b🚀"), Value::I64(1), Value::I64(3)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "👍b");
+    let args = [string(&mut vm, "a👍b🚀"), Value::I64(2), Value::I64(4)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "b🚀");
+    // boundary indexes: the empty range at zero and at the count
+    let args = [string(&mut vm, "漢字"), Value::I64(2), Value::I64(2)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "");
+    let args = [string(&mut vm, "漢字"), Value::I64(0), Value::I64(0)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "");
+    // huge bounds clamp to the char count
+    let args = [string(&mut vm, "漢字"), Value::I64(0), Value::I64(i64::MAX)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "漢字");
+    let args = [
+        string(&mut vm, "漢字"),
+        Value::I64(i64::MAX),
+        Value::I64(i64::MAX),
+    ];
+    assert_eq!(run_str(&mut vm, "clip", &args), "");
+    // the empty text
+    let args = [string(&mut vm, ""), Value::I64(-1), Value::I64(3)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "");
+    // char_at over the same strings: every scalar, empty past both ends
+    let args = [string(&mut vm, "a👍b🚀"), Value::I64(1)];
+    assert_eq!(run_str(&mut vm, "pick", &args), "👍");
+    let args = [string(&mut vm, "a👍b🚀"), Value::I64(3)];
+    assert_eq!(run_str(&mut vm, "pick", &args), "🚀");
+    let args = [string(&mut vm, "漢字"), Value::I64(1)];
+    assert_eq!(run_str(&mut vm, "pick", &args), "字");
+    let args = [string(&mut vm, "漢字"), Value::I64(2)];
+    assert_eq!(run_str(&mut vm, "pick", &args), "");
+    let args = [string(&mut vm, "漢字"), Value::I64(i64::MAX)];
+    assert_eq!(run_str(&mut vm, "pick", &args), "");
+}
+
+/// One interned string hit by every char-indexed native in turn: the
+/// lazily built boundary map must answer every later call exactly like
+/// the first.
+#[test]
+fn repeated_char_indexed_access_serves_one_boundary_map() {
+    let mut vm = Vm::new(st_registry());
+    let text = string(&mut vm, "夢見漢字");
+    let expect: Vec<char> = "夢見漢字".chars().collect();
+    for i in 0..3_usize {
+        let index = i64::try_from(i).expect("loop index fits i64");
+        let args = [text, Value::I64(index), Value::I64(index + 2)];
+        let want: String = expect[i..i + 2].iter().collect();
+        assert_eq!(run_str(&mut vm, "clip", &args), want);
+    }
+    let args = [text, Value::I64(3), Value::I64(4)];
+    assert_eq!(run_str(&mut vm, "clip", &args), "字");
+    for (i, want) in expect.iter().enumerate() {
+        let index = i64::try_from(i).expect("loop index fits i64");
+        let args = [text, Value::I64(index)];
+        assert_eq!(run_str(&mut vm, "pick", &args), want.to_string());
+    }
+    // and len agrees over the same map after it exists
+    assert_eq!(vm.run("st", "measure", &[text]), Ok(Value::I64(4)));
 }

@@ -54,4 +54,22 @@ impl LowerError {
     pub(crate) fn unsupported(span: Span, what: &'static str, reason: &'static str) -> Self {
         Self::Unsupported { span, what, reason }
     }
+
+    /// Re-points a sentinel-spanned [`Self::Unsupported`] at the node
+    /// whose lowering observed it: shape and word-address refusals are
+    /// type-keyed and observe no node, so without this they render
+    /// against an unrelated file's first line.
+    #[must_use]
+    pub(crate) fn respanned(self, span: Span) -> Self {
+        match self {
+            Self::Unsupported {
+                span: sentinel,
+                what,
+                reason,
+            } if sentinel.file.as_u32() == 0 && sentinel.start == 0 && sentinel.end == 0 => {
+                Self::unsupported(span, what, reason)
+            },
+            other => other,
+        }
+    }
 }

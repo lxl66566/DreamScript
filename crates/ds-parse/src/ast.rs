@@ -779,6 +779,23 @@ pub enum Expr {
         /// Index expression.
         index: Box<Expr>,
     },
+    /// The map constructor's type application `map[k, v]` [F9, B3]: the
+    /// one expression-position application with two type arguments, pinned
+    /// to the head spelled `map` by the grammar — no other head takes a
+    /// two-element bracket. Call position constructs the empty map
+    /// (`map[k, v]()`) exactly like `list[t]()`; the bracketed arguments
+    /// are type spellings in expression position, the list application's
+    /// own convention.
+    MapApply {
+        /// Span of `map[k, v]`.
+        span: Span,
+        /// The applied head; always the spelled `map`.
+        head: Ident,
+        /// The key type argument.
+        key: Box<Expr>,
+        /// The value type argument.
+        value: Box<Expr>,
+    },
     /// Postfix `?` propagation (E4).
     Try {
         /// Span of `e?`.
@@ -931,6 +948,7 @@ impl Expr {
             | Self::Call { span, .. }
             | Self::Field { span, .. }
             | Self::Index { span, .. }
+            | Self::MapApply { span, .. }
             | Self::Try { span, .. }
             | Self::Unary { span, .. }
             | Self::Binary { span, .. }

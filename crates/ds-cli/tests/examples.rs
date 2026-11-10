@@ -60,6 +60,40 @@ fn lists_print_the_literal_and_constructor_surface() {
 }
 
 #[test]
+fn containers_compose_the_generic_closes() {
+    // the six container closes dispatch through CALLG: cons builds, tail
+    // drops the first, collect copies, head/first answer the checked
+    // first element (the empty list the none member), and max orders
+    // both numeric instances
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("containers.ds"))),
+        "cons 2 1 1 2\nempty -1 -1\nmax 9 2.5\n0\n"
+    );
+}
+
+#[test]
+fn combinators_run_their_lambdas_reentrantly() {
+    // the lambda-taking combinators dispatch through CALLG and reenter
+    // the dispatcher per element: map and filter answer fresh lists,
+    // reduce folds (an empty list would answer its init), and the
+    // block-body println interleaves in element order
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("combinators.ds"))),
+        "doubled 5 2 10
+evens 2 2 4
+visiting 1
+visiting 2
+visiting 3
+visiting 4
+visiting 5
+traced 10 50
+sum 15 joined alphabeta
+0
+"
+    );
+}
+
+#[test]
 fn tuples_destructure_in_bindings_and_match_arms() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("tuples.ds"))),
@@ -76,21 +110,36 @@ fn strings_print_every_conversion() {
 }
 
 #[test]
-fn mutation_rebinds_vars_and_chains_ufcs_calls() {
-    // the while loop accumulates through compound assignment; the UFCS
-    // chains stage their receiver as the callee's first argument [F3],
-    // including the fallible parse_int and the tail-position chain in
-    // `shout`; the union var re-stores its whole span at each rebinding
-    assert_eq!(
-        run_ok(ds().arg("run").arg(example("mutation.ds"))),
-        "total: 10\nname: DREAMSCRIPT\nfirst: a\nport + total: 8090\njoined: abc\nslot: 7\n0\n"
+fn mutation_checks_clean_and_refuses_at_the_fallible_native_seam() {
+    // the ambient's success-typed parse_int makes the example's fallback
+    // spelling check clean, and the run refuses at the honest M7 platform
+    // seam: the fallible native's two-word runtime span has no
+    // source-level union shape to land in yet (the pre-upgrade run,
+    // before the ambient carried the failure union, printed the full
+    // green demo)
+    let out = ds()
+        .arg("run")
+        .arg(example("mutation.ds"))
+        .output()
+        .expect("the binary runs");
+    assert_eq!(out.status.code(), Some(1), "the refusal exits 1: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains("error[DS4009]: a fallible native call is outside the M3 runtime contract"),
+        "the seam refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains("const port = \"8080\".parse_int().err((_: parse_err) => 0)"),
+        "the refusal names the extraction spelling: {stderr}"
     );
 }
 
 #[test]
-fn files_round_trip_real_bytes() {
-    // the example's fixed path is relative to the current directory, so
-    // the run lands it in a temp dir and the test reads the real bytes
+fn files_round_trip_checks_clean_and_refuses_at_the_fallible_native_seam() {
+    // the round trip's read leg rides the ambient's string | io_err
+    // signature (handled through .err), so the run refuses at the same
+    // M7 platform seam before any byte is written — the seam the
+    // success-typed ambient upgrade recorded
     let dir = env::temp_dir().join("ds_cli_files_example");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("the temp dir creates");
@@ -100,14 +149,19 @@ fn files_round_trip_real_bytes() {
         .current_dir(&dir)
         .output()
         .expect("the binary runs");
-    assert!(out.status.success(), "the run failed: {out:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "read back: files round trip\nsize: 16\nexists: true\nround trip ok\n0\n"
+    assert_eq!(out.status.code(), Some(1), "the refusal exits 1: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains("error[DS4009]: a fallible native call is outside the M3 runtime contract"),
+        "the seam refusal: {stderr}"
     );
-    assert_eq!(
-        fs::read_to_string(dir.join("ds_files_example.txt")).expect("the bytes are there"),
-        "files round trip"
+    assert!(
+        stderr.contains("const back = read_file(path).err((_: io_err) => \"\")"),
+        "the refusal names the read leg: {stderr}"
+    );
+    assert!(
+        !dir.join("ds_files_example.txt").exists(),
+        "the refusal happens before any byte is written"
     );
 }
 

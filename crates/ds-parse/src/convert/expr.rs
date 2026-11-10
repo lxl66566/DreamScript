@@ -6,7 +6,7 @@ use pest::iterators::Pair;
 use super::{Ctx, empty_block, inner, inner_or_break, is_op_rule, is_operand_rule, join};
 use crate::{Rule, ast::*};
 
-impl Ctx<'_> {
+impl Ctx {
     // ===== expressions =====
 
     pub(super) fn expr(&mut self, p: Pair<'_, Rule>) -> Expr {
@@ -132,6 +132,21 @@ impl Ctx<'_> {
                 lit: Literal::Bool(false),
             },
             Rule::block_expr => Expr::Block(self.block(p)),
+            Rule::map_apply => {
+                let span = self.span(&p);
+                let mut children = inner(&p);
+                let head = children.next().filter(|c| c.as_rule() == Rule::map_head);
+                let mut args = children.filter(|c| c.as_rule() == Rule::expr);
+                match (head, args.next(), args.next()) {
+                    (Some(head), Some(key), Some(value)) => Expr::MapApply {
+                        span,
+                        head: self.ident(head),
+                        key: Box::new(self.expr(key)),
+                        value: Box::new(self.expr(value)),
+                    },
+                    _ => Expr::Break(span),
+                }
+            },
             Rule::path_atom | Rule::path => {
                 let span = self.span(&p);
                 let path = self.conv_path(p);
@@ -332,7 +347,12 @@ impl Ctx<'_> {
                 acc = e;
                 first = false;
             } else {
-                let op = pending_op.take().unwrap_or(BinaryOp::Eq);
+                let op = pending_op.take().unwrap_or_else(|| {
+                    // The grammar alternates operand/op strictly, so a
+                    // second operand without an operator is unreachable.
+                    debug_assert!(false, "binary chain operand without an operator");
+                    BinaryOp::Eq
+                });
                 let s = join(acc.span(), e.span());
                 acc = Expr::Binary {
                     span: s,
@@ -384,11 +404,32 @@ impl Ctx<'_> {
                             body: Box::new(Expr::Block(self.block(b))),
                         }
                     });
-                    Expr::Call {
-                        span: Span::new(self.file, start, end),
-                        callee: Box::new(acc),
-                        args: Vec::new(),
-                        trailing: lambda.map(Box::new),
+                    match (lambda, acc) {
+                        // The block feeds the directly preceding call's
+                        // final parameter as its zero-argument lambda [F7],
+                        // so it attaches to that call instead of wrapping a
+                        // second, computed-callee call around it.
+                        (
+                            Some(lambda),
+                            Expr::Call {
+                                callee,
+                                args,
+                                trailing: None,
+                                ..
+                            },
+                        ) => Expr::Call {
+                            span: Span::new(self.file, start, end),
+                            callee,
+                            args,
+                            trailing: Some(Box::new(lambda)),
+                        },
+                        (Some(lambda), recv) => Expr::Call {
+                            span: Span::new(self.file, start, end),
+                            callee: Box::new(recv),
+                            args: Vec::new(),
+                            trailing: Some(Box::new(lambda)),
+                        },
+                        (None, recv) => recv,
                     }
                 },
                 Rule::postfix_index => {
@@ -696,7 +737,6 @@ impl Ctx<'_> {
                         body = self.expr(b);
                     }
                 },
-                Rule::block_expr => body = Expr::Block(self.block(c)),
                 _ => {},
             }
         }
@@ -761,6 +801,27 @@ impl Ctx<'_> {
 
     // ===== blocks and statements =====
 
+    /// Attaches one comment trivia of a statement block: a comment on the
+    /// same line as the last statement's end trails that statement; anything
+    /// else stays pending (leading trivia of the next statement, or the
+    /// block's trailing tail).
+    fn attach_stmt_comment(&self, t: Trivia, stmts: &mut [Stmt], pending: &mut Vec<Trivia>) {
+        let start_line = self.line(t.span.start);
+        let attaches_behind = start_line
+            == stmts
+                .last()
+                .map_or(u32::MAX, |st: &Stmt| self.line(st.span.end));
+        if attaches_behind {
+            stmts
+                .last_mut()
+                .expect("guarded by map_or")
+                .trailing_trivia
+                .push(t);
+        } else {
+            pending.push(t);
+        }
+    }
+
     pub(super) fn block(&mut self, p: Pair<'_, Rule>) -> BlockExpr {
         let span = self.span(&p);
         let mut stmts = Vec::new();
@@ -770,40 +831,14 @@ impl Ctx<'_> {
             match c.as_rule() {
                 Rule::line_comment | Rule::block_comment => {
                     let t = self.trivia(&c);
-                    let start_line = self.line(t.span.start);
-                    let attaches_behind = start_line
-                        == stmts
-                            .last()
-                            .map_or(u32::MAX, |st: &Stmt| self.line(st.span.end));
-                    if attaches_behind {
-                        stmts
-                            .last_mut()
-                            .expect("guarded by map_or")
-                            .trailing_trivia
-                            .push(t);
-                    } else {
-                        pending.push(t);
-                    }
+                    self.attach_stmt_comment(t, &mut stmts, &mut pending);
                 },
                 Rule::stmt_list => {
                     for s in c.into_inner() {
                         match s.as_rule() {
                             Rule::line_comment | Rule::block_comment => {
                                 let t = self.trivia(&s);
-                                let start_line = self.line(t.span.start);
-                                let attaches_behind = start_line
-                                    == stmts
-                                        .last()
-                                        .map_or(u32::MAX, |st: &Stmt| self.line(st.span.end));
-                                if attaches_behind {
-                                    stmts
-                                        .last_mut()
-                                        .expect("guarded by map_or")
-                                        .trailing_trivia
-                                        .push(t);
-                                } else {
-                                    pending.push(t);
-                                }
+                                self.attach_stmt_comment(t, &mut stmts, &mut pending);
                             },
                             Rule::stmt => {
                                 if let Some(inner_s) = inner(&s).next() {

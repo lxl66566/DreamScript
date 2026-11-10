@@ -97,6 +97,18 @@ pub enum SlotType {
     /// following slots, typed structurally by the same [`FrameLayout`]; a
     /// unit tag carries no payload slots.
     Tag,
+    /// A callable word (the fn slot classification, F2): one word holding a
+    /// copyable scalar FuncRef — module id plus function index packed into
+    /// the word — naming a non-capturing function; copied by value with zero
+    /// RC cost. Capturing lambdas are not scalars: they are `Ref` words
+    /// pointing at closure objects (header word the FuncRef, then the
+    /// capture block). A value-site closure word lives in a `Ref`-classified
+    /// slot; a fn-typed *parameter* slot is callable-defaulted — its
+    /// classification stays `Fn` while the arriving word may be either the
+    /// scalar or the closure `Ref` (the slide admits that pairing), and the
+    /// call readers (CALLS, the hosted per-element call) resolve the callee
+    /// word by its runtime kind, the one dynamic-dispatch point.
+    Fn,
     /// An untyped raw word: the overlay region's staging slots when one
     /// frame stages more than one call shape, or receives a callee's
     /// result span whose types differ from the staged arguments on the

@@ -1,0 +1,48 @@
+// purpose: the `.err` handler's success branch over a multi-member
+// union whose handled member contributes a word shape the retained
+// set does not need — bad_port's int payload and missing's string
+// payload share one region in the full three-member union, while
+// each retained two-member span is one word narrower and places its
+// payload at a different offset; the success branch re-spans the
+// kept members out of the operand's region instead of trusting the
+// retained subset's layout. Both directions run: a Ref-carrying
+// retained set against a handled int member, and an int-carrying
+// retained set against a handled Ref member.
+
+tag int
+tag string
+tag bool
+
+struct bad_port { port: int }
+struct missing { name: string }
+
+extern fn println (s: string) -> ()
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+
+fn as_bad() -> bad_port | missing | none { bad_port { port: 7 } }
+fn as_missing() -> bad_port | missing | none { missing { name: "kept" } }
+fn as_none() -> bad_port | missing | none { none }
+
+// retained = missing | none: the kept Ref member's string moves from
+// the operand's third word into the result's second
+fn keep_name(v: bad_port | missing | none) -> string {
+  v.err((_: bad_port) => missing { name: "handled" }).unwrap_or(missing { name: "anon" }).name
+}
+
+// retained = bad_port | none: the kept int member's port word stays
+// at its offset while the handled Ref member's word never enters the
+// result span
+fn keep_port(v: bad_port | missing | none) -> int {
+  v.err((_: missing) => bad_port { port: 0 }).unwrap_or(bad_port { port: 99 }).port
+}
+
+fn main() -> bool {
+  const kept = keep_name(as_missing())
+  const anon = keep_name(as_none())
+  const handled = keep_name(as_bad())
+  const port = keep_port(as_bad())
+  const fell_back = keep_port(as_none())
+  const zeroed = keep_port(as_missing())
+  println("name ${kept} ${anon} ${handled} port ${port} ${fell_back} ${zeroed}")
+  kept == "kept" && anon == "anon" && handled == "handled" && port == 7 && fell_back == 99 && zeroed == 0
+}

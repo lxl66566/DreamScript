@@ -45,7 +45,7 @@
 //! seen through substitution (H3); ranges, indexing, and `in`-containment
 //! (they need the M3 stdlib's type vocabulary).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use ds_diag::{Diagnostic, ErrorCode, Files, Span};
 use ds_parse::{
@@ -56,8 +56,10 @@ use ds_parse::{
 use crate::{
     TypeExpr,
     atom::{AtomKind, TraitId, TypeId},
-    decls::{self, Decls, FnSig, GenericParam},
+    decls::{self, Decls, FnSig, GenericParam, ParamSig},
     error::Error,
+    extraction::Extraction,
+    instance::InstanceId,
     resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
     universe::Ty,
 };
@@ -77,6 +79,17 @@ pub struct Val {
 struct Binding {
     ty: Ty,
     mutable: bool,
+}
+
+/// One scope boundary's rollback point: both binder tables' undo-log
+/// marks, the assumption stack's length, and the enclosing return union.
+/// Cheap by construction — restoring replays only what the scope changed.
+#[derive(Clone, Copy)]
+struct ScopeMark {
+    locals: usize,
+    refined: usize,
+    assumptions: usize,
+    ret: Option<Ty>,
 }
 
 /// One narrowing fact harvested from a condition.
@@ -108,11 +121,44 @@ pub struct Checked {
     /// side table instead of re-deriving types; entries are recorded in
     /// walk order and a re-walk overwrites them.
     pub expr_types: HashMap<Span, Val>,
+    /// The instantiation of every generic call, keyed by the call's span:
+    /// the solved type of each generic parameter, in declaration order
+    /// [H3]. Recorded only when every parameter solves (no `any` fallback
+    /// [B1]); the lowering pass [M3] mints the CALLG evidence words from
+    /// it.
+    pub generic_calls: HashMap<Span, Vec<Ty>>,
+    /// The solved dispatch of every trait-method call whose instance the
+    /// environment statically resolved, keyed by the call's span [B6].
+    /// The lowering pass mints the CALLG evidence word from it.
+    pub trait_calls: HashMap<Span, TraitCall>,
+}
+
+/// One trait-method call's solved dispatch [B6]: the selected trait member
+/// plus the unique instance whose head contains the receiver's type,
+/// recorded at the call's own span. A site satisfied only through an
+/// in-scope assumption (the receiver's type is a bound type variable)
+/// records nothing — that site is the runtime-resolved evidence form, and
+/// its dispatch waits for the runtime-tag shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TraitCall {
+    /// The selected trait member.
+    pub method: MethodId,
+    /// The trait the member belongs to.
+    pub trait_id: TraitId,
+    /// The unique containing instance for the receiver's type.
+    pub instance: InstanceId,
+    /// The declaring impl item's span, when the package recorded one; the
+    /// impl's bodies live in that item.
+    pub impl_site: Option<Span>,
+    /// The receiver's solved type at the call site.
+    pub recv: Ty,
 }
 
 mod ops;
 use ops::compound_op;
 mod pattern;
+mod scope;
+use scope::ScopedMap;
 
 /// Checks one package: collects and resolves every file, builds the
 /// declaration tables, then body-checks every item. The files registry
@@ -151,6 +197,8 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         def_types: checked.def_types,
         binders: checked.binders,
         expr_types: checked.expr_types,
+        generic_calls: checked.generic_calls,
+        trait_calls: checked.trait_calls,
     };
     Analyzed {
         package,
@@ -206,21 +254,41 @@ where
 {
     let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
     let (mut decls, mut diags) = decls::build(package, &trees, resolutions);
+    let res_by_file: HashMap<ds_diag::FileId, usize> = trees
+        .iter()
+        .zip(resolutions.iter().enumerate())
+        .map(|(ast, (index, _))| (ast.file, index))
+        .collect();
     let mut def_types = HashMap::new();
     let mut binders = HashMap::new();
     let mut expr_types = HashMap::new();
-    let mut counter = 0u32;
+    let mut generic_calls = HashMap::new();
+    let mut trait_calls = HashMap::new();
     for (ast, res) in trees.iter().zip(resolutions) {
-        let mut bodies = Bodies::new(
+        let mut bodies = Bodies {
             files,
             package,
             res,
-            &mut decls,
-            &mut def_types,
-            &mut binders,
-            &mut expr_types,
-            &mut counter,
-        );
+            resolutions,
+            res_by_file: &res_by_file,
+            decls: &mut decls,
+            def_types: &mut def_types,
+            binders: &mut binders,
+            expr_types: &mut expr_types,
+            generic_calls: &mut generic_calls,
+            trait_calls: &mut trait_calls,
+            diags: Vec::new(),
+            linear_vars: HashMap::new(),
+            locals: ScopedMap::default(),
+            refined: ScopedMap::default(),
+            type_vars: Vec::new(),
+            assumptions: Vec::new(),
+            assumption_marks: Vec::new(),
+            ret: None,
+            loop_depth: 0,
+            visiting: Vec::new(),
+            solve_reported: false,
+        };
         bodies.file(ast);
         diags.append(&mut bodies.diags);
     }
@@ -229,6 +297,8 @@ where
         def_types,
         binders,
         expr_types,
+        generic_calls,
+        trait_calls,
     })
 }
 
@@ -251,20 +321,27 @@ struct Bodies<'a> {
     files: &'a Files,
     package: &'a Package,
     res: &'a Resolutions,
+    /// Every file's resolutions, aligned with the trees by position; a
+    /// lazily typed top-level binding walks under its OWN file's table
+    /// [G3], no matter which file's body triggered the memo fill.
+    resolutions: &'a [Resolutions],
+    res_by_file: &'a HashMap<ds_diag::FileId, usize>,
     decls: &'a mut Decls,
     def_types: &'a mut HashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
     expr_types: &'a mut HashMap<Span, Val>,
-    counter: &'a mut u32,
+    generic_calls: &'a mut HashMap<Span, Vec<Ty>>,
+    trait_calls: &'a mut HashMap<Span, TraitCall>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
     /// copyability constraint (`[t: ~Copyable]`) [C1]; the binder facts
     /// consult them while recording.
     linear_vars: HashMap<TypeId, bool>,
-    /// Declared types of locals, keyed by binder span.
-    locals: HashMap<Span, Binding>,
+    /// Declared types of locals, keyed by binder span; snapshot/restore
+    /// at scope boundaries runs through its undo log, never a clone.
+    locals: ScopedMap<Binding>,
     /// The refinement overlay, keyed by binder span [B2].
-    refined: HashMap<Span, Ty>,
+    refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
     type_vars: Vec<HashMap<String, Ty>>,
     /// In-scope trait assumptions from generic bounds (`[t: json]`), with
@@ -282,40 +359,7 @@ struct Bodies<'a> {
     solve_reported: bool,
 }
 
-impl<'a> Bodies<'a> {
-    fn new(
-        files: &'a Files,
-        package: &'a Package,
-        res: &'a Resolutions,
-        decls: &'a mut Decls,
-        def_types: &'a mut HashMap<DefId, Ty>,
-        binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
-        expr_types: &'a mut HashMap<Span, Val>,
-        counter: &'a mut u32,
-    ) -> Self {
-        Self {
-            files,
-            package,
-            res,
-            decls,
-            def_types,
-            binders,
-            expr_types,
-            counter,
-            diags: Vec::new(),
-            linear_vars: HashMap::new(),
-            locals: HashMap::new(),
-            refined: HashMap::new(),
-            type_vars: Vec::new(),
-            assumptions: Vec::new(),
-            assumption_marks: Vec::new(),
-            ret: None,
-            loop_depth: 0,
-            visiting: Vec::new(),
-            solve_reported: false,
-        }
-    }
-
+impl Bodies<'_> {
     /// Binds one local and records its affine facts [C1]: copyability of
     /// the solved type under the in-scope generic bounds.
     fn bind_local(&mut self, span: Span, binding: Binding) {
@@ -414,18 +458,37 @@ impl<'a> Bodies<'a> {
 
     /// A top-level binding: its initializer is typed (memoized for
     /// order-independent uses [G3]); a written annotation anchors the check.
+    /// A destructuring pattern declares many defs — the memo and the cycle
+    /// guard cover them all, so tuple/or/struct binders receive types like
+    /// any other top-level name.
     fn top_level_local(&mut self, local: &LocalDecl) {
-        let Some(def) = self.pattern_def(local) else {
-            return
-        };
-        if self.def_types.contains_key(&def) || self.visiting.contains(&def) {
+        let defs: Vec<DefId> = crate::pattern::pattern_binders(&local.pat)
+            .into_iter()
+            .filter_map(|(_, name)| self.package.lookup_value(name))
+            .collect();
+        if defs.is_empty() {
             return;
         }
-        self.visiting.push(def);
+        if defs.iter().all(|def| self.def_types.contains_key(def))
+            || defs.iter().any(|def| self.visiting.contains(def))
+        {
+            return;
+        }
+        let visiting = self.visiting.len();
+        self.visiting.extend(defs.iter().copied());
         let saved = self.snapshot();
         self.locals.clear();
         self.refined.clear();
         self.ret = None;
+        // A use in another file's body can trigger this lazy fill; the
+        // initializer's spans resolve under the binding's OWN file table,
+        // never the triggering file's [G3].
+        let home_res = self.res;
+        if let Some(&index) = self.res_by_file.get(&self.package.def(defs[0]).span.file) {
+            if let Some(res) = self.resolutions.get(index) {
+                self.res = res;
+            }
+        }
 
         let mut val = self.expr(&local.init, None);
         if let Some(ann) = &local.ty {
@@ -451,7 +514,8 @@ impl<'a> Bodies<'a> {
             }
         }
         self.restore(saved);
-        self.visiting.pop();
+        self.res = home_res;
+        self.visiting.truncate(visiting);
     }
 
     /// One named function declaration: boundary-anchored [B2]. `self_ty`
@@ -719,6 +783,20 @@ impl<'a> Bodies<'a> {
                     "index typing arrives with the stdlib collection types [F5, M3]".to_owned(),
                     *span,
                     "index",
+                );
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                }
+            },
+            Expr::MapApply { span, .. } => {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "`map` is a type; the application `map[...]` constructs only in call position \
+                     — `map[k, v]()` [F9, B3]"
+                        .to_owned(),
+                    *span,
+                    "type application outside a call",
                 );
                 Val {
                     ty: self.empty(),
@@ -1680,9 +1758,123 @@ impl<'a> Bodies<'a> {
         })
     }
 
+    /// The map constructor call `map[k, v]()` [F9, B3]: the mirror of the
+    /// list constructor over the two-argument application of the map
+    /// struct. Construction takes no value arguments — the builder call
+    /// (`map_set`) fills the map, the interim the record pins while the
+    /// map literal rides the anonymous-record-literal reservation.
+    fn map_ctor_call(
+        &mut self,
+        head: &Ident,
+        key: &Expr,
+        value: &Expr,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Val {
+        let walk_args = |this: &mut Self| {
+            for arg in args {
+                this.expr(&arg.value, None);
+            }
+            if let Some(tail) = trailing {
+                this.expr(tail, None);
+            }
+        };
+        let Some(def) = self.package.lookup_type(&head.name) else {
+            // the resolver already reported the unknown type name
+            self.solve_reported = true;
+            return self.empty_val();
+        };
+        let is_map = self
+            .decls
+            .structs
+            .get(&def)
+            .is_some_and(|shape| shape.params.len() == 2 && shape.fields.is_empty());
+        if !is_map {
+            // Construction is fixed per declaration [B3]; the map
+            // constructs by type application, any other head is the
+            // cross-spelling error.
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "`{}` constructs per its declaration, not by type application [B3]",
+                    head.name
+                ),
+                span,
+                "cross-spelling construction",
+            );
+            walk_args(self);
+            self.solve_reported = true;
+            return self.empty_val();
+        }
+        if trailing.is_some() {
+            self.error(
+                ErrorCode::TypeMismatch,
+                "a type application takes no trailing block".to_owned(),
+                span,
+                "trailing block",
+            );
+            self.solve_reported = true;
+            return self.empty_val();
+        }
+        if !args.is_empty() {
+            self.error(
+                ErrorCode::TypeMismatch,
+                "the empty-map constructor takes no arguments; build by `map_set` calls [B3]"
+                    .to_owned(),
+                span,
+                "constructor arguments",
+            );
+            walk_args(self);
+            self.solve_reported = true;
+            return self.empty_val();
+        }
+        let arg_ty = |this: &mut Self, arg: &Expr| -> Option<Ty> {
+            let Some(ty) = Self::ctor_type_arg(arg) else {
+                this.error(
+                    ErrorCode::TypeMismatch,
+                    "the bracketed arguments of `map[...]` are types, not values [F9]".to_owned(),
+                    arg.span(),
+                    "not a type",
+                );
+                this.solve_reported = true;
+                return None;
+            };
+            let Some(solved) = this.solve_here(&ty) else {
+                if !this.take_solve_reported() {
+                    this.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "the type argument `{}` does not solve against the package \
+                             declarations",
+                            decls::render_type(&ty)
+                        ),
+                        ty.span(),
+                        "unsolvable type argument",
+                    );
+                }
+                this.solve_reported = true;
+                return None;
+            };
+            Some(solved)
+        };
+        let (Some(key_ty), Some(value_ty)) = (arg_ty(self, key), arg_ty(self, value)) else {
+            return self.empty_val();
+        };
+        let Some(ty) = self.applied_map_ty(key_ty, value_ty) else {
+            self.solve_reported = true;
+            return self.empty_val();
+        };
+        Val {
+            ty,
+            diverges: false,
+        }
+    }
+
     /// The bracketed argument of a type application: a type spelled in
-    /// expression position [F9] — a path, a parenthesized form, or a
-    /// tuple of the same.
+    /// expression position [F9] — a path, a parenthesized form, a tuple of
+    /// the same, or a nested generic application (`list[string]`,
+    /// `map[string, int]`) whose own bracketed arguments recurse.
     fn ctor_type_arg(arg: &Expr) -> Option<Type> {
         match arg {
             Expr::Path { span, path, .. } if path.segments.len() == 1 => Some(Type::Path {
@@ -1695,6 +1887,32 @@ impl<'a> Bodies<'a> {
                 span: *span,
                 items: items.iter().filter_map(Self::ctor_type_arg).collect(),
             }),
+            Expr::Index { recv, index, .. } => {
+                let head = single_path_ident(recv)?;
+                let arg = Self::ctor_type_arg(index)?;
+                Some(Type::Path {
+                    span: recv.span(),
+                    path: Path {
+                        span: head.span,
+                        segments: vec![head.clone()],
+                    },
+                    args: vec![arg],
+                })
+            },
+            Expr::MapApply {
+                head, key, value, ..
+            } => {
+                let key = Self::ctor_type_arg(key)?;
+                let value = Self::ctor_type_arg(value)?;
+                Some(Type::Path {
+                    span: head.span,
+                    path: Path {
+                        span: head.span,
+                        segments: vec![head.clone()],
+                    },
+                    args: vec![key, value],
+                })
+            },
             _ => None,
         }
     }
@@ -1704,6 +1922,14 @@ impl<'a> Bodies<'a> {
         let def = self.package.lookup_type("list")?;
         let ctor = self.decls.atoms.get(&def).copied()?;
         let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
+        self.decls.universe.atom_ty(atom).ok()
+    }
+
+    /// The applied `map[k, v]` type over the key and value types.
+    fn applied_map_ty(&mut self, key: Ty, value: Ty) -> Option<Ty> {
+        let def = self.package.lookup_type("map")?;
+        let ctor = self.decls.atoms.get(&def).copied()?;
+        let atom = self.decls.universe.apply_atom(ctor, &[key, value]).ok()?;
         self.decls.universe.atom_ty(atom).ok()
     }
 
@@ -1730,6 +1956,14 @@ impl<'a> Bodies<'a> {
             if let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span) {
                 return val;
             }
+        }
+        // The map constructor `map[k, v]()` [F9, B3]: the head resolved
+        // in the type namespace.
+        if let Expr::MapApply {
+            head, key, value, ..
+        } = callee
+        {
+            return self.map_ctor_call(head, key, value, args, trailing.as_deref(), *span);
         }
         if let Expr::Path { path, .. } = callee {
             match path.segments.as_slice() {
@@ -1984,18 +2218,43 @@ impl<'a> Bodies<'a> {
         span: Span,
     ) -> Val {
         let Some(sig) = self.decls.fns.get(&def).cloned() else {
+            // The callee resolved in the value namespace [F9], so it can
+            // be a plain const or var binding (a dot-call's free tier); a
+            // call against it is a call-shape error with the receiver and
+            // every argument walked, never a silently empty type.
+            let name = self.package.def(def).name.clone();
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!("`{name}` is a value binding, not a function"),
+                span,
+                "not callable",
+            );
+            if let Some(recv) = fed {
+                self.expr(recv, None);
+            }
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
             return Val {
                 ty: self.empty(),
                 diverges: false,
             };
         };
-        let slots = self.arg_slots(fed, 0, args, trailing, &sig, span);
+        // The E4 extraction family types by rule against the checked
+        // receiver, never through generic inference: an inferred `t?`
+        // parameter would bind a plain `t` receiver, and the fallback's
+        // width meeting must be diagnosed, not assumed.
+        if let Some(kind) = self.extraction_kind(def, &sig) {
+            return self.extraction_call(kind, fed, args, trailing, span);
+        }
+        let slots = self.arg_slots(fed, 0, args, trailing, &sig.params, span);
         let Some(slots) = slots else {
             return Val {
                 ty: self.empty(),
                 diverges: false,
             };
         };
+        self.check_mut_window_args(&slots, &sig.params);
         if sig.generics.is_empty() {
             let mut param_tys = Vec::with_capacity(sig.params.len());
             for param in &sig.params {
@@ -2018,7 +2277,7 @@ impl<'a> Bodies<'a> {
                 .as_ref()
                 .and_then(|r| self.solve_here(r))
                 .unwrap_or_else(|| self.unit());
-            self.check_slots(&slots, &sig, &param_tys);
+            self.check_slots(&slots, &sig.params, &param_tys);
             return Val {
                 ty: ret,
                 diverges: false,
@@ -2047,7 +2306,9 @@ impl<'a> Bodies<'a> {
                 }
             }
         }
-        // Pass one: non-lambda arguments bind variables structurally.
+        // Pass one: non-lambda arguments bind variables structurally,
+        // then check against the solved parameter type [B2]: a
+        // constructor mismatch binds nothing silently otherwise.
         for (slot, param) in slots.iter().zip(sig.params.iter()) {
             let (Some(arg), Some(param_ty)) = (slot, param.ty.as_ref()) else {
                 continue;
@@ -2058,6 +2319,9 @@ impl<'a> Bodies<'a> {
             }
             let arg_val = self.expr(arg, None);
             self.match_param(param_ty, arg_val.ty, &sig.generics, &mut subst);
+            if let Some(expected) = self.solve_with(param_ty, &subst, &sig.generics) {
+                self.expect_param_contains(arg_val, param_ty, expected, arg.span());
+            }
         }
         // Pass two: lambda arguments check against the fn-typed parameter,
         // and their result type binds the parameter's return variables.
@@ -2111,6 +2375,35 @@ impl<'a> Bodies<'a> {
                 .unwrap_or_else(|| self.empty()),
             None => self.unit(),
         };
+        // Record the instantiation when every generic parameter solved
+        // [H3]: the lowering pass mints the CALLG evidence words from it.
+        // A partially-solved call is an inference failure below and the
+        // lowerer rejects the missing record, never a silent `any`.
+        let mut solved = Vec::with_capacity(sig.generics.len());
+        for param in &sig.generics {
+            let Some(ty) = subst.get(&param.name) else {
+                solved.clear();
+                break;
+            };
+            solved.push(*ty);
+        }
+        // A solved instantiation answers for its declared bounds [B6]:
+        // every bound must hold for the solved type, through the
+        // instance environment or an in-scope assumption (a caller
+        // bound propagates that way). An empty solved type rides a
+        // cascading argument error and skips the check.
+        for (param, ty) in sig.generics.iter().zip(solved.iter()) {
+            let Some(trait_id) = param.bound.as_ref().and_then(|b| self.trait_of_type(b)) else {
+                continue;
+            };
+            if self.decls.universe.is_empty(*ty) {
+                continue;
+            }
+            self.trait_satisfied(trait_id, *ty, span);
+        }
+        if !solved.is_empty() {
+            self.generic_calls.insert(span, solved);
+        }
         // Unbound variables leaking into the result are inference
         // failures: no any fallback [B1].
         let ret_members = self.decls.universe.members(ret).to_vec();
@@ -2144,10 +2437,10 @@ impl<'a> Bodies<'a> {
         skip: usize,
         args: &'x [ds_parse::CallArg],
         trailing: Option<&'x Expr>,
-        sig: &FnSig,
+        params: &[ParamSig],
         span: Span,
     ) -> Option<Vec<Option<&'x Expr>>> {
-        let mut slots: Vec<Option<&'x Expr>> = vec![None; sig.params.len()];
+        let mut slots: Vec<Option<&'x Expr>> = vec![None; params.len()];
         let mut next_positional = skip;
         let mut ok = true;
         // The UFCS-fed receiver occupies the first positional slot [F3].
@@ -2171,7 +2464,7 @@ impl<'a> Bodies<'a> {
             match &arg.name {
                 Some(name) => {
                     let value: &'x Expr = &arg.value;
-                    match sig.params.iter().position(|p| p.name == name.name) {
+                    match params.iter().position(|p| p.name == name.name) {
                         Some(index) if slots[index].is_none() => slots[index] = Some(value),
                         Some(_) => {
                             self.error(
@@ -2226,7 +2519,7 @@ impl<'a> Bodies<'a> {
         }
         let missing: Vec<&str> = slots
             .iter()
-            .zip(sig.params.iter())
+            .zip(params.iter())
             .enumerate()
             .filter(|(index, (slot, param))| {
                 slot.is_none() && param.default.is_none() && *index >= skip
@@ -2253,8 +2546,13 @@ impl<'a> Bodies<'a> {
 
     /// Checks filled slots against their parameter types and omitted ones
     /// against their written literal defaults [F7].
-    fn check_slots(&mut self, slots: &[Option<&Expr>], sig: &FnSig, param_tys: &[Option<Ty>]) {
-        for ((slot, param), param_ty) in slots.iter().zip(sig.params.iter()).zip(param_tys.iter()) {
+    fn check_slots(
+        &mut self,
+        slots: &[Option<&Expr>],
+        params: &[ParamSig],
+        param_tys: &[Option<Ty>],
+    ) {
+        for ((slot, param), param_ty) in slots.iter().zip(params.iter()).zip(param_tys.iter()) {
             match (slot, param_ty) {
                 (Some(arg), Some(param_ty)) => {
                     let val = self.expr(arg, Some(*param_ty));
@@ -2271,6 +2569,70 @@ impl<'a> Bodies<'a> {
                 },
                 (None, None) => {},
             }
+        }
+    }
+
+    /// A `mut` window parameter over a copyable binding takes only a
+    /// `var` receiver [D2, C3]: copyable Ref words alias with no
+    /// checker-visible trace, so exclusivity is proven by spelling the
+    /// binder `var`. `~Copyable` receivers keep their linearity proof and
+    /// fresh rvalues are uniquely owned by construction, so only a const
+    /// binding of a copyable type is rejected. A hidden copy behind an
+    /// alias would keep mutation invisible at the call site, so the
+    /// spelling is corrected, never coerced.
+    fn check_mut_window_args(&mut self, slots: &[Option<&Expr>], params: &[ParamSig]) {
+        for (slot, param) in slots.iter().zip(params.iter()) {
+            if !matches!(param.mode, ds_parse::ParamMode::Mut(_)) {
+                continue;
+            }
+            let Some(arg) = slot else { continue };
+            let Expr::Path { path, .. } = peel_paren(arg) else {
+                continue;
+            };
+            let [only] = path.segments.as_slice() else {
+                continue
+            };
+            let Some(res) = self.res.get(only.span).cloned() else {
+                continue;
+            };
+            let (binder, mutable, ty) = match res {
+                Res::Local { bind } => {
+                    let Some(binding) = self.locals.get(bind) else {
+                        continue
+                    };
+                    (bind, binding.mutable, binding.ty)
+                },
+                Res::Def(def) => {
+                    let def_info = self.package.def(def);
+                    if def_info.kind != DefKind::Const {
+                        continue;
+                    }
+                    let Some(ty) = self.def_types.get(&def).copied() else {
+                        continue;
+                    };
+                    (def_info.span, false, ty)
+                },
+                _ => continue,
+            };
+            // An empty type is an inference failure the walk already
+            // reported; the ruling is about copyable shared-heap words.
+            if mutable
+                || self.decls.universe.is_empty(ty)
+                || !crate::linearity::ty_copyable(self.decls, ty, &self.linear_vars)
+            {
+                continue;
+            }
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::MutWindowConstReceiver,
+                    format!(
+                        "`{}` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]",
+                        only.name
+                    ),
+                )
+                .with_secondary(binder, "bound here")
+                .with_primary(only.span, "const receiver"),
+            );
         }
     }
 
@@ -2323,6 +2685,7 @@ impl<'a> Bodies<'a> {
                     diverges: false,
                 };
             }
+            self.record_solved_dispatch(method, recv_val.ty, span);
         }
         self.member_call(&sig, recv_val.ty, &args[1..], trailing, span)
     }
@@ -2336,10 +2699,16 @@ impl<'a> Bodies<'a> {
         span: Span,
     ) -> Val {
         let Some(res) = self.res.get(name.span).cloned() else {
+            // The resolution pass already reported the root cause (no
+            // name behind the dot); the empty result must not cascade
+            // into downstream empty-intersection errors. The flag sets
+            // last — a nested solve_here would wipe it (solve_here
+            // clears the flag it reads).
             self.expr(recv, None);
             for arg in args {
                 self.expr(&arg.value, None);
             }
+            self.solve_reported = true;
             return Val {
                 ty: self.empty(),
                 diverges: false,
@@ -2389,7 +2758,7 @@ impl<'a> Bodies<'a> {
         span: Span,
     ) -> Val {
         let recv_val = self.expr(recv, None);
-        let mut survivors: Vec<FnSig> = Vec::new();
+        let mut survivors: Vec<(MethodId, Arc<FnSig>)> = Vec::new();
         for &candidate in candidates {
             let Some(sig) = self.member_sig(candidate) else {
                 continue
@@ -2401,10 +2770,10 @@ impl<'a> Bodies<'a> {
             match trait_id {
                 Some(trait_id) => {
                     if self.trait_satisfied_quiet(trait_id, recv_val.ty) {
-                        survivors.push(sig);
+                        survivors.push((candidate, sig));
                     }
                 },
-                None => survivors.push(sig),
+                None => survivors.push((candidate, sig)),
             }
         }
         if survivors.is_empty() {
@@ -2473,8 +2842,34 @@ impl<'a> Bodies<'a> {
                 diverges: false,
             };
         }
-        let sig = survivors.remove(0);
+        let (method, sig) = survivors.remove(0);
+        self.record_solved_dispatch(method, recv_val.ty, span);
         self.member_call(&sig, recv_val.ty, args, trailing, span)
+    }
+
+    /// Records one selected trait method's solved dispatch at the call's
+    /// own span: the unique containing instance for the receiver's type,
+    /// when the environment statically solved one. An inherent-impl
+    /// survivor records nothing, and a site satisfied only through an
+    /// in-scope assumption records nothing — its dispatch is the
+    /// runtime-resolved evidence form.
+    fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
+        let MethodOwner::Trait(def) = self.package.method(method).owner else {
+            return;
+        };
+        let Some(&trait_id) = self.decls.traits.get(&def) else {
+            return;
+        };
+        let Some(instance) = self.solved_instance(trait_id, recv) else {
+            return;
+        };
+        self.trait_calls.insert(span, TraitCall {
+            method,
+            trait_id,
+            instance,
+            impl_site: self.decls.instance_impls.get(&instance).copied(),
+            recv,
+        });
     }
 
     /// One selected method's call check: the member signature with `Self`
@@ -2495,15 +2890,8 @@ impl<'a> Bodies<'a> {
         }
         // The receiver already filled the `self` parameter [record 6.1];
         // the remaining arguments feed the rest.
-        if let Some(slots) = self.arg_slots(None, 1, args, trailing, sig, span) {
-            let rest: Vec<Option<&Expr>> = slots[1..].to_vec();
-            let rest_tys: Vec<Option<Ty>> = param_tys[1..].to_vec();
-            let rest_sig = FnSig {
-                generics: sig.generics.clone(),
-                params: sig.params[1..].to_vec(),
-                ret: sig.ret.clone(),
-            };
-            self.check_slots(&rest, &rest_sig, &rest_tys);
+        if let Some(slots) = self.arg_slots(None, 1, args, trailing, &sig.params, span) {
+            self.check_slots(&slots[1..], &sig.params[1..], &param_tys[1..]);
         }
         let ret = sig
             .ret
@@ -2536,12 +2924,11 @@ impl<'a> Bodies<'a> {
                 diverges: false,
             };
         }
-        let handler = args[0].value.clone();
         let Expr::Lambda {
             params: handler_params,
             body,
             ..
-        } = peel_paren(&handler)
+        } = peel_paren(&args[0].value)
         else {
             self.error(
                 ErrorCode::TypeMismatch,
@@ -2607,6 +2994,251 @@ impl<'a> Bodies<'a> {
         Val {
             ty: result,
             diverges: false,
+        }
+    }
+
+    /// The family member a call addresses, when the callee's shape could
+    /// be the ambient's: a generic function of the family name and
+    /// two-parameter arity. Without the ambient, a same-named generic
+    /// function rides the family rules (the natives' name-routing
+    /// hazard, unchanged).
+    fn extraction_kind(&self, def: DefId, sig: &FnSig) -> Option<Extraction> {
+        let kind = Extraction::of_name(&self.package.def(def).name)?;
+        (!sig.generics.is_empty() && sig.params.len() == 2).then_some(kind)
+    }
+
+    /// One extraction-family call [E4]: the receiver and one argument,
+    /// typed locally against the checked receiver's members. The eager
+    /// `unwrap_or` binds its fallback to the extracted type, the lazy
+    /// `unwrap_or_else` checks a zero-parameter lambda against it, `ok_or`
+    /// unions the new member in, and `map_err` mirrors the `.err`/`.ok`
+    /// handler rules — the annotated parameter handles, or everything
+    /// but what the lambda's own result keeps.
+    fn extraction_call(
+        &mut self,
+        kind: Extraction,
+        fed: Option<&Expr>,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Val {
+        if trailing.is_some() {
+            self.error(
+                ErrorCode::ArityMismatch,
+                format!(
+                    "`{}` takes no trailing block argument; write the lambda inline",
+                    kind.name()
+                ),
+                span,
+                "extra argument",
+            );
+            return self.empty_val();
+        }
+        let (recv, arg): (&Expr, &Expr) = match (fed, args) {
+            (Some(recv), [only]) => (recv, &only.value),
+            (None, [recv, arg]) => (&recv.value, &arg.value),
+            _ => {
+                self.error(
+                    ErrorCode::ArityMismatch,
+                    format!("`{}` takes the receiver and one argument", kind.name()),
+                    span,
+                    "wrong arity",
+                );
+                return self.empty_val();
+            },
+        };
+        if args.iter().any(|arg| arg.name.is_some()) {
+            self.error(
+                ErrorCode::ArityMismatch,
+                format!("`{}` takes positional arguments only", kind.name()),
+                span,
+                "named argument",
+            );
+            return self.empty_val();
+        }
+        match kind {
+            Extraction::UnwrapOr | Extraction::UnwrapOrElse | Extraction::OkOr => {
+                let recv_val = self.expr(recv, None);
+                let total = recv_val.ty;
+                let name = kind.name();
+                let none = self.none_ty();
+                if !self.decls.universe.contains(total, none) {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "`{name}` extracts a `t | none` receiver; `{}` carries no `none` \
+                             member [E4]",
+                            self.decls.universe.render(total)
+                        ),
+                        span,
+                        "receiver is not optional",
+                    );
+                    self.expr(arg, None);
+                    return self.empty_val();
+                }
+                let extracted = self.decls.universe.diff(total, none);
+                if self.decls.universe.is_empty(extracted) {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!("`{name}` over `none` leaves nothing to extract [E4]"),
+                        span,
+                        "empty extraction",
+                    );
+                    self.expr(arg, None);
+                    return self.empty_val();
+                }
+                match kind {
+                    Extraction::UnwrapOr => {
+                        let arg_val = self.expr(arg, None);
+                        if !self.decls.universe.contains(extracted, arg_val.ty) {
+                            self.error(
+                                ErrorCode::TypeMismatch,
+                                format!(
+                                    "the fallback `{}` does not meet the extracted type `{}` [E4]",
+                                    self.decls.universe.render(arg_val.ty),
+                                    self.decls.universe.render(extracted)
+                                ),
+                                span,
+                                "fallback mismatch",
+                            );
+                            return self.empty_val();
+                        }
+                        Val {
+                            ty: extracted,
+                            diverges: false,
+                        }
+                    },
+                    Extraction::UnwrapOrElse => {
+                        let Expr::Lambda { params, body, .. } = peel_paren(arg) else {
+                            self.error(
+                                ErrorCode::TypeMismatch,
+                                format!(
+                                    "`{name}` takes a `fn() -> t` lambda that inlines at the call \
+                                     site"
+                                ),
+                                arg.span(),
+                                "not a fallback lambda",
+                            );
+                            self.expr(arg, None);
+                            return self.empty_val();
+                        };
+                        if !params.is_empty() {
+                            self.error(
+                                ErrorCode::ArityMismatch,
+                                "the fallback lambda takes no parameters".to_owned(),
+                                arg.span(),
+                                "wrong lambda arity",
+                            );
+                            return self.empty_val();
+                        }
+                        let saved = self.snapshot();
+                        let body_val = self.expr(body, Some(extracted));
+                        self.restore(saved);
+                        if !self.decls.universe.contains(extracted, body_val.ty) {
+                            self.error(
+                                ErrorCode::TypeMismatch,
+                                format!(
+                                    "the fallback lambda's `{}` does not meet the extracted type \
+                                     `{}` [E4]",
+                                    self.decls.universe.render(body_val.ty),
+                                    self.decls.universe.render(extracted)
+                                ),
+                                span,
+                                "fallback mismatch",
+                            );
+                            return self.empty_val();
+                        }
+                        Val {
+                            ty: extracted,
+                            diverges: false,
+                        }
+                    },
+                    Extraction::OkOr => {
+                        let arg_val = self.expr(arg, None);
+                        Val {
+                            ty: self.decls.universe.union(extracted, arg_val.ty),
+                            diverges: false,
+                        }
+                    },
+                    Extraction::MapErr => unreachable!("the optional arm owns three of four"),
+                }
+            },
+            Extraction::MapErr => {
+                let Expr::Lambda {
+                    params: handler_params,
+                    body,
+                    ..
+                } = peel_paren(arg)
+                else {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        "`map_err` takes a one-parameter lambda `(e) => ...`".to_owned(),
+                        arg.span(),
+                        "not a handler lambda",
+                    );
+                    self.expr(arg, None);
+                    return self.empty_val();
+                };
+                let [param] = handler_params.as_slice() else {
+                    self.error(
+                        ErrorCode::ArityMismatch,
+                        "`map_err` takes a one-parameter lambda".to_owned(),
+                        arg.span(),
+                        "wrong lambda arity",
+                    );
+                    return self.empty_val();
+                };
+                let recv_val = self.expr(recv, None);
+                let total = recv_val.ty;
+                let annotated = param.ty.as_ref().and_then(|t| self.solve_here(t));
+                let saved = self.snapshot();
+                let param_ty = annotated.unwrap_or(total);
+                self.bind_local(param.name.span, Binding {
+                    ty: param_ty,
+                    mutable: false,
+                });
+                let body_val = self.expr(body, None);
+                self.restore(saved);
+                let handled_set = match annotated {
+                    Some(written) => written,
+                    None => {
+                        let kept = self.decls.universe.inter(total, body_val.ty);
+                        self.decls.universe.diff(total, kept)
+                    },
+                };
+                let overlap = self.decls.universe.inter(total, handled_set);
+                if self.decls.universe.is_empty(overlap) && !self.decls.universe.is_empty(total) {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "`map_err` handles `{}`, which `{}` does not carry",
+                            self.decls.universe.render(handled_set),
+                            self.decls.universe.render(total)
+                        ),
+                        span,
+                        "disjoint handler",
+                    );
+                    return self.empty_val();
+                }
+                let remainder = self.decls.universe.diff(total, handled_set);
+                let result = self.decls.universe.union(remainder, body_val.ty);
+                if self.decls.universe.is_empty(result) && !self.decls.universe.is_empty(total) {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!(
+                            "`map_err` leaves nothing: the handler consumed all of `{}`",
+                            self.decls.universe.render(total)
+                        ),
+                        span,
+                        "empty remainder",
+                    );
+                    return self.empty_val();
+                }
+                Val {
+                    ty: result,
+                    diverges: false,
+                }
+            },
         }
     }
 
@@ -2802,7 +3434,7 @@ impl<'a> Bodies<'a> {
             };
         };
         let (declared, bind_span, mutable) = match &res {
-            Res::Local { bind } => match self.locals.get(bind) {
+            Res::Local { bind } => match self.locals.get(*bind) {
                 Some(binding) => (binding.ty, Some(*bind), binding.mutable),
                 None => (self.empty(), None, false),
             },
@@ -2826,7 +3458,7 @@ impl<'a> Bodies<'a> {
             self.expect_contains(val, declared, right.span(), "assignment");
         } else {
             let current = bind_span
-                .and_then(|span| self.refined.get(&span).copied())
+                .and_then(|span| self.refined.get(span).copied())
                 .unwrap_or(declared);
             let right_val = self.expr(right, Some(current));
             let result = self.binary_val(
@@ -2841,7 +3473,7 @@ impl<'a> Bodies<'a> {
         }
         // Refinement resets at assignment [B2].
         if let Some(bind_span) = bind_span {
-            self.refined.remove(&bind_span);
+            self.refined.remove(bind_span);
         }
         Val {
             ty: unit,
@@ -2862,6 +3494,18 @@ impl<'a> Bodies<'a> {
         let cond_val = self.expr(cond, None);
         self.expect_bool(cond_val, cond.span());
         let narrows = self.harvest(cond);
+        // The else path runs on ¬(a∧b∧…) = ¬a∨¬b∨…: when the condition is
+        // an `&&` chain, no single conjunct is guaranteed false, so none
+        // of its narrows inverts soundly there. A single-conjunct
+        // condition still inverts (¬a is exactly the else).
+        let else_narrows: &[Narrow] = if matches!(peel_paren(cond), Expr::Binary {
+            op: BinaryOp::And,
+            ..
+        }) {
+            &[]
+        } else {
+            &narrows
+        };
         let unit = self.unit();
         let saved = self.snapshot();
         for narrow in &narrows {
@@ -2871,7 +3515,7 @@ impl<'a> Bodies<'a> {
         self.restore(saved);
         let else_val = if let Some(else_expr) = else_ {
             let saved = self.snapshot();
-            for narrow in &narrows {
+            for narrow in else_narrows {
                 self.apply_inverse(narrow);
             }
             let val = self.expr(else_expr, expected);
@@ -2882,7 +3526,7 @@ impl<'a> Bodies<'a> {
                 // The then arm never falls through, so the continuation
                 // is exactly the implicit else path: its inverse
                 // narrowing stays live after the if.
-                for narrow in &narrows {
+                for narrow in else_narrows {
                     self.apply_inverse(narrow);
                 }
             }
@@ -2921,22 +3565,18 @@ impl<'a> Bodies<'a> {
         let mut remaining = scrut_ty;
         for arm in arms {
             let saved = self.snapshot();
-            let arm_cover = self.pattern_cover(&arm.pat, remaining, arm.ann.as_ref());
+            let (arm_cover, arm_binders) =
+                self.pattern_cover(&arm.pat, remaining, arm.ann.as_ref());
             if let Some(bind) = scrut_bind {
-                let refined = self.cover_ty(&arm_cover);
-                self.refined.insert(bind, refined);
+                // An arm covering no member atom (a literal arm) refines
+                // nothing: narrowing the scrutinee to the empty type
+                // would poison the arm body.
+                if !arm_cover.is_empty() {
+                    let refined = self.cover_ty(&arm_cover);
+                    self.refined.insert(bind, refined);
+                }
             }
-            let mut ann_binders = Vec::new();
-            self.pattern_walk(
-                &arm.pat,
-                remaining,
-                arm.ann.as_ref(),
-                &mut Vec::new(),
-                &mut ann_binders,
-                0,
-                true,
-            );
-            for (_, span, ty) in ann_binders {
+            for (_, span, ty) in arm_binders {
                 self.bind_local(span, Binding { ty, mutable: false });
             }
             if let Some(guard) = &arm.guard {
@@ -3103,10 +3743,10 @@ impl<'a> Bodies<'a> {
 
     /// Monotone narrowing: intersect the binder's current type.
     fn apply_narrow(&mut self, narrow: &Narrow) {
-        let Some(declared) = self.locals.get(&narrow.bind).map(|b| b.ty) else {
-            return
+        let Some(declared) = self.locals.get(narrow.bind).map(|b| b.ty) else {
+            return;
         };
-        let current = self.refined.get(&narrow.bind).copied().unwrap_or(declared);
+        let current = self.refined.get(narrow.bind).copied().unwrap_or(declared);
         let next = if narrow.keep {
             self.decls.universe.inter(current, narrow.ty)
         } else {
@@ -3126,7 +3766,9 @@ impl<'a> Bodies<'a> {
 
     // ---- helpers ---------------------------------------------------------
 
-    fn member_sig(&self, method: MethodId) -> Option<FnSig> {
+    /// The method's registered signature, shared (the handle clones; the
+    /// AST-shaped signature never deep-copies at call sites).
+    fn member_sig(&self, method: MethodId) -> Option<Arc<FnSig>> {
         self.decls
             .members
             .get(&method)
@@ -3159,6 +3801,77 @@ impl<'a> Bodies<'a> {
         }
     }
 
+    /// One generic call's argument against its solved parameter type [B2]:
+    /// the structural binder stays silent on a constructor mismatch (it
+    /// binds nothing for `list_len("words")`), so the solved parameter has
+    /// to contain the argument or the mismatch reports. A parameter that
+    /// still carries an unbound variable renders its written spelling,
+    /// never the internal `$t` name.
+    fn expect_param_contains(
+        &mut self,
+        val: Val,
+        written: &Type,
+        expected: Ty,
+        span: Span,
+    ) -> bool {
+        // An empty side is an already-reported operand, never a new
+        // mismatch: the cascade stays with its root cause.
+        if val.diverges
+            || self.decls.universe.is_empty(val.ty)
+            || self.decls.universe.is_empty(expected)
+            || self.decls.universe.contains(expected, val.ty)
+        {
+            return true;
+        }
+        let expected_text = if self.has_free_vars(expected) {
+            decls::render_type(written)
+        } else {
+            self.decls.universe.render(expected)
+        };
+        self.diags.push(
+            Diagnostic::error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "`argument` has type `{}`, not contained in `{}` [B2]",
+                    self.decls.universe.render(val.ty),
+                    expected_text
+                ),
+            )
+            .with_primary(span, "not contained"),
+        );
+        false
+    }
+
+    /// Whether a solved type still carries an inference variable: a bare
+    /// minted variable, or a structural shape applied over one.
+    fn has_free_vars(&self, ty: Ty) -> bool {
+        self.decls
+            .universe
+            .members(ty)
+            .iter()
+            .any(|atom| self.atom_has_free_vars(*atom))
+    }
+
+    fn atom_has_free_vars(&self, atom: TypeId) -> bool {
+        match self.decls.universe.atom_decl(atom) {
+            Ok(decl) => {
+                decl.name.starts_with('$')
+                    || match &decl.kind {
+                        AtomKind::Apply(_, args) => args.iter().any(|arg| self.has_free_vars(*arg)),
+                        AtomKind::Tuple(elements) => {
+                            elements.iter().any(|elem| self.atom_has_free_vars(*elem))
+                        },
+                        AtomKind::FnSig(params, ret) => {
+                            params.iter().any(|param| self.has_free_vars(*param))
+                                || self.has_free_vars(*ret)
+                        },
+                        _ => false,
+                    }
+            },
+            Err(_) => false,
+        }
+    }
+
     fn expect_bool(&mut self, val: Val, span: Span) -> bool {
         let bool_ty = self.bool_ty();
         if val.diverges || self.decls.universe.contains(bool_ty, val.ty) {
@@ -3177,7 +3890,31 @@ impl<'a> Bodies<'a> {
         }
     }
 
-    fn check_args(&mut self, args: &[&Expr], param_tys: &[Option<Ty>], _span: Span) {
+    fn check_args(&mut self, args: &[&Expr], param_tys: &[Option<Ty>], span: Span) {
+        if args.len() > param_tys.len() {
+            // The direct path reports extra arguments where they appear;
+            // the fn-typed-value path matches it, and the dropped
+            // expressions still walk so inner errors surface.
+            self.error(
+                ErrorCode::ArityMismatch,
+                "more arguments than the function type takes".to_owned(),
+                args[param_tys.len()].span(),
+                "extra argument",
+            );
+            for arg in &args[param_tys.len()..] {
+                self.expr(arg, None);
+            }
+        } else if args.len() < param_tys.len() {
+            self.error(
+                ErrorCode::ArityMismatch,
+                format!(
+                    "missing argument(s): the function type takes {}",
+                    param_tys.len()
+                ),
+                span,
+                "missing arguments",
+            );
+        }
         for (arg, param) in args.iter().zip(param_tys.iter()) {
             match param {
                 Some(param) => {
@@ -3512,12 +4249,19 @@ impl<'a> Bodies<'a> {
         {
             return true;
         }
-        matches!(
-            self.decls
-                .instances
-                .resolve_unique(&self.decls.universe, trait_id, ty),
-            Ok(Some(_))
-        )
+        self.solved_instance(trait_id, ty).is_some()
+    }
+
+    /// The unique containing instance for a receiver type [B6], when the
+    /// environment statically solved one; `None` for an unsatisfied trait,
+    /// a site only an in-scope assumption covers, or the impossible
+    /// multi-head answer over a coherent environment.
+    fn solved_instance(&self, trait_id: TraitId, ty: Ty) -> Option<InstanceId> {
+        self.decls
+            .instances
+            .resolve_unique(&self.decls.universe, trait_id, ty)
+            .ok()
+            .flatten()
     }
 
     fn trait_name(&self, trait_id: TraitId) -> String {
@@ -3553,12 +4297,17 @@ impl<'a> Bodies<'a> {
     }
 
     fn mint_var(&mut self, name: &str) -> TypeId {
-        *self.counter += 1;
-        let unique = format!("${name}#{}", self.counter);
+        self.decls.var_counter += 1;
+        let unique = format!("${name}#{}", self.decls.var_counter);
+        // Impossible by construction: surface names cannot contain `$` or
+        // `#`, and both minting sites (instance declaration and body
+        // checking) draw from the shared var_counter, so the minted name
+        // is always fresh — a failure would be a silently wrong type, so
+        // it panics instead of falling back to NONE.
         self.decls
             .universe
             .declare_tag(&unique)
-            .unwrap_or(TypeId::NONE)
+            .expect("minted variable names are unique by the shared counter")
     }
 
     fn fresh_var(&mut self, name: &str) -> Ty {
@@ -3569,25 +4318,27 @@ impl<'a> Bodies<'a> {
             .unwrap_or_else(|_| self.empty())
     }
 
-    fn snapshot(&self) -> (HashMap<Span, Binding>, HashMap<Span, Ty>, usize) {
-        (
-            self.locals.clone(),
-            self.refined.clone(),
-            self.assumptions.len(),
-        )
+    fn snapshot(&self) -> ScopeMark {
+        ScopeMark {
+            locals: self.locals.mark(),
+            refined: self.refined.mark(),
+            assumptions: self.assumptions.len(),
+            ret: self.ret,
+        }
     }
 
-    fn restore(&mut self, saved: (HashMap<Span, Binding>, HashMap<Span, Ty>, usize)) {
-        self.locals = saved.0;
-        self.refined = saved.1;
-        self.assumptions.truncate(saved.2);
+    fn restore(&mut self, saved: ScopeMark) {
+        self.locals.restore_to(saved.locals);
+        self.refined.restore_to(saved.refined);
+        self.assumptions.truncate(saved.assumptions);
+        self.ret = saved.ret;
     }
 
     fn local_ty(&self, bind: Span) -> Option<Ty> {
         self.refined
-            .get(&bind)
+            .get(bind)
             .copied()
-            .or_else(|| self.locals.get(&bind).map(|b| b.ty))
+            .or_else(|| self.locals.get(bind).map(|b| b.ty))
     }
 
     /// The binder span when an expression is a local path.

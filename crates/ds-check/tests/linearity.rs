@@ -737,3 +737,33 @@ fn calling_a_consumed_capture_closure_twice_is_currently_unaudited() {
         "the captured binding is dead, not dropped"
     );
 }
+
+#[test]
+fn cross_file_top_level_consumption_is_order_independent() {
+    // A body in file A consuming file B's top-level binding: every
+    // file's top-levels come live before any body walks, so the move
+    // and the use-after-move fire with the consuming file processed
+    // first [G3] — a per-file interleave would silently skip them.
+    let mut files = Files::new();
+    let a = files.add_source(
+        "a.ds",
+        concat!(
+            "fn go() -> int {\n",
+            "  take_handle(shared)\n",
+            "  take_handle(shared)\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    let b = files.add_source(
+        "b.ds",
+        &format!("{PRELUDE}const shared = open_handle(\"x\")\n"),
+    );
+    let ast_a = parse(&files, a).unwrap_or_else(|d| panic!("a parses: {d:?}"));
+    let ast_b = parse(&files, b).unwrap_or_else(|d| panic!("b parses: {d:?}"));
+    let (checked, lin) = linearity::check(&files, &[ast_a, ast_b]);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `shared` is no longer usable");
+}

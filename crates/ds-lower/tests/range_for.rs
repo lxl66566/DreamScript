@@ -121,14 +121,13 @@ fn a_non_int_width_range_stays_a_named_lowering_boundary() {
         analyzed.checked.diags.is_empty(),
         "same-width integer ranges check clean"
     );
-    let err = match lower(
+    let Err(err) = lower(
         "width_range",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) {
-        Err(err) => err,
-        Ok(_) => panic!("the uop contract has no width arithmetic"),
+    ) else {
+        panic!("the uop contract has no width arithmetic")
     };
     assert!(
         matches!(err, LowerError::Unsupported { .. }),

@@ -1,6 +1,6 @@
 [package]
 name         = "ds-cli"
-description  = "The ds binary: DreamScript's command-line interface (check, run, build)"
+description  = "The ds binary: DreamScript's command-line interface (check, run, build, fmt)"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -28,3 +28,4 @@ ds-mod.workspace    = true
 ds-vm.workspace     = true
 ds-lower = { path = "../ds-lower" }
 ds-parse = { path = "../ds-parse" }
+ds-fmt   = { path = "../ds-fmt" }

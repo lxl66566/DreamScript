@@ -1,14 +1,14 @@
 // A write/read round trip through the file-IO natives: write_file, then
-// read_file, file_size, and file_exists over the same bytes, comparing
-// the round trip by content. The path is fixed relative to the current
-// directory.
+// read_file (its failure handled through .err), file_size, and
+// file_exists over the same bytes, comparing the round trip by content.
+// The path is fixed relative to the current directory.
 
 
 fn main() -> () {
   const path = "ds_files_example.txt"
   const text = "files round trip"
   write_file(path, text)
-  const back = read_file(path)
+  const back = read_file(path).err((_: io_err) => "")
   println("read back: ${back}")
   println("size: ${file_size(path)}")
   println("exists: ${file_exists(path)}")

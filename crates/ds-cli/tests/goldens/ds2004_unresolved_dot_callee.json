@@ -1,0 +1,1 @@
+{"code":"DS2004","severity":"error","message":"no name `ok_or` behind the dot","spans":[{"file":"tests/fixtures/negative/ds2004_unresolved_dot_callee.ds","start_line":11,"start_col":19,"end_line":11,"end_col":24,"label":"not a free function, not a method","primary":true}],"notes":["tried free functions first, then trait and inherent methods [F3]"],"suggestions":[]}

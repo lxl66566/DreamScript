@@ -185,6 +185,128 @@ fn pest_error(file: FileId, src: &str, err: pest::error::Error<Rule>) -> Diagnos
     Diagnostic::error(code, message).with_primary(span, label)
 }
 
+/// Human phrasing of one grammar rule for parse-error messages: the
+/// user-reachable vocabulary is named, grammar-internal helpers keep their
+/// variant name as the fallback.
 fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
-    format!("{rule:?}").into()
+    let named = match rule {
+        // Trivia and sentinels.
+        Rule::line_comment | Rule::block_comment => "a comment",
+        Rule::EOI => "end of input",
+        // Keywords: their own spelling.
+        Rule::kw_const => "`const`",
+        Rule::kw_var => "`var`",
+        Rule::kw_fn => "`fn`",
+        Rule::kw_if => "`if`",
+        Rule::kw_else => "`else`",
+        Rule::kw_match => "`match`",
+        Rule::kw_while => "`while`",
+        Rule::kw_for => "`for`",
+        Rule::kw_in => "`in`",
+        Rule::kw_break => "`break`",
+        Rule::kw_continue => "`continue`",
+        Rule::kw_return => "`return`",
+        Rule::kw_is => "`is`",
+        Rule::kw_struct => "`struct`",
+        Rule::kw_enum => "`enum`",
+        Rule::kw_tag => "`tag`",
+        Rule::kw_type => "`type`",
+        Rule::kw_trait => "`trait`",
+        Rule::kw_impl => "`impl`",
+        Rule::kw_import => "`import`",
+        Rule::kw_pub => "`pub`",
+        Rule::kw_extern => "`extern`",
+        Rule::kw_mut => "`mut`",
+        Rule::kw_nursery => "`nursery`",
+        Rule::kw_spawn => "`spawn`",
+        Rule::kw_defer => "`defer`",
+        Rule::kw_true => "`true`",
+        Rule::kw_false => "`false`",
+        Rule::local_kw => "`const` or `var`",
+        // Operators.
+        Rule::assign_op
+        | Rule::range_op
+        | Rule::cmp_op
+        | Rule::shift_op
+        | Rule::add_op
+        | Rule::mul_op => "an operator",
+        Rule::neg_op => "a unary operator",
+        Rule::opt_mark => "`?`",
+        // Expressions: the precedence chain collapses to one description.
+        Rule::expr
+        | Rule::expr_nos
+        | Rule::assign_lvl
+        | Rule::nos_assign
+        | Rule::range_lvl
+        | Rule::nos_range
+        | Rule::logor_lvl
+        | Rule::nos_logor
+        | Rule::logand_lvl
+        | Rule::nos_logand
+        | Rule::isin_lvl
+        | Rule::nos_isin
+        | Rule::bitor_lvl
+        | Rule::nos_bitor
+        | Rule::bitxor_lvl
+        | Rule::nos_bitxor
+        | Rule::bitand_lvl
+        | Rule::nos_bitand
+        | Rule::cmp_lvl
+        | Rule::nos_cmp
+        | Rule::shift_lvl
+        | Rule::nos_shift
+        | Rule::add_lvl
+        | Rule::nos_add
+        | Rule::mul_lvl
+        | Rule::nos_mul
+        | Rule::unary_lvl
+        | Rule::nos_unary
+        | Rule::postfix_lvl
+        | Rule::nos_postfix
+        | Rule::primary
+        | Rule::primary_nos => "an expression",
+        // Types, patterns, and the declaration vocabulary.
+        Rule::type_expr
+        | Rule::type_union
+        | Rule::type_inter
+        | Rule::type_diff
+        | Rule::type_postfix
+        | Rule::type_unary
+        | Rule::type_atom => "a type",
+        Rule::pattern | Rule::pat_or => "a pattern",
+        Rule::ident => "an identifier",
+        Rule::path | Rule::path_atom | Rule::type_path | Rule::field_name => "a name",
+        Rule::generics => "generic parameters",
+        Rule::gparam => "a generic parameter",
+        Rule::params => "a parameter list",
+        Rule::param => "a parameter",
+        Rule::param_mode => "a parameter mode",
+        Rule::args => "call arguments",
+        Rule::arg => "an argument",
+        Rule::arm => "a match arm",
+        Rule::arm_list => "match arms",
+        Rule::arm_body => "a match arm body",
+        Rule::block_expr => "a block",
+        Rule::stmt => "a statement",
+        Rule::stmt_list => "statements",
+        Rule::item | Rule::file_item => "a declaration",
+        Rule::attr => "an attribute",
+        Rule::import_item => "an import",
+        Rule::import_path => "an import path",
+        Rule::import_select => "an import selection",
+        Rule::import_alias => "an import alias",
+        Rule::lambda => "a lambda",
+        Rule::case_tuple | Rule::case_struct => "an enum case payload",
+        Rule::impl_body => "an impl body",
+        Rule::literal => "a literal",
+        Rule::int_lit => "an integer literal",
+        Rule::float_lit => "a float literal",
+        Rule::string_lit => "a string literal",
+        Rule::raw_string => "a raw string literal",
+        Rule::char_lit => "a character literal",
+        Rule::byte_lit => "a byte literal",
+        // Grammar-internal helpers keep their variant name as the fallback.
+        _ => return std::borrow::Cow::Owned(format!("{rule:?}")),
+    };
+    std::borrow::Cow::Borrowed(named)
 }

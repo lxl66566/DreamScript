@@ -31,6 +31,20 @@
 //! death in spawn order, and a first failure raises the nursery's cancel
 //! flag — observed only at taken backward branches (the `jump!` macro), so
 //! a linear consume in flight is never interrupted.
+//!
+//! # Reentrant native calls
+//!
+//! The lambda-taking generic builtins (map/filter/reduce) call user code
+//! from Rust: `Vm::call_hosted` pushes a synthetic reentry frame (marked
+//! by the entry-frame sentinel return pc) on the running fiber's chain
+//! and drives it through `execute` with a `boundary` depth, nesting
+//! stack-style — map-in-lambda stacks another frame on the same chain.
+//! A drive that ends the fiber or parks at the host instead of returning
+//! refuses with [`Trap::ReentrancyRefused`]: a Rust-side loop cannot
+//! suspend. CALLG stays one instruction from the outer loop's view, so
+//! the cancel discipline adds no observation point inside the
+//! per-element loop; a lambda's own backward jumps observe through the
+//! same `jump!` macro as any code.
 
 use std::sync::Arc;
 
@@ -49,7 +63,7 @@ use crate::{
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::Objects,
     program::{Const, ConstKind},
-    value::{Value, Word},
+    value::{FuncRef, Value, Word},
 };
 
 /// Default value-stack limit: 1 Mi words (8 MiB on 64-bit targets).
@@ -92,6 +106,13 @@ pub enum Trap {
         module: String,
         /// The target function-table index.
         func: u32,
+    },
+    /// A scalar FuncRef word named a module id the registry never
+    /// assigned: hand-assembled code or a host argument carried a bogus
+    /// callable word.
+    UnknownModule {
+        /// The word's module id.
+        module: u32,
     },
     /// A call or run passed the wrong argument count.
     ArityMismatch {
@@ -153,6 +174,12 @@ pub enum Trap {
         /// The kind the entry holds.
         found: ConstKind,
     },
+    /// A CALLG evidence word names no builtin instance. Lowering only
+    /// mints known instance ids, so this names a corrupted stream.
+    UnknownInstance {
+        /// The staged evidence word.
+        evidence: i64,
+    },
     /// A body word does not decode: the stream is not canonical. Load
     /// rejects these, so this is defensive.
     BadEncoding {
@@ -189,6 +216,14 @@ pub enum Trap {
         /// The class of the underlying io failure.
         kind: std::io::ErrorKind,
     },
+    /// A reentrant native drive (a generic container body invoking its
+    /// user lambda) could not return: the lambda's execution ended the
+    /// fiber — HALT under nesting, a fiber switch whose resumer chain
+    /// never came back, a nursery cancel — or parked at the host (a
+    /// yield with no in-language resumer). A Rust-side loop cannot
+    /// suspend, so the drive refuses instead of corrupting the frame
+    /// chain; the frames stay for [`Vm::backtrace`].
+    ReentrancyRefused,
 }
 
 /// One entry of the call-info stack: the frame base plus the module version
@@ -234,6 +269,10 @@ enum Callee<'a> {
 enum RetOutcome {
     /// The fiber's entry frame returned; `Value` is its final value.
     Root(Value),
+    /// The reentry frame of a nested drive returned (the synthetic
+    /// entry frame [`Vm::call_hosted`] pushed); `Value` is the hosted
+    /// call's answer, and the Rust-side native loop resumes.
+    Boundary(Value),
     /// Resume the caller's function at the metadata word's return pc.
     Resume {
         version: Arc<ModuleVersion>,
@@ -243,12 +282,15 @@ enum RetOutcome {
 }
 
 /// How a drive of the dispatcher ended for its host: the current fiber
-/// completed, or it parked at a yield whose resumer is the host.
+/// completed, it parked at a yield whose resumer is the host, or a
+/// nested drive's reentry frame returned.
 enum DriveOutcome {
     /// The current fiber's entry frame returned or `HALT`ed.
     Died(Value),
     /// The current fiber yielded with no in-language resumer.
     Yielded(Value),
+    /// A nested reentrant call's synthetic frame returned.
+    Frame(Value),
 }
 
 /// The result of a control-native switch at a `CALL` site.
@@ -353,6 +395,47 @@ impl StackState<'_> {
         Ok(Callee::Native(native))
     }
 
+    /// Resolves a scalar FuncRef word (module id + function index, the
+    /// `Fn` slot classification, F2) through the two-slot module table at
+    /// call time [H6 item 5]: the id names a module, the index names a
+    /// function in its current slot's table. Resolution never caches a
+    /// code pointer, so a hot-reload swap redirects a staged fn word at
+    /// its next call exactly like every cross-module call. Callable words
+    /// address the uop module tables only — natives are not values.
+    fn resolve_func_word(
+        registry: &ModuleRegistry,
+        funcref: FuncRef,
+        nargs: u8,
+    ) -> Result<(Arc<ModuleVersion>, u32), Trap> {
+        let name = registry
+            .module_name(funcref.module())
+            .ok_or(Trap::UnknownModule {
+                module: funcref.module(),
+            })?;
+        let (version, func_id) =
+            registry
+                .resolve_indexed(name, funcref.func())
+                .ok_or(Trap::UnknownCallee {
+                    module: name.to_owned(),
+                    func: funcref.func(),
+                })?;
+        let target = &version.functions()[func_id as usize];
+        let entry = target.entry.resolve();
+        if entry != func_id as usize {
+            return Err(Trap::EntryWordMismatch {
+                resolved: entry,
+                expected: func_id as usize,
+            });
+        }
+        if usize::from(nargs) != target.layout.params_len() {
+            return Err(Trap::ArityMismatch {
+                expected: target.layout.params_len(),
+                given: usize::from(nargs),
+            });
+        }
+        Ok((version, func_id))
+    }
+
     /// The per-call-site check for `Raw`-staged arguments: they carry no
     /// static type, so the staged value words are checked against the
     /// callee's parameter types here (concrete staging was already proved
@@ -373,7 +456,11 @@ impl StackState<'_> {
             let slot = u8::try_from(start + index).expect("slot index fits u8");
             let value = read_value(stack, fp, slot, caller.slots(), body_len)?;
             let staged = value.slot_type();
-            if staged != *param {
+            // a Ref word staged against a Fn parameter is the
+            // callable-defaulted slot (F2): a closure object's word behind
+            // a fn-typed parameter, admitted exactly like the slide admits
+            // the static pairing
+            if staged != *param && !(staged == SlotType::Ref && *param == SlotType::Fn) {
                 return Err(Trap::CallLayout(SlideError::TypeMismatch {
                     index,
                     staged,
@@ -477,8 +564,15 @@ impl StackState<'_> {
 
     /// `RET`: the result word overlays slot 0 (the caller reads it from its
     /// outgoing-argument slot 0 [H2]); the stack restores the caller's frame
-    /// span; the caller resumes at the metadata word's return pc.
-    fn ret(&mut self, value: Value, fp: usize) -> Result<RetOutcome, Trap> {
+    /// span; the caller resumes at the metadata word's return pc. A nested
+    /// drive's synthetic reentry frame answers [`RetOutcome::Boundary`]
+    /// instead: its caller is Rust-side code (`Vm::call_hosted`), not a
+    /// frame. The sentinel return pc is the frame's identity marker — every
+    /// CALL-pushed frame carries a real return pc, and a fiber switched in
+    /// mid-drive never carries a reentry frame at all (a resumable fiber
+    /// parks only at switch points, never mid-native), so the
+    /// chain-position test cannot false-positive across a switch.
+    fn ret(&mut self, value: Value, fp: usize, boundary: usize) -> Result<RetOutcome, Trap> {
         let meta = match self.stack[fp] {
             Word::Meta(m) => m,
             Word::Slot(_) => return Err(Trap::MetaWordCorrupt { fp }),
@@ -487,6 +581,14 @@ impl StackState<'_> {
         if self.callinfo.len() == 1 {
             self.stack.truncate(fp + 2);
             return Ok(RetOutcome::Root(value));
+        }
+        if boundary != usize::MAX && self.callinfo.len() == boundary && meta.return_pc.0 == u32::MAX
+        {
+            // the reentry frame and everything above it leave the chain;
+            // the value rides the outcome
+            self.stack.truncate(fp);
+            self.callinfo.pop();
+            return Ok(RetOutcome::Boundary(value));
         }
         let caller = self.callinfo[self.callinfo.len() - 2].clone();
         let caller_fn = &caller.module.functions()[caller.func as usize];
@@ -883,6 +985,16 @@ impl Vm {
         Value::Ref(self.objects.intern(text))
     }
 
+    /// Stages a closure value for the host (the F2 capturing-lambda
+    /// object): one heap object behind one `Ref` word, the header FuncRef
+    /// word plus the moved-in capture block. The host-held reference owns
+    /// the object's birth count; the module-code construction path (and
+    /// with it the value's own RC traffic) waits on lambda-value lowering.
+    #[must_use = "the reference is the handle; the count is the host's to drop"]
+    pub fn alloc_closure(&mut self, func: FuncRef, captures: Vec<Value>) -> Value {
+        Value::Ref(self.objects.alloc_closure(func, captures))
+    }
+
     /// Switches the output sink to an in-memory buffer: print/println
     /// write there until the next [`Vm::run`] or forever. Callers read the
     /// bytes with [`Vm::captured_output`].
@@ -1066,16 +1178,22 @@ impl Vm {
         }
         self.pool[fiber.index()].resumer = None; // the host resumes
         let (active, pc) = self.switch_in(fiber, payload);
-        let outcome = self.execute(active, pc);
+        let outcome = self.execute(active, pc, usize::MAX);
         self.host_release();
         match outcome {
             Ok(DriveOutcome::Died(v) | DriveOutcome::Yielded(v)) => Ok(v),
+            // a host-level drive passes no boundary, so no reentry frame
+            // exists to return through
+            Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
             Err((trap, at)) => {
                 self.trap_pc = Some(at);
                 // a nursery child dying trapped under a host drive: ledger
                 // it and raise the cancel flag [E2 first failure]; the
-                // fiber itself stays interrupted (frames kept)
-                self.trap_child(fiber, &trap);
+                // fiber itself stays interrupted (frames kept). The blame
+                // follows the fiber the drive ended on — the drive may have
+                // switched away from `fiber` (it parked at its own resume
+                // call) before the trap struck
+                self.trap_child(self.current, &trap);
                 Err(trap)
             },
         }
@@ -1200,27 +1318,28 @@ impl Vm {
         self.nursery_open(nursery)?;
         let outcomes = self.run_nursery_to_death(nursery, false);
         Ok(
+            // only an all-Completed record joins; a synthesized Cancelled
+            // with no Trapped sibling (an interrupted drive) is a boundary
+            // failure the same way a trap is
             if outcomes
                 .iter()
-                .any(|o| matches!(o, ChildOutcome::Trapped(_)))
+                .all(|o| matches!(o, ChildOutcome::Completed(_)))
             {
-                JoinOutcome::Failed(outcomes)
-            } else {
                 JoinOutcome::Joined(
                     outcomes
                         .into_iter()
                         .map(|o| match o {
                             ChildOutcome::Completed(v) => v,
-                            // a Cancelled entry implies a Trapped sibling raised
-                            // the flag, so the Failed branch took it
+                            // the all-Completed test took every other shape
+                            // to the Failed branch
                             ChildOutcome::Cancelled | ChildOutcome::Trapped(_) => {
-                                unreachable!(
-                                    "join without a failure has no cancelled or trapped child"
-                                )
+                                unreachable!("a joined child completed")
                             },
                         })
                         .collect(),
                 )
+            } else {
+                JoinOutcome::Failed(outcomes)
             },
         )
     }
@@ -1256,10 +1375,13 @@ impl Vm {
     /// The join/teardown driver: enters each child in spawn order and
     /// drives it to death before the next (sequential — the deterministic
     /// choice). Every death path ledgers its outcome into the nursery
-    /// whoever ran it, so this loop only drives and collects. A trapped
-    /// child ledgers `Trapped` and raises the flag; the walk that marks
-    /// such an interrupted child dead below is the future deinit pass's
-    /// hook point [E5: teardown walks frames].
+    /// whoever ran it, so this loop only drives and collects. A trap
+    /// escaping a drive is attributed to the fiber the drive ended on (a
+    /// child parked at its own resume call while its resumee traps is
+    /// innocent: it is bounced back in to land); a trapped child ledgers
+    /// `Trapped` and raises the flag, and the walk that marks such an
+    /// interrupted child dead below is the future deinit pass's hook
+    /// point [E5: teardown walks frames].
     fn run_nursery_to_death(
         &mut self,
         nursery: NurseryId,
@@ -1280,12 +1402,22 @@ impl Vm {
                     break; // interrupted mid-trap (already ledgered)
                 }
                 let (active, pc) = self.switch_in(child, Value::Tag(PLATFORM_NONE));
-                match self.execute(active, pc) {
+                match self.execute(active, pc, usize::MAX) {
                     Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => {},
+                    Ok(DriveOutcome::Frame(_)) => {
+                        unreachable!("a host drive answers no reentry frame")
+                    },
                     Err((trap, _at)) => {
+                        // the trap escaped the drive on whichever fiber was
+                        // running when it struck — a child that resumed
+                        // another fiber parks at its resume call while the
+                        // resumee traps, and that parked child is innocent.
+                        // Blame the fiber the drive ended on (like `run`),
+                        // then let the loop re-validate this child: itself
+                        // trapped → interrupted (already ledgered, the guard
+                        // breaks); parked → bounced back in to land
                         self.host_release();
-                        self.trap_child(child, &trap);
-                        break;
+                        self.trap_child(self.current, &trap);
                     },
                 }
             }
@@ -1302,7 +1434,10 @@ impl Vm {
         slot.state = NurseryState::Dead;
         slot.outcomes
             .drain(..)
-            .map(|o| o.expect("every child died through a ledgered path"))
+            // a child cut down before any ledgered death (an interrupted
+            // drive, an exotic switch tangle) reports as a boundary
+            // cancellation — a structured outcome, never a panic
+            .map(|o| o.unwrap_or(ChildOutcome::Cancelled))
             .collect()
     }
 
@@ -1357,7 +1492,13 @@ impl Vm {
             });
         }
         for (i, (&arg, &ty)) in args.iter().zip(target.layout.params()).enumerate() {
-            if arg.slot_type() != ty && ty != SlotType::Raw {
+            // a Ref word against a Fn parameter is the callable-defaulted
+            // slot (F2): the host stages a closure word into a fn-typed
+            // entry parameter exactly like a module call
+            if arg.slot_type() != ty
+                && ty != SlotType::Raw
+                && !(arg.slot_type() == SlotType::Ref && ty == SlotType::Fn)
+            {
                 return Err(Trap::SlotTypeMismatch {
                     slot: u8::try_from(i).expect("argument index exceeds u8"),
                     expected: ty,
@@ -1621,7 +1762,7 @@ impl Vm {
         };
         let mut pc = CodePc(0);
         loop {
-            match self.execute(active, pc) {
+            match self.execute(active, pc, usize::MAX) {
                 Ok(DriveOutcome::Died(value)) => {
                     self.host_release();
                     return Ok(value);
@@ -1630,6 +1771,9 @@ impl Vm {
                     let (a, p) = self.switch_in(FIBER_ROOT, Value::Tag(PLATFORM_NONE));
                     active = a;
                     pc = p;
+                },
+                Ok(DriveOutcome::Frame(_)) => {
+                    unreachable!("a host drive answers no reentry frame")
                 },
                 Err((trap, at)) => {
                     self.trap_pc = Some(at);
@@ -1643,11 +1787,173 @@ impl Vm {
         }
     }
 
+    /// Whether the live call chain still carries this drive's reentry
+    /// frame (the sentinel-metadata frame [`Vm::call_hosted`] pushed at
+    /// `boundary - 1`): the honesty condition for effects that cannot
+    /// suspend the Rust-side native loop. A fiber switched in mid-drive
+    /// never carries one — a resumable fiber parks only at switch
+    /// points, never mid-native — so the sentinel test cannot
+    /// false-positive across a switch.
+    fn reentry_live(&self, boundary: usize) -> bool {
+        if boundary == usize::MAX || self.callinfo.len() < boundary {
+            return false;
+        }
+        matches!(
+            self.stack[self.callinfo[boundary - 1].fp],
+            Word::Meta(m) if m.return_pc.0 == u32::MAX
+        )
+    }
+
+    /// Drives one reentrant call of a planned function from native code
+    /// — the lambda-taking container combinators' per-element
+    /// invocation: a synthetic reentry frame (the entry-frame sentinel
+    /// return pc marks it) is pushed on the CURRENT fiber's chain at
+    /// `boundary` and driven to its return, which answers
+    /// [`DriveOutcome::Frame`]. The callee word is callable-defaulted
+    /// (F2): a scalar FuncRef names the function directly, a `Ref` word
+    /// names a closure object whose capture block lands in the callee's
+    /// leading local slots exactly like a CALLS copy-in (one acquired
+    /// count per `Ref` capture, balanced by the callee body's own
+    /// placement). Each Ref argument carries one count into
+    /// the frame (the local-call hand-off: the callee's placement owns
+    /// its params), and the returned word transfers its count to the
+    /// caller. A drive that ends any other way —
+    /// the lambda HALTs under nesting, a fiber switch's resumer chain
+    /// never returns, a nursery cancel kills the fiber, a yield parks
+    /// at the host — refuses with [`Trap::ReentrancyRefused`]: a
+    /// Rust-side loop cannot suspend, and the chain is already lost or
+    /// parked. On every non-returning outcome the fiber that hosted the
+    /// reentry frame is interrupted (never resumable again — a parked
+    /// resume would run its lambda into the sentinel return pc). A
+    /// trapped lambda propagates its trap with the frames kept for
+    /// [`Vm::backtrace`].
+    pub(crate) fn call_hosted(&mut self, callee: Value, args: &[Value]) -> Result<Value, Trap> {
+        let nargs = u8::try_from(args.len()).expect("hosted-call arities are tiny");
+        let (funcref, captures) = match callee {
+            Value::Fn(funcref) => (funcref, None),
+            Value::Ref(obj) => {
+                let (header, block) = self.objects.closure_at(obj)?;
+                (header, Some(block.to_vec()))
+            },
+            other => {
+                return Err(Trap::SlotTypeMismatch {
+                    slot: 0,
+                    expected: SlotType::Fn,
+                    actual: other.slot_type(),
+                })
+            },
+        };
+        let (version, func_id) = StackState::resolve_func_word(&self.registry, funcref, nargs)?;
+        let target = &version.functions()[func_id as usize];
+        let frame_size = target.layout.frame_size() as usize;
+        let base = self.stack.len();
+        let needed = base + frame_size;
+        if needed > self.limit {
+            return Err(Trap::StackOverflow {
+                needed,
+                limit: self.limit,
+            });
+        }
+        self.stack.push(Word::Meta(FrameMetadata {
+            return_pc: CodePc(u32::MAX),
+            frame_size: u32::try_from(frame_size).expect("frame span fits u32"),
+            tail: TailChain::default(),
+        }));
+        // the local-call hand-off: each Ref argument carries one count
+        // into the frame (the callee's placement treats its params as
+        // owned — returning one transfers that count with the answer,
+        // and a dropped one balances at the body's exit drops)
+        for &arg in args {
+            if let Value::Ref(id) = arg {
+                self.objects.inc(id)?;
+            }
+        }
+        for &arg in args {
+            self.stack.push(Word::Slot(arg));
+        }
+        self.stack.grow_to(needed);
+        // the closure's capture block lands in the callee's leading local
+        // slots — the CALLS copy-in discipline: one acquired count per
+        // Ref capture, the body's own placement balancing it, while the
+        // closure object keeps its own count untouched
+        let capture_body_len = target.layout.slots().len() - target.layout.arg_area_len();
+        if let Some(block) = &captures {
+            let end = target.layout.params_len() + block.len();
+            if end > capture_body_len {
+                return Err(Trap::SlotOutOfRange {
+                    slot: u8::try_from(end - 1).unwrap_or(u8::MAX),
+                    frame_slots: target.layout.slots().len(),
+                });
+            }
+            for (index, &word) in block.iter().enumerate() {
+                if let Value::Ref(id) = word {
+                    self.objects.inc(id)?;
+                }
+                let slot = u8::try_from(target.layout.params_len() + index)
+                    .expect("capture slot fits u8 after the range check");
+                write_slot(
+                    &mut self.stack,
+                    base,
+                    slot,
+                    target.layout.slots(),
+                    capture_body_len,
+                    word,
+                )?;
+            }
+        }
+        self.callinfo.push(CallInfo {
+            fp: base,
+            module: Arc::clone(&version),
+            func: func_id,
+        });
+        let fiber = &mut self.pool[self.current.index()];
+        fiber.max_len = fiber.max_len.max(needed);
+        let boundary = self.callinfo.len();
+        let host = self.current;
+        let active = Active {
+            version: Arc::clone(&version),
+            func: func_id,
+        };
+        let driven = match self.execute(active, CodePc(0), boundary) {
+            Ok(DriveOutcome::Frame(value)) => Ok(value),
+            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => Err(Trap::ReentrancyRefused),
+            Err((trap, _at)) => Err(trap),
+        };
+        if driven.is_err() {
+            // the Rust-side loop is gone, so the sentinel reentry frame on
+            // the hosting fiber's chain can never be answered — the drive
+            // answered anything but its Frame. A parked host left resumable
+            // would re-enter on a later resume and run its lambda straight
+            // into the sentinel return pc, so interrupt it like a trapped
+            // drive: frames kept (the staged-argument counts stay with
+            // them, the same accounting as every trap path), re-entry
+            // refused with the structured fiber refusal
+            let fiber = &mut self.pool[host.index()];
+            if fiber.state != FiberState::Dead {
+                fiber.resume = None;
+                fiber.state = FiberState::Running;
+            }
+        }
+        driven
+    }
+
+    /// Splits the VM for a generic builtin body's pure-object work: the
+    /// heap and the output sink, disjoint from every other field. The
+    /// reentrant bodies (the lambda-taking combinators) keep `vm` whole
+    /// and call back through [`Vm::call_hosted`].
+    pub(crate) fn split(&mut self) -> (&mut Objects, &mut OutputSink) {
+        (&mut self.objects, &mut self.out)
+    }
+
     /// The dispatcher: decode-on-dispatch (see the module docs), then a
     /// dense `match` over the uop [BL-3 note: computed goto is not available
     /// on stable Rust]. A drive ends when the current fiber completes
     /// ([`DriveOutcome::Died`]) or yields to the host
     /// ([`DriveOutcome::Yielded`]); switches between fibers happen inside.
+    /// `boundary` is the call-chain depth of a nested reentrant drive's
+    /// synthetic reentry frame ([`Vm::call_hosted`]): a host-level drive
+    /// passes `usize::MAX` and never sees [`DriveOutcome::Frame`], and a
+    /// nested drive answers it when its reentry frame returns.
     // One flat match over the whole uop set is the point of a dispatch loop
     // [BL-3]; splitting arms into helpers would fragment it and add a call
     // per op in debug builds.
@@ -1656,6 +1962,7 @@ impl Vm {
         &mut self,
         mut active: Active,
         mut pc: CodePc,
+        boundary: usize,
     ) -> Result<DriveOutcome, (Trap, CodePc)> {
         loop {
             let f = &active.version.functions()[active.func as usize];
@@ -1777,6 +2084,24 @@ impl Vm {
                     let v = match pool.get(usize::from(kidx.0)) {
                         Some(Const::F64(v)) => Value::F64(*v),
                         Some(Const::Bool(v)) => Value::Bool(*v),
+                        // A fn word (F2): the FuncRef's module name resolves
+                        // through the registry id space at issue time — ids
+                        // are stable across swaps, and CALLS re-resolves the
+                        // word through the target's current slot at call
+                        // time, so a minted word picks up a hot-reload swap
+                        // like a staged one. The loader validated the
+                        // reference at install, so an unresolved name is a
+                        // corrupted pool, never a program fact.
+                        Some(Const::FuncRef { module, func }) => {
+                            let module_id = self.registry.module_id(module).ok_or((
+                                Trap::UnknownCallee {
+                                    module: module.clone(),
+                                    func: *func,
+                                },
+                                pc,
+                            ))?;
+                            Value::Fn(FuncRef::new(module_id, *func))
+                        },
                         Some(found) => {
                             let e = Trap::PoolKind {
                                 kidx: kidx.0,
@@ -2149,6 +2474,48 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                     pc.0 += 1;
                 },
+                Uop::ClosureNew { dst, func, n } => {
+                    // CLOSURE_NEW (F2): the header is the scalar FuncRef
+                    // word at `func` (KCONST-minted), the capture block the
+                    // n words staged at overlay positions 0..n. The object
+                    // acquires one count per Ref capture as it adopts the
+                    // block — the staged sources keep their own counts — and
+                    // the fresh Ref lands in dst with birth count one.
+                    let funcref = match read_value(&self.stack, fp, func, slots, body_len)
+                        .map_err(|e| (e, pc))?
+                    {
+                        Value::Fn(funcref) => funcref,
+                        v => {
+                            return Err((
+                                Trap::SlotTypeMismatch {
+                                    slot: func,
+                                    expected: SlotType::Fn,
+                                    actual: v.slot_type(),
+                                },
+                                pc,
+                            ))
+                        },
+                    };
+                    let overlay_base = slots.len() - f.layout.arg_area_len();
+                    let mut captures = Vec::with_capacity(usize::from(n));
+                    for index in 0..usize::from(n) {
+                        let slot = u8::try_from(overlay_base + index)
+                            .expect("overlay words fit u8; frames cap at 256 slots");
+                        captures.push(
+                            read_value(&self.stack, fp, slot, slots, body_len)
+                                .map_err(|e| (e, pc))?,
+                        );
+                    }
+                    for word in &captures {
+                        if let Value::Ref(id) = *word {
+                            self.objects.inc(id).map_err(|e| (e, pc))?;
+                        }
+                    }
+                    let obj = self.objects.alloc_closure(funcref, captures);
+                    write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Ref(obj))
+                        .map_err(|e| (e, pc))?;
+                    pc.0 += 1;
+                },
                 Uop::TagTest { dst, src, tag } => {
                     let v = read_tag(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                     write_slot(
@@ -2331,7 +2698,7 @@ impl Vm {
                                 },
                             };
                             let mut st = stack_state!();
-                            match st.ret(value, fp).map_err(|e| (e, pc))? {
+                            match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
                                 RetOutcome::Root(v) => match self.complete_current(v) {
                                     Some((a, at)) => {
                                         active = a;
@@ -2339,6 +2706,7 @@ impl Vm {
                                     },
                                     None => return Ok(DriveOutcome::Died(v)),
                                 },
+                                RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
                                 RetOutcome::Resume {
                                     version,
                                     func,
@@ -2351,11 +2719,235 @@ impl Vm {
                         },
                     }
                 },
+                Uop::Calls { callee_slot, nargs } => {
+                    // CALLS, the callable-word call form (F2): the callee
+                    // operand is a frame slot, the ISA's one dynamic-dispatch
+                    // point — the callee word's identity is runtime data by
+                    // construction, so the read dispatches on the word's
+                    // kind: a scalar FuncRef names the function directly, a
+                    // Ref word names a closure object whose header is the
+                    // FuncRef and whose capture block rides along. The
+                    // slot's static classification stays the boundary: a
+                    // Fn slot is callable-defaulted (either word may
+                    // arrive), a Ref slot holds a value-site closure.
+                    // read_value bounds-checks the slot operand first.
+                    let word = read_value(&self.stack, fp, callee_slot, slots, body_len)
+                        .map_err(|e| (e, pc))?;
+                    if !matches!(
+                        slots[usize::from(callee_slot)],
+                        SlotType::Fn | SlotType::Ref
+                    ) {
+                        return Err((
+                            Trap::SlotTypeMismatch {
+                                slot: callee_slot,
+                                expected: SlotType::Fn,
+                                actual: slots[usize::from(callee_slot)],
+                            },
+                            pc,
+                        ));
+                    }
+                    let (funcref, captures) = match word {
+                        Value::Fn(funcref) => (funcref, None),
+                        Value::Ref(obj) => {
+                            let (header, block) =
+                                self.objects.closure_at(obj).map_err(|e| (e, pc))?;
+                            (header, Some(block.to_vec()))
+                        },
+                        v => {
+                            return Err((
+                                Trap::SlotTypeMismatch {
+                                    slot: callee_slot,
+                                    expected: SlotType::Fn,
+                                    actual: v.slot_type(),
+                                },
+                                pc,
+                            ))
+                        },
+                    };
+                    let (version, func_id) =
+                        StackState::resolve_func_word(&self.registry, funcref, nargs)
+                            .map_err(|e| (e, pc))?;
+                    let target = &version.functions()[func_id as usize];
+                    // a closure's capture block lands in the callee's frame
+                    // starting at the first local slot (after the params),
+                    // so the body reads a capture where a lowered lambda
+                    // declares it. Each Ref capture acquires one count for
+                    // the frame at the copy-in — the callee owns its copy
+                    // like a borrow parameter and balances it with its own
+                    // exit drops, while the closure object keeps its own
+                    // count untouched. The range check runs before the
+                    // frame is pushed; each write re-checks the word
+                    // against the slot's declared type.
+                    let capture_body_len =
+                        target.layout.slots().len() - target.layout.arg_area_len();
+                    if let Some(block) = &captures {
+                        let end = target.layout.params_len() + block.len();
+                        if end > capture_body_len {
+                            return Err((
+                                Trap::SlotOutOfRange {
+                                    slot: u8::try_from(end - 1).unwrap_or(u8::MAX),
+                                    frame_slots: target.layout.slots().len(),
+                                },
+                                pc,
+                            ));
+                        }
+                    }
+                    // the frame setup mirrors CALL: slide-plan validation,
+                    // the raw-staged check, the callee's metadata word in
+                    // the caller's call word, the args overlaid. No tail
+                    // variant exists, so this is an ordinary push.
+                    {
+                        let mut st = stack_state!();
+                        st.call(Arc::clone(&version), func_id, &f.layout, fp, pc.0 + 1)
+                            .map_err(|e| (e, pc))?;
+                    }
+                    if let Some(block) = &captures {
+                        let callee_fp = fp + 1 + f.layout.arg_area().start;
+                        for (index, &word) in block.iter().enumerate() {
+                            if let Value::Ref(id) = word {
+                                self.objects.inc(id).map_err(|e| (e, pc))?;
+                            }
+                            let slot = u8::try_from(target.layout.params_len() + index)
+                                .expect("capture slot fits u8 after the range check");
+                            write_slot(
+                                &mut self.stack,
+                                callee_fp,
+                                slot,
+                                target.layout.slots(),
+                                capture_body_len,
+                                word,
+                            )
+                            .map_err(|e| (e, pc))?;
+                        }
+                    }
+                    active = Active {
+                        version,
+                        func: func_id,
+                    };
+                    pc = CodePc(0);
+                },
+                Uop::Callg { callee, nargs } => {
+                    // A generic call site [H3]: the callee is a generic
+                    // builtin's ONE body, and the call's evidence words sit
+                    // in the overlay after the staged arguments — their
+                    // count travels with the callee, so the uop carries
+                    // CALL's operand layout. The dispatch reads the
+                    // evidence words and selects the body's behavior on the
+                    // resolved types; monomorphic instances do not exist.
+                    let found = pool
+                        .get(usize::from(callee.0))
+                        .ok_or((Trap::PoolIndex { kidx: callee.0 }, pc))?;
+                    let Const::FuncRef { module, func } = found else {
+                        return Err((
+                            Trap::PoolKind {
+                                kidx: callee.0,
+                                expected: ConstKind::FuncRef,
+                                found: found.kind(),
+                            },
+                            pc,
+                        ));
+                    };
+                    if self.registry.resolve_indexed(module, *func).is_some() {
+                        // a lowered generic body has no constraint list yet
+                        return Err((
+                            Trap::UnknownCallee {
+                                module: module.clone(),
+                                func: *func,
+                            },
+                            pc,
+                        ));
+                    }
+                    let g = crate::native::resolve_generic(module, *func).ok_or((
+                        Trap::UnknownCallee {
+                            module: module.clone(),
+                            func: *func,
+                        },
+                        pc,
+                    ))?;
+                    if usize::from(nargs) != g.params.len() {
+                        return Err((
+                            Trap::ArityMismatch {
+                                expected: g.params.len(),
+                                given: usize::from(nargs),
+                            },
+                            pc,
+                        ));
+                    }
+                    // the evidence words share the overlay with the staged
+                    // arguments, so the area must hold both plus the result
+                    let area = f.layout.arg_area_len();
+                    let needed = g.params.len() + usize::from(g.evidence);
+                    if needed > area {
+                        return Err((
+                            Trap::CallLayout(SlideError::StagingTooSmall {
+                                available: area,
+                                needed,
+                            }),
+                            pc,
+                        ));
+                    }
+                    if usize::from(g.result_words) > area {
+                        return Err((
+                            Trap::RetSpanTooWide {
+                                span: u16::from(g.result_words),
+                                caller_area: u16::try_from(area).expect("argument areas fit u16"),
+                            },
+                            pc,
+                        ));
+                    }
+                    let body_len = f.layout.slots().len() - f.layout.arg_area_len();
+                    let start = f.layout.arg_area().start;
+                    let mut args = Vec::with_capacity(usize::from(nargs));
+                    for i in 0..usize::from(nargs) {
+                        let slot = u8::try_from(start + i).expect("slot index fits u8");
+                        args.push(
+                            read_value(&self.stack, fp, slot, slots, body_len)
+                                .map_err(|e| (e, pc))?,
+                        );
+                    }
+                    for (index, (&value, &want)) in args.iter().zip(g.params).enumerate() {
+                        // a `Raw` parameter is the wildcard: the staged
+                        // value words carry the call site's concrete kinds;
+                        // a `Ref` word against a `Fn` parameter is the
+                        // callable-defaulted slot (F2) — the combinators'
+                        // staged lambda may be a closure object
+                        let staged = value.slot_type();
+                        if staged != want
+                            && want != SlotType::Raw
+                            && !(staged == SlotType::Ref && want == SlotType::Fn)
+                        {
+                            return Err((
+                                Trap::CallLayout(SlideError::TypeMismatch {
+                                    index,
+                                    staged,
+                                    expected: want,
+                                }),
+                                pc,
+                            ));
+                        }
+                    }
+                    let mut evidence = Vec::with_capacity(usize::from(g.evidence));
+                    for i in 0..usize::from(g.evidence) {
+                        let slot =
+                            u8::try_from(start + usize::from(nargs) + i).expect("slot fits u8");
+                        evidence.push(
+                            read_value(&self.stack, fp, slot, slots, body_len)
+                                .map_err(|e| (e, pc))?,
+                        );
+                    }
+                    // the body takes the whole VM: the pure bodies split
+                    // off the heap and sink themselves, and the
+                    // lambda-taking combinators reenter the dispatcher
+                    // through `call_hosted`
+                    let result = (g.func)(self, &evidence, &args).map_err(|e| (e, pc))?;
+                    overlay_native(result, &mut self.stack, &f.layout, fp);
+                    pc.0 += 1;
+                },
                 Uop::Ret { src } => {
                     let value =
                         read_value(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                     let mut st = stack_state!();
-                    match st.ret(value, fp).map_err(|e| (e, pc))? {
+                    match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
                         RetOutcome::Root(v) => match self.complete_current(v) {
                             Some((a, at)) => {
                                 active = a;
@@ -2363,6 +2955,7 @@ impl Vm {
                             },
                             None => return Ok(DriveOutcome::Died(v)),
                         },
+                        RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
                         RetOutcome::Resume {
                             version,
                             func,
@@ -2425,7 +3018,7 @@ impl Vm {
                         },
                     };
                     let mut st = stack_state!();
-                    match st.ret(value, fp).map_err(|e| (e, pc))? {
+                    match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
                         RetOutcome::Root(v) => match self.complete_current(v) {
                             Some((a, at)) => {
                                 active = a;
@@ -2433,6 +3026,7 @@ impl Vm {
                             },
                             None => return Ok(DriveOutcome::Died(v)),
                         },
+                        RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
                         RetOutcome::Resume {
                             version,
                             func,
@@ -2446,6 +3040,13 @@ impl Vm {
                 Uop::Halt { slot } => {
                     let value =
                         read_value(&self.stack, fp, slot, slots, body_len).map_err(|e| (e, pc))?;
+                    // HALT ends the fiber; under a nested reentrant drive
+                    // that fiber carries the Rust-side native loop's
+                    // frames — refuse instead of dying mid-native (the
+                    // frames stay for backtrace)
+                    if self.reentry_live(boundary) {
+                        return Err((Trap::ReentrancyRefused, pc));
+                    }
                     match self.complete_current(value) {
                         Some((a, at)) => {
                             active = a;

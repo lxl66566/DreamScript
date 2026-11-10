@@ -5,10 +5,13 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 use ds_mod::{Constant, Function, Hash128, Module, TargetClass, write};
-use ds_vm::abi::{
-    ConstIdx, FrameLayout, SlotType,
-    SlotType::{Bool, I64},
-    uop::Uop,
+use ds_vm::{
+    abi::{
+        ConstIdx, FrameLayout, SlotType,
+        SlotType::{Bool, I64},
+        uop::Uop,
+    },
+    native::{PLATFORM_NONE, PLATFORM_PARSE_ERR},
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -201,6 +204,23 @@ fn temp_module(tag: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// A one-function module whose main halts on a bare platform tag word: the
+/// run-result decode under test, driven through the real entry path.
+fn platform_tag_module(name: &str, tag: u8) -> Module {
+    let main = Function::new("main", layout(&[SlotType::Tag], 0, 0), vec![], vec![
+        Uop::Funcf { frame_slots: 1 },
+        Uop::TagNew { dst: 0, tag },
+        Uop::Halt { slot: 0 },
+    ])
+    .expect("valid function");
+    Module::new(
+        name,
+        TargetClass::Bytecode,
+        Hash128::compute(name.as_bytes()),
+    )
+    .with_function(main)
+}
+
 /// Runs the built binary and flattens the outcome.
 fn ds_run(args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_ds"))
@@ -303,4 +323,30 @@ fn foreign_callee_reports_the_missing_module() {
         err.contains("module `dep` is not installed"),
         "stderr: {err}"
     );
+}
+
+#[test]
+fn platform_tags_in_run_results_decode_by_name() {
+    // main halts on the parse_err tag: a failed run naming the failure,
+    // where the decode previously printed the raw id.
+    let path = temp_module(
+        "parse-err",
+        &write(&platform_tag_module("parse_err", PLATFORM_PARSE_ERR)),
+    );
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp dsmod removes");
+    assert!(!ok, "an unhandled parse failure exits nonzero");
+    assert_eq!(out, "");
+    assert!(err.contains("unhandled parse failure"), "stderr: {err}");
+
+    // The none member of a checked read is a plain result: printed by
+    // name, not as the reservation's raw id.
+    let path = temp_module(
+        "none-tag",
+        &write(&platform_tag_module("none_tag", PLATFORM_NONE)),
+    );
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp dsmod removes");
+    assert!(ok, "a none result is a successful run (stderr: {err})");
+    assert_eq!(out, "none\n");
 }

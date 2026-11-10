@@ -36,16 +36,14 @@ Equality is one structural `==` over all data, never overloadable, and no `===` 
 Declarations are nominal — every `tag`, `struct`, and `enum` has identity — and the type language above them is set algebra: unions `a | b`, intersections `a & b`, and differences `a - b` are ordinary type expressions over nominal atoms. Intersections keep the most precise member's layout; difference types are compile-time only and erase entirely. Type aliases never declare cases; payload cases live only in enum blocks.
 
 ```ts
-tag timeout                                    // unit tag: distinct identity, no payload
-tag refused
-tag io_error
 struct bad_port { got: int }
 struct page { url: string, body: string }
 struct user { name: string, age: int }
 enum parse_error { bad_number(string), missing_field(string) }
-type net_err = timeout | refused               // a set expression, not a declaration
-type row = map[string, string]
+type entry = map[string, string]
 ```
+
+The stdlib ambient predeclares the failure taxonomy the fallible reads answer — `io_err`, `parse_err`, and the net error `net_err` (`timeout | refused`) — the way `none` is predeclared, so a script's IO errors share one vocabulary (the bare `timeout` construction example below names an ambient member; redeclaring any of them is a duplicate-definition error).
 
 Construction is fixed per declaration, and cross-spellings are checker errors: structs use brace form only, enum cases use call form only, unit tags are bare. Struct braces support punning.
 
@@ -94,11 +92,13 @@ fn add(a: int, b: int) -> int { a + b }
 
 Parameters are `name: t`, returns are `-> t`, union returns parse as `-> a | b`, and `T?` is legal in any annotation. The body's final expression is the return value; `return e` exits early; `break` and `continue` serve loops; `unit` optionally names the unit type and `()` stays legal, and a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions and anchor the set algebra; locals, lambdas, and match arms are inferred. Functions are values.
 
-Anonymous functions are const-arrow lambdas, the only other function spelling:
+Anonymous functions are const-arrow lambdas, the only other function spelling — a binding inside any block names one, while top level names functions with `fn` only:
 
 ```ts
-const double = (x: int) => x * 2
-[1, 2, 3].map(double)
+fn doubled(xs: list[int]) -> list[int] {
+  const double = (x: int) => x * 2
+  xs.map(double)
+}
 ```
 
 UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first, then trait methods, `trait::f(x)` qualification as the escape hatch, and true ambiguity a compile error. Capability parameters (IO and the like) are named and excluded from the dot position: `println(io, msg)` can never be written `msg.println()` with `io` hidden.
@@ -127,8 +127,8 @@ const m = if a >= b { a } else { b }
 ```ts
 fn parse_age(s: string) -> int | parse_error {
   match s.trim().parse_int() {
-    e if e is parse_error => bad_number(s),
-    n                     => n,
+    parse_err => bad_number(s),
+    n         => n,
   }
 }
 
@@ -168,8 +168,7 @@ Operator precedence is one frozen C-family table, published here once and never 
 Expected failures are union members of return types — storable data, one predicted branch in the VM, no exception machinery. `?` propagates: members outside the ok-type return early, with checked containment — the enclosing return union must contain the propagated member, and there are no implicit conversions.
 
 ```ts
-struct config { host: string, port: int? }
-fn load_config(path: string) -> config | io_error | parse_error {
+fn load_config(path: string) -> config | io_err | parse_error {
   const text = read_file(path)?          // non-members of config return early
   parse_config(text)?
 }
@@ -179,10 +178,10 @@ fn load_config(path: string) -> config | io_error | parse_error {
 
 ```ts
 const cfg = load_config("app.cfg").err((e) => default_config())
-// result type: (config | io_error | parse_error) - (io_error | parse_error) == config
+// result type: (config | io_err | parse_error) - (io_err | parse_error) == config
 const port = cfg.port.unwrap_or(8080)                       // int? -> int, eager fallback
 const p2 = cfg.port.unwrap_or_else(() => env_port())        // lazy variant
-const nm = row.get("name").ok_or(missing_field("name"))?    // early exit with a new value
+const nm = entry.get("name").ok_or(missing_field("name"))?  // early exit with a new value
 ```
 
 The @std extraction family — `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err` — plus `.err`/`.ok` are plain UFCS-callable generic functions with fully local typing; there is no operator to remember. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary; let-it-crash supervision is a library pattern.
@@ -190,9 +189,9 @@ The @std extraction family — `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`
 The whole story in one function:
 
 ```ts
-fn parse_user(row: row) -> user | parse_error {
+fn parse_user(row: entry) -> user | parse_error {
   const nm = row.get("name").ok_or(missing_field("name"))?
-  user { name: nm, age: parse_age(row.get("age").ok_or(missing_field("age"))?) }
+  user { name: nm, age: parse_age(row.get("age").ok_or(missing_field("age"))?)? }
 }
 ```
 
@@ -202,7 +201,7 @@ Every value is affine: moving it into a new binding, a consume-mode call, or a r
 
 `~Copyable` is a negated set constraint — it subtracts the default copyability constraint and composes with unions — marking real resources such as file descriptors, locks, and foreign memory. Such values cannot be copied and cannot be lost: `deinit` runs exactly once at the unique instance's death, on every path including early return, panic, and cancellation teardown. Phantom-state unions (`file[open] | file[closed]` style) typestate protocols on the same marker; explicit `drop` exists only as a debug and FFI tool — users never write routine drops.
 
-Mutation has exactly one channel — a named call on an owned receiver with a `mut` mode — so it is always lexically visible at the call itself. The three parameter modes are fixed at the definition site — default borrow (immutable), `mut` (an exclusive mutable window for the call), consume — and call sites carry zero mode syntax: `xs.push(1)` reads identically whatever the mode. Inside a window there are zero runtime checks, because alias-freeness is proven; outside it everything is shared-immutable. Shared mutation is unrepresentable by construction: there is no hidden sharing anywhere in the language.
+Mutation has exactly one channel — a named call on an owned receiver with a `mut` mode — so it is always lexically visible at the call itself. The three parameter modes are fixed at the definition site — default borrow (immutable), `mut` (an exclusive mutable window for the call), consume — and call sites carry zero mode syntax: `xs.list_push(1)` reads identically whatever the mode. Inside a window there are zero runtime checks, because alias-freeness is proven; outside it everything is shared-immutable. Shared mutation is unrepresentable by construction: there is no hidden sharing anywhere in the language.
 
 ```ts
 type raw_fd = int
@@ -218,20 +217,23 @@ fn close(move h: file) { ... }              // consume: moved in, dies and deini
 
 ## Collections and iteration
 
-Collections are linear-mutable copy-on-write: a functional API that mutates in place if and only if the value is uniquely owned — in-place reuse is guaranteed and observable, not a JIT hope. Aliasing means copying, surfaced as a perf note, never an error. Persistent structures are ordinary library types on the same runtime; `bytes` and `vec` are the unboxed unique members of the same model (FFI-grade).
+Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned — in-place reuse is guaranteed and observable, not a JIT hope. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, a `const` receiver is a compile error, and no hidden copy ever happens behind an aliasing call — mutation is visible at the call site or it does not happen. Functional updates (`map`, `filter`, `reduce` and friends returning fresh values) copy only when their source is aliased, surfaced as a perf note, never an error. Persistent structures are ordinary library types on the same runtime; `bytes` and `vec` are the unboxed unique members of the same model (FFI-grade).
 
 ```ts
 var pages = list[page]()
-pages.push(page { url: "https://ds.dev", body: "" })   // in place: uniquely owned
-const snapshot = pages                                 // now shared
-pages.push(page { url: "https://ds.dev", body: "" })   // copies first: perf note, never an error
+pages.list_push(page { url: "https://ds.dev", body: "" })        // in place: the var receiver owns the window
+pages.list_push(page { url: "https://example.org", body: "" })   // still in place: no copy hides behind the call
 ```
 
 Iteration is combinators — `map`, `filter`, `reduce`, and friends — plus `for`, all over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops, and non-fusable shapes fall back to the same cursor semantics, so behavior is uniform. Subscripts are single-element (`xs[0]`); there is no slicing sugar — string slices are checked library calls (`s.slice_char(0, 2)` returns `string | none`, because UTF-8 char boundaries must be honored).
 
 ```ts
-// rows: list[row]
-const (users, errors) = rows.map(parse_user).partition((r) => r is parse_error)
+// rows: list[entry]
+var users = list[user]()
+var errors = list[parse_error]()
+for r in rows.map(parse_user) {
+  if r is parse_error { errors.list_push(r) } else { users.list_push(r) }
+}
 const total = users
   .filter((u) => u.age >= 18)
   .map((u) => u.age * 2)
@@ -284,7 +286,7 @@ A line-initial `##` at top level separates blocks (the rest of the line is free 
 ```ts
 ## state
 
-tag timeout
+tag disk_full
 
 ## io helpers
 
@@ -297,7 +299,7 @@ Imports are symbol-selective, aliasable, conditional per target, and re-exportab
 
 ```ts
 import @std/csv (reader)
-import acme/pipeline/schema (row, parse_row)
+import acme/pipeline/schema (entry, parse_row)
 import acme/pipeline/io as pio
 import acme/pipeline/fs if os == "windows"
 pub import acme/pipeline/api (parse_row)
@@ -308,7 +310,7 @@ Script mode is zero-config: `ds run script.ds` compiles and runs the entry file,
 ```ts
 import @std/csv (reader)
 
-fn greet(row: row) -> string {
+fn greet(row: entry) -> string {
   match row.get("name") {
     none => "hello, stranger",
     nm   => "hello, ${nm}",
@@ -334,8 +336,9 @@ fn fetch_all(urls: list[string]) -> list[page] | net_err {
     for url in urls {
       spawn {
         match fetch_body(url) {
-          p => pages.push(p),
-          e => cancel(e),
+          timeout => cancel(timeout),
+          refused => cancel(refused),
+          p       => pages.list_push(p),
         }
       }
     }

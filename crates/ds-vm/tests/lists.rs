@@ -1,9 +1,11 @@
 //! List natives: hand-assembled fixtures over the builtin core native
-//! module's list surface — `list_new`, `list_len`, `list_get`,
-//! `list_concat` (indices 20-23, appended past the historical 0-19 run)
-//! — composed with `split`, the string family's list producer. The
-//! round trips run entirely through CALL/RET: construction, length, the
-//! checked read's both members, and the fresh-object join.
+//! module's list surface — `list_new` (index 20) and the generic reads
+//! `list_len`, `list_get`, `list_concat` (indices 21-23, CALLG-addressed
+//! with one evidence word naming the list instance) — composed with
+//! `split`, the string family's list producer. The round trips run
+//! through CALLG for the generic reads and CALL for the monomorphic
+//! constructors: construction, length, the checked read's both members,
+//! and the fresh-object join.
 //!
 //! Layout conventions (the contract ds-lower targets): `list_get` is the
 //! fallible shape — a two-word tag+payload span [BL-2] on the caller's
@@ -16,7 +18,7 @@
 use ds_vm::{
     Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
-        ConstIdx, FrameLayout, SlotType,
+        BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
         uop::Uop,
     },
@@ -42,12 +44,13 @@ fn builtin(index: u32) -> Const {
 /// space separator (KSTR-staged) and the five list-facing natives.
 fn pool() -> Vec<Const> {
     vec![
-        Const::Str(" ".into()),       // k0
-        builtin(BUILTIN_SPLIT),       // k1
-        builtin(BUILTIN_LIST_NEW),    // k2
-        builtin(BUILTIN_LIST_LEN),    // k3
-        builtin(BUILTIN_LIST_GET),    // k4
-        builtin(BUILTIN_LIST_CONCAT), // k5
+        Const::Str(" ".into()),                   // k0
+        builtin(BUILTIN_SPLIT),                   // k1
+        builtin(BUILTIN_LIST_NEW),                // k2
+        builtin(BUILTIN_LIST_LEN),                // k3
+        builtin(BUILTIN_LIST_GET),                // k4
+        builtin(BUILTIN_LIST_CONCAT),             // k5
+        Const::I64(BuiltinInstance::List as i64), // k6: the evidence word
     ]
 }
 
@@ -111,12 +114,14 @@ fn parts() -> FunctionDef {
     ])
 }
 
-/// `(list) -> int`: `list_len` overlays one word.
+/// `(list) -> int`: `list_len` through CALLG, one evidence word staged
+/// after the receiver.
 fn count() -> FunctionDef {
-    def("count", &[Ref, I64, Raw], 1, 1, &[
-        Uop::Funcf { frame_slots: 3 },
+    def("count", &[Ref, I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 4 },
         Uop::Mov { dst: 2, src: 0 },
-        Uop::Call {
+        Uop::Kimm { dst: 3, kidx: k(6) },
+        Uop::Callg {
             callee: k(3),
             nargs: 1,
         },
@@ -124,18 +129,20 @@ fn count() -> FunctionDef {
     ])
 }
 
-/// `(list, i: int) -> string | none`: stage, call, dispatch on the
+/// `(list, i: int) -> string | none`: stage the receiver and index, the
+/// evidence word behind them, call through CALLG, then dispatch on the
 /// span's tag word; success returns the payload element, an out-of-range
 /// index halts on the tag word so the run result itself is the `none`
 /// shape.
 ///
-/// Slots: [list, i, elem, t, overlay tag, overlay payload].
+/// Slots: [list, i, elem, t, overlay words: args, evidence, span].
 fn at() -> FunctionDef {
-    def("at", &[Ref, I64, Ref, Bool, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 6 },
+    def("at", &[Ref, I64, Ref, Bool, Raw, Raw, Raw], 2, 3, &[
+        Uop::Funcf { frame_slots: 7 },
         Uop::Mov { dst: 4, src: 0 },
         Uop::Mov { dst: 5, src: 1 },
-        Uop::Call {
+        Uop::Kimm { dst: 6, kidx: k(6) },
+        Uop::Callg {
             callee: k(4),
             nargs: 2,
         },
@@ -144,20 +151,22 @@ fn at() -> FunctionDef {
             src: 4,
             tag: PLATFORM_NONE,
         },
-        Uop::Jmpif { cond: 3, target: 8 },
+        Uop::Jmpif { cond: 3, target: 9 },
         Uop::Mov { dst: 2, src: 5 },
         Uop::Ret { src: 2 },
         Uop::Halt { slot: 4 },
     ])
 }
 
-/// `(a, b: list) -> list`: `list_concat` overlays one word.
+/// `(a, b: list) -> list`: `list_concat` through CALLG, one evidence
+/// word staged after the two lists.
 fn glue() -> FunctionDef {
-    def("glue", &[Ref, Ref, Ref, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
+    def("glue", &[Ref, Ref, Ref, Raw, Raw, Raw], 2, 3, &[
+        Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::Mov { dst: 4, src: 1 },
-        Uop::Call {
+        Uop::Kimm { dst: 5, kidx: k(6) },
+        Uop::Callg {
             callee: k(5),
             nargs: 2,
         },

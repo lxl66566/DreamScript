@@ -43,15 +43,18 @@
 //! | IntCmp (0x3)         | EQI64 .. GTI64          | dst slot | lhs slot   | rhs slot   | —
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
 //! | BoolCmp (0x5)        | EQBOOL, NEQBOOL         | dst slot | lhs slot   | rhs slot   | —
-//! | Ref (0xD)            | EQSTR, NEQSTR, STRCAT   | dst slot | lhs slot   | rhs slot   | —
+//! | Ref (0xD)            | EQSTR, NEQSTR, STRCAT,  | dst slot | lhs slot   | rhs slot   | —
+//! |                      | CLOSURE_NEW              |          | or fn slot | or capture |
+//! |                      |                          |          | (NEW only) | count (NEW)|
 //! | Tag (0x6)            | TAG_TEST(_NOT), TAG_NEW | dst slot | src slot   | tag id     | —
 //! |                      |                         |          | (TEST) or  | (TEST only)|
 //! |                      |                         |          | tag (NEW)  |            |
 //! | Cvt (0x7)            | CVTI2F, CVTF2I          | dst slot | src slot   | —          | —
 //! | Mov (0x8)            | MOV                     | dst slot | src slot   | —          | —
 //! | Ctl (0x9)            | JMPIF, JMPIF_NOT, JMP   | cond / — | —          | —          | jump bias
-//! | Call (0xA)           | CALL, CALLT, RET,       | nargs /  | —          | span       | const idx
-//! |                      | RETSPAN                 | src slot |            | (RETSPAN) |            |
+//! | Call (0xA)           | CALL, CALLT, RET,       | nargs /  | callee slot  | span       | const idx    |
+//! |                      | RETSPAN, CALLG, CALLS   | src slot | (CALLS only) | (RETSPAN)  | (CALL/       |
+//! |                      | (CALLTG reserved: 0xA.5)|          |             |            | CALLT/CALLG) |
 //! | Frame (0xB)          | FUNCF                   | —        | —          | —          | frame slots
 //! | Halt (0xC)           | HALT                    | slot     | —          | —          | —
 //!
@@ -105,6 +108,22 @@
 //! `CALLT odd, nargs=1, src=r3` names that derived slot (r3 is the arg-area
 //! slot of even's frame). RET likewise needs no extra convention: the return
 //! word overlays slot 0 (H2).
+//!
+//! # CALLS operands
+//!
+//! CALLS is the callable-word call form (F2's functions-are-values story):
+//! the callee operand is a frame slot, so the call dispatches on a word
+//! computed at runtime — the ISA's one dynamic-dispatch point. It keeps the
+//! call family's operand shape (`a` = nargs, staged arguments in the
+//! caller's outgoing-argument area, result overlaying slot 0) with the
+//! callee moving from the `d` pool field to the `b` slot field and `c`
+//! reserved zero. The slot's static classification tells the handler where
+//! the FuncRef lives: a Fn slot holds the copyable scalar FuncRef word
+//! itself; a Ref slot holds a closure object whose header word is the
+//! FuncRef, the capture block following inside the object. This is not one
+//! of the banned dynamic "V" variants (BL-1): the word's type is a
+//! compile-time fact, and only which function it names is dynamic — the
+//! same register-operand shape as JMPIF's condition slot.
 //!
 //! # Budgets and caps
 //!
@@ -233,6 +252,18 @@ pub enum Uop {
     /// the primitive interpolation lowers onto (F6), and no existing uop
     /// builds a new string.
     StrCat { dst: u8, lhs: u8, rhs: u8 },
+    /// `0xD.3` — `slots[dst] =` a fresh heap closure object: the header is
+    /// the scalar FuncRef word read at `slots[func]` (KCONST-minted), the
+    /// capture block the `n` words staged at overlay positions `0..n`.
+    /// Allocating, so impure for the same reason as KSTR and STRCAT, and
+    /// the object acquires one count per `Ref` capture word as it adopts
+    /// the block (the store-acquires rule: the staged sources keep their
+    /// own counts and die their ordinary deaths). M3 extension, justified:
+    /// a capturing lambda value is one `Ref` word naming the object (the
+    /// callable-word ruling, F2), and no existing uop builds one; the
+    /// FuncRef rides a slot because the fixed format cannot carry a
+    /// destination, a capture span, and a pool index in one word.
+    ClosureNew { dst: u8, func: u8, n: u8 },
     /// `0x6.0` — `slots[dst] = (slots[src] == tag)`, unboxed bool: reads the
     /// tag word of a tag+payload union (BL-2) and compares its discriminant
     /// against immediate tag id `tag` (in the `c` field). `0x6.0 ^ 1 ==
@@ -274,6 +305,36 @@ pub enum Uop {
     /// VM re-checks `nargs` against the callee's layout. The slide source is
     /// derived from the caller layout (see module docs).
     Callt { callee: ConstIdx, nargs: u8 },
+    /// `0xA.4` — CALLG (the record's `CALL_GENERIC` emission form [H3]):
+    /// call the pool FuncRef `callee`, the ONE body of a generic function,
+    /// with `nargs` real arguments staged in the outgoing-argument area
+    /// followed by the call's evidence words at overlay positions
+    /// `nargs .. nargs + arity`, one per entry of the constraint list the
+    /// callee attaches. The callee's own descriptor carries that arity, so
+    /// the uop needs no count field: its operand layout is CALL's, and the
+    /// dispatch reads the evidence words to select the body's behavior on
+    /// the resolved types — monomorphic instances never exist at runtime.
+    /// Evidence words are ordinary register arguments, so a generic call
+    /// in tail position tail-calls normally; that tail variant is CALLTG,
+    /// minor 5, reserved (no variant yet; decode rejects it). Phase-1
+    /// convention: each evidence word is an i64 pool constant, a
+    /// statically-resolved instance reference ([`BuiltinInstance`]); the
+    /// future runtime-resolved shape (a slot keyed by the runtime tag,
+    /// later patched into a 1-2 entry inline cache [H3]) stages through
+    /// the same overlay positions, so the layout admits both.
+    Callg { callee: ConstIdx, nargs: u8 },
+    /// `0xA.6` — CALLS (the callable-word call form, F2): call the function
+    /// named by frame slot `callee_slot` with `nargs` arguments staged in
+    /// the caller's outgoing-argument area; the result overlays slot 0 like
+    /// CALL. The callee is a slot operand — the ISA's one dynamic-dispatch
+    /// point: a Fn slot holds the copyable scalar FuncRef word itself
+    /// (module id plus function index, zero RC cost); a Ref slot holds a
+    /// closure object whose header word is the FuncRef and whose following
+    /// words are the capture block. The slot's static classification selects
+    /// the read, never a runtime value test (BL-1). Reserved with the
+    /// encoding locked (2026-11-10): no tier-1 dispatch and no lowering
+    /// emit it yet. `c` is reserved zero.
+    Calls { callee_slot: u8, nargs: u8 },
     /// `0xA.2` — return `slots[src]`; the word overlays slot 0 of the
     /// caller's outgoing-argument area (H2).
     Ret { src: u8 },
@@ -298,6 +359,33 @@ pub enum Uop {
     Funcf { frame_slots: u16 },
     /// `0xC.0` — stop the VM and report `slots[slot]` as the run result.
     Halt { slot: u8 },
+}
+
+/// The statically-resolved instance reference one CALLG evidence word
+/// carries [H3]: the builtin instance the call's receiver addresses.
+/// Lowering mints an i64 pool constant from this enumeration; the
+/// callee's one body dispatches on it (`len` answers per instance; the
+/// container reads and counts record the instance and stay
+/// element-agnostic). The scalar instances name the numeric receivers
+/// (`cons`'s element, `max`'s operands). A runtime-resolved evidence
+/// word (the future inline-cache shape keyed by the runtime tag) reuses
+/// the same i64 word, so the vocabulary stays stable when the patching
+/// arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(i64)]
+pub enum BuiltinInstance {
+    /// The `string` instance: the receiver is a heap string reference.
+    Str = 0,
+    /// The `list` instance: the receiver is a list object reference,
+    /// whatever the element type.
+    List = 1,
+    /// The `map` instance: the receiver is a map object reference,
+    /// whatever the key and value types.
+    Map = 2,
+    /// The `int` instance: the receiver is an unboxed i64 word.
+    Int = 3,
+    /// The `float` instance: the receiver is an unboxed f64 word.
+    Float = 4,
 }
 
 /// The biased u16 field for a jump from pc to `target` (BL-1):

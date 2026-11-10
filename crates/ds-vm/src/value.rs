@@ -2,10 +2,44 @@
 
 use ds_abi::SlotType;
 
+/// The scalar callable word (the `Fn` slot classification, F2): a module
+/// id plus a function-table index packed into one copyable word. Never a
+/// code pointer — resolution goes through the two-slot module table at
+/// call time, so a staged word picks up a swapped module at its next call
+/// [H6 item 5]. The module id space is the registry's (one id per module
+/// name, assigned at first install) until the ds-mod link table assigns
+/// module indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FuncRef {
+    module: u32,
+    func: u32,
+}
+
+impl FuncRef {
+    /// Packs a module id and a function-table index into the word.
+    #[must_use]
+    pub const fn new(module: u32, func: u32) -> Self {
+        Self { module, func }
+    }
+
+    /// The target module's registry id.
+    #[must_use]
+    pub const fn module(self) -> u32 {
+        self.module
+    }
+
+    /// The target function's table index.
+    #[must_use]
+    pub const fn func(self) -> u32 {
+        self.func
+    }
+}
+
 /// A raw unboxed scalar in one frame slot [BL-2]: no NaN-boxing, no per-slot
 /// tags, no boxed scalars. Covers every kind the uop set operates on
-/// [BL-5]: the scalars, union tag words, and the reference word into the
-/// VM's heap object store (M3: string objects; [`crate::object::Objects`]).
+/// [BL-5]: the scalars, union tag words, the reference word into the
+/// VM's heap object store (M3: string objects; [`crate::object::Objects`]),
+/// and the callable word (the `Fn` classification, F2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     /// A 64-bit integer, the `int` default [B7].
@@ -21,6 +55,11 @@ pub enum Value {
     /// table. `Ref` slots hold only these words, so no null niche is spent
     /// and `T | none` packing stays a legal later pass [B4].
     Ref(u32),
+    /// A callable word (the `Fn` classification, F2): the scalar
+    /// [`FuncRef`] naming a non-capturing function. Copied by MOV like any
+    /// scalar, zero RC traffic. A capturing lambda is not this word: it is
+    /// a `Ref` word to a closure object whose header word is the FuncRef.
+    Fn(FuncRef),
 }
 
 impl Value {
@@ -33,6 +72,7 @@ impl Value {
             Self::Bool(_) => SlotType::Bool,
             Self::Tag(_) => SlotType::Tag,
             Self::Ref(_) => SlotType::Ref,
+            Self::Fn(_) => SlotType::Fn,
         }
     }
 }
@@ -40,9 +80,9 @@ impl Value {
 /// One word of the value stack: a value slot, or a frame's metadata word.
 ///
 /// Frames are contiguous spans of [`Word`]s inline in the stack [BL-6]: the
-/// metadata word at the frame base, then the statically typed slots, then the
-/// call word (which hosts a callee's metadata word during a call) and the
-/// outgoing-argument area — see the layout diagram in `ds-abi/src/layout.rs`.
+/// metadata word at the frame base, then the statically typed slots, then
+/// the call word (which hosts a callee's metadata word during a call) and
+/// the outgoing-argument area — see the layout diagram in `ds-abi/src/layout.rs`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Word {
     /// A value slot word.

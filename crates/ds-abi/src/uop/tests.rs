@@ -69,6 +69,47 @@ fn samples() -> Vec<Uop> {
         Ret { src: 255 },
         RetSpan { src: 0, n: 1 },
         RetSpan { src: 255, n: 255 },
+        ClosureNew {
+            dst: 0,
+            func: 0,
+            n: 0,
+        },
+        ClosureNew {
+            dst: 255,
+            func: 255,
+            n: 255,
+        },
+        ClosureNew {
+            dst: 1,
+            func: 255,
+            n: 2,
+        },
+    ]);
+    s.extend(call_samples());
+    s.extend(jump_samples());
+    s
+}
+
+/// The jump samples: absolute targets spanning both bias edges relative
+/// to pc = 100 (window [0, 32868]); other pcs in the round-trip test
+/// cover the rest.
+fn jump_samples() -> Vec<Uop> {
+    let mut s = Vec::new();
+    for target in [0, 1, 99, 100, 101, 32868] {
+        s.push(Jmp { target });
+        s.push(Jmpif { cond: 0, target });
+        s.push(Jmpif { cond: 255, target });
+        s.push(JmpifNot { cond: 255, target });
+        s.push(JmpifNot { cond: 0, target });
+    }
+    s
+}
+
+/// The call-family samples: CALL, CALLT, CALLG at both pool-index and
+/// argument-count boundaries (CALLG carries CALL's operand layout), CALLS at
+/// both callee-slot and argument-count boundaries.
+fn call_samples() -> Vec<Uop> {
+    vec![
         Call {
             callee: K0,
             nargs: 0,
@@ -85,17 +126,23 @@ fn samples() -> Vec<Uop> {
             callee: KMAX,
             nargs: 1,
         },
-    ]);
-    // jumps: absolute targets spanning both bias edges relative to pc = 100
-    // (window [0, 32868]); other pcs in the round-trip test cover the rest
-    for target in [0, 1, 99, 100, 101, 32868] {
-        s.push(Jmp { target });
-        s.push(Jmpif { cond: 0, target });
-        s.push(Jmpif { cond: 255, target });
-        s.push(JmpifNot { cond: 255, target });
-        s.push(JmpifNot { cond: 0, target });
-    }
-    s
+        Callg {
+            callee: K0,
+            nargs: 0,
+        },
+        Callg {
+            callee: KMAX,
+            nargs: 255,
+        },
+        Calls {
+            callee_slot: 0,
+            nargs: 0,
+        },
+        Calls {
+            callee_slot: 255,
+            nargs: 255,
+        },
+    ]
 }
 
 #[test]
@@ -341,20 +388,6 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
         (Jmp { target: 0 }, 0x92),
         (Jmpif { cond: 0, target: 0 }, 0x90),
         (JmpifNot { cond: 0, target: 0 }, 0x91),
-        (
-            Call {
-                callee: K0,
-                nargs: 0,
-            },
-            0xa0,
-        ),
-        (
-            Callt {
-                callee: K0,
-                nargs: 0,
-            },
-            0xa1,
-        ),
         (Ret { src: 0 }, 0xa2),
         (RetSpan { src: 0, n: 1 }, 0xa3),
         (Funcf { frame_slots: 0 }, 0xb0),
@@ -384,6 +417,53 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
             },
             0xd2,
         ),
+        (
+            ClosureNew {
+                dst: 0,
+                func: 0,
+                n: 0,
+            },
+            0xd3,
+        ),
+    ]
+    .into_iter()
+    .chain(documented_call_opcodes())
+    .collect()
+}
+
+/// The call-family opcode entries (CALL, CALLT, CALLG, CALLS): the
+/// multi-line struct literals are the bulk of the table, so they live in
+/// their own helper to keep each function readable.
+fn documented_call_opcodes() -> Vec<(Uop, u8)> {
+    vec![
+        (
+            Call {
+                callee: K0,
+                nargs: 0,
+            },
+            0xa0,
+        ),
+        (
+            Callt {
+                callee: K0,
+                nargs: 0,
+            },
+            0xa1,
+        ),
+        (
+            Callg {
+                callee: K0,
+                nargs: 0,
+            },
+            0xa4,
+        ),
+        (
+            Calls {
+                callee_slot: 0,
+                nargs: 0,
+            },
+            0xa6,
+        ),
     ]
 }
 
@@ -410,6 +490,143 @@ fn every_sample_lands_on_a_documented_code() {
             "opcode {:02X} not documented",
             u.opcode()
         );
+    }
+}
+
+/// The module doc's field-map table as exact words: one sentinel instance
+/// per variant — 0x11 in `a` (dst/cond/src/slot/nargs), 0x22 in `b`
+/// (lhs/src/func/callee_slot, TAG_NEW's tag), 0x33 in `c` (rhs/tag/n),
+/// 0x0203/0x00CC in `d` (pool index, frame slot count) — so a field
+/// extraction that disagrees with the documented mapping fails here.
+#[test]
+fn field_map_matches_the_module_doc_table() {
+    // every three-register variant: dst/lhs/rhs fill a/b/c
+    macro_rules! r3_words {
+        ($($op:literal $v:ident),* $(,)?) => { vec![
+            $( ($v { dst: 0x11, lhs: 0x22, rhs: 0x33 },
+                u32::from_be_bytes([$op, 0x11, 0x22, 0x33])) ),*
+        ] };
+    }
+    let kidx = ConstIdx(0x0203);
+    let mut cases: Vec<(Uop, u32)> = vec![
+        (Kimm { dst: 0x11, kidx }, 0x0011_0203),
+        (Kconst { dst: 0x11, kidx }, 0x0111_0203),
+        (Kstr { dst: 0x11, kidx }, 0x0211_0203),
+        (
+            ClosureNew {
+                dst: 0x11,
+                func: 0x22,
+                n: 0x33,
+            },
+            0xd311_2233,
+        ),
+        (
+            TagTest {
+                dst: 0x11,
+                src: 0x22,
+                tag: 0x33,
+            },
+            0x6011_2233,
+        ),
+        (
+            TagTestNot {
+                dst: 0x11,
+                src: 0x22,
+                tag: 0x33,
+            },
+            0x6111_2233,
+        ),
+        (
+            TagNew {
+                dst: 0x11,
+                tag: 0x22,
+            },
+            0x6211_2200,
+        ),
+        (
+            CvtI2F {
+                dst: 0x11,
+                src: 0x22,
+            },
+            0x7011_2200,
+        ),
+        (
+            CvtF2I {
+                dst: 0x11,
+                src: 0x22,
+            },
+            0x7111_2200,
+        ),
+        (
+            Mov {
+                dst: 0x11,
+                src: 0x22,
+            },
+            0x8011_2200,
+        ),
+        // target 0x205 at pc 0: offset 0x204, biased field 0x8204
+        (
+            Jmpif {
+                cond: 0x11,
+                target: 0x205,
+            },
+            0x9011_8204,
+        ),
+        (
+            JmpifNot {
+                cond: 0x11,
+                target: 0x205,
+            },
+            0x9111_8204,
+        ),
+        (Jmp { target: 0x205 }, 0x9200_8204),
+        (
+            Call {
+                callee: kidx,
+                nargs: 0x11,
+            },
+            0xa011_0203,
+        ),
+        (
+            Callt {
+                callee: kidx,
+                nargs: 0x11,
+            },
+            0xa111_0203,
+        ),
+        (
+            Callg {
+                callee: kidx,
+                nargs: 0x11,
+            },
+            0xa411_0203,
+        ),
+        (
+            Calls {
+                callee_slot: 0x22,
+                nargs: 0x11,
+            },
+            0xa611_2200,
+        ),
+        (Ret { src: 0x11 }, 0xa211_0000),
+        (RetSpan { src: 0x11, n: 0x33 }, 0xa311_0033),
+        (
+            Funcf {
+                frame_slots: 0x00cc,
+            },
+            0xb000_00cc,
+        ),
+        (Halt { slot: 0x11 }, 0xc011_0000),
+    ];
+    cases.extend(r3_words![
+        0x10 AddI64, 0x11 SubI64, 0x12 MulI64, 0x13 DivI64, 0x14 ModI64, 0x20 AddF64, 0x21 SubF64,
+        0x22 MulF64, 0x23 DivF64, 0x30 EqI64, 0x31 NeqI64, 0x32 LtI64, 0x33 GeI64, 0x34 LeI64,
+        0x35 GtI64, 0x40 EqF64, 0x41 NeqF64, 0x42 LtF64, 0x43 GeF64, 0x44 LeF64, 0x45 GtF64,
+        0x50 EqBool, 0x51 NeqBool, 0xD0 EqStr, 0xD1 NeqStr, 0xD2 StrCat,
+    ]);
+    assert_eq!(cases.len(), 47, "one sentinel per variant");
+    for (uop, word) in cases {
+        assert_eq!(uop.encode(0), Ok(word), "field map drift: {uop:?}");
     }
 }
 
@@ -574,11 +791,57 @@ fn malformed_encodings_are_rejected() {
     }
     // unassigned minor inside the Ref major
     assert_eq!(
-        Uop::decode(0, 0xd3_00_00_00),
+        Uop::decode(0, 0xd4_00_00_00),
         Err(DecodeError::UnknownOpcode {
             major: 0xd,
-            minor: 0x3
+            minor: 0x4
         })
+    );
+    // CALLTG (0xA.5) is reserved with no variant yet; decode rejects it
+    assert_eq!(
+        Uop::decode(0, 0xa5_00_00_00),
+        Err(DecodeError::UnknownOpcode {
+            major: 0xa,
+            minor: 0x5
+        })
+    );
+    // CALLG decodes with CALL's operand layout and re-encodes to itself
+    assert_eq!(
+        Uop::decode(0, 0xa4_01_ab_cd),
+        Ok(Callg {
+            callee: ConstIdx(0xab_cd),
+            nargs: 1,
+        })
+    );
+    assert_eq!(
+        Callg {
+            callee: ConstIdx(0xab_cd),
+            nargs: 1,
+        }
+        .encode(0),
+        Ok(0xa4_01_ab_cd)
+    );
+    // CALLS keeps the call-family `a` = nargs with the callee moved to the
+    // `b` slot field and `c` reserved zero; it re-encodes to itself
+    assert_eq!(
+        Uop::decode(0, 0xa6_01_02_00),
+        Ok(Calls {
+            callee_slot: 2,
+            nargs: 1,
+        })
+    );
+    assert_eq!(
+        Calls {
+            callee_slot: 2,
+            nargs: 1,
+        }
+        .encode(0),
+        Ok(0xa6_01_02_00)
+    );
+    // a nonzero `c` is not canonical
+    assert_eq!(
+        Uop::decode(0, 0xa6_01_02_01),
+        Err(DecodeError::ReservedField)
     );
     // biased field 0x0000 at pc 0 points below the code stream
     assert_eq!(
@@ -638,9 +901,11 @@ fn effects_are_consistent_with_slot_operands() {
             | TagTest { dst, src, .. }
             | TagTestNot { dst, src, .. } => vec![dst, src],
             Jmpif { cond, .. } | JmpifNot { cond, .. } => vec![cond],
+            ClosureNew { dst, func, .. } => vec![dst, func],
             Ret { src } | RetSpan { src, .. } => vec![src],
             Halt { slot } => vec![slot],
-            Jmp { .. } | Funcf { .. } | Call { .. } | Callt { .. } => vec![],
+            Calls { callee_slot, .. } => vec![callee_slot],
+            Jmp { .. } | Funcf { .. } | Call { .. } | Callg { .. } | Callt { .. } => vec![],
             AddI64 { dst, lhs, rhs }
             | SubI64 { dst, lhs, rhs }
             | MulI64 { dst, lhs, rhs }
@@ -692,6 +957,8 @@ fn effects_are_consistent_with_slot_operands() {
                 | Jmpif { .. }
                 | JmpifNot { .. }
                 | Call { .. }
+                | Callg { .. }
+                | Calls { .. }
                 | Callt { .. }
                 | Ret { .. }
                 | RetSpan { .. }
@@ -728,6 +995,13 @@ fn effect_lists_report_expected_slots() {
     let rs = RetSpan { src: 4, n: 2 };
     assert_eq!(rs.reads().as_slice(), &[4]);
     assert!(rs.writes().is_empty());
+    // CALLS reads its callee slot operand and writes none of its own frame
+    let cs = Calls {
+        callee_slot: 5,
+        nargs: 1,
+    };
+    assert_eq!(cs.reads().as_slice(), &[5]);
+    assert!(cs.writes().is_empty());
 }
 
 #[test]
@@ -739,11 +1013,14 @@ fn purity_table_is_exact() {
                 | Jmpif { .. }
                 | JmpifNot { .. }
                 | Call { .. }
+                | Callg { .. }
+                | Calls { .. }
                 | Callt { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }
                 | StrCat { .. }
+                | ClosureNew { .. }
                 | Funcf { .. }
                 | Halt { .. }
         );

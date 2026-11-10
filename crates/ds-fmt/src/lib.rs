@@ -131,7 +131,13 @@ fn content_start(block: &Block) -> u32 {
     if start == u32::MAX {
         start = block.span.start;
     }
-    start
+    // The synthesized script-entry main joins the file's first..last folded
+    // statements, so its span starts before the carrying block's own content;
+    // a gap-window end left at that lying start would swallow (or invert,
+    // panicking) the windows that hold the separators between the folded
+    // statement groups. Real content never starts before its block, so the
+    // clamp is a no-op outside the fold.
+    start.max(block.span.start)
 }
 
 /// Last content offset of a block (items, their comments, trailing
@@ -141,7 +147,14 @@ fn content_start(block: &Block) -> u32 {
 fn content_end(block: &Block) -> u32 {
     let mut end = 0;
     for item in &block.items {
-        end = end.max(item.span.end);
+        // The synthesized script-entry main ends at the last folded
+        // statement, which can sit before this block's own span (a trailing
+        // separator leaves an empty block the fold then fills); its ground
+        // belongs to earlier windows, so a lying end is skipped. Real items
+        // never end before their block.
+        if item.span.end >= block.span.start {
+            end = end.max(item.span.end);
+        }
         if let Some(t) = item.trailing_trivia.last() {
             end = end.max(t.span.end);
         }
@@ -150,9 +163,10 @@ fn content_end(block: &Block) -> u32 {
         end = end.max(t.span.end);
     }
     if end == 0 {
-        // Empty block (consecutive separators): it sits right after the
-        // previous separator, so anchor the window at its start.
-        end = block.span.start;
+        // Empty block: for the empty pairs between consecutive separators
+        // start and end coincide; for a block whose statements the fold
+        // routed away, the pair's end is where its content really ends.
+        end = block.span.end;
     }
     end
 }
@@ -169,10 +183,16 @@ struct Separator {
 
 /// Finds the `##` separator inside a gap window. All comments in the gap
 /// are attached as trivia (rendered inside block content), so the window
-/// holds only whitespace around the separator token and its line text.
+/// holds only whitespace around the separator token and its line text. An
+/// inverted window (start past end) holds nothing — slicing it would
+/// panic, and a folded script entry can produce one before the clamp in
+/// [`content_start`].
 // Offsets are u32 by the Files contract.
 #[allow(clippy::cast_possible_truncation)]
 fn find_separator(ctx: &Ctx, from: u32, to: u32) -> Option<Separator> {
+    if from >= to {
+        return None;
+    }
     let src = ctx.src();
     let tok = src[from as usize..to as usize].find("##")? + from as usize;
     let line_start = src[..tok]

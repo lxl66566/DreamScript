@@ -16,7 +16,8 @@
 //! namespaces [F9]. The script-entry round adds DS1014 (a top-level
 //! statement outside the entry file); DS1015, the script-mode collision
 //! with a written `main`, fires only through `parse_script` and is pinned
-//! in ds-parse's unit suite instead.
+//! in ds-parse's unit suite instead. The mut-window round adds DS3006
+//! (a `const` binding fed to a `mut` window parameter [D2]).
 
 use std::{
     env, fs,
@@ -56,6 +57,11 @@ const CASES: &[Case] = &[
         stem: "ds2003_non_exhaustive_match",
         human: include_str!("goldens/ds2003_non_exhaustive_match.human"),
         json: include_str!("goldens/ds2003_non_exhaustive_match.json"),
+    },
+    Case {
+        stem: "ds2004_unresolved_dot_callee",
+        human: include_str!("goldens/ds2004_unresolved_dot_callee.human"),
+        json: include_str!("goldens/ds2004_unresolved_dot_callee.json"),
     },
     Case {
         stem: "ds2006_instance_overlap",
@@ -101,6 +107,11 @@ const CASES: &[Case] = &[
         stem: "ds3001_moved_then_used",
         human: include_str!("goldens/ds3001_moved_then_used.human"),
         json: include_str!("goldens/ds3001_moved_then_used.json"),
+    },
+    Case {
+        stem: "ds3006_mut_window_const_receiver",
+        human: include_str!("goldens/ds3006_mut_window_const_receiver.human"),
+        json: include_str!("goldens/ds3006_mut_window_const_receiver.json"),
     },
     Case {
         stem: "ds3004_deinit_shape",

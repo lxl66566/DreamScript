@@ -13,11 +13,12 @@ use super::{
         Mov, Ref, Tag,
     },
     Uop::{
-        self, AddF64, AddI64, Call as UCall, Callt, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64,
-        EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot,
-        Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64, ModI64,
-        Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64,
-        SubI64, TagNew, TagTest, TagTestNot,
+        self, AddF64, AddI64, Call as UCall, Callg as UCallg, Calls as UCalls, Callt,
+        ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr,
+        Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst,
+        Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64,
+        MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew,
+        TagTest, TagTestNot,
     },
 };
 
@@ -149,6 +150,12 @@ impl Uop {
                 0 => r3!(EqStr),
                 1 => r3!(NeqStr),
                 2 => r3!(StrCat),
+                // a = dst, b = the Fn word slot, c = the capture count
+                3 => Ok(UClosureNew {
+                    dst: a,
+                    func: b,
+                    n: c,
+                }),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Tag => match minor {
@@ -213,6 +220,17 @@ impl Uop {
                     callee: ConstIdx(d),
                     nargs: a,
                 }),
+                4 => Ok(UCallg {
+                    callee: ConstIdx(d),
+                    nargs: a,
+                }),
+                6 => {
+                    cx(c == 0)?;
+                    Ok(UCalls {
+                        callee_slot: b,
+                        nargs: a,
+                    })
+                },
                 2 => {
                     cx(d == 0)?;
                     Ok(Ret { src: a })
@@ -280,9 +298,17 @@ impl Uop {
             | TagNew { .. }
             | Jmp { .. }
             | Ret { .. } => 2,
-            DivI64 { .. } | DivF64 { .. } | GeI64 { .. } | GeF64 { .. } | RetSpan { .. } => 3,
-            ModI64 { .. } | LeI64 { .. } | LeF64 { .. } => 4,
+            // minor 3 spans majors: DIVI64/GEI64/RETSPAN and CLOSURE_NEW
+            DivI64 { .. }
+            | DivF64 { .. }
+            | GeI64 { .. }
+            | GeF64 { .. }
+            | RetSpan { .. }
+            | UClosureNew { .. } => 3,
+            // minor 4 spans majors: MODI64/LEI64/LEF64 and CALLG
+            ModI64 { .. } | LeI64 { .. } | LeF64 { .. } | UCallg { .. } => 4,
             GtI64 { .. } | GtF64 { .. } => 5,
+            UCalls { .. } => 6,
         }
     }
 
@@ -322,9 +348,13 @@ impl Uop {
             | TagNew { dst, .. }
             | CvtI2F { dst, .. }
             | CvtF2I { dst, .. }
+            | UClosureNew { dst, .. }
             | UMov { dst, .. } => dst,
             Jmpif { cond, .. } | JmpifNot { cond, .. } => cond,
-            UCall { nargs, .. } | Callt { nargs, .. } => nargs,
+            UCall { nargs, .. }
+            | Callt { nargs, .. }
+            | UCallg { nargs, .. }
+            | UCalls { nargs, .. } => nargs,
             Ret { src } | RetSpan { src, .. } => src,
             UHalt { slot } => slot,
             Jmp { .. } | Funcf { .. } => 0,
@@ -334,7 +364,13 @@ impl Uop {
     fn bc_field(self, pc: u32) -> Result<Bc, EncodeError> {
         Ok(match self {
             UKimm { kidx, .. } | UKconst { kidx, .. } | UKstr { kidx, .. } => Bc::Wide(kidx.0),
-            UCall { callee, .. } | Callt { callee, .. } => Bc::Wide(callee.0),
+            UCall { callee, .. } | Callt { callee, .. } | UCallg { callee, .. } => {
+                Bc::Wide(callee.0)
+            },
+            UCalls { callee_slot, .. } => Bc::Reg {
+                b: callee_slot,
+                c: 0,
+            },
             Funcf { frame_slots } => {
                 if frame_slots > MAX_FRAME_SLOTS {
                     return Err(EncodeError::FrameSlotsExceedCap { frame_slots });
@@ -351,6 +387,7 @@ impl Uop {
                 Bc::Reg { b: 0, c: n }
             },
             TagNew { tag, .. } => Bc::Reg { b: tag, c: 0 },
+            UClosureNew { func, n, .. } => Bc::Reg { b: func, c: n },
             TagTest { src, tag, .. } | TagTestNot { src, tag, .. } => Bc::Reg { b: src, c: tag },
             CvtI2F { src, .. } | CvtF2I { src, .. } | UMov { src, .. } => Bc::Reg { b: src, c: 0 },
             AddI64 { lhs, rhs, .. }

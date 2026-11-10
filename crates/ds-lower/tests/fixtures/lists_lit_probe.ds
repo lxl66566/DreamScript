@@ -13,6 +13,7 @@ struct list[t]
 extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 
 fn literal_sums() -> int {
   const xs = [1, 2, 3]
@@ -39,6 +40,33 @@ fn fresh_and_empty() -> int {
 
 fn empty_strings() -> list[string] {
   []
+}
+
+// the direct list_push calls: int and string words stage as the
+// element, the UFCS and free-call spellings identical at runtime
+fn push_words() -> int {
+  var words = list[string]()
+  words.list_push("alpha")
+  list_push(words, "beta")
+  const n = list_len(words)
+  n
+}
+
+// a list-of-list Ref element: the pushed word is the inner list's
+// Ref (the nested constructor application has no call spelling and a
+// checked read of it would union an application member, so the empty
+// literal types against the declared return and the length is the
+// observable)
+fn empty_nested() -> list[list[string]] {
+  []
+}
+
+fn push_lists() -> int {
+  var nested = empty_nested()
+  nested.list_push(["a", "b"])
+  list_push(nested, ["c"])
+  const n = list_len(nested)
+  n
 }
 
 fn main() -> int {

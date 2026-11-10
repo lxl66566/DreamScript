@@ -275,10 +275,11 @@ fn corpus_computes_rows_without_panicking() {
 #[test]
 fn effects_nursery_rows_match_the_record() {
     let effects = corpus("effects_nursery.ds");
-    // row-bearing definitions are the four functions; the five type
-    // declarations carry none.
+    // row-bearing definitions are the four functions; the file's two
+    // type declarations carry none (the net failure taxonomy is the
+    // ambient's).
     assert_eq!(effects.defs().len(), 4);
-    assert_eq!(effects.def_count(), 9);
+    assert_eq!(effects.def_count(), 6);
     assert_eq!(effects.of_name("url"), None);
     assert_eq!(effects.of_name("page"), None);
     assert_eq!(row_of(&effects, "fetch_body").render(), "error");

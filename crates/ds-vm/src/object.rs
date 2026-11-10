@@ -28,16 +28,105 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use crate::{net::Connections, value::Value, vm::Trap};
+use crate::{
+    net::Connections,
+    value::{FuncRef, Value},
+    vm::Trap,
+};
 
 /// The free-list end sentinel: no `Free` word points past it.
 const NO_FREE: u32 = u32::MAX;
+
+/// A capturing lambda's closure object (F2): the header word is the
+/// body's FuncRef, then the capture block inline. The object owns the
+/// moved-in capture words' counts (affine words move at construction,
+/// copyable words copy), so a unique death drops one count per `Ref`
+/// capture — the same retain contract a list carries over its elements.
+#[derive(Debug)]
+struct Closure {
+    /// The header word: the body's FuncRef, resolved through the
+    /// two-slot module table at call time [H6 item 5].
+    func: FuncRef,
+    /// The capture block: the moved-in binding words.
+    captures: Vec<Value>,
+}
+
+/// A string object's live payload: the text plus the char-boundary map
+/// the char-indexed queries (`substring`, `char_at`, the string `len`)
+/// build on their first access. Re-deriving char boundaries per call
+/// costs O(string length) per call, so one map per object serves every
+/// later access; interned strings share one object, hence one map.
+#[derive(Debug)]
+struct Str {
+    text: Box<str>,
+    /// `None` until the first char-indexed query builds it.
+    chars: Option<CharIndex>,
+}
+
+impl Str {
+    fn new(text: Box<str>) -> Self {
+        Self { text, chars: None }
+    }
+}
+
+/// Char-boundary metadata: maps a char position to its byte offset in
+/// O(1), and answers the char count.
+#[derive(Debug)]
+enum CharIndex {
+    /// Pure ASCII: char index == byte index and the char count is the
+    /// byte length, so nothing is stored.
+    Ascii,
+    /// The byte offset of every char boundary through the end: char
+    /// count + 1 entries, the last at the byte length. Stored only for
+    /// multi-byte text, where byte offsets diverge from char indexes.
+    Offsets(Box<[u32]>),
+}
+
+impl CharIndex {
+    /// One scan of `text`: pure-ASCII text answers from its length,
+    /// multi-byte text records the boundary table.
+    fn build(text: &str) -> Self {
+        if text.is_ascii() {
+            return Self::Ascii;
+        }
+        // byte offsets are u32 words: the length check bounds every entry
+        let len = u32::try_from(text.len()).expect("string byte length fits u32");
+        let mut offsets = Vec::with_capacity(text.len() + 1);
+        for (o, _) in text.char_indices() {
+            offsets.push(u32::try_from(o).expect("char offset below the byte length"));
+        }
+        // the final entry is the end-of-text boundary a range end reaches
+        offsets.push(len);
+        Self::Offsets(offsets.into())
+    }
+
+    /// The char count.
+    fn count(&self, text: &str) -> usize {
+        match self {
+            Self::Ascii => text.len(),
+            Self::Offsets(offsets) => offsets.len() - 1,
+        }
+    }
+
+    /// The byte offset of char boundary `index`, a valid char position
+    /// (`index <= count`).
+    fn byte_at(&self, index: usize) -> usize {
+        match self {
+            Self::Ascii => index,
+            Self::Offsets(offsets) => offsets[index] as usize,
+        }
+    }
+}
 
 /// One heap object: live payloads, or a freed slot threading the free
 /// list.
 #[derive(Debug)]
 enum Object {
-    Str(Box<str>),
+    /// A string: the text plus its lazily built char-boundary map.
+    Str(Str),
+    /// A closure object: one heap object behind one `Ref` word (F2) —
+    /// the value a capturing lambda's slot holds.
+    Closure(Closure),
     /// A list: one heap object — len, capacity, and the element words
     /// inline in a single table entry. The one in-place mutation is the
     /// append behind list literals ([`Objects::push_list`], the
@@ -45,6 +134,15 @@ enum Object {
     /// list); every other mutation stays reserved for the exclusive
     /// windows, and growth is the backing buffer's amortized doubling.
     List(Vec<Value>),
+    /// A map: one heap object behind one `Ref` word, the list object's
+    /// conventions over key-value pairs. The internal shape is an
+    /// association vector scanned front to back — the interim the
+    /// builder-call construction story needs (no map literal yet), with
+    /// no ordering promise and no iteration surface. Key matching:
+    /// string keys compare by content (two equal-content string objects
+    /// are one key), every other word by identity — so scalar and
+    /// reference keys never collide across kinds.
+    Map(Vec<(Value, Value)>),
     /// A freed slot: the next freed slot's index, or [`NO_FREE`]. The
     /// payload died when the slot freed, so its content was released.
     Free(u32),
@@ -94,7 +192,9 @@ impl Objects {
     #[must_use = "the count is the witness"]
     pub fn rc_at(&self, obj: u32) -> Result<u32, Trap> {
         match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_)) => Ok(self.rc[obj as usize]),
+            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {
+                Ok(self.rc[obj as usize])
+            },
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -139,7 +239,31 @@ impl Objects {
 
     /// Allocates a fresh string object (no interning), owned by the caller.
     pub fn alloc_str(&mut self, text: String) -> u32 {
-        self.alloc(Object::Str(text.into()))
+        self.alloc(Object::Str(Str::new(text.into())))
+    }
+
+    /// Allocates a fresh string object holding `part`, owned by the
+    /// caller. The empty answers of `substring` and `char_at` copy once
+    /// through here instead of staging a `String` (which would copy
+    /// twice).
+    pub fn alloc_str_part(&mut self, part: &str) -> u32 {
+        self.alloc(Object::Str(Str::new(part.into())))
+    }
+
+    /// Allocates a fresh string object holding the byte range
+    /// `[begin, stop)` of string object `src` — a range on char
+    /// boundaries, which every char-indexed query produces — owned by
+    /// the caller. The `substring` and `char_at` results copy once
+    /// through here instead of staging a `String` (which would copy
+    /// twice).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live string
+    /// object.
+    pub fn alloc_substr(&mut self, src: u32, begin: usize, stop: usize) -> Result<u32, Trap> {
+        let part: Box<str> = self.str_at(src)?[begin..stop].into();
+        Ok(self.alloc(Object::Str(Str::new(part))))
     }
 
     /// Allocates a fresh list object over `elems`, owned by the caller.
@@ -159,7 +283,7 @@ impl Objects {
     /// hand-assembled code or a host argument carried a bogus `Ref` word.
     pub fn inc(&mut self, obj: u32) -> Result<(), Trap> {
         match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_)) => {},
+            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {},
             _ => return Err(Trap::UnknownObject { obj }),
         }
         let rc = &mut self.rc[obj as usize];
@@ -185,7 +309,7 @@ impl Objects {
     /// (a double drop of a freed object lands here: the slot is `Free`).
     pub fn dec(&mut self, obj: u32) -> Result<(), Trap> {
         match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_)) => {},
+            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {},
             _ => return Err(Trap::UnknownObject { obj }),
         }
         let rc = &mut self.rc[obj as usize];
@@ -201,27 +325,66 @@ impl Objects {
     }
 
     /// The unique death: releases the payload, unbinds the intern entry,
-    /// and threads the slot onto the free list.
+    /// and threads the slot onto the free list. The death cascade runs on
+    /// an explicit work stack — a composite's owned counts drop in a loop
+    /// instead of native recursion, so a deeply nested structure dies in
+    /// bounded stack (the heap bounds the stack, and the free order stays
+    /// the recursive depth-first one: each owner's children fully before
+    /// the next sibling).
     fn free(&mut self, obj: u32) {
-        // an interned entry pointing here must not outlive the object:
-        // the next intern of the same content allocates a fresh one
-        if let Object::Str(text) = &self.table[obj as usize] {
-            if self.interned.get(&**text) == Some(&obj) {
-                self.interned.remove(&**text);
-            }
-        }
-        let next = self.free_head.unwrap_or(NO_FREE);
-        self.free_head = Some(obj);
-        let taken = std::mem::replace(&mut self.table[obj as usize], Object::Free(next));
-        self.live -= 1;
-        if let Object::List(elems) = taken {
-            // the list owned one count per Ref element (C4): the death
-            // drops them, freed in element order
-            for elem in elems {
-                if let Value::Ref(id) = elem {
-                    self.dec(id).expect("a stored element reference is live");
+        let mut dying = vec![obj];
+        while let Some(id) = dying.pop() {
+            // an interned entry pointing here must not outlive the object:
+            // the next intern of the same content allocates a fresh one
+            if let Object::Str(s) = &self.table[id as usize] {
+                if self.interned.get(&*s.text) == Some(&id) {
+                    self.interned.remove(&*s.text);
                 }
             }
+            let next = self.free_head.unwrap_or(NO_FREE);
+            self.free_head = Some(id);
+            let taken = std::mem::replace(&mut self.table[id as usize], Object::Free(next));
+            self.live -= 1;
+            // one owned count per Ref word drops here (C4): lists per
+            // element, maps per key and value word, closures per capture.
+            // The dec is inlined so a zero queues the object instead of
+            // recursing; a stored reference is live by construction, and
+            // the kind check keeps the double-drop tripwire
+            let words: Vec<Value> = match taken {
+                Object::List(elems) => elems,
+                Object::Map(pairs) => pairs
+                    .into_iter()
+                    .flat_map(|(key, value)| [key, value])
+                    .collect(),
+                Object::Closure(closure) => closure.captures,
+                Object::Str(_) | Object::Free(_) => Vec::new(),
+            };
+            let mut zeros: Vec<u32> = Vec::new();
+            for word in words {
+                let Value::Ref(child) = word else {
+                    continue;
+                };
+                match self.table.get(child as usize) {
+                    Some(
+                        Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_),
+                    ) => {},
+                    _ => panic!("a stored element reference is live"),
+                }
+                #[cfg(feature = "diag")]
+                assert!(
+                    self.rc[child as usize] > 0,
+                    "ds-vm diag: rc underflow (double drop)"
+                );
+                #[cfg(not(feature = "diag"))]
+                debug_assert!(self.rc[child as usize] > 0);
+                self.rc[child as usize] -= 1;
+                if self.rc[child as usize] == 0 {
+                    zeros.push(child);
+                }
+            }
+            // reverse push pops in owned order: the first child's whole
+            // subtree frees before the next sibling
+            dying.extend(zeros.into_iter().rev());
         }
     }
 
@@ -295,7 +458,70 @@ impl Objects {
     /// `Ref` word.
     pub fn str_at(&self, obj: u32) -> Result<&str, Trap> {
         match self.table.get(obj as usize) {
-            Some(Object::Str(text)) => Ok(text),
+            Some(Object::Str(s)) => Ok(&s.text),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// The char count of string object `obj`, building its char-boundary
+    /// map on the first char-indexed query (see [`Str`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live string
+    /// object.
+    pub fn char_count(&mut self, obj: u32) -> Result<usize, Trap> {
+        self.ensure_char_index(obj)?;
+        let (text, chars) = self.str_with_chars(obj)?;
+        Ok(chars.count(text))
+    }
+
+    /// The byte offsets of the char range `[start, end)` of string object
+    /// `obj`, building its char-boundary map on the first char-indexed
+    /// query. Both bounds are valid char positions with
+    /// `start <= end <= char count` — the contract the clamping in
+    /// `substring` establishes — so both offsets sit on char boundaries
+    /// and the slice between them cannot cut a code point.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live string
+    /// object.
+    pub fn char_byte_range(
+        &mut self,
+        obj: u32,
+        start: usize,
+        end: usize,
+    ) -> Result<(usize, usize), Trap> {
+        self.ensure_char_index(obj)?;
+        let (_, chars) = self.str_with_chars(obj)?;
+        Ok((chars.byte_at(start), chars.byte_at(end)))
+    }
+
+    /// Builds the char-boundary map of string object `obj` unless it
+    /// already exists.
+    fn ensure_char_index(&mut self, obj: u32) -> Result<(), Trap> {
+        if matches!(self.table.get(obj as usize), Some(Object::Str(s)) if s.chars.is_some()) {
+            return Ok(());
+        }
+        let built = CharIndex::build(self.str_at(obj)?);
+        if let Some(Object::Str(s)) = self.table.get_mut(obj as usize) {
+            s.chars = Some(built);
+        }
+        Ok(())
+    }
+
+    /// The text and its char-boundary map of string object `obj`; the
+    /// caller built the map first (a char-indexed query's private
+    /// invariant, not a promise to embedders).
+    fn str_with_chars(&self, obj: u32) -> Result<(&str, &CharIndex), Trap> {
+        match self.table.get(obj as usize) {
+            Some(Object::Str(s)) => Ok((
+                &s.text,
+                s.chars
+                    .as_ref()
+                    .expect("a char-indexed query built the map"),
+            )),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -308,6 +534,133 @@ impl Objects {
     pub fn list_at(&self, obj: u32) -> Result<&[Value], Trap> {
         match self.table.get(obj as usize) {
             Some(Object::List(elems)) => Ok(elems),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// Allocates a fresh empty map object, owned by the caller.
+    pub fn alloc_map(&mut self) -> u32 {
+        self.alloc(Object::Map(Vec::new()))
+    }
+
+    /// Allocates a fresh closure object (the header FuncRef plus the
+    /// capture block), owned by the caller. The capture words are adopted
+    /// as-is: a moved-in `Ref` word keeps its count — the object owns it
+    /// now — while copyable words are plain copies [F2].
+    pub fn alloc_closure(&mut self, func: FuncRef, captures: Vec<Value>) -> u32 {
+        self.alloc(Object::Closure(Closure { func, captures }))
+    }
+
+    /// The closure object's header word plus its capture block.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no closure object
+    /// (out of range, or the object is not a closure).
+    pub fn closure_at(&self, obj: u32) -> Result<(FuncRef, &[Value]), Trap> {
+        match self.table.get(obj as usize) {
+            Some(Object::Closure(closure)) => Ok((closure.func, &closure.captures)),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// Whether two key words name the same key: string references compare
+    /// by content (one key per content, whatever object carries it),
+    /// every other word by identity — mixed kinds never match.
+    fn key_matches(&self, stored: Value, probe: Value) -> bool {
+        match (stored, probe) {
+            (Value::Ref(a), Value::Ref(b)) => {
+                match (self.table.get(a as usize), self.table.get(b as usize)) {
+                    (Some(Object::Str(x)), Some(Object::Str(y))) => x.text == y.text,
+                    _ => a == b,
+                }
+            },
+            _ => stored == probe,
+        }
+    }
+
+    /// Stores one key-value pair into a map object in place, the exclusive
+    /// window's one mutation (the `map_set` native). Every stored `Ref`
+    /// word is acquired for the map before it enters an entry, fresh or
+    /// overwriting, so the caller's own count stays the caller's and a
+    /// later death drops exactly what was stored. A content-equal key
+    /// overwrites: the old value's count drops, and the entry keeps its
+    /// original key word (the map already owns that count; the caller
+    /// keeps its own probe word).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn set_map(&mut self, obj: u32, key: Value, value: Value) -> Result<(), Trap> {
+        if !matches!(self.table.get(obj as usize), Some(Object::Map(_))) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        if let Some(at) = self.map_pair_at(obj, key)? {
+            // the store acquires for the map first, whatever it replaces:
+            // a value word arriving with its caller's count must not ride
+            // that count into the entry (a dying caller would free it)
+            if let Value::Ref(id) = value {
+                self.inc(id)?;
+            }
+            let Object::Map(pairs) = &mut self.table[obj as usize] else {
+                return Err(Trap::UnknownObject { obj });
+            };
+            let old = std::mem::replace(&mut pairs[at].1, value);
+            if let Value::Ref(id) = old {
+                self.dec(id).expect("a stored pair reference is live");
+            }
+            return Ok(());
+        }
+        // the acquires happen before the store: a bogus reference word
+        // leaves the map untouched
+        if let Value::Ref(id) = key {
+            self.inc(id)?;
+        }
+        if let Value::Ref(id) = value {
+            self.inc(id)?;
+        }
+        let Object::Map(pairs) = &mut self.table[obj as usize] else {
+            return Err(Trap::UnknownObject { obj });
+        };
+        pairs.push((key, value));
+        Ok(())
+    }
+
+    /// The entry position of `key` in map object `obj`, if present.
+    fn map_pair_at(&self, obj: u32, key: Value) -> Result<Option<usize>, Trap> {
+        match self.table.get(obj as usize) {
+            Some(Object::Map(pairs)) => Ok(pairs
+                .iter()
+                .position(|(stored, _)| self.key_matches(*stored, key))),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// The value word stored under `key` in map object `obj`, if present.
+    /// The read is a lookup, not a hand-out: the map keeps every count it
+    /// owns, so the caller that wants the value acquires its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn map_at(&self, obj: u32, key: Value) -> Result<Option<Value>, Trap> {
+        match self.table.get(obj as usize) {
+            Some(Object::Map(pairs)) => Ok(pairs
+                .iter()
+                .find(|(stored, _)| self.key_matches(*stored, key))
+                .map(|(_, value)| *value)),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// The pairs of map object `obj`, in entry order.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn map_pairs(&self, obj: u32) -> Result<&[(Value, Value)], Trap> {
+        match self.table.get(obj as usize) {
+            Some(Object::Map(pairs)) => Ok(pairs),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -416,6 +769,72 @@ mod tests {
         assert_eq!(objects.str_at(b), Ok("gone"));
     }
 
+    /// The death cascade runs on a work stack, not native recursion: a
+    /// chain nested far deeper than any thread stack dies completely from
+    /// one dropped count.
+    #[test]
+    fn a_deeply_nested_death_does_not_recurse_on_the_native_stack() {
+        const DEPTH: usize = 500_000;
+        let mut objects = Objects::new();
+        // each level's birth count becomes its parent's stored count (the
+        // list adopts the Ref word as-is), so the outermost's single count
+        // owns the whole chain
+        let mut node = objects.alloc_list(Vec::new());
+        for _ in 1..DEPTH {
+            node = objects.alloc_list(vec![Value::Ref(node)]);
+        }
+        objects.dec(node).expect("the outermost drops");
+        assert!(objects.is_empty(), "the whole cascade died");
+    }
+
+    /// A map stores and looks up by content keys: two equal-content
+    /// string objects are one key, a scalar key never matches a string,
+    /// and an overwrite replaces the value while keeping the entry count.
+    #[test]
+    fn maps_store_and_lookup_by_content_keys() {
+        let mut objects = Objects::new();
+        let interned = objects.intern("host");
+        let fresh = objects.alloc_str("host".to_owned());
+        assert_ne!(interned, fresh, "the fresh word is a distinct object");
+        let map = objects.alloc_map();
+        objects
+            .set_map(map, Value::Ref(interned), Value::I64(80))
+            .expect("the map object accepts the pair");
+        // the fresh object's content names the interned key's entry
+        assert_eq!(
+            objects.map_at(map, Value::Ref(fresh)),
+            Ok(Some(Value::I64(80))),
+            "string keys match by content, not object identity"
+        );
+        assert_eq!(objects.map_at(map, Value::I64(80)), Ok(None));
+        // a scalar key of its own
+        objects
+            .set_map(map, Value::I64(1), Value::Bool(true))
+            .expect("the map accepts scalars");
+        assert_eq!(
+            objects.map_at(map, Value::I64(1)),
+            Ok(Some(Value::Bool(true)))
+        );
+        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
+        // the overwrite keeps one entry and drops the old value's count
+        objects
+            .set_map(map, Value::Ref(fresh), Value::I64(8080))
+            .expect("the content-equal key overwrites");
+        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
+        assert_eq!(
+            objects.map_at(map, Value::Ref(interned)),
+            Ok(Some(Value::I64(8080)))
+        );
+        // wrong-kind reads name no object
+        assert_eq!(objects.list_at(map), Err(Trap::UnknownObject { obj: map }));
+        assert_eq!(objects.str_at(map), Err(Trap::UnknownObject { obj: map }));
+        // a set over a non-map reports the bogus side
+        assert_eq!(
+            objects.set_map(interned, Value::I64(1), Value::I64(2)),
+            Err(Trap::UnknownObject { obj: interned })
+        );
+    }
+
     /// A shared list decs to zero without freeing; the unique death frees
     /// the list and drops its acquired element counts (a list of lists
     /// dies recursively).
@@ -434,5 +853,92 @@ mod tests {
         assert_eq!(objects.rc_at(s), Ok(2), "inner still lives in outer");
         objects.dec(outer).expect("the outer's owner drops");
         assert!(objects.is_empty(), "the recursive death drains the heap");
+    }
+
+    /// A closure object carries its header FuncRef plus the moved-in
+    /// capture block: a shared copy incs one count, the unique death
+    /// drops one count per `Ref` capture, and wrong-kind reads name no
+    /// object.
+    #[test]
+    fn closures_carry_the_header_and_retain_their_captures() {
+        let mut objects = Objects::new();
+        let id = objects.alloc_closure(FuncRef::new(3, 4), vec![Value::I64(9)]);
+        assert_eq!(
+            objects.closure_at(id),
+            Ok((FuncRef::new(3, 4), &[Value::I64(9)][..])),
+            "the header word and the capture block read back"
+        );
+        // a closure is not a string or a list
+        assert_eq!(objects.str_at(id), Err(Trap::UnknownObject { obj: id }));
+        assert_eq!(objects.list_at(id), Err(Trap::UnknownObject { obj: id }));
+        // a string is not a closure
+        let s = objects.intern("cap");
+        assert_eq!(objects.closure_at(s), Err(Trap::UnknownObject { obj: s }));
+        // the shared copy is one count on the closure itself [C4]
+        objects.inc(id).expect("a shared lambda copy incs once");
+        assert_eq!(objects.rc_at(id), Ok(2));
+        objects.dec(id).expect("the shared copy drops");
+        assert_eq!(objects.rc_at(id), Ok(1));
+    }
+
+    /// A closure's unique death frees the object and drops the moved-in
+    /// capture counts: a `Ref` capture's object dies with it, the same
+    /// retain contract a list carries.
+    #[test]
+    fn a_closure_death_drops_its_capture_counts() {
+        let mut objects = Objects::new();
+        let s = objects.alloc_str("cap".to_owned());
+        // the moved-in word keeps its count: the closure owns it now
+        let id = objects.alloc_closure(FuncRef::new(0, 0), vec![Value::Ref(s)]);
+        assert_eq!(objects.rc_at(s), Ok(1));
+        objects.dec(id).expect("the unique owner drops");
+        assert_eq!(objects.rc_at(s), Err(Trap::UnknownObject { obj: s }));
+        assert!(objects.is_empty(), "the capture died with the closure");
+    }
+
+    /// A map death drops one count per stored `Ref` word — keys and
+    /// values both, the retain contract the list carries: the map's own
+    /// acquired counts die with it, and the heap drains once the
+    /// caller's counts drop too.
+    #[test]
+    fn a_map_death_drops_its_pair_counts() {
+        let mut objects = Objects::new();
+        let map = objects.alloc_map();
+        let key = objects.alloc_str("host".to_owned());
+        let value = objects.alloc_str("localhost".to_owned());
+        objects
+            .set_map(map, Value::Ref(key), Value::Ref(value))
+            .expect("the map accepts the pair");
+        // the store acquired one count per stored Ref word, on top of the
+        // caller's own
+        assert_eq!(objects.rc_at(key), Ok(2));
+        assert_eq!(objects.rc_at(value), Ok(2));
+        // the overwrite drops the replaced value's acquired count and
+        // keeps the key's
+        objects
+            .set_map(map, Value::Ref(key), Value::I64(8080))
+            .expect("the content-equal key overwrites");
+        assert_eq!(objects.rc_at(value), Ok(1));
+        assert_eq!(objects.rc_at(key), Ok(2));
+        let other = objects.alloc_str("port".to_owned());
+        objects
+            .set_map(map, Value::I64(1), Value::Ref(other))
+            .expect("the second entry adopts the scalar key");
+        assert_eq!(objects.rc_at(other), Ok(2));
+        // the death drops exactly the map's acquired counts, both pairs'
+        // Ref words
+        objects.dec(map).expect("the map's owner drops");
+        assert_eq!(objects.rc_at(key), Ok(1));
+        assert_eq!(objects.rc_at(value), Ok(1));
+        assert_eq!(objects.rc_at(other), Ok(1));
+        // the caller's own counts drop last: the heap drains
+        objects.dec(key).expect("the caller drops the key");
+        objects
+            .dec(value)
+            .expect("the caller drops the replaced value");
+        objects
+            .dec(other)
+            .expect("the caller drops the second value");
+        assert!(objects.is_empty(), "the pair words died with the map");
     }
 }

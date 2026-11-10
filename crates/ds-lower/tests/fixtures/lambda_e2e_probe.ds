@@ -1,0 +1,31 @@
+// The lambda-value probe: a non-capturing lambda mints a fn word, calls
+// through it dispatch via CALLS, higher-order shapes pass fn values into
+// user functions, and a capturing lambda builds a closure object whose
+// capture block rides inside it (F2).
+
+tag int
+tag string
+
+extern fn println (msg: string) -> ()
+
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+
+fn twice(f: fn(int) -> int, x: int) -> int { f(f(x)) }
+
+fn make(k: int) -> fn(int) -> int { (y: int) => y + k }
+
+fn main() -> int {
+  const f = (x: int) => x + 1
+  println("f(3) = ${f(3)}")
+  println("apply = ${apply((y: int) => y * 2, 5)}")
+  println("twice = ${twice(f, 7)}")
+  const s = "!"
+  const greet = (n: string) => "${n}${s}"
+  println("greet = ${greet("hey")}")
+  const add4 = make(4)
+  println("factory = ${add4(10)}")
+  const mk = (a: int) => (b: int) => a * b
+  const times3 = mk(3)
+  println("value = ${times3(5)}")
+  f(3) + apply((y: int) => y * 2, 5) + twice(f, 7) + add4(1) + times3(2)
+}

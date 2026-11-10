@@ -172,6 +172,7 @@ parses! {
     for_plain => "fn f() {\nfor u in us { g(u) }\nfor i in 0..n { g(i) }\nfor i in 0..=n { g(i) }\n}\n",
     for_parenthesized => "fn f() {\nfor (u in us) println(\"u ${u.n}\")\n}\n",
     trailing_lambda_call => "fn f() { with_file(p, f) { body(f) }\n}\n",
+    trailing_lambda_no_parens => "fn f() { g() { 42 }\n}\n",
     fn_type_annotation => "fn with_file(p: string, body: fn(mut file) -> int) -> int { body }\n",
 }
 
@@ -258,6 +259,46 @@ fn newline_separates_expression_bodied_arms() {
     assert_eq!(arms.len(), 2);
     assert!(matches!(arms[0].body, Expr::Literal { .. }));
     assert!(matches!(arms[1].body, Expr::Literal { .. }));
+}
+
+#[test]
+fn pattern_negation_cooks_into_numeric_literals() {
+    // The `-` sign is consumed by the int/float literal itself.
+    let ast = ok("fn f() {\nmatch x { -1 => a, -1.5 => b, _ => 0, }\n}\n");
+    let Expr::Match { arms, .. } = first_stmt_expr(&ast) else {
+        panic!("match");
+    };
+    assert!(matches!(
+        &arms[0].pat,
+        Pattern::Literal {
+            lit: Literal::Int { text, .. },
+            ..
+        } if text.as_str() == "-1"
+    ));
+    assert!(matches!(
+        &arms[1].pat,
+        Pattern::Literal {
+            lit: Literal::Float { text, .. },
+            ..
+        } if text.as_str() == "-1.5"
+    ));
+}
+
+#[test]
+fn pattern_negation_on_non_numeric_literal_is_a_diagnostic() {
+    // The grammar accepts `-` before any literal; on a non-numeric one the
+    // sign could only be dropped silently, so the shape reports instead of
+    // changing meaning.
+    for src in [
+        "fn f() {\nmatch x { -true => 1, _ => 0, }\n}\n",
+        "fn f() {\nmatch x { -'a' => 1, _ => 0, }\n}\n",
+        "fn f() {\nmatch x { -\"s\" => 1, _ => 0, }\n}\n",
+        "fn f() {\nmatch x { -b'x' => 1, _ => 0, }\n}\n",
+        "fn f() {\nmatch x { -r\"s\" => 1, _ => 0, }\n}\n",
+    ] {
+        let (code, ..) = err(src);
+        assert_eq!(code, ErrorCode::InvalidLiteral, "source: {src}");
+    }
 }
 
 // ===== F7: named arguments and literal-only defaults =====
@@ -539,6 +580,48 @@ fn list_literals_parse_items_and_stay_distinct_from_generic_lambdas() {
 }
 
 #[test]
+fn map_applications_take_exactly_two_type_arguments() {
+    // the two-argument form parses as the map application, call position
+    // or bare (the call makes the outer expression a call)
+    let ast = ok("const m = map[string, string]()\n");
+    let Expr::Call { callee, .. } = init_expr(&ast) else {
+        panic!("constructor call");
+    };
+    let Expr::MapApply {
+        head, key, value, ..
+    } = &**callee
+    else {
+        panic!("map application callee, got {:?}", callee);
+    };
+    assert_eq!(head.name, "map");
+    assert!(
+        matches!(&**key, Expr::Path { path, .. } if path.text() == "string")
+            && matches!(&**value, Expr::Path { path, .. } if path.text() == "string"),
+        "the bracketed arguments parse as the two type spellings"
+    );
+    // spacing and the trailing comma follow the bracketed forms' laxity
+    ok("const m = map[int , string ,]()\n");
+    // three arguments never parse: the form is exactly two, so the head
+    // falls back to an ordinary identifier and the bracket run breaks
+    let (code, starts, labels) = err("const m = map[a, b, c]()\n");
+    assert_eq!(
+        code,
+        ErrorCode::UnexpectedToken,
+        "three arguments do not parse"
+    );
+    assert_eq!(starts.len(), labels, "one span per label");
+    // a two-element bracket parses only under the spelled `map` head: an
+    // ordinary receiver keeps the single-expression index
+    err("const xs = rows[0, 1]\n");
+    // and a bare `map` identifier is still the value namespace's name
+    let ast = ok("const f = map\n");
+    assert!(
+        matches!(init_expr(&ast), Expr::Path { path, .. } if path.text() == "map"),
+        "the bare name stays a path"
+    );
+}
+
+#[test]
 fn string_parts_are_structured() {
     let ast = ok("const s = \"a ${x + 1} b $name c\"\n");
     let Expr::Str { parts, .. } = init_expr(&ast) else {
@@ -628,6 +711,34 @@ fn raw_string_hash_counting_is_exact() {
         panic!("raw");
     };
     assert_eq!(text, "a \"# b");
+}
+
+#[test]
+fn parse_error_messages_name_rules_in_user_terms() {
+    // The expectation list maps grammar rules to human descriptions; no
+    // internal rule name (`kw_*`, `*_lvl`, comment tokens) reaches the user.
+    for (src, want) in [
+        ("pub \n", "`const` or `var`"),
+        ("extern \n", "`fn`"),
+        ("const a = 1 +\n", "an expression"),
+        ("const a:  = 1\n", "a type"),
+        ("for x of y { 0 }\n", "`in`"),
+        ("fn g() { match y { 1 => } }\n", "a match arm body"),
+        ("const a = b.c.\n", "a name"),
+        ("enum e { a: }\n", "an enum case payload"),
+    ] {
+        let mut files = Files::new();
+        let f = files.add_source("t.ds", src);
+        let diags = parse(&files, f).expect_err("should fail");
+        let message = &diags[0].message;
+        assert!(message.contains(want), "{src:?}: {message}");
+        for leaked in ["kw_", "_lvl", "line_comment", "block_comment", "Rule::"] {
+            assert!(
+                !message.contains(leaked),
+                "{src:?}: internal rule name leaked: {message}"
+            );
+        }
+    }
 }
 
 #[test]

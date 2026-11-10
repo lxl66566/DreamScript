@@ -1,0 +1,78 @@
+// source: the E4 extraction ruling (design-decisions.md) and tutorial blocks b14/b15 (docs/en/tutorial.md)
+// purpose: the @std extraction family — unwrap_or's eager fallback, unwrap_or_else's inlined lazy one, ok_or's ?-composed early exit, map_err's handled-member mapping — plus the negative: the non-optional receiver (the two struct-field and row.get spellings stage to typecheck: union-typed struct fields and the map read are not in the M3 lowering contract yet)
+// items:
+// parse_error: stage: typecheck
+// env_port: stage: typecheck
+// port_of: stage: typecheck
+// lazy_port: stage: typecheck
+// name_of_row: stage: typecheck
+// eager_word: stage: run
+// name_of: stage: run
+// parse_user: stage: run
+// reworded: stage: run
+// main: stage: run
+// plain_receiver: stage: reject unwrap_or over a receiver without the none member names the receiver type [E4]
+
+enum parse_error { missing_field(string) }
+
+fn env_port() -> int {
+  9000
+}
+
+// b14's spelling: the eager fallback over an `int?` struct field
+fn port_of(cfg: config) -> int {
+  cfg.port.unwrap_or(8080)
+}
+
+// b14's lazy spelling: the fallback lambda inlines on the none side only
+fn lazy_port(cfg: config) -> int {
+  cfg.port.unwrap_or_else(() => env_port())
+}
+
+// b15's spelling over the ambient's row read: ok_or composes with `?` at
+// the tail over the contained union
+fn name_of_row(row: map[string, string]) -> string | parse_error {
+  row.get("name").ok_or(missing_field("name"))?
+}
+
+// the eager fallback over a checked read
+fn eager_word(xs: list[string]) -> string {
+  list_get(xs, 0).unwrap_or("?")
+}
+
+// ok_or over a checked read: the none side constructs the payload error
+// member, the final-expression `?` returns it
+fn name_of(xs: list[string]) -> string | parse_error {
+  list_get(xs, 0).ok_or(missing_field("name"))?
+}
+
+// the mid-block early exit: `return e?` over the contained union
+fn parse_user(xs: list[string]) -> string | parse_error {
+  const nm = list_get(xs, 0).ok_or(missing_field("name"))
+  return nm?
+}
+
+// map_err: the handled member maps through the inlined lambda, the
+// remainder flows
+fn reworded(xs: list[string]) -> string | parse_error {
+  list_get(xs, 1).ok_or(missing_field("second")).map_err((e: parse_error) => missing_field("remap"))
+}
+
+fn main() -> () {
+  const eager = eager_word(["ada"])
+  const missed = eager_word([])
+  println("eager ${eager} ${missed}")
+  const nm = name_of(["ada"]).err((_: parse_error) => "?")
+  println("name ${nm}")
+  const parsed = parse_user([]).err((_: parse_error) => "?")
+  println("parsed ${parsed}")
+  const remapped = reworded(["a"]).err((_: parse_error) => "?")
+  println("reworded ${remapped}")
+  const flowed = reworded(["a", "b"]).err((_: parse_error) => "?")
+  println("flowed ${flowed}")
+}
+
+// the sharp negative: `unwrap_or` over a plain `int` receiver
+fn plain_receiver(x: int) -> int {
+  x.unwrap_or(0)
+}

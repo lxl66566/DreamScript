@@ -100,7 +100,7 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     }
 
     let resolved = query(db.get::<Resolve>(PackageId::new(0)), "resolve")?;
-    for diag in &resolved.diags {
+    for diag in &*resolved.diags {
         reports.push(Report {
             diag: diag.clone(),
             fatal: !exempt(&scopes, diag),
@@ -110,16 +110,16 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     for &file in &files {
         let index = query(db.get::<BlockIndex>(file), "block index")?;
         for block in &index.blocks {
-            let def = DefId::new((file.as_u32() << 8) | block.id.index);
+            let def = DefId::from_block(block.id)?;
             let typed = query(db.get::<TypeOf>(def), "type_of")?;
-            for diag in &typed.diags {
+            for diag in &*typed.diags {
                 reports.push(Report {
                     diag: diag.clone(),
                     fatal: !exempt(&scopes, diag),
                 });
             }
             let linear = query(db.get::<LinearityCheck>(def), "linearity_check")?;
-            for diag in &linear.diags {
+            for diag in &*linear.diags {
                 reports.push(Report {
                     diag: diag.clone(),
                     fatal: !exempt(&scopes, diag),

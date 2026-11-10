@@ -1,11 +1,12 @@
 //! Type and pattern conversion.
 
+use ds_diag::{ErrorCode, Span};
 use pest::iterators::Pair;
 
 use super::{Ctx, inner, is_type_rule, join};
 use crate::{Rule, ast::*};
 
-impl Ctx<'_> {
+impl Ctx {
     // ===== types =====
 
     pub(super) fn type_expr(&mut self, p: Pair<'_, Rule>) -> Type {
@@ -223,6 +224,17 @@ impl Ctx<'_> {
         }
     }
 
+    /// A pattern's `-` sign applies only to int and float literals; on any
+    /// other literal the grammar accepts the shape but the convert layer
+    /// could only drop the sign silently, so it is a diagnostic instead.
+    fn pat_neg_on_non_numeric(&mut self, span: Span) {
+        self.err(
+            span,
+            ErrorCode::InvalidLiteral,
+            "a negative sign in a pattern applies only to int and float literals",
+        );
+    }
+
     pub(super) fn pat_atom(&mut self, p: Pair<'_, Rule>) -> Pattern {
         let span = self.span(&p);
         match p.as_rule() {
@@ -244,6 +256,11 @@ impl Ctx<'_> {
                         Rule::int_lit => lit = self.int_lit(c, neg),
                         Rule::float_lit => lit = self.float_lit(c, neg),
                         Rule::string_lit => {
+                            // `pat_neg` is a prefix, so the sign is already
+                            // known here.
+                            if neg {
+                                self.pat_neg_on_non_numeric(span);
+                            }
                             let span = self.span(&c);
                             if let Expr::Str { parts, .. } = self.string_lit(c) {
                                 return Pattern::Str { span, parts };
@@ -251,6 +268,9 @@ impl Ctx<'_> {
                             return Pattern::Wildcard(span);
                         },
                         Rule::raw_hashed | Rule::raw_zero => {
+                            if neg {
+                                self.pat_neg_on_non_numeric(span);
+                            }
                             let span = self.span(&c);
                             if let Expr::RawStr { hashes, text, .. } = self.raw_str(c) {
                                 return Pattern::RawStr { span, hashes, text };
@@ -261,6 +281,9 @@ impl Ctx<'_> {
                         Rule::byte_lit => lit = self.byte_lit(c),
                         _ => {},
                     }
+                }
+                if neg && !matches!(lit, Literal::Int { .. } | Literal::Float { .. }) {
+                    self.pat_neg_on_non_numeric(span);
                 }
                 Pattern::Literal { span, lit }
             },

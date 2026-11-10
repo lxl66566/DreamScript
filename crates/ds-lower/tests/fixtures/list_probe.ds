@@ -19,9 +19,9 @@ type cfg = config | io_err
 extern fn println (s: string) -> ()
 extern fn split (s: string, sep: char) -> list[string]
 extern fn list_new () -> list[string]
-extern fn list_len (xs: list[string]) -> int
-extern fn list_get (xs: list[string], i: int) -> string | none
-extern fn list_concat (a: list[string], b: list[string]) -> list[string]
+extern fn list_len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn fs_list (dir: string) -> list[string]
 
 fn word_at(s: string, at: int) -> string {

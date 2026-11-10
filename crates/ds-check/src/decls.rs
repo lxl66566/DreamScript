@@ -26,18 +26,18 @@
 //! the parameter and otherwise unchecked here; the affine pass owns it at
 //! M4.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
-    Ast, EnumPayload, Expr, FieldDecl, FnDecl, Ident, Item, ItemKind, LocalDecl, ParamMode,
-    Pattern, StructMember, TraitMember, Type, TypeParam,
+    Ast, EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, LocalDecl,
+    ParamMode, Pattern, StructMember, TraitMember, Type, TypeParam,
 };
 
 use crate::{
     TypeExpr,
     atom::{Case, Field, TraitId, TypeId},
-    instance::{Condition, InstanceDecl, InstanceEnv},
+    instance::{Condition, InstanceDecl, InstanceEnv, InstanceId},
     resolve::{DefId, MethodId, MethodOwner, Package},
     universe::{Ty, Universe},
 };
@@ -175,6 +175,12 @@ pub struct Decls {
     pub universe: Universe,
     /// The trait instance environment [B6].
     pub instances: InstanceEnv,
+    /// The declaring impl item's span for every declared instance, keyed
+    /// by the instance the environment allocated (per-branch instances of
+    /// one written head all name their shared impl item). This is the tie a
+    /// trait-method call site's solved instance needs to reach the impl's
+    /// bodies; the environment itself stores only heads and conditions.
+    pub instance_impls: HashMap<InstanceId, Span>,
     /// DefId to atom identity for tags, structs, and enums.
     pub atoms: HashMap<DefId, TypeId>,
     /// Atom identity back to the declaring DefId (field access on
@@ -191,17 +197,23 @@ pub struct Decls {
     /// Minted cases of non-generic enums, keyed by the case's def.
     pub cases: HashMap<DefId, CaseDecl>,
     /// Signatures of named functions, extern functions, and const-arrow
-    /// function bindings.
-    pub fns: HashMap<DefId, FnSig>,
+    /// function bindings. Shared behind [`Arc`] because call sites clone
+    /// the handle per lookup and `ParamSig::default` carries an AST
+    /// subtree — a per-call deep clone dominated the checker's hot path.
+    pub fns: HashMap<DefId, Arc<FnSig>>,
     /// Trait member signatures keyed by their registered method id [F3].
-    pub members: HashMap<MethodId, FnSig>,
+    pub members: HashMap<MethodId, Arc<FnSig>>,
     /// Member names of each trait, for impl signature matching [B6].
     pub trait_members: HashMap<DefId, Vec<String>>,
     /// Inherent impl-function signatures keyed by method id [F3].
-    pub inherent: HashMap<MethodId, FnSig>,
+    pub inherent: HashMap<MethodId, Arc<FnSig>>,
     /// Top-level `const`/`var` initializers keyed by every name the
     /// binding pattern declares (lazy memoized typing [G3]).
     pub consts: HashMap<DefId, LocalDecl>,
+    /// Shared counter for minted type-variable tags (`$t#3`): instance
+    /// declaration and body checking draw from it so the package universe
+    /// never sees one name twice.
+    pub var_counter: u32,
 }
 
 /// Builds the declaration tables over every collected file of one package,
@@ -258,6 +270,18 @@ fn item_def(package: &Package, item: &Item) -> Option<DefId> {
 }
 
 fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
+    // Locals and impl fns declare no single package def: a local
+    // registers one entry per pattern binder, an impl fn registers its
+    // method signature by registration span — both bypass the item-name
+    // gate (an impl item names no value of its own).
+    if let ItemKind::Local(local) = &item.kind {
+        reserve_local(package, local, decls);
+        return;
+    }
+    if let ItemKind::Impl(imp) = &item.kind {
+        reserve_impl_fns(package, imp, decls);
+        return;
+    }
     let Some(def) = item_def(package, item) else {
         return; // a duplicate definition was reported at collection
     };
@@ -364,7 +388,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     if let TraitMember::Fn(f) = member {
                         names.push(f.name.name.clone());
                         if let Some(method) = member_id(package, def, &f.name.name) {
-                            decls.members.insert(method, FnSig::of(f));
+                            decls.members.insert(method, Arc::new(FnSig::of(f)));
                         }
                     }
                 }
@@ -372,43 +396,32 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             }
         },
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
-            decls.fns.insert(def, FnSig::of(f));
+            decls.fns.insert(def, Arc::new(FnSig::of(f)));
         },
-        ItemKind::Local(local) => {
-            if def_kind_is_binding(package, def) {
-                for binder in pattern_names(&local.pat) {
-                    if let Some(binder_def) = package.lookup_value(&binder) {
-                        decls.consts.insert(binder_def, local.clone());
-                    }
-                }
-            }
-            if let Some(mut sig) = FnSig::of_lambda(&local.init) {
-                // A const-arrow function binding: the signature is the
-                // lambda's own annotations; a written binding annotation
-                // supplies the return where the lambda omits one.
-                if sig.ret.is_none() {
-                    sig.ret.clone_from(&local.ty);
-                }
-                decls.fns.insert(def, sig);
-            }
-        },
-        ItemKind::Impl(imp) => {
-            // Inherent impl functions register as method candidates [F3];
-            // their signatures are checked from the impl bodies directly.
-            if imp.trait_ref.is_none() {
-                for f in &imp.fns {
-                    if let Some(method) = package
-                        .method_candidates(&f.name.name)
-                        .iter()
-                        .copied()
-                        .find(|&id| package.method(id).owner == MethodOwner::Inherent)
-                    {
-                        decls.inherent.insert(method, FnSig::of(f));
-                    }
-                }
-            }
-        },
-        ItemKind::Import(_) => {},
+        ItemKind::Import(_) | ItemKind::Local(_) | ItemKind::Impl(_) => {},
+    }
+}
+
+/// Inherent impl functions register their signatures against the method
+/// registration their own span names [F3] — the same span discipline as
+/// the effects walk. Trait impls register nothing here: the trait's
+/// member signatures already provide the candidates, and the instance
+/// declaration is the shape pass's work. Call sites check against each
+/// impl's own signature; a same-name second inherent impl never gets a
+/// registration (collection reports the duplicate and keeps the first).
+fn reserve_impl_fns(package: &Package, imp: &ImplDecl, decls: &mut Decls) {
+    if imp.trait_ref.is_some() {
+        return;
+    }
+    for f in &imp.fns {
+        if let Some(method) = package
+            .method_candidates(&f.name.name)
+            .iter()
+            .copied()
+            .find(|&id| package.method(id).span == f.name.span)
+        {
+            decls.inherent.insert(method, Arc::new(FnSig::of(f)));
+        }
     }
 }
 
@@ -417,6 +430,35 @@ fn def_kind_is_binding(package: &Package, def: DefId) -> bool {
         package.def(def).kind,
         crate::resolve::DefKind::Const | crate::resolve::DefKind::Var
     )
+}
+
+/// One top-level binding: every binder the pattern declares maps back to
+/// this initializer [G3] — a destructuring pattern declares many defs, so
+/// the item's own def is not the gate (a tuple pattern names no single
+/// def). The const-of-lambda registration is the single-name shape only:
+/// a lambda value binds one name.
+fn reserve_local(package: &Package, local: &LocalDecl, decls: &mut Decls) {
+    for binder in pattern_names(&local.pat) {
+        if let Some(def) = package.lookup_value(&binder) {
+            if def_kind_is_binding(package, def) {
+                decls.consts.insert(def, local.clone());
+            }
+        }
+    }
+    let Pattern::Binding { name, .. } = &local.pat else {
+        return;
+    };
+    if let Some(mut sig) = FnSig::of_lambda(&local.init) {
+        // A const-arrow function binding: the signature is the lambda's
+        // own annotations; a written binding annotation supplies the
+        // return where the lambda omits one.
+        if sig.ret.is_none() {
+            sig.ret.clone_from(&local.ty);
+        }
+        if let Some(def) = package.lookup_value(&name.name) {
+            decls.fns.insert(def, Arc::new(sig));
+        }
+    }
 }
 
 fn struct_fields_ast(members: &[StructMember]) -> Vec<FieldDecl> {
@@ -777,7 +819,7 @@ fn solve_written(
 fn declare_instance(
     package: &Package,
     item: &Item,
-    imp: &ds_parse::ImplDecl,
+    imp: &ImplDecl,
     decls: &mut Decls,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -796,7 +838,12 @@ fn declare_instance(
 
     let mut vars = HashMap::new();
     for param in &imp.generics {
-        if let Ok(var) = decls.universe.declare_tag(&format!("${}", param.name.name)) {
+        // A bare `$name` would collide with every other impl naming its
+        // parameter the same (the universe is package-wide), so minted
+        // variables carry the shared counter.
+        decls.var_counter += 1;
+        let unique = format!("${}#{}", param.name.name, decls.var_counter);
+        if let Ok(var) = decls.universe.declare_tag(&unique) {
             vars.insert(param.name.name.clone(), var);
         }
     }
@@ -827,8 +874,13 @@ fn declare_instance(
     }
 
     let decl = InstanceDecl::new(trait_id, head).with_conditions(conditions);
-    if let Err(err) = decls.instances.declare(&mut decls.universe, &decl) {
-        diags.push(instance_diag(&decls.universe, &err, item, &imp.target));
+    match decls.instances.declare(&mut decls.universe, &decl) {
+        Ok(ids) => {
+            for id in ids {
+                decls.instance_impls.insert(id, item.span);
+            }
+        },
+        Err(err) => diags.push(instance_diag(&decls.universe, &err, item, &imp.target)),
     }
 }
 
@@ -886,41 +938,19 @@ fn member_id(package: &Package, trait_def: DefId, name: &str) -> Option<MethodId
         .find(|&id| package.method(id).owner == MethodOwner::Trait(trait_def))
 }
 
-/// Every name a binding pattern binds.
+/// Every name a binding pattern binds, through the shared binder walker.
 fn pattern_names(pat: &Pattern) -> Vec<String> {
-    let mut out = Vec::new();
-    walk_pattern_names(pat, &mut out);
-    out
+    crate::pattern::pattern_binders(pat)
+        .into_iter()
+        .map(|(_, name)| name.to_owned())
+        .collect()
 }
 
-fn walk_pattern_names(pat: &Pattern, out: &mut Vec<String>) {
-    match pat {
-        Pattern::Binding { name, .. } => out.push(name.name.clone()),
-        Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
-            for sub in pats {
-                walk_pattern_names(sub, out);
-            }
-        },
-        Pattern::Struct { fields, .. } => {
-            for (name, field) in fields {
-                match field {
-                    None => out.push(name.name.clone()),
-                    Some(sub) => walk_pattern_names(sub, out),
-                }
-            }
-        },
-        _ => {},
-    }
-}
-
-/// The declared name of an item, for package lookup.
+/// The declared name of an item, for package lookup. Locals never route
+/// here: they register one entry per pattern binder (see `reserve_local`).
 fn item_name(item: &Item) -> &str {
     match &item.kind {
-        ItemKind::Import(_) | ItemKind::Impl(_) => "",
-        ItemKind::Local(local) => match &local.pat {
-            Pattern::Binding { name, .. } => name.name.as_str(),
-            _ => "",
-        },
+        ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Local(_) => "",
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => f.name.name.as_str(),
         ItemKind::Struct(s) => s.name.name.as_str(),
         ItemKind::Enum(e) => e.name.name.as_str(),

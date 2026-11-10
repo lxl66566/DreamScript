@@ -7,8 +7,6 @@ DreamScript is a general-purpose interpreted language with hybrid set-theoretic 
 This block runs end to end through `ds run` — every construct in it is inside the lowered subset (the final `0` is the echoed unit entry result):
 
 ```ts
-extern fn str_int (v: int) -> string
-
 fn shout_at(words: list[string], i: int) -> string {
   list_get(words, i).ok((w: string) => w.to_upper()).err((_: none) => "?")
 }
@@ -17,21 +15,23 @@ fn main() -> () {
   const line = "set types, affine values, no GC"
   const words = split(line, ' ')
   println("line: ${line}")
-  println("words: ${str_int(list_len(words))}")
+  println("words: ${len(words)}")
   println("first: ${shout_at(words, 0)}")
   println("tenth: ${shout_at(words, 9)}")
 
-  const all = list_concat(words, split("tail calls", ' '))
+  const all = list_concat(words, ["tail", "calls"])
   var scanned: int = 0
-  var i: int = 0
-  while i < list_len(all) {
+  for i in 0..len(all) {
     const w = list_get(all, i)
     if w is string {
       scanned += 1
     }
-    i += 1
   }
-  println("scanned: ${str_int(scanned)} of ${str_int(list_len(all))}")
+  println("scanned: ${scanned} of ${len(all)}")
+
+  const xs = [1, 2, 3]
+  const doubled = xs.map((x: int) => x * 2)
+  println("sum: ${reduce(doubled, 0, (a: int, b: int) => a + b)}")
 }
 ```
 
@@ -41,8 +41,22 @@ words: 6
 first: SET
 tenth: ?
 scanned: 8 of 8
+sum: 12
 0
 ```
+
+The lowered subset behind that block: `const`/`var` bindings with compound assignment, `fn` declarations and lambdas (capturing closures included), set-algebra types with `T?` and `is` narrowing, enum blocks and struct construction, list literals with the `list[t]()` constructor and `list_push`, `map[k, v]()` builder calls, anonymous tuples with destructuring, `for x in a..b`/`a..=b` with `in` membership, `while`/`if`/`match`, the combinator surface (`map`/`filter`/`reduce` and the container closes `cons`/`head`/`tail`/`collect`/`first`/`max`), the early exits `return`/`?`/`.ok`/`.err` with the extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`), string interpolation over printable primitives, char literals, script-entry top-level statements, and guaranteed self-and-mutual tail calls at constant stack. Constructs outside the subset fail with a diagnostic naming the seam they need.
+
+## The `ds` CLI
+
+| Command | What it does |
+|---|---|
+| `ds run <file>` | Executes one module — a `.ds` source compiled in-process, or a `.dsmod` loaded through the mmap loader. `--entry <name>` (default `main`), `--args <i64>...` staged onto the entry's parameter slots, `--no-ambient` to compile without the stdlib ambient. |
+| `ds build <file> -o <module>` | Compiles a `.ds` source to a dsmod module whose header carries the source's blake3 hash; `ds run` loads it back with identical output. `--no-ambient` as above. |
+| `ds check <files...>` | Runs the static story alone — parse, resolve, bidirectional typing with refinement, linearity, effect rows. `--no-ambient`; `--error-format json` renders one JSON object per diagnostic. |
+| `ds fmt <files...>` | Rewrites `.ds` sources in place through the zero-option formatter (no style flags exist). `--check` reports would-change files without writing and exits 1. |
+
+The stdlib ambient registers before user sources: the string/list/map natives, the generic vocabulary (`len`, `str`, the combinators, the container closes, the extraction family), and the failure taxonomy the fallible reads answer — `read_file -> string | io_err`, `parse_int -> int | parse_err`, `fetch -> response | net_err` with `net_err` the two-case `timeout | refused` — plus the `config` struct and the `urls` const. An unhandled fallible-native failure prints `io error: <message>` (or `net error:`) and exits 1; a handled one checks clean and today refuses at lowering (DS4009) at the documented run-level seam where the platform's two-word span meets a source-level union.
 
 ## Design highlights
 
@@ -56,9 +70,7 @@ scanned: 8 of 8
 
 ## Status
 
-The front end, the checker, and the tier-1 pipeline run: `ds run file.ds` compiles in-process — parse, static check, lowering — and executes on the tier-1 VM, and `ds build` freezes the same compilation to a dsmod module that `ds run` loads back through the mmap loader. The lowered subset: monomorphic `fn` declarations, `const`/`var` with compound assignment, `while` and `if`, `is` narrowing over unions, monomorphic UFCS dot-calls, string interpolation (holes are string-typed; non-strings wrap through the `str_*` natives), char literals, the early exits (`return`, `?`, `.err`, `.ok`), the list surface (`split`, `list_len`, `list_get`, `list_concat`), the console/file/net natives, and guaranteed self-and-mutual tail calls at constant stack. Constructs outside the subset fail with a diagnostic naming the seam they need.
-
-Designed and recorded, not yet running: the M4 memory-pass tail (Perceus dup/drop placement in ds-lower — the ds-rt arenas/RC core has landed), M6 generics, traits, and comptime, M7 modules, packages, FFI, and tooling, and the M8 JIT tiers, with fiber groundwork in flight for M5. Gates: the conformance corpus with golden diagnostics, fuzz targets (parse, check, dsmod reader, query engine) with nextest mirrors in CI, and the cross-language benchmark suite. The ruled surface is [docs/en/tutorial.md](docs/en/tutorial.md); the authoritative decisions are [docs/en/design-decisions.md](docs/en/design-decisions.md); milestone state lives in [docs/en/implementation-plan.md](docs/en/implementation-plan.md#progress-log).
+The front end, the checker, and the tier-1 pipeline run: `ds run` compiles in-process — parse, static check, Perceus dup/drop placement, lowering — and executes on the tier-1 VM; the M5 substrate (fiber pool, nursery join with first-failure cancellation, boundary error unioning) is landed, with the in-language `nursery`/`spawn` surface waiting on its round. Hardening rounds have pinned the locked contracts to their encoders — the uop field map (a sentinel assertion per variant), the dsmod reader, DefId packing, trap attribution, `.err` member re-spanning — and the ambient failure taxonomy gives the fallible reads real success unions. Designed and recorded, not yet running: M6 derives and comptime (trait impl bodies are the dispatch seam), M7 modules, packages, FFI, and tooling, and the M8 JIT tiers. Gates: the conformance corpus with golden diagnostics, fuzz targets (parse, check, dsmod reader, query engine) with nextest mirrors in CI, and the cross-language benchmark suite. The ruled surface is [docs/en/tutorial.md](docs/en/tutorial.md); the authoritative decisions are [docs/en/design-decisions.md](docs/en/design-decisions.md); milestone state lives in [docs/en/implementation-plan.md](docs/en/implementation-plan.md#progress-log).
 
 ## Repository layout
 
@@ -68,11 +80,11 @@ Designed and recorded, not yet running: the M4 memory-pass tail (Perceus dup/dro
 | `crates/ds-query` | Memoized query engine with block-grain invalidation |
 | `crates/ds-fmt` | Block-aware zero-option formatter over the parse |
 | `crates/ds-check` | Set-theoretic type algebra, bidirectional typing, linearity, effect rows |
-| `crates/ds-lower` | Checked programs to frame layouts, uop bodies, dsmod modules |
-| `crates/ds-vm` | Tier-1 VM: uop decoding, unboxed slots, frame-reuse TCO, inline caches, builtins |
-| `crates/ds-rt` | Runtime unsafe core: per-frame bump arenas, precise RC, reuse threading |
-| `crates/ds-stdlib` | The stdlib ambient: checked declarations registered before user sources |
-| `crates/ds-cli` | The `ds` binary: check, run, build |
+| `crates/ds-lower` | Checked programs to frame layouts, uop bodies, dsmod modules, plus the Perceus dup/drop placement pass |
+| `crates/ds-vm` | Tier-1 VM: uop decoding, unboxed slots, frame-reuse TCO, CALLS/CALLG dispatch, inline caches, the RC object runtime, fibers and nurseries, builtins |
+| `crates/ds-rt` | Reference unsafe core: per-frame bump arenas, precise RC, reuse threading (the consumed runtime lives in ds-vm's object module) |
+| `crates/ds-stdlib` | The stdlib ambient: checked declarations and the failure taxonomy, registered before user sources |
+| `crates/ds-cli` | The `ds` binary: check, run, build, fmt |
 | `crates/ds-abi` | Locked slot-overlay call ABI: typed frame layouts, CALLT slide, entry descriptors |
 | `crates/ds-mod` | dsmod module format: byte-stable writer, validating reader, blake3 hash, mmap loader |
 | `crates/ds-diag` | Span model, error-code registry, human and JSON diagnostic rendering |
@@ -81,7 +93,7 @@ Designed and recorded, not yet running: the M4 memory-pass tail (Perceus dup/dro
 | `fuzz/` | cargo-fuzz targets: parse, check, dsmod reader, query engine |
 | `docs/` | Tutorial, decision record, implementation plan |
 
-## Building
+## Building and testing
 
 Stable Rust (MSRV 1.85) builds and tests the workspace; `cargo fmt` needs the nightly toolchain (`rustfmt.toml` uses unstable options).
 
@@ -89,7 +101,8 @@ Stable Rust (MSRV 1.85) builds and tests the workspace; `cargo fmt` needs the ni
 cargo fmt --all                              # nightly
 cargo clippy --all-targets -- -D warnings
 cargo nextest run
-cargo bench --bench vm
+cargo bench -p ds-vm --bench vm              # tier-1 VM (criterion)
+cargo bench -p ds-check --bench check_perf   # checker pipeline
 ```
 
 The cargo-fuzz targets live in the separate `fuzz/` workspace, e.g. `cargo fuzz run fuzz_parse`. The cross-language kernels in `benchmarks/` time a release build and run under POSIX sh (git bash on Windows, Linux):
@@ -102,18 +115,18 @@ benchmarks/run.sh bench                      # wall-clock table; DS_BIN override
 
 ## Running
 
-`ds run` executes one module end to end: a `.ds` source compiled in-process, or a compiled `.dsmod` file; `ds check` runs the static story alone. The stdlib ambient registers by default; `--no-ambient` compiles the file alone.
-
 ```sh
 cargo run -- ds run examples/hello.ds             # parse, check, lower, run
 cargo run -- ds run examples/fib.ds               # the tail-recursive variant runs 10^6 deep
-cargo run -- ds run examples/net.ds --args 8080   # stage i64 arguments onto the entry
+cargo run -- ds run examples/combinators.ds       # map/filter/reduce driving lambdas
+cargo run -- ds run examples/script_entry.ds      # entry-file top-level statements
 cargo run -- ds run examples/net.ds               # without a staged port: instructions, exit 0
+cargo run -- ds run examples/net.ds --args 8080   # stage i64 arguments onto the entry
 cargo run -- ds build examples/hello.ds -o hello.dsmod
 cargo run -- ds run hello.dsmod                   # the built module, identical output
 ```
 
-Entries default to `main` (`--entry <name>` overrides). A fallible native's unhandled failure prints `io error: <message>` (or `net error:`) and exits 1.
+Entries default to `main` (`--entry <name>` overrides). Most examples run green; `files.ds` and `mutation.ds` check clean and refuse at the documented fallible-native seam instead — a stage expectation [docs/en/implementation-plan.md](docs/en/implementation-plan.md) records.
 
 ## Documentation
 

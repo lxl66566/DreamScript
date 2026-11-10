@@ -29,7 +29,7 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use ds_abi::SlotType;
+use ds_abi::{BuiltinInstance, SlotType};
 use ds_check::{Analyzed, Ty, TypeExpr, TypeId};
 
 use crate::error::LowerError;
@@ -55,9 +55,9 @@ fn primitive_slot(name: &str) -> Option<SlotType> {
 }
 
 /// The heap-reference constructors: an application of one of these is a
-/// single RC'd object behind one Ref word. `list` today (the list
-/// natives' object); `map` still waits for its own runtime shape.
-const HEAP_REFS: &[&str] = &["list"];
+/// single RC'd object behind one Ref word — the list and map natives'
+/// objects.
+const HEAP_REFS: &[&str] = &["list", "map"];
 
 /// One word of a value's span: the field's name (or `None` for a
 /// primitive member's own payload word) plus the span offset it lives at.
@@ -120,6 +120,15 @@ pub(crate) enum Shape {
     Union(UnionShape),
 }
 
+/// The first tag id the platform reserves at the top of the u8 space,
+/// counting down from the fallible-native success discriminant through
+/// the cancellation tag: module lowering mints ids upward from 0 and a
+/// mint that reached the reserved range would alias a user member with
+/// a platform span discriminant (TAG_TEST dispatch is byte equality).
+/// Pinned against the VM's deepest reservation by the native-table
+/// drift test.
+pub(crate) const FIRST_RESERVED_TAG: u8 = u8::MAX - 5;
+
 /// Shapes of the types of one package, plus the module-wide tag ids.
 pub(crate) struct Shapes<'a> {
     analyzed: &'a Analyzed,
@@ -139,15 +148,25 @@ impl<'a> Shapes<'a> {
     }
 
     /// The module-wide tag id of one atom, assigned in first-use order
-    /// while functions lower in declaration order.
-    pub(crate) fn tag_id(&mut self, atom: TypeId) -> u8 {
+    /// while functions lower in declaration order. The counter is
+    /// checked against the platform's reserved top: a module with more
+    /// distinct tag atoms than the space below it leaves refuses with a
+    /// typed error instead of wrapping into the reserved range.
+    pub(crate) fn tag_id(&mut self, atom: TypeId) -> Result<u8, LowerError> {
         if let Some(tag) = self.tags.get(&atom) {
-            return *tag;
+            return Ok(*tag);
+        }
+        if self.next_tag >= FIRST_RESERVED_TAG {
+            return Err(unsupported(
+                "a union member",
+                "the module's distinct tag atoms exceed the tag-id space below the platform's \
+                 reserved top",
+            ));
         }
         let tag = self.next_tag;
         self.next_tag += 1;
         self.tags.insert(atom, tag);
-        tag
+        Ok(tag)
     }
 
     /// The tag table keyed by atom name, for the run entry path.
@@ -193,7 +212,7 @@ impl<'a> Shapes<'a> {
         let mut region: Vec<SlotType> = Vec::new();
         let mut shapes = Vec::with_capacity(members.len());
         for atom in members {
-            let tag = self.tag_id(*atom);
+            let tag = self.tag_id(*atom)?;
             let payload = self.payload_fields(*atom)?;
             let mut claimed = vec![false; region.len()];
             let mut fields = Vec::with_capacity(payload.len());
@@ -281,8 +300,14 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
                 Ok(Shape::Word(SlotType::Ref))
             },
+            // A fn value is one Fn word (the callable-word ruling, F2):
+            // a non-capturing lambda mints its copyable scalar FuncRef
+            // into the slot; a capturing lambda's VALUE is a Ref word
+            // naming the closure object, flowing through value-site
+            // places and callable-defaulted fn-typed parameter slots.
+            ds_check::AtomKind::FnSig(..) => Ok(Shape::Word(SlotType::Fn)),
             _ => Err(unsupported(
-                "an enum, application, or function value",
+                "an enum or application value",
                 "the M3 runtime contract covers unit, primitive, and struct atoms only",
             )),
         }
@@ -318,6 +343,12 @@ impl<'a> Shapes<'a> {
                 "a tuple payload spans several words and the union region gives members one word \
                  each this round; reboxing is the open alternative",
             )),
+            // A callable member's payload is the one Fn word (F2): the
+            // checked read hands the element word out under the element's
+            // own classification — a closure element refuses at the
+            // construction guard, so the word reaching a payload slot is
+            // the scalar FuncRef.
+            ds_check::AtomKind::FnSig(..) => Ok(vec![(None, SlotType::Fn)]),
             _ => Err(unsupported(
                 "an enum, application, or function member",
                 "the M3 runtime contract covers unit, primitive, and struct atoms only",
@@ -338,6 +369,37 @@ impl<'a> Shapes<'a> {
         match decl.kind {
             ds_check::AtomKind::Unit => Some(SlotType::I64), // a unit word
             _ => None,
+        }
+    }
+
+    /// The builtin instance of a generic call's receiver type [H3]: the
+    /// statically-resolved instance reference a CALLG site stages as
+    /// its evidence words. The covered vocabulary is the builtin
+    /// instance set — `string`, the `list`/`map` container constructors,
+    /// and the `int`/`float` scalars — a single-atom type check, so
+    /// unions and unresolved variables answer None and the call site
+    /// reports the uncovered receiver.
+    pub(crate) fn builtin_instance(&self, ty: Ty) -> Option<BuiltinInstance> {
+        let universe = &self.analyzed.decls.universe;
+        let [only] = universe.members(ty) else {
+            return None;
+        };
+        let decl = universe.atom_decl(*only).ok()?;
+        match &decl.kind {
+            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
+                let ctor_name = universe.atom_decl(*ctor).ok()?.name.clone();
+                match ctor_name.as_str() {
+                    "list" => Some(BuiltinInstance::List),
+                    "map" => Some(BuiltinInstance::Map),
+                    _ => None,
+                }
+            },
+            _ => match decl.name.as_str() {
+                "string" => Some(BuiltinInstance::Str),
+                "int" => Some(BuiltinInstance::Int),
+                "float" => Some(BuiltinInstance::Float),
+                _ => None,
+            },
         }
     }
 

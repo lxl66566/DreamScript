@@ -21,7 +21,7 @@ fn main() -> () {
   const first = "alpha beta".char_at(0)
   println("first: ${first}")
 
-  const port = "8080".parse_int()
+  const port = "8080".parse_int().err((_: parse_err) => 0)
   println("port + total: ${port + total}")
 
   const joined = concat("a", "b").concat("c").to_lower()

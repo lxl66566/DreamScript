@@ -161,7 +161,13 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 /// `layout` module docs).
 /// Validation: the caller's area must stage all callee parameters
 /// ([`SlideError::StagingTooSmall`]) with pairwise-equal slot types
-/// ([`SlideError::TypeMismatch`]).
+/// ([`SlideError::TypeMismatch`]), with two exceptions: a staged `Ref`
+/// against a `Fn` parameter is the callable-defaulted slot admitting a
+/// closure object's word (F2), and the `Raw` exemption is one-way — a
+/// staged `Raw` word (caller side) passes against any callee parameter
+/// typing, while a `Raw` callee parameter is matched only by a `Raw`
+/// staged word, because the check grants the exemption to the staged
+/// side alone.
 ///
 /// Cost: n word copies at displacement [`SlidePlan::delta`] — the O(delta)
 /// argument slide plus a jump of (H2); the stack never grows at any depth,
@@ -181,8 +187,15 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
         .enumerate()
     {
         // `Raw` staging carries no static type: the value words are
-        // checked at the call site instead (see SlotType::Raw).
-        if staged != expected && staged != SlotType::Raw {
+        // checked at the call site instead (see SlotType::Raw). A staged
+        // `Ref` against a `Fn` parameter is the callable-defaulted slot
+        // (F2): the arriving word is a closure object's reference behind a
+        // fn-typed parameter, so the slide admits the pairing and the call
+        // readers resolve the word by its runtime kind.
+        if staged != expected
+            && staged != SlotType::Raw
+            && !(staged == SlotType::Ref && expected == SlotType::Fn)
+        {
             return Err(SlideError::TypeMismatch {
                 index,
                 staged,
@@ -206,7 +219,7 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;
-    use crate::layout::SlotType::{Bool, F64, I64, Raw, Ref};
+    use crate::layout::SlotType::{Bool, F64, Fn, I64, Raw, Ref};
 
     fn layout(slots: Vec<SlotType>, params: usize, args: usize) -> FrameLayout {
         FrameLayout::new(slots, params, args).expect("valid test layout")
@@ -295,6 +308,27 @@ mod tests {
         ] {
             slide_plan(&caller, &callee).expect("Raw stages any shape");
         }
+    }
+
+    #[test]
+    fn a_staged_closure_word_lands_in_a_fn_parameter() {
+        // the callable-defaulted slot (F2): a closure stages its Ref word
+        // against a fn-typed parameter; every other pairing still refuses
+        let caller = layout(vec![Ref], 0, 1);
+        let callee = layout(vec![Fn, Bool], 1, 1);
+        slide_plan(&caller, &callee).expect("a closure inhabits the fn slot");
+        // the reverse pairing is not the callable default: a scalar staged
+        // against a Ref parameter would alias an untracked reference
+        let caller2 = layout(vec![Fn], 0, 1);
+        let callee2 = layout(vec![Ref, Bool], 1, 1);
+        assert_eq!(
+            slide_plan(&caller2, &callee2),
+            Err(SlideError::TypeMismatch {
+                index: 0,
+                staged: Fn,
+                expected: Ref
+            })
+        );
     }
 
     #[test]

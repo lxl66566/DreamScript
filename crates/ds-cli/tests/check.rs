@@ -6,6 +6,8 @@
 
 use std::{
     env,
+    fmt::Write,
+    fs,
     process::{Command, Output},
 };
 
@@ -40,43 +42,48 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 /// per file, all confined to items the header stages away from
 /// `typecheck`:
 ///
-/// * types_hybrid: the `config` type is the file's own declaration, so `default_config` stays out
-///   of the ambient and the row-typed `read_file`/`parse_json` leave the run items' `?`-propagation
-///   tensions (get_port, load, cfg, same).
+/// * types_hybrid: get_port's `pv is int` tension over the json atoms (two ordering errors) and
+///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
+///   propagation pair) — the io failure, `default_config`, and the config type ride the ambient.
 /// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
 ///   the derive engine behind `json for point`).
-/// * syntax_ts_heart: run items only — `read_config`/`default_config` absence and the now-typed
-///   `.map` chain, plus the parse-staged byte-literal item (`sep`: the record pins `b'x'` as a
-///   single byte but no byte type, so its needs-declared-`byte` inference error is noise) (the
-///   ambient's `fn map` resolves since F9; `partition`'s one-`t` signature keeps the error members
-///   in `users`, so the later field accesses name the union that wants narrowing); the enum-block
-///   case constructions (`bad_number(s)`, `missing_field("name")`) check clean since the
-///   payload-case story landed [B3].
-/// * linearity_modes_rc: run items only — `open`/`read_exact` absence (the `file` type is the
-///   file's own) and `u32`'s distinct width [B7] (the `.err` fallback meets `lens.len()`'s int —
-///   the retired `or` hid that width meeting).
-/// * effects_nursery: run items only — `urls` is an ambient value the M5 run milestone owns (its
-///   DS2004/DS2002 cascade), `push` is the generics file's own stack API (M6), and the
-///   outcome-union assignment in `with_retry` stages to run; `list[page]()` construction resolves
-///   since the constructor round and ranges keep the counted loop clean, so four errors remain.
+/// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
+///   signature keeps the error members in `users`, so the later field accesses name the union that
+///   wants narrowing); `read_config`/`default_config`/`load_rows` resolve through the ambient.
+/// * linearity_modes_rc: run items only — `open`/`read_exact` absence (their signatures cannot name
+///   the file's own `file` struct; the dot-callee resolution failure reports alone since the
+///   root-cause-first fix) and `u32`'s distinct width [B7] (the `.err` fallback meets
+///   `lens.len()`'s int — the retired `or` hid that width meeting).
+/// * effects_nursery: zero noise — `urls` and the net failure taxonomy are ambient, and the
+///   fetch/retry matches use member-test arms plus the leftover page binder.
 /// * range_for: zero noise — the for-over-range and `in` membership items are self-contained under
 ///   the ambient.
-/// * pattern_dispatch: zero noise — the tutorial-pass regressions are self-contained (the file's
-///   own `parse_config` extern and error tags; `read_file` degrades to its success type under the
-///   ambient row, which still leaves the tail `?` contained).
+/// * pattern_dispatch: zero noise — the tutorial-pass regressions check clean against the
+///   ambient-owned io_err (the tail `?` over the contained union included).
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
-    assert_corpus_clean("types_hybrid.ds", 12);
+    assert_corpus_clean("types_hybrid.ds", 4);
     assert_corpus_clean("generics_coherent_traits.ds", 8);
-    assert_corpus_clean("syntax_ts_heart.ds", 16);
-    assert_corpus_clean("linearity_modes_rc.ds", 11);
-    assert_corpus_clean("effects_nursery.ds", 4);
+    assert_corpus_clean("syntax_ts_heart.ds", 8);
+    assert_corpus_clean("linearity_modes_rc.ds", 10);
+    assert_corpus_clean("effects_nursery.ds", 0);
     assert_corpus_clean("range_for.ds", 0);
     assert_corpus_clean("pattern_dispatch.ds", 0);
     // the one error is the file's own reject item (the mixed-element literal)
     assert_corpus_clean("lists_surface.ds", 1);
     // the one error is the file's own reject item (the union destructuring)
     assert_corpus_clean("tuples_surface.ds", 1);
+    // the one error is the file's own reject item (the constructor
+    // arguments); the `get` spelling item checks under the ambient's own
+    // `get` declaration
+    assert_corpus_clean("maps_surface.ds", 1);
+    // the one error is the file's own reject item (the non-optional
+    // unwrap_or receiver); the run items ride the checked list reads
+    assert_corpus_clean("extraction_family.ds", 1);
+    // zero noise — the defaults call and the widened argument shapes
+    // are self-contained under the ambient; the inline-member items
+    // check clean and their lowering refusal is the e2e pin
+    assert_corpus_clean("calls_surface.ds", 0);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its
@@ -196,6 +203,34 @@ fn the_negative_fixture_renders_golden_json_diagnostics() {
 fn a_missing_source_reports_the_path() {
     let out = ds_check(&["check", "tests/fixtures/absent.ds"]);
     assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(stderr.contains("reading tests/fixtures/absent.ds"));
+}
+
+/// A file past the DefId block budget reports the packing limit instead of
+/// silently checking the next file's block 0 (block 256 would alias it).
+#[test]
+fn a_file_past_the_block_budget_reports_the_packing_limit() {
+    let mut source = String::from("const b0 = 0\n");
+    for i in 1..=256_u32 {
+        source.push_str("##\n");
+        // writing into a String cannot fail
+        let _ = writeln!(source, "const b{i} = {i}");
+    }
+    let dir = env::temp_dir().join(format!("ds-cli-check-blocks-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let path = dir.join("many_blocks.ds");
+    fs::write(&path, source).expect("the temp source writes");
+    let out = ds_check(&[
+        "check",
+        "--no-ambient",
+        path.to_str().expect("temp path is UTF-8"),
+    ]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("block 256 of file 0 does not fit the DefId packing"),
+        "stderr: {stderr}"
+    );
 }

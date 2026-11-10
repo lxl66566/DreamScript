@@ -3,7 +3,6 @@
 // items:
 // json: stage: typecheck
 // cfg_err: stage: typecheck
-// config: stage: typecheck
 // get_port: stage: run
 // load: stage: run
 // cfg: stage: run
@@ -20,16 +19,14 @@ enum json {
   json_obj { fields: map[string, json] }
 }
 
-// the config error family: two bare cases and one payload case; case
+// the config error family: one bare case and one payload case; case
 // names enter the tag namespace, so `int | missing | bad_port` is a set
-// expression over them exactly like over standalone tags
+// expression over them exactly like over standalone tags (io failures
+// ride the ambient's io_err)
 enum cfg_err {
-  io_err
   missing
   bad_port { got: int }
 }
-
-struct config { host: string, port: int, retries: int }
 
 fn get_port(j: json) -> int | missing | bad_port {
   if j is json_obj {
@@ -41,7 +38,7 @@ fn get_port(j: json) -> int | missing | bad_port {
   }
 }
 
-fn load(path: string) -> config | cfg_err {
+fn load(path: string) -> config | io_err | cfg_err {
   const text = read_file(path)?
   const port = get_port(parse_json(text)?)?
   config { host: "localhost", port, retries: 3 }

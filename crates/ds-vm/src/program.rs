@@ -11,7 +11,8 @@ pub enum ConstKind {
     F64,
     /// A bool loaded by KCONST.
     Bool,
-    /// A callee reference loaded by CALL/CALLT.
+    /// A function reference loaded by CALL/CALLT (a callee) and by KCONST
+    /// (the scalar fn word a callable binding holds, F2).
     FuncRef,
     /// A string constant loaded by KSTR: the VM materializes it as an
     /// interned heap string reference.
@@ -19,7 +20,8 @@ pub enum ConstKind {
 }
 
 /// One constant-pool entry [BL-1]: the single immediate channel. KIMM loads
-/// the i64 entries, KCONST the f64/bool entries, and CALL/CALLT load
+/// the i64 entries, KCONST the f64/bool/fn-word entries (a FuncRef entry
+/// materializes as the scalar callable word, F2), and CALL/CALLT load
 /// [`Const::FuncRef`] callees [H6 item 5].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Const {

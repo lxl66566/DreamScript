@@ -16,14 +16,16 @@
 //! * `resolve` reads every registered file's parse and runs the ds-check collection and resolution
 //!   passes (G3): every registered file is the package, a file whose parse failed contributes no
 //!   declarations, and the value carries the namespace, per-file use tables, and the collection and
-//!   resolution diagnostics. The dependency is the whole set of parses, so the query invalidates at
-//!   file grain — collection is package-wide, so any parse edit can change any resolution.
+//!   resolution diagnostics. The dependency is the whole set of parses plus the file-set input
+//!   ([`Ctx::file_count`]), so the query invalidates at file grain and on registration — collection
+//!   is package-wide, so any parse edit can change any resolution.
 //! * `type_of` reads the resolve query (resolution computes once per package) and every parse, runs
 //!   the ds-check bidirectional pass (B2) over the package, and slices one definition's story out
 //!   of it: the declaration and body diagnostics whose primary labels address the definition's
 //!   block, plus the solved type of each binding it holds, rendered through the package universe.
 //!   Like `linearity_check` the dependency is the whole parse set, so the query invalidates at file
-//!   grain — the check is package-wide, so block-grain renewal would under-approximate it.
+//!   grain — and on registration, through the file-set input `package_asts` also reads — the check
+//!   is package-wide, so block-grain renewal would under-approximate it.
 //! * `linearity_check` reads the parse result and the block index of the definition's file and runs
 //!   the M2 affine pass [C1, C5] over that file as a single-file package, then slices out the
 //!   definition's facts. The dependency is the whole parse, so this query invalidates at file
@@ -32,9 +34,11 @@
 //!   lowering reads.
 //! * `effects_of` reads every registered file's parse and runs the ds-check effects pass (E1): the
 //!   M2 package is all registered files (G3), a file whose parse failed contributes no tree (its
-//!   definitions are absent), and one definition's row is returned by its package index.
+//!   definitions are absent), and one definition's row is returned by its package index. The
+//!   file-set input rides along with the parses, so registration invalidates every row too.
 //!
 //! [`Ctx::file_content`]: crate::Ctx::file_content
+//! [`Ctx::file_count`]: crate::Ctx::file_count
 //! [`Ctx::files`]: crate::Ctx::files
 
 use std::sync::Arc;
@@ -154,11 +158,11 @@ pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Qu
 /// registered files, keyed by the definition's package index.
 ///
 /// Package grain at M2 (G3): every registered file is the package, and
-/// the compute reads each file's parse, so an edit anywhere invalidates
-/// every row. Two limits, both resolved by the M7 `PackageConfig` seam:
-/// adding files mid-session does not invalidate existing rows, and the
-/// ambient row table (`ds_check::DeclaredRows`) is empty here — world
-/// rows flow once the platform declaration supplies it.
+/// the compute reads each file's parse plus the file-set input, so an
+/// edit anywhere — or a file registered mid-session — invalidates every
+/// row. One limit stays for the M7 `PackageConfig` seam: the ambient row
+/// table (`ds_check::DeclaredRows`) is fixed when the database is built,
+/// so world rows flow only once the platform declaration supplies it.
 pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::EffectsOf(def) = key else {
         return Err(QueryError::KindMismatch(key));
@@ -172,6 +176,12 @@ pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue,
 }
 
 /// Parses one file with `ds-parse`: tree plus diagnostics as one value.
+///
+/// A pure function of exactly one input — the file's `FileContent` read
+/// through [`Ctx::file_content`]; nothing else in the context is read.
+/// `ParseOutput::eq` (value.rs) compares only the source text on the
+/// strength of that purity: if this compute ever grows more inputs, that
+/// equality must widen with it.
 pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::ParseFile(file) = key else {
         return Err(QueryError::KindMismatch(key));
@@ -346,10 +356,13 @@ const SEPARATOR: &str = "##";
 /// line (its opening newline, as in the tree) to its last content byte —
 /// the same rule the tree applies, so a file healing from scan to tree
 /// keeps every intact block's text and renews its dependents instead of
-/// recomputing them. Content is every byte outside comments, plus
-/// whitespace inside strings and raw strings; horizontal whitespace,
-/// newlines, and comment lines trailing an item stay outside the extent,
-/// exactly like the tree's span.
+/// recomputing them. Block 0 is the exception on the opening side: the
+/// tree's `top_gap` eats the leading gap before the first item (it lives
+/// outside `file_blocks`, unlike the gap after a separator, which the
+/// first `file_block` owns), so block 0 opens at its first content byte.
+/// Content is every byte outside comments, plus whitespace inside strings
+/// and raw strings; horizontal whitespace, newlines, and comment lines
+/// trailing an item stay outside the extent, exactly like the tree's span.
 ///
 /// Residual approximation, inherent to scanning unparseable input: pairing
 /// brackets and strings on a broken file can mis-lex (a stray closer pops a
@@ -361,6 +374,10 @@ fn split_blocks(file: FileId, source: &str) -> Vec<BlockInfo> {
     let mut blocks = Vec::new();
     let mut block_start = 0_u32;
     let mut content_end = 0_u32;
+    // First content byte of block 0 (None while none was seen): the offset
+    // the tree's block 0 opens at. An empty block 0 takes its position from
+    // the push sites below instead.
+    let mut first_content: Option<u32> = None;
     let mut stack: Vec<ScanFrame> = Vec::new();
     let mut i = 0_usize;
     while i < b.len() {
@@ -372,12 +389,23 @@ fn split_blocks(file: FileId, source: &str) -> Vec<BlockInfo> {
             && b.get(i..i + SEPARATOR.len()) == Some(SEPARATOR.as_bytes())
             && matches!(prev, None | Some(b'\n'))
         {
+            let start = if blocks.is_empty() {
+                match first_content {
+                    // The tree's empty block 0 sits at the newline ending
+                    // the leading gap (sep_unit claims it; top_gap stops
+                    // right before).
+                    Some(start) => start,
+                    None => u32::try_from(i.saturating_sub(1)).expect("offset overflows u32"),
+                }
+            } else {
+                block_start
+            };
             blocks.push(BlockInfo {
                 id: BlockId {
                     file,
                     index: u32::try_from(blocks.len()).expect("block count overflows u32"),
                 },
-                span: Span::new(file, block_start, content_end),
+                span: Span::new(file, start, content_end.max(start)),
             });
             // The separator owns the rest of its line; the newline ending
             // it opens the next block (the tree agrees).
@@ -394,11 +422,19 @@ fn split_blocks(file: FileId, source: &str) -> Vec<BlockInfo> {
         match stack.last() {
             Some(ScanFrame::LineComment | ScanFrame::BlockComment) => {},
             Some(ScanFrame::Str | ScanFrame::Char | ScanFrame::Raw(..)) => {
+                if blocks.is_empty() {
+                    first_content.get_or_insert(u32::try_from(i).expect("offset overflows u32"));
+                }
                 content_end = u32::try_from(i + 1).expect("offset overflows u32");
             },
             _ if b[i] == b'/' && matches!(at(1), b'/' | b'*') => {},
             _ if matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') => {},
-            _ => content_end = u32::try_from(i + 1).expect("offset overflows u32"),
+            _ => {
+                if blocks.is_empty() {
+                    first_content.get_or_insert(u32::try_from(i).expect("offset overflows u32"));
+                }
+                content_end = u32::try_from(i + 1).expect("offset overflows u32");
+            },
         }
         match stack.last().copied() {
             Some(ScanFrame::LineComment) => {
@@ -505,12 +541,22 @@ fn split_blocks(file: FileId, source: &str) -> Vec<BlockInfo> {
             },
         }
     }
+    let start = if blocks.is_empty() {
+        match first_content {
+            Some(start) => start,
+            // An all-trivia file: the tree's single block sits at the end
+            // of the gap, which is the end of input.
+            None => u32::try_from(b.len()).expect("offset overflows u32"),
+        }
+    } else {
+        block_start
+    };
     blocks.push(BlockInfo {
         id: BlockId {
             file,
             index: u32::try_from(blocks.len()).expect("block count overflows u32"),
         },
-        span: Span::new(file, block_start, content_end),
+        span: Span::new(file, start, content_end.max(start)),
     });
     blocks
 }
@@ -539,6 +585,19 @@ mod tests {
         // ends at its last content byte.
         let spans = spans(FileId::new(0), "const a\n##\nconst b\n");
         assert_eq!(spans, vec![(0, 7), (10, 18)]);
+    }
+
+    #[test]
+    fn leading_gap_before_block_0_stays_outside_the_extent() {
+        // The tree's `top_gap` before `file_blocks` owns the leading gap;
+        // block 0 opens at its first content byte under the scan too, so a
+        // file healing from scan to tree renews block 0's dependents.
+        let got = spans(FileId::new(0), "// header\nconst a = 1\n");
+        assert_eq!(got, vec![(10, 21)]);
+        let got = spans(FileId::new(0), "\nconst a = 1\n");
+        assert_eq!(got, vec![(1, 12)]);
+        let got = spans(FileId::new(0), "// h\nconst a = 1\n##\nconst b = 2\n");
+        assert_eq!(got, vec![(5, 16), (19, 31)]);
     }
 
     #[test]
@@ -622,6 +681,8 @@ mod tests {
         // A file that later fails to parse degrades to the scan, so the
         // scan must number blocks exactly like the tree it replaces:
         // same count, and every item of tree block i lands in scan block i.
+        // The spans must agree too, or healing from scan to tree would
+        // spuriously invalidate the blocks whose text never changed.
         let sources = [
             "##\n",
             "##",
@@ -634,6 +695,10 @@ mod tests {
             "// c\n##\nconst b = 2\n",
             "const a = 1\n\n##\n\nconst b = 2\n",
             "## one\nconst b = 2\n## two\nconst c = 3\n",
+            "// header\nconst a = 1\n",
+            "\n\nconst a = 1\n",
+            "// h\nconst a = 1\n##\nconst b = 2\n",
+            "// a\nconst x = 1 // tail\n##\nconst y = 2\n",
         ];
         for src in sources {
             let mut files = ds_diag::Files::new();
@@ -642,6 +707,13 @@ mod tests {
                 .unwrap_or_else(|d| panic!("{src:?} fails to parse: {d:?}"));
             let scan = split_blocks(file, src);
             assert_eq!(scan.len(), ast.blocks.len(), "block count for {src:?}");
+            let tree: Vec<(u32, u32)> = ast
+                .blocks
+                .iter()
+                .map(|b| (b.span.start, b.span.end))
+                .collect();
+            let got: Vec<(u32, u32)> = scan.iter().map(|b| (b.span.start, b.span.end)).collect();
+            assert_eq!(got, tree, "scan spans for {src:?}");
             for (i, block) in ast.blocks.iter().enumerate() {
                 for item in &block.items {
                     let hit = scan

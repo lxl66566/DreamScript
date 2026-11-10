@@ -1,0 +1,8 @@
+error[DS3006]: `xs` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]
+ --> tests/fixtures/negative/ds3006_mut_window_const_receiver.ds:9:3
+  |
+8 |   const xs = [1]
+  |         -- bound here
+  |
+9 |   xs.list_push(2)
+  |   ^^ const receiver

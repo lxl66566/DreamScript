@@ -106,6 +106,9 @@ impl<'a> JsonDiagnostic<'a> {
 }
 
 fn json_loc(files: &Files, span: Span) -> JsonLoc {
+    // A span may predate a `set_source` swap; rendering clamps it into the
+    // current bounds instead of panicking.
+    let span = files.clamp_span(span);
     let start = files.location(span.file, span.start);
     let end = files.location(span.file, span.end);
     JsonLoc {

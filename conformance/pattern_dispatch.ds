@@ -6,14 +6,10 @@
 // sw: stage: typecheck
 // show: stage: run
 // show_rev: stage: run
-// timeout: stage: typecheck
-// refused: stage: typecheck
 // ready: stage: typecheck
 // outcome: stage: typecheck
 // brief: stage: run
-// io_error: stage: typecheck
 // parse_error: stage: typecheck
-// config: stage: typecheck
 // parse_config: stage: typecheck
 // load_config: stage: run
 // eager: stage: typecheck
@@ -41,9 +37,8 @@ fn show_rev(s: sw) -> () {
   }
 }
 
-// B: an or-pattern of unit tags is one member set binding nothing
-tag timeout
-tag refused
+// B: an or-pattern of unit tags is one member set binding nothing (the
+// transient members ride the ambient's net_err cases)
 tag ready
 type outcome = timeout | refused | ready
 
@@ -56,21 +51,20 @@ fn brief(e: outcome) -> () {
 
 // C: a tail `?` whose operand union is contained in the return union is
 // the return itself (E4's canonical load_config shape); parse_config is
-// this file's stand-in for the record's parser
-tag io_error
+// this file's stand-in for the record's parser, and the io failure rides
+// the ambient's read_file signature
 tag parse_error
-struct config { host: string, port: int }
 
 extern fn parse_config (text: string) -> config | parse_error
 
-fn load_config(path: string) -> config | io_error | parse_error {
+fn load_config(path: string) -> config | io_err | parse_error {
   const text = read_file(path)?
   parse_config(text)?
 }
 
 // D: a mid-block `return e?` types its operand against the declared
 // return union, the same anchor the final expression carries
-fn eager(path: string) -> config | io_error | parse_error {
+fn eager(path: string) -> config | io_err | parse_error {
   if path == "x" {
     return load_config(path)?
   }
@@ -79,7 +73,7 @@ fn eager(path: string) -> config | io_error | parse_error {
 
 // E: a mid-block `return e` whose operand union is a strict subset of
 // the declared return re-spans per member into the return union
-fn forward(text: string) -> config | io_error | parse_error {
+fn forward(text: string) -> config | io_err | parse_error {
   if text == "x" {
     return parse_config(text)
   }
@@ -99,10 +93,10 @@ fn branchy(text: string) -> config | parse_error {
 // G: a strict-sub-union initializer widens into the annotated binding,
 // and the assignment widens over the old value
 fn store(text: string) -> () {
-  var kept: config | io_error | parse_error = parse_config(text)
+  var kept: config | io_err | parse_error = parse_config(text)
   kept = parse_config(text)
   match kept {
-    io_error => (),
+    io_err => (),
     parse_error => (),
     c => (),
   }

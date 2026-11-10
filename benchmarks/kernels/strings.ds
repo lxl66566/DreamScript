@@ -1,16 +1,26 @@
 // Kernel: build strings then reprocess them — interpolation with two holes,
-// concat, trim, char_at scanning, substring cuts, parse_int. Pieces are
-// always three digits plus ';', so the joined length is known arithmetic
-// (len is not in the lowered subset) and every parse_int sees clean digits.
-// Accumulators seed with the empty string literal, mirrored exactly in
-// the peer kernels.
+// concat, trim, char_at scanning, substring cuts, a char digit fold. Pieces
+// are always three digits plus ';', so the joined length is known
+// arithmetic and the fold's positional weights (100/10/1) reconstruct
+// exactly the piece value the build loop interpolated. The digit ladder
+// replaces the parse native (the fallible-read seam: the success-typed
+// ambient's union answers no runtime extraction yet), mirrored in the
+// peer kernels. Accumulators seed with the empty string literal.
+// Every intermediate stays a non-negative int below 2^47.
+
+fn dv(c: string) -> int {
+  if c == "0" { 0 } else if c == "1" { 1 } else if c == "2" { 2 } else if c == "3" { 3 } else if c == "4" { 4 } else if c == "5" { 5 } else if c == "6" { 6 } else if c == "7" { 7 } else if c == "8" { 8 } else { 9 }
+}
+
+fn fold3(w: string) -> int {
+  dv(w.char_at(0)) * 100 + dv(w.char_at(1)) * 10 + dv(w.char_at(2))
+}
 
 fn main() -> () {
   var s: string = ""
-  var piece: string = ""
   var gi: int = 0
   while gi < 25 {
-    piece = ""
+    var piece: string = ""
     var k: int = 0
     while k < 1000 {
       const v = (gi * 1000 + k) * 37 % 900 + 100
@@ -25,10 +35,10 @@ fn main() -> () {
   var j: int = 0
   while j < 100000 {
     if s.char_at(j) == ";" {
-      sum += s.substring(start, j).parse_int()
+      sum += fold3(s.substring(start, j))
       start = j + 1
     }
     j += 1
   }
-  println("result: ${sum} ${100000}")
+  println("result: ${sum} ${len(s)}")
 }

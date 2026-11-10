@@ -6,7 +6,7 @@ use pest::iterators::Pair;
 use super::{Cooked, Ctx, cook_escape, inner, split_float_suffix, split_int_suffix};
 use crate::{Rule, ast::*};
 
-impl Ctx<'_> {
+impl Ctx {
     // ===== literals =====
 
     pub(super) fn int_lit(&mut self, p: Pair<'_, Rule>, neg: bool) -> Literal {

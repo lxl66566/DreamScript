@@ -2,7 +2,8 @@
 //! the M2 affine pass, memoized through the engine, and recomputed when the
 //! file's parse changes [C1, C5].
 
-use ds_query::{Db, DefId, LinearityCheck};
+use ds_diag::FileId;
+use ds_query::{BlockId, Db, DefId, LinearityCheck};
 
 const CLEAN: &str = concat!(
     "trait Copyable { }\n",
@@ -24,9 +25,13 @@ const CLEAN: &str = concat!(
     "}\n",
 );
 
-/// `(file << 8) | block`: the placeholder `DefId` packing.
+/// The placeholder `DefId` packing of one block (see `DefId::from_block`).
 fn def(file: u32, block: u32) -> DefId {
-    DefId::new((file << 8) | block)
+    DefId::from_block(BlockId {
+        file: FileId::new(file),
+        index: block,
+    })
+    .expect("fixture files stay under the packing bounds")
 }
 
 #[test]

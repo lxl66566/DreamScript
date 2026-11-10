@@ -8,7 +8,7 @@ use crate::{
     FORMAT_VERSION, MAGIC,
     hash::Hash128,
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
-    module::{Constant, DebugSpan, Function, Module, jump_target_of, slot_from_tag},
+    module::{Constant, DebugSpan, Function, FunctionError, Module, jump_target_of, slot_from_tag},
     write::BLOCKS_PAYLOAD_VERSION,
 };
 
@@ -66,6 +66,17 @@ pub enum ReadError {
         at: usize,
         /// What is wrong there.
         reason: &'static str,
+    },
+    /// A function record fails [`Function::new`] re-validation (DS4004).
+    /// The concrete cause — a jump escaping the body, a word that cannot
+    /// re-encode at its pc — rides along as the error source instead of
+    /// being flattened into a generic reason.
+    #[error("function record fails validation: {source}")]
+    FunctionValidation {
+        /// Offset of the record's first byte.
+        at: usize,
+        /// The underlying [`FunctionError`].
+        source: FunctionError,
     },
     /// The stored source hash does not match the actual source (DS4001).
     #[error("stored source hash {stored} does not match the actual source hash {computed}")]
@@ -139,7 +150,8 @@ impl ReadError {
             | Self::UnexpectedEof { .. }
             | Self::MalformedUleb { .. }
             | Self::InvalidUtf8 { .. }
-            | Self::Malformed { .. } => ErrorCode::BytecodeMalformed,
+            | Self::Malformed { .. }
+            | Self::FunctionValidation { .. } => ErrorCode::BytecodeMalformed,
         }
     }
 
@@ -155,6 +167,7 @@ impl ReadError {
             | Self::MalformedUleb { at }
             | Self::InvalidUtf8 { at }
             | Self::Malformed { at, .. }
+            | Self::FunctionValidation { at, .. }
             | Self::UnknownSectionKind { at, .. }
             | Self::NonCanonicalSectionOrder { at, .. } => Some(*at),
             Self::HashMismatch { .. }
@@ -409,17 +422,21 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
         for _ in 0..const_count {
             constants.push(parse_constant(&mut p)?);
         }
+        let count_at = p.abs();
         let code_count = p.count()?;
+        // pcs are u32; a larger declared count is malformed data, not a
+        // mid-loop panic (the reader never panics on any input)
+        let code_count = u32::try_from(code_count)
+            .map_err(|_| malformed(count_at, "code word count exceeds the u32 pc range"))?;
         let mut code = Vec::new();
         for pc in 0..code_count {
             let at = p.abs();
             let word = p.u32le()?;
-            let pc = u32::try_from(pc).expect("pc fits u32");
             let inst = Inst::decode(pc, word)
                 .map_err(|_| malformed(at, "code word does not decode to an instruction"))?;
             if let Inst::Uop(uop) = inst {
                 if let Some(target) = jump_target_of(uop) {
-                    if usize::try_from(target).unwrap_or(usize::MAX) >= code_count {
+                    if target >= code_count {
                         return Err(malformed(at, "jump target escapes the function body"));
                     }
                 }
@@ -435,8 +452,12 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
                 "entry descriptor words must be zero on disk",
             ));
         }
-        let function = Function::new(name, layout, constants, code)
-            .map_err(|_| malformed(record_at, "function record fails validation"))?;
+        let function = Function::new(name, layout, constants, code).map_err(|source| {
+            ReadError::FunctionValidation {
+                at: record_at,
+                source,
+            }
+        })?;
         functions.push(function);
     }
     p.exhausted("trailing bytes in blocks section")?;

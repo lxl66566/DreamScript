@@ -175,6 +175,20 @@ impl Files {
         &self.get(file).line_starts
     }
 
+    /// Folds `span` into the file's current bounds: an offset past the end
+    /// of the current source becomes the end. The rendering paths use this
+    /// to degrade spans that predate a [`Files::set_source`] instead of
+    /// panicking in the display layer; in-bounds spans map to themselves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `span.file` was never registered.
+    #[must_use]
+    pub fn clamp_span(&self, span: Span) -> Span {
+        let f = self.get(span.file);
+        Span::new(span.file, span.start.min(f.len), span.end.min(f.len))
+    }
+
     /// Number of lines; every file has at least one.
     #[must_use]
     pub fn line_count(&self, file: FileId) -> u32 {

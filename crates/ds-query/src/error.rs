@@ -27,6 +27,16 @@ pub enum QueryError {
     /// No block with the given id exists in the file's block index.
     #[error("no block {} in file {}", .0.index, .0.file.as_u32())]
     UnknownBlock(BlockId),
+    /// The (file, block) pair does not fit DefId's placeholder packing:
+    /// the block field is 8 bits and the file field 24, so a block index
+    /// past 255 (or a file id past 16 777 215) would silently alias
+    /// another file's block.
+    #[error(
+        "block {} of file {} does not fit the DefId packing",
+        .0.index,
+        .0.file.as_u32()
+    )]
+    DefIdOverflow(BlockId),
     /// The key belongs to a query whose compute is not registered: either a
     /// placeholder M2+ variant or a kind unregistered via
     /// [`Db::set_compute`](crate::Db::set_compute).

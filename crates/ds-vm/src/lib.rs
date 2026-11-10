@@ -37,6 +37,14 @@
 //!   the metadata word is rewritten in place via [`ds_abi::FrameMetadata::enter_tail_call`] (return
 //!   pc preserved, callee frame size, elided count +1), and control enters the callee. The stack
 //!   never grows at any depth.
+//! - `CALLS` executes the callable-word call form (F2): the callee operand is a frame slot — a `Fn`
+//!   slot holds the copyable scalar `FuncRef` word (module id + function index; the id space is
+//!   registry-assigned), a `Ref` slot holds a closure object whose header word is the FuncRef and
+//!   whose capture block follows inside the object ([`crate::object::Objects::alloc_closure`]).
+//!   Resolution goes through the target module's current slot at call time — never a cached code
+//!   pointer, so staged words pick up hot-reload swaps — and a closure callee's captures are copied
+//!   into its frame starting at the first local slot. No tail variant exists; every CALLS is an
+//!   ordinary frame push bounded by the stack limit.
 //! - Entries. Every function carries a two-word [`ds_abi::EntryDescriptor`]; word 0 (the function's
 //!   table index, written once at module load and immutable after) is all that exists until the JIT
 //!   does. All calls route through [`ds_abi::EntryDescriptor::resolve`].
@@ -108,5 +116,5 @@ pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, Module
 pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
 pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
 pub use program::{Const, ConstKind, FunctionDef, assemble};
-pub use value::{Value, Word};
+pub use value::{FuncRef, Value, Word};
 pub use vm::{BacktraceFrame, Trap, Vm};

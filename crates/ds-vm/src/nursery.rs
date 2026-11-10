@@ -16,6 +16,10 @@
 //!   bare `PLATFORM_NONE` bounce tag — the same convention a `run` entry follows.
 //! - A child's own resumer links stay live under the driver: in-language parent/child switches
 //!   inside the nursery keep their answers.
+//! - A trap escaping a child's drive is attributed to the fiber the drive ended on: a child parked
+//!   at its own `fiber_resume` call while its resumee traps is innocent — the resumee ledgers
+//!   `Trapped`, the parked child is bounced back in and lands (or reports `Cancelled` if the
+//!   boundary cut it down mid-park).
 //!
 //! # Cancellation [E5]
 //!
@@ -58,8 +62,10 @@ pub enum ChildOutcome {
     /// Ran to its entry RET/HALT with this final value — including a child
     /// that landed normally under the cancel flag (cooperative).
     Completed(Value),
-    /// Stopped at a taken backward branch under the cancel flag; its death
-    /// value to any resumer is the `PLATFORM_CANCELLED` sentinel.
+    /// Stopped under the cancel discipline: at a taken backward branch
+    /// under the flag (its death value to any resumer is the
+    /// `PLATFORM_CANCELLED` sentinel), or cut down by the boundary walk
+    /// before any ledgered death.
     Cancelled,
     /// Died trapped; the trap that killed it, unioned out at the boundary.
     Trapped(Trap),
@@ -71,9 +77,10 @@ pub enum ChildOutcome {
 pub enum JoinOutcome {
     /// Every child completed; final values in spawn order.
     Joined(Vec<Value>),
-    /// At least one child died trapped: per-child outcomes in spawn order
-    /// (`Trapped` for the failures, `Cancelled` for siblings stopped at a
-    /// preemption point, `Completed` for those that landed).
+    /// At least one child did not complete — a trap, or a boundary
+    /// cancellation: per-child outcomes in spawn order (`Trapped` for the
+    /// failures, `Cancelled` for siblings stopped under the flag or cut
+    /// down by the boundary, `Completed` for those that landed).
     Failed(Vec<ChildOutcome>),
 }
 

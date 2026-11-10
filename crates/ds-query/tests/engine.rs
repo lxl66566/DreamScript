@@ -225,7 +225,9 @@ fn same_content_edit_is_a_noop() {
 
     db.set_file_content(file, TWO_BLOCKS).unwrap();
 
-    assert_eq!(db.revision().as_u64(), 0);
+    // One bump so far — the registration (a file-set change); the
+    // same-content edit added none.
+    assert_eq!(db.revision().as_u64(), 1);
     let _ = db.get::<BlockIndex>(file).unwrap();
     assert_eq!(db.compute_count(&parse_key(file)), 1);
     assert_eq!(db.compute_count(&index_key(file)), 1);
@@ -235,19 +237,19 @@ fn same_content_edit_is_a_noop() {
 fn revision_is_monotonic() {
     let mut db = Db::new();
     let file = db.add_file("main.ds", "const a = 1\n");
-    assert_eq!(db.revision().as_u64(), 0);
+    assert_eq!(db.revision().as_u64(), 1); // the registration
 
     db.set_file_content(file, "const a = 2\n").unwrap();
-    assert_eq!(db.revision().as_u64(), 1);
+    assert_eq!(db.revision().as_u64(), 2);
 
     db.set_file_content(file, "const a = 2\n").unwrap();
-    assert_eq!(db.revision().as_u64(), 1);
+    assert_eq!(db.revision().as_u64(), 2);
 
     db.set_file_content(file, "const a = 3\n").unwrap();
-    assert!(db.revision().as_u64() > 1);
+    assert!(db.revision().as_u64() > 2);
 
     let _ = db.get::<ParseFile>(file).unwrap();
-    assert_eq!(db.revision().as_u64(), 2);
+    assert_eq!(db.revision().as_u64(), 3);
 }
 
 #[test]
@@ -325,6 +327,55 @@ fn broken_file_does_not_poison_other_blocks_and_healing_renews() {
     // extents).
     assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(0))), 1);
     assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(1))), 2);
+}
+
+#[test]
+fn healing_renews_block_0_under_a_leading_comment() {
+    // A leading comment before block 0 belongs to no block in the tree
+    // (the grammar's top_gap owns it); the degraded scan must agree, or a
+    // file healing from scan to tree would spuriously recompute block 0's
+    // dependents once over a text differing by exactly that gap.
+    let mut db = db_with_downstream_queries();
+    let file = db.add_file("main.ds", "// header\nconst a = 1\n##\nconst b = \"open\n");
+
+    let text = db.get::<TypeOf>(DefId::new(0)).unwrap();
+    assert_eq!(&*text, "const a = 1");
+    let _ = db.get::<TypeOf>(DefId::new(1)).unwrap();
+
+    db.set_file_content(file, "// header\nconst a = 1\n##\nconst b = \"closed\"\n")
+        .unwrap();
+    let _ = db.get::<ParseFile>(file).unwrap();
+    let _ = db.get::<TypeOf>(DefId::new(1)).unwrap();
+
+    // Block 0 kept its text across the heal: renewal, never a recompute.
+    let text = db.get::<TypeOf>(DefId::new(0)).unwrap();
+    assert_eq!(&*text, "const a = 1");
+    assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(0))), 1);
+    assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(1))), 2);
+}
+
+#[test]
+fn swapping_a_compute_invalidates_memos_of_that_kind_and_dependents() {
+    let fixed: ComputeFn = |_, _| Ok(QueryValue::BlockSource(Arc::from("swapped")));
+
+    let mut db = db_with_downstream_queries();
+    db.add_file("main.ds", TWO_BLOCKS);
+    assert_eq!(&*db.get::<TypeOf>(DefId::new(0)).unwrap(), BLOCK0);
+    let rev = db.revision().as_u64();
+
+    db.set_compute(ds_query::QueryKind::BlockSource, fixed);
+
+    // The swap is an input change: one revision bump, the memo of the
+    // swapped kind is dropped (a dirty memo would deep-verify against
+    // unchanged dependencies and wrongly renew), and dependents observe the
+    // new compute on their next read.
+    assert_eq!(db.revision().as_u64(), rev + 1);
+    assert_eq!(&*db.get::<TypeOf>(DefId::new(0)).unwrap(), "swapped");
+    assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(0))), 2);
+
+    // Swapping before any memo of the kind exists changes nothing.
+    db.set_compute(ds_query::QueryKind::EffectsOf, fixed);
+    assert_eq!(db.revision().as_u64(), rev + 1);
 }
 
 #[test]

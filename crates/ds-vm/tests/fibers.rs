@@ -16,6 +16,9 @@
 //!   frame addresses stable across growth.
 //! - the O(1) switch: a parked fiber's top-frame word keeps its address across switch round-trips —
 //!   no stack is ever copied.
+//! - hosted-drive honesty: a generic combinator's lambda yielding under `Vm::call_hosted` refuses
+//!   the drive, and the interrupted fiber can never be re-entered — a second resume answers the
+//!   structured fiber refusal, not the sentinel return pc's InvalidPc lie.
 //!
 //! Layout conventions (as everywhere): overlay slots that stage arguments
 //! and then receive results declare `Raw`; fiber ids are i64 immediates
@@ -25,12 +28,15 @@ use ds_vm::{
     Const, FIBER_ROOT, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
     Value, Vm,
     abi::{
-        ConstIdx, FrameLayout, SlotType,
+        BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
         uop::Uop,
     },
     assemble,
-    native::{BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, PLATFORM_NONE},
+    native::{
+        BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+        BUILTIN_MAP, PLATFORM_NONE,
+    },
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -367,9 +373,73 @@ fn echo_def() -> FunctionDef {
     )
 }
 
+/// `() -> int`: builds a one-element list, then maps the yielding lambda
+/// over it through CALLG — the hosted drive whose refusal interrupts the
+/// fiber.
+fn hosted_map_def() -> FunctionDef {
+    def(
+        "hosted_map",
+        &[Ref, Raw, Raw, Raw, Raw],
+        0,
+        4,
+        vec![
+            builtin(BUILTIN_LIST_NEW),                // k0
+            builtin(BUILTIN_LIST_PUSH),               // k1
+            Const::I64(7),                            // k2 the element
+            builtin(BUILTIN_MAP),                     // k3
+            fb_ref(10),                               // k4 the yielding lambda
+            Const::I64(BuiltinInstance::List as i64), // k5 the evidence words
+        ],
+        &[
+            Uop::Funcf { frame_slots: 5 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            }, // fresh list → overlay 0
+            Uop::Mov { dst: 0, src: 1 }, // keep the list (push answers unit)
+            Uop::Mov { dst: 1, src: 0 }, // list_push: (list, element)
+            Uop::Kimm { dst: 2, kidx: k(2) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 1, src: 0 }, // map: (list, lambda) + evidence
+            Uop::Kconst { dst: 2, kidx: k(4) },
+            Uop::Kimm { dst: 3, kidx: k(5) },
+            Uop::Kimm { dst: 4, kidx: k(5) },
+            Uop::Callg {
+                callee: k(3),
+                nargs: 2,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// `(x: int) -> int`: yields `x` — parking the fiber that hosts the
+/// drive — then answers the resume payload as the mapped word.
+fn yielding_lambda_def() -> FunctionDef {
+    def(
+        "yielding_lambda",
+        &[I64, Raw],
+        1,
+        1,
+        vec![builtin(BUILTIN_FIBER_YIELD)],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
 /// The fixture module. Function indices are pool-FuncRef contract:
 /// 0 main, 1 a, 2 b, 3 join_main, 4 join_child, 5 bounce_main, 6 spin,
-/// 7 deep, 8 echo.
+/// 7 deep, 8 echo, 9 hosted_map, 10 yielding_lambda.
 fn fb_registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     reg.install(
@@ -383,6 +453,8 @@ fn fb_registry() -> ModuleRegistry {
             spin_def(),
             deep_def(),
             echo_def(),
+            hosted_map_def(),
+            yielding_lambda_def(),
         ])
         .expect("valid fixture module"),
     );
@@ -532,6 +604,32 @@ fn resuming_an_unresumable_fiber_names_it_in_the_trap() {
         Err(Trap::UnknownCallee {
             module: "fiber".into(),
             func: 99,
+        })
+    );
+}
+
+#[test]
+fn a_refused_hosted_drive_leaves_the_fiber_never_resumable() {
+    let mut vm = Vm::new(fb_registry());
+    let hosted = vm
+        .spawn_fiber("fb", "hosted_map", &[])
+        .expect("spawn the hosted driver");
+    // the map body's lambda yields: a Rust-side loop cannot suspend, so
+    // the hosted drive refuses with the fiber parked mid-lambda
+    assert_eq!(
+        vm.resume_fiber(hosted, Value::I64(0)),
+        Err(Trap::ReentrancyRefused)
+    );
+    // the sentinel reentry frame can never be answered: the fiber is
+    // interrupted (frames kept, like any trapped drive), and a second
+    // resume answers the structured fiber refusal — never the sentinel
+    // return pc's InvalidPc lie
+    assert_eq!(vm.fiber_state(hosted), Some(FiberState::Running));
+    assert_eq!(
+        vm.resume_fiber(hosted, Value::I64(0)),
+        Err(Trap::UnknownCallee {
+            module: "fiber".into(),
+            func: hosted.0,
         })
     );
 }

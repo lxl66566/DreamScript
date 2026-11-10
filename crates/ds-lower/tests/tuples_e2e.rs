@@ -71,7 +71,6 @@ fn lower_inline(source: &str) -> Result<(), LowerError> {
     // in-process checking has no ambient: the primitives ride along
     const PRELUDE: &str = "tag int\ntag string\ntag bool\ntrait Copyable { }\n";
     let combined = format!("{PRELUDE}{source}");
-    let combined = format!("{PRELUDE}{source}");
     let mut files = Files::new();
     let id = files.add_source("inline.ds", &combined);
     let asts = [parse(&files, id).expect("the source parses")];

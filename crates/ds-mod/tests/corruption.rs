@@ -3,7 +3,8 @@
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{
-    Constant, Hash128, Module, ReadError, SectionKind, TargetClass, read, read_checked, write,
+    Constant, FunctionError, Hash128, MAGIC, Module, ReadError, SectionKind, TargetClass, read,
+    read_checked, write,
 };
 
 const SOURCE: &[u8] = b"const x = 1";
@@ -340,5 +341,89 @@ fn jump_out_of_body_rejected() {
         reason: "jump target escapes the function body",
         ..
     }));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+/// The Function::new re-validation error keeps its concrete cause: the
+/// pc, target, and body length reach the caller instead of a flattened
+/// generic message. The reader's own word loop makes the failure
+/// unreachable from real bytes (it validates the same facts first), so
+/// the wiring is pinned directly.
+#[test]
+fn function_validation_error_carries_the_cause() {
+    let error = ReadError::FunctionValidation {
+        at: 9,
+        source: FunctionError::JumpEscapesBody {
+            pc: 1,
+            target: 5,
+            len: 3,
+        },
+    };
+    assert_eq!(
+        error.to_string(),
+        "function record fails validation: jump target 5 at pc 1 escapes the function body (3 \
+         words)"
+    );
+    assert_eq!(error.code(), ErrorCode::BytecodeMalformed);
+    assert_eq!(error.offset(), Some(9));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+/// A blocks payload declaring 2^32 code words: the count itself must
+/// reject as malformed data — a pc beyond u32 is unrepresentable, and the
+/// reader never panics on any input. No writer can emit this file, so it
+/// is hand-assembled: the minimal four-section module.
+#[test]
+fn code_word_count_beyond_u32_rejected() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&[3, 0, 0, 0]); // version, target tag, flags, collector flags
+    bytes.extend_from_slice(&[0u8; 16]); // collector hook slots
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // max call depth
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // IR-version checksum
+    bytes.extend_from_slice(&[1, b'm']); // module name
+    bytes.push(0); // dependency count
+    bytes.extend_from_slice(Hash128::ZERO.as_bytes()); // source hash
+    bytes.push(4); // section directory count
+    let dir_entries_at = bytes.len();
+    bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
+    let blocks_at = bytes.len();
+    // blocks payload v1: one function "f" with no params, slots, or
+    // constants, then the over-range code count uleb (2^32)
+    bytes.extend_from_slice(&[1, 1, 1, b'f', 0, 0, 0, 0]);
+    bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+    let blocks_len = bytes.len() - blocks_at;
+    let constants_at = bytes.len();
+    bytes.push(0); // zero constants
+    let type_metadata_at = bytes.len();
+    bytes.extend_from_slice(&[0, 0]); // placeholder payload v0 + reserved 0
+    let effect_rows_at = bytes.len();
+    bytes.extend_from_slice(&[0, 0]);
+    // Directory rows in canonical order: kind byte, offset uleb, length
+    // uleb — every value stays under 128, so each entry is exactly three
+    // bytes as reserved above.
+    let rows = [
+        (SectionKind::Blocks.tag(), blocks_at, blocks_len),
+        (SectionKind::Constants.tag(), constants_at, 1),
+        (SectionKind::TypeMetadata.tag(), type_metadata_at, 2),
+        (SectionKind::EffectRows.tag(), effect_rows_at, 2),
+    ];
+    let mut at = dir_entries_at;
+    for (kind, offset, len) in rows {
+        bytes[at] = kind;
+        bytes[at + 1] = u8::try_from(offset).expect("offset under 128");
+        bytes[at + 2] = u8::try_from(len).expect("length under 128");
+        at += 3;
+    }
+    let error = read(&bytes).expect_err("declared count beyond u32 must be rejected");
+    // 64-bit hosts reject the count as malformed; 32-bit hosts reject the
+    // same uleb one step earlier, as a count too large to address memory
+    assert!(matches!(
+        error,
+        ReadError::Malformed {
+            reason: "code word count exceeds the u32 pc range",
+            ..
+        } | ReadError::MalformedUleb { .. }
+    ));
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
 }

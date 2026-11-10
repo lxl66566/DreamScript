@@ -1,0 +1,44 @@
+// Kernel: the lambda combinators — map/filter/reduce chains over
+// list[int] and list[string] with non-capturing lambdas (the CALLG
+// reentry surface: the VM reenters the interpreter once per element per
+// combinator). The int pipeline runs 100 rounds of map (x*2), filter
+// (x % 3 == 0), reduce (sum) over a 10000-element list built with
+// list_push; the string pipeline runs 15 rounds of map (suffix concat),
+// filter (len < 5), reduce (concat join) over a 1000-element list,
+// checksummed by length so the golden stays short. Capturing lambdas
+// refuse at lowering (a closure cannot inhabit the fn-typed parameter
+// slot), so every lambda here is non-capturing by construction. Every
+// integer intermediate stays non-negative below 2^47.
+
+fn main() -> () {
+  var xs: list[int] = list[int]()
+  var i: int = 0
+  while i < 10000 {
+    list_push(xs, (i * 37) % 900 + 100)
+    i += 1
+  }
+  var sum: int = 0
+  var r: int = 0
+  while r < 250 {
+    const doubled = xs.map((x: int) => x * 2)
+    const kept = filter(doubled, (x: int) => x % 3 == 0)
+    sum += reduce(kept, 0, (a: int, b: int) => a + b)
+    r += 1
+  }
+  var ys: list[string] = list[string]()
+  var j: int = 0
+  while j < 1000 {
+    list_push(ys, "w${j % 40}")
+    j += 1
+  }
+  var lensum: int = 0
+  var q: int = 0
+  while q < 40 {
+    const banged = ys.map((w: string) => concat(w, "!"))
+    const short = filter(banged, (w: string) => len(w) < 5)
+    const joined = reduce(short, "", (a: string, b: string) => concat(a, b))
+    lensum += len(joined)
+    q += 1
+  }
+  println("result: ${sum} ${len(xs)} ${lensum} ${len(ys)}")
+}

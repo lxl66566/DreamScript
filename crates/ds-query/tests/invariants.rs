@@ -109,7 +109,11 @@ impl Query for LinearityOf {
 
 /// Packs (file, block) into the placeholder DefId the downstream keys use.
 fn def_id(file: u32, block: u32) -> DefId {
-    DefId::new((file << 8) | block)
+    DefId::from_block(BlockId {
+        file: FileId::new(file),
+        index: block,
+    })
+    .expect("the harness stays inside the packing bounds")
 }
 
 fn type_of_block(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
@@ -293,8 +297,8 @@ impl Harness {
         };
         assert_eq!(
             harness.db.revision().as_u64(),
-            0,
-            "setup registers inputs but performs no changes"
+            u64::try_from(FILE_COUNT).expect("file count fits u64"),
+            "setup registers one file-set change per file"
         );
         harness
     }

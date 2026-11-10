@@ -1,0 +1,20 @@
+// purpose: the generic-call seam — the ambient-shaped `len[t]` extern
+// called over string and list receivers in both the free-call and UFCS
+// spellings lowers to CALLG: one generic body, the instantiated type as
+// the site's evidence word, distinct outputs per receiver shape.
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn len[t] (xs: t) -> int
+
+fn main() -> () {
+  const words = ["alpha", "beta", "gamma"]
+  const name = "DreamScript"
+  println("string ${len(name)} ${name.len()}")
+  println("list ${len(words)} ${words.len()}")
+  println("mixed ${len(name)} ${len(words)}")
+}

@@ -9,7 +9,7 @@ The DreamScript conformance corpus: the frozen archive's seed programs (`design/
 | types_hybrid.ds | 01-types | M3 | config parser: enum-minted cases, unions, `is`-narrowing, bare `return`, `?`, `.err`, structural `==` |
 | linearity_modes_rc.ds | 02-linearity-ownership | M4 | linear `file` with `deinit`, `mut` windows, affine move, COW split, fused chain |
 | effects_nursery.ds | 03-effects-errors-async | M5 | nursery `fetch_all` with cancel-on-failure, retry loop, `par_map`/`par_reduce` |
-| syntax_ts_heart.ds | 04-syntax | M3 | full surface: guards, bare `return`, `?`, `.err`, interpolation, destructuring, byte literal (staged `parse`) |
+| syntax_ts_heart.ds | 04-syntax | M3 | full surface: guards, bare `return`, `?`, `.err`, interpolation, destructuring, byte literal |
 | generics_coherent_traits.ds | 05-generics-metaprogramming | M2 (check), M6 (comptime) | `~Copyable` stack, disjoint heads, `#[derive]` + comptime schema |
 | modules_hash_core.ds | 06-modules-tooling | M7 | ds.pkg manifest, selective imports, linear sqlite handle |
 | linearity_negative.ds | C1, C5 | M2 (check) | reject items: moved-then-used, move-mode parameters, projection transfers, moves across match arms and loops, deinit outside `~Copyable` |
@@ -17,6 +17,10 @@ The DreamScript conformance corpus: the frozen archive's seed programs (`design/
 | pattern_dispatch.ds | tutorial verification pass 2026-11-10 | M3 | bug regressions: bare-tag match arms dispatch by value (both orders), or-patterns of unit tags, tail-`?`, mid-block `return e?`, and branch-final `?` over a contained union, a strict-sub-union `return e` and binding/assignment |
 | lists_surface.ds | record B3/F7/F9, the constructor round 2026-11-10 | M3 | list literals, the `list[t]()` empty constructor, the empty literal against a declared return, checked reads over built lists, the mixed-element rejection |
 | tuples_surface.ds | record B3, the expected-gap round closing tuple lowering | M3 | anonymous tuples: construction, destructuring in bindings and match arms, one-word frame elements, the 1-tuple and `()`, the union-destructuring rejection |
+| maps_surface.ds | record B3/F7/D2, the builder-call interim round | M3 | the `map[k, v]()` empty constructor, `map_set`'s mut-window construction, checked reads over the hit and miss members, the entry count, the `get` spelling (typecheck; its generic dispatch waits for the M6 seam), the constructor-arguments rejection |
+| extraction_family.ds | record E4, the tutorial-block plumbing round 2026-11-10 | M3 | the @std extraction family: eager `unwrap_or`, inlined-lazy `unwrap_or_else`, `ok_or` composed with `?` (tail and `return e?`), `map_err` over the handled members, the non-optional receiver rejection |
+| calls_surface.ds | tutorial verification pass (R9), call-site staging [F7, BL-6] | M3 | literal parameter defaults stage at the call site; an inline union-member argument against a multi-word parameter region refuses at lowering instead of trapping in the VM |
+| closures_surface.ds | record F2, F7, the b07 callable-word seam audit 2026-11-10 | M2 (check); the callable-word ruling landed and the closure surface runs, re-staging pending | lambda values: fn-typed parameters, trailing block and parenthesized arguments, let-stored and passed lambdas, a capturing lambda |
 
 ## Header format
 
@@ -35,8 +39,8 @@ Rules: exactly one `source` line and one `purpose` line, one `items:` line, then
 
 | Stage | Binds at | Meaning |
 |---|---|---|
-| `parse` | M1 | item must parse; no further expectation yet (syntax_ts_heart.ds's byte-literal item: the record pins `b'x'` as a single byte but names no byte type, so nothing past parse is checkable) |
-| `typecheck` | M2 | item must typecheck under ds-check |
+| `parse` | M1 | item must parse; no further expectation yet |
+| `typecheck` | M2 | item must typecheck under ds-check (syntax_ts_heart.ds's byte literal `b'x'` types through the ambient's `tag byte` with no user declaration) |
 | `run` | M3-M5 | item must execute with correct output once its file's run-binding milestone lands (see file list) |
 | `m6` | M6 | item needs derives, comptime evaluation, or reflection |
 | `m7` | M7 | item needs modules, packages, or FFI |
@@ -55,23 +59,24 @@ The archive's seed programs predate the surface decisions for catalogs 01/02/03/
 4. Interpolation holes convert under the F6 printable rule: a printable primitive (`int`, `float`, `bool`, `char`, `string`) converts through `str(e)` implicitly, so the record's `${e}`, `${b.got}`, `$t` lower as written; a union or optional operand is an error (extract first), and every other type waits for the M6 `show` derive. The bare `$x` form is the same rule over one identifier.
 5. Trait and impl members are `fn` declarations, bodiless signatures in traits [F2, record 6.1]; generic functions carry a bracketed type-parameter clause after the name (`fn push[t: ~Copyable](s: stack[t], ...) -> ...`).
 6. types_hybrid.ds: `missing` stays a bare case used bare, following B2's own decided rewrite of `get_port` (the catalog's `Missing { key: ... }` payload is dropped); the `j is json_obj or return ...` pseudocode becomes `if j is json_obj` narrowing per B2; the json value family and the config error family are enum blocks per B3's payload-case story (cases mint into the tag namespace, so `int | missing | bad_port` and `config | cfg_err` are set expressions over them), and case construction is call form (`bad_port(got: -1)`).
-7. syntax_ts_heart.ds: the alias-declared cases `type parse_error = bad_number(string) | missing_field(string)` and `type io_error = not_found | permission_denied` become enum blocks (type aliases never declare cases per B3), keeping the case names and payload spellings verbatim.
+7. syntax_ts_heart.ds: the alias-declared cases `type parse_error = bad_number(string) | missing_field(string)` become an enum block (type aliases never declare cases per B3), keeping the case names and payload spellings verbatim; io failures mint no file enum — they ride the ambient's `io_err` tag, and `parse_age` matches the ambient `parse_err` member the success-typed `parse_int` answers.
 8. linearity_modes_rc.ds: the single-line `while` body is expanded to newline-terminated statements [F1]; `raw_fd` is declared as `type raw_fd = int`; compound assignment `+=` is kept verbatim (used by two seed programs, contradicted by no decision).
-9. effects_nursery.ds: `val pages = Mut[List[Page]]()` becomes `var pages = list[page]()` (D2 COW list; `freeze` dropped since a COW list is already a value, and the empty-construction spelling `list[t]()` is a stdlib surface choice owned by M3); `error e` match patterns become plain binding patterns (the arm binds the leftover member by set difference); positional `Page(url, body)` construction becomes named fields; `p.size` becomes `p.body.len()`; `url` is declared as `type url = string` and `urls` stays ambient as in the record.
+9. effects_nursery.ds: `val pages = Mut[List[Page]]()` becomes `var pages = list[page]()` (D2 COW list; `freeze` dropped since a COW list is already a value, and the empty-construction spelling `list[t]()` is a stdlib surface choice owned by M3); the transient error arms are member tests over the ambient `net_err` cases (`timeout`/`refused`) with the leftover member a plain binder; positional `Page(url, body)` construction becomes named fields; `p.size` becomes `p.body.len()`; the file declares `type url = string` while `net_err`, `response`, `fetch`, `consume`, and the `urls` const are ambient-owned.
 10. generics_coherent_traits.ds: `@derive(...)` becomes `#[derive(...)]` with lowercase derive names [F7, G1]; the anonymous-record alias `type Stack[T] = { items: List[T] }` becomes `struct stack[t] { items: list[t] }` (anonymous record types are deferred-additive [B3]); `|x|` lambdas become `(x) => ...` [F2]; stack operations are functional under D2 (collections expose a functional API and mutate in place iff unique) because `&mut self` field assignment has no decided surface; `ord` joins point's derives so `max` resolves; the execution item is staged m6 because it needs the derive engine.
 11. modules_hash_core.ds: the ds.pkg manifest is preserved as a comment block (manifest syntax is parsed by ds-pkg at M7, never by ds-parse); import symbols are lowercased; the extern declarations keep the record's C-type notation (`*const c.char`, `c["sqlite3"]`, `c.int`) near-verbatim, and ds-ffi (M7) owns the final spelling; the `double_close` function is added as the reject item proving the linear-handle rule the record states in its comment.
 12. Multi-statement blocks in match arms use braces with newline-terminated statements; `for` bodies always brace [F1].
 
 ## Ambient names
 
-Stdlib and environment names the corpus assumes; the M3+ minimal stdlib grows to cover them:
+The stdlib ambient (`crates/ds-stdlib/src/ambient.ds`) declares the vocabulary the corpus assumes, registered as a package member before the user's sources; it also owns the failure taxonomy (`io_err`, `parse_err`, `enum net_err { timeout, refused }`) and the `config`/`row`/`response` types, so those names need no file-local declaration:
 
-- types_hybrid.ds: `read_file: (string) -> string | io_err`, `parse_json: (string) -> json | io_err`, `log`, `default_config: () -> config`, `map`/`list` types.
-- linearity_modes_rc.ds: `open: (string) -> file`, `close: (raw_fd) -> ()`, `read_exact: (mut file, int) -> bytes`, `to_u32_le: (bytes) -> u32`, `map`, `collect`, `len` (the `words` binding builds by literal since the constructor round).
-- effects_nursery.ds: `urls: list[url]`, `fetch: (url) -> response | net_err`, `consume: (response) -> string`, `list[t]()` empty construction, `push: (mut list[t], t) -> ()`, `cancel`, `par_map`, `par_reduce`, `print`, `die`, `len`.
-- syntax_ts_heart.ds: the `row` and `config` types, `load_rows: (string) -> list[row] | io_error`, `read_config: (string) -> config | io_error`, `default_config`, `println`, `trim`, `parse_int`, `get`, `map`, `partition`, `filter`, `reduce`, `first`.
-- generics_coherent_traits.ds: `cons`, `head: (list[t]) -> t?`, `tail`, `join`, `map`, `str: (t) -> string`, `max[t: ord](t, t) -> t`, and the comptime builtins `fields`/`type_name` (M6).
+- types_hybrid.ds: `read_file: (string) -> string | io_err`, `parse_json: (string) -> string` (success-typed; the `json | io_err` shape waits on M7 package-owned types), `log`, `default_config: () -> config` over the ambient `config` struct; the file owns its `json`/`cfg_err` enums.
+- linearity_modes_rc.ds: `to_u32_le: (bytes) -> u32`, `close: (int) -> ()`, `map`, `collect`, `len`, and the `bytes`/`u32` tags (the `words` binding builds by literal since the constructor round); `open`/`read_exact` stay absent because their signatures cannot name the caller's file-owned `file` struct — the M7 package-owned-types blocker.
+- effects_nursery.ds: the ambient-owned `net_err` enum, `response`, `fetch: (string) -> response | net_err`, `consume: (response) -> string`, the `urls` const (a running use waits on ambient data values lowering), `list[t]()` empty construction, `list_push: (mut list[t], t) -> ()`, `cancel`, `par_map`, `par_reduce`, `print`, `die`, `len`; the file owns `type url = string` and `page`.
+- syntax_ts_heart.ds: the `row` alias and `config` struct, `load_rows: (string) -> list[row] | io_err`, `read_config: (string) -> config | io_err`, `default_config`, `parse_int: (string) -> int | parse_err`, `println`, `trim`, `get`, `map`, `partition`, `filter`, `reduce`, `first`.
+- generics_coherent_traits.ds: `cons`, `head: (list[t]) -> t?`, `tail`, `join`, `map`, `str: (t) -> string`, `max: (t, t) -> t`, and the comptime builtins `fields`/`type_name` (M6).
 - modules_hash_core.ds: `os` (build target) and the `c` namespace of C types and handles.
-- pattern_dispatch.ds: `read_file: (string) -> string | io_error` and `println` (both against the file's own tags; the file declares its own `parse_config` extern).
-- lists_surface.ds: `list_new`/`list_len`/`list_get`/`list_concat` (the ambient list surface; `list_push` is the compiler-internal construction append behind literals).
+- pattern_dispatch.ds: `read_file: (string) -> string | io_err` and `println`, both against the ambient taxonomy; the file declares its own `parse_config` extern over the ambient `config`.
+- lists_surface.ds: `list_new`/`list_len`/`list_get`/`list_concat`/`list_push` (the ambient list surface).
 - tuples_surface.ds: `list_len` (the one list read the list-bearing tuple item builds against; tuples themselves need no ambient).
+- maps_surface.ds: `map_new`/`map_set`/`map_get`/`map_len` (the ambient map surface; the constructor spelling is `map[k, v]()`), plus the record's `get` spelling the tutorial's field lookups use.
