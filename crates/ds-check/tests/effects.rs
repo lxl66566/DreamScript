@@ -60,9 +60,9 @@ fn row_algebra_is_structural() {
 fn calls_union_rows_through_the_callee_edge() {
     let effects = rows(
         concat!(
-            "const f = (a: int) -> int { a + 1 }\n",
-            "const g = (a: int) -> int { f(f(a)) }\n",
-            "const pure = (a: int) -> int { a }\n",
+            "fn f(a: int) -> int { a + 1 }\n",
+            "fn g(a: int) -> int { f(f(a)) }\n",
+            "fn pure(a: int) -> int { a }\n",
         ),
         &DeclaredRows::new(),
     );
@@ -83,9 +83,9 @@ fn declared_rows_are_respected_as_lower_bounds() {
         concat!(
             "extern fn fetch (u: int) -> int | io_err\n",
             "extern fn quiet (u: int) -> int\n",
-            "const declared_only = (u: int) -> int | io_err { fetch(u) }\n",
-            "const undeclared_only = (u: int) -> int { quiet(u) }\n",
-            "const mine = (x: int) -> int { x + 1 }\n",
+            "fn declared_only(u: int) -> int | io_err { fetch(u) }\n",
+            "fn undeclared_only(u: int) -> int { quiet(u) }\n",
+            "fn mine(x: int) -> int { x + 1 }\n",
         ),
         &declared,
     );
@@ -105,9 +105,9 @@ fn propagation_sites_contribute_error() {
     let effects = rows(
         concat!(
             "extern fn read (u: int) -> int | io_err\n",
-            "const t = (u: int) -> int { read(u)? }\n",
-            "const r = (u: int) -> int { read(u) or return 0 }\n",
-            "const early = (u: int) -> int { if u is int { read(u)? } else { 0 } }\n",
+            "fn t(u: int) -> int { read(u)? }\n",
+            "fn r(u: int) -> int { if u < 0 { return 0 }\n read(u)? }\n",
+            "fn early(u: int) -> int { if u is int { read(u)? } else { 0 } }\n",
         ),
         &DeclaredRows::new(),
     );
@@ -125,16 +125,13 @@ fn consuming_forms_mask_the_lefts_failure_members() {
     let effects = rows(
         concat!(
             "extern fn read (u: int) -> int | io_err\n",
-            "const plain = (u: int) -> int { read(u) or 0 }\n",
-            "const handled = (u: int) -> int { read(u).err((e) => 0) }\n",
-            "const chained = (u: int) -> int { (read(u) or 0) + 1 }\n",
+            "fn handled(u: int) -> int { read(u).err((e) => 0) }\n",
+            "fn chained(u: int) -> int { read(u).err((e) => 0) + 1 }\n",
         ),
         &declared,
     );
-    // the plain `or` extracts the wanted member: read's `error` is
-    // consumed, `world` survives [E4].
-    assert_eq!(row_of(&effects, "plain").render(), "world");
-    // `.err(h)` handles the failure set the same way.
+    // `.err(h)` consumes the failure set: read's `error` is consumed,
+    // `world` survives [E4].
     assert_eq!(row_of(&effects, "handled").render(), "world");
     // the mask is scoped to the operand: surrounding code is unmasked.
     assert_eq!(row_of(&effects, "chained").render(), "trap | world");
@@ -146,9 +143,9 @@ fn branches_union_their_arms() {
     let effects = rows(
         concat!(
             "extern fn side (u: int) -> int\n",
-            "const br = (u: int) -> int { if u == 0 { side(u) } else { 1 } }\n",
-            "const m = (u: int) -> int { match u { a => side(a), _ => 2 } }\n",
-            "const w = (u: int) -> int { var i = 0\n while i < u { i += 1 }\n i }\n",
+            "fn br(u: int) -> int { if u == 0 { side(u) } else { 1 } }\n",
+            "fn m(u: int) -> int { match u { a => side(a), _ => 2 } }\n",
+            "fn w(u: int) -> int { var i = 0\n while i < u { i += 1 }\n i }\n",
         ),
         &declared,
     );
@@ -163,8 +160,8 @@ fn lambda_bodies_and_holes_contribute_in_place() {
     let effects = rows(
         concat!(
             "extern fn read (u: int) -> int\n",
-            "const lam = (xs: int) -> int { xs.map((x) => x + 1).head() }\n",
-            "const s = (x: int) -> string { \"v=${read(x)}\" }\n",
+            "fn lam(xs: int) -> int { xs.map((x) => x + 1).head() }\n",
+            "fn s(x: int) -> string { \"v=${read(x)}\" }\n",
         ),
         &declared,
     );
@@ -176,8 +173,8 @@ fn lambda_bodies_and_holes_contribute_in_place() {
 fn nursery_carries_the_internal_effects() {
     let effects = rows(
         concat!(
-            "const n = (xs: int) -> int { nursery { spawn { xs + 1 } }\n 0 }\n",
-            "const d = (u: int) -> int { defer { u + 1 }\n u }\n",
+            "fn n(xs: int) -> int { nursery { spawn { xs + 1 } }\n 0 }\n",
+            "fn d(u: int) -> int { defer { u + 1 }\n u }\n",
         ),
         &DeclaredRows::new(),
     );
@@ -195,12 +192,12 @@ fn nursery_carries_the_internal_effects() {
 fn rows_solve_over_call_cycles() {
     let effects = rows(
         concat!(
-            "const even = (n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\n",
-            "const odd = (n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\n",
-            "const self_loop = (n: int) -> int { self_loop(n - 1) }\n",
+            "fn even(n: int) -> bool { if n == 0 { true } else { odd(n - 1) } }\n",
+            "fn odd(n: int) -> bool { if n == 0 { false } else { even(n - 1) } }\n",
+            "fn self_loop(n: int) -> int { self_loop(n - 1) }\n",
             "extern fn read (u: int) -> int | io_err\n",
-            "const fail = (u: int) -> int { read(u)? }\n",
-            "const through = (u: int) -> int { fail(u)? }\n",
+            "fn fail(u: int) -> int { read(u)? }\n",
+            "fn through(u: int) -> int { fail(u)? }\n",
         ),
         &DeclaredRows::new(),
     );
@@ -214,14 +211,13 @@ fn rows_solve_over_call_cycles() {
 fn trait_calls_union_every_impl_body() {
     let effects = rows(
         concat!(
-            "trait shows { const show = (self: self) -> string }\n",
-            "impl shows for int { const show = (self: self) -> string { str(self) } }\n",
-            "impl shows for list[int] { const show = (self: self) -> string { \"[\" + self.len() \
-             + \"]\" } }\n",
-            "const via_dot = (x: int) -> string { x.show() }\n",
-            "const via_hatch = (x: int) -> string { shows::show(x) }\n",
-            "impl int { const twice = (self: self) -> int { self + self } }\n",
-            "const use_inherent = (x: int) -> int { x.twice() }\n",
+            "trait shows { fn show(self) -> string }\n",
+            "impl shows for int { fn show(self) -> string { str(self) } }\n",
+            "impl shows for list[int] { fn show(self) -> string { \"[\" + self.len() + \"]\" } }\n",
+            "fn via_dot(x: int) -> string { x.show() }\n",
+            "fn via_hatch(x: int) -> string { shows::show(x) }\n",
+            "impl int { fn twice(self) -> int { self + self } }\n",
+            "fn use_inherent(x: int) -> int { x.twice() }\n",
         ),
         &DeclaredRows::new(),
     );
@@ -241,7 +237,7 @@ fn top_level_pattern_bindings_share_the_initializer_row() {
     let effects = rows(
         concat!(
             "extern fn read (u: int) -> int\n",
-            "const (a, b) = (read(1) or 0, 2)\n",
+            "const (a, b) = (read(1).err((e) => 0), 2)\n",
         ),
         &declared,
     );
@@ -294,7 +290,7 @@ fn effects_nursery_rows_match_the_record() {
     let main = row_of(&effects, "main");
     assert!(main.contains(Effect::Trap));
     assert!(main.contains(Effect::Cancel));
-    // the `or die` consumed fetch_all's failure members [E4].
+    // the `.err` handler consumed fetch_all's failure members [E4].
     assert!(!main.contains(Effect::Error));
 }
 
@@ -303,7 +299,8 @@ fn linearity_rows_match_the_record() {
     let effects = corpus("linearity_modes_rc.ds");
     assert_eq!(row_of(&effects, "read_u32").render(), "error");
     assert_eq!(row_of(&effects, "sum_file").render(), "error | trap");
-    // the `or 0` consumed sum_file's failure members; the `+` remains.
+    // the `.err` handler consumed sum_file's failure members; the `+`
+    // remains.
     assert_eq!(row_of(&effects, "total").render(), "trap");
     assert!(row_of(&effects, "words").is_pure());
     assert!(row_of(&effects, "lens").is_pure());
@@ -312,7 +309,9 @@ fn linearity_rows_match_the_record() {
 #[test]
 fn types_hybrid_rows_match_the_record() {
     let effects = corpus("types_hybrid.ds");
-    assert_eq!(row_of(&effects, "get_port").render(), "error | trap");
+    // bare `return` is no propagation site: only `?` contributes `error`,
+    // and get_port calls nothing declared [E4].
+    assert_eq!(row_of(&effects, "get_port").render(), "trap");
     assert_eq!(row_of(&effects, "load").render(), "error | trap");
     // the `.err` handler consumed load's failure members; its `trap`
     // survives [E4].

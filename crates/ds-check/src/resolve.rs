@@ -1,27 +1,44 @@
-//! Package-level name resolution over the parsed surface [G3, F3].
+//! Package-level name resolution over the parsed surface [G3, F3, F9].
 //!
-//! A [`Package`] collects the declarations of its files into ONE namespace
-//! [G3]: files in one package share it, there are zero intra-package
-//! imports, and top-level definitions are order-independent — collection
-//! inserts every declaration before any use is resolved, so intra-file and
-//! cross-file definition cycles are legal by construction (resolution is
-//! name lookup, not dependency ordering; the "whole-package fixpoint" of
-//! the record is exactly this two-pass shape).
+//! A [`Package`] collects the declarations of its files into TWO
+//! namespaces [G3, F9]: a type namespace (structs, enums, enum cases,
+//! tags, aliases, traits) and a value namespace (functions, const/var
+//! bindings). Files in
+//! one package share both, there are zero intra-package imports, and
+//! top-level definitions are order-independent — collection inserts every
+//! declaration before any use is resolved, so intra-file and cross-file
+//! definition cycles are legal by construction (resolution is name lookup,
+//! not dependency ordering; the "whole-package fixpoint" of the record is
+//! exactly this two-pass shape).
+//!
+//! # Namespace split [F9]
+//!
+//! Constructor positions resolve against the TYPE namespace only: brace
+//! construction (`user { ... }`), bare tag references, pattern paths, and
+//! generic-application constructors (`list[page]()`, whose head and type
+//! arguments are type uses). A call-form name resolves against the VALUE
+//! namespace (a function call), else the TYPE namespace (a constructor
+//! call — tag or payload construction); present in BOTH it is an
+//! ambiguity error (DS2014), never a priority search. A bare (non-call)
+//! use resolves VALUE-first, then TYPE — a bare tag is a
+//! value-producing constructor, while a struct/enum/trait name reached at
+//! a bare use resolves so the checker can word its "type used as a value"
+//! error. `struct map` and `fn map` therefore coexist, each resolving in
+//! its own positions.
 //!
 //! # Method tier [F3]
 //!
 //! UFCS resolution is fixed: a dot-call `x.f(args)` feeds the receiver to
-//! the first parameter of a FREE function named `f` if one exists, else the
-//! registered method candidates (trait members, plus inherent impl fns);
-//! `Trait::f(x)` qualifies directly. Trait methods are REGISTERED here
-//! only — selection among candidates is the checker's type-directed work,
-//! and F3's true-ambiguity error therefore lives there too, never as a
-//! priority search here. There is no name-level ambiguity in this pass: the
-//! package namespace is unique and locals shadow. A dot-call resolving
-//! nowhere reports both tiers in F3's order. The fed parameter index is
-//! recorded (always 0 today — capability parameters have no syntax yet, so
-//! the first parameter IS the first data parameter; the checker enforces
-//! the exclusion once they do).
+//! the first parameter of a FREE function named `f` if one exists (the
+//! dot position is a function position — the VALUE namespace only), else
+//! the registered method candidates (trait members, plus inherent impl
+//! fns); `Trait::f(x)` qualifies directly. Trait methods are REGISTERED
+//! here only — selection among candidates is the checker's type-directed
+//! work, and F3's true-ambiguity error therefore lives there too, never as
+//! a priority search here. The fed parameter index is recorded (always 0
+//! today — capability parameters have no syntax yet, so the first
+//! parameter IS the first data parameter; the checker enforces the
+//! exclusion once they do).
 //!
 //! # Local scoping [F2]
 //!
@@ -33,7 +50,7 @@
 //! function is in scope inside its own body via the package table
 //! (recursion). Generic parameters bind in a separate type-variable scope
 //! stack for type positions; a trait member's signatures additionally bind
-//! `self` as the self type [section 6.1]. Or-pattern alternatives rebind
+//! `Self` as the self type [F2, record 6.1]. Or-pattern alternatives rebind
 //! identical names into one arm scope without error; whether alternatives
 //! must bind the SAME set is the checker's [F4].
 //!
@@ -112,10 +129,47 @@ pub enum DefKind {
     Enum,
     /// A unit tag [B1].
     Tag,
+    /// A case minted by an enum block [B3]: a member of the tag
+    /// namespace like a tag, constructed per its payload.
+    Case,
     /// A trait [B6].
     Trait,
     /// A type alias [F7].
     TypeAlias,
+}
+
+impl DefKind {
+    /// Whether the kind declares into the type namespace [F9]; the rest
+    /// declare into the value namespace.
+    #[must_use]
+    pub const fn in_type_namespace(self) -> bool {
+        matches!(
+            self,
+            Self::Struct | Self::Enum | Self::Tag | Self::Case | Self::Trait | Self::TypeAlias
+        )
+    }
+
+    /// Whether the kind mints an atom a bare pattern can test: traits and
+    /// aliases are sets, not constructors.
+    #[must_use]
+    pub const fn is_constructor(self) -> bool {
+        matches!(self, Self::Struct | Self::Enum | Self::Tag | Self::Case)
+    }
+
+    /// The diagnostic word for the kind ("struct", "function", ...).
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Fn => "function",
+            Self::Const | Self::Var => "binding",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Tag => "tag",
+            Self::Case => "enum case",
+            Self::Trait => "trait",
+            Self::TypeAlias => "type alias",
+        }
+    }
 }
 
 /// One package-level definition: name, kind, and defining name span.
@@ -236,15 +290,17 @@ impl Resolutions {
     }
 }
 
-/// A package: the declarations of its files in one namespace [G3], plus
-/// the method-tier registries [F3]. Collection (`add_file`) is
-/// order-independent; use resolution (`resolve`) runs against the complete
-/// tables, which is what makes intra-package definition cycles legal.
+/// A package: the declarations of its files in the type and value
+/// namespaces [G3, F9], plus the method-tier registries [F3]. Collection
+/// (`add_file`) is order-independent; use resolution (`resolve`) runs
+/// against the complete tables, which is what makes intra-package
+/// definition cycles legal.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Package {
     files: Vec<ds_diag::FileId>,
     defs: Vec<Def>,
-    names: HashMap<String, DefId>,
+    type_names: HashMap<String, DefId>,
+    value_names: HashMap<String, DefId>,
     methods: Vec<MethodDecl>,
     method_index: HashMap<String, Vec<MethodId>>,
 }
@@ -334,10 +390,33 @@ impl Package {
         &self.methods[id.index() as usize]
     }
 
-    /// The definition of a package-level name, if any.
+    /// The definition of a type-namespace name, if any [F9].
+    #[must_use]
+    pub fn lookup_type(&self, name: &str) -> Option<DefId> {
+        self.type_names.get(name).copied()
+    }
+
+    /// The definition of a value-namespace name, if any [F9].
+    #[must_use]
+    pub fn lookup_value(&self, name: &str) -> Option<DefId> {
+        self.value_names.get(name).copied()
+    }
+
+    /// Whether either namespace declares the name — the sentinel checks
+    /// (`none`, `self`) that must not shadow universe spellings.
+    #[must_use]
+    pub fn declares(&self, name: &str) -> bool {
+        self.type_names.contains_key(name) || self.value_names.contains_key(name)
+    }
+
+    /// The namespace-agnostic lookup: the type declaration when the name
+    /// has one, else the value declaration. For consumers that cannot say
+    /// which namespace they mean (a name's atom, a legacy plan); call
+    /// sites that know their position use [`Self::lookup_type`] or
+    /// [`Self::lookup_value`].
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<DefId> {
-        self.names.get(name).copied()
+        self.lookup_type(name).or_else(|| self.lookup_value(name))
     }
 
     /// The ids of the files collected so far, in addition order.
@@ -381,6 +460,14 @@ impl Package {
             },
             ItemKind::Enum(e) => {
                 self.declare(&e.name, DefKind::Enum, diags);
+                // Generic enums keep the opaque atom: their case names do
+                // not mint yet (substitution over minted case shapes is
+                // future work), so they collect no defs.
+                if e.generics.is_empty() {
+                    for case in &e.cases {
+                        self.declare(&case.name, DefKind::Case, diags);
+                    }
+                }
             },
             ItemKind::Tag(t) => {
                 self.declare(&t.name, DefKind::Tag, diags);
@@ -408,10 +495,13 @@ impl Package {
         }
     }
 
-    /// Declares one name; a duplicate reports both spans and keeps the
-    /// first definition.
+    /// Declares one name into its kind's namespace [F9]; a duplicate
+    /// WITHIN that namespace reports both spans and keeps the first
+    /// definition — the same name in the other namespace coexists.
     fn declare(&mut self, name: &Ident, kind: DefKind, diags: &mut Vec<Diagnostic>) -> DefId {
-        if let Some(&first) = self.names.get(&name.name) {
+        let names =
+            if kind.in_type_namespace() { &mut self.type_names } else { &mut self.value_names };
+        if let Some(&first) = names.get(&name.name) {
             let first_span = self.defs[first.index() as usize].span;
             diags.push(
                 Diagnostic::error(
@@ -429,7 +519,7 @@ impl Package {
             kind,
             span: name.span,
         });
-        self.names.insert(name.name.clone(), id);
+        names.insert(name.name.clone(), id);
         id
     }
 
@@ -487,6 +577,16 @@ struct FileResolver<'a> {
     type_scopes: Vec<HashMap<String, Span>>,
 }
 
+/// What a bare identifier in a pattern names.
+enum ArmTag {
+    /// No constructor entry: the identifier binds.
+    Binding,
+    /// The universe's predeclared `none` atom, which has no def.
+    BuiltinNone,
+    /// A constructor type's definition.
+    Def(DefId),
+}
+
 impl FileResolver<'_> {
     fn item(&mut self, item: &Item) {
         match &item.kind {
@@ -501,7 +601,7 @@ impl FileResolver<'_> {
                     self.type_(ty);
                 }
             },
-            ItemKind::Fn(f) | ItemKind::ExternFn(f) => self.fn_decl(f),
+            ItemKind::Fn(f) | ItemKind::ExternFn(f) => self.fn_decl(f, false),
             ItemKind::Struct(s) => {
                 self.type_params(&s.generics);
                 for ty in &s.supers {
@@ -561,14 +661,14 @@ impl FileResolver<'_> {
                 for ty in &t.supers {
                     self.type_(ty);
                 }
-                // A trait member's signatures spell the self type `self`
-                // [section 6.1].
+                // A trait member's signatures spell the self type `Self`
+                // [F2, record 6.1].
                 self.type_scopes
-                    .push(HashMap::from([("self".to_owned(), t.name.span)]));
+                    .push(HashMap::from([("Self".to_owned(), t.name.span)]));
                 for member in &t.members {
                     match member {
                         TraitMember::AssocType { .. } => {},
-                        TraitMember::Fn(f) => self.fn_decl(f),
+                        TraitMember::Fn(f) => self.fn_decl(f, true),
                     }
                 }
                 self.type_scopes.pop();
@@ -576,26 +676,21 @@ impl FileResolver<'_> {
             },
             ItemKind::Impl(imp) => {
                 self.type_params(&imp.generics);
-                let trait_impl = imp.trait_ref.is_some();
                 if let Some(trait_ref) = &imp.trait_ref {
                     for arg in &trait_ref.args {
                         self.type_(arg);
                     }
                     self.path_use(&trait_ref.path);
                 }
-                // A trait impl's signatures spell the self type `self` too
-                // [section 6.1], mirroring the trait's own members.
-                if trait_impl {
-                    self.type_scopes
-                        .push(HashMap::from([("self".to_owned(), imp.span)]));
-                }
+                // An impl's members spell the self type `Self` [F2, record
+                // 6.1], trait and inherent alike.
+                self.type_scopes
+                    .push(HashMap::from([("Self".to_owned(), imp.span)]));
                 self.type_(&imp.target);
                 for f in &imp.fns {
-                    self.fn_decl(f);
+                    self.fn_decl(f, true);
                 }
-                if trait_impl {
-                    self.type_scopes.pop();
-                }
+                self.type_scopes.pop();
                 self.type_scopes.pop();
             },
         }
@@ -613,11 +708,11 @@ impl FileResolver<'_> {
         self.type_scopes.push(scope);
     }
 
-    fn fn_decl(&mut self, f: &FnDecl) {
+    fn fn_decl(&mut self, f: &FnDecl, member: bool) {
         self.type_params(&f.generics);
         self.scopes.push(HashMap::new());
-        for param in &f.params {
-            self.param(param);
+        for (index, param) in f.params.iter().enumerate() {
+            self.param(param, member && index == 0);
         }
         if let Some(ret) = &f.ret {
             self.type_(ret);
@@ -629,9 +724,21 @@ impl FileResolver<'_> {
         self.type_scopes.pop();
     }
 
-    fn param(&mut self, param: &Param) {
+    fn param(&mut self, param: &Param, receiver: bool) {
         if let Some(ty) = &param.ty {
-            self.type_(ty);
+            // The annotated receiver's `self` annotation is the checker's
+            // to report (the receiver ruling names the new spelling); a
+            // plain `self` path here would double-report.
+            let bare_self = matches!(
+                ty,
+                Type::Path { path, args, .. }
+                    if args.is_empty()
+                        && path.segments.len() == 1
+                        && path.segments[0].name == "self"
+            );
+            if !(receiver && bare_self) {
+                self.type_(ty);
+            }
         }
         self.bind(&param.name, false);
     }
@@ -685,7 +792,7 @@ impl FileResolver<'_> {
                 self.type_params(generics);
                 self.scopes.push(HashMap::new());
                 for param in params {
-                    self.param(param);
+                    self.param(param, false);
                 }
                 if let Some(ret) = ret {
                     self.type_(ret);
@@ -696,7 +803,7 @@ impl FileResolver<'_> {
             },
             Expr::Path { path, .. } => self.path_use(path),
             Expr::Struct { path, fields, .. } => {
-                self.path_use(path);
+                self.ctor_path_use(path);
                 for (name, value) in fields {
                     match value {
                         // Punning: the field name is also a value use.
@@ -705,7 +812,7 @@ impl FileResolver<'_> {
                     }
                 }
             },
-            Expr::Tuple { items, .. } => {
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => {
                 for item in items {
                     self.expr(item);
                 }
@@ -717,12 +824,20 @@ impl FileResolver<'_> {
                 trailing,
                 ..
             } => {
-                // UFCS: a dot-callee gets tiered resolution [F3].
-                if let Expr::Field { recv, name, .. } = callee.as_ref() {
-                    self.expr(recv);
-                    self.dot_use(name);
-                } else {
-                    self.expr(callee);
+                match callee.as_ref() {
+                    // UFCS: a dot-callee gets tiered resolution [F3].
+                    Expr::Field { recv, name, .. } => {
+                        self.expr(recv);
+                        self.dot_use(name);
+                    },
+                    // A call-form name resolves per the namespace split
+                    // [F9]; a generic-application constructor head is a
+                    // type use [F9].
+                    Expr::Path { path, .. } if path.segments.len() == 1 => {
+                        self.call_name_use(&path.segments[0]);
+                    },
+                    Expr::Index { recv, index, .. } => self.ctor_apply_use(recv, index),
+                    _ => self.expr(callee),
                 }
                 for arg in args {
                     self.expr(&arg.value);
@@ -754,10 +869,6 @@ impl FileResolver<'_> {
                 self.expr(left);
                 self.expr(right);
             },
-            Expr::Or { left, right, .. } => {
-                self.expr(left);
-                self.or_tail(right);
-            },
             Expr::If {
                 cond, then, else_, ..
             } => {
@@ -774,7 +885,7 @@ impl FileResolver<'_> {
                 for arm in arms {
                     // Each arm is its own scope nested in the enclosing one.
                     self.scopes.push(HashMap::new());
-                    self.bind_pattern(&arm.pat, false);
+                    self.arm_pattern(&arm.pat);
                     if let Some(ann) = &arm.ann {
                         self.type_(ann);
                     }
@@ -810,25 +921,19 @@ impl FileResolver<'_> {
         }
     }
 
-    fn or_tail(&mut self, tail: &ds_parse::OrTail) {
-        match tail {
-            ds_parse::OrTail::Expr(expr) => self.expr(expr),
-            ds_parse::OrTail::Return { expr, .. } => {
-                if let Some(expr) = expr {
-                    self.expr(expr);
-                }
-            },
-            ds_parse::OrTail::Break(_) | ds_parse::OrTail::Continue(_) => {},
-        }
-    }
-
-    /// A plain identifier use: locals shadow package names. Bare `none`
-    /// is the universe's distinguished unit atom [B4], not a package name;
-    /// the checker types it directly, so it records nothing here.
+    /// A plain identifier use: locals shadow package names, the value
+    /// namespace comes next, and the type namespace last — a bare tag is a
+    /// value-producing constructor, and a struct/enum/trait name reached
+    /// here still resolves so the checker words its "type used as a value"
+    /// error [F9]. Bare `none` is the universe's distinguished unit atom
+    /// [B4], not a package name; the checker types it directly, so it
+    /// records nothing here.
     fn name_use(&mut self, name: &Ident) {
         let res = if let Some(bind) = self.lookup_local(&name.name) {
             Res::Local { bind }
-        } else if let Some(def) = self.package.lookup(&name.name) {
+        } else if let Some(def) = self.package.lookup_value(&name.name) {
+            Res::Def(def)
+        } else if let Some(def) = self.package.lookup_type(&name.name) {
             Res::Def(def)
         } else if name.name == "none" {
             return;
@@ -839,13 +944,118 @@ impl FileResolver<'_> {
         self.uses.insert(name.span, res);
     }
 
+    /// The callee of a call form [F9]: locals first (an indirect call of a
+    /// bound function value), then the value namespace, then the type
+    /// namespace (a constructor call — tag or payload construction).
+    /// Present in BOTH namespaces the call is ambiguous — an error naming
+    /// both declarations, never a priority search.
+    fn call_name_use(&mut self, name: &Ident) {
+        if let Some(bind) = self.lookup_local(&name.name) {
+            self.uses.insert(name.span, Res::Local { bind });
+            return;
+        }
+        let res = match (
+            self.package.lookup_value(&name.name),
+            self.package.lookup_type(&name.name),
+        ) {
+            (Some(value), Some(ty)) => {
+                self.namespace_collision(name, value, ty);
+                // Still record the value declaration so the checker types
+                // the call through and the ambiguity stays the single
+                // diagnostic; the error is fatal.
+                Res::Def(value)
+            },
+            (Some(value), None) => Res::Def(value),
+            (None, Some(ty)) => Res::Def(ty),
+            (None, None) => {
+                if name.name == "none" {
+                    return;
+                }
+                self.unknown_name(name, self.callable_candidates());
+                return;
+            },
+        };
+        self.uses.insert(name.span, res);
+    }
+
+    /// A call-form name present in both namespaces: DS2014, naming both
+    /// declarations [F9].
+    fn namespace_collision(&mut self, name: &Ident, value: DefId, ty: DefId) {
+        let value_def = self.package.def(value);
+        let ty_def = self.package.def(ty);
+        self.diags.push(
+            Diagnostic::error(
+                ErrorCode::AmbiguousCall,
+                format!(
+                    "call-form `{}` is ambiguous between the value `{}` and the {} `{}` [F9]",
+                    name.name,
+                    value_def.name,
+                    ty_def.kind.word(),
+                    ty_def.name
+                ),
+            )
+            .with_primary(name.span, "ambiguous call form")
+            .with_secondary(value_def.span, "the value declaration")
+            .with_secondary(ty_def.span, "the type declaration"),
+        );
+    }
+
+    /// A generic-application constructor `list[page]()` [F9]: the head
+    /// resolves in the type namespace and the bracketed arguments are type
+    /// uses. A head that names no type is an ordinary index expression
+    /// (`xs[i]`), whose typing is the checker's.
+    fn ctor_apply_use(&mut self, recv: &Expr, index: &Expr) {
+        let head = single_path_ident(recv);
+        if let Some(head) = head.filter(|id| self.package.lookup_type(&id.name).is_some()) {
+            self.type_name_use(head);
+            self.ctor_type_arg(index);
+        } else {
+            self.expr(recv);
+            self.expr(index);
+        }
+    }
+
+    /// One bracketed constructor argument: a type spelled in expression
+    /// position — a path is a type use, a tuple walks its items, anything
+    /// else falls back to the expression walk.
+    fn ctor_type_arg(&mut self, arg: &Expr) {
+        match arg {
+            Expr::Path { path, .. } if path.segments.len() == 1 => {
+                self.type_name_use(&path.segments[0]);
+            },
+            Expr::Paren { inner, .. } => self.ctor_type_arg(inner),
+            Expr::Tuple { items, .. } => {
+                for item in items {
+                    self.ctor_type_arg(item);
+                }
+            },
+            _ => self.expr(arg),
+        }
+    }
+
     /// A path expression: one segment is a name use; `Trait::f` qualifies
     /// directly [F3]; longer paths are module paths [G4, M7].
     fn path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => self.name_use(only),
             [head, method] => {
-                let Some(def) = self.package.lookup(&head.name) else {
+                let Some(def) = self.package.lookup_type(&head.name) else {
+                    // A value name at the qualifier position still gets
+                    // the sharper "not a trait" word.
+                    if self.package.lookup_value(&head.name).is_some() {
+                        self.diags.push(
+                            Diagnostic::error(
+                                ErrorCode::UnresolvedName,
+                                format!(
+                                    "`{}` is not a trait; `A::f` is the trait-method escape hatch \
+                                     [F3]",
+                                    head.name
+                                ),
+                            )
+                            .with_primary(head.span, "not a trait"),
+                        );
+                        return;
+                    }
                     self.unknown_name(head, self.shadowing_candidates());
                     return;
                 };
@@ -907,15 +1117,41 @@ impl FileResolver<'_> {
         }
     }
 
+    /// A brace-construction head `user { ... }` [F9]: the type namespace
+    /// only; longer paths are module paths [G4, M7].
+    fn ctor_path_use(&mut self, path: &Path) {
+        match path.segments.as_slice() {
+            [only] => {
+                if let Some(def) = self.package.lookup_type(&only.name) {
+                    self.uses.insert(only.span, Res::Def(def));
+                } else if only.name != "none" {
+                    let candidates = self.type_candidates();
+                    self.unknown_name_at(only, candidates, "struct");
+                }
+            },
+            _ => {
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::UnresolvedName,
+                        "qualified struct literals resolve through imports, which land with \
+                         modules [G4]",
+                    )
+                    .with_primary(path.span, "qualified constructor path"),
+                );
+            },
+        }
+    }
+
     /// A UFCS dot-call's method position [F3]: free functions first, then
     /// registered methods; the `.err`/`.ok` handler forms are surface
-    /// syntax, not names.
+    /// syntax, not names. The dot is a function position, so the free
+    /// tier searches the VALUE namespace only [F9].
     fn dot_use(&mut self, name: &Ident) {
         if name.name == "err" || name.name == "ok" {
             self.uses.insert(name.span, Res::Handler);
             return;
         }
-        if let Some(func) = self.package.lookup(&name.name) {
+        if let Some(func) = self.package.lookup_value(&name.name) {
             // Capability parameters have no syntax yet, so the receiver
             // feeds parameter 0 — the first data parameter [F3].
             self.uses
@@ -997,11 +1233,26 @@ impl FileResolver<'_> {
     fn type_name_use(&mut self, name: &Ident) {
         let res = if let Some(bind) = self.lookup_type_var(&name.name) {
             Res::Local { bind }
-        } else if let Some(def) = self.package.lookup(&name.name) {
+        } else if let Some(def) = self.package.lookup_type(&name.name) {
             Res::Def(def)
         } else if name.name == "none" {
             // `none` is the universe's distinguished unit atom [B4], not a
             // package declaration; the checker solves it directly.
+            return;
+        } else if name.name == "self" {
+            // `self` as a type name is retired; the receiver type is
+            // spelled `Self` [F2, record 6.1].
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::LowercaseSelfType,
+                    "`self` is retired as a type name; the receiver type is spelled `Self`",
+                )
+                .with_primary(name.span, "type name `self`")
+                .with_suggestion(Suggestion::Replace {
+                    span: name.span,
+                    with: "Self".to_owned(),
+                }),
+            );
             return;
         } else {
             let candidates = self.type_candidates();
@@ -1017,18 +1268,40 @@ impl FileResolver<'_> {
     /// case paths. `or_rebind` allows identical rebinding across
     /// or-pattern alternatives [F4].
     fn bind_pattern(&mut self, pat: &Pattern, or_rebind: bool) {
+        self.pattern_at(pat, or_rebind, false);
+    }
+
+    /// A match-arm pattern: sub-patterns are member tests first, bindings
+    /// second [F9].
+    fn arm_pattern(&mut self, pat: &Pattern) {
+        self.pattern_at(pat, false, true);
+    }
+
+    /// One pattern walk shared by binding declarations (`arm == false`)
+    /// and match-arm tests (`arm == true`): in a test position a single
+    /// identifier that names a constructor type (or the predeclared
+    /// `none`) is a member test that binds nothing — bare tags are
+    /// constructor values, so the type namespace wins over any
+    /// same-named local; identifiers with no constructor entry bind.
+    fn pattern_at(&mut self, pat: &Pattern, or_rebind: bool, arm: bool) {
         match pat {
             Pattern::Wildcard(_)
             | Pattern::Literal { .. }
             | Pattern::Str { .. }
             | Pattern::RawStr { .. } => {},
-            Pattern::Binding { name, .. } => self.bind(name, or_rebind),
+            Pattern::Binding { name, .. } => match self.arm_tag(name, arm) {
+                ArmTag::Binding => self.bind(name, or_rebind),
+                ArmTag::BuiltinNone => {},
+                ArmTag::Def(def) => {
+                    self.uses.insert(name.span, Res::Def(def));
+                },
+            },
             // Pattern paths are item references, not locals.
             Pattern::Path { path, .. } => self.pattern_path(path),
             Pattern::Call { path, args, .. } => {
                 self.pattern_path(path);
                 for arg in args {
-                    self.bind_pattern(arg, or_rebind);
+                    self.pattern_at(arg, or_rebind, arm);
                 }
             },
             Pattern::Struct { path, fields, .. } => {
@@ -1037,49 +1310,65 @@ impl FileResolver<'_> {
                     match field {
                         // Punning binds the field name.
                         None => self.bind(name, or_rebind),
-                        Some(sub) => self.bind_pattern(sub, or_rebind),
+                        Some(sub) => self.pattern_at(sub, or_rebind, arm),
                     }
                 }
             },
             Pattern::Tuple { pats, .. } => {
                 for sub in pats {
-                    self.bind_pattern(sub, or_rebind);
+                    self.pattern_at(sub, or_rebind, arm);
                 }
             },
             Pattern::Or { pats, .. } => {
                 for sub in pats {
-                    self.bind_pattern(sub, true);
+                    self.pattern_at(sub, true, arm);
                 }
             },
         }
     }
 
+    /// The type-namespace entry a bare arm identifier names [F9]: the
+    /// predeclared `none`, a constructor type's def, or nothing (a
+    /// binding). Traits and aliases are sets, not constructors.
+    fn arm_tag(&self, name: &Ident, arm: bool) -> ArmTag {
+        if arm && name.name == "none" && !self.package.declares("none") {
+            return ArmTag::BuiltinNone;
+        }
+        if !arm {
+            return ArmTag::Binding;
+        }
+        self.package
+            .lookup_type(&name.name)
+            .filter(|&def| self.package.def(def).kind.is_constructor())
+            .map_or(ArmTag::Binding, ArmTag::Def)
+    }
+
+    /// Pattern paths are constructor references [F9]: the type namespace
+    /// only.
     fn pattern_path(&mut self, path: &Path) {
+        let candidates = || {
+            self.package
+                .defs
+                .iter()
+                .filter(|def| def.kind.in_type_namespace())
+                .map(|def| def.name.clone())
+                .collect::<Vec<_>>()
+        };
         match path.segments.as_slice() {
             [only] => {
-                if let Some(def) = self.package.lookup(&only.name) {
+                if let Some(def) = self.package.lookup_type(&only.name) {
                     self.uses.insert(only.span, Res::Def(def));
                 } else {
-                    let candidates = self
-                        .package
-                        .defs
-                        .iter()
-                        .map(|def| def.name.clone())
-                        .collect::<Vec<_>>();
+                    let candidates = candidates();
                     self.unknown_name_at(only, candidates, "pattern");
                 }
             },
             // The tail is a case name; case tables are the checker's.
             [head, _case] => {
-                if let Some(def) = self.package.lookup(&head.name) {
+                if let Some(def) = self.package.lookup_type(&head.name) {
                     self.uses.insert(head.span, Res::Def(def));
                 } else {
-                    let candidates = self
-                        .package
-                        .defs
-                        .iter()
-                        .map(|def| def.name.clone())
-                        .collect::<Vec<_>>();
+                    let candidates = candidates();
                     self.unknown_name_at(head, candidates, "pattern");
                 }
             },
@@ -1195,17 +1484,23 @@ impl FileResolver<'_> {
         names
     }
 
-    /// Callable-ish names for dot-call suggestions: package names plus
-    /// registered method names.
+    /// Callable-ish names for dot-call suggestions: value-namespace
+    /// declarations plus registered method names.
     fn callable_candidates(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .package
-            .defs
-            .iter()
-            .map(|def| def.name.clone())
-            .collect();
+        let mut names: Vec<String> = self.package.value_names.keys().cloned().collect();
         names.extend(self.package.method_index.keys().cloned());
         names
+    }
+}
+
+/// The identifier of a single-segment path expression, if it is one.
+fn single_path_ident(expr: &Expr) -> Option<&Ident> {
+    let Expr::Path { path, .. } = expr else {
+        return None;
+    };
+    match path.segments.as_slice() {
+        [only] => Some(only),
+        _ => None,
     }
 }
 

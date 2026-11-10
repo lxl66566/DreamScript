@@ -33,18 +33,31 @@ pub(crate) const MAX_CHAIN_TERMS: usize = 128;
 
 /// Conversion state: the file every span belongs to, plus diagnostics found
 /// while converting (value-level errors the pair tree alone cannot express).
+/// Under script mode (`script`), top-level statements collect into
+/// `script_stmts` for the synthesized `main` body.
 pub(crate) struct Ctx<'a> {
     file: FileId,
     src: &'a str,
     diags: Vec<Diagnostic>,
+    script: bool,
+    script_stmts: Vec<Stmt>,
 }
 
-/// Converts the `file` pair into an [`Ast`].
-pub(crate) fn convert(file: FileId, src: &str, pairs: Pairs<Rule>) -> Result<Ast, Vec<Diagnostic>> {
+/// Converts the `file` pair into an [`Ast`]; `script` folds the entry file's
+/// top-level statements into one synthesized `main` binding (G3's script
+/// entry), while library mode rejects them as diagnostics.
+pub(crate) fn convert(
+    file: FileId,
+    src: &str,
+    pairs: Pairs<Rule>,
+    script: bool,
+) -> Result<Ast, Vec<Diagnostic>> {
     let mut ctx = Ctx {
         file,
         src,
         diags: Vec::new(),
+        script,
+        script_stmts: Vec::new(),
     };
     let Some(file_pair) = pairs.into_iter().next() else {
         return Err(vec![Diagnostic::error(
@@ -74,6 +87,91 @@ fn empty_block(span: Span) -> BlockExpr {
         span,
         stmts: Vec::new(),
         trailing_trivia: Vec::new(),
+    }
+}
+
+/// One converted top-level entry: a declaration, or (script mode) a
+/// statement of the synthesized `main` body.
+enum Entry {
+    /// A declaration item of the block.
+    Item(Item),
+    /// A script-mode statement, collected out of the block.
+    Stmt(Stmt),
+}
+
+impl Entry {
+    /// A comment behind the entry trails it.
+    fn push_trailing(&mut self, t: Trivia) {
+        match self {
+            Self::Item(item) => item.trailing_trivia.push(t),
+            Self::Stmt(stmt) => stmt.trailing_trivia.push(t),
+        }
+    }
+}
+
+/// A top-level `const`/`var` binding as a script statement: plain
+/// bindings only — visibility or attributes mark a package declaration,
+/// and a lambda initializer is the named-function shape a written `fn`
+/// converts to. Everything else comes back unchanged.
+fn script_stmt_of(item: Item) -> Result<Stmt, Item> {
+    if !item.attrs.is_empty() || item.vis.is_some() {
+        return Err(item);
+    }
+    let ItemKind::Local(local) = item.kind else {
+        return Err(item);
+    };
+    if matches!(local.init, Expr::Lambda { .. }) {
+        return Err(Item {
+            kind: ItemKind::Local(local),
+            ..item
+        });
+    }
+    Ok(Stmt {
+        span: item.span,
+        kind: StmtKind::Local(local),
+        leading_trivia: item.leading_trivia,
+        trailing_trivia: item.trailing_trivia,
+    })
+}
+
+/// A top-level expression statement: script mode collects it for the
+/// synthesized `main`; library mode rejects it (G3's pure-declaration
+/// rule holds everywhere but the entry file).
+fn script_stmt_expr(
+    ctx: &mut Ctx<'_>,
+    c: Pair<'_, Rule>,
+    pending: &mut Vec<Trivia>,
+) -> Option<Stmt> {
+    let span = ctx.span(&c);
+    if !ctx.script {
+        ctx.err(
+            span,
+            ErrorCode::TopLevelStatement,
+            "top-level statements are legal only in the entry file under script mode; wrap them \
+             in a function body, or run the file as the entry with `ds run`",
+        );
+        return None;
+    }
+    let expr = ctx.expr(c);
+    Some(Stmt {
+        span,
+        kind: StmtKind::Expr(expr),
+        leading_trivia: std::mem::take(pending),
+        trailing_trivia: Vec::new(),
+    })
+}
+
+/// Whether an item declares the `main` entry: a `fn main` (either spelling
+/// converts to a binding of one lambda) collides with the script-mode
+/// synthesis.
+fn is_main_decl(item: &Item) -> bool {
+    match &item.kind {
+        ItemKind::Fn(f) => f.name.name == "main",
+        ItemKind::Local(l) => matches!(
+            &l.pat,
+            Pattern::Binding { name, .. } if name.name == "main"
+        ),
+        _ => false,
     }
 }
 
@@ -113,10 +211,39 @@ impl Ctx<'_> {
         let mut blocks: Vec<Block> = Vec::new();
         let mut pending: Vec<Trivia> = Vec::new();
         let mut trailing: Vec<Trivia> = Vec::new();
+        // File-level spacing carries the comments behind the last block
+        // (the file rules close the structure, so they surface here, at
+        // the `file` pair, not inside `file_blocks`).
+        let mut seen_blocks = false;
         for c in p.into_inner() {
             match c.as_rule() {
-                Rule::line_comment | Rule::block_comment => pending.push(self.trivia(&c)),
+                Rule::line_comment | Rule::block_comment => {
+                    let t = self.trivia(&c);
+                    if !seen_blocks {
+                        pending.push(t);
+                        continue;
+                    }
+                    // A comment on the same line as the last item's end
+                    // trails that item; anything else closes the file.
+                    let attaches = blocks
+                        .iter()
+                        .rev()
+                        .find_map(|b| b.items.last())
+                        .is_some_and(|item| self.line(t.span.start) == self.line(item.span.end));
+                    if attaches {
+                        blocks
+                            .iter_mut()
+                            .rev()
+                            .find_map(|b| b.items.last_mut())
+                            .expect("attaches implies a last item")
+                            .trailing_trivia
+                            .push(t);
+                    } else {
+                        trailing.push(t);
+                    }
+                },
                 Rule::file_blocks => {
+                    seen_blocks = true;
                     self.conv_file_blocks(c, &mut blocks, &mut pending, &mut trailing);
                 },
                 _ => {},
@@ -143,11 +270,83 @@ impl Ctx<'_> {
         if let Some(last) = blocks.last_mut() {
             last.trailing_trivia.extend(trailing);
         }
+        if self.script {
+            self.fold_script_main(&mut blocks);
+        }
         Ast {
             file: self.file,
             span,
             blocks,
         }
+    }
+
+    /// Appends the synthesized `main` binding carrying every collected
+    /// top-level statement, in source order, as the file's last item — the
+    /// same shape a written `fn main() -> () { ... }` converts to, so every
+    /// later pass sees one uniform entry function. A written `main`
+    /// colliding with the synthesis is a diagnostic; nothing is appended
+    /// then. The synthesized name carries an empty span at the first
+    /// statement's start: no other node owns an empty span, so the span-
+    /// keyed tables of later passes cannot alias it.
+    fn fold_script_main(&mut self, blocks: &mut [Block]) {
+        let Some(first) = self.script_stmts.first().map(|s| s.span) else {
+            return;
+        };
+        let last = self.script_stmts.last().expect("nonempty").span;
+        if blocks.iter().any(|b| b.items.iter().any(is_main_decl)) {
+            self.err(
+                first,
+                ErrorCode::ScriptMainConflict,
+                "script statements compile into the synthesized `main` entry function, but the \
+                 file already declares `main`",
+            );
+            return;
+        }
+        // Later passes key tables by span (expression types, binder facts,
+        // name resolutions), so every synthesized node needs a span no real
+        // node owns: real token spans are never empty, and the three
+        // synthesized positions are pairwise distinct (the statements are
+        // non-empty, so `first.start < last.end`).
+        let span = join(first, last);
+        let head = Span::new(self.file, first.start, first.start);
+        let tail = Span::new(self.file, last.end, last.end);
+        let stmts = std::mem::take(&mut self.script_stmts);
+        let main = Item {
+            span,
+            attrs: Vec::new(),
+            vis: None,
+            kind: ItemKind::Local(LocalDecl {
+                span,
+                mutable: false,
+                pat: Pattern::Binding {
+                    span: head,
+                    name: Ident {
+                        span: head,
+                        name: "main".to_owned(),
+                    },
+                },
+                ty: None,
+                init: Expr::Lambda {
+                    span: head,
+                    generics: Vec::new(),
+                    params: Vec::new(),
+                    ret: Some(Type::Unit(span)),
+                    arrow: false,
+                    body: Box::new(Expr::Block(BlockExpr {
+                        span: tail,
+                        stmts,
+                        trailing_trivia: Vec::new(),
+                    })),
+                },
+            }),
+            leading_trivia: Vec::new(),
+            trailing_trivia: Vec::new(),
+        };
+        blocks
+            .last_mut()
+            .expect("conv_file keeps at least one block")
+            .items
+            .push(main);
     }
 
     fn conv_file_blocks(
@@ -179,28 +378,46 @@ impl Ctx<'_> {
 
     fn conv_block_unit(&mut self, p: Pair<'_, Rule>, pending: &mut Vec<Trivia>) -> Block {
         let span = self.span(&p);
-        let mut items = Vec::new();
+        // Script mode routes statement-shaped top-level entries out of the
+        // block (they become the synthesized `main` body), so each converted
+        // entry is either a declaration item or such a statement.
+        let mut entries: Vec<(u32, Entry)> = Vec::new();
         for c in p.into_inner() {
             match c.as_rule() {
                 Rule::item => {
                     let mut item = self.conv_item(c.clone());
                     item.leading_trivia = std::mem::take(pending);
                     let end_line = self.line(item.span.end);
-                    items.push((end_line, item));
+                    let entry = if self.script {
+                        match script_stmt_of(item) {
+                            Ok(stmt) => Entry::Stmt(stmt),
+                            Err(item) => Entry::Item(item),
+                        }
+                    } else {
+                        Entry::Item(item)
+                    };
+                    entries.push((end_line, entry));
+                },
+                Rule::expr => {
+                    let stmt = script_stmt_expr(self, c, pending);
+                    if let Some(stmt) = stmt {
+                        let end_line = self.line(stmt.span.end);
+                        entries.push((end_line, Entry::Stmt(stmt)));
+                    }
                 },
                 Rule::line_comment | Rule::block_comment => {
                     let t = self.trivia(&c);
                     let start_line = self.line(t.span.start);
-                    // A comment on the same line as the previous item's end
-                    // trails that item; anything else leads the next one.
-                    let attaches_behind = start_line == items.last().map_or(u32::MAX, |(l, _)| *l);
+                    // A comment on the same line as the previous entry's end
+                    // trails that entry; anything else leads the next one.
+                    let attaches_behind =
+                        start_line == entries.last().map_or(u32::MAX, |(l, _)| *l);
                     if attaches_behind {
-                        items
+                        entries
                             .last_mut()
                             .expect("guarded by map_or")
                             .1
-                            .trailing_trivia
-                            .push(t);
+                            .push_trailing(t);
                     } else {
                         pending.push(t);
                     }
@@ -208,7 +425,13 @@ impl Ctx<'_> {
                 _ => {},
             }
         }
-        let items = items.into_iter().map(|(_, item)| item).collect();
+        let mut items = Vec::new();
+        for (_, entry) in entries {
+            match entry {
+                Entry::Item(item) => items.push(item),
+                Entry::Stmt(stmt) => self.script_stmts.push(stmt),
+            }
+        }
         Block {
             span,
             items,
@@ -256,8 +479,8 @@ impl Ctx<'_> {
                 Rule::attr => attrs.push(self.conv_attr(c)),
                 Rule::vis => vis = Some(self.conv_vis(c)),
                 Rule::import_item => kind = Some(ItemKind::Import(self.conv_import(c))),
-                Rule::local => kind = Some(ItemKind::Local(self.conv_local(c))),
-                Rule::fn_item => kind = Some(ItemKind::Fn(self.conv_fn(c, false))),
+                Rule::local => kind = Some(ItemKind::Local(self.top_local(c))),
+                Rule::fn_item => kind = Some(self.fn_item(c)),
                 Rule::extern_fn_item => kind = Some(ItemKind::ExternFn(self.conv_fn(c, true))),
                 Rule::struct_item => kind = Some(ItemKind::Struct(self.conv_struct(c))),
                 Rule::enum_item => kind = Some(ItemKind::Enum(self.conv_enum(c))),
@@ -424,6 +647,59 @@ impl Ctx<'_> {
             ty,
             init,
         }
+    }
+
+    /// A top-level `const`/`var` binding [F2]: the const-declaration node
+    /// stays the named-function representation downstream, but naming a
+    /// lambda at the declaration site is retired — `fn` is the only
+    /// named-function spelling, so a lambda initializer records DS1013 and
+    /// still converts (the diagnostic fails the parse).
+    fn top_local(&mut self, p: Pair<'_, Rule>) -> LocalDecl {
+        let local = self.conv_local(p);
+        if let Expr::Lambda { .. } = local.init {
+            let name = match &local.pat {
+                Pattern::Binding { name, .. } => format!("`{}` ", name.name),
+                _ => String::new(),
+            };
+            self.err(
+                local.span,
+                ErrorCode::NamedConstLambda,
+                format!(
+                    "a top-level binding cannot name a lambda; {name}is a function, so declare it \
+                     `fn name(params) -> ret {{ ... }}`"
+                ),
+            );
+        }
+        local
+    }
+
+    /// A top-level `fn name(params) -> ret { body }` declaration converts
+    /// onto the const-declaration node (a `const` of one lambda) — the
+    /// shape the checker, lowerer, and entry staging consume; only the
+    /// source spelling is canonicalized [F2]. A bodiless `fn` (signature
+    /// position only) stays a [`FnDecl`].
+    fn fn_item(&mut self, p: Pair<'_, Rule>) -> ItemKind {
+        let fd = self.conv_fn(p.clone(), false);
+        let Some(body) = fd.body else {
+            return ItemKind::Fn(fd);
+        };
+        ItemKind::Local(LocalDecl {
+            span: fd.span,
+            mutable: false,
+            pat: Pattern::Binding {
+                span: fd.name.span,
+                name: fd.name.clone(),
+            },
+            ty: None,
+            init: Expr::Lambda {
+                span: fd.span,
+                generics: fd.generics,
+                params: fd.params,
+                ret: fd.ret,
+                arrow: false,
+                body: Box::new(Expr::Block(body)),
+            },
+        })
     }
 
     fn conv_fn(&mut self, p: Pair<'_, Rule>, extern_: bool) -> FnDecl {
@@ -744,6 +1020,15 @@ impl Ctx<'_> {
                             },
                             Rule::fn_item => members.push(TraitMember::Fn(self.conv_fn(m, false))),
                             Rule::member_const => {
+                                // Const-arrow members retire with fn-only
+                                // declarations [F2]: members are `fn`
+                                // declarations, bodiless in traits.
+                                self.err(
+                                    self.span(&m),
+                                    ErrorCode::InvalidImplMember,
+                                    "trait members are `fn` declarations; spell the signature `fn \
+                                     name(params) -> ret`",
+                                );
                                 members.push(TraitMember::Fn(self.member_const_fn(m)));
                             },
                             _ => {},
@@ -762,8 +1047,9 @@ impl Ctx<'_> {
         }
     }
 
-    /// Converts a `const name = (params) -> ret` trait signature (no body)
-    /// or a bodied const-arrow member into a [`FnDecl`].
+    /// Converts a const-arrow trait member into a [`FnDecl`]; reached only
+    /// after its DS1010 retirement was recorded, so the tree stays total
+    /// while the parse fails.
     fn member_const_fn(&mut self, p: Pair<'_, Rule>) -> FnDecl {
         let span = self.span(&p);
         let mut name = None;
@@ -830,52 +1116,17 @@ impl Ctx<'_> {
         fd
     }
 
-    /// Converts an impl-body `const name = (params) -> ret { body }` local
-    /// into a [`FnDecl`]. A non-lambda init (`const x = 1`) is not an impl
-    /// member form; it records a diagnostic and yields None — nothing is
-    /// silently dropped.
+    /// Converts an impl-body `fn` declaration. A `const`/`var` member
+    /// (const-arrow included) retired with fn-only declarations [F2]: it
+    /// records DS1010 and yields None — nothing is silently dropped.
     fn local_as_fn(&mut self, p: Pair<'_, Rule>) -> Option<FnDecl> {
-        let local = self.conv_local(p.clone());
-        let Expr::Lambda {
-            generics,
-            params,
-            ret,
-            body,
-            ..
-        } = &local.init
-        else {
-            self.err(
-                local.span,
-                ErrorCode::InvalidImplMember,
-                "impl members are `fn` declarations or const-arrow lambdas, not plain values",
-            );
-            return None;
-        };
-        let body_block = match &**body {
-            Expr::Block(b) => b.clone(),
-            other => BlockExpr {
-                span: other.span(),
-                stmts: vec![Stmt {
-                    span: other.span(),
-                    kind: StmtKind::Expr(other.clone()),
-                    leading_trivia: Vec::new(),
-                    trailing_trivia: Vec::new(),
-                }],
-                trailing_trivia: Vec::new(),
-            },
-        };
-        let name = match &local.pat {
-            Pattern::Binding { name, .. } => name.clone(),
-            _ => self.bad_ident(local.span),
-        };
-        Some(FnDecl {
-            span: local.span,
-            name,
-            generics: generics.clone(),
-            params: params.clone(),
-            ret: ret.clone(),
-            body: Some(body_block),
-        })
+        let local = self.conv_local(p);
+        self.err(
+            local.span,
+            ErrorCode::InvalidImplMember,
+            "impl members are `fn` declarations; a `const`/`var` member is not a member form",
+        );
+        None
     }
 
     fn conv_impl(&mut self, p: Pair<'_, Rule>) -> ImplDecl {
@@ -913,10 +1164,10 @@ impl Ctx<'_> {
                     for f in inner(&c) {
                         match f.as_rule() {
                             Rule::fn_item => fns.push(self.conv_fn(f, false)),
-                            // `const name = (params) -> t { body }` members
-                            // become function declarations.
+                            // A `const`/`var` member is DS1010 (fn-only
+                            // member declarations), never a silent drop.
                             Rule::local => {
-                                if let Some(fd) = self.local_as_fn(f.clone()) {
+                                if let Some(fd) = self.local_as_fn(f) {
                                     fns.push(fd);
                                 }
                             },
@@ -1019,13 +1270,6 @@ fn inner_or_break(ctx: &mut Ctx, p: &Pair<'_, Rule>) -> Expr {
     match inner(p).next() {
         Some(c) => ctx.expr(c),
         None => Expr::Break(ctx.span(p)),
-    }
-}
-
-fn or_tail_span(tail: &OrTail) -> Span {
-    match tail {
-        OrTail::Expr(e) => e.span(),
-        OrTail::Return { span, .. } | OrTail::Break(span) | OrTail::Continue(span) => *span,
     }
 }
 

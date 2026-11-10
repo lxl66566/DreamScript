@@ -1,4 +1,4 @@
-// source: docs/en/design-decisions.md section 13.3 (effects: effect-ready)
+// source: frozen archive catalog 03-effects-errors-async (seed corpus)
 // purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, par combinators
 // items:
 // url: stage: typecheck
@@ -18,12 +18,12 @@ tag timeout
 tag refused
 type net_err = timeout | refused
 
-const fetch_body = (url: url) -> page | net_err {
+fn fetch_body(url: url) -> page | net_err {
   const resp = fetch(url)?
   page { url: url, body: resp.consume() }
 }
 
-const fetch_all = (urls: list[url]) -> list[page] | net_err {
+fn fetch_all(urls: list[url]) -> list[page] | net_err {
   var pages = list[page]()
   nursery {
     for url in urls {
@@ -38,7 +38,7 @@ const fetch_all = (urls: list[url]) -> list[page] | net_err {
   pages
 }
 
-const with_retry = (n: int, url: url) -> page | net_err {
+fn with_retry(n: int, url: url) -> page | net_err {
   var last: net_err = timeout
   var done: page? = none
   for i in 0..n {
@@ -52,11 +52,14 @@ const with_retry = (n: int, url: url) -> page | net_err {
       }
     }
   }
-  done or last
+  match done {
+    none => last,
+    p => p,
+  }
 }
 
-const main = () -> () | net_err {
-  const pages = fetch_all(urls) or die("all fetches failed")
+fn main() -> () | net_err {
+  const pages = fetch_all(urls).err((e: net_err) => die("all fetches failed"))
   print("total: ${str(pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b))}")
 }
 

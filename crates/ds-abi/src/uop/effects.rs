@@ -1,5 +1,5 @@
-//! Slot effects and purity metadata [BL-5]: the tables that make uop fusion
-//! safe [BL-4] and that drive stencil generation (one stencil per uop, the
+//! Slot effects and purity metadata (BL-5): the tables that make uop fusion
+//! safe (BL-4) and that drive stencil generation (one stencil per uop, the
 //! read/write sets become the holes' dependencies).
 
 use super::{
@@ -14,8 +14,10 @@ use super::{
 
 /// An operation class: the opcode byte's major nibble. The class fixes the
 /// operand shape (which fields mean what); the minor selects the variant.
-/// 14 of 16 codes are assigned; the rest are reserved growth budget — the
-/// M4 reference-counting ops (DUP/DROP) take one major.
+/// 14 of 16 codes are assigned. Major 0xE belongs to the M4
+/// reference-counting pair RCINC/RCDEC, which lives beside `Uop` as
+/// [`super::RcOp`] (body words of both majors decode through
+/// [`super::Inst`]); 0xF stays reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Major {
@@ -33,7 +35,7 @@ pub enum Major {
     BoolCmp = 0x5,
     /// 0xD — heap-string data ops: EQSTR, NEQSTR (XOR-negated pair), STRCAT.
     Ref = 0xd,
-    /// 0x6 — tag words [BL-2]: TAG_TEST(_NOT), TAG_NEW.
+    /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
     /// 0x7 — conversions: CVTI2F, CVTF2I [B7 explicit conversions].
     Cvt = 0x7,
@@ -75,7 +77,7 @@ impl Major {
 }
 
 /// A by-value list of at most three slot indices: effect queries never
-/// allocate [BL-5]. Constructed only by [`Uop::reads`] and [`Uop::writes`].
+/// allocate (BL-5). Constructed only by [`Uop::reads`] and [`Uop::writes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotList {
     slots: [u8; 3],
@@ -268,7 +270,7 @@ impl Uop {
     /// Whether the uop only reads its read-set and writes its write-set:
     /// no control transfer and no frame-boundary effect, so reordering,
     /// duplicating, or fusing it inside a dataflow window preserves
-    /// semantics [BL-4]. Pure uops may still trap — the B7 cold overflow
+    /// semantics (BL-4). Pure uops may still trap — the B7 cold overflow
     /// edge — and traps compose under fusion. Calls, jumps, returns, the
     /// FUNCF entry protocol, and HALT are impure. So are the allocating
     /// ops (KSTR, STRCAT): reordering or duplicating an allocation breaks
@@ -292,7 +294,7 @@ impl Uop {
     }
 
     /// The XOR-negated counterpart of a comparison, if this is one:
-    /// `opcode ^ 1` is the negation's opcode [BL-1]. Conditional jumps are
+    /// `opcode ^ 1` is the negation's opcode (BL-1). Conditional jumps are
     /// adjacent too (JMPIF^1 == JMPIF_NOT) but negate is about
     /// value-producing comparisons; flipping branch sense is a one-bit
     /// opcode rewrite performed directly by rewriters.

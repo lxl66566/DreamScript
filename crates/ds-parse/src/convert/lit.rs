@@ -55,7 +55,7 @@ impl Ctx<'_> {
                 self.err(
                     span,
                     ErrorCode::InvalidLiteral,
-                    format!("`{ch}` is not a single ASCII byte"),
+                    format!("`{}` is not a single ASCII byte", ch.escape_debug()),
                 );
                 Literal::Byte(0)
             },

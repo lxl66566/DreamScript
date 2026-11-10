@@ -1,0 +1,10 @@
+// The old receiver spelling `(self: self, ...)` [record 6.1]: the receiver
+// is bare `self` or `mut self`, typed `Self`, exempt from annotation.
+
+tag int
+trait show {
+  fn text(self: self) -> int
+}
+impl show for int {
+  fn text(self: self) -> int { 1 }
+}

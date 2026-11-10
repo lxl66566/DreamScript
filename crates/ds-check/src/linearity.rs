@@ -81,7 +81,7 @@ use std::collections::{HashMap, HashSet};
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
     Ast, BinaryOp, BlockExpr, CallArg, Expr, FnDecl, Ident, Item, ItemKind, LocalDecl, MatchArm,
-    OrTail, Param, ParamMode, Path, Pattern, Stmt, StructDecl, StructMember, TraitMember,
+    Param, ParamMode, Path, Pattern, Stmt, StructDecl, StructMember, TraitMember,
 };
 
 use crate::{
@@ -553,7 +553,7 @@ impl<'a> Lin<'a> {
     /// the memoized top-level types, no scope-exit death.
     fn bind_pattern_defs(&mut self, pat: &'a Pattern) {
         for (_, name) in Self::pattern_binders(pat) {
-            let Some(def) = self.package.lookup(name) else {
+            let Some(def) = self.package.lookup_value(name) else {
                 continue;
             };
             let place = Place::Def(def);
@@ -725,8 +725,14 @@ impl<'a> Lin<'a> {
             Expr::Literal { .. } | Expr::RawStr { .. } => false,
             Expr::Str { parts, .. } => {
                 for part in parts {
-                    if let ds_parse::StrPart::Expr { expr, .. } = part {
-                        self.expr(expr, true);
+                    match part {
+                        ds_parse::StrPart::Expr { expr, .. } => {
+                            self.expr(expr, true);
+                        },
+                        // `$x` is a consuming value use of the name, same
+                        // as a `${x}` hole
+                        ds_parse::StrPart::Ident { name, .. } => self.name_use(name, true),
+                        ds_parse::StrPart::Text { .. } => {},
                     }
                 }
                 false
@@ -736,7 +742,9 @@ impl<'a> Lin<'a> {
                 false
             },
             Expr::Paren { inner, .. } => self.expr(inner, consuming),
-            Expr::Tuple { items, .. } => {
+            // A list literal's items move into the constructed list, like
+            // a tuple's.
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => {
                 for item in items {
                     self.expr(item, true);
                 }
@@ -788,7 +796,6 @@ impl<'a> Lin<'a> {
                 self.expr(end, true);
                 false
             },
-            Expr::Or { left, right, .. } => self.or_expr(left, right),
             Expr::Assign { .. } => self.assign(e),
             Expr::If {
                 cond, then, else_, ..
@@ -875,27 +882,6 @@ impl<'a> Lin<'a> {
         self.epoch -= 1;
         self.drop_scope(*span);
         diverges
-    }
-
-    fn or_expr(&mut self, left: &'a Expr, right: &'a OrTail) -> bool {
-        self.expr(left, true);
-        let after_left = self.state.clone();
-        let tail_diverges = match right {
-            OrTail::Expr(expr) => self.expr(expr, true),
-            OrTail::Return { expr, .. } => {
-                if let Some(expr) = expr {
-                    self.expr(expr, true);
-                }
-                true
-            },
-            OrTail::Break(_) | OrTail::Continue(_) => true,
-        };
-        if tail_diverges {
-            self.state = after_left;
-        } else {
-            self.state = merge_states(&after_left, &self.state);
-        }
-        false
     }
 
     fn assign(&mut self, e: &'a Expr) -> bool {
@@ -1354,7 +1340,7 @@ mod tests {
     #[test]
     fn an_uninitialized_read_reports_ds3002() {
         let mut files = ds_diag::Files::new();
-        let file = files.add_source("t.ds", "tag int\nconst go = (p: int) -> int { p }\n");
+        let file = files.add_source("t.ds", "tag int\nfn go(p: int) -> int { p }\n");
         let ast = ds_parse::parse(&files, file).expect("parses");
         let crate::type_of::Analyzed {
             package,

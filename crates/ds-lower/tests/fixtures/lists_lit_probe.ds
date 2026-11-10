@@ -1,0 +1,46 @@
+// purpose: the list literal and the `list[t]()` constructor — literals
+// lower to list_new plus one list_push per element (every element kind:
+// int and string words), the constructor to the bare list_new call, the
+// empty literal types against the declared return, and the built lists
+// read back through the checked list_get span.
+
+tag int
+tag string
+tag bool
+
+struct list[t]
+
+extern fn list_len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+
+fn literal_sums() -> int {
+  const xs = [1, 2, 3]
+  const a = list_get(xs, 0).ok((x: int) => x).err((_: none) => 0)
+  const b = list_get(xs, 2).ok((x: int) => x).err((_: none) => 0)
+  const bad = list_get(xs, 9).ok((x: int) => x).err((_: none) => 0)
+  a + b + bad
+}
+
+fn literal_words() -> bool {
+  const words = ["alpha", "beta"]
+  const joined = list_concat(words, ["gamma"])
+  const n = list_len(joined)
+  const last = list_get(joined, n - 1)
+  const w = last.ok((s: string) => s).err((_: none) => "?")
+  n == 3 && w == "gamma"
+}
+
+fn fresh_and_empty() -> int {
+  const fresh = list[int]()
+  const empty = empty_strings()
+  list_len(fresh) + list_len(empty) + list_len(["a", "b"])
+}
+
+fn empty_strings() -> list[string] {
+  []
+}
+
+fn main() -> int {
+  literal_sums()
+}

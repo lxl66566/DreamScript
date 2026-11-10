@@ -32,8 +32,11 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_HTTP_GET, BUILTIN_NET_CONNECT, BUILTIN_NET_RECV, BUILTIN_PRINT, BUILTIN_PRINTLN,
-        BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT, BUILTIN_STR_INT,
+        BUILTIN_CHAR_AT, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_LEN,
+        BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
+        BUILTIN_LIST_PUSH, BUILTIN_NURSERY_JOIN, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT,
+        BUILTIN_STR_INT, STD_HTTP_GET, STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE,
+        STD_PRINT, STD_PRINTLN, std_platform_module,
     },
 };
 
@@ -92,10 +95,10 @@ fn pool() -> Vec<Const> {
             module: "cfg".into(),
             func: 4,
         }, // k17: default_config
-        builtin(BUILTIN_PRINTLN),                    // k18: println
+        platform(STD_PRINTLN),                       // k18: println
         builtin(BUILTIN_STR_INT),                    // k19: str_int
         builtin(BUILTIN_STR_BOOL),                   // k20: str_bool
-        builtin(BUILTIN_PRINT),                      // k21: print
+        platform(STD_PRINT),                         // k21: print
         builtin(BUILTIN_STR_FLOAT),                  // k22: str_float
     ]
 }
@@ -111,6 +114,13 @@ fn builtin(index: u32) -> Const {
     }
 }
 
+fn platform(index: u32) -> Const {
+    Const::FuncRef {
+        module: STD_PLATFORM_MODULE.into(),
+        func: index,
+    }
+}
+
 fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
     FunctionDef {
         name: name.into(),
@@ -122,6 +132,9 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 
 fn registry(module: &str, defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
+    // the fixtures call println/print: the std platform table is the
+    // host's to install (`Vm::new` only adds the builtin core)
+    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
     reg.install(ModuleVersion::new(module, defs).expect("valid fixture module"));
     reg
 }
@@ -928,25 +941,72 @@ fn retspan_edges_trap_and_load_checks_reject() {
     );
 }
 
-/// Native module resolution: the builtin table is contract-checked and
-/// the registry routes FuncRefs to it through the same path as uop callees.
+/// Native module resolution: both tables are contract-checked and the
+/// registry routes FuncRefs to them through the same path as uop callees.
 #[test]
-fn builtin_module_is_installed_and_resolvable() {
+fn both_native_modules_are_installed_and_resolvable() {
     let vm = Vm::new(cfg_registry());
     let reg = vm.registry();
-    assert!(reg.resolve_native("builtin", BUILTIN_PRINTLN).is_some());
-    assert!(reg.resolve_native("builtin", BUILTIN_PRINT).is_some());
+    // the builtin core: the str conversions and string ops, the gaps as
+    // reserved entries, and the appended list block (20-23)
     assert!(reg.resolve_native("builtin", BUILTIN_STR_INT).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_STR_FLOAT).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_STR_BOOL).is_some());
-    assert!(reg.resolve_native("builtin", BUILTIN_NET_CONNECT).is_some());
-    assert!(reg.resolve_native("builtin", BUILTIN_NET_RECV).is_some());
-    assert!(reg.resolve_native("builtin", BUILTIN_HTTP_GET).is_some());
-    // 10-19 are the string natives' reserved block: present as placeholders
-    assert!(reg.resolve_native("builtin", 10).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_LEN).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_CHAR_AT).is_some());
+    assert!(reg.resolve_native("builtin", 0).is_some(), "a gap entry");
     assert!(
-        reg.resolve_native("builtin", 25).is_none(),
-        "25 table entries: 10 scalars and files, 10 reserved, 5 net"
+        reg.resolve_native("builtin", 19).is_some(),
+        "the spare slot"
+    );
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_NEW).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_LEN).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_GET).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_CONCAT).is_some());
+    // the fiber substrate's control pair (24-25) and the nursery join (26)
+    assert!(reg.resolve_native("builtin", BUILTIN_FIBER_YIELD).is_some());
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_FIBER_RESUME)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_NURSERY_JOIN)
+            .is_some()
+    );
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_PUSH).is_some());
+    assert!(
+        reg.resolve_native("builtin", 28).is_none(),
+        "28 table entries: the core's, the list block, the fiber pair, the join, the push"
+    );
+    // the std platform module: console, file, net — its own gaps reserved
+    assert!(
+        reg.resolve_native(STD_PLATFORM_MODULE, STD_PRINTLN)
+            .is_some()
+    );
+    assert!(reg.resolve_native(STD_PLATFORM_MODULE, STD_PRINT).is_some());
+    assert!(
+        reg.resolve_native(STD_PLATFORM_MODULE, STD_NET_CONNECT)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native(STD_PLATFORM_MODULE, STD_NET_RECV)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native(STD_PLATFORM_MODULE, STD_HTTP_GET)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native(STD_PLATFORM_MODULE, 19).is_some(),
+        "a gap entry"
+    );
+    assert!(reg.resolve_native(STD_PLATFORM_MODULE, 25).is_none());
+    // a bare VM's registry carries no other native module
+    let bare = Vm::new(ModuleRegistry::new());
+    assert!(
+        bare.registry()
+            .resolve_native(STD_PLATFORM_MODULE, 0)
+            .is_none()
     );
     assert!(reg.resolve_native("other", 0).is_none());
 }

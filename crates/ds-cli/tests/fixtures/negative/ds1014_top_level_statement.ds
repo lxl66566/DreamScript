@@ -1,0 +1,6 @@
+// A library file cannot carry top-level statements: the same text is the
+// entry file's script form under `ds run`, but every non-entry path
+// through the pipeline keeps the pure-declaration rule.
+
+const answer = 6 * 7
+answer

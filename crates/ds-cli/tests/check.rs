@@ -45,20 +45,38 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   tensions (get_port, load, cfg, same).
 /// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
 ///   the derive engine behind `json for point`).
-/// * syntax_ts_heart: run items only — `read_config`/`default_config` absence and the
-///   type-constructor call form of `bad_number`/ `missing_field`.
+/// * syntax_ts_heart: run items only — `read_config`/`default_config` absence and the now-typed
+///   `.map` chain, plus the parse-staged byte-literal item (`sep`: the record pins `b'x'` as a
+///   single byte but no byte type, so its needs-declared-`byte` inference error is noise) (the
+///   ambient's `fn map` resolves since F9; `partition`'s one-`t` signature keeps the error members
+///   in `users`, so the later field accesses name the union that wants narrowing); the enum-block
+///   case constructions (`bad_number(s)`, `missing_field("name")`) check clean since the
+///   payload-case story landed [B3].
 /// * linearity_modes_rc: run items only — `open`/`read_exact` absence (the `file` type is the
-///   file's own) and `u32`'s distinct width [B7].
-/// * effects_nursery: run items only — `urls` is an ambient value the M5 run milestone owns, `push`
-///   is the generics file's own stack API, and `list[t]()` construction plus ranges arrive with the
-///   collection M3 work.
+///   file's own) and `u32`'s distinct width [B7] (the `.err` fallback meets `lens.len()`'s int —
+///   the retired `or` hid that width meeting).
+/// * effects_nursery: run items only — `urls` is an ambient value the M5 run milestone owns (its
+///   DS2004/DS2002 cascade), `push` is the generics file's own stack API (M6), and the
+///   outcome-union assignment in `with_retry` stages to run; `list[page]()` construction resolves
+///   since the constructor round and ranges keep the counted loop clean, so four errors remain.
+/// * range_for: zero noise — the for-over-range and `in` membership items are self-contained under
+///   the ambient.
+/// * pattern_dispatch: zero noise — the tutorial-pass regressions are self-contained (the file's
+///   own `parse_config` extern and error tags; `read_file` degrades to its success type under the
+///   ambient row, which still leaves the tail `?` contained).
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 12);
     assert_corpus_clean("generics_coherent_traits.ds", 8);
-    assert_corpus_clean("syntax_ts_heart.ds", 12);
-    assert_corpus_clean("linearity_modes_rc.ds", 10);
-    assert_corpus_clean("effects_nursery.ds", 9);
+    assert_corpus_clean("syntax_ts_heart.ds", 16);
+    assert_corpus_clean("linearity_modes_rc.ds", 11);
+    assert_corpus_clean("effects_nursery.ds", 4);
+    assert_corpus_clean("range_for.ds", 0);
+    assert_corpus_clean("pattern_dispatch.ds", 0);
+    // the one error is the file's own reject item (the mixed-element literal)
+    assert_corpus_clean("lists_surface.ds", 1);
+    // the one error is the file's own reject item (the union destructuring)
+    assert_corpus_clean("tuples_surface.ds", 1);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

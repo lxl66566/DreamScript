@@ -6,7 +6,7 @@
 //!
 //! Inputs are typed ([`InputKey`], today file contents; package config at
 //! M7) and stamped with a global [`Revision`] when they change. Queries are
-//! keyed by the [`non_exhaustive`](non_exhaustive) [`QueryKey`] enum and
+//! keyed by the [`non_exhaustive`] [`QueryKey`] enum and
 //! memoized: each memo stores its value, the dependency edges recorded while
 //! computing (reading an input or another query creates an edge), and the
 //! revisions it was verified and last changed at.
@@ -25,7 +25,7 @@
 //! [`QueryKey::ParseFile`] runs `ds-parse` and returns tree plus diagnostics
 //! as one value — syntax errors are data, not engine errors, so a broken
 //! file does not poison dependents. [`QueryKey::BlockIndex`] maps the tree's
-//! block spans to block ids (degrading to a `///|` text scan when the parse
+//! block spans to block ids (degrading to a `##` text scan when the parse
 //! failed). [`QueryKey::BlockSource`] is the renewal seam: it returns one
 //! block's source text, and downstream block-keyed queries (the M2+
 //! resolve/type_of family) depend on it instead of on the file — so editing
@@ -40,7 +40,7 @@
 //! * Query-level cycles — a query transitively reading its own in-flight result — mean
 //!   non-termination and are an engine error, detected and reported as [`QueryError::Cycle`] with
 //!   the full path.
-//! * Intra-package definition cycles are legal language semantics [G3], resolved by whole-package
+//! * Intra-package definition cycles are legal language semantics (G3), resolved by whole-package
 //!   fixpoint at M2. They are the queries' values' business, not the engine's; nothing here
 //!   prevents them.
 //!
@@ -57,7 +57,7 @@
 //! use ds_query::{BlockIndex, BlockSource, Db, ParseFile};
 //!
 //! let mut db = Db::new();
-//! let file = db.add_file("main.ds", "const a = 1\n///|\nconst b = 2\n");
+//! let file = db.add_file("main.ds", "const a = 1\n##\nconst b = 2\n");
 //!
 //! let parse = db.get::<ParseFile>(file).unwrap();
 //! assert!(parse.ast.is_some());
@@ -65,16 +65,17 @@
 //! let blocks = db.get::<BlockIndex>(file).unwrap();
 //! assert_eq!(blocks.blocks.len(), 2);
 //! let second = db.get::<BlockSource>(blocks.blocks[1].id).unwrap();
-//! // Tree spans include the separator line's terminating newline.
-//! assert_eq!(&*second, "\nconst b = 2\n");
+//! // The newline ending the separator line opens the following block,
+//! // whose extent ends at its last content byte.
+//! assert_eq!(&*second, "\nconst b = 2");
 //!
 //! // Editing the first block re-derives the file's parse and index, but the
 //! // second block's source renews and its readers never recompute.
-//! db.set_file_content(file, "const a = 3\n///|\nconst b = 2\n")
+//! db.set_file_content(file, "const a = 3\n##\nconst b = 2\n")
 //!     .unwrap();
 //! assert_eq!(
 //!     &*db.get::<BlockSource>(blocks.blocks[1].id).unwrap(),
-//!     "\nconst b = 2\n"
+//!     "\nconst b = 2"
 //! );
 //! ```
 //!

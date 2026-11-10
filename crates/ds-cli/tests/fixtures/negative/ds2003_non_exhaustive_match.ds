@@ -4,7 +4,7 @@ tag a
 tag b
 tag c
 tag int
-const classify = (x: a | b | c) -> int {
+fn classify(x: a | b | c) -> int {
   match x {
     y: a => 1,
   }

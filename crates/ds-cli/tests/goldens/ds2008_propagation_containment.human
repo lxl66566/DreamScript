@@ -1,5 +1,5 @@
 error[DS2008]: `?` propagates `wire_err`, which the return union `()` does not contain [E4]
- --> tests/fixtures/negative/ds2008_propagation_containment.ds:7:42
+ --> tests/fixtures/negative/ds2008_propagation_containment.ds:7:36
   |
-7 | const load = (path: string) -> () { emit(fetch_text(path)?) }
-  |                                          ^^^^^^^^^^^^^^^^^ not contained
+7 | fn load(path: string) -> () { emit(fetch_text(path)?) }
+  |                                    ^^^^^^^^^^^^^^^^^ not contained

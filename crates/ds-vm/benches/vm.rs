@@ -91,7 +91,7 @@ fn sum_to_fixture() -> ModuleRegistry {
 }
 
 /// Mutual `even`/`odd` tail calls as in tests/fixtures.rs (the canonical
-/// ds-abi 13.7 encoding): one CALLT slide per depth step at constant stack.
+/// ds-abi encoding): one CALLT slide per depth step at constant stack.
 fn even_odd_fixture() -> ModuleRegistry {
     let body = |callee: u16, base: u16| {
         vec![

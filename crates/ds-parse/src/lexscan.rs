@@ -286,11 +286,20 @@ pub(crate) fn scan(file: FileId, src: &str) -> Option<Vec<Diagnostic>> {
                     diags.push(invalid_char(file, i));
                     i += 1;
                 },
+                b'#' if stack.is_empty() && at(1) == b'#' && matches!(prev, None | Some(b'\n')) => {
+                    // A line-initial `##` opens a separator line (G3); the
+                    // rest of the line is separator text, invisible here.
+                    i = match b[i..].iter().position(|&c| c == b'\n') {
+                        Some(p) => i + p + 1,
+                        None => b.len(),
+                    };
+                },
                 b'#' if at(1) != b'[' => {
                     diags.push(
                         Diagnostic::error(
                             ErrorCode::InvalidChar,
-                            "`#` only starts an attribute (`#[...]`)",
+                            "`#` only starts an attribute (`#[...]`) or a line-initial separator \
+                             (`##`)",
                         )
                         .with_primary(Span::new(file, i as u32, i as u32 + 1), "invalid character"),
                     );

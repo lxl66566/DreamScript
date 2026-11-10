@@ -1,0 +1,65 @@
+// Probe: anonymous tuples through params, returns, lets, and match
+// arms, over the frame word conventions — strings ride Ref, lists ride
+// one Ref, `()` rides the I64 unit word.
+
+tag int
+tag string
+tag bool
+
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+
+fn mk(host: string, port: int) -> (string, int) {
+  (host, port)
+}
+
+fn pair_sum(t: (int, int)) -> int {
+  const (a, b) = t
+  a + b
+}
+
+fn arm_pick(t: (int, string)) -> string {
+  match t {
+    (n, s) => if n > 0 { s } else { "flat" },
+  }
+}
+
+fn tail_pair(host: string, port: int) -> (string, int) {
+  mk(host, port)
+}
+
+fn one_tuple() -> int {
+  const one = (5,)
+  const (five,) = one
+  five
+}
+
+fn unit_element() -> int {
+  const t = (1, ())
+  const (n, _) = t
+  n
+}
+
+fn list_element() -> int {
+  const t = ([10, 20], 3)
+  const (xs, n) = t
+  const c = list_get(xs, 1)
+  c.ok((x: int) => x).err((_: none) => 0 - 1) + n
+}
+
+fn main() -> bool {
+  const t = mk("host", 8080)
+  const (name, port) = t
+  println("${name}:${port}")
+  println("sum ${pair_sum((3, 4))}")
+  println("arm ${arm_pick((1, "go"))}")
+  const (tail_s, tail_n) = tail_pair("z", 2)
+  println("tail ${tail_s}${tail_n}")
+  println("one ${one_tuple()}")
+  println("unit ${unit_element()}")
+  println("list ${list_element()}")
+  println(if t == mk("host", 8080) { "eq" } else { "ne" })
+  pair_sum((20, 22)) == 42
+}

@@ -1,0 +1,35 @@
+// Rebindable `var` locals [C3] and UFCS method calls [F3]: `x.f(a)` stages
+// x as f's first argument, so the free functions of the stdlib surface read
+// as methods. The counted loop accumulates through compound assignment; the
+// union var re-stores its whole span (tag + payload) at each rebinding.
+
+fn shout(s: string) -> string {
+  s.trim().to_upper()
+}
+
+fn main() -> () {
+  var total: int = 0
+  for i in 0..5 {
+    total += i
+  }
+  println("total: ${total}")
+
+  var name: string = "  DreamScript  "
+  name = shout(name)
+  println("name: $name")
+
+  const first = "alpha beta".char_at(0)
+  println("first: ${first}")
+
+  const port = "8080".parse_int()
+  println("port + total: ${port + total}")
+
+  const joined = concat("a", "b").concat("c").to_lower()
+  println("joined: ${joined}")
+
+  var slot: int | none = none
+  slot = 7
+  if slot is int {
+    println("slot: ${slot}")
+  }
+}

@@ -1,7 +1,10 @@
 //! The DreamScript stdlib ambient: the checked-declaration layer that
 //! makes corpus sources check clean as-is [M3]. The runtime half of the
-//! stdlib already exists as the ds-vm builtin native module; this crate is
-//! the static half — the vocabulary a `ds check` package receives before
+//! stdlib is the H5.5 two-module native layer — the ds-vm `builtin` core
+//! (pure primitives, in every VM) and the `std` platform native module
+//! (console/file/net, installed by the host that provides the platform)
+//! — with a ds-source `@std` package layer to come; this crate is the
+//! static half — the vocabulary a `ds check` package receives before
 //! the user's sources, so a corpus file needs no hand-written ambient
 //! package member.
 //!
@@ -12,8 +15,8 @@
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
 //!   parse, resolve, the declaration tables, the bidirectional check. A file that redeclares an
-//!   ambient name is a duplicate-definition error [G3], so self-contained packages check with
-//!   `--no-ambient`.
+//!   ambient name in the same namespace is a duplicate-definition error [G3, F9], so self-contained
+//!   packages check with `--no-ambient`.
 //! * [`declared_rows`]: the [`ds_check::DeclaredRows`] table of the ambient functions — the
 //!   effect-row surface v1 has no syntax for [E1]. The rows enter through the ds-query database's
 //!   ambient-rows seam and are a lower bound on the computed row; M7's platform declarations merge
@@ -28,25 +31,21 @@
 //! out-of-scope name is the corpus's own staged noise, never an ambient
 //! error.
 //!
-//! # Single-namespace consequences
+//! # Two-namespace consequences
 //!
-//! The package namespace is single [G3]: types and values share it, one
-//! meaning per name. Three consequences shape this ambient:
+//! The package namespace is two [G3, F9] — types and values — so the
+//! ambient's `struct map[k, v]` and the list-transform function
+//! `fn map[t, r]` coexist: brace and type positions resolve the struct,
+//! the dot position resolves the function. Consequences that remain:
 //!
-//! * `map` is the type constructor `map[k, v]`, so the list-transform function `map` cannot
-//!   coexist: `xs.map(f)` resolves the free-function tier to the struct and types vacuously (the
-//!   call returns the empty type without a diagnostic). Every corpus use of the function sits in
-//!   run-stage or M6 items, which the conformance scoping exempts. A surface decision (separate
-//!   type/value namespaces, or a stdlib spelling for the transform) is required before `map` can
-//!   mean both.
 //! * Per-file types stay file-owned: `config`, `io_err`/`io_error`, `file`, `raw_fd`, `url`,
-//!   `net_err`, `ord`, `json`, and the stack API (`push`/`pop`) are corpus declarations. The
-//!   ambient's signatures never reference them, so world-touching functions return their success
-//!   type and declare the failure set as the `error` row: `read_file` is `(string) -> string` with
-//!   row `error | world`, standing for the record's `string | io_err` once packages own their error
-//!   taxonomy. `open`, `read_exact`, `default_config`, and `read_config` are absent for the same
-//!   reason (their parameter or return types are file-owned); their uses surface as staged run-item
-//!   noise.
+//!   `net_err`, `ord`, `json`, and the stack API (`push`/`pop`) are corpus declarations, and the
+//!   three spellings of the failure union differ per file, so no shared signature can name them.
+//!   World-touching functions therefore return their success type and declare the failure set as
+//!   the `error` row: `read_file` is `(string) -> string` with row `error | world`, standing for
+//!   the record's `string | io_err` once packages own their error taxonomy. `open`, `read_exact`,
+//!   `default_config`, and `read_config` are absent for the same reason (their parameter or return
+//!   types are file-owned); their uses surface as staged run-item noise.
 //! * `max` carries no bound: the `[t: ord]` constraint needs a stdlib-owned `ord` trait, and the
 //!   corpus declares its own. Likewise `u32` is a distinct atom [B7] (mixed-width arithmetic is the
 //!   corpus's staged noise), and `close` takes `int` because `raw_fd` is a file-owned alias of it.
@@ -106,7 +105,9 @@ mod tests {
     use super::*;
 
     /// The ambient parses clean and collects with no duplicate definition:
-    /// every corpus file shares this member's namespace.
+    /// every corpus file shares this member's namespaces. `map` rides both:
+    /// the struct in the type namespace, the transform in the value
+    /// namespace [F9].
     #[test]
     fn ambient_collects_into_one_clean_package() {
         let mut files = ds_diag::Files::new();
@@ -116,9 +117,29 @@ mod tests {
         assert!(diags.is_empty(), "duplicate ambient names: {diags:?}");
         let (package, _, diags) = ds_check::resolve_package(&[ast]);
         assert!(diags.is_empty(), "ambient resolution failures: {diags:?}");
-        for name in ["read_file", "map", "list", "str", "max", "Copyable"] {
-            assert!(package.lookup(name).is_some(), "`{name}` is ambient");
+        for name in [
+            "read_file",
+            "str",
+            "max",
+            "list_new",
+            "list_len",
+            "list_get",
+            "list_concat",
+        ] {
+            assert!(package.lookup_value(name).is_some(), "`{name}` is ambient");
         }
+        for name in ["list", "map", "row", "Copyable", "response"] {
+            assert!(package.lookup_type(name).is_some(), "`{name}` is ambient");
+        }
+        assert_eq!(
+            package.def(package.lookup_type("map").unwrap()).kind,
+            ds_check::DefKind::Struct,
+            "the type namespace holds the map struct"
+        );
+        assert!(
+            package.lookup_value("map").is_some(),
+            "the value namespace holds the map transform [F9]"
+        );
     }
 
     /// The declared rows name only ambient functions, and the rows render
@@ -144,6 +165,10 @@ mod tests {
         assert_eq!(rows.row("die").render(), "trap");
         assert_eq!(rows.row("cancel").render(), "cancel");
         assert!(rows.row("cons").is_pure(), "the combinators are row-pure");
+        assert!(
+            rows.row("concat").is_pure(),
+            "the string surface is row-pure"
+        );
         assert!(
             rows.row("absent").is_pure(),
             "absent names carry the pure row"

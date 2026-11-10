@@ -1,6 +1,6 @@
 [package]
 name         = "ds-rt"
-description  = "DreamScript runtime unsafe core: per-frame bump arenas with chunk-append growth, per-fiber marks, and restore-on-every-pop guards"
+description  = "DreamScript runtime unsafe core: per-frame bump arenas plus precise non-atomic RC with reuse threading, deinit dispatch, and a diag borrow counter"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -9,6 +9,11 @@ repository.workspace   = true
 keywords.workspace     = true
 categories.workspace   = true
 readme.workspace       = true
+
+[features]
+# Diagnostic layer for the memory story: rc underflow/overflow tripwires,
+# rc==1 assertions before destructive ops, Inko-style borrow counter.
+diag = []
 
 [lints]
 workspace = true

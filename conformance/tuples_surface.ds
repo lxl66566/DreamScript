@@ -1,0 +1,49 @@
+// source: record B3 anonymous tuples, the expected-gap round closing tuple lowering
+// purpose: tuple construction, destructuring in bindings and match arms, one-word elements on the frame
+// items:
+// pair_of: stage: run
+// swap: stage: run
+// arm_sum: stage: run
+// one_word: stage: run
+// unit_word: stage: run
+// list_bearing: stage: run
+// reject-union-destructure: stage: reject a destructuring declaration over a union binds unproven members (DS2001) [B3, F4]
+
+fn pair_of(host: string, port: int) -> (string, int) {
+  const t = (host, port)
+  const (name, n) = t
+  (name, n)
+}
+
+fn swap(a: int, b: string) -> (string, int) {
+  const (s, n) = (b, a)
+  (s, n)
+}
+
+fn arm_sum(t: (int, int)) -> int {
+  match t {
+    (a, b) => a + b,
+  }
+}
+
+fn one_word() -> int {
+  const one = (5,)
+  const (five,) = one
+  five
+}
+
+fn unit_word() -> () {
+  const z: () = ()
+  z
+}
+
+fn list_bearing() -> int {
+  const l = ([1, 2], "two")
+  const (xs, s) = l
+  list_len(xs)
+}
+
+fn reject_union_destructure(u: (int, int) | none) -> int {
+  const (a, b) = u
+  a
+}

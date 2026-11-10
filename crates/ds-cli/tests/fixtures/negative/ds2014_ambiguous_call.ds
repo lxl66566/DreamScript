@@ -2,11 +2,11 @@
 
 tag int
 trait show {
-  const text = (self: self) -> int
+  fn text(self) -> int
 }
 trait render {
-  const text = (self: self) -> int
+  fn text(self) -> int
 }
 impl show for int { }
 impl render for int { }
-const f = (x: int) -> int { x.text() }
+fn f(x: int) -> int { x.text() }

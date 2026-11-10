@@ -66,15 +66,59 @@ parses! {
     trailing_commas => "fn f(a: int,\n  b: int,\n) -> int { g(a, b,) }\n",
     if_is_an_expression => "fn f() { const x = if c { 1 } else { 2 }\n x\n}\n",
     else_if_chain => "fn f() {\nif a { 1 } else if b { 2 } else { 3 }\n}\n",
-    block_closes_statement => "const f = (x: int) -> int { x }\n",
-    empty_blocks => "fn f() { }\nconst h = () -> int { 0 }\n",
+    block_closes_statement => "fn f(x: int) -> int { x }\n",
+    empty_blocks => "fn f() { }\nfn h() -> int { 0 }\n",
     one_block_no_separators => "tag a\ntag b\n",
-    separator_blocks => "tag a\n///|\ntag b\n///|\ntag c\n",
-    separator_with_text => "tag a\n///| section: types\ntag b\n",
-    trailing_separator => "tag a\n///|\n",
-    consecutive_separators => "///|\n///|\ntag a\n",
-    leading_separator_then_item => "///|\nconst b = 2\n",
-    separator_wrapped_file => "///|\ntag a\n///|\ntag b\n///|\n",
+    separator_blocks => "tag a\n##\ntag b\n##\ntag c\n",
+    separator_with_text => "tag a\n## section: types\ntag b\n",
+    trailing_separator => "tag a\n##\n",
+    consecutive_separators => "##\n##\ntag a\n",
+    leading_separator_then_item => "##\nconst b = 2\n",
+    separator_wrapped_file => "##\ntag a\n##\ntag b\n##\n",
+}
+
+#[test]
+fn separator_is_line_initial_only() {
+    // G3: `##` separates only at column 0 — mid-line or indented `##` is
+    // an error, never a separator or a comment.
+    let (code, locs, ..) = err("const a = 1 ## mid\nconst b = 2\n");
+    assert_eq!(code, ErrorCode::InvalidChar);
+    assert_eq!(locs[0], Location { line: 1, col: 13 });
+    let (code, ..) = err("const a = 1\n  ## indented\nconst b = 2\n");
+    assert_eq!(code, ErrorCode::InvalidChar);
+    // Inside braces the separator is body text, and rejected there too.
+    let (code, ..) = err("fn f() {\n##\n}\n");
+    assert_eq!(code, ErrorCode::InvalidChar);
+}
+
+#[test]
+fn separator_rest_of_line_is_text() {
+    // Any bytes up to the newline are separator text, `#` included.
+    let ast = ok("## one\ntag a\n## two: x, y\n");
+    assert_eq!(ast.blocks.len(), 3);
+    assert!(ast.blocks[1].items.len() == 1);
+}
+
+#[test]
+fn doc_comment_prefix_is_reserved_trivia() {
+    // `///` is the reserved doc-comment prefix: trivia today, one more
+    // `//` comment form — and the retired `///|` spelling reads as one.
+    let ast = ok("/// doc\n///| retired spelling\ntag a\n");
+    assert_eq!(ast.blocks.len(), 1);
+    let lead = &ast.blocks[0].items[0].leading_trivia;
+    assert_eq!(lead.len(), 2);
+    assert!(lead.iter().all(|t| t.kind == TriviaKind::Line));
+}
+
+#[test]
+fn imports_take_the_sigil_or_plain_path_form() {
+    // G4: `@std/...` registry paths and plain package paths; the quoted
+    // form is retired and must never parse in another role.
+    let ast = ok("import @std/csv (reader)\nimport acme/pipeline/schema (row, parse_row)\n");
+    assert_eq!(ast.blocks[0].items.len(), 2);
+    let (code, locs, ..) = err("import \"acme/pipeline/schema\" (row)\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+    assert_eq!(locs[0], Location { line: 1, col: 8 });
 }
 
 #[test]
@@ -107,10 +151,7 @@ fn dot_continuation_crosses_newlines_but_calls_do_not() {
     // A call opening on the next line is NOT part of the expression: the
     // block holds three statements, not `g(x)`.
     let ast = ok("fn f() { const t = g\n(x)\n t\n}\n");
-    let ItemKind::Fn(fd) = &ast.blocks[0].items[0].kind else {
-        panic!("fn");
-    };
-    assert_eq!(fd.body.as_ref().expect("body").stmts.len(), 3);
+    assert_eq!(fn_body(&ast).stmts.len(), 3);
 }
 
 // ===== F2: bindings, const-arrow functions, annotations, returns =====
@@ -118,12 +159,11 @@ fn dot_continuation_crosses_newlines_but_calls_do_not() {
 parses! {
     const_binding => "const one = 1\n",
     var_binding_typed => "var n: int = 0\n",
-    const_arrow_fn => "const parse_age = (s: string) -> int | parse_error { s.len() }\n",
+    const_arrow_fn => "fn parse_age(s: string) -> int | parse_error { s.len() }\n",
     arrow_fn_blockless_body => "fn f() { const g = (a: int, b: int) => a + b\n g\n}\n",
     bare_lambda_param => "fn f() { const lens = ws.map(w => w.len()).collect()\n lens\n}\n",
-    recursion_in_own_body => "const loop = (n: int) -> int { loop(n)\n}\n",
+    recursion_in_own_body => "fn loop(n: int) -> int { loop(n)\n}\n",
     early_return_with_value => "fn f() { return badport { got: -1 }\n}\n",
-    or_return_tail => "fn f() { const name = row.get(\"n\") or return missing(\"n\")\n name\n}\n",
     bare_return => "fn f() { return\n}\n",
     break_continue => "fn f() {\nwhile c { break }\nwhile c { continue }\n}\n",
     typed_tuple_destructure => "fn f() { const (a, b) = xs.partition((r) => r is pe)\n a\n}\n",
@@ -137,25 +177,25 @@ parses! {
 
 #[test]
 fn lambda_and_arrow_shapes() {
-    let ast = ok("const f = (a: int, b: int) => a + b\n");
+    let ast = ok("fn f() { const g = (a: int, b: int) => a + b\n g\n}\n");
     let Expr::Lambda {
         params,
         arrow: true,
         body,
         ..
-    } = init_expr(&ast)
+    } = first_local_init(&ast)
     else {
         panic!("lambda");
     };
     assert_eq!(params.len(), 2);
     assert!(matches!(**body, Expr::Binary { .. }));
 
-    let ast = ok("const g = (j: json) -> int | missing { 0 }\n");
+    let ast = ok("fn f() { const g = (j: json) -> int | missing { 0 }\n g\n}\n");
     let Expr::Lambda {
         ret: Some(Type::Union { .. }),
         arrow: false,
         ..
-    } = init_expr(&ast)
+    } = first_local_init(&ast)
     else {
         panic!("arrow with return type and block body");
     };
@@ -238,8 +278,8 @@ parses! {
     named_arg_values_are_expressions => "fn f() { g(x: a + b, y: h(c))\n}\n",
     named_args_trailing_comma => "fn f() { g(x: 1,)\n}\n",
     fn_default_arguments => "fn f(a: int = 0, b: string = \"s\", c: float = -1.5) -> int { a }\n",
-    lambda_default_arguments => "const g = (a: int = 0) => a\n",
-    trait_member_default => "trait t {\nconst g = (a: int = 0) -> int\n}\n",
+    lambda_default_arguments => "fn f() { const g = (a: int = 0) => a\n g\n}\n",
+    trait_member_default => "trait t {\nfn g(a: int = 0) -> int\n}\n",
 }
 
 #[test]
@@ -265,16 +305,18 @@ fn non_literal_default_is_a_diagnostic() {
 
 #[test]
 fn default_arguments_reach_the_fn_decl() {
+    // A bodied top-level `fn` converts onto the const-declaration node,
+    // so the defaults live on the converted lambda's parameters.
     let ast = ok("fn f(a: int = 0) -> int { a }\n");
-    let ItemKind::Fn(f) = &ast.blocks[0].items[0].kind else {
-        panic!("fn item");
+    let Expr::Lambda { params, .. } = init_expr(&ast) else {
+        panic!("converted fn");
     };
-    assert!(f.params[0].default.is_some());
+    assert!(params[0].default.is_some());
     let ast = ok("fn f(a: int) -> int { a }\n");
-    let ItemKind::Fn(f) = &ast.blocks[0].items[0].kind else {
-        panic!("fn item");
+    let Expr::Lambda { params, .. } = init_expr(&ast) else {
+        panic!("converted fn");
     };
-    assert!(f.params[0].default.is_none());
+    assert!(params[0].default.is_none());
 }
 
 #[test]
@@ -332,10 +374,7 @@ fn kw_blocks_keep_their_statements() {
     // atomic body has no children — so nursery/spawn/defer bodies silently
     // formatted as `{}`.
     let ast = ok("fn f() {\nnursery {\nspawn { g(1)\n}\n}\ndefer { h(2)\n}\n}\n");
-    let ItemKind::Fn(f) = &ast.blocks[0].items[0].kind else {
-        panic!("fn");
-    };
-    let body = f.body.as_ref().expect("body");
+    let body = fn_body(&ast);
     assert_eq!(body.stmts.len(), 2);
     let StmtKind::Expr(Expr::Nursery { body: nb, .. }) = &body.stmts[0].kind else {
         panic!("nursery");
@@ -380,15 +419,6 @@ fn precedence_mul_over_add() {
         op: ds_parse::BinaryOp::Mul,
         ..
     }));
-}
-
-#[test]
-fn is_binds_tighter_than_or() {
-    let ast = ok("fn f() { pv is int or return bad\n}\n");
-    let Expr::Or { left, .. } = first_stmt_expr(&ast) else {
-        panic!("or at top");
-    };
-    assert!(matches!(**left, Expr::Is { .. }));
 }
 
 #[test]
@@ -464,10 +494,48 @@ parses! {
     raw_one_hash => "const s = r#\"has \"quotes\" inside\"#\n",
     raw_escalation => "const s = r###\"deeper \"## hash\"###\n",
     char_literals => "const c = 'x'\nconst n = '\\n'\nconst u = '\\u{65}'\nconst q = '\\''\n",
-    byte_literals => "const b = b'x'\nconst n = b'\\n'\n",
+    byte_literals => "const b = b'x'\nconst n = b'\\n'\nconst q = b'\\''\nconst s = b'\\\\'\nconst u = b'\\u{7f}'\nconst z = b'\\0'\n",
     int_suffixes => "const a = 1_000_000i64\nconst b = 42u8\nconst c = 0xFFi64\nconst d = 0b1010_1010u8\nconst e = 0o777i32\nconst f = 0i64\n",
     float_suffixes => "const a = 2.0f32\nconst b = 1e5\nconst c = 1.0e-5f64\nconst d = 2.5\n",
     range_not_float => "fn f() { g(1..5)\n}\n",
+}
+
+#[test]
+fn list_literals_parse_items_and_stay_distinct_from_generic_lambdas() {
+    let ast = ok("const xs = [1, \"a\", true]\n");
+    let Expr::List { items, .. } = init_expr(&ast) else {
+        panic!("list");
+    };
+    assert_eq!(items.len(), 3);
+    assert!(matches!(items[0], Expr::Literal { .. }));
+    assert!(matches!(items[1], Expr::Str { .. }));
+    // the empty literal and the trailing-comma/multiline forms
+    let ast = ok("const ys = []\n");
+    let Expr::List { items, .. } = init_expr(&ast) else {
+        panic!("empty list");
+    };
+    assert!(items.is_empty());
+    ok("const zs = [\n  1,\n  2,\n]\n");
+    // a bracketed generic clause opens a lambda, never a literal (the
+    // call makes the outer expression a call, so the binding names no
+    // lambda)
+    let ast = ok("const f = [t] (x: t) -> t { x }(1)\n");
+    assert!(
+        matches!(init_expr(&ast), Expr::Call { callee, .. }
+            if matches!(&**callee, Expr::Lambda { generics, .. } if generics.len() == 1)),
+        "the generic clause stays a lambda"
+    );
+    // the constructor form keeps its indexed-callee shape for the checker
+    let ast = ok("const e = list[int]()\n");
+    let Expr::Call { callee, .. } = init_expr(&ast) else {
+        panic!("constructor call");
+    };
+    assert!(
+        matches!(&**callee, Expr::Index { recv, index, .. }
+            if matches!(&**recv, Expr::Path { path, .. } if path.text() == "list")
+            && matches!(&**index, Expr::Path { path, .. } if path.text() == "int")),
+        "list[int]() parses as an indexed callee"
+    );
 }
 
 #[test]
@@ -510,6 +578,47 @@ fn numeric_literals_parse_text_and_suffix() {
 }
 
 #[test]
+fn byte_literals_cook_to_single_bytes() {
+    let ast = ok("const b = b'x'\n");
+    let Expr::Literal {
+        lit: Literal::Byte(120),
+        ..
+    } = init_expr(&ast)
+    else {
+        panic!("byte");
+    };
+    // the char/byte distinction [F6]: 'x' stays a Unicode scalar char
+    let ast = ok("const c = 'x'\n");
+    assert!(matches!(init_expr(&ast), Expr::Literal {
+        lit: Literal::Char('x'),
+        ..
+    }));
+    // the full escape set cooks inside bytes too
+    let ast = ok("const u = b'\\u{7f}'\nconst z = b'\\0'\nconst q = b'\\''\n");
+    let Expr::Literal {
+        lit: Literal::Byte(127),
+        ..
+    } = init_expr(&ast)
+    else {
+        panic!("escaped byte");
+    };
+}
+
+#[test]
+fn byte_literals_reject_non_ascii_and_non_single_bodies() {
+    // a non-ASCII scalar names itself; an escape past the byte range does too
+    let (code, ..) = err("const b = b'é'\n");
+    assert_eq!(code, ErrorCode::InvalidLiteral);
+    let (code, ..) = err("const b = b'\\u{80}'\n");
+    assert_eq!(code, ErrorCode::InvalidLiteral);
+    // empty and multi-char bodies never match the single-byte shape
+    let (code, ..) = err("const b = b''\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+    let (code, ..) = err("const b = b'xy'\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+}
+
+#[test]
 fn raw_string_hash_counting_is_exact() {
     let ast = ok("const s = r##\"a \"# b\"##\n");
     let Expr::RawStr {
@@ -519,6 +628,24 @@ fn raw_string_hash_counting_is_exact() {
         panic!("raw");
     };
     assert_eq!(text, "a \"# b");
+}
+
+#[test]
+fn malformed_enum_blocks_report_the_unexpected_token() {
+    // The enum body admits only case declarations; anything else fails
+    // the item rule and reports DS1001/DS1002 at the offending token,
+    // same as every other malformed declaration body.
+    for (src, code) in [
+        ("enum e { 1 }\n", ErrorCode::UnexpectedToken),
+        ("enum e { fn f() { } }\n", ErrorCode::UnexpectedToken),
+        ("enum e { case field: int }\n", ErrorCode::UnexpectedToken),
+        // an unclosed delimiter is the lexscan's DS1008, before grammar
+        ("enum e { a(\n", ErrorCode::UnbalancedDelimiter),
+        ("enum e { a { x: \n", ErrorCode::UnbalancedDelimiter),
+    ] {
+        let (found, ..) = err(src);
+        assert_eq!(found, code, "{src}");
+    }
 }
 
 #[test]
@@ -541,7 +668,7 @@ parses! {
     type_set_algebra => "type t = a | b & c - d\n",
     negation => "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
     fn_types => "type h = fn(a: int) -> int\n",
-    unit_type => "const main = () -> () | io_error { 0 }\n",
+    unit_type => "fn main() -> () | io_error { 0 }\n",
     case_type_refs => "type e = badnumber(string) | missingfield(string)\n",
     enum_decl => "enum color { red, green(int), blue { shade: int } }\n",
     tag_decl => "tag timeout\ntag missing\n",
@@ -585,9 +712,9 @@ fn impl_variants_distinguished() {
 }
 
 parses! {
-    trait_members_comma_separated => "trait t {\nfn f(a: int) -> int,\nconst g = (a: int) -> int,\n}\n",
-    impl_members_comma_separated => "impl u {\nfn f() -> int { 0 },\nconst g = (a: int) -> int { a },\n}\n",
-    members_mix_commas_and_newlines => "trait t {\nfn f() -> int,\nconst g = (a: int) -> int\n}\n",
+    trait_members_comma_separated => "trait t {\nfn f(a: int) -> int,\nfn g(a: int) -> int,\n}\n",
+    impl_members_comma_separated => "impl u {\nfn f() -> int { 0 },\nfn g(a: int) -> int { a },\n}\n",
+    members_mix_commas_and_newlines => "trait t {\nfn f() -> int,\nfn g() -> int\n}\n",
 }
 
 #[test]
@@ -595,6 +722,39 @@ fn impl_plain_value_member_is_a_diagnostic() {
     // `const x = 1` is no impl member form; it must not vanish silently.
     let (code, ..) = err("impl u {\nconst x = 1\n}\n");
     assert_eq!(code, ErrorCode::InvalidImplMember);
+}
+
+#[test]
+fn const_arrow_members_retire_as_fn_only() {
+    // F2: members are `fn` declarations; the const-arrow member spellings
+    // record DS1010 on both sides (trait signature and impl body).
+    let (code, ..) = err("trait t {\nconst g = (a: int) -> int\n}\n");
+    assert_eq!(code, ErrorCode::InvalidImplMember);
+    let (code, ..) = err("impl u {\nconst g = (a: int) -> int { a }\n}\n");
+    assert_eq!(code, ErrorCode::InvalidImplMember);
+}
+
+#[test]
+fn top_level_named_const_lambdas_retire() {
+    // F2: `fn` is the only named-function declaration; naming a lambda at
+    // the top level suggests the spelling (arrow and block forms, const
+    // and var alike). Inside a body the same binding stays legal.
+    let (code, ..) = err("const f = (x: int) -> int { x }\n");
+    assert_eq!(code, ErrorCode::NamedConstLambda);
+    let (code, ..) = err("const f = (x: int) => x\n");
+    assert_eq!(code, ErrorCode::NamedConstLambda);
+    let (code, ..) = err("var f = (x: int) -> int { x }\n");
+    assert_eq!(code, ErrorCode::NamedConstLambda);
+    let _ = ok("fn h() { const g = (x: int) => x\n g\n}\n");
+}
+
+#[test]
+fn receivers_parse_bare_and_annotated() {
+    // Record 6.1: the receiver is `self` or `mut self`, no annotation;
+    // both spellings parse everywhere a member signature does.
+    let _ = ok("trait t {\nfn f(self) -> int\n}\n");
+    let _ = ok("trait t {\nfn f(mut self) -> int\n}\n");
+    let _ = ok("impl t for int {\nfn f(mut self, other: Self) -> int { 0 }\n}\n");
 }
 
 // ===== G3: file structure, trivia, spans =====
@@ -608,7 +768,7 @@ fn file_without_separators_is_one_block() {
 
 #[test]
 fn separators_split_blocks() {
-    let ast = ok("tag a\n///|\ntag b\n///|\ntag c\n");
+    let ast = ok("tag a\n##\ntag b\n##\ntag c\n");
     assert_eq!(ast.blocks.len(), 3);
     for (i, block) in ast.blocks.iter().enumerate() {
         assert_eq!(block.items.len(), 1, "block {i}");
@@ -619,7 +779,7 @@ fn separators_split_blocks() {
 fn leading_and_trailing_separators_are_empty_edge_blocks() {
     // A leading separator opens block 0 as an empty block; a trailing
     // separator closes the file with an empty block.
-    let ast = ok("///|\ntag a\n///|\ntag b\n///|\n");
+    let ast = ok("##\ntag a\n##\ntag b\n##\n");
     assert_eq!(ast.blocks.len(), 4);
     assert!(ast.blocks[0].items.is_empty());
     assert_eq!(ast.blocks[1].items.len(), 1);
@@ -646,10 +806,7 @@ fn comments_attach_as_trivia() {
 #[test]
 fn statement_trivia_in_blocks() {
     let ast = ok("fn f() {\n// about x\nconst x = 1\nx // done\n}\n");
-    let ItemKind::Fn(fndef) = &ast.blocks[0].items[0].kind else {
-        panic!("fn");
-    };
-    let body = fndef.body.as_ref().expect("body");
+    let body = fn_body(&ast);
     assert_eq!(body.stmts.len(), 2);
     assert_eq!(body.stmts[0].leading_trivia.len(), 1);
     assert_eq!(body.stmts[0].trailing_trivia.len(), 0);
@@ -791,7 +948,7 @@ fn at_sign_and_dollar_rejected_in_code() {
 
 #[test]
 fn keywords_are_reserved() {
-    for kw in ["const", "fn", "match", "or", "is", "in", "type", "trait"] {
+    for kw in ["const", "fn", "match", "is", "in", "type", "trait"] {
         let src = format!("const {kw} = 1\n");
         let (code, ..) = err(&src);
         assert_eq!(code, ErrorCode::UnexpectedToken, "keyword {kw}");
@@ -800,7 +957,13 @@ fn keywords_are_reserved() {
 
 #[test]
 fn keyword_prefixes_are_fine() {
-    let _ = ok("const constants = 1\nconst matches = 2\nconst types = 3\n");
+    let _ = ok("const constants = 1\nconst matches = 2\nconst types = 3\nconst orders = 4\n");
+}
+
+#[test]
+fn or_is_a_plain_identifier() {
+    // The `or` extraction operator is retired; the word now names bindings.
+    let _ = ok("const or = 1\nfn f() { or\n}\n");
 }
 
 #[test]
@@ -839,7 +1002,7 @@ fn adversarial_input_never_panics() {
         "match",
         "match {",
         "fn f(",
-        "///|",
+        "##",
         "#[",
         "\u{feff}",
         "const \u{65e5}\u{672c} = 1\n",
@@ -864,15 +1027,34 @@ fn init_expr(ast: &Ast) -> &Expr {
     &l.init
 }
 
-fn first_stmt_expr(ast: &Ast) -> &Expr {
-    let ItemKind::Fn(f) = &ast.blocks[0].items[0].kind else {
-        panic!("first item is not a fn");
+/// The block body of a bodied top-level `fn` (converted onto the
+/// const-declaration node: one binding of one block-bodied lambda).
+fn fn_body(ast: &Ast) -> &BlockExpr {
+    let Expr::Lambda { body, .. } = init_expr(ast) else {
+        panic!("first item is not a converted fn");
     };
-    let body: &BlockExpr = f.body.as_ref().expect("body");
+    let Expr::Block(b) = &**body else {
+        panic!("converted fn body is a block");
+    };
+    b
+}
+
+fn first_stmt_expr(ast: &Ast) -> &Expr {
+    let body = fn_body(ast);
     match &body.stmts[0].kind {
         StmtKind::Expr(e) => e,
         StmtKind::Local(_) => panic!("first statement is not an expression"),
     }
+}
+
+/// The initializer of the first statement-level binding inside the first
+/// top-level fn's body.
+fn first_local_init(ast: &Ast) -> &Expr {
+    let body = fn_body(ast);
+    let StmtKind::Local(l) = &body.stmts[0].kind else {
+        panic!("first statement is not a binding");
+    };
+    &l.init
 }
 
 // ===== pattern shape regression =====
@@ -885,7 +1067,7 @@ fn pattern_atoms_keep_their_shape() {
     let ast = ok(concat!(
         "const one = 1\n",
         "const (a, b) = pair\n",
-        "const f = (x) -> () {\n",
+        "fn f(x) -> () {\n",
         "  match x {\n",
         "    p | q => p,\n",
         "    (c, d) => c,\n",
@@ -923,4 +1105,44 @@ fn pattern_atoms_keep_their_shape() {
     );
     assert!(matches!(&arms[1].pat, Pattern::Tuple { pats, .. } if pats.len() == 2));
     assert!(matches!(&arms[2].pat, Pattern::Wildcard(_)));
+}
+
+/// The tuple corners [B3]: `(e)` is grouping, `(e,)` a 1-tuple, `()` the
+/// unit construction; the trailing comma is the only disambiguator, and
+/// both layers keep the distinction (the formatter re-emits the comma).
+#[test]
+fn tuple_corners_split_grouping_one_element_and_unit() {
+    let ast = ok(concat!(
+        "fn f() -> () {\n",
+        "  const a = (1)\n",
+        "  const b = (1,)\n",
+        "  const c = ()\n",
+        "  const d = ((1, 2), 3)\n",
+        "}\n",
+    ));
+    let body = fn_body(&ast);
+    let init = |i: usize| match &body.stmts[i].kind {
+        StmtKind::Local(l) => &l.init,
+        _ => panic!("statement {i} is not a binding"),
+    };
+    assert!(
+        matches!(init(0), Expr::Paren { .. }),
+        "one element without the comma is grouping"
+    );
+    assert!(
+        matches!(init(1), Expr::Tuple { items, trailing_comma: true, .. }
+        if items.len() == 1)
+    );
+    assert!(
+        matches!(init(2), Expr::Tuple { items, trailing_comma: false, .. }
+        if items.is_empty())
+    );
+    let Expr::Tuple { items, .. } = init(3) else {
+        panic!("statement 3 constructs a tuple");
+    };
+    assert_eq!(items.len(), 2, "the outer tuple holds two elements");
+    assert!(
+        matches!(&items[0], Expr::Tuple { items, .. } if items.len() == 2),
+        "the first element is itself a tuple construction"
+    );
 }

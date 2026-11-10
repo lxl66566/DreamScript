@@ -27,7 +27,8 @@ pub trait Query {
     /// Builds the engine key.
     fn make_key(key: Self::Key) -> QueryKey;
     /// Extracts the typed value from the engine value, or `None` on a kind
-    /// mismatch (mapped to [`QueryError::KindMismatch`] by the engine).
+    /// mismatch (the engine maps that to
+    /// [`QueryError::KindMismatch`](crate::QueryError::KindMismatch)).
     fn extract(value: QueryValue) -> Option<Self::Value>;
 }
 
@@ -91,7 +92,7 @@ impl Query for LinearityCheck {
 /// Marker for the resolve query: [`QueryKey::Resolve`]. The key is the
 /// package id — 0 while M2's one package is every registered file; the
 /// value is the package's namespace, per-file resolutions, and the
-/// collection and resolution diagnostics [G3].
+/// collection and resolution diagnostics (G3).
 pub struct Resolve;
 
 impl Query for Resolve {
@@ -112,7 +113,7 @@ impl Query for Resolve {
 
 /// Marker for the type-of query: [`QueryKey::TypeOf`]. The key is the
 /// definition's block packed `(file << 8) | block` (see
-/// [`QueryKey::TypeOf`]); the value is its typed story [B2].
+/// [`QueryKey::TypeOf`]); the value is its typed story (B2).
 pub struct TypeOf;
 
 impl Query for TypeOf {
@@ -133,7 +134,7 @@ impl Query for TypeOf {
 
 /// Marker for the effects-of query: [`QueryKey::EffectsOf`]. The key is
 /// the definition's package index — declaration order across the
-/// registered files [G3]; the value is its effect row [E1].
+/// registered files (G3); the value is its effect row (E1).
 pub struct EffectsOf;
 
 impl Query for EffectsOf {

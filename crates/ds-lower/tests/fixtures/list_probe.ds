@@ -1,0 +1,54 @@
+// purpose: the list surface and the `.ok` handler — split produces the
+// list object, len/get/concat read and join it, the checked read answers
+// a `t | none` union the `.ok`/`.err` handlers extract, fs_list lists a
+// directory through the fallible platform span, and the `port_of`
+// pipeline runs `.ok` over an error union: the success member transforms
+// through the handler, the error member flows to the `.err` fallback.
+
+tag int
+tag string
+tag bool
+tag char
+tag io_err
+
+struct list[t]
+
+struct config { host: string, port: int }
+type cfg = config | io_err
+
+extern fn println (s: string) -> ()
+extern fn split (s: string, sep: char) -> list[string]
+extern fn list_new () -> list[string]
+extern fn list_len (xs: list[string]) -> int
+extern fn list_get (xs: list[string], i: int) -> string | none
+extern fn list_concat (a: list[string], b: list[string]) -> list[string]
+extern fn fs_list (dir: string) -> list[string]
+
+fn word_at(s: string, at: int) -> string {
+  const word = list_get(split(s, ':'), at)
+  word.ok((w: string) => w).err((_: none) => "?")
+}
+
+fn main() -> bool {
+  const parts = split("alpha:beta:gamma", ':')
+  const joined = list_concat(parts, parts)
+  const n = list_len(joined) + list_len(list_new())
+  const a = word_at("alpha:beta:gamma", 1)
+  const b = word_at("alpha:beta:gamma", 9)
+  println("n ${n} ${a} ${b}")
+  n == 6 && a == "beta" && b == "?"
+}
+
+fn port_of(ok: bool) -> int {
+  const cfg = if ok { config { host: "h", port: 8080 } } else { io_err }
+  const port = cfg.ok((c: config) => c.port)
+  port.err((_: io_err) => 0)
+}
+
+fn dir_report(dir: string) -> bool {
+  const names = fs_list(dir)
+  const first = list_get(names, 0)
+  const name = first.ok((s: string) => s).err((_: none) => "?")
+  println("files ${list_len(names)} ${name}")
+  list_len(names) == 2 && name == "a.ds"
+}

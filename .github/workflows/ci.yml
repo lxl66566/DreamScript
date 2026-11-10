@@ -35,3 +35,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo nextest run --all-targets
+      - run: cargo nextest run -p ds-rt --all-targets --features diag
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Warnings surfaced, not denied: the doc tree still carries ~250 broken
+      # intra-doc link warnings (single-token bracket refs like [C4] in doc
+      # comments). Flip to RUSTDOCFLAGS: "-D warnings" once those are swept.
+      - run: cargo doc --workspace --no-deps
+
+  bench-goldens:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Release CLI only (timings never run here); the check compares each
+      # kernel's final `result:` line across ds, python, and node (lua SKIPs
+      # when absent) and exits nonzero on any golden mismatch.
+      - run: cargo build --release -p ds-cli
+      - run: bash benchmarks/run.sh check
+        env:
+          DS_BIN: ${{ github.workspace }}/target/release/ds

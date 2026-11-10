@@ -7,9 +7,9 @@
 use ds_diag::{FileId, Files, Span};
 use ds_fmt::format_source;
 use ds_parse::{
-    Ast, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, LocalDecl, MatchArm, OrTail,
-    Param, ParamMode, Path, Pattern, Stmt, StmtKind, StrPart, StructMember, TraitMember, Type,
-    TypeParam, Vis, parse,
+    Ast, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, LocalDecl, MatchArm, Param,
+    ParamMode, Path, Pattern, Stmt, StmtKind, StrPart, StructMember, TraitMember, Type, TypeParam,
+    Vis, parse,
 };
 
 /// Parses and formats once; panics with rendered diagnostics on parse failure.
@@ -62,22 +62,21 @@ pub const POSITIVE: &[&str] = &[
     "fn f(a: int,\n  b: int,\n) -> int { g(a, b,) }\n",
     "fn f() { const x = if c { 1 } else { 2 }\n x\n}\n",
     "fn f() {\nif a { 1 } else if b { 2 } else { 3 }\n}\n",
-    "const f = (x: int) -> int { x }\n",
-    "fn f() { }\nconst h = () -> int { 0 }\n",
+    "fn f(x: int) -> int { x }\n",
+    "fn f() { }\nfn h() -> int { 0 }\n",
     "tag a\ntag b\n",
-    "tag a\n///|\ntag b\n///|\ntag c\n",
-    "tag a\n///| section: types\ntag b\n",
-    "tag a\n///|\n",
-    "///|\n///|\ntag a\n",
+    "tag a\n##\ntag b\n##\ntag c\n",
+    "tag a\n## section: types\ntag b\n",
+    "tag a\n##\n",
+    "##\n##\ntag a\n",
     // F2: bindings, const-arrow functions, annotations, returns
     "const one = 1\n",
     "var n: int = 0\n",
-    "const parse_age = (s: string) -> int | parse_error { s.len() }\n",
+    "fn parse_age(s: string) -> int | parse_error { s.len() }\n",
     "fn f() { const g = (a: int, b: int) => a + b\n g\n}\n",
     "fn f() { const lens = ws.map(w => w.len()).collect()\n lens\n}\n",
-    "const loop = (n: int) -> int { loop(n)\n}\n",
+    "fn loop(n: int) -> int { loop(n)\n}\n",
     "fn f() { return badport { got: -1 }\n}\n",
-    "fn f() { const name = row.get(\"n\") or return missing(\"n\")\n name\n}\n",
     "fn f() { return\n}\n",
     "fn f() {\nwhile c { break }\nwhile c { continue }\n}\n",
     "fn f() { const (a, b) = xs.partition((r) => r is pe)\n a\n}\n",
@@ -122,7 +121,8 @@ pub const POSITIVE: &[&str] = &[
     "const s = r#\"has \"quotes\" inside\"#\n",
     "const s = r###\"deeper \"## hash\"###\n",
     "const c = 'x'\nconst n = '\\n'\nconst u = '\\u{65}'\nconst q = '\\''\n",
-    "const b = b'x'\nconst n = b'\\n'\n",
+    "const b = b'x'\nconst n = b'\\n'\nconst q = b'\\''\nconst s = b'\\\\'\nconst u = \
+     b'\\u{7f}'\nconst z = b'\\0'\n",
     "const a = 1_000_000i64\nconst b = 42u8\nconst c = 0xFFi64\nconst d = 0b1010_1010u8\nconst e \
      = 0o777i32\nconst f = 0i64\n",
     "const a = 2.0f32\nconst b = 1e5\nconst c = 1.0e-5f64\nconst d = 2.5\n",
@@ -132,7 +132,7 @@ pub const POSITIVE: &[&str] = &[
     "type t = a | b & c - d\n",
     "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
     "type h = fn(a: int) -> int\n",
-    "const main = () -> () | io_error { 0 }\n",
+    "fn main() -> () | io_error { 0 }\n",
     "type e = badnumber(string) | missingfield(string)\n",
     "enum color { red, green(int), blue { shade: int } }\n",
     "tag timeout\ntag missing\n",
@@ -161,15 +161,15 @@ pub const POSITIVE: &[&str] = &[
     "fn f() { g(x: a + b, y: h(c))\n}\n",
     "fn f() { g(x: 1,)\n}\n",
     "fn f(a: int = 0, b: string = \"s\", c: float = -1.5) -> int { a }\n",
-    "const g = (a: int = 0) => a\n",
-    "trait t {\nconst g = (a: int = 0) -> int\n}\n",
-    "trait t {\nfn f(a: int) -> int,\nconst g = (a: int) -> int,\n}\n",
-    "impl u {\nfn f() -> int { 0 },\nconst g = (a: int) -> int { a },\n}\n",
-    "trait t {\nfn f() -> int,\nconst g = (a: int) -> int\n}\n",
+    "fn f() { const g = (a: int = 0) => a\n g\n}\n",
+    "trait t {\nfn g(a: int = 0) -> int\n}\n",
+    "trait t {\nfn f(a: int) -> int,\nfn g(a: int) -> int,\n}\n",
+    "impl u {\nfn f() -> int { 0 },\nfn g(a: int) -> int { a },\n}\n",
+    "trait t {\nfn f() -> int,\nfn g() -> int\n}\n",
     "fn f() {\nmatch x {\na => 1\nb => 2\n}\n}\n",
     // pattern shape regression corpus (parse_suite tail)
-    "const one = 1\nconst (a, b) = pair\nconst f = (x) -> () {\n  match x {\n    p | q => p,\n    \
-     (c, d) => c,\n    _ => x,\n  }\n}\n",
+    "const one = 1\nconst (a, b) = pair\nfn f(x) -> () {\n  match x {\n    p | q => p,\n    (c, \
+     d) => c,\n    _ => x,\n  }\n}\n",
 ];
 
 // ===== AST shape (the AST-preservation comparison) =====
@@ -636,6 +636,12 @@ fn norm_expr(e: &mut Expr) {
             norm_expr(recv);
             norm_ident(name);
         },
+        Expr::List { span, items } => {
+            z(span);
+            for i in items {
+                norm_expr(i);
+            }
+        },
         Expr::Index { span, recv, index } => {
             z(span);
             norm_expr(recv);
@@ -666,20 +672,6 @@ fn norm_expr(e: &mut Expr) {
             z(span);
             norm_expr(start);
             norm_expr(end);
-        },
-        Expr::Or { span, left, right } => {
-            z(span);
-            norm_expr(left);
-            match &mut **right {
-                OrTail::Expr(e) => norm_expr(e),
-                OrTail::Return { span, expr } => {
-                    z(span);
-                    if let Some(e) = expr {
-                        norm_expr(e);
-                    }
-                },
-                OrTail::Break(s) | OrTail::Continue(s) => z(s),
-            }
         },
         Expr::If {
             span,

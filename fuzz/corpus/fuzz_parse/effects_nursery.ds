@@ -1,0 +1,67 @@
+// source: frozen archive catalog 03-effects-errors-async (seed corpus)
+// purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, par combinators
+// items:
+// url: stage: typecheck
+// page: stage: typecheck
+// timeout: stage: typecheck
+// refused: stage: typecheck
+// net_err: stage: typecheck
+// fetch_body: stage: run
+// fetch_all: stage: run
+// with_retry: stage: run
+// main: stage: run
+// v2-handler: stage: unresolved: user-defined handlers are a v2 additive escape hatch [E1], not parsed in v1
+
+type url = string
+struct page { url: url, body: string }
+tag timeout
+tag refused
+type net_err = timeout | refused
+
+const fetch_body = (url: url) -> page | net_err {
+  const resp = fetch(url)?
+  page { url: url, body: resp.consume() }
+}
+
+const fetch_all = (urls: list[url]) -> list[page] | net_err {
+  var pages = list[page]()
+  nursery {
+    for url in urls {
+      spawn {
+        match fetch_body(url) {
+          p => pages.push(p),
+          e => cancel(e),
+        }
+      }
+    }
+  }
+  pages
+}
+
+const with_retry = (n: int, url: url) -> page | net_err {
+  var last: net_err = timeout
+  var done: page? = none
+  for i in 0..n {
+    match fetch_body(url) {
+      p => {
+        done = p
+        break
+      }
+      e => {
+        last = e
+      }
+    }
+  }
+  match done {
+    none => last,
+    p => p,
+  }
+}
+
+const main = () -> () | net_err {
+  const pages = fetch_all(urls).err((e: net_err) => die("all fetches failed"))
+  print("total: ${str(pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b))}")
+}
+
+// v2, additive with no migration, user handlers for final/tail-resumptive effects only [E1]:
+// with handler { op ask() => resume(42) }

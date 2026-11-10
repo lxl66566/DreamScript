@@ -161,7 +161,7 @@ fn placeholder_payload() -> Vec<u8> {
     out
 }
 
-/// The blocks payload, version 1 [BL-7]: per-function records over the
+/// The blocks payload, version 1 (BL-7): per-function records over the
 /// BL-5 uop set and BL-6 frame layouts. See the crate docs for the byte
 /// layout.
 fn blocks_payload(functions: &[Function]) -> Vec<u8> {
@@ -200,10 +200,11 @@ fn blocks_payload(functions: &[Function]) -> Vec<u8> {
             &mut out,
             u64::try_from(function.code().len()).expect("code count fits u64"),
         );
-        for (pc, uop) in function.code().iter().enumerate() {
+        for (pc, inst) in function.code().iter().enumerate() {
             let pc = u32::try_from(pc).expect("pc fits u32");
             out.extend_from_slice(
-                &uop.encode(pc)
+                &inst
+                    .encode(pc)
                     .expect("Function::new validated encodability")
                     .to_le_bytes(),
             );

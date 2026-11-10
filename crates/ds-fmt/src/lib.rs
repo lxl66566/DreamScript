@@ -1,7 +1,7 @@
 //! `ds fmt` as a compiler component [H6 item 2]: a block-aware, zero-option
 //! formatter over the parse query. The public entry formats a whole file;
-//! internally every `///|` block renders from its own AST plus trivia only
-//! ([`render_block`]), so the LSP on-type path can later format one block
+//! internally every `##` block renders from its own AST plus trivia only
+//! (`render_block`), so the LSP on-type path can later format one block
 //! without touching its neighbors — block boundaries are the only thing the
 //! file-level assembly reads.
 //!
@@ -18,11 +18,11 @@
 //!   const-arrow member spelling, so one form is chosen.
 //! - Multiline struct/enum/trait/impl bodies and match arms are newline-separated without commas
 //!   [6.1]; commas survive only inside a one-line inline container. Named arguments render `name:
-//!   value` and literal signature defaults render `= lit` [F7].
+//!   value` and literal signature defaults render `= lit` (F7).
 //! - `.`-chains keep the author's line breaks (continuations at base indent + 2); everything else
 //!   that fits its container's layout renders flat.
 //! - Paths render with `::` separators; `a.b` types render `a::b`.
-//! - A call whose only argument is the trailing block [F7] renders without a parenthesis pair of
+//! - A call whose only argument is the trailing block (F7) renders without a parenthesis pair of
 //!   its own (`with_file(p, f) { ... }`); `else if` chains keep the `if`.
 //! - There is NO wrapping: long lines stay long. A braced container renders inline iff its span
 //!   lies on one source line; otherwise it opens up.
@@ -34,7 +34,7 @@
 //! the last item of a block (including EOF comments) are kept as the block's
 //! trailing lines — nothing is dropped. `///` doc-comments are ordinary
 //! leading trivia and travel with their item. Blank-line runs between
-//! elements collapse to at most one blank line. `///|` separators are
+//! elements collapse to at most one blank line. `##` separators are
 //! recovered verbatim from the source (text and column preserved) and a
 //! blank line around a separator is preserved. Comments interior to a
 //! declaration (deep trivia) migrate to the item's trailing position — a v1
@@ -135,9 +135,9 @@ fn content_start(block: &Block) -> u32 {
 }
 
 /// Last content offset of a block (items, their comments, trailing
-/// comments). Not the block span: the `file_block` pair swallows the
-/// trailing newlines up to a separator, which would defeat blank-line
-/// detection around the separator.
+/// comments). Not the block span: a trailing comment behind the last item
+/// sits outside the pair (the separator's spacing rule consumes it), so
+/// blank-line detection around the separator needs real content offsets.
 fn content_end(block: &Block) -> u32 {
     let mut end = 0;
     for item in &block.items {
@@ -157,8 +157,8 @@ fn content_end(block: &Block) -> u32 {
     end
 }
 
-/// A recovered `///|` separator line, verbatim from the source (its text
-/// after the marker and its column are preserved).
+/// A recovered `##` separator line, verbatim from the source (the marker
+/// is line-initial, so the line starts at it; its text is preserved).
 struct Separator {
     text: String,
     /// Offset of the separator line's first byte.
@@ -167,14 +167,14 @@ struct Separator {
     line_end: u32,
 }
 
-/// Finds the `///|` separator inside a gap window. All comments in the gap
+/// Finds the `##` separator inside a gap window. All comments in the gap
 /// are attached as trivia (rendered inside block content), so the window
 /// holds only whitespace around the separator token and its line text.
 // Offsets are u32 by the Files contract.
 #[allow(clippy::cast_possible_truncation)]
 fn find_separator(ctx: &Ctx, from: u32, to: u32) -> Option<Separator> {
     let src = ctx.src();
-    let tok = src[from as usize..to as usize].find("///|")? + from as usize;
+    let tok = src[from as usize..to as usize].find("##")? + from as usize;
     let line_start = src[..tok]
         .rfind('\n')
         .map_or(from as usize, |i| i + 1)
@@ -242,8 +242,8 @@ mod tests {
     /// block rendered alone equals its slice of the file output.
     #[test]
     fn blocks_format_independently() {
-        let src = "tag a\n// about b\nconst b = 1\n\n///| section two\n\nfn c() { \
-                   x\n}\n\n///|\n\ntag d\n// eof\n";
+        let src = "tag a\n// about b\nconst b = 1\n\n## section two\n\nfn c() { x\n}\n\n##\n\ntag \
+                   d\n// eof\n";
         let mut files = Files::new();
         let file = files.add_source("t.ds", src);
         let ast = parse(&files, file).expect("parses");
@@ -262,13 +262,13 @@ mod tests {
 
     #[test]
     fn separators_and_blanks_survive() {
-        assert_eq!(fmt_src("tag a\n///|\ntag b\n"), "tag a\n///|\ntag b\n");
+        assert_eq!(fmt_src("tag a\n##\ntag b\n"), "tag a\n##\ntag b\n");
         assert_eq!(
-            fmt_src("tag a\n\n///| s\n\ntag b\n"),
-            "tag a\n\n///| s\n\ntag b\n"
+            fmt_src("tag a\n\n## s\n\ntag b\n"),
+            "tag a\n\n## s\n\ntag b\n"
         );
-        assert_eq!(fmt_src("///|\n///|\ntag a\n"), "///|\n///|\ntag a\n");
-        assert_eq!(fmt_src("tag a\n///|\n"), "tag a\n///|\n");
+        assert_eq!(fmt_src("##\n##\ntag a\n"), "##\n##\ntag a\n");
+        assert_eq!(fmt_src("tag a\n##\n"), "tag a\n##\n");
     }
 
     #[test]

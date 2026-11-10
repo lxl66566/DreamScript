@@ -3,7 +3,7 @@
 //! Every node carries a [`Span`]. Comments are attached as [`Trivia`] payload
 //! (leading on the following item, trailing at container end) so the M1
 //! formatter is lossless over comments. A file is a `Vec<Block>` of
-//! `///|`-separated blocks [G3]; a file without separators is one block.
+//! `##`-separated blocks (G3); a file without separators is one block.
 //! Top-level definitions are order-independent data — no ordering validation
 //! happens at parse time.
 
@@ -16,11 +16,11 @@ pub struct Ast {
     pub file: FileId,
     /// Span of the whole file.
     pub span: Span,
-    /// `///|`-separated blocks; at least one, possibly empty.
+    /// `##`-separated blocks; at least one, possibly empty.
     pub blocks: Vec<Block>,
 }
 
-/// A `///|`-delimited slice of a file [G3].
+/// A `##`-delimited slice of a file (G3).
 #[derive(Clone, Debug)]
 pub struct Block {
     /// Span from the first item to the last (or the separator).
@@ -77,7 +77,7 @@ pub struct Attribute {
     pub args: Vec<Path>,
 }
 
-/// Visibility of a definition [G4].
+/// Visibility of a definition (G4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Vis {
     /// `pub`: visible to dependents, enters the `.dsi`.
@@ -99,29 +99,32 @@ impl Vis {
 /// One top-level definition.
 #[derive(Clone, Debug)]
 pub enum ItemKind {
-    /// `import path (sel)? as alias? if cond?` [G4].
+    /// `import path (sel)? as alias? if cond?` (G4).
     Import(ImportDecl),
-    /// `const`/`var` binding (top level).
+    /// `const`/`var` binding (top level); also the converted shape of a
+    /// bodied `fn name(params) -> t { ... }` declaration (F2) — one binding
+    /// of one lambda, the named-function representation downstream.
     Local(LocalDecl),
-    /// `fn name(params) -> t { ... }`.
+    /// A bodiless `fn name(params) -> t` signature (top level); bodied
+    /// declarations convert onto [`ItemKind::Local`].
     Fn(FnDecl),
-    /// `extern fn name(params) -> t` [H5].
+    /// `extern fn name(params) -> t` (H5).
     ExternFn(FnDecl),
-    /// `struct Name: supers? { fields, deinit? }` [B3].
+    /// `struct Name: supers? { fields, deinit? }` (B3).
     Struct(StructDecl),
-    /// `enum Name { Case, Case(t), Case { f } }` [B3].
+    /// `enum Name { Case, Case(t), Case { f } }` (B3).
     Enum(EnumDecl),
-    /// `tag Name` — unit tag [B1].
+    /// `tag Name` — unit tag (B1).
     Tag(TagDecl),
-    /// `type Name = type` [F7].
+    /// `type Name = type` (F7).
     TypeAlias(TypeAliasDecl),
-    /// `trait Name { type A; fn sig }` [B6].
+    /// `trait Name { type A; fn sig }` (B6).
     Trait(TraitDecl),
-    /// `impl[g]? Trait? for? type { fn }` [B6].
+    /// `impl[g]? Trait? for? type { fn }` (B6).
     Impl(ImplDecl),
 }
 
-/// An import declaration [G4].
+/// An import declaration (G4).
 #[derive(Clone, Debug)]
 pub struct ImportDecl {
     /// Span of the whole declaration.
@@ -173,7 +176,9 @@ pub struct LocalDecl {
     pub init: Expr,
 }
 
-/// A named function declaration (used at top level and inside trait/impl).
+/// A named function declaration: bodiless top-level signatures plus every
+/// trait/impl member (bodied `fn` declarations at top level convert onto
+/// [`ItemKind::Local`]).
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     /// Span of the whole declaration.
@@ -206,28 +211,28 @@ pub struct TypeParam {
 pub struct Param {
     /// Span of the parameter.
     pub span: Span,
-    /// Passing mode [C2]: borrow (default), `mut`, consume (`move`),
+    /// Passing mode (C2): borrow (default), `mut`, consume (`move`),
     /// or `comptime`.
     pub mode: ParamMode,
     /// Parameter name.
     pub name: Ident,
     /// Optional type annotation.
     pub ty: Option<Type>,
-    /// Optional literal-only default `x: t = lit` [F7]; conversion rejects
+    /// Optional literal-only default `x: t = lit` (F7); conversion rejects
     /// non-literal defaults, so a `Some` value is always a literal shape.
     pub default: Option<Expr>,
 }
 
-/// A parameter's passing mode [C2].
+/// A parameter's passing mode (C2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParamMode {
     /// Default immutable borrow.
     Borrow,
     /// `mut`: exclusive mutable window.
     Mut(Span),
-    /// `move`: consume [C2]; exact spelling is a parse-time liberal choice.
+    /// `move`: consume (C2); exact spelling is a parse-time liberal choice.
     Consume(Span),
-    /// `comptime`: compile-time parameter [G1].
+    /// `comptime`: compile-time parameter (G1).
     Comptime(Span),
 }
 
@@ -253,7 +258,7 @@ pub struct StructDecl {
 pub enum StructMember {
     /// `name: type` field.
     Field(FieldDecl),
-    /// `deinit { ... }` [C5].
+    /// `deinit { ... }` (C5).
     Deinit {
         /// Span of `deinit { ... }`.
         span: Span,
@@ -310,7 +315,7 @@ pub enum EnumPayload {
     Struct(Vec<FieldDecl>),
 }
 
-/// A unit tag declaration [B1].
+/// A unit tag declaration (B1).
 #[derive(Clone, Debug)]
 pub struct TagDecl {
     /// Span of the declaration.
@@ -319,7 +324,7 @@ pub struct TagDecl {
     pub name: Ident,
 }
 
-/// A type alias [F7].
+/// A type alias (F7).
 #[derive(Clone, Debug)]
 pub struct TypeAliasDecl {
     /// Span of the whole declaration.
@@ -332,7 +337,7 @@ pub struct TypeAliasDecl {
     pub ty: Type,
 }
 
-/// A trait declaration [B6].
+/// A trait declaration (B6).
 #[derive(Clone, Debug)]
 pub struct TraitDecl {
     /// Span of the whole declaration.
@@ -350,7 +355,7 @@ pub struct TraitDecl {
 /// One trait member.
 #[derive(Clone, Debug)]
 pub enum TraitMember {
-    /// Associated type `type A` [B6].
+    /// Associated type `type A` (B6).
     AssocType {
         /// Span of the member.
         span: Span,
@@ -361,7 +366,7 @@ pub enum TraitMember {
     Fn(FnDecl),
 }
 
-/// An impl block [B6]: inherent (`impl list<t> { ... }`) or
+/// An impl block (B6): inherent (`impl list<t> { ... }`) or
 /// trait (`impl[T: ord] ord for list<t> { ... }`).
 #[derive(Clone, Debug)]
 pub struct ImplDecl {
@@ -389,14 +394,14 @@ pub enum Type {
         /// Generic arguments.
         args: Vec<Type>,
     },
-    /// `t?` — exactly `t | none` [B4].
+    /// `t?` — exactly `t | none` (B4).
     Optional {
         /// Span of `t?`.
         span: Span,
         /// The inner type.
         inner: Box<Type>,
     },
-    /// `~t` negated constraint [C1].
+    /// `~t` negated constraint (C1).
     Negation {
         /// Span of `~t`.
         span: Span,
@@ -421,7 +426,7 @@ pub enum Type {
         /// Right side.
         right: Box<Type>,
     },
-    /// `a - b` difference (compile-time only) [B1].
+    /// `a - b` difference (compile-time only) (B1).
     Difference {
         /// Span of `a - b`.
         span: Span,
@@ -437,7 +442,7 @@ pub enum Type {
         /// Inner type.
         inner: Box<Type>,
     },
-    /// Anonymous tuple type `(a, b)` [B3].
+    /// Anonymous tuple type `(a, b)` (B3).
     Tuple {
         /// Span including parens.
         span: Span,
@@ -455,7 +460,7 @@ pub enum Type {
         /// Return type.
         ret: Option<Box<Type>>,
     },
-    /// Raw pointer `*const t` / `*mut t` (extern surface) [H5].
+    /// Raw pointer `*const t` / `*mut t` (extern surface) (H5).
     Ptr {
         /// Span of the whole type.
         span: Span,
@@ -464,9 +469,9 @@ pub enum Type {
         /// Pointee type.
         inner: Box<Type>,
     },
-    /// The `type` keyword as a type atom (`comptime T: type`) [G2].
+    /// The `type` keyword as a type atom (`comptime T: type`) (G2).
     TypeKw(Span),
-    /// Opaque foreign type named by a string argument, `c["sqlite3"]` [H5].
+    /// Opaque foreign type named by a string argument, `c["sqlite3"]` (H5).
     Foreign {
         /// Span of the whole reference.
         span: Span,
@@ -538,7 +543,7 @@ pub struct Ident {
     pub name: String,
 }
 
-/// A pattern [F4].
+/// A pattern (F4).
 #[derive(Clone, Debug)]
 pub enum Pattern {
     /// `_`.
@@ -616,7 +621,7 @@ pub enum Pattern {
     },
 }
 
-/// One match arm [F4].
+/// One match arm (F4).
 #[derive(Clone, Debug)]
 pub struct MatchArm {
     /// Span of the whole arm.
@@ -631,7 +636,7 @@ pub struct MatchArm {
     pub body: Expr,
 }
 
-/// A `{ ... }` block; its value is the final expression [F2].
+/// A `{ ... }` block; its value is the final expression (F2).
 #[derive(Clone, Debug)]
 pub struct BlockExpr {
     /// Span including braces.
@@ -655,7 +660,7 @@ pub struct Stmt {
     pub trailing_trivia: Vec<Trivia>,
 }
 
-/// A statement is a binding or an expression [F1].
+/// A statement is a binding or an expression (F1).
 #[derive(Clone, Debug)]
 pub enum StmtKind {
     /// `const`/`var` binding.
@@ -667,21 +672,21 @@ pub enum StmtKind {
 /// An expression.
 #[derive(Clone, Debug)]
 pub enum Expr {
-    /// Integer literal [B7]; text is unparsed digits plus suffix.
+    /// Integer literal (B7); text is unparsed digits plus suffix.
     Literal {
         /// Span of the literal.
         span: Span,
         /// The literal.
         lit: Literal,
     },
-    /// Interpolating or plain string; holes are structured [F6].
+    /// Interpolating or plain string; holes are structured (F6).
     Str {
         /// Span including quotes.
         span: Span,
         /// Parts in source order.
         parts: Vec<StrPart>,
     },
-    /// A raw string; no escapes, no interpolation [F6].
+    /// A raw string; no escapes, no interpolation (F6).
     RawStr {
         /// Span including `r`, hashes, and quotes.
         span: Span,
@@ -690,7 +695,7 @@ pub enum Expr {
         /// The raw content between the delimiters.
         text: String,
     },
-    /// A lambda: `(x, y: t) -> t { ... }` or `x => e` [F2].
+    /// A lambda: `(x, y: t) -> t { ... }` or `x => e` (F2).
     Lambda {
         /// Span of the whole lambda.
         span: Span,
@@ -705,7 +710,7 @@ pub enum Expr {
         /// Body expression.
         body: Box<Expr>,
     },
-    /// A path expression (`x`, `Trait::f`) [F3].
+    /// A path expression (`x`, `Trait::f`) (F3).
     Path {
         /// Span of the path.
         span: Span,
@@ -737,18 +742,26 @@ pub enum Expr {
         /// Inner expression.
         inner: Box<Expr>,
     },
-    /// A call `f(args)`; `trailing` is the block-argument lambda [F7].
+    /// A list literal `[a, b, c]` (F7, B3); the empty form types only
+    /// against an expected `list[t]`.
+    List {
+        /// Span including brackets.
+        span: Span,
+        /// Elements in source order.
+        items: Vec<Expr>,
+    },
+    /// A call `f(args)`; `trailing` is the block-argument lambda (F7).
     Call {
         /// Span of the whole call.
         span: Span,
         /// Called expression.
         callee: Box<Expr>,
-        /// Arguments; named arguments follow positional ones [F7].
+        /// Arguments; named arguments follow positional ones (F7).
         args: Vec<CallArg>,
         /// Trailing block argument, if present.
         trailing: Option<Box<Expr>>,
     },
-    /// Field access `x.f` — for calls, UFCS applies [F3].
+    /// Field access `x.f` — for calls, UFCS applies (F3).
     Field {
         /// Span of `x.f`.
         span: Span,
@@ -757,7 +770,7 @@ pub enum Expr {
         /// Field name.
         name: Ident,
     },
-    /// Index `xs[i]` [F5].
+    /// Index `xs[i]` (F5).
     Index {
         /// Span of `xs[i]`.
         span: Span,
@@ -766,7 +779,7 @@ pub enum Expr {
         /// Index expression.
         index: Box<Expr>,
     },
-    /// Postfix `?` propagation [E4].
+    /// Postfix `?` propagation (E4).
     Try {
         /// Span of `e?`.
         span: Span,
@@ -782,7 +795,7 @@ pub enum Expr {
         /// Operand.
         expr: Box<Expr>,
     },
-    /// `expr is type` narrowing test [F7]; the right side is a type.
+    /// `expr is type` narrowing test (F7); the right side is a type.
     Is {
         /// Span of the whole test.
         span: Span,
@@ -792,7 +805,7 @@ pub enum Expr {
         ty: Box<Type>,
     },
     /// A binary operation (arithmetic, shifts, comparison, `in`,
-    /// logical, bitwise) [F5].
+    /// logical, bitwise) (F5).
     Binary {
         /// Span of the whole expression.
         span: Span,
@@ -803,7 +816,7 @@ pub enum Expr {
         /// Right side.
         right: Box<Expr>,
     },
-    /// A range `a..b` or `a..=b` [F7].
+    /// A range `a..b` or `a..=b` (F7).
     Range {
         /// Span of the whole range.
         span: Span,
@@ -813,15 +826,6 @@ pub enum Expr {
         start: Box<Expr>,
         /// End.
         end: Box<Expr>,
-    },
-    /// `a or b` / `a or return e` extraction [E4].
-    Or {
-        /// Span of the whole expression.
-        span: Span,
-        /// Left side.
-        left: Box<Expr>,
-        /// Right side: a plain expression or an early exit.
-        right: Box<OrTail>,
     },
     /// An assignment `x = e` or compound `x += e`.
     Assign {
@@ -834,7 +838,7 @@ pub enum Expr {
         /// Value.
         right: Box<Expr>,
     },
-    /// `if cond { a } else { b }` — an expression [F1].
+    /// `if cond { a } else { b }` — an expression (F1).
     If {
         /// Span of the whole expression.
         span: Span,
@@ -845,7 +849,7 @@ pub enum Expr {
         /// `else` block or `else if` chain.
         else_: Option<Box<Expr>>,
     },
-    /// `match scrutinee { arms }` — an expression [F4].
+    /// `match scrutinee { arms }` — an expression (F4).
     Match {
         /// Span of the whole expression.
         span: Span,
@@ -863,7 +867,7 @@ pub enum Expr {
         /// Body.
         body: BlockExpr,
     },
-    /// `for pat in iter { body }` or `for (pat in iter) body` [F7].
+    /// `for pat in iter { body }` or `for (pat in iter) body` (F7).
     For {
         /// Span of the whole expression.
         span: Span,
@@ -885,21 +889,21 @@ pub enum Expr {
     Break(Span),
     /// `continue`.
     Continue(Span),
-    /// `nursery { ... }` [E2].
+    /// `nursery { ... }` (E2).
     Nursery {
         /// Span of the whole expression.
         span: Span,
         /// Body.
         body: BlockExpr,
     },
-    /// `spawn { ... }` [E2].
+    /// `spawn { ... }` (E2).
     Spawn {
         /// Span of the whole expression.
         span: Span,
         /// Body.
         body: BlockExpr,
     },
-    /// `defer { ... }` scope-exit sugar [E5].
+    /// `defer { ... }` scope-exit sugar (E5).
     Defer {
         /// Span of the whole expression.
         span: Span,
@@ -922,6 +926,7 @@ impl Expr {
             | Self::Path { span, .. }
             | Self::Struct { span, .. }
             | Self::Tuple { span, .. }
+            | Self::List { span, .. }
             | Self::Paren { span, .. }
             | Self::Call { span, .. }
             | Self::Field { span, .. }
@@ -931,7 +936,6 @@ impl Expr {
             | Self::Binary { span, .. }
             | Self::Is { span, .. }
             | Self::Range { span, .. }
-            | Self::Or { span, .. }
             | Self::Assign { span, .. }
             | Self::If { span, .. }
             | Self::Match { span, .. }
@@ -948,7 +952,7 @@ impl Expr {
     }
 }
 
-/// One argument of a call [F7]: positional, or named (`f(x: 1)`).
+/// One argument of a call (F7): positional, or named (`f(x: 1)`).
 #[derive(Clone, Debug)]
 pub struct CallArg {
     /// Span of the whole argument.
@@ -959,25 +963,7 @@ pub struct CallArg {
     pub value: Expr,
 }
 
-/// The right side of an `or` [E4].
-#[derive(Clone, Debug)]
-pub enum OrTail {
-    /// A plain fallback expression.
-    Expr(Expr),
-    /// `or return e?`.
-    Return {
-        /// Span of `return ...`.
-        span: Span,
-        /// Returned value, if any.
-        expr: Option<Box<Expr>>,
-    },
-    /// `or break`.
-    Break(Span),
-    /// `or continue`.
-    Continue(Span),
-}
-
-/// One part of an interpolated string [F6].
+/// One part of an interpolated string (F6).
 #[derive(Clone, Debug)]
 pub enum StrPart {
     /// Literal text with escapes already cooked.
@@ -1006,14 +992,14 @@ pub enum StrPart {
 /// A non-string literal.
 #[derive(Clone, Debug)]
 pub enum Literal {
-    /// Integer [B7]: raw digits text (radix prefix kept) and suffix.
+    /// Integer (B7): raw digits text (radix prefix kept) and suffix.
     Int {
         /// Suffix text, e.g. `i64`; empty when unsuffixed.
         suffix: String,
         /// Raw digit text without separators, e.g. `0xff`.
         text: String,
     },
-    /// Float [B7]: raw mantissa/exponent text and suffix.
+    /// Float (B7): raw mantissa/exponent text and suffix.
     Float {
         /// Suffix text, e.g. `f32`; empty when unsuffixed.
         suffix: String,
@@ -1033,18 +1019,18 @@ pub enum Literal {
 pub enum UnaryOp {
     /// Negate (traps on int-min).
     Neg,
-    /// Negate wrapping [B7].
+    /// Negate wrapping (B7).
     WrapNeg,
     /// Boolean not.
     Not,
 }
 
-/// Binary operator — the frozen set [F5].
+/// Binary operator — the frozen set (F5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BinaryOp {
     /// `+` (traps).
     Add,
-    /// `+%` wrapping [B7].
+    /// `+%` wrapping (B7).
     WrapAdd,
     /// `-`.
     Sub,
@@ -1062,7 +1048,7 @@ pub enum BinaryOp {
     Shl,
     /// `>>`.
     Shr,
-    /// `==` structural [B9].
+    /// `==` structural (B9).
     Eq,
     /// `!=`.
     Ne,
@@ -1074,7 +1060,7 @@ pub enum BinaryOp {
     Gt,
     /// `>=`.
     Ge,
-    /// `x in y` containment [F7].
+    /// `x in y` containment (F7).
     In,
     /// `&&`.
     And,

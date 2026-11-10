@@ -12,10 +12,20 @@ use ds_mod::{LoadError as ModLoadError, Module, ReadError, read_mmap};
 use ds_vm::{
     LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap, Value, Vm,
     abi::SlotType,
-    native::{BUILTIN_IO_ERR, BUILTIN_NET_ERR},
+    native::{PLATFORM_IO_ERR, PLATFORM_NET_ERR, STD_PLATFORM_MODULE, std_platform_module},
 };
 
 use crate::source;
+
+/// The CLI is the default platform provider [H5.5]: every run installs
+/// the `std` platform natives (console, file, net) into its registry.
+/// This must precede [`Vm::install_dsmod`] — the loader validates pool
+/// FuncRefs at install time, so a world-native call site in the module
+/// would fail as an unresolved callee otherwise (`Vm::new` installs the
+/// builtin core only, and too late for this path regardless).
+fn provide_platform(registry: &mut ModuleRegistry) {
+    registry.install_native(STD_PLATFORM_MODULE, std_platform_module());
+}
 
 /// The `ds run` surface: one module or source file, one entry name, i64
 /// arguments.
@@ -82,7 +92,9 @@ struct PreparedRun {
 fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let module = read_mmap(&args.file).map_err(|error| open_error(&args.file, &error))?;
     let name = module.module().name().to_owned();
-    let mut vm = Vm::new(ModuleRegistry::new());
+    let mut registry = ModuleRegistry::new();
+    provide_platform(&mut registry);
+    let mut vm = Vm::new(registry);
     vm.install_dsmod(module.module())
         .map_err(|error| install_error(module.module(), &error))?;
     Ok(PreparedRun {
@@ -102,7 +114,9 @@ fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
 /// the entry parameters' checked types.
 fn compile_source(args: &RunArgs) -> Result<PreparedRun> {
     let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
-    let mut vm = Vm::new(ModuleRegistry::new());
+    let mut registry = ModuleRegistry::new();
+    provide_platform(&mut registry);
+    let mut vm = Vm::new(registry);
     vm.install_dsmod(compiled.lowered.module())
         .map_err(|error| install_error(compiled.lowered.module(), &error))?;
     Ok(PreparedRun {
@@ -132,10 +146,10 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
     }
     match prepared.vm.run(&prepared.name, entry, &prepared.staged) {
         Ok(value) => match value {
-            Value::Tag(tag) if tag == BUILTIN_IO_ERR => Err(anyhow!(
+            Value::Tag(tag) if tag == PLATFORM_IO_ERR => Err(anyhow!(
                 "the run halted on an unhandled io failure (the message is on stdout)"
             )),
-            Value::Tag(tag) if tag == BUILTIN_NET_ERR => Err(anyhow!(
+            Value::Tag(tag) if tag == PLATFORM_NET_ERR => Err(anyhow!(
                 "the run halted on an unhandled net failure (the message is on stdout)"
             )),
             value => {

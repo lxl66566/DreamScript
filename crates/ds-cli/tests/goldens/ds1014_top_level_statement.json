@@ -1,0 +1,1 @@
+{"code":"DS1014","severity":"error","message":"top-level statements are legal only in the entry file under script mode; wrap them in a function body, or run the file as the entry with `ds run`","spans":[{"file":"tests/fixtures/negative/ds1014_top_level_statement.ds","start_line":6,"start_col":1,"end_line":6,"end_col":7,"label":"here","primary":true}],"notes":[],"suggestions":[]}

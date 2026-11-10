@@ -15,17 +15,38 @@
 //! [`Trap::BadEncoding`] is a canonicity violation, not a slow path. The
 //! decode itself is branch-light by construction: the bias arithmetic is
 //! branch-free [BL-1].
+//!
+//! # Fibers and nurseries
+//!
+//! The dispatcher also owns the fiber switch mechanics over the pool in
+//! `crate::fiber` [E2]: the control natives park the running fiber (record
+//! its resume point), and entering a fiber swaps segment and call-chain
+//! ownership between its pool slot and the VM's context — two buffer
+//! swaps, O(1), no word copied. A fiber completing at its entry frame
+//! marks itself dead and switches back to its resumer with its final
+//! value.
+//!
+//! Nurseries [E2, E5] layer on top (`crate::nursery`): fibers spawn into a
+//! nursery (the child-of link), the join/teardown driver drives children to
+//! death in spawn order, and a first failure raises the nursery's cancel
+//! flag — observed only at taken backward branches (the `jump!` macro), so
+//! a linear consume in flight is never interrupted.
 
 use std::sync::Arc;
 
 use ds_abi::{
-    CodePc, ConstIdx, FrameLayout, FrameMetadata, SlideDirection, SlideError, SlotType, TailChain,
+    CodePc, ConstIdx, FrameLayout, FrameMetadata, RC_MAJOR, RcDecodeError, RcOp, SlideDirection,
+    SlideError, SlotType, TailChain,
     uop::{DecodeError, Uop},
 };
 
 use crate::{
+    fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
     module::{ModuleRegistry, ModuleVersion},
-    native::{NativeFunction, NativeResult, OutputSink},
+    native::{
+        ControlNative, NativeFunction, NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
+    },
+    nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::Objects,
     program::{Const, ConstKind},
     value::{Value, Word},
@@ -63,7 +84,9 @@ pub enum Trap {
         func: String,
     },
     /// A pool FuncRef resolved to no function in the target module's
-    /// current slot.
+    /// current slot. Also the host-side fiber-routing failure
+    /// ([`Vm::resume_fiber`]), with the virtual module `fiber` naming the
+    /// rejected pool index.
     UnknownCallee {
         /// The target module's name.
         module: String,
@@ -169,14 +192,15 @@ pub enum Trap {
 }
 
 /// One entry of the call-info stack: the frame base plus the module version
-/// and function the frame runs. Frames live inline in the value stack; this
-/// records which version's code and pool a frame executes, so retiring
-/// versions stay runnable until their frames return [H6 item 5].
+/// and function the frame runs. Frames live inline in the fiber's value
+/// stack; this records which version's code and pool a frame executes, so
+/// retiring versions stay runnable until their frames return [H6 item 5].
+/// The chain belongs to the fiber whose segment holds the frames.
 #[derive(Clone, Debug)]
-struct CallInfo {
-    fp: usize,
-    module: Arc<ModuleVersion>,
-    func: u32,
+pub(crate) struct CallInfo {
+    pub(crate) fp: usize,
+    pub(crate) module: Arc<ModuleVersion>,
+    pub(crate) func: u32,
 }
 
 /// The function the dispatcher is executing.
@@ -192,7 +216,7 @@ struct Transfer {
 }
 
 /// A resolved pool FuncRef: a uop function (resolved through its module's
-/// current slot) or a native one (the VM-resident builtin tables).
+/// current slot) or a native one (the VM-resident native tables).
 #[derive(Debug)]
 enum Callee<'a> {
     /// Enter the callee's encoded body.
@@ -208,7 +232,7 @@ enum Callee<'a> {
 
 /// The outcome of a `RET`.
 enum RetOutcome {
-    /// The run's entry frame returned; `Value` is the run result.
+    /// The fiber's entry frame returned; `Value` is its final value.
     Root(Value),
     /// Resume the caller's function at the metadata word's return pc.
     Resume {
@@ -218,18 +242,42 @@ enum RetOutcome {
     },
 }
 
+/// How a drive of the dispatcher ended for its host: the current fiber
+/// completed, or it parked at a yield whose resumer is the host.
+enum DriveOutcome {
+    /// The current fiber's entry frame returned or `HALT`ed.
+    Died(Value),
+    /// The current fiber yielded with no in-language resumer.
+    Yielded(Value),
+}
+
+/// The result of a control-native switch at a `CALL` site.
+enum SwitchOutcome {
+    /// A fiber was entered: the dispatcher continues here.
+    Entered(Active, CodePc),
+    /// No switch happened (an unresumable `fiber_resume` target): the
+    /// bare `PLATFORM_NONE` bounce tag is on the caller's overlay; the
+    /// dispatcher advances past the call.
+    Bounced,
+    /// The switch reached the host: this drive ends with the event.
+    Host(DriveOutcome),
+}
+
 /// The mutable execution state the frame operations share, borrowed disjoint
-/// from the dispatcher's current-function snapshot.
+/// from the dispatcher's current-function snapshot. The stack is the
+/// current fiber's segment; `max_len` is that fiber's high-water mark, so
+/// the TCO criterion holds per fiber [H2].
 struct StackState<'a> {
-    stack: &'a mut Vec<Word>,
+    stack: &'a mut Segment,
     callinfo: &'a mut Vec<CallInfo>,
     limit: usize,
     max_len: &'a mut usize,
 }
 
 impl StackState<'_> {
-    /// Grows the stack to `new_len` after the per-entry limit compare [H1].
-    /// Never shrinks; resizes never move live frames' bases.
+    /// Grows the segment to `new_len` after the per-entry limit compare
+    /// [H1]. Never shrinks; growth appends chunks, so live frames' words
+    /// keep their addresses [H2].
     fn grow(&mut self, new_len: usize) -> Result<(), Trap> {
         if new_len <= self.stack.len() {
             return Ok(());
@@ -240,7 +288,7 @@ impl StackState<'_> {
                 limit: self.limit,
             });
         }
-        self.stack.resize(new_len, Word::Slot(Value::I64(0)));
+        self.stack.grow_to(new_len);
         *self.max_len = (*self.max_len).max(new_len);
         Ok(())
     }
@@ -310,7 +358,7 @@ impl StackState<'_> {
     /// callee's parameter types here (concrete staging was already proved
     /// by [`ds_abi::slide_plan`]).
     fn check_raw_staged(
-        stack: &[Word],
+        stack: &Segment,
         target_params: &[SlotType],
         caller: &FrameLayout,
         fp: usize,
@@ -475,7 +523,7 @@ fn word_of(fp: usize, slot: usize, body_len: usize) -> usize {
 }
 
 fn read_value(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -499,7 +547,7 @@ fn read_value(
 /// Reads a slot typed `want`; the value-type check doubles as the check of
 /// the static layout (writes enforce layout and value agreement).
 fn read_typed(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -518,7 +566,7 @@ fn read_typed(
 }
 
 fn read_i64(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -531,7 +579,7 @@ fn read_i64(
 }
 
 fn read_f64(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -544,7 +592,7 @@ fn read_f64(
 }
 
 fn read_bool(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -557,7 +605,7 @@ fn read_bool(
 }
 
 fn read_tag(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -570,7 +618,7 @@ fn read_tag(
 }
 
 fn read_ref(
-    stack: &[Word],
+    stack: &Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -585,7 +633,7 @@ fn read_ref(
 /// Writes a value into a slot, checking it against the slot's static type:
 /// hand-assembled code that mis-stages a value traps here.
 fn write_slot(
-    stack: &mut [Word],
+    stack: &mut Segment,
     fp: usize,
     slot: u8,
     slots: &[SlotType],
@@ -638,7 +686,7 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
 /// sink), so the registry borrow the callee came from stays alive.
 fn invoke_native(
     nf: &NativeFunction,
-    stack: &mut [Word],
+    stack: &mut Segment,
     objects: &mut Objects,
     out: &mut OutputSink,
     caller: &FrameLayout,
@@ -658,8 +706,11 @@ fn invoke_native(
         args.push(read_value(stack, fp, slot, caller.slots(), body_len)?);
     }
     for (index, (&value, &want)) in args.iter().zip(nf.params).enumerate() {
+        // a `Raw` parameter is the wildcard: the native's argument kind
+        // varies by call site (list_push's element), so the body receives
+        // whatever word staged
         let staged = value.slot_type();
-        if staged != want {
+        if staged != want && want != SlotType::Raw {
             return Err(Trap::CallLayout(SlideError::TypeMismatch {
                 index,
                 staged,
@@ -677,7 +728,7 @@ fn invoke_native(
 /// and reading them as typed slots is the lowering's discipline (mixed
 /// shapes declare the slots `Raw`). The call site pre-checks the width,
 /// so both writes stay in range by construction.
-fn overlay_native(result: NativeResult, stack: &mut [Word], caller: &FrameLayout, fp: usize) {
+fn overlay_native(result: NativeResult, stack: &mut Segment, caller: &FrameLayout, fp: usize) {
     let body_len = caller.slots().len() - caller.arg_area_len();
     let start = caller.arg_area().start;
     match result {
@@ -689,6 +740,27 @@ fn overlay_native(result: NativeResult, stack: &mut [Word], caller: &FrameLayout
             stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
             stack[word_of(fp, start + 1, body_len)] = Word::Slot(payload);
         },
+    }
+}
+
+/// Reads the i64 the caller staged on overlay word `index` for a control
+/// native — the same staged-type discipline `invoke_native` applies to
+/// ordinary natives.
+fn control_i64(
+    stack: &Segment,
+    fp: usize,
+    caller: &FrameLayout,
+    index: usize,
+) -> Result<i64, Trap> {
+    let body_len = caller.slots().len() - caller.arg_area_len();
+    let slot = u8::try_from(caller.arg_area().start + index).expect("slot index fits u8");
+    match read_value(stack, fp, slot, caller.slots(), body_len)? {
+        Value::I64(v) => Ok(v),
+        v => Err(Trap::CallLayout(SlideError::TypeMismatch {
+            index,
+            staged: v.slot_type(),
+            expected: SlotType::I64,
+        })),
     }
 }
 
@@ -739,18 +811,32 @@ pub struct BacktraceFrame {
 }
 
 /// The tier-1 VM. Construct with a [`ModuleRegistry`], then run encoded
-/// entry functions. Every VM owns its heap object store and output sink,
-/// and installs its builtin native module ([`crate::native::BUILTIN_MODULE`])
-/// into the registry at construction.
+/// entry functions. Every VM owns its heap object store, output sink, and
+/// the single-threaded fiber pool [E2] (slot 0 is the root a `run` entry
+/// drives), and installs the builtin core native module
+/// ([`crate::native::BUILTIN_MODULE`]) into the registry at construction;
+/// the std platform native module ([`crate::native::STD_PLATFORM_MODULE`])
+/// is the host's to install — a bare VM carries no world surface.
 #[derive(Debug)]
 pub struct Vm {
     registry: ModuleRegistry,
     objects: Objects,
     out: OutputSink,
-    stack: Vec<Word>,
+    /// The running fiber's segment and call chain, swapped in from its
+    /// pool slot; `ctx_live` tracks whether they are here (true) or
+    /// stashed in the slot (false).
+    stack: Segment,
     callinfo: Vec<CallInfo>,
+    ctx_live: bool,
+    pool: Vec<Fiber>,
+    current: FiberId,
+    /// The nursery pool [E2]: one slot per open-or-consumed nursery, Dead
+    /// slots reuse like fiber slots.
+    nurseries: Vec<Nursery>,
+    /// The live root nursery bare host spawns route into [E2]; `None` or a
+    /// consumed id = the host itself is the supervisor.
+    root_nursery: Option<NurseryId>,
     limit: usize,
-    max_stack_len: usize,
     trap_pc: Option<CodePc>,
 }
 
@@ -762,7 +848,9 @@ impl Vm {
     }
 
     /// A VM with an explicit value-stack word limit. Installs the builtin
-    /// native module (a same-named prior native table is replaced).
+    /// core native module only (a same-named prior native table is
+    /// replaced); the std platform natives are the host's explicit choice
+    /// (a library embedder gets no world surface by default).
     #[must_use]
     pub fn with_limit(mut registry: ModuleRegistry, limit: usize) -> Self {
         registry.install_native(
@@ -773,18 +861,24 @@ impl Vm {
             registry,
             objects: Objects::new(),
             out: OutputSink::default(),
-            stack: Vec::new(),
+            stack: Segment::new(),
             callinfo: Vec::new(),
+            ctx_live: false,
+            pool: vec![Fiber::empty()],
+            current: FIBER_ROOT,
+            nurseries: Vec::new(),
+            root_nursery: None,
             limit,
-            max_stack_len: 0,
             trap_pc: None,
         }
     }
 
     /// Interns a string into the heap and hands back its reference word:
     /// the host-facing way to stage string arguments into `run` (and the
-    /// discipline KSTR follows for pool constants).
-    #[must_use = "the reference is the handle; dropping it never frees (M3 placeholder)"]
+    /// discipline KSTR follows for pool constants). The claim is one
+    /// reference count; a host that abandons a staged word never decs
+    /// it, so host-held references keep their objects alive.
+    #[must_use = "the reference is the handle; the count is the host's to drop"]
     pub fn intern_str(&mut self, text: &str) -> Value {
         Value::Ref(self.objects.intern(text))
     }
@@ -845,24 +939,409 @@ impl Vm {
         &self.registry
     }
 
-    /// Current value-stack word count.
+    /// Current value-stack word count: the current fiber's segment length.
     #[must_use]
     pub fn stack_len(&self) -> usize {
-        self.stack.len()
+        self.pool[self.current.index()].segment.len()
     }
 
-    /// High-water mark of the value stack over the last run. Constant across
-    /// unbounded tail recursion is the tail-call acceptance criterion.
+    /// High-water mark of the ROOT fiber's segment over the last run.
+    /// Constant across unbounded tail recursion is the tail-call
+    /// acceptance criterion [H2, per fiber].
     #[must_use]
     pub fn max_stack_len(&self) -> usize {
-        self.max_stack_len
+        self.pool[FIBER_ROOT.index()].max_len
     }
 
-    /// Runs an entry function to its `HALT` or entry-frame `RET` and reports
-    /// the resulting value. Execution state resets per run; on a `Trap` the
-    /// state is kept for [`Vm::backtrace`].
-    pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<Value, Trap> {
-        self.trap_pc = None;
+    // -- The fiber substrate [E2] --------------------------------------
+    //
+    // Pool ownership invariant: the running fiber's segment and call chain
+    // live in the VM's context fields while `ctx_live` holds; every other
+    // time (and for every other fiber, always) they live in the pool slot.
+    // A switch is two ownership swaps — no word is ever copied.
+
+    /// Spawns a fiber bare [E2]: with a live root nursery
+    /// ([`Vm::open_root_nursery`]) the fiber is born its child; without one
+    /// the host itself is the supervisor and the fiber detaches (no
+    /// child-of link — the substrate regime the fiber fixtures pin). The
+    /// in-language surface rejects bare spawn outside any nursery block;
+    /// that check lands with the checker/lowerer rounds.
+    ///
+    /// # Errors
+    ///
+    /// The entry checks of [`Vm::run`] verbatim: unknown function, arity,
+    /// argument types, entry frame versus the stack limit.
+    pub fn spawn_fiber(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
+        let nursery = self.live_root_nursery();
+        self.spawn_into(nursery, module, func, args)
+    }
+
+    /// Spawns a fiber into an open nursery [E2]: the child-of link is set
+    /// and the nursery records the child in spawn order.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownCallee`] with the virtual module `nursery` when
+    /// `nursery` names no open nursery; the entry checks of [`Vm::run`]
+    /// verbatim otherwise.
+    pub fn spawn_fiber_in(
+        &mut self,
+        nursery: NurseryId,
+        module: &str,
+        func: &str,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
+        self.nursery_open(nursery)?;
+        self.spawn_into(Some(nursery), module, func, args)
+    }
+
+    /// The spawn core: one pool entry with a fresh entry frame, born ready
+    /// and never started, plus the child-of bookkeeping. The first switch
+    /// into it (a `fiber_resume` call or [`Vm::resume_fiber`]) runs its
+    /// entry function; the pool slot of a dead fiber is reused.
+    fn spawn_into(
+        &mut self,
+        nursery: Option<NurseryId>,
+        module: &str,
+        func: &str,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
+        let (version, func_id) = self.resolve_entry(module, func, args)?;
+        let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
+        // born into the pool: reuse a dead slot above the reserved root,
+        // or grow the pool by one
+        let slot = match self
+            .pool
+            .iter()
+            .skip(1)
+            .position(|f| f.state == FiberState::Dead)
+        {
+            Some(at) => at + 1,
+            None => self.pool.len(),
+        };
+        if slot == self.pool.len() {
+            self.pool.push(Fiber::empty());
+        }
+        let fiber = &mut self.pool[slot];
+        fiber.segment.truncate(0); // reuse keeps the chunks: spawn stays cheap
+        Self::push_entry_frame(fiber, &version, func_id, args, frame_size);
+        fiber.resume = Some(ResumePoint {
+            version,
+            func: func_id,
+            pc: CodePc(0),
+        });
+        fiber.state = FiberState::Ready;
+        fiber.resumer = None;
+        fiber.nursery = nursery;
+        let id = FiberId(u32::try_from(slot).expect("pool size fits u32 ids"));
+        if let Some(n) = nursery {
+            self.nurseries[n.index()].push_child(id);
+        }
+        Ok(id)
+    }
+
+    /// Drives one fiber slice from the host: enters `fiber` (Ready or
+    /// parked), delivering `payload` as the answer of the call it parked at
+    /// (a Ready fiber drops the payload), and runs until that fiber next
+    /// parks with the host as resumer (the payload it yielded, or the value
+    /// of a fiber it resumed completing) or completes (its final value). A
+    /// trapped drive leaves the fiber interrupted (not resumable) with its
+    /// frames kept for [`Vm::backtrace`].
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownCallee`] with module `fiber` when `fiber` is absent
+    /// or not parked at a switch point; the execution traps otherwise.
+    pub fn resume_fiber(&mut self, fiber: FiberId, payload: Value) -> Result<Value, Trap> {
+        if !self.pool.get(fiber.index()).is_some_and(Fiber::resumable) {
+            return Err(Trap::UnknownCallee {
+                module: "fiber".into(),
+                func: fiber.0,
+            });
+        }
+        self.pool[fiber.index()].resumer = None; // the host resumes
+        let (active, pc) = self.switch_in(fiber, payload);
+        let outcome = self.execute(active, pc);
+        self.host_release();
+        match outcome {
+            Ok(DriveOutcome::Died(v) | DriveOutcome::Yielded(v)) => Ok(v),
+            Err((trap, at)) => {
+                self.trap_pc = Some(at);
+                // a nursery child dying trapped under a host drive: ledger
+                // it and raise the cancel flag [E2 first failure]; the
+                // fiber itself stays interrupted (frames kept)
+                self.trap_child(fiber, &trap);
+                Err(trap)
+            },
+        }
+    }
+
+    /// A fiber's lifecycle state, for debug and test assertions.
+    #[must_use]
+    pub fn fiber_state(&self, fiber: FiberId) -> Option<FiberState> {
+        self.pool.get(fiber.index()).map(|f| f.state)
+    }
+
+    /// High-water mark of a fiber's segment: the per-fiber TCO criterion —
+    /// a tail-looping fiber's mark never rises past its frame size [H2].
+    #[must_use]
+    pub fn fiber_max_len(&self, fiber: FiberId) -> Option<usize> {
+        self.pool.get(fiber.index()).map(|f| f.max_len)
+    }
+
+    /// How many chunks a fiber's segment owns — the chunk-append growth
+    /// witness.
+    #[must_use]
+    pub fn fiber_chunk_count(&self, fiber: FiberId) -> Option<usize> {
+        self.pool
+            .get(fiber.index())
+            .map(|f| f.segment.chunk_count())
+    }
+
+    /// The address of word `index` in a fiber's segment — any allocated
+    /// word, live or truncated-over: stable across later growth (chunks
+    /// never move) and across switch round-trips (a switch copies no
+    /// words) [H2, E2].
+    #[must_use]
+    pub fn fiber_word_addr(&self, fiber: FiberId, index: usize) -> Option<usize> {
+        self.pool
+            .get(fiber.index())
+            .filter(|f| index < f.segment.capacity())
+            .map(|f| f.segment.word_addr(index))
+    }
+
+    /// The frame base of a fiber's innermost live frame.
+    #[must_use]
+    pub fn fiber_top_fp(&self, fiber: FiberId) -> Option<usize> {
+        self.pool
+            .get(fiber.index())
+            .and_then(|f| f.callinfo.last().map(|ci| ci.fp))
+    }
+
+    /// The nursery a fiber was spawned into (the child-of link [E2]);
+    /// `None` = the root fiber or a detached spawn.
+    #[must_use]
+    pub fn fiber_nursery(&self, fiber: FiberId) -> Option<NurseryId> {
+        self.pool.get(fiber.index()).and_then(|f| f.nursery)
+    }
+
+    // -- Nurseries [E2, E5] ---------------------------------------------
+    //
+    // Determinism: spawn order drives everything observable — the join and
+    // teardown drivers enter children in spawn order, one to death at a
+    // time, and outcomes report in spawn order. A host-visible yield under
+    // a drive is answered with the bare PLATFORM_NONE bounce tag (the
+    // run-entry convention); a child's own resumer links stay live.
+
+    /// Opens (or returns the live) root nursery [E2]: the explicit root a
+    /// bare host spawn routes into. With none live, the host itself is the
+    /// supervisor and bare spawns detach.
+    pub fn open_root_nursery(&mut self) -> NurseryId {
+        if let Some(id) = self.live_root_nursery() {
+            return id;
+        }
+        let slot = match self
+            .nurseries
+            .iter()
+            .position(|n| n.state == NurseryState::Dead)
+        {
+            Some(at) => at,
+            None => self.nurseries.len(),
+        };
+        if slot == self.nurseries.len() {
+            self.nurseries.push(Nursery::open());
+        } else {
+            self.nurseries[slot] = Nursery::open();
+        }
+        let id = NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"));
+        self.root_nursery = Some(id);
+        id
+    }
+
+    /// The root nursery while it is open.
+    fn live_root_nursery(&self) -> Option<NurseryId> {
+        self.root_nursery.filter(|&n| {
+            self.nurseries
+                .get(n.index())
+                .is_some_and(|nr| nr.state == NurseryState::Open)
+        })
+    }
+
+    /// Whether `nursery` names an open nursery.
+    fn nursery_open(&self, nursery: NurseryId) -> Result<(), Trap> {
+        if self
+            .nurseries
+            .get(nursery.index())
+            .is_some_and(|n| n.state == NurseryState::Open)
+        {
+            Ok(())
+        } else {
+            Err(Trap::UnknownCallee {
+                module: "nursery".into(),
+                func: nursery.0,
+            })
+        }
+    }
+
+    /// Joins a nursery [E2]: drives every child to death in spawn order —
+    /// a child dying trapped raises the cancel flag for the rest [E5] —
+    /// then reports the boundary result and consumes the nursery.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownCallee`] with the virtual module `nursery` when
+    /// `nursery` names no open nursery (absent, or already consumed).
+    pub fn join_nursery(&mut self, nursery: NurseryId) -> Result<JoinOutcome, Trap> {
+        self.nursery_open(nursery)?;
+        let outcomes = self.run_nursery_to_death(nursery, false);
+        Ok(
+            if outcomes
+                .iter()
+                .any(|o| matches!(o, ChildOutcome::Trapped(_)))
+            {
+                JoinOutcome::Failed(outcomes)
+            } else {
+                JoinOutcome::Joined(
+                    outcomes
+                        .into_iter()
+                        .map(|o| match o {
+                            ChildOutcome::Completed(v) => v,
+                            // a Cancelled entry implies a Trapped sibling raised
+                            // the flag, so the Failed branch took it
+                            ChildOutcome::Cancelled | ChildOutcome::Trapped(_) => {
+                                unreachable!(
+                                    "join without a failure has no cancelled or trapped child"
+                                )
+                            },
+                        })
+                        .collect(),
+                )
+            },
+        )
+    }
+
+    /// Tears a nursery down [E5]: raises the cancel flag, drives every
+    /// live child to death (straight-line work lands, looping work stops
+    /// at its next backward branch), then consumes the nursery and reports
+    /// the per-child outcomes. The owner-death panic path will call this;
+    /// the per-child death walk is where the future deinit pass hooks in.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownCallee`] with the virtual module `nursery` when
+    /// `nursery` names no open nursery.
+    pub fn teardown_nursery(&mut self, nursery: NurseryId) -> Result<Vec<ChildOutcome>, Trap> {
+        self.nursery_open(nursery)?;
+        Ok(self.run_nursery_to_death(nursery, true))
+    }
+
+    /// A nursery's lifecycle state, for debug and test assertions.
+    #[must_use]
+    pub fn nursery_state(&self, nursery: NurseryId) -> Option<NurseryState> {
+        self.nurseries.get(nursery.index()).map(|n| n.state)
+    }
+
+    /// Whether a nursery's cancel flag is raised, for debug and test
+    /// assertions.
+    #[must_use]
+    pub fn nursery_cancelled(&self, nursery: NurseryId) -> Option<bool> {
+        self.nurseries.get(nursery.index()).map(|n| n.cancelled)
+    }
+
+    /// The join/teardown driver: enters each child in spawn order and
+    /// drives it to death before the next (sequential — the deterministic
+    /// choice). Every death path ledgers its outcome into the nursery
+    /// whoever ran it, so this loop only drives and collects. A trapped
+    /// child ledgers `Trapped` and raises the flag; the walk that marks
+    /// such an interrupted child dead below is the future deinit pass's
+    /// hook point [E5: teardown walks frames].
+    fn run_nursery_to_death(
+        &mut self,
+        nursery: NurseryId,
+        cancel_first: bool,
+    ) -> Vec<ChildOutcome> {
+        if cancel_first {
+            self.nurseries[nursery.index()].cancelled = true;
+        }
+        let children = self.nurseries[nursery.index()].children.clone();
+        for child in children {
+            // a reused slot belongs to another nursery: the child died and
+            // was ledgered before its slot was recycled
+            if self.pool[child.index()].nursery != Some(nursery) {
+                continue;
+            }
+            while self.pool[child.index()].state != FiberState::Dead {
+                if !self.pool[child.index()].resumable() {
+                    break; // interrupted mid-trap (already ledgered)
+                }
+                let (active, pc) = self.switch_in(child, Value::Tag(PLATFORM_NONE));
+                match self.execute(active, pc) {
+                    Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => {},
+                    Err((trap, _at)) => {
+                        self.host_release();
+                        self.trap_child(child, &trap);
+                        break;
+                    },
+                }
+            }
+            // the child's death walk completes here: a trapped child keeps
+            // its frames until now, then its slot is released
+            let fiber = &mut self.pool[child.index()];
+            if fiber.state != FiberState::Dead {
+                fiber.state = FiberState::Dead;
+                fiber.resume = None;
+            }
+        }
+        self.host_release();
+        let slot = &mut self.nurseries[nursery.index()];
+        slot.state = NurseryState::Dead;
+        slot.outcomes
+            .drain(..)
+            .map(|o| o.expect("every child died through a ledgered path"))
+            .collect()
+    }
+
+    /// Ledgers a fiber's death into its nursery, if it has one.
+    fn record_child_outcome(&mut self, fiber: FiberId, outcome: ChildOutcome) {
+        if let Some(n) = self.pool[fiber.index()].nursery {
+            self.nurseries[n.index()].record(fiber, outcome);
+        }
+    }
+
+    /// A fiber dying trapped under any driver: ledger `Trapped` and raise
+    /// its nursery's cancel flag [E2 first failure]. The fiber's own state
+    /// is the caller's business (interrupted under interactive drives,
+    /// marked dead by the nursery walk).
+    fn trap_child(&mut self, fiber: FiberId, trap: &Trap) {
+        if let Some(n) = self.pool[fiber.index()].nursery {
+            let nursery = &mut self.nurseries[n.index()];
+            nursery.record(fiber, ChildOutcome::Trapped(trap.clone()));
+            nursery.cancelled = true;
+        }
+    }
+
+    /// Whether the running fiber's nursery has its cancel flag raised
+    /// [E5]: the preemption check. Only nurseries with live children are
+    /// ever cancelled, so a stale id cannot fire here.
+    fn cancel_requested(&self) -> bool {
+        self.pool[self.current.index()]
+            .nursery
+            .is_some_and(|n| self.nurseries[n.index()].cancelled)
+    }
+
+    /// Resolves and checks a run/spawn entry: unknown function, arity,
+    /// argument types, entry frame versus the limit.
+    fn resolve_entry(
+        &self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+    ) -> Result<(Arc<ModuleVersion>, u32), Trap> {
         let (version, func_id) =
             self.registry
                 .resolve(module, func)
@@ -893,44 +1372,291 @@ impl Vm {
                 limit: self.limit,
             });
         }
+        Ok((version, func_id))
+    }
+
+    /// Builds a fiber's entry frame in its own segment: metadata word,
+    /// arguments, zero-filled to the frame span. The caller has already
+    /// reset the segment (`clear` for a fresh root run, `truncate(0)` to
+    /// reuse a dead fiber's chunks).
+    fn push_entry_frame(
+        fiber: &mut Fiber,
+        version: &Arc<ModuleVersion>,
+        func_id: u32,
+        args: &[Value],
+        frame_size: usize,
+    ) {
         // Root frame: the return-pc sentinel is never read, because a RET
-        // from the entry frame ends the run instead of returning.
-        self.stack.clear();
-        self.stack.push(Word::Meta(FrameMetadata {
+        // from the entry frame completes the fiber instead of returning.
+        fiber.segment.push(Word::Meta(FrameMetadata {
             return_pc: CodePc(u32::MAX),
-            frame_size: target.layout.frame_size(),
+            frame_size: u32::try_from(frame_size).expect("frame span fits u32"),
             tail: TailChain::default(),
         }));
-        self.stack.extend(args.iter().map(|&a| Word::Slot(a)));
-        self.stack.resize(frame_size, Word::Slot(Value::I64(0)));
-        self.max_stack_len = frame_size;
-        self.callinfo.clear();
-        self.callinfo.push(CallInfo {
+        for &arg in args {
+            fiber.segment.push(Word::Slot(arg));
+        }
+        fiber.segment.grow_to(frame_size);
+        fiber.callinfo.clear();
+        fiber.callinfo.push(CallInfo {
             fp: 0,
-            module: Arc::clone(&version),
+            module: Arc::clone(version),
             func: func_id,
         });
-        let active = Active {
+        fiber.max_len = frame_size;
+    }
+
+    /// Stashes the running fiber's context into its pool slot, ending a
+    /// drive; the pool is then the single home of every fiber's state.
+    fn host_release(&mut self) {
+        if !self.ctx_live {
+            return;
+        }
+        let fiber = &mut self.pool[self.current.index()];
+        std::mem::swap(&mut self.stack, &mut fiber.segment);
+        std::mem::swap(&mut self.callinfo, &mut fiber.callinfo);
+        self.ctx_live = false;
+    }
+
+    /// Parks the running fiber at `resume_pc` (the instruction after the
+    /// call that is switching): only the resume point is recorded; segment
+    /// and call chain are untouched.
+    fn park_current(&mut self, active: &Active, resume_pc: CodePc) {
+        let fiber = &mut self.pool[self.current.index()];
+        fiber.resume = Some(ResumePoint {
+            version: Arc::clone(&active.version),
+            func: active.func,
+            pc: resume_pc,
+        });
+        fiber.state = FiberState::Suspended;
+    }
+
+    /// Enters `target` with `payload` [E2: switch is O(1)]: stash the
+    /// outgoing fiber's context, swap the target's in (buffer ownership
+    /// moves, no word is copied), and deliver `payload` onto the call the
+    /// target parked at (a Ready fiber drops it — first entry runs the
+    /// spawn arguments). The caller has validated the target. Entering
+    /// the fiber the last drive ended on is the host's O(1) round-trip:
+    /// its context was stashed at host release and swaps back in.
+    fn switch_in(&mut self, target: FiberId, payload: Value) -> (Active, CodePc) {
+        if target != self.current {
+            self.host_release(); // stash the outgoing fiber's context if live
+        }
+        if target != self.current || !self.ctx_live {
+            let fiber = &mut self.pool[target.index()];
+            std::mem::swap(&mut self.stack, &mut fiber.segment);
+            std::mem::swap(&mut self.callinfo, &mut fiber.callinfo);
+            self.current = target;
+            self.ctx_live = true;
+        }
+        let fiber = &mut self.pool[target.index()];
+        let resume = fiber
+            .resume
+            .take()
+            .expect("a validated switch target carries its continuation");
+        let parked = fiber.state == FiberState::Suspended;
+        fiber.state = FiberState::Running;
+        if parked {
+            let f = &resume.version.functions()[resume.func as usize];
+            let fp = self.callinfo[self.callinfo.len() - 1].fp;
+            overlay_native(NativeResult::Word(payload), &mut self.stack, &f.layout, fp);
+        }
+        (
+            Active {
+                version: resume.version,
+                func: resume.func,
+            },
+            resume.pc,
+        )
+    }
+
+    /// Ends the running fiber [E2]: ledgers `outcome` into its nursery,
+    /// marks it dead, and switches to its resumer delivering `value` to the
+    /// call the resumer parked at. `None` = the host takes the delivery —
+    /// it was the resumer, or the resumer died while this fiber was parked
+    /// (the leftover pattern; the join/teardown drivers must survive it).
+    fn die_current(&mut self, value: Value, outcome: ChildOutcome) -> Option<(Active, CodePc)> {
+        self.record_child_outcome(self.current, outcome);
+        let resumer = self.pool[self.current.index()].resumer;
+        let fiber = &mut self.pool[self.current.index()];
+        fiber.state = FiberState::Dead;
+        fiber.resume = None;
+        resumer
+            .filter(|&r| self.pool[r.index()].resumable())
+            .map(|target| self.switch_in(target, value))
+    }
+
+    /// The running fiber completed at its entry frame with `value`.
+    fn complete_current(&mut self, value: Value) -> Option<(Active, CodePc)> {
+        self.die_current(value, ChildOutcome::Completed(value))
+    }
+
+    /// The running fiber observed its nursery's cancel flag at a taken
+    /// backward branch [E5]: it stops here — no instruction of the loop
+    /// body it was re-entering runs — and its resumer receives the
+    /// `PLATFORM_CANCELLED` sentinel.
+    fn cancel_current(&mut self) -> Option<(Active, CodePc)> {
+        self.die_current(Value::Tag(PLATFORM_CANCELLED), ChildOutcome::Cancelled)
+    }
+
+    /// The switch behind a control native's `CALL` site (the fiber pair,
+    /// and the nursery join's park-drive-redeliver). The staged words are
+    /// already width- and type-checked by the caller of this helper.
+    fn control_switch(
+        &mut self,
+        control: ControlNative,
+        active: &Active,
+        pc: u32,
+        fp: usize,
+        caller: &FrameLayout,
+    ) -> Result<SwitchOutcome, Trap> {
+        match control {
+            ControlNative::Yield => {
+                let payload = control_i64(&self.stack, fp, caller, 0)?;
+                self.park_current(active, CodePc(pc + 1));
+                let resumer = self.pool[self.current.index()].resumer;
+                // the resumer is the host, a fiber parked at its own resume
+                // call, or dead (the leftover pattern: it died while this
+                // fiber was parked) — a dead resumer hands the yield to the
+                // host, never a switch into a corpse
+                match resumer.filter(|&r| self.pool[r.index()].resumable()) {
+                    None => Ok(SwitchOutcome::Host(DriveOutcome::Yielded(Value::I64(
+                        payload,
+                    )))),
+                    Some(target) => {
+                        let (a, at) = self.switch_in(target, Value::I64(payload));
+                        Ok(SwitchOutcome::Entered(a, at))
+                    },
+                }
+            },
+            ControlNative::Resume => {
+                let id = control_i64(&self.stack, fp, caller, 0)?;
+                let payload = control_i64(&self.stack, fp, caller, 1)?;
+                let target = u32::try_from(id).ok().map(FiberId).filter(|t| {
+                    *t != self.current && self.pool.get(t.index()).is_some_and(Fiber::resumable)
+                });
+                let Some(target) = target else {
+                    // no switch: the checked-read bounce answer [E2 debug surface]
+                    overlay_native(
+                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
+                        &mut self.stack,
+                        caller,
+                        fp,
+                    );
+                    return Ok(SwitchOutcome::Bounced);
+                };
+                self.park_current(active, CodePc(pc + 1));
+                self.pool[target.index()].resumer = Some(self.current);
+                let (a, at) = self.switch_in(target, Value::I64(payload));
+                Ok(SwitchOutcome::Entered(a, at))
+            },
+            ControlNative::NurseryJoin => {
+                let id = control_i64(&self.stack, fp, caller, 0)?;
+                let nursery = u32::try_from(id).ok().map(NurseryId).filter(|&n| {
+                    self.nurseries
+                        .get(n.index())
+                        .is_some_and(|nr| nr.state == NurseryState::Open)
+                });
+                let Some(nursery) = nursery else {
+                    // absent or consumed: the checked-read bounce answer
+                    overlay_native(
+                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
+                        &mut self.stack,
+                        caller,
+                        fp,
+                    );
+                    return Ok(SwitchOutcome::Bounced);
+                };
+                if self.pool[self.current.index()].nursery == Some(nursery) {
+                    // a child joining its own nursery would deadlock the
+                    // single-threaded driver on itself [E2]
+                    return Err(Trap::UnknownCallee {
+                        module: "nursery".into(),
+                        func: nursery.0,
+                    });
+                }
+                self.park_current(active, CodePc(pc + 1));
+                let joiner = self.current;
+                let outcomes = self.run_nursery_to_death(nursery, false);
+                let failed = outcomes
+                    .iter()
+                    .filter(|o| matches!(o, ChildOutcome::Trapped(_)))
+                    .count();
+                let count = i64::try_from(failed).expect("child count fits i64");
+                let (a, at) = self.switch_in(joiner, Value::I64(count));
+                Ok(SwitchOutcome::Entered(a, at))
+            },
+        }
+    }
+
+    /// Runs an entry function to its `HALT` or entry-frame `RET` and reports
+    /// the resulting value: the root fiber's drive to completion [E2]. The
+    /// root's execution state resets per run (other pool fibers keep their
+    /// state); on a `Trap` the state is kept for [`Vm::backtrace`]. A root
+    /// that yields to the host (it has no in-language resumer) is re-entered
+    /// with the bare `PLATFORM_NONE` tag as the yield's answer — a `run`
+    /// entry drives to completion; interactive stepping is
+    /// [`Vm::resume_fiber`].
+    pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<Value, Trap> {
+        self.trap_pc = None;
+        let (version, func_id) = self.resolve_entry(module, func, args)?;
+        let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
+        self.host_release(); // stash any interrupted drive's context
+        let root = &mut self.pool[FIBER_ROOT.index()];
+        root.segment.clear();
+        Self::push_entry_frame(root, &version, func_id, args, frame_size);
+        root.resume = None;
+        root.resumer = None;
+        root.state = FiberState::Running;
+        std::mem::swap(&mut self.stack, &mut self.pool[FIBER_ROOT.index()].segment);
+        std::mem::swap(
+            &mut self.callinfo,
+            &mut self.pool[FIBER_ROOT.index()].callinfo,
+        );
+        self.current = FIBER_ROOT;
+        self.ctx_live = true;
+        let mut active = Active {
             version,
             func: func_id,
         };
-        match self.execute(active, CodePc(0)) {
-            Ok(v) => Ok(v),
-            Err((trap, at)) => {
-                self.trap_pc = Some(at);
-                Err(trap)
-            },
+        let mut pc = CodePc(0);
+        loop {
+            match self.execute(active, pc) {
+                Ok(DriveOutcome::Died(value)) => {
+                    self.host_release();
+                    return Ok(value);
+                },
+                Ok(DriveOutcome::Yielded(_)) => {
+                    let (a, p) = self.switch_in(FIBER_ROOT, Value::Tag(PLATFORM_NONE));
+                    active = a;
+                    pc = p;
+                },
+                Err((trap, at)) => {
+                    self.trap_pc = Some(at);
+                    self.host_release();
+                    // the drive may have ended on a nursery child entered
+                    // in-language: ledger it and raise its nursery's flag
+                    self.trap_child(self.current, &trap);
+                    return Err(trap);
+                },
+            }
         }
     }
 
     /// The dispatcher: decode-on-dispatch (see the module docs), then a
     /// dense `match` over the uop [BL-3 note: computed goto is not available
-    /// on stable Rust].
+    /// on stable Rust]. A drive ends when the current fiber completes
+    /// ([`DriveOutcome::Died`]) or yields to the host
+    /// ([`DriveOutcome::Yielded`]); switches between fibers happen inside.
     // One flat match over the whole uop set is the point of a dispatch loop
     // [BL-3]; splitting arms into helpers would fragment it and add a call
     // per op in debug builds.
     #[allow(clippy::too_many_lines)]
-    fn execute(&mut self, mut active: Active, mut pc: CodePc) -> Result<Value, (Trap, CodePc)> {
+    fn execute(
+        &mut self,
+        mut active: Active,
+        mut pc: CodePc,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
         loop {
             let f = &active.version.functions()[active.func as usize];
             let code = &f.code;
@@ -957,6 +1683,20 @@ impl Vm {
                         };
                         return Err((e, pc));
                     }
+                    // the preemption point [E2, E5]: a taken backward branch
+                    // (a loop back-edge, self or below) is where the running
+                    // fiber observes its nursery's cancel flag. Never
+                    // mid-instruction: a linear consume in flight is done.
+                    if t <= pc.0 && self.cancel_requested() {
+                        match self.cancel_current() {
+                            Some((a, at)) => {
+                                active = a;
+                                pc = at;
+                                continue;
+                            },
+                            None => return Ok(DriveOutcome::Died(Value::Tag(PLATFORM_CANCELLED))),
+                        }
+                    }
                     pc = CodePc(t);
                 }};
             }
@@ -966,12 +1706,43 @@ impl Vm {
                         stack: &mut self.stack,
                         callinfo: &mut self.callinfo,
                         limit: self.limit,
-                        max_len: &mut self.max_stack_len,
+                        max_len: &mut self.pool[self.current.index()].max_len,
                     }
                 };
             }
             let op = match Uop::decode(pc.0, code[idx]) {
                 Ok(op) => op,
+                // Major 0xE: the placed RC pair (C4). Load decode-checks
+                // every word once, so a decode failure here is a
+                // canonicity violation like any other; the arm moves one
+                // counted heap block's count per word.
+                Err(DecodeError::UnknownOpcode {
+                    major: RC_MAJOR, ..
+                }) => match RcOp::decode(code[idx]) {
+                    Ok(RcOp::Inc { src }) => {
+                        let id =
+                            read_ref(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
+                        self.objects.inc(id).map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                        continue;
+                    },
+                    Ok(RcOp::Dec { src }) => {
+                        let id =
+                            read_ref(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
+                        self.objects.dec(id).map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                        continue;
+                    },
+                    Err(cause) => {
+                        let cause = match cause {
+                            RcDecodeError::UnknownOpcode { major, minor } => {
+                                DecodeError::UnknownOpcode { major, minor }
+                            },
+                            RcDecodeError::ReservedField => DecodeError::ReservedField,
+                        };
+                        return Err((Trap::BadEncoding { pc: pc.0, cause }, pc));
+                    },
+                },
                 Err(cause) => return Err((Trap::BadEncoding { pc: pc.0, cause }, pc)),
             };
             match op {
@@ -1233,7 +2004,7 @@ impl Vm {
                         read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
                     );
                     // bit-structural equality: reflexive, total, dict-safe
-                    // [resolved question 8]
+                    // [B9]
                     let v = x.to_bits() == y.to_bits();
                     write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(v))
                         .map_err(|e| (e, pc))?;
@@ -1474,20 +2245,38 @@ impl Vm {
                         // staged words are read as arguments and the result
                         // overlays argument slot 0 exactly where a RET
                         // would put it (a fallible native's span overlays
-                        // slots 0 and 1).
+                        // slots 0 and 1). The fiber-control natives are the
+                        // exception: the dispatcher itself is the switch
+                        // [E2] — their bodies never run from a CALL site.
                         Callee::Native(nf) => {
                             check_native_call_site(&f.layout, nf).map_err(|e| (e, pc))?;
-                            let result = invoke_native(
-                                nf,
-                                &mut self.stack,
-                                &mut self.objects,
-                                &mut self.out,
-                                &f.layout,
-                                fp,
-                            )
-                            .map_err(|e| (e, pc))?;
-                            overlay_native(result, &mut self.stack, &f.layout, fp);
-                            pc.0 += 1;
+                            if let Some(control) = nf.control {
+                                match self
+                                    .control_switch(control, &active, pc.0, fp, &f.layout)
+                                    .map_err(|e| (e, pc))?
+                                {
+                                    SwitchOutcome::Entered(a, at) => {
+                                        active = a;
+                                        pc = at;
+                                    },
+                                    SwitchOutcome::Bounced => {
+                                        pc.0 += 1;
+                                    },
+                                    SwitchOutcome::Host(event) => return Ok(event),
+                                }
+                            } else {
+                                let result = invoke_native(
+                                    nf,
+                                    &mut self.stack,
+                                    &mut self.objects,
+                                    &mut self.out,
+                                    &f.layout,
+                                    fp,
+                                )
+                                .map_err(|e| (e, pc))?;
+                                overlay_native(result, &mut self.stack, &f.layout, fp);
+                                pc.0 += 1;
+                            }
                         },
                     }
                 },
@@ -1543,7 +2332,13 @@ impl Vm {
                             };
                             let mut st = stack_state!();
                             match st.ret(value, fp).map_err(|e| (e, pc))? {
-                                RetOutcome::Root(v) => return Ok(v),
+                                RetOutcome::Root(v) => match self.complete_current(v) {
+                                    Some((a, at)) => {
+                                        active = a;
+                                        pc = at;
+                                    },
+                                    None => return Ok(DriveOutcome::Died(v)),
+                                },
                                 RetOutcome::Resume {
                                     version,
                                     func,
@@ -1561,7 +2356,13 @@ impl Vm {
                         read_value(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                     let mut st = stack_state!();
                     match st.ret(value, fp).map_err(|e| (e, pc))? {
-                        RetOutcome::Root(v) => return Ok(v),
+                        RetOutcome::Root(v) => match self.complete_current(v) {
+                            Some((a, at)) => {
+                                active = a;
+                                pc = at;
+                            },
+                            None => return Ok(DriveOutcome::Died(v)),
+                        },
                         RetOutcome::Resume {
                             version,
                             func,
@@ -1625,7 +2426,13 @@ impl Vm {
                     };
                     let mut st = stack_state!();
                     match st.ret(value, fp).map_err(|e| (e, pc))? {
-                        RetOutcome::Root(v) => return Ok(v),
+                        RetOutcome::Root(v) => match self.complete_current(v) {
+                            Some((a, at)) => {
+                                active = a;
+                                pc = at;
+                            },
+                            None => return Ok(DriveOutcome::Died(v)),
+                        },
                         RetOutcome::Resume {
                             version,
                             func,
@@ -1637,32 +2444,42 @@ impl Vm {
                     }
                 },
                 Uop::Halt { slot } => {
-                    return read_value(&self.stack, fp, slot, slots, body_len).map_err(|e| (e, pc));
+                    let value =
+                        read_value(&self.stack, fp, slot, slots, body_len).map_err(|e| (e, pc))?;
+                    match self.complete_current(value) {
+                        Some((a, at)) => {
+                            active = a;
+                            pc = at;
+                        },
+                        None => return Ok(DriveOutcome::Died(value)),
+                    }
                 },
             }
         }
     }
 
-    /// Renders the live frames, innermost first: each real frame with its
-    /// position plus the tail-chain elided count [H2]. The counter is always
-    /// available; per-elision `ElisionRecord`s for lazy materialization come
-    /// with per-fiber debug recording, so at M3 the count reports how many
+    /// Renders the live frames of the fiber the last drive ended on
+    /// (innermost first): each real frame with its position plus the
+    /// tail-chain elided count [H2]. The counter is always available;
+    /// per-elision `ElisionRecord`s for lazy materialization come with
+    /// per-fiber debug recording, so at M3 the count reports how many
     /// logical frames a debugger would materialize later.
     #[must_use]
     pub fn backtrace(&self) -> Vec<BacktraceFrame> {
-        let mut frames = Vec::with_capacity(self.callinfo.len());
-        for depth in (0..self.callinfo.len()).rev() {
-            let ci = &self.callinfo[depth];
+        let fiber = &self.pool[self.current.index()];
+        let mut frames = Vec::with_capacity(fiber.callinfo.len());
+        for depth in (0..fiber.callinfo.len()).rev() {
+            let ci = &fiber.callinfo[depth];
             let f = &ci.module.functions()[ci.func as usize];
-            let pc = if depth + 1 == self.callinfo.len() {
+            let pc = if depth + 1 == fiber.callinfo.len() {
                 self.trap_pc.unwrap_or(CodePc(0))
             } else {
-                match self.stack[self.callinfo[depth + 1].fp] {
+                match fiber.segment[fiber.callinfo[depth + 1].fp] {
                     Word::Meta(m) => m.return_pc,
                     Word::Slot(_) => CodePc(0),
                 }
             };
-            let elided = match self.stack[ci.fp] {
+            let elided = match fiber.segment[ci.fp] {
                 Word::Meta(m) => m.tail.elided,
                 Word::Slot(_) => 0,
             };

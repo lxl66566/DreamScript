@@ -4,7 +4,7 @@ error[DS2012]: tuple (a | b | c | d, a | b | c | d, a | b | c | d, a | b | c | d
 11 | const big = (v, v, v, v, v, v, v)
    |             ^^^^^^^^^^^^^^^^^^^^^ tuple distribution cap
 error[DS2012]: tuple (a | b | c | d, a | b | c | d, a | b | c | d, a | b | c | d, a | b | c | d, a | b | c | d, a | b | c | d) distributes into more than 4096 combinations (element sizes [4, 4, 4, 4, 4, 4, 4])
- --> tests/fixtures/negative/ds2012_tuple_distribution_cap.ds:12:15
+ --> tests/fixtures/negative/ds2012_tuple_distribution_cap.ds:12:9
    |
-12 | const f = (t: (u, u, u, u, u, u, u)) -> int { 1 }
-   |               ^^^^^^^^^^^^^^^^^^^^^ tuple distribution cap
+12 | fn f(t: (u, u, u, u, u, u, u)) -> int { 1 }
+   |         ^^^^^^^^^^^^^^^^^^^^^ tuple distribution cap

@@ -4,7 +4,7 @@ tag int
 trait Copyable { }
 struct link: ~Copyable { slot: int }
 extern fn close_link (move l: link) -> ()
-const use_twice = (n: int) -> () {
+fn use_twice(n: int) -> () {
   const l = link { slot: n }
   close_link(l)
   close_link(l)

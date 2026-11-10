@@ -157,6 +157,16 @@ pub struct EnumShape {
     pub linear: bool,
 }
 
+/// One case minted by a non-generic enum block [B3]: the case's def maps
+/// back to its enum (the case table) and carries the written payload.
+#[derive(Clone, Debug)]
+pub struct CaseDecl {
+    /// The enum declaration the case belongs to.
+    pub enum_def: DefId,
+    /// The written payload; `None` marks a bare case.
+    pub payload: EnumPayload,
+}
+
 /// The declaration tables one package checks against: the universe and
 /// instance environment plus the AST-shaped shapes and signatures.
 #[derive(Default)]
@@ -178,6 +188,8 @@ pub struct Decls {
     pub structs: HashMap<DefId, StructShape>,
     /// Enum shapes for every enum def.
     pub enums: HashMap<DefId, EnumShape>,
+    /// Minted cases of non-generic enums, keyed by the case's def.
+    pub cases: HashMap<DefId, CaseDecl>,
     /// Signatures of named functions, extern functions, and const-arrow
     /// function bindings.
     pub fns: HashMap<DefId, FnSig>,
@@ -228,8 +240,25 @@ where
 
 use crate::resolve::Resolutions;
 
+/// The definition an item declares, in its kind's namespace [F9].
+fn item_def(package: &Package, item: &Item) -> Option<DefId> {
+    let name = item_name(item);
+    if matches!(
+        item.kind,
+        ItemKind::Struct(_)
+            | ItemKind::Enum(_)
+            | ItemKind::Tag(_)
+            | ItemKind::TypeAlias(_)
+            | ItemKind::Trait(_)
+    ) {
+        package.lookup_type(name)
+    } else {
+        package.lookup_value(name)
+    }
+}
+
 fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
-    let Some(def) = package.lookup(item_name(item)) else {
+    let Some(def) = item_def(package, item) else {
         return; // a duplicate definition was reported at collection
     };
     match &item.kind {
@@ -251,9 +280,25 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             }
         },
         ItemKind::Enum(e) => {
-            if let Ok(id) = decls.universe.declare_enum(&e.name.name) {
-                decls.atoms.insert(def, id);
-                decls.defs_of_atoms.insert(id, def);
+            // A duplicate name keeps the first def (reported at
+            // collection); the name span proves this item owns the def.
+            if package.def(def).span != e.name.span {
+                return;
+            }
+            let generic = !e.generics.is_empty();
+            // A non-generic enum mints one atom per case into the tag
+            // namespace [B3] (the enum name then names their union); a
+            // generic enum keeps the opaque nominal atom until
+            // substitution over minted case shapes lands.
+            let declared = if generic {
+                decls.universe.declare_enum(&e.name.name).map(|id| {
+                    decls.atoms.insert(def, id);
+                    decls.defs_of_atoms.insert(id, def);
+                })
+            } else {
+                Ok(())
+            };
+            if declared.is_ok() {
                 decls.enums.insert(def, EnumShape {
                     params: e.generics.iter().map(GenericParam::from).collect(),
                     cases: e
@@ -263,6 +308,43 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                         .collect(),
                     linear: e.supers.iter().any(linear_marker),
                 });
+            }
+            if !generic {
+                let linear = e.supers.iter().any(linear_marker);
+                for case in &e.cases {
+                    // A duplicate case name keeps the first def; the
+                    // collection pass already reported both spans. The
+                    // def's name span proves this item owns the def.
+                    let Some(case_def) = package
+                        .lookup_type(&case.name.name)
+                        .filter(|&d| package.def(d).span == case.name.span)
+                    else {
+                        continue;
+                    };
+                    let atom = match &case.payload {
+                        EnumPayload::None => decls.universe.declare_tag(&case.name.name),
+                        EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
+                            decls.universe.declare_struct(&case.name.name)
+                        },
+                    };
+                    if let Ok(id) = atom {
+                        decls.atoms.insert(case_def, id);
+                        decls.defs_of_atoms.insert(id, case_def);
+                    }
+                    if let EnumPayload::Struct(fields) = &case.payload {
+                        // A named-payload case carries the struct shape
+                        // field access and struct patterns read [B3].
+                        decls.structs.insert(case_def, StructShape {
+                            params: Vec::new(),
+                            fields: fields.clone(),
+                            linear,
+                        });
+                    }
+                    decls.cases.insert(case_def, CaseDecl {
+                        enum_def: def,
+                        payload: case.payload.clone(),
+                    });
+                }
             }
         },
         ItemKind::TypeAlias(a) => {
@@ -295,7 +377,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
         ItemKind::Local(local) => {
             if def_kind_is_binding(package, def) {
                 for binder in pattern_names(&local.pat) {
-                    if let Some(binder_def) = package.lookup(&binder) {
+                    if let Some(binder_def) = package.lookup_value(&binder) {
                         decls.consts.insert(binder_def, local.clone());
                     }
                 }
@@ -350,7 +432,7 @@ fn struct_fields_ast(members: &[StructMember]) -> Vec<FieldDecl> {
 fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec<Diagnostic>) {
     match &item.kind {
         ItemKind::Struct(s) => {
-            let Some(def) = package.lookup(&s.name.name) else {
+            let Some(def) = package.lookup_type(&s.name.name) else {
                 return
             };
             let Some(&atom) = decls.atoms.get(&def) else {
@@ -363,14 +445,48 @@ fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec
             }
         },
         ItemKind::Enum(e) => {
-            let Some(def) = package.lookup(&e.name.name) else {
+            let Some(def) = package
+                .lookup_type(&e.name.name)
+                .filter(|&d| package.def(d).span == e.name.span)
+            else {
                 return
             };
-            let Some(&atom) = decls.atoms.get(&def) else {
-                return
-            };
-            register_supers(package, &e.supers, atom, decls);
             if e.generics.is_empty() {
+                // Minted cases: each case's atom takes its payload as the
+                // struct field signature (positional slots for tuple
+                // payloads), so a minted payload case IS a struct atom for
+                // the set algebra and the lowerer [B3].
+                for case in &e.cases {
+                    let Some(case_def) = package
+                        .lookup_type(&case.name.name)
+                        .filter(|&d| package.def(d).span == case.name.span)
+                    else {
+                        continue
+                    };
+                    let Some(&atom) = decls.atoms.get(&case_def) else {
+                        continue
+                    };
+                    register_supers(package, &e.supers, atom, decls);
+                    let fields = match &case.payload {
+                        EnumPayload::None => Vec::new(),
+                        EnumPayload::Tuple(types) => types
+                            .iter()
+                            .filter_map(|t| conv_expr(package, t, decls))
+                            .map(Field::positional)
+                            .collect(),
+                        EnumPayload::Struct(fields) => universe_fields(package, fields, decls),
+                    };
+                    if !fields.is_empty() {
+                        let _ = decls.universe.set_struct_fields(atom, fields);
+                    }
+                }
+            } else {
+                // A generic enum keeps the opaque atom with its case
+                // signatures until case minting grows substitution.
+                let Some(&atom) = decls.atoms.get(&def) else {
+                    return
+                };
+                register_supers(package, &e.supers, atom, decls);
                 let mut cases = Vec::new();
                 for case in &e.cases {
                     let fields = match &case.payload {
@@ -428,7 +544,7 @@ fn trait_of_type(package: &Package, ty: &Type, decls: &Decls) -> Option<TraitId>
     let [only] = path.segments.as_slice() else {
         return None;
     };
-    let def = package.lookup(&only.name)?;
+    let def = package.lookup_type(&only.name)?;
     decls.traits.get(&def).copied()
 }
 
@@ -508,12 +624,19 @@ fn conv_args(
 /// trait as its member set, or a non-generic alias expanded to its full
 /// written union — never a set's single member.
 fn path_expr(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeExpr> {
-    let def = package.lookup(&name.name)?;
+    let def = package.lookup_type(&name.name)?;
     if let Some(&atom) = decls.atoms.get(&def) {
         return Some(TypeExpr::Atom(atom));
     }
     if let Some(&trait_id) = decls.traits.get(&def) {
         return Some(TypeExpr::Trait(trait_id));
+    }
+    // A non-generic enum names the union of its minted case atoms [B3].
+    if let Some(shape) = decls.enums.get(&def) {
+        if shape.params.is_empty() {
+            return enum_case_union(package, &shape.cases, decls);
+        }
+        return None;
     }
     if let Some((params, body)) = decls.aliases.get(&def).cloned() {
         if params.is_empty() {
@@ -523,10 +646,31 @@ fn path_expr(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeE
     None
 }
 
+/// The union of one enum's minted case atoms; `None` when a case did
+/// not mint (or the enum is empty, which is uninhabited either way).
+fn enum_case_union(
+    package: &Package,
+    cases: &[(String, Span, EnumPayload)],
+    decls: &Decls,
+) -> Option<TypeExpr> {
+    let mut union: Option<TypeExpr> = None;
+    for (name, ..) in cases {
+        let atom = package
+            .lookup_type(name)
+            .and_then(|def| decls.atoms.get(&def).copied())?;
+        let expr = TypeExpr::Atom(atom);
+        union = Some(match union {
+            Some(acc) => acc.union(expr),
+            None => expr,
+        });
+    }
+    union
+}
+
 /// The atom a single-segment type path names as a CONSTRUCTOR: declared
 /// atoms only (aliases and traits are sets, not constructors).
 fn atom_of_path(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeId> {
-    let def = package.lookup(&name.name)?;
+    let def = package.lookup_type(&name.name)?;
     decls.atoms.get(&def).copied()
 }
 
@@ -643,8 +787,8 @@ fn declare_instance(
     let [trait_only] = trait_ref.path.segments.as_slice() else {
         return
     };
-    let Some(owner) = package.lookup(&trait_only.name) else {
-        return
+    let Some(owner) = package.lookup_type(&trait_only.name) else {
+        return;
     };
     let Some(&trait_id) = decls.traits.get(&owner) else {
         return

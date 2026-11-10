@@ -52,10 +52,38 @@ fn fib_computes_and_runs_the_tail_variant_a_million_deep() {
 }
 
 #[test]
+fn lists_print_the_literal_and_constructor_surface() {
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("lists.ds"))),
+        "ints 6 0\nwords 3 alpha\n0\n"
+    );
+}
+
+#[test]
+fn tuples_destructure_in_bindings_and_match_arms() {
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("tuples.ds"))),
+        "host:8080\nport 5432\nmatched host 8080\nlabel unit\nseven 7\nequal\n0\n"
+    );
+}
+
+#[test]
 fn strings_print_every_conversion() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("strings.ds"))),
         "int: 42\nfloat: 2.5\nbool: true\ngreeting: hello, DreamScript\n0\n"
+    );
+}
+
+#[test]
+fn mutation_rebinds_vars_and_chains_ufcs_calls() {
+    // the while loop accumulates through compound assignment; the UFCS
+    // chains stage their receiver as the callee's first argument [F3],
+    // including the fallible parse_int and the tail-position chain in
+    // `shout`; the union var re-stores its whole span at each rebinding
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("mutation.ds"))),
+        "total: 10\nname: DREAMSCRIPT\nfirst: a\nport + total: 8090\njoined: abc\nslot: 7\n0\n"
     );
 }
 
@@ -127,6 +155,17 @@ fn net_round_trips_against_a_local_listener() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "server replied: echo: ping from DreamScript\n0\n"
+    );
+}
+
+#[test]
+fn script_entry_runs_top_level_statements() {
+    // The entry file's top-level statements fold into the synthesized
+    // `main` while the declarations beside them stay pure-declaration;
+    // the early return ends the run before the final line.
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("script_entry.ds"))),
+        "total: 3\nsize: small\nbumped: 41\n0\n"
     );
 }
 

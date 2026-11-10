@@ -5,7 +5,7 @@ use ds_diag::FileId;
 /// Placeholder identifier of one definition, to be replaced by the real id
 /// type when the definition table lands. Carried by the [`QueryKey`]
 /// def-keyed variants; the M2 `linearity_check` compute reads it as the
-/// packed pair `(file << 8) | block`, so a definition is its `///|` block
+/// packed pair `(file << 8) | block`, so a definition is its `##` block
 /// until real identity arrives.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DefId(u32);
@@ -44,7 +44,7 @@ impl PackageId {
     }
 }
 
-/// Identifies one `///|`-separated block of one file [G3]. A file without
+/// Identifies one `##`-separated block of one file (G3). A file without
 /// separators is one block.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BlockId {
@@ -56,7 +56,7 @@ pub struct BlockId {
 
 /// Key of one memoized compiler query [H6 item 1].
 ///
-/// The enum is [`non_exhaustive`]: `Lower` is the remaining placeholder,
+/// The enum is `non_exhaustive`: `Lower` is the remaining placeholder,
 /// documented as such; asking the engine to compute it before its
 /// milestone yields [`QueryError::Unavailable`](crate::QueryError::Unavailable).
 /// Every other variant is a real M2 query: `Resolve`, `TypeOf`,
@@ -66,12 +66,12 @@ pub struct BlockId {
 pub enum QueryKey {
     /// Parse one file's source into the syntax tree.
     ParseFile(FileId),
-    /// Map a file's byte spans to its `///|` blocks.
+    /// Map a file's byte spans to its `##` blocks.
     BlockIndex(FileId),
     /// The source text of one block; the seam downstream block-keyed queries
     /// depend on so file edits invalidate at block grain.
     BlockSource(BlockId),
-    /// Name resolution for one package [G3]: collection and resolution of
+    /// Name resolution for one package (G3): collection and resolution of
     /// every registered file. The `PackageId` is the package grain; M2
     /// has one package — every registered file — so the id is always 0
     /// until M7's package loading mints real package identity.
@@ -82,7 +82,7 @@ pub enum QueryKey {
     /// plus the solved type of each binding it holds. `DefId` packs
     /// `(file << 8) | block` like [`QueryKey::LinearityCheck`].
     TypeOf(DefId),
-    /// Effect row of one definition [E1]: the ds-check effects pass over
+    /// Effect row of one definition (E1): the ds-check effects pass over
     /// the registered files, keyed by the definition's package index.
     EffectsOf(DefId),
     /// The linearity check of one definition (M2): the affine pass over
@@ -136,7 +136,7 @@ pub enum QueryKind {
 ///
 /// M7 seam: package-grain invalidation adds a `PackageConfig(PackageId)`
 /// variant here plus package-keyed queries reading it. The enum is
-/// [`non_exhaustive`] so that addition breaks no consumer; the revision and
+/// `non_exhaustive` so that addition breaks no consumer; the revision and
 /// dependency machinery below is already per-input and needs no change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]

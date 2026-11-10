@@ -1,6 +1,6 @@
 //! Locked-contract tests: exhaustive round-trips, bias arithmetic, XOR
 //! adjacency, effect-table consistency, malformed rejection, and the two
-//! section-13.7 program fixtures.
+//! seed program fixtures.
 
 use std::{collections::HashSet, mem::discriminant};
 
@@ -752,11 +752,11 @@ fn purity_table_is_exact() {
 }
 
 /// `fn sum_to(n: i64) -> i64 { let mut acc = 0i64; while n > 0 { acc += n; n -= 1 }; acc }`
-/// from the record's 13.7, ported to the locked encoding: immediates ride
+/// from the archive seed corpus, ported to the locked encoding: immediates ride
 /// the constant pool (k0 = 0i64, k1 = 1i64) because comparisons take slot
-/// operands only [BL-1]. Slots: r0 = n, r1 = acc, r2 = compare bool, r3 =
+/// operands only (BL-1). Slots: r0 = n, r1 = acc, r2 = compare bool, r3 =
 /// the zero constant, r4 = the one constant.
-// record 13.7 sketch erratum: its `JMPIF_NOT` exit polarity (jumps when the
+// archive sketch erratum: its `JMPIF_NOT` exit polarity (jumps when the
 // condition is false) would leave the loop on the first iteration, and its
 // single scratch aliases the 0/1 constants into `n <= 1`; corrected here to
 // JMPIF on `n <= 0` with separate scratch slots, matching the executable
@@ -829,7 +829,7 @@ fn sum_to_fixture_round_trips_with_biased_jumps() {
     );
 }
 
-/// The mutual `even`/`odd` of the record's 13.7 (H2's example). Slots:
+/// The mutual `even`/`odd` (H2's example). Slots:
 /// r0 = n, r1 = compare bool, r2 = constant scratch, r3 = the outgoing
 /// argument (the slide source the ABI derives as the arg-area slot). Pool:
 /// k0 = 0i64, k1 = 1i64, k2 = true, k3 = FuncRef odd, k4 = FuncRef even,
@@ -948,7 +948,7 @@ fn even_odd_fixtures_round_trip_and_slide_from_r3() {
 
 #[test]
 fn fixtures_exercise_the_uops_the_record_spells() {
-    // the two 13.7 encodings alone cover the record's spelled instruction
+    // the two seed encodings alone cover the record's spelled instruction
     // set (sum_to in its executable form): FUNCF, LDIMM->KIMM/KCONST,
     // ADDI64, SUBI64, LEI64, EQI64, JMPIF, JMP, CALLT, RET
     let mut variants = Vec::new();

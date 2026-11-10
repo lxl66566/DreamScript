@@ -1,13 +1,13 @@
 //! The `ds check` subcommand: the M2 static story over one package. The
 //! given sources register in a query database and every check runs as a
 //! memoized query — parse (syntax errors are data), resolve, the
-//! bidirectional type check with refinement [B2], the affine pass
-//! [C1, C5], and the effect rows [E1] (computed, informational until the
+//! bidirectional type check with refinement (B2), the affine pass
+//! [C1, C5], and the effect rows (E1) (computed, informational until the
 //! M7 platform check decides what they forbid). Diagnostics print through
 //! the ds-diag renderers; the exit code is 0 when nothing fatal was
 //! reported.
 //!
-//! The package is the stdlib ambient plus the files given [G3]: the M3
+//! The package is the stdlib ambient plus the files given (G3): the M3
 //! ambient (ds-stdlib) registers as a package member before the user's
 //! files, so corpus sources check clean as-is. `--no-ambient` checks the
 //! files alone — for self-contained packages whose declarations would
@@ -35,7 +35,7 @@ use ds_query::{
 /// rendering.
 #[derive(Debug, Args)]
 pub struct CheckArgs {
-    /// One .ds source file of the package; the files share one namespace [G3]
+    /// One .ds source file of the package; the files share one namespace (G3)
     files: Vec<PathBuf>,
     /// Check the files alone, without the stdlib ambient package member
     #[arg(long)]

@@ -13,8 +13,10 @@ const PRELUDE: &str = concat!(
     "tag float\n",
     "tag string\n",
     "tag bool\n",
+    "tag char\n",
     "tag io_err\n",
     "struct config { host: string, port: int }\n",
+    "struct list[t]\n",
     "extern fn str[t] (v: t) -> string\n",
 );
 
@@ -44,33 +46,34 @@ fn clean(source: &str) {
 fn boundary_annotation_checks_by_containment() {
     // The written signature anchors the algebra [B2]: the body's final
     // expression must be contained in it.
-    clean("const f = (x: int) -> int { x }\n");
-    assert_eq!(check("const f = (x: int) -> string { x }\n"), [
-        "DS2001 `lambda body` has type `int`, not contained in `string` [B2]"
-    ]);
+    clean("fn f(x: int) -> int { x }\n");
+    assert_eq!(check("fn f(x: int) -> string { x }\n"), ["DS2001 `lambda \
+                                                          body` has type \
+                                                          `int`, not \
+                                                          contained in \
+                                                          `string` [B2]"]);
 }
 
 #[test]
 fn boundary_parameters_require_annotations() {
     // Inference failure is a compile error; locals infer, boundaries do
-    // not [B2, B1].
-    assert_eq!(check("const f = (x) -> int { 1 }\n"), ["DS2002 parameter \
-                                                        `x` has no \
-                                                        expected type to \
-                                                        infer from; \
-                                                        annotate it [B2]"]);
-    // A named function's parameters are boundaries too.
-    assert_eq!(check("fn g(x) -> int { 1 }\n"), ["DS2002 parameter `x` \
-                                                  needs a type \
-                                                  annotation at this \
-                                                  boundary [B2]"]);
+    // not [B2, B1]. A top-level `fn` converts onto the const-declaration
+    // node, so it carries the lambda's message; a trait member keeps the
+    // boundary wording.
+    assert_eq!(check("fn f(x) -> int { 1 }\n"), ["DS2002 parameter `x` \
+                                                  has no expected type \
+                                                  to infer from; \
+                                                  annotate it [B2]"]);
+    assert_eq!(check("trait t {\n  fn g(x) -> int\n}\n"), [
+        "DS2002 parameter `x` needs a type annotation at this boundary [B2]"
+    ]);
 }
 
 #[test]
 fn is_narrows_the_then_branch() {
-    clean("const f = (x: int | string) -> int {\n  if x is int { x + 1 } else { 0 }\n}\n");
+    clean("fn f(x: int | string) -> int {\n  if x is int { x + 1 } else { 0 }\n}\n");
     // Without the test, the union does not support arithmetic.
-    assert_eq!(check("const f = (x: int | string) -> int { x + 1 }\n"), [
+    assert_eq!(check("fn f(x: int | string) -> int { x + 1 }\n"), [
         "DS2001 arithmetic needs numeric operands, `int | string` and `int` given [B7]"
     ]);
 }
@@ -78,17 +81,14 @@ fn is_narrows_the_then_branch() {
 #[test]
 fn and_right_operand_sees_the_left_narrowing() {
     // The record's own condition shape: `x is int && x >= 1` [B2].
-    clean(
-        "const f = (x: int | string) -> bool {\n  if x is int && x >= 1 { true } else { false \
-         }\n}\n",
-    );
+    clean("fn f(x: int | string) -> bool {\n  if x is int && x >= 1 { true } else { false }\n}\n");
 }
 
 #[test]
 fn none_tests_narrow_both_branches() {
-    clean("const f = (x: int | none) -> int {\n  if x != none { x + 1 } else { 0 }\n}\n");
+    clean("fn f(x: int | none) -> int {\n  if x != none { x + 1 } else { 0 }\n}\n");
     // The inverse: `== none` keeps none in the then branch.
-    clean("const f = (x: int | none) -> int {\n  if x == none { 0 } else { x + 1 }\n}\n");
+    clean("fn f(x: int | none) -> int {\n  if x == none { 0 } else { x + 1 }\n}\n");
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn refinement_resets_at_assignment() {
     // `var` is the only rebindable binding; assignment resets refinement
     // to the declared type [B2, C3].
     clean(concat!(
-        "const f = (n: int | none) -> int {\n",
+        "fn f(n: int | none) -> int {\n",
         "  var m: int | none = n\n",
         "  if m is none { m = 1 } else { m = 2 }\n",
         "  3\n",
@@ -105,7 +105,7 @@ fn refinement_resets_at_assignment() {
     // After the reset the union is back: arithmetic on it is an error.
     assert_eq!(
         check(concat!(
-            "const f = (n: int | none) -> int {\n",
+            "fn f(n: int | none) -> int {\n",
             "  var m: int | none = n\n",
             "  if m is none { m = 1 } else { m = 2 }\n",
             "  m + 1\n",
@@ -122,7 +122,7 @@ fn match_arms_type_over_the_remainder() {
     // Sequential set semantics: the second arm binds what the first left
     // [F4]; the annotated first arm is a narrowing filter.
     clean(concat!(
-        "const f = (x: int | string | bool) -> int {\n",
+        "fn f(x: int | string | bool) -> int {\n",
         "  match x {\n",
         "    s: string => 0,\n",
         "    i: int    => i + 1,\n",
@@ -135,7 +135,7 @@ fn match_arms_type_over_the_remainder() {
 #[test]
 fn match_guards_narrow_the_arm_body() {
     clean(concat!(
-        "const f = (x: int | string) -> int {\n",
+        "fn f(x: int | string) -> int {\n",
         "  match x {\n",
         "    n if n is int => n + 1,\n",
         "    _             => 0,\n",
@@ -150,7 +150,7 @@ fn non_exhaustive_match_names_the_missing_set() {
         check(concat!(
             "tag timeout\n",
             "tag refused\n",
-            "const f = (x: io_err | timeout | refused) -> int {\n",
+            "fn f(x: io_err | timeout | refused) -> int {\n",
             "  match x {\n",
             "    e if e is io_err => 0,\n",
             "  }\n",
@@ -168,7 +168,7 @@ fn non_exhaustive_match_names_the_missing_set() {
         check(concat!(
             "tag timeout\n",
             "tag refused\n",
-            "const f = (x: io_err | timeout | refused) -> int {\n",
+            "fn f(x: io_err | timeout | refused) -> int {\n",
             "  match x {\n",
             "    e if e is io_err => 0,\n",
             "    e if e is timeout => 1,\n",
@@ -183,16 +183,106 @@ fn non_exhaustive_match_names_the_missing_set() {
 }
 
 #[test]
-fn or_return_extracts_none_from_optionals() {
-    // `none` is always the extractable member [B4]; the early exit's value
-    // must be contained in the return union [E4].
-    clean(
-        "tag parse_err\nconst f = (x: int | none) -> int | parse_err {\n  x or return \
-         parse_err\n}\n",
+fn bare_tag_arms_are_member_tests() {
+    // A bare unit-tag arm names a member test [F9]: it credits
+    // exhaustiveness, dispatches by value, and binds nothing.
+    clean(concat!(
+        "tag on\n",
+        "tag off\n",
+        "fn f(s: on | off) -> string {\n",
+        "  match s {\n",
+        "    on => \"a\",\n",
+        "    off => \"b\",\n",
+        "  }\n",
+        "}\n",
+    ));
+    // A missing tag arm names the missing member.
+    assert_eq!(
+        check(concat!(
+            "tag on\n",
+            "tag off\n",
+            "fn f(s: on | off) -> string {\n",
+            "  match s {\n",
+            "    on => \"a\",\n",
+            "  }\n",
+            "}\n",
+        ))
+        .last()
+        .map(String::as_str),
+        Some("DS2003 match on `on | off` is not exhaustive: missing: `off`")
     );
-    assert_eq!(check("const f = (x: string) -> int { x or return 0 }\n"), [
-        "DS2002 `or return` extracts nothing from `string` against the return union `int` [E4]"
-    ]);
+    // A tag the scrutinee does not carry is an error, not a binding.
+    assert_eq!(
+        check(concat!(
+            "tag on\n",
+            "fn f(x: int | io_err) -> int {\n",
+            "  match x {\n",
+            "    on => 1,\n",
+            "    _   => 2,\n",
+            "  }\n",
+            "}\n",
+        ))
+        .last()
+        .map(String::as_str),
+        Some("DS2001 pattern `on` is not a member of `int | io_err`")
+    );
+}
+
+#[test]
+fn tag_arms_win_over_same_named_locals_and_declarations_still_bind() {
+    // The type-namespace entry wins in test positions: the local `on`
+    // cannot capture the arm, and the match still exhausts by tags.
+    clean(concat!(
+        "tag on\n",
+        "tag off\n",
+        "fn f(s: on | off, on: int) -> string {\n",
+        "  match s {\n",
+        "    on => \"a\",\n",
+        "    off => \"b\",\n",
+        "  }\n",
+        "}\n",
+    ));
+    // Declaration positions bind as ever: a local may share a tag's name.
+    clean(concat!(
+        "tag on\n",
+        "fn f() -> int {\n",
+        "  const on = 3\n",
+        "  on\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn or_patterns_of_unit_tags_form_one_member_set() {
+    // Alternatives that are both tag tests bind no names, so the
+    // or-pattern is one member set, not an inconsistent-binding error.
+    clean(concat!(
+        "tag timeout\n",
+        "tag refused\n",
+        "tag ready\n",
+        "fn f(e: timeout | refused | ready) -> int {\n",
+        "  match e {\n",
+        "    timeout | refused => 1,\n",
+        "    ready => 2,\n",
+        "  }\n",
+        "}\n",
+    ));
+    // Mixing a tag test with a binder still binds different names.
+    assert_eq!(
+        check(concat!(
+            "tag timeout\n",
+            "tag refused\n",
+            "fn f(e: timeout | refused) -> int {\n",
+            "  match e {\n",
+            "    timeout | other => 1,\n",
+            "    refused => 2,\n",
+            "  }\n",
+            "}\n",
+        ))
+        .first()
+        .map(String::as_str),
+        Some("DS2001 or-pattern alternatives bind different names [F4]")
+    );
 }
 
 #[test]
@@ -200,10 +290,10 @@ fn try_propagation_checks_containment() {
     // The ok part survives, the error members must be contained [E4]:
     // at an expected position the split runs by the expectation, and
     // every propagated member must be carried by the return union.
-    clean("const f = (x: int | io_err) -> string | io_err { str(x?) }\n");
+    clean("fn f(x: int | io_err) -> string | io_err { str(x?) }\n");
     assert_eq!(
         check(concat!(
-            "const f = (x: int | io_err) -> config {\n",
+            "fn f(x: int | io_err) -> config {\n",
             "  config { host: \"h\", port: x? }\n",
             "}\n",
         ))
@@ -212,6 +302,211 @@ fn try_propagation_checks_containment() {
         Some(
             "DS2008 `?` propagates `io_err`, which the return union `config` does not contain [E4]"
         )
+    );
+}
+
+#[test]
+fn tail_try_over_a_contained_union_is_the_return() {
+    // E4's canonical shape: the final-expression `?` splits against the
+    // return union, so a fully-contained operand yields itself — the
+    // expression IS the return [E4].
+    clean(concat!(
+        "tag parse_err\n",
+        "extern fn read_file (path: string) -> string | io_err\n",
+        "extern fn parse_config (text: string) -> config | parse_err\n",
+        "fn load_config(path: string) -> config | io_err | parse_err {\n",
+        "  const text = read_file(path)?\n",
+        "  parse_config(text)?\n",
+        "}\n",
+    ));
+    // An operand sharing no member with the return union still leaves
+    // nothing.
+    assert_eq!(
+        check(concat!(
+            "extern fn read_file (path: string) -> string | io_err\n",
+            "fn f(path: string) -> config {\n",
+            "  read_file(path)?\n",
+            "}\n",
+        ))
+        .last()
+        .map(String::as_str),
+        Some("DS2002 `?` leaves nothing: every member of `string | io_err` propagates [E4]")
+    );
+    // A member outside the return union cannot propagate through the tail.
+    assert_eq!(
+        check(concat!(
+            "extern fn read_file (path: string) -> string | io_err\n",
+            "fn f() -> config | io_err {\n",
+            "  read_file(\"x\")?\n",
+            "}\n",
+        ))
+        .last()
+        .map(String::as_str),
+        Some(
+            "DS2008 `?` propagates `string`, which the return union `io_err | config` does not \
+             contain [E4]"
+        )
+    );
+}
+
+#[test]
+fn mid_block_return_try_over_a_contained_union_is_the_return() {
+    // A statement-position `return e?` types its operand against the
+    // declared return, exactly like the final-expression shape: a
+    // fully-contained union keeps itself instead of reporting an empty
+    // success part [E4].
+    clean(concat!(
+        "extern fn read_file (path: string) -> config | io_err\n",
+        "fn load_config(path: string) -> config | io_err {\n",
+        "  if path == \"x\" {\n",
+        "    return read_file(path)?\n",
+        "  }\n",
+        "  read_file(path)?\n",
+        "}\n",
+    ));
+    // A member outside the return union still cannot propagate.
+    assert_eq!(
+        check(concat!(
+            "extern fn read_file (path: string) -> string | io_err\n",
+            "fn f(path: string) -> config | io_err {\n",
+            "  if path == \"x\" {\n",
+            "    return read_file(path)?\n",
+            "  }\n",
+            "  read_file(path)?\n",
+            "}\n",
+        ))
+        .first()
+        .map(String::as_str),
+        Some(
+            "DS2008 `?` propagates `string`, which the return union `io_err | config` does not \
+             contain [E4]"
+        )
+    );
+}
+
+#[test]
+fn branch_final_try_splits_against_the_expected_return() {
+    // The final-expression anchor threads through if and match branch
+    // finals, so a fully-contained union keeps itself in every branch
+    // [E4].
+    clean(concat!(
+        "extern fn read_file (path: string) -> config | io_err\n",
+        "fn load(path: string) -> config | io_err {\n",
+        "  if path == \"x\" {\n",
+        "    read_file(path)?\n",
+        "  } else {\n",
+        "    read_file(path)?\n",
+        "  }\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "tag on\n",
+        "tag off\n",
+        "extern fn read_file (path: string) -> config | io_err\n",
+        "fn load(g: on | off, path: string) -> config | io_err {\n",
+        "  match g {\n",
+        "    on => read_file(path)?,\n",
+        "    off => read_file(path)?,\n",
+        "  }\n",
+        "}\n",
+    ));
+    // A member outside the return union still cannot propagate through a
+    // branch final.
+    assert_eq!(
+        check(concat!(
+            "extern fn read_file (path: string) -> string | io_err\n",
+            "fn f(path: string) -> config | io_err {\n",
+            "  if path == \"x\" {\n",
+            "    read_file(path)?\n",
+            "  } else {\n",
+            "    read_file(path)?\n",
+            "  }\n",
+            "}\n",
+        ))
+        .first()
+        .map(String::as_str),
+        Some(
+            "DS2008 `?` propagates `string`, which the return union `io_err | config` does not \
+             contain [E4]"
+        )
+    );
+}
+
+#[test]
+fn for_over_a_range_binds_the_element_and_gates_endpoints() {
+    // The range's element type is the endpoints' shared integer width;
+    // the body's binder carries it [F7].
+    clean(concat!(
+        "fn f() -> int {\n",
+        "  var total: int = 0\n",
+        "  for i in 1..5 {\n",
+        "    total += i\n",
+        "  }\n",
+        "  total\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "fn f(x: int, n: int) -> bool {\n",
+        "  for i in x..n { }\n",
+        "  x in n\n",
+        "}\n",
+    ));
+    // Float endpoints are rejected naming the conversion discipline [B7].
+    assert_eq!(
+        check("fn f() -> () { for i in 1.0..5.0 { } }\n")
+            .first()
+            .map(String::as_str),
+        Some(
+            "DS2001 range endpoints are integers, `float` and `float` given; conversions are \
+             explicit [B7]"
+        )
+    );
+    // Mixed integer widths name the conversion, like arithmetic [B7].
+    assert_eq!(
+        check(concat!(
+            "tag u32\n",
+            "fn f(a: u32, b: int) -> () {\n",
+            "  for i in a..b { }\n",
+            "}\n",
+        ))
+        .first()
+        .map(String::as_str),
+        Some(
+            "DS2001 mixed integer widths `u32` and `int`; conversions are explicit [B7]: `u32(x)`"
+        )
+    );
+    // Non-numeric endpoints never iterate.
+    assert_eq!(
+        check("fn f(s: string) -> () { for i in s..5 { } }\n")
+            .first()
+            .map(String::as_str),
+        Some(
+            "DS2001 range endpoints are integers, `string` and `int` given; conversions are \
+             explicit [B7]"
+        )
+    );
+}
+
+#[test]
+fn range_membership_checks_against_the_element_type() {
+    // `x in a..b` is bool-typed against the range's element type [F7].
+    clean("fn f(x: int) -> bool { x in 1..=5 }\n");
+    assert_eq!(
+        check("fn f(x: float) -> bool { x in 1..5 }\n")
+            .first()
+            .map(String::as_str),
+        Some(
+            "DS2001 range membership needs the range's integer type, `float` given; conversions \
+             are explicit [B7]: `int(x)`"
+        )
+    );
+    // A range itself is not a storable value: only `for`-in and `in`
+    // consume it [F7].
+    assert_eq!(
+        check("fn f() -> () { const r = 1..5 }\n")
+            .first()
+            .map(String::as_str),
+        Some("DS2002 a range is not a storable value; ranges are `for`-in and `in` sugar [F7]")
     );
 }
 
@@ -242,47 +537,93 @@ fn err_handler_is_difference_typed() {
 
 #[test]
 fn numeric_table_int_float_split() {
-    clean("const f = (a: int, b: int) -> int { a +% b }\n");
-    clean("const f = (a: float, b: float) -> float { a + b }\n");
+    clean("fn f(a: int, b: int) -> int { a +% b }\n");
+    clean("fn f(a: float, b: float) -> float { a + b }\n");
     // Wrapping operators are integer-only [B7].
-    assert_eq!(
-        check("const f = (a: float, b: float) -> float { a +% b }\n"),
-        ["DS2001 wrapping operators are integer-only; floats are IEEE [B7]"]
-    );
+    assert_eq!(check("fn f(a: float, b: float) -> float { a +% b }\n"), [
+        "DS2001 wrapping operators are integer-only; floats are IEEE [B7]"
+    ]);
     // Mixed int/float arithmetic suggests the explicit conversion [B7].
-    let diags = check("const f = (a: int, b: float) -> float { a + b }\n");
+    let diags = check("fn f(a: int, b: float) -> float { a + b }\n");
     assert_eq!(diags.as_slice(), ["DS2001 mixed numeric operands `int` \
                                    and `float`; conversions are explicit \
                                    [B7]"]);
     // Suffixes name their atoms: unsuffixed is int, `f32` needs the atom.
-    clean("const f = () -> int { 1 + 2 }\n");
-    assert_eq!(check("const f = () -> float { 1.5f32 }\n"), [
-        "DS2002 `float literal suffix` needs a declared `f32` type; inference never falls back \
-         [B1, B7]"
+    clean("fn f() -> int { 1 + 2 }\n");
+    assert_eq!(check("fn f() -> float { 1.5f32 }\n"), ["DS2002 `float \
+                                                        literal suffix` \
+                                                        needs a declared \
+                                                        `f32` type; \
+                                                        inference never \
+                                                        falls back [B1, \
+                                                        B7]"]);
+}
+
+#[test]
+fn byte_literals_type_through_a_declared_byte_atom() {
+    // The record pins `b'x'` as a single byte [F6] but names no byte
+    // type, so the literal types through the declared-atom convention
+    // like any width suffix: inference never falls back [B7], and a
+    // declared `byte` is a distinct atom disjoint from `int` [B1].
+    assert_eq!(check("fn f() -> () { const b: int = b'x' }\n"), [
+        "DS2002 `byte literal` needs a declared `byte` type; inference never falls back [B1, B7]"
+    ]);
+    clean("tag byte\nfn f() -> () { const b: byte = b'x' }\n");
+    assert_eq!(check("tag byte\nfn f() -> () { const n: int = b'x' }\n"), [
+        "DS2001 `annotated binding` has type `byte`, not contained in `int` [B2]"
     ]);
 }
 
 #[test]
 fn structural_equality_carve_outs() {
-    clean("const f = (a: int, b: int) -> bool { a == b }\n");
+    clean("fn f(a: int, b: int) -> bool { a == b }\n");
     clean("const same = config { host: \"h\", port: 1 } == config { host: \"h\", port: 1 }\n");
     // Disjoint operands make `==` constant: rejected [B9].
-    assert_eq!(
-        check("const f = (a: int, b: string) -> bool { a == b }\n"),
-        ["DS2001 `int` and `string` share no member; `==` would be constant [B9]"]
-    );
+    assert_eq!(check("fn f(a: int, b: string) -> bool { a == b }\n"), [
+        "DS2001 `int` and `string` share no member; `==` would be constant [B9]"
+    ]);
     // Function comparison is rejected statically [B9 carve-out 1].
-    assert_eq!(
-        check("const f = (g: fn(int) -> int) -> bool { g == g }\n"),
-        ["DS2001 function comparison is rejected [B9 carve-out 1]"]
-    );
+    assert_eq!(check("fn f(g: fn(int) -> int) -> bool { g == g }\n"), [
+        "DS2001 function comparison is rejected [B9 carve-out 1]"
+    ]);
 }
 
 #[test]
-fn interpolation_holes_are_string_operands() {
-    clean("const s = \"count: ${str(1)}\"\n");
-    assert_eq!(check("const s = \"count: ${1}\"\n"), [
-        "DS2001 interpolation hole has type `int`; call `str()` at the boundary [F6]"
+fn interpolation_holes_convert_printable_primitives() {
+    // F6: a hole is a string context; the printable primitives convert
+    // through str(e) implicitly, in both hole spellings
+    clean("const s = \"count: ${1}\"\n");
+    clean("const s = \"${1.5} ${true} ${'x'}\"\n");
+    clean("fn f(x: int, s: string) -> string { \"v=${x} w=$s\" }\n");
+    clean("const s = \"${str(1)}\"\n");
+}
+
+#[test]
+fn interpolation_rejects_unprintable_and_union_holes() {
+    // a struct operand waits for the M6 show derive
+    assert_eq!(
+        check(concat!(
+            "const c = config { host: \"h\", port: 1 }\n",
+            "const s = \"${c}\"\n",
+        )),
+        [
+            "DS2001 interpolation hole has type `config`; the printable primitives (bool, char, \
+             float, int, string) convert implicitly [F6]"
+        ]
+    );
+    // a union operand extracts first
+    assert_eq!(check("fn f(x: int | io_err) -> string { \"${x}\" }\n"), [
+        "DS2001 interpolation hole has type `int | io_err`; the printable primitives (bool, char, \
+         float, int, string) convert implicitly [F6]"
+    ]);
+}
+
+#[test]
+fn bare_ident_hole_resolves_and_reports() {
+    clean("fn f(x: int) -> string { \"v=$x\" }\n");
+    assert_eq!(check("const s = \"v=$missing\"\n"), [
+        "DS2004 unknown name `missing`",
+        "DS2002 `missing` does not resolve to a value"
     ]);
 }
 
@@ -291,20 +632,20 @@ fn method_selection_through_instances_and_assumptions() {
     // A concrete receiver resolves through the instance environment [B6].
     clean(concat!(
         "trait show {\n",
-        "  const text = (self: self) -> string\n",
+        "  fn text(self) -> string\n",
         "}\n",
         "impl show for int {\n",
-        "  const text = (self: self) -> string { str(self) }\n",
+        "  fn text(self) -> string { str(self) }\n",
         "}\n",
-        "const f = (x: int) -> string { x.text() }\n",
+        "fn f(x: int) -> string { x.text() }\n",
     ));
     // No instance: an unsatisfied constraint, not any fallback.
     assert_eq!(
         check(concat!(
             "trait show {\n",
-            "  const text = (self: self) -> string\n",
+            "  fn text(self) -> string\n",
             "}\n",
-            "const f = (x: int) -> string { x.text() }\n",
+            "fn f(x: int) -> string { x.text() }\n",
         ))
         .last()
         .map(String::as_str),
@@ -313,22 +654,22 @@ fn method_selection_through_instances_and_assumptions() {
     // A generic bound carries the assumption into the body [B6].
     clean(concat!(
         "trait show {\n",
-        "  const text = (self: self) -> string\n",
+        "  fn text(self) -> string\n",
         "}\n",
-        "const shown = [t: show] (x: t) -> string { x.text() }\n",
+        "fn shown[t: show](x: t) -> string { x.text() }\n",
     ));
     // Two traits, both satisfied: true ambiguity [F3].
     assert_eq!(
         check(concat!(
             "trait show {\n",
-            "  const text = (self: self) -> string\n",
+            "  fn text(self) -> string\n",
             "}\n",
             "trait render {\n",
-            "  const text = (self: self) -> string\n",
+            "  fn text(self) -> string\n",
             "}\n",
             "impl show for int { }\n",
             "impl render for int { }\n",
-            "const f = (x: int) -> string { x.text() }\n",
+            "fn f(x: int) -> string { x.text() }\n",
         ))
         .last()
         .map(String::as_str),
@@ -351,13 +692,96 @@ fn tuples_and_struct_literals_check_shapes() {
         "DS2001 `field value` has type `string`, not contained in `int` [B2]"
     ]);
     // Punning reads the field name as a value use.
-    clean("const f = (host: string) -> config {\n  config { host, port: 1 }\n}\n");
+    clean("fn f(host: string) -> config {\n  config { host, port: 1 }\n}\n");
+}
+
+#[test]
+fn receivers_bind_self_and_annotate_self_type() {
+    // Record 6.1: the receiver is `self` (borrow) or `mut self` (exclusive
+    // window), exempt from annotation and typed `Self`; other parameters
+    // and the return may spell `Self`.
+    clean(concat!(
+        "trait add {\n",
+        "  fn add(self, other: Self) -> Self\n",
+        "}\n",
+        "impl add for int {\n",
+        "  fn add(self, other: Self) -> Self { self + other }\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "trait bump {\n",
+        "  fn bump(mut self) -> int\n",
+        "}\n",
+        "impl bump for int {\n",
+        "  fn bump(mut self) -> int { self + 1 }\n",
+        "}\n",
+    ));
+    // Inherent impls see `Self` too, and the receiver binds their target.
+    clean(concat!(
+        "impl int {\n",
+        "  fn zero(self) -> Self { self - self }\n",
+        "}\n",
+    ));
+    // The receiver's type is the implementing type: a field access
+    // through it checks.
+    clean(concat!(
+        "impl config {\n",
+        "  fn host(self) -> string { self.host }\n",
+        "}\n",
+    ));
+    // A member referencing `Self` outside the member scopes does not
+    // resolve: `Self` binds inside trait/impl declarations only (the
+    // resolve rejection plus the parameter's inference fallback).
+    assert_eq!(check("fn f(x: Self) -> int { 1 }\n").as_slice(), [
+        "DS2004 unknown type `Self`",
+        "DS2002 parameter `x` has no expected type to infer from; annotate it [B2]",
+    ]);
+}
+
+#[test]
+fn self_as_a_type_name_is_retired() {
+    // One diagnostic names the replacement; the annotation fallbacks stay
+    // silent under it.
+    assert_eq!(check("fn f(x: self) -> int { 1 }\n").as_slice(), [
+        "DS2015 `self` is retired as a type name; the receiver type is spelled `Self`"
+    ]);
+    assert_eq!(check("trait t {\n  fn f(self) -> self\n}\n").as_slice(), [
+        "DS2015 `self` is retired as a type name; the receiver type is spelled `Self`"
+    ]);
+}
+
+#[test]
+fn the_annotated_receiver_is_the_old_spelling() {
+    // The pre-adoption `(self: self, ...)` shape reports the receiver
+    // ruling once per member, not per annotation site.
+    assert_eq!(
+        check(concat!("trait t {\n", "  fn f(self: self) -> int\n", "}\n",)).as_slice(),
+        [
+            "DS2016 the receiver is spelled `self` or `mut self` with no annotation; it is typed \
+             `Self`"
+        ]
+    );
+    assert_eq!(
+        check(concat!(
+            "trait t {\n",
+            "  fn f(self) -> int\n",
+            "}\n",
+            "impl t for int {\n",
+            "  fn f(self: int) -> int { 1 }\n",
+            "}\n",
+        ))
+        .as_slice(),
+        [
+            "DS2016 the receiver is spelled `self` or `mut self` with no annotation; it is typed \
+             `Self`"
+        ]
+    );
 }
 
 #[test]
 fn field_access_needs_one_struct() {
-    clean("const f = (c: config) -> int { c.port }\n");
-    assert_eq!(check("const f = (c: config | int) -> int { c.port }\n"), [
+    clean("fn f(c: config) -> int { c.port }\n");
+    assert_eq!(check("fn f(c: config | int) -> int { c.port }\n"), [
         "DS2001 field access needs one struct, `int | config` given; narrow with `is` first [B2]"
     ]);
 }
@@ -373,6 +797,86 @@ fn difference_types_erase_to_the_solved_shape() {
 
 #[test]
 fn optional_sugar_is_union_none_everywhere() {
-    clean("const f = (x: int?) -> int | none { x }\n");
-    clean("const g = (x: int | none) -> int? { x }\n");
+    clean("fn f(x: int?) -> int | none { x }\n");
+    clean("fn g(x: int | none) -> int? { x }\n");
+}
+
+#[test]
+fn a_binding_tail_checks_and_the_block_value_is_unit() {
+    // The final statement of a block checks even when it is a binding
+    // (script entry files fold into exactly this shape), and the block's
+    // value is then unit: a non-unit boundary still fails containment.
+    clean("fn f() -> int { const x = 1\n x\n}\n");
+    clean("fn f() -> () { const x = 1\n}\n");
+    let diags = check("fn f() -> int { const x = 1\n}\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.starts_with("DS2001") && d.contains("`lambda body`")),
+        "the unit block fails the int boundary: {diags:?}"
+    );
+    let diags = check("fn f() -> () { const x = 1 + \"s\"\n}\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.starts_with("DS2001") && d.contains("numeric")),
+        "the binding tail itself is checked: {diags:?}"
+    );
+}
+
+/// A destructuring declaration binds exactly one tuple [B3]: the element
+/// binders take their element types, a wrong arity is the tuple-pattern
+/// error, and a union-typed initializer is rejected outright — picking
+/// one member's types would bind without a coverage proof [F4].
+#[test]
+fn destructuring_declarations_bind_one_tuple_or_reject() {
+    clean("fn f(t: (int, string)) -> int { const (a, b) = t\n a }\n");
+    clean("fn f(t: (int, string)) -> int { const (a, _) = t\n a }\n");
+    // wrong arity: no member of the initializer's type matches
+    assert_eq!(
+        check("fn f(t: (int, string)) -> int { const (a, b, c) = t\n 0 }\n"),
+        ["DS2001 tuple pattern of 3 element(s) matches no member of `(int, string)` [B3]"]
+    );
+    // a union initializer would bind one member's types unproven
+    assert_eq!(
+        check(concat!(
+            "fn pick() -> (int, int) | none { (1, 2) }\n",
+            "fn f() -> int { const u = pick()\n const (a, b) = u\n a }\n",
+        )),
+        [
+            "DS2001 a destructuring declaration over `none | (int, int)` needs one tuple of 2 \
+             element(s); narrow the union with a match first [B3, F4]"
+        ]
+    );
+}
+
+/// A match arm's tuple pattern types and binds each element [B3, F4].
+#[test]
+fn match_arm_tuple_patterns_type_each_element() {
+    clean("fn f(t: (int, string)) -> int { match t { (a, b) => a, } }\n");
+    clean("fn f(t: (int, string)) -> string { match t { (_, b) => b, } }\n");
+    // the element binder carries its own element type
+    assert_eq!(
+        check("fn f(t: (int, string)) -> string { match t { (a, b) => a, } }\n"),
+        ["DS2001 `lambda body` has type `int`, not contained in `string` [B2]"]
+    );
+}
+
+/// Tuple construction is bidirectional against an expected tuple type:
+/// each element receives its expected type, so the expected-consuming
+/// forms infer inside a tuple the way they do in a return position.
+#[test]
+fn tuple_construction_propagates_expected_element_types() {
+    clean("fn f() -> (list[int], int) { ([], 3) }\n");
+    // the expected element reaches the empty literal; without a
+    // matching element expectation the empty literal still demands one
+    assert_eq!(check("fn f() -> (int, int) { ([], 3) }\n"), ["DS2002 the \
+                                                              empty list \
+                                                              literal needs \
+                                                              an expected \
+                                                              `list[t]`; \
+                                                              write `list[t]()` \
+                                                              for the explicit \
+                                                              empty list \
+                                                              [B3]"]);
 }

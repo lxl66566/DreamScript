@@ -6,10 +6,10 @@
 
 use ds_abi::SlotType::{self, I64, Raw, Tag};
 use ds_check::analyze;
-use ds_diag::Files;
-use ds_lower::{Lowered, lower};
+use ds_diag::{Files, human};
+use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
-use ds_parse::parse;
+use ds_parse::{parse, parse_script};
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
@@ -34,10 +34,12 @@ fn build_vm() -> (Vm, Lowered) {
     let bytes = write(lowered.module());
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
-    // the loader validates pool FuncRefs at install time, so the builtin
-    // native table must be present first (`Vm::new` would install it too
-    // late for the ds-mod path)
+    // the loader validates pool FuncRefs at install time, so both native
+    // tables must be present first (`Vm::new` would install the builtin
+    // core too late for the ds-mod path; the std platform table is this
+    // test's to provide, as any platform host must)
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
     loader::install(&mut registry, &module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
@@ -111,7 +113,7 @@ fn bad_port_prints_the_interpolated_handler_message() {
 #[test]
 fn missing_and_none_print_the_fallback_handler_line() {
     // `p_none` and `p_str` both miss `p_num`: find_num answers none, the
-    // `or return missing` fires, the fallback arm prints
+    // `return missing` early exit fires, the fallback arm prints
     run_main(probe_none, "config read failed\nsame true\n", true);
     run_main(
         |vm, l| probe_str(vm, l, "oops"),
@@ -200,6 +202,79 @@ fn fn_layout<'m>(
     module.functions()[lowered.function_index(name).expect("planned") as usize].layout()
 }
 
+/// Lowers one inline source through the full pipeline (parse -> analyze
+/// -> lower), asserting the check is clean so failures are the lowerer's.
+fn lower_inline(source: &str) -> Result<Lowered, LowerError> {
+    let mut files = Files::new();
+    let id = files.add_source("inline.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the source checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    lower(
+        "inline",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+}
+
+#[test]
+fn float_remainder_rejects_at_the_lowering_boundary() {
+    // the numeric table admits float rem [B7]; the locked uop set has no
+    // ModF64, so both spellings reject at compile time instead of
+    // compiling a runtime SlotTypeMismatch trap
+    for source in [
+        "tag int\ntag float\nfn main() -> float { 7.5 % 2.0 }",
+        "tag int\ntag float\nfn main() -> () {\n  var x: float = 7.5\n  x %= 2.0\n}",
+    ] {
+        let Err(error) = lower_inline(source) else {
+            panic!("float rem does not lower: {source}")
+        };
+        assert!(
+            error.to_string().contains("a float remainder"),
+            "the error names the seam: {error}"
+        );
+    }
+}
+
+#[test]
+fn byte_literal_stays_a_named_lowering_boundary() {
+    // the record pins `b'x'` as a single byte [F6] but no byte type, so
+    // a declared `byte` atom types the literal while the locked uop set
+    // has no byte slot; lowering rejects by name instead of compiling a
+    // wrong-width word
+    let Err(error) = lower_inline("tag byte\nfn main() -> byte { b'x' }") else {
+        panic!("byte literals do not lower: the uop contract has no byte slot");
+    };
+    assert!(
+        error.to_string().contains("a byte literal"),
+        "the error names the seam: {error}"
+    );
+}
+
+#[test]
+fn integer_compound_remainder_assign_runs() {
+    let source = "tag int\nfn main() -> int {\n  var x: int = 7\n  x %= 3\n  x\n}";
+    let lowered = lower_inline(source).expect("integer %= lowers");
+    let bytes = write(lowered.module());
+    let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    assert_eq!(vm.run("inline", "main", &[]), Ok(Value::I64(1)));
+}
+
 #[test]
 fn frame_layouts_follow_the_locked_slot_rules() {
     // the trimmed probe union has three members; per BL-6 the parameter
@@ -238,4 +313,42 @@ fn frame_layouts_follow_the_locked_slot_rules() {
         [Raw, I64, Raw, I64],
         "main's four overlay words"
     );
+}
+
+#[test]
+fn a_binding_tail_lowers_and_returns_unit() {
+    // A block ending in a binding is a statement tail: it lowers, and the
+    // frame returns the unit value, never the binding's type. Script mode
+    // folds an entry file's statements into exactly this shape, so the
+    // tail path is load-bearing for `ds run`.
+    let source = "tag int\nfn bump(n: int) -> int { n + 1 }\nconst a = 40\nconst b = bump(a)";
+    let mut files = Files::new();
+    let id = files.add_source("script.ds", source);
+    let asts = [parse_script(&files, id).expect("the entry parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the script checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "script",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the synthesized main lowers");
+    let bytes = write(lowered.module());
+    let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    assert_eq!(vm.run("script", "main", &[]), Ok(Value::I64(0)));
 }

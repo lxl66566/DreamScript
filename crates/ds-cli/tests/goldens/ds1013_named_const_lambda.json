@@ -1,0 +1,1 @@
+{"code":"DS1013","severity":"error","message":"a top-level binding cannot name a lambda; `greet` is a function, so declare it `fn name(params) -> ret { ... }`","spans":[{"file":"tests/fixtures/negative/ds1013_named_const_lambda.ds","start_line":5,"start_col":1,"end_line":5,"end_col":42,"label":"here","primary":true}],"notes":[],"suggestions":[]}

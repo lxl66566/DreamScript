@@ -1,0 +1,83 @@
+// source: negative regression items for the affine pass (record C1, C5; corpus README stage vocabulary)
+// purpose: moved-then-used pairs, move-mode parameters, projection transfers, use-after-move across a match join and inside a re-executing loop, deinit outside ~Copyable
+// items:
+// bool: stage: typecheck
+// ready: stage: typecheck
+// later: stage: typecheck
+// handle: stage: typecheck
+// open-handle: stage: typecheck
+// drop-handle: stage: typecheck
+// close-handle: stage: typecheck
+// moved-then-used: stage: reject `h` was moved by the first close_handle and used again by the second (DS3001) [C1]
+// moved-across-arms: stage: reject the `ready` arm moves `h` and the tail expression uses it after the match (DS3001) [C1]
+// moved-in-loop: stage: reject `h` is moved again on every iteration of the while loop (DS3001) [C1]
+// plain: stage: reject deinit on a struct without the `~Copyable` marker (DS3004) [C5]
+// slot: stage: typecheck
+// open-slot: stage: typecheck
+// param-moved-then-used: stage: reject a `move`-mode parameter is consumed by the first close_handle and used again by the second (DS3001) [C1, C2]
+// projection-moved-then-used: stage: reject the first `s.inner` projection consumes `s` and the second uses it again (DS3001) [C1]
+
+tag bool
+
+tag ready
+tag later
+
+struct handle: ~Copyable {
+  fd: int
+  deinit { drop_handle(self.fd) }
+}
+
+extern fn open_handle (p: string) -> handle
+extern fn drop_handle (fd: int) -> ()
+extern fn close_handle (move h: handle) -> ()
+
+const moved_then_used = (p: string) -> () {
+  const h = open_handle(p)
+  close_handle(h)
+  close_handle(h)
+}
+
+const moved_across_arms = (p: string, s: ready | later) -> int {
+  const h = open_handle(p)
+  const r = match s {
+    ready => {
+      close_handle(h)
+      1
+    },
+    later => 2,
+  }
+  h.fd
+}
+
+const moved_in_loop = (p: string) -> int {
+  const h = open_handle(p)
+  var n = 0
+  while n < 3 {
+    close_handle(h)
+    n += 1
+  }
+  n
+}
+
+struct plain {
+  data: int
+  deinit { drop_handle(self.data) }
+}
+
+struct slot: ~Copyable {
+  inner: handle
+}
+
+extern fn open_slot (p: string) -> slot
+
+const param_moved_then_used = (move h: handle) -> () {
+  close_handle(h)
+  close_handle(h)
+}
+
+const projection_moved_then_used = (p: string) -> () {
+  const s = open_slot(p)
+  const i = s.inner
+  close_handle(i)
+  const j = s.inner
+}

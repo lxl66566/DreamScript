@@ -21,10 +21,11 @@
 //!
 //! # Primitive atoms
 //!
-//! The corpus declares `int`/`float`/`string`/`bool` as ambient tags
-//! (conformance/README.md); the lowerer maps those four names onto the
-//! slot types of the same names. `none` is the universe's predeclared
-//! unit atom and needs no declaration.
+//! The corpus declares `int`/`float`/`string`/`bool`/`char` as ambient
+//! tags (conformance/README.md); the lowerer maps those names onto the
+//! slot types of the same names, with `char` riding the string Ref —
+//! one scalar per word, the pinned list-separator convention. `none` is
+//! the universe's predeclared unit atom and needs no declaration.
 
 use std::{collections::HashMap, rc::Rc};
 
@@ -39,16 +40,24 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 
 /// The primitive vocabulary: atom name to slot type. These atoms are
 /// declared as ambient `tag` names by the corpus and check like any tag.
+/// `char` shares the string Ref: one scalar value per one-char string
+/// word, the runtime convention the list natives' separator pins.
 const PRIMITIVES: &[(&str, SlotType)] = &[
     ("int", SlotType::I64),
     ("float", SlotType::F64),
     ("bool", SlotType::Bool),
     ("string", SlotType::Ref),
+    ("char", SlotType::Ref),
 ];
 
 fn primitive_slot(name: &str) -> Option<SlotType> {
     PRIMITIVES.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
+
+/// The heap-reference constructors: an application of one of these is a
+/// single RC'd object behind one Ref word. `list` today (the list
+/// natives' object); `map` still waits for its own runtime shape.
+const HEAP_REFS: &[&str] = &["list"];
 
 /// One word of a value's span: the field's name (or `None` for a
 /// primitive member's own payload word) plus the span offset it lives at.
@@ -103,6 +112,10 @@ pub(crate) enum Shape {
     Word(SlotType),
     /// A bare struct: fields at consecutive words.
     Struct(StructShape),
+    /// An anonymous tuple: one positional word per element (B3). The
+    /// fields carry `None` names and their `word` is the element
+    /// position; the shape never spans more words than elements.
+    Tuple(StructShape),
     /// A tag+payload union span.
     Union(UnionShape),
 }
@@ -169,7 +182,7 @@ impl<'a> Shapes<'a> {
         let shape = self.shape(ty)?;
         Ok(match &*shape {
             Shape::Word(slot) => vec![*slot],
-            Shape::Struct(s) => s.fields.iter().map(|f| f.slot).collect(),
+            Shape::Struct(s) | Shape::Tuple(s) => s.fields.iter().map(|f| f.slot).collect(),
             Shape::Union(u) => u.words.clone(),
         })
     }
@@ -241,8 +254,35 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Tuple(elements) if elements.is_empty() => {
                 Ok(Shape::Word(SlotType::I64)) // the `()` unit value
             },
+            ds_check::AtomKind::Tuple(elements) => {
+                let mut fields = Vec::with_capacity(elements.len());
+                for (index, element) in elements.iter().enumerate() {
+                    // One plain frame word per element: struct, union, and
+                    // nested-tuple elements carry their own spans and need
+                    // reboxing (the open alternative in this module's doc).
+                    let shape = self.atom_shape(*element)?;
+                    let Shape::Word(slot) = shape else {
+                        return Err(unsupported(
+                            "a multi-word tuple element",
+                            "tuple elements lower as one plain frame word this round; struct, \
+                             union, and nested-tuple elements need reboxing",
+                        ));
+                    };
+                    fields.push(MemberField {
+                        name: None,
+                        slot,
+                        word: word_of(index)?,
+                    });
+                }
+                Ok(Shape::Tuple(StructShape { fields }))
+            },
+            // a heap-reference application: one Ref word, the object
+            // behind it owned by the runtime (the list object)
+            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
+                Ok(Shape::Word(SlotType::Ref))
+            },
             _ => Err(unsupported(
-                "an enum, tuple, application, or function value",
+                "an enum, application, or function value",
                 "the M3 runtime contract covers unit, primitive, and struct atoms only",
             )),
         }
@@ -261,9 +301,10 @@ impl<'a> Shapes<'a> {
                 Some(slot) => Ok(vec![(None, slot)]),
                 None => Ok(Vec::new()),
             },
+            // Positional slots (tuple-payload enum cases [B3]) keep
+            // their `None` name; the span places them by word offset.
             ds_check::AtomKind::Struct(fields) => fields
                 .iter()
-                .filter(|f| f.name.is_some())
                 .map(|f| match self.field_slot(&f.ty) {
                     Some(slot) => Ok((f.name.clone(), slot)),
                     None => Err(unsupported(
@@ -272,8 +313,13 @@ impl<'a> Shapes<'a> {
                     )),
                 })
                 .collect(),
+            ds_check::AtomKind::Tuple(_) => Err(unsupported(
+                "a tuple member of a union",
+                "a tuple payload spans several words and the union region gives members one word \
+                 each this round; reboxing is the open alternative",
+            )),
             _ => Err(unsupported(
-                "an enum, tuple, application, or function member",
+                "an enum, application, or function member",
                 "the M3 runtime contract covers unit, primitive, and struct atoms only",
             )),
         }
@@ -293,6 +339,15 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Unit => Some(SlotType::I64), // a unit word
             _ => None,
         }
+    }
+
+    /// Whether an atom is a heap-reference constructor.
+    fn heap_ref(&self, ctor: TypeId) -> bool {
+        self.analyzed
+            .decls
+            .universe
+            .atom_decl(ctor)
+            .is_ok_and(|decl| HEAP_REFS.contains(&decl.name.as_str()))
     }
 }
 

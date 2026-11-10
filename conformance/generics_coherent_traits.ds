@@ -1,4 +1,4 @@
-// source: docs/en/design-decisions.md section 13.5 (generics: coherent traits)
+// source: frozen archive catalog 05-generics-metaprogramming (seed corpus)
 // purpose: ~Copyable generic stack, disjoint instance heads plus rejection, derive + comptime schema, evidence dispatch
 // items:
 // stack: stage: typecheck
@@ -19,37 +19,37 @@
 
 // 1. polymorphic container API over affine elements [C1, D2]
 struct stack[t] { items: list[t] }
-const push = [t: ~Copyable] (s: stack[t], x: t) -> stack[t] {
+fn push[t: ~Copyable](s: stack[t], x: t) -> stack[t] {
   stack { items: cons(x, s.items) }
 }
-const pop = [t: ~Copyable] (s: stack[t]) -> (stack[t], t?) {
+fn pop[t: ~Copyable](s: stack[t]) -> (stack[t], t?) {
   (stack { items: s.items.tail() }, s.items.head())
 }
 
 // 2. traits with disjoint instance heads [B6]
 trait ord {
-  const compare = (self: self, other: self) -> int
+  fn compare(self, other: Self) -> int
 }
 trait json {
-  const to_json = (self: self) -> string
+  fn to_json(self) -> string
 }
 impl json for int {
-  const to_json = (self: self) -> string { str(self) }
+  fn to_json(self) -> string { str(self) }
 }
 impl json for bool {
-  const to_json = (self: self) -> string { str(self) }
+  fn to_json(self) -> string { str(self) }
 }
 impl[t: json] json for list[t] {
-  const to_json = (self: self) -> string { "[" + self.map((x) => x.to_json()).join(",") + "]" }
+  fn to_json(self) -> string { "[" + self.map((x) => x.to_json()).join(",") + "]" }
 }
 impl json for int | bool {
-  const to_json = (self: self) -> string { str(self) }
+  fn to_json(self) -> string { str(self) }
 }
 
 // 3. derive + comptime reflection [G1, G2]
 #[derive(hash, show, to_json, ord)]
 struct point { x: int, y: int }
-const schema = (comptime t: type) -> string {
+fn schema(comptime t: type) -> string {
   var s = "{"
   for f in fields(t) {
     s += f.name + ": " + type_name(f.type) + ", "

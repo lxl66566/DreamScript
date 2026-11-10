@@ -1,0 +1,9 @@
+// The minimal end-to-end program: a greeting and an interpolation hole.
+// Interpolation holes are string-typed, so the sum wraps through str_int.
+
+extern fn str_int (v: int) -> string
+
+const main = () -> () {
+  println("hello, DreamScript")
+  println("1 + 2 = ${str_int(1 + 2)}")
+}

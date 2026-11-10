@@ -1,0 +1,19 @@
+// Kernel: f64 loop — float mul/add/compare per iteration with a conditional
+// rescale. The printed value is the halving counter over two plus 0.25: an
+// odd fourth (x.25 or x.75), exact in binary and short in decimal, so every
+// interpreter prints the same digits.
+
+fn main() -> () {
+  var x: float = 0.25
+  var half: float = 0.0
+  var i: int = 0
+  while i < 10000000 {
+    x = x * 1.5 + 0.25
+    if x > 1000000.0 {
+      x = x * 0.25
+      half = half + 0.5
+    }
+    i += 1
+  }
+  println("result: ${half + 0.25}")
+}

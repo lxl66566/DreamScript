@@ -6,9 +6,9 @@
 // in the ds-vm net_io fixtures plus the CLI integration test, which
 // spins an in-process listener.
 
-const some = (v: int) -> int? { v }
+fn some(v: int) -> int? { v }
 
-const main = (port: int?) -> () {
+fn main(port: int?) -> () {
   if port is none {
     println("skipped: no local test server")
     println("  start a TCP listener, then run: ds run examples/net.ds --args <port>")

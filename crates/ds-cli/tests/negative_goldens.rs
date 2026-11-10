@@ -9,7 +9,14 @@
 //! uninitialized state never reaches a use; the lattice base is pinned by
 //! a unit test inside the affine pass instead). DS2012 is pinned here on
 //! both of its surface routes: the tuple expression and the tuple type
-//! annotation.
+//! annotation. The fn-only round adds its retirement classes: DS1013
+//! (a lambda named at the top level), DS2015 (`self` as a type name), and
+//! DS2016 (the annotated receiver). The namespace round adds the second
+//! DS2014 route: the call-form collision between the type and value
+//! namespaces [F9]. The script-entry round adds DS1014 (a top-level
+//! statement outside the entry file); DS1015, the script-mode collision
+//! with a written `main`, fires only through `parse_script` and is pinned
+//! in ds-parse's unit suite instead.
 
 use std::{
     env, fs,
@@ -34,6 +41,16 @@ const CASES: &[Case] = &[
         stem: "ds1008_unclosed_delimiter",
         human: include_str!("goldens/ds1008_unclosed_delimiter.human"),
         json: include_str!("goldens/ds1008_unclosed_delimiter.json"),
+    },
+    Case {
+        stem: "ds1013_named_const_lambda",
+        human: include_str!("goldens/ds1013_named_const_lambda.human"),
+        json: include_str!("goldens/ds1013_named_const_lambda.json"),
+    },
+    Case {
+        stem: "ds1014_top_level_statement",
+        human: include_str!("goldens/ds1014_top_level_statement.human"),
+        json: include_str!("goldens/ds1014_top_level_statement.json"),
     },
     Case {
         stem: "ds2003_non_exhaustive_match",
@@ -64,6 +81,21 @@ const CASES: &[Case] = &[
         stem: "ds2014_ambiguous_call",
         human: include_str!("goldens/ds2014_ambiguous_call.human"),
         json: include_str!("goldens/ds2014_ambiguous_call.json"),
+    },
+    Case {
+        stem: "ds2014_namespace_call_collision",
+        human: include_str!("goldens/ds2014_namespace_call_collision.human"),
+        json: include_str!("goldens/ds2014_namespace_call_collision.json"),
+    },
+    Case {
+        stem: "ds2015_lowercase_self_type",
+        human: include_str!("goldens/ds2015_lowercase_self_type.human"),
+        json: include_str!("goldens/ds2015_lowercase_self_type.json"),
+    },
+    Case {
+        stem: "ds2016_annotated_receiver",
+        human: include_str!("goldens/ds2016_annotated_receiver.human"),
+        json: include_str!("goldens/ds2016_annotated_receiver.json"),
     },
     Case {
         stem: "ds3001_moved_then_used",

@@ -12,8 +12,9 @@ use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
-/// -> read back -> install. The native table must precede the loader's
-/// install (pool FuncRefs validate against installed tables).
+/// -> read back -> install. Both native tables must precede the loader's
+/// install (pool FuncRefs validate against installed tables); the std
+/// platform table is this test's to provide, as any platform host must.
 fn build_vm() -> (Vm, Lowered) {
     let source = include_str!("fixtures/file_native_probe.ds");
     let mut files = Files::new();
@@ -41,6 +42,7 @@ fn build_vm() -> (Vm, Lowered) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
     loader::install(&mut registry, &module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
@@ -69,7 +71,7 @@ fn a_failed_read_prints_the_message_and_halts_on_the_tag() {
     vm.capture_output();
     assert_eq!(
         vm.run("file_natives", "fail_read", &staged),
-        Ok(Value::Tag(native::BUILTIN_IO_ERR)),
+        Ok(Value::Tag(native::PLATFORM_IO_ERR)),
         "the handler halts on the discriminant, the run result is the tag"
     );
     let out = String::from_utf8_lossy(vm.captured_output()).into_owned();

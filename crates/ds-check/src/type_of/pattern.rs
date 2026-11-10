@@ -5,7 +5,8 @@
 use super::*;
 
 impl Bodies<'_> {
-    /// One pattern against a scrutinee type: the atoms it covers.
+    /// One match-arm pattern against a scrutinee type: the atoms it
+    /// covers.
     pub(crate) fn pattern_cover(
         &mut self,
         pat: &Pattern,
@@ -13,14 +14,14 @@ impl Bodies<'_> {
         ann: Option<&Type>,
     ) -> Vec<TypeId> {
         let mut covered = Vec::new();
-        self.pattern_walk(pat, scrut, ann, &mut covered, &mut Vec::new(), 0);
+        self.pattern_walk(pat, scrut, ann, &mut covered, &mut Vec::new(), 0, true);
         covered
     }
 
-    /// Binds one pattern's binders into the current scope.
+    /// Binds one declaration pattern's binders into the current scope.
     pub(crate) fn bind_pattern(&mut self, pat: &Pattern, scrut: Ty, mutable: bool) {
         let mut binders = Vec::new();
-        self.pattern_walk(pat, scrut, None, &mut Vec::new(), &mut binders, 0);
+        self.pattern_walk(pat, scrut, None, &mut Vec::new(), &mut binders, 0, false);
         for (_, span, ty) in binders {
             self.bind_local(span, Binding { ty, mutable });
         }
@@ -33,11 +34,11 @@ impl Bodies<'_> {
         scrut: Ty,
     ) -> Vec<(String, Option<DefId>, Ty)> {
         let mut binders = Vec::new();
-        self.pattern_walk(pat, scrut, None, &mut Vec::new(), &mut binders, 0);
+        self.pattern_walk(pat, scrut, None, &mut Vec::new(), &mut binders, 0, false);
         binders
             .into_iter()
             .map(|(name, _, ty)| {
-                let def = self.package.lookup(&name);
+                let def = self.package.lookup_value(&name);
                 (name, def, ty)
             })
             .collect()
@@ -45,14 +46,15 @@ impl Bodies<'_> {
 
     pub(crate) fn pattern_def(&self, local: &LocalDecl) -> Option<DefId> {
         match &local.pat {
-            Pattern::Binding { name, .. } => self.package.lookup(&name.name),
+            Pattern::Binding { name, .. } => self.package.lookup_value(&name.name),
             _ => None,
         }
     }
 
     /// One pattern walk: coverage accumulates into `covered`, binder
     /// tuples `(name, span, ty)` into `binders`. `depth` guards against
-    /// pathological or-pattern nesting.
+    /// pathological or-pattern nesting. `arm` marks a test position
+    /// (match arms); declarations keep every identifier a binding.
     pub(crate) fn pattern_walk(
         &mut self,
         pat: &Pattern,
@@ -61,6 +63,7 @@ impl Bodies<'_> {
         covered: &mut Vec<TypeId>,
         binders: &mut Vec<(String, Span, Ty)>,
         depth: usize,
+        arm: bool,
     ) {
         if depth > 64 {
             return;
@@ -69,6 +72,16 @@ impl Bodies<'_> {
         match pat {
             Pattern::Wildcard(_) => covered.extend(members),
             Pattern::Binding { name, .. } => {
+                // A bare identifier in a test position names a member test
+                // when the type namespace carries it [F9]: bare tags are
+                // constructor values, so the type entry wins over any
+                // same-named local and nothing binds.
+                if arm {
+                    if let Some(atom) = self.unit_pattern_atom(&name.name) {
+                        self.case_cover(name.span, atom, &members, scrut, covered);
+                        return;
+                    }
+                }
                 let ty = match ann {
                     Some(ann) => match self.solve_here(ann) {
                         Some(solved) => {
@@ -156,7 +169,15 @@ impl Bodies<'_> {
                             );
                         }
                         for (sub, field_ty) in args.iter().zip(fields.iter()) {
-                            self.pattern_walk(sub, *field_ty, None, covered, binders, depth + 1);
+                            self.pattern_walk(
+                                sub,
+                                *field_ty,
+                                None,
+                                covered,
+                                binders,
+                                depth + 1,
+                                arm,
+                            );
                         }
                         self.case_cover(*span, atom, &members, scrut, covered);
                     },
@@ -212,7 +233,15 @@ impl Bodies<'_> {
                     match sub {
                         Some(sub) => {
                             let scrut_field = field_ty.unwrap_or_else(|| self.empty());
-                            self.pattern_walk(sub, scrut_field, None, covered, binders, depth + 1);
+                            self.pattern_walk(
+                                sub,
+                                scrut_field,
+                                None,
+                                covered,
+                                binders,
+                                depth + 1,
+                                arm,
+                            );
                         },
                         None => binders.push((
                             name.name.clone(),
@@ -230,7 +259,26 @@ impl Bodies<'_> {
                 trailing_comma,
             } => {
                 if pats.len() == 1 && !trailing_comma {
-                    self.pattern_walk(&pats[0], scrut, ann, covered, binders, depth + 1);
+                    self.pattern_walk(&pats[0], scrut, ann, covered, binders, depth + 1, arm);
+                    return;
+                }
+                if !arm && members.len() != 1 {
+                    // Declaration patterns bind without a coverage
+                    // proof: picking the one tuple member out of a union
+                    // would bind unproven types, so the scrutinee must
+                    // be exactly one tuple. Match arms split unions
+                    // instead, with the checker proving coverage.
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "a destructuring declaration over `{}` needs one tuple of {} \
+                             element(s); narrow the union with a match first [B3, F4]",
+                            self.decls.universe.render(scrut),
+                            pats.len()
+                        ),
+                        *span,
+                        "not one tuple type",
+                    );
                     return;
                 }
                 let mut matched = Vec::new();
@@ -251,6 +299,7 @@ impl Bodies<'_> {
                                     covered,
                                     binders,
                                     depth + 1,
+                                    arm,
                                 );
                             }
                         }
@@ -282,6 +331,7 @@ impl Bodies<'_> {
                         &mut sub_covered,
                         &mut sub_binders,
                         depth + 1,
+                        arm,
                     );
                     let names: Vec<String> = sub_binders.iter().map(|(n, ..)| n.clone()).collect();
                     match &alternative {
@@ -369,22 +419,28 @@ impl Bodies<'_> {
 
     fn pattern_path_atom(&mut self, path: &Path) -> Option<TypeId> {
         match path.segments.as_slice() {
-            [only] => {
-                if only.name == "none" && self.package.lookup("none").is_none() {
-                    return Some(TypeId::NONE);
-                }
-                let def = self.package.lookup(&only.name)?;
-                self.decls.atoms.get(&def).copied()
-            },
+            [only] => self.unit_pattern_atom(&only.name),
             [head, tail] => {
-                let def = self.package.lookup(&head.name)?;
+                // A qualified case path tests the CASE's own minted atom
+                // [B3], never the enum's name.
+                let def = self.package.lookup_type(&head.name)?;
                 let shape = self.decls.enums.get(&def)?;
-                if !shape.cases.iter().any(|(name, ..)| name == &tail.name) {
-                    return None;
-                }
-                self.decls.atoms.get(&def).copied()
+                let (case_name, ..) = shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
+                let case_def = self.package.lookup_type(case_name)?;
+                self.decls.atoms.get(&case_def).copied()
             },
             _ => None,
         }
+    }
+
+    /// The member atom a bare identifier names in a pattern: the
+    /// predeclared `none`, or a type-namespace constructor's atom —
+    /// aliases and traits carry none, so those names bind instead.
+    fn unit_pattern_atom(&self, name: &str) -> Option<TypeId> {
+        if name == "none" && !self.package.declares("none") {
+            return Some(TypeId::NONE);
+        }
+        let def = self.package.lookup_type(name)?;
+        self.decls.atoms.get(&def).copied()
     }
 }

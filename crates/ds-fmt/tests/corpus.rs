@@ -71,7 +71,7 @@ fn conformance_corpus_round_trips() {
 fn positive_fixtures_round_trip() {
     assert_eq!(
         POSITIVE.len(),
-        99,
+        98,
         "fixture count drifted; keep in sync with ds-parse positives"
     );
     for (i, src) in POSITIVE.iter().enumerate() {

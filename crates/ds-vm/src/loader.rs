@@ -16,8 +16,10 @@
 //!   slot at issue time, which is what the two-slot retirement semantics require [H6 item 5].
 //! - Strings. A `Str` entry is a genuine string constant; KSTR loads it as an interned heap string
 //!   reference (the pool-kind check admits it for KSTR only).
-//! - Natives. A payload FuncRef may name the VM's builtin native module (every VM installs it, so
-//!   builtins resolve like any installed dependency).
+//! - Natives. A payload FuncRef may name a reserved native module: the `builtin` core (every VM
+//!   installs it, so its primitives resolve like any installed dependency) or the `std` platform
+//!   module (host-installed — a run over world natives requires the platform table in place before
+//!   the module's install, the dependencies-first rule).
 //! - Entry descriptors. The blocks payload stores a two-word zero placeholder per function; the
 //!   in-memory `ds_mod::Function` record does not carry it, and the fill happens here: install
 //!   writes word 0 (the tier-1 prologue pointer, the function's table index by the M3 convention)
@@ -66,8 +68,9 @@ fn resolve_funcref(
         }
         return Err(());
     }
-    // the registry's native tables answer too: the builtin module is
-    // installed in every VM, so builtins resolve like any dependency
+    // the registry's native tables answer too: the builtin core is
+    // installed in every VM and the std platform module by its host, so
+    // natives resolve like any installed dependency
     let resolved = registry.resolve_native(module, index).is_some()
         || registry.resolve_indexed(module, index).is_some();
     if resolved { Ok((module.to_owned(), index)) } else { Err(()) }
@@ -112,8 +115,8 @@ fn map_function(
         name: function.name().to_owned(),
         layout: function.layout().clone(),
         pool,
-        // ds-mod validated every uop's encodability when the record was
-        // built, so re-encoding cannot fail
+        // ds-mod validated every body word's encodability when the record
+        // was built, so re-encoding cannot fail
         code: assemble(function.code())
             .expect("ds-mod validated every word at build and parse time"),
     })

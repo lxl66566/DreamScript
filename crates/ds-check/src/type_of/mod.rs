@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use ds_diag::{Diagnostic, ErrorCode, Files, Span};
 use ds_parse::{
     Ast, BinaryOp, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal, LocalDecl,
-    MatchArm, OrTail, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam, UnaryOp,
+    MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam, UnaryOp,
 };
 
 use crate::{
@@ -265,7 +265,7 @@ struct Bodies<'a> {
     locals: HashMap<Span, Binding>,
     /// The refinement overlay, keyed by binder span [B2].
     refined: HashMap<Span, Ty>,
-    /// Type-variable scopes, innermost last (generic parameters, `self`).
+    /// Type-variable scopes, innermost last (generic parameters, `Self`).
     type_vars: Vec<HashMap<String, Ty>>,
     /// In-scope trait assumptions from generic bounds (`[t: json]`), with
     /// per-scope truncation marks.
@@ -346,15 +346,12 @@ impl<'a> Bodies<'a> {
             },
             ItemKind::Trait(t) => {
                 self.push_generics(&t.generics.iter().map(generic_of).collect::<Vec<_>>());
-                let self_ty = self.fresh_var("self");
-                self.type_vars
-                    .push(HashMap::from([("self".to_owned(), self_ty)]));
+                let self_ty = self.fresh_var("Self");
                 for member in &t.members {
                     if let TraitMember::Fn(f) = member {
-                        self.fn_decl(f, None);
+                        self.fn_decl(f, Some(self_ty));
                     }
                 }
-                self.type_vars.pop();
                 self.pop_generics();
             },
             ItemKind::Impl(imp) => {
@@ -390,14 +387,12 @@ impl<'a> Bodies<'a> {
             self.pop_generics();
             return;
         };
-        self.type_vars
-            .push(HashMap::from([("self".to_owned(), target)]));
         let member_names: Option<Vec<String>> = imp.trait_ref.as_ref().and_then(|tr| {
             let [only] = tr.path.segments.as_slice() else {
                 return None
             };
             self.package
-                .lookup(&only.name)
+                .lookup_type(&only.name)
                 .and_then(|def| self.decls.trait_members.get(&def).cloned())
         });
         for f in &imp.fns {
@@ -414,7 +409,6 @@ impl<'a> Bodies<'a> {
             }
             self.fn_decl(f, Some(target));
         }
-        self.type_vars.pop();
         self.pop_generics();
     }
 
@@ -461,19 +455,39 @@ impl<'a> Bodies<'a> {
     }
 
     /// One named function declaration: boundary-anchored [B2]. `self_ty`
-    /// binds the `self` type inside trait/impl scopes [section 6.1].
+    /// binds `Self` inside trait/impl scopes, where the first parameter
+    /// named `self` is the receiver — exempt from annotation and typed
+    /// `Self` [record 6.1].
     fn fn_decl(&mut self, f: &FnDecl, self_ty: Option<Ty>) {
         let generics: Vec<GenericParam> = f.generics.iter().map(generic_of).collect();
         self.push_generics(&generics);
         if let Some(target) = self_ty {
             self.type_vars
-                .push(HashMap::from([("self".to_owned(), target)]));
+                .push(HashMap::from([("Self".to_owned(), target)]));
         }
         let saved = self.snapshot();
         self.locals.clear();
         self.refined.clear();
         self.ret = None;
-        for param in &f.params {
+        for (index, param) in f.params.iter().enumerate() {
+            if index == 0 && self_ty.is_some() && param.name.name == "self" {
+                if let Some(ann) = &param.ty {
+                    self.error(
+                        ErrorCode::AnnotatedReceiver,
+                        "the receiver is spelled `self` or `mut self` with no annotation; it is \
+                         typed `Self`"
+                            .to_owned(),
+                        ann.span(),
+                        "annotated receiver",
+                    );
+                }
+                let recv_ty = self_ty.unwrap_or_else(|| self.empty());
+                self.bind_local(param.name.span, Binding {
+                    ty: recv_ty,
+                    mutable: param_is_mut(param),
+                });
+                continue;
+            }
             if let Some(solved) = param.ty.as_ref().and_then(|t| self.solve_here(t)) {
                 self.bind_local(param.name.span, Binding {
                     ty: solved,
@@ -517,7 +531,7 @@ impl<'a> Bodies<'a> {
         let old_ret = self.ret;
         self.ret = ret;
         if let Some(body) = &f.body {
-            let val = self.block(body);
+            let val = self.block_expected(body, ret);
             if let Some(ret) = ret {
                 if !val.diverges {
                     self.expect_contains(val, ret, body.span, "function body");
@@ -535,13 +549,36 @@ impl<'a> Bodies<'a> {
     // ---- statements ---------------------------------------------------------
 
     fn block(&mut self, block: &BlockExpr) -> Val {
+        self.block_expected(block, None)
+    }
+
+    /// A block whose final expression carries an expected type — the
+    /// function-body anchor: a tail `?` splits its operand against the
+    /// return union there, so a fully-contained operand yields itself
+    /// instead of propagating everything [E4].
+    fn block_expected(&mut self, block: &BlockExpr, expected: Option<Ty>) -> Val {
         let saved = self.snapshot();
         let mut val = Val {
             ty: self.unit(),
             diverges: false,
         };
-        for stmt in &block.stmts {
+        let (head, last) = match block.stmts.split_last() {
+            Some((last, head)) => (head, Some(last)),
+            None => (&block.stmts[..], None),
+        };
+        for stmt in head {
             val = self.stmt(stmt);
+        }
+        match last {
+            // Only an expression tail carries the expected type (the
+            // function-body anchor); a binding tail still checks, its
+            // block value stays unit [F2].
+            Some(Stmt {
+                kind: ds_parse::StmtKind::Expr(expr),
+                ..
+            }) => val = self.expr(expr, expected),
+            Some(other) => val = self.stmt(other),
+            None => {},
         }
         self.restore(saved);
         val
@@ -614,9 +651,20 @@ impl<'a> Bodies<'a> {
                 if items.len() == 1 && !trailing_comma {
                     return self.expr(&items[0], expected);
                 }
+                // Bidirectional against an expected tuple type: a
+                // single-member expectation of the pattern's arity feeds
+                // each element its expected type, so the
+                // expected-consuming forms (the empty list literal, a
+                // struct literal, a nested tuple, `?`) infer inside a
+                // tuple the way they do in a return position.
+                let expected_elems: Option<Vec<Ty>> =
+                    expected.and_then(|exp| self.expected_tuple_elems(exp, items.len()));
                 let mut elements = Vec::with_capacity(items.len());
-                for item in items {
-                    elements.push(self.expr(item, None).ty);
+                for (index, item) in items.iter().enumerate() {
+                    let item_expected = expected_elems
+                        .as_ref()
+                        .and_then(|elems| elems.get(index).copied());
+                    elements.push(self.expr(item, item_expected).ty);
                 }
                 let ty = match self.decls.universe.product(&elements) {
                     Ok(ty) => ty,
@@ -641,10 +689,31 @@ impl<'a> Bodies<'a> {
                     diverges: false,
                 }
             },
+            Expr::List { .. } => self.list_expr(e, expected),
             Expr::Paren { inner, .. } => self.expr(inner, expected),
             Expr::Call { .. } => self.call(e),
             Expr::Field { recv, name, .. } => self.field_access(recv, name),
-            Expr::Index { span, .. } => {
+            Expr::Index { span, recv, .. } => {
+                if let Some(head) = single_path_ident(recv) {
+                    if self.package.lookup_type(&head.name).is_some() {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "`{}` is a type; the application `{}[...]` constructs only in \
+                                 call position — `{name}[t]()` [F9, B3]",
+                                head.name,
+                                head.name,
+                                name = head.name
+                            ),
+                            *span,
+                            "type application outside a call",
+                        );
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                        };
+                    }
+                }
                 self.error(
                     ErrorCode::InferenceFailed,
                     "index typing arrives with the stdlib collection types [F5, M3]".to_owned(),
@@ -685,16 +754,16 @@ impl<'a> Bodies<'a> {
             Expr::Range { span, .. } => {
                 self.error(
                     ErrorCode::InferenceFailed,
-                    "range types arrive with the stdlib [F7, M3]".to_owned(),
+                    "a range is not a storable value; ranges are `for`-in and `in` sugar [F7]"
+                        .to_owned(),
                     *span,
-                    "range",
+                    "range value",
                 );
                 Val {
                     ty: self.empty(),
                     diverges: false,
                 }
             },
-            Expr::Or { left, right, span } => self.or_expr(left, right, *span),
             Expr::Assign {
                 op,
                 left,
@@ -703,12 +772,12 @@ impl<'a> Bodies<'a> {
             } => self.assign(*op, left, right, *span),
             Expr::If {
                 cond, then, else_, ..
-            } => self.if_expr(cond, then, else_.as_deref()),
+            } => self.if_expr(cond, then, else_.as_deref(), expected),
             Expr::Match {
                 scrutinee,
                 arms,
                 span,
-            } => self.match_expr(scrutinee, arms, *span),
+            } => self.match_expr(scrutinee, arms, *span, expected),
             Expr::While { cond, body, .. } => {
                 let cond_val = self.expr(cond, None);
                 self.expect_bool(cond_val, cond.span());
@@ -730,8 +799,12 @@ impl<'a> Bodies<'a> {
                 span,
             } => self.for_expr(pat, iter, body, *span),
             Expr::Return { expr, span } => {
+                // The returned expression carries the declared return as
+                // its expected type, matching the final-expression anchor:
+                // a `?` operand splits against the return union here too
+                // [E4].
                 let value = match expr {
-                    Some(expr) => self.expr(expr, None),
+                    Some(expr) => self.expr(expr, self.ret),
                     None => Val {
                         ty: self.unit(),
                         diverges: false,
@@ -784,7 +857,7 @@ impl<'a> Bodies<'a> {
                     diverges: false,
                 }
             },
-            Expr::Block(block) => self.block(block),
+            Expr::Block(block) => self.block_expected(block, expected),
         }
     }
 
@@ -841,8 +914,10 @@ impl<'a> Bodies<'a> {
         }
     }
 
-    /// Interpolated strings: every hole is a string operand — no hidden
-    /// stringification [F6].
+    /// Interpolated strings: every hole is an explicit string context
+    /// [F6] — a printable primitive (bool, char, float, int, string)
+    /// converts through `str(e)` implicitly; every other operand needs
+    /// extraction or the `show` derive (the M6 seam).
     fn string_expr(&mut self, span: Span, parts: &[StrPart]) -> Val {
         let string_ty = self.named_atom_ty(span, "string", "string literal");
         let Some(string_ty) = string_ty else {
@@ -852,31 +927,91 @@ impl<'a> Bodies<'a> {
             };
         };
         for part in parts {
-            if let StrPart::Expr { expr, span } = part {
-                let val = self.expr(expr, Some(string_ty));
-                if !self.decls.universe.contains(string_ty, val.ty) {
-                    let hole = self.span_text(*span);
-                    self.diags.push(
-                        Diagnostic::error(
-                            ErrorCode::TypeMismatch,
-                            format!(
-                                "interpolation hole has type `{}`; call `str()` at the boundary \
-                                 [F6]",
-                                self.decls.universe.render(val.ty)
-                            ),
-                        )
-                        .with_primary(*span, "not a string operand")
-                        .with_suggestion(ds_diag::Suggestion::Replace {
-                            span: *span,
-                            with: format!("str({hole})"),
-                        }),
-                    );
-                }
+            let (hole_span, hole_ty) = match part {
+                StrPart::Text { .. } => continue,
+                StrPart::Expr { span, expr } => (*span, self.expr(expr, Some(string_ty)).ty),
+                StrPart::Ident { name, .. } => {
+                    let val = self.ident_hole_value(name);
+                    self.expr_types.insert(name.span, val);
+                    (name.span, val.ty)
+                },
+            };
+            if self.printable_hole(hole_ty) {
+                continue;
             }
+            if self.decls.universe.is_empty(hole_ty) {
+                continue; // the operand's own walk already reported
+            }
+            let note = if self.decls.universe.members(hole_ty).len() == 1 {
+                "the `show` derive arrives with M6"
+            } else {
+                "extract a member first [B4, E4]"
+            };
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "interpolation hole has type `{}`; the printable primitives (bool, char, \
+                         float, int, string) convert implicitly [F6]",
+                        self.decls.universe.render(hole_ty)
+                    ),
+                )
+                .with_primary(hole_span, "not a printable operand")
+                .with_note(note),
+            );
         }
         Val {
             ty: string_ty,
             diverges: false,
+        }
+    }
+
+    /// One hole operand under the printable rule [F6]: the string
+    /// context itself, or exactly one printable primitive atom.
+    fn printable_hole(&self, ty: Ty) -> bool {
+        let [atom] = self.decls.universe.members(ty) else {
+            return false;
+        };
+        let name = self
+            .decls
+            .universe
+            .atom_decl(*atom)
+            .map_or("", |decl| decl.name.as_str());
+        matches!(name, "bool" | "char" | "float" | "int" | "string")
+    }
+
+    /// The value type of a bare `$name` hole: the single-segment path
+    /// resolution, recorded at the name's own span so the lowerer reads
+    /// it there [F6].
+    fn ident_hole_value(&mut self, name: &Ident) -> Val {
+        if let Some(res) = self.res.get(name.span) {
+            match res {
+                Res::Local { bind } => Val {
+                    ty: self.local_ty(*bind).unwrap_or_else(|| self.empty()),
+                    diverges: false,
+                },
+                Res::Def(def) => self.def_value(*def, name.span),
+                Res::TraitMethod(_) | Res::Dot(_) | Res::Handler => Val {
+                    ty: self.empty(),
+                    diverges: false,
+                },
+            }
+        } else if name.name == "none" && !self.package.declares("none") {
+            Val {
+                ty: self.none_ty(),
+                diverges: false,
+            }
+        } else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!("`{}` does not resolve to a value", name.name),
+                name.span,
+                "not a value",
+            );
+            Val {
+                ty: self.empty(),
+                diverges: false,
+            }
         }
     }
 
@@ -894,7 +1029,7 @@ impl<'a> Bodies<'a> {
                         diverges: false,
                     },
                 }
-            } else if only.name == "none" && self.package.lookup("none").is_none() {
+            } else if only.name == "none" && !self.package.declares("none") {
                 Val {
                     ty: self.none_ty(),
                     diverges: false,
@@ -961,6 +1096,47 @@ impl<'a> Bodies<'a> {
                     ty: self.empty(),
                     diverges: false,
                 },
+            },
+            DefKind::Case => {
+                // A bare case is the unit form, like a tag; a payload
+                // case constructs by call form only [B3], so a bare use
+                // is the cross-spelling.
+                let payload = self
+                    .decls
+                    .cases
+                    .get(&def)
+                    .map_or(EnumPayload::None, |c| c.payload.clone());
+                if !matches!(payload, EnumPayload::None) {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!(
+                            "`{}` is an enum case with a payload; construct it by call form: \
+                             `{}(...)`",
+                            self.package.def(def).name,
+                            self.package.def(def).name
+                        ),
+                        span,
+                        "payload case used bare",
+                    );
+                    return Val {
+                        ty: self.empty(),
+                        diverges: false,
+                    };
+                }
+                match self.decls.atoms.get(&def).copied() {
+                    Some(atom) => Val {
+                        ty: self
+                            .decls
+                            .universe
+                            .atom_ty(atom)
+                            .unwrap_or_else(|_| self.empty()),
+                        diverges: false,
+                    },
+                    None => Val {
+                        ty: self.empty(),
+                        diverges: false,
+                    },
+                }
             },
             DefKind::Const | DefKind::Var => self.const_ty(def, span),
             DefKind::Struct | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait => {
@@ -1095,7 +1271,7 @@ impl<'a> Bodies<'a> {
         let expected_is_var = fn_ret_expected.is_some_and(|r| self.is_var_ty(r));
         let old_ret = self.ret;
         self.ret = if expected_is_var { None } else { fn_ret_expected };
-        let body_val = self.expr(body, None);
+        let body_val = self.expr(body, self.ret);
         let fn_ret = match fn_ret_expected {
             Some(r) if !expected_is_var => {
                 if !body_val.diverges {
@@ -1141,12 +1317,34 @@ impl<'a> Bodies<'a> {
                 diverges: false,
             };
         };
-        let Some(def) = self.package.lookup(&only.name) else {
+        let Some(def) = self.package.lookup_type(&only.name) else {
             return Val {
                 ty: self.empty(),
                 diverges: false,
             }; // resolver reported
         };
+        // An enum case constructs by call form only [B3]; the brace form
+        // is the struct construction, so this is the cross-spelling.
+        if self.decls.cases.contains_key(&def) {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "`{}` is an enum case; construct it by call form: `{}(...)`",
+                    only.name, only.name
+                ),
+                only.span,
+                "brace form on an enum case",
+            );
+            for (_, value) in fields {
+                if let Some(expr) = value {
+                    self.expr(expr, None);
+                }
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+            };
+        }
         let Some(shape) = self.decls.structs.get(&def).cloned() else {
             self.error(
                 ErrorCode::TypeMismatch,
@@ -1292,6 +1490,223 @@ impl<'a> Bodies<'a> {
         }
     }
 
+    /// One list literal `[a, b, c]` [F7, B3]. Bidirectional: an expected
+    /// `list[t]` fixes the element type and every item checks against it;
+    /// without one, the first item fixes the type and a later item
+    /// outside it is the mixed-element error. The empty literal has no
+    /// element evidence — it needs the expected type, and `list[t]()`
+    /// is the always-spellable empty form.
+    fn list_expr(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
+        let Expr::List { span, items, .. } = e else {
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+            };
+        };
+        let Some(list_def) = self.package.lookup_type("list") else {
+            for item in items {
+                self.expr(item, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+            }; // the resolver reported the unknown type
+        };
+        let expected_elem = expected.and_then(|exp| {
+            let (ctor, args) = self.single_apply(exp)?;
+            let [elem] = args.as_slice() else {
+                return None;
+            };
+            (self.decls.defs_of_atoms.get(&ctor) == Some(&list_def)).then_some(*elem)
+        });
+        let elem = if items.is_empty() {
+            let Some(elem) = expected_elem else {
+                self.error(
+                    ErrorCode::InferenceFailed,
+                    "the empty list literal needs an expected `list[t]`; write `list[t]()` for \
+                     the explicit empty list [B3]"
+                        .to_owned(),
+                    *span,
+                    "empty list literal",
+                );
+                // downstream empty-type fallbacks must not re-report
+                self.solve_reported = true;
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                };
+            };
+            elem
+        } else if let Some(elem) = expected_elem {
+            elem
+        } else {
+            self.expr(&items[0], None).ty
+        };
+        for (index, item) in items.iter().enumerate() {
+            if index == 0 && expected_elem.is_none() {
+                continue; // walked above for the element evidence
+            }
+            let val = self.expr(item, Some(elem));
+            if val.diverges || self.decls.universe.contains(elem, val.ty) {
+                continue;
+            }
+            match expected_elem {
+                Some(_) => {
+                    self.expect_contains(val, elem, item.span(), "list element");
+                },
+                None => {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "list literal mixes element types: item {} has type `{}`, the first \
+                             item `{}` [B2]",
+                            index + 1,
+                            self.decls.universe.render(val.ty),
+                            self.decls.universe.render(elem)
+                        ),
+                        item.span(),
+                        "mixed element types",
+                    );
+                },
+            }
+        }
+        let ty = self.applied_list_ty(elem).unwrap_or_else(|| self.empty());
+        Val {
+            ty,
+            diverges: false,
+        }
+    }
+
+    /// One generic-application constructor call `list[page]()` [F9, B3]:
+    /// the head resolved in the type namespace, so the bracketed form is
+    /// a type application, never an index. Returns `None` when the head
+    /// names no type — the ordinary index error reports instead.
+    fn ctor_apply_call(
+        &mut self,
+        recv: &Expr,
+        index: &Expr,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Option<Val> {
+        let head = single_path_ident(recv)?;
+        let def = self.package.lookup_type(&head.name)?;
+        let walk_args = |this: &mut Self| {
+            for arg in args {
+                this.expr(&arg.value, None);
+            }
+            if let Some(tail) = trailing {
+                this.expr(tail, None);
+            }
+        };
+        let is_list = |this: &Self| {
+            this.decls
+                .structs
+                .get(&def)
+                .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
+        };
+        if !is_list(self) {
+            // Construction is fixed per declaration [B3]; every type
+            // application besides the list surface is the cross-spelling
+            // error.
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "`{}` constructs per its declaration, not by type application [B3]",
+                    head.name
+                ),
+                span,
+                "cross-spelling construction",
+            );
+            walk_args(self);
+            self.solve_reported = true;
+            return Some(self.empty_val());
+        }
+        if trailing.is_some() {
+            self.error(
+                ErrorCode::TypeMismatch,
+                "a type application takes no trailing block".to_owned(),
+                span,
+                "trailing block",
+            );
+            self.solve_reported = true;
+            return Some(self.empty_val());
+        }
+        if !args.is_empty() {
+            self.error(
+                ErrorCode::TypeMismatch,
+                "the empty-list constructor takes no arguments; build with a list literal `[...]` \
+                 [B3]"
+                    .to_owned(),
+                span,
+                "constructor arguments",
+            );
+            walk_args(self);
+            self.solve_reported = true;
+            return Some(self.empty_val());
+        }
+        let Some(arg_ty) = Self::ctor_type_arg(index) else {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "the bracketed argument of `{}[...]` is a type, not a value [F9]",
+                    head.name
+                ),
+                index.span(),
+                "not a type",
+            );
+            self.solve_reported = true;
+            return Some(self.empty_val());
+        };
+        let Some(elem) = self.solve_here(&arg_ty) else {
+            if !self.take_solve_reported() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "the type argument `{}` does not solve against the package declarations",
+                        decls::render_type(&arg_ty)
+                    ),
+                    arg_ty.span(),
+                    "unsolvable type argument",
+                );
+            }
+            self.solve_reported = true;
+            return Some(self.empty_val());
+        };
+        let ty = self.applied_list_ty(elem)?;
+        Some(Val {
+            ty,
+            diverges: false,
+        })
+    }
+
+    /// The bracketed argument of a type application: a type spelled in
+    /// expression position [F9] — a path, a parenthesized form, or a
+    /// tuple of the same.
+    fn ctor_type_arg(arg: &Expr) -> Option<Type> {
+        match arg {
+            Expr::Path { span, path, .. } if path.segments.len() == 1 => Some(Type::Path {
+                span: *span,
+                path: path.clone(),
+                args: Vec::new(),
+            }),
+            Expr::Paren { inner, .. } => Self::ctor_type_arg(inner),
+            Expr::Tuple { items, span, .. } => Some(Type::Tuple {
+                span: *span,
+                items: items.iter().filter_map(Self::ctor_type_arg).collect(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The applied `list[t]` type over one element type.
+    fn applied_list_ty(&mut self, elem: Ty) -> Option<Ty> {
+        let def = self.package.lookup_type("list")?;
+        let ctor = self.decls.atoms.get(&def).copied()?;
+        let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
+        self.decls.universe.atom_ty(atom).ok()
+    }
+
     fn call(&mut self, e: &Expr) -> Val {
         let Expr::Call {
             callee,
@@ -1309,6 +1724,13 @@ impl<'a> Bodies<'a> {
         if let Expr::Field { recv, name, .. } = callee {
             return self.dot_call(recv, name, args, trailing.as_deref(), *span);
         }
+        // A generic-application constructor `list[t]()` [F9]: the callee
+        // head resolves in the type namespace.
+        if let Expr::Index { recv, index, .. } = callee {
+            if let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span) {
+                return val;
+            }
+        }
         if let Expr::Path { path, .. } = callee {
             match path.segments.as_slice() {
                 [only] => {
@@ -1316,6 +1738,13 @@ impl<'a> Bodies<'a> {
                         let def = *def;
                         if self.decls.fns.contains_key(&def) {
                             return self.call_def(def, None, args, trailing.as_deref(), *span);
+                        }
+                        // A minted case constructs by call form [B3]; a
+                        // bare case falls through to the tag error below.
+                        if let Some(case) = self.decls.cases.get(&def).cloned() {
+                            if !matches!(case.payload, EnumPayload::None) {
+                                return self.case_call(def, only, args, trailing.as_deref(), *span);
+                            }
                         }
                         if self.decls.structs.contains_key(&def)
                             || self.decls.atoms.contains_key(&def)
@@ -1352,6 +1781,154 @@ impl<'a> Bodies<'a> {
         }
         let callee_val = self.expr(callee, None);
         self.indirect_call(callee_val, args, trailing.as_deref(), *span)
+    }
+
+    /// Constructs one minted enum case by call form [B3]: positional
+    /// arguments fill tuple-payload slots and named arguments fill
+    /// named-payload fields; the result is the case's own atom set.
+    fn case_call(
+        &mut self,
+        def: DefId,
+        name: &Ident,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Val {
+        let payload = self
+            .decls
+            .cases
+            .get(&def)
+            .map_or(EnumPayload::None, |c| c.payload.clone());
+        if trailing.is_some() {
+            self.error(
+                ErrorCode::ArityMismatch,
+                format!("enum case `{}` takes no trailing block", name.name),
+                span,
+                "trailing block on a case construction",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+            };
+        }
+        let case_name = self.package.def(def).name.clone();
+        let slots: Vec<(Option<String>, Span, Type)> = match &payload {
+            EnumPayload::Tuple(types) => {
+                types.iter().map(|t| (None, name.span, t.clone())).collect()
+            },
+            EnumPayload::Struct(fields) => fields
+                .iter()
+                .map(|f| (Some(f.name.name.clone()), f.name.span, f.ty.clone()))
+                .collect(),
+            // A bare case constructs by name like a unit tag; the call
+            // site routes here only after the payload check, so this is
+            // the belt behind it.
+            EnumPayload::None => {
+                self.error(
+                    ErrorCode::InferenceFailed,
+                    format!("`{}` is a bare case; it constructs by name", name.name),
+                    name.span,
+                    "unit case called as a function",
+                );
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                };
+            },
+        };
+        let mut written = vec![false; slots.len()];
+        let mut broken = false;
+        let mut positional = 0usize;
+        for arg in args {
+            let slot = if let Some(arg_name) = &arg.name {
+                let index = slots
+                    .iter()
+                    .position(|(field, ..)| field.as_deref().is_some_and(|f| f == arg_name.name));
+                let Some(index) = index else {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("enum case `{case_name}` has no field `{}`", arg_name.name),
+                        arg_name.span,
+                        "no such field",
+                    );
+                    self.expr(&arg.value, None);
+                    broken = true;
+                    continue;
+                };
+                index
+            } else {
+                let index = positional;
+                positional += 1;
+                let Some(_slot) = slots.get(index) else {
+                    self.error(
+                        ErrorCode::ArityMismatch,
+                        format!("enum case `{case_name}` takes {} argument(s)", slots.len()),
+                        arg.span,
+                        "extra argument",
+                    );
+                    self.expr(&arg.value, None);
+                    continue;
+                };
+                index
+            };
+            if written[slot] {
+                self.error(
+                    ErrorCode::DuplicateDefinition,
+                    format!(
+                        "field `{}` of `{case_name}` is written twice",
+                        slots[slot].0.clone().unwrap_or_default()
+                    ),
+                    arg.span,
+                    "duplicate field",
+                );
+            }
+            written[slot] = true;
+            let Some(field_ty) = self.solve_here(&slots[slot].2) else {
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("a field of `{case_name}` does not solve"),
+                        arg.span,
+                        "unsolvable field type",
+                    );
+                }
+                self.expr(&arg.value, None);
+                continue;
+            };
+            let val = self.expr(&arg.value, Some(field_ty));
+            self.expect_contains(val, field_ty, arg.value.span(), "case field value");
+        }
+        if !broken {
+            for (index, &is_written) in written.iter().enumerate() {
+                if is_written {
+                    continue;
+                }
+                match &slots[index].0 {
+                    Some(field) => self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("enum case `{case_name}` misses field `{field}`"),
+                        span,
+                        "missing field",
+                    ),
+                    None => self.error(
+                        ErrorCode::ArityMismatch,
+                        format!("enum case `{case_name}` takes {} argument(s)", slots.len()),
+                        span,
+                        "missing argument",
+                    ),
+                }
+            }
+        }
+        let ty = self
+            .decls
+            .atoms
+            .get(&def)
+            .and_then(|&a| self.decls.universe.atom_ty(a).ok())
+            .unwrap_or_else(|| self.empty());
+        Val {
+            ty,
+            diverges: false,
+        }
     }
 
     fn indirect_call(
@@ -1900,8 +2477,8 @@ impl<'a> Bodies<'a> {
         self.member_call(&sig, recv_val.ty, args, trailing, span)
     }
 
-    /// One selected method's call check: the member signature with `self`
-    /// bound to the receiver's type [section 6.1].
+    /// One selected method's call check: the member signature with `Self`
+    /// bound to the receiver's type [record 6.1].
     fn member_call(
         &mut self,
         sig: &FnSig,
@@ -1911,12 +2488,12 @@ impl<'a> Bodies<'a> {
         span: Span,
     ) -> Val {
         self.type_vars
-            .push(HashMap::from([("self".to_owned(), recv_ty)]));
+            .push(HashMap::from([("Self".to_owned(), recv_ty)]));
         let mut param_tys = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
             param_tys.push(param.ty.as_ref().and_then(|t| self.solve_here(t)));
         }
-        // The receiver already filled the `self` parameter [section 6.1];
+        // The receiver already filled the `self` parameter [record 6.1];
         // the remaining arguments feed the rest.
         if let Some(slots) = self.arg_slots(None, 1, args, trailing, sig, span) {
             let rest: Vec<Option<&Expr>> = slots[1..].to_vec();
@@ -2202,105 +2779,6 @@ impl<'a> Bodies<'a> {
         }
     }
 
-    /// `a or tail` [E4]: extracts the wanted members. `none` is always the
-    /// extractable member of an optional [B4]: `x or ...` on `t | none`
-    /// yields `t`. For non-optional operands the wanted set comes from the
-    /// context — the right operand's type for a plain tail, the return
-    /// union for `or return`.
-    fn or_expr(&mut self, left: &Expr, right: &OrTail, span: Span) -> Val {
-        let left_val = self.expr(left, None);
-        let total = left_val.ty;
-        let none = self.none_ty();
-        let optional = self.decls.universe.members(total).contains(&TypeId::NONE);
-        let fallback_val = match right {
-            OrTail::Expr(fallback) => Some(self.expr(fallback, None)),
-            _ => None,
-        };
-        let wanted = if optional {
-            self.decls.universe.diff(total, none)
-        } else {
-            match (&fallback_val, self.ret) {
-                (Some(fallback_val), _) => {
-                    if self.decls.universe.is_empty(fallback_val.ty) {
-                        // An uninhabited fallback never produces a value:
-                        // everything is wanted.
-                        total
-                    } else {
-                        self.decls.universe.inter(total, fallback_val.ty)
-                    }
-                },
-                (None, Some(ret)) => self.decls.universe.inter(total, ret),
-                (None, None) => total,
-            }
-        };
-        match right {
-            OrTail::Expr(fallback) => {
-                let fallback_val = fallback_val.unwrap_or_else(|| Val {
-                    ty: self.empty(),
-                    diverges: false,
-                });
-                let _ = fallback;
-                let result = if self.decls.universe.is_empty(fallback_val.ty) {
-                    total
-                } else {
-                    self.decls.universe.union(wanted, fallback_val.ty)
-                };
-                Val {
-                    ty: result,
-                    diverges: false,
-                }
-            },
-            OrTail::Return {
-                expr,
-                span: ret_span,
-            } => {
-                let value = match expr {
-                    Some(expr) => self.expr(expr, None),
-                    None => Val {
-                        ty: self.unit(),
-                        diverges: false,
-                    },
-                };
-                if let Some(ret) = self.ret {
-                    self.expect_contains(value, ret, *ret_span, "or-return value");
-                    if self.decls.universe.is_empty(wanted) && !self.decls.universe.is_empty(total)
-                    {
-                        self.error(
-                            ErrorCode::InferenceFailed,
-                            format!(
-                                "`or return` extracts nothing from `{}` against the return union \
-                                 `{}` [E4]",
-                                self.decls.universe.render(total),
-                                self.decls.universe.render(ret)
-                            ),
-                            span,
-                            "empty extraction",
-                        );
-                    }
-                    Val {
-                        ty: wanted,
-                        diverges: false,
-                    }
-                } else {
-                    self.error(
-                        ErrorCode::PropagationNotContained,
-                        "`or return` outside a function [E4]".to_owned(),
-                        *ret_span,
-                        "stray early exit",
-                    );
-                    Val {
-                        ty: self.empty(),
-                        diverges: false,
-                    }
-                }
-            },
-            OrTail::Break(_) | OrTail::Continue(_) => Val {
-                ty: wanted,
-                diverges: false,
-            },
-        }
-    }
-
     fn assign(&mut self, op: ds_parse::AssignOp, left: &Expr, right: &Expr, span: Span) -> Val {
         let unit = self.unit();
         let place = match peel_paren(left) {
@@ -2371,7 +2849,16 @@ impl<'a> Bodies<'a> {
         }
     }
 
-    fn if_expr(&mut self, cond: &Expr, then: &BlockExpr, else_: Option<&Expr>) -> Val {
+    /// `?` in a branch-final position splits against the expected type
+    /// when one flows in [E4]: a branch-final expression is the enclosing
+    /// function's final expression when the if/match itself is last.
+    fn if_expr(
+        &mut self,
+        cond: &Expr,
+        then: &BlockExpr,
+        else_: Option<&Expr>,
+        expected: Option<Ty>,
+    ) -> Val {
         let cond_val = self.expr(cond, None);
         self.expect_bool(cond_val, cond.span());
         let narrows = self.harvest(cond);
@@ -2380,22 +2867,29 @@ impl<'a> Bodies<'a> {
         for narrow in &narrows {
             self.apply_narrow(narrow);
         }
-        let then_val = self.block(then);
+        let then_val = self.block_expected(then, expected);
         self.restore(saved);
-        let else_val = match else_ {
-            Some(else_expr) => {
-                let saved = self.snapshot();
+        let else_val = if let Some(else_expr) = else_ {
+            let saved = self.snapshot();
+            for narrow in &narrows {
+                self.apply_inverse(narrow);
+            }
+            let val = self.expr(else_expr, expected);
+            self.restore(saved);
+            val
+        } else {
+            if then_val.diverges {
+                // The then arm never falls through, so the continuation
+                // is exactly the implicit else path: its inverse
+                // narrowing stays live after the if.
                 for narrow in &narrows {
                     self.apply_inverse(narrow);
                 }
-                let val = self.expr(else_expr, None);
-                self.restore(saved);
-                val
-            },
-            None => Val {
+            }
+            Val {
                 ty: unit,
                 diverges: false,
-            },
+            }
         };
         if then_val.diverges {
             return else_val;
@@ -2409,7 +2903,13 @@ impl<'a> Bodies<'a> {
         }
     }
 
-    fn match_expr(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Val {
+    fn match_expr(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Val {
         let scrut_val = self.expr(scrutinee, None);
         let scrut_ty = scrut_val.ty;
         let scrut_bind = self.path_local(scrutinee);
@@ -2434,6 +2934,7 @@ impl<'a> Bodies<'a> {
                 &mut Vec::new(),
                 &mut ann_binders,
                 0,
+                true,
             );
             for (_, span, ty) in ann_binders {
                 self.bind_local(span, Binding { ty, mutable: false });
@@ -2445,7 +2946,7 @@ impl<'a> Bodies<'a> {
                     self.apply_narrow(&narrow);
                 }
             }
-            let body_val = self.expr(&arm.body, None);
+            let body_val = self.expr(&arm.body, expected);
             self.restore(saved);
             arm_vals.push(body_val);
             if arm.guard.is_none() {
@@ -2486,8 +2987,27 @@ impl<'a> Bodies<'a> {
     }
 
     fn for_expr(&mut self, pat: &Pattern, iter: &Expr, body: &Expr, span: Span) -> Val {
-        let iter_val = self.expr(iter, None);
         let unit = self.unit();
+        // A range is the surface's one pinned iterable: integer
+        // endpoints, the pattern binds the element [F7]. A storable
+        // range value is not in the record; the value-position stub
+        // below stands.
+        if let Expr::Range { start, end, .. } = peel_paren(iter) {
+            if let Some(element_ty) = self.range_element(start, end, span) {
+                let saved = self.snapshot();
+                self.refined.clear();
+                self.loop_depth += 1;
+                self.bind_pattern(pat, element_ty, false);
+                self.expr(body, None);
+                self.loop_depth -= 1;
+                self.restore(saved);
+            }
+            return Val {
+                ty: unit,
+                diverges: false,
+            };
+        }
+        let iter_val = self.expr(iter, None);
         let members = self.decls.universe.members(iter_val.ty).to_vec();
         let element_ty = (|| {
             let single = members.first().filter(|_| members.len() == 1)?;
@@ -2714,10 +3234,16 @@ impl<'a> Bodies<'a> {
                     let var = self.mint_var(&only.name);
                     return self.decls.universe.atom_ty(var).ok();
                 }
-                if only.name == "none" && self.package.lookup("none").is_none() {
+                if only.name == "none" && !self.package.declares("none") {
                     return Some(self.none_ty());
                 }
-                let def = self.package.lookup(&only.name)?;
+                if only.name == "self" && !self.package.declares("self") {
+                    // `self` as a type name retired [record 6.1]; resolve
+                    // reported DS2015, so suppress the generic fallbacks.
+                    self.solve_reported = true;
+                    return None;
+                }
+                let def = self.package.lookup_type(&only.name)?;
                 if !args.is_empty() {
                     let mut arg_tys = Vec::new();
                     for arg in args {
@@ -2728,9 +3254,32 @@ impl<'a> Bodies<'a> {
                     return self.decls.universe.atom_ty(apply).ok();
                 }
                 match self.package.def(def).kind {
-                    DefKind::Tag | DefKind::Struct | DefKind::Enum => {
+                    DefKind::Tag | DefKind::Struct | DefKind::Case => {
                         let atom = self.decls.atoms.get(&def).copied()?;
                         self.decls.universe.atom_ty(atom).ok()
+                    },
+                    DefKind::Enum => {
+                        // A generic enum keeps its opaque atom; a
+                        // non-generic one names the union of its minted
+                        // case atoms [B3].
+                        if let Some(&atom) = self.decls.atoms.get(&def) {
+                            return self.decls.universe.atom_ty(atom).ok();
+                        }
+                        let shape = self.decls.enums.get(&def)?.clone();
+                        if !shape.params.is_empty() {
+                            return None;
+                        }
+                        let mut union: Option<Ty> = None;
+                        for (name, ..) in &shape.cases {
+                            let case_def = self.package.lookup_type(name)?;
+                            let atom = self.decls.atoms.get(&case_def).copied()?;
+                            let ty = self.decls.universe.atom_ty(atom).ok()?;
+                            union = Some(match union {
+                                Some(acc) => self.decls.universe.union(acc, ty),
+                                None => ty,
+                            });
+                        }
+                        union
                     },
                     DefKind::TypeAlias => {
                         let (params, body) = self.decls.aliases.get(&def)?.clone();
@@ -2761,7 +3310,7 @@ impl<'a> Bodies<'a> {
                 let [only] = path.segments.as_slice() else {
                     return None
                 };
-                let def = self.package.lookup(&only.name)?;
+                let def = self.package.lookup_type(&only.name)?;
                 let trait_id = self.decls.traits.get(&def).copied()?;
                 self.decls.universe.solve(&TypeExpr::not(trait_id)).ok()
             },
@@ -2860,7 +3409,7 @@ impl<'a> Bodies<'a> {
                     return
                 };
                 // The parameter's constructor must be the argument's.
-                let Some(def) = self.package.lookup(&only.name) else {
+                let Some(def) = self.package.lookup_type(&only.name) else {
                     return
                 };
                 if self.decls.atoms.get(&def) != Some(&ctor) {
@@ -2918,7 +3467,7 @@ impl<'a> Bodies<'a> {
         let [only] = path.segments.as_slice() else {
             return None
         };
-        let def = self.package.lookup(&only.name)?;
+        let def = self.package.lookup_type(&only.name)?;
         self.decls.traits.get(&def).copied()
     }
 
@@ -3083,7 +3632,7 @@ impl<'a> Bodies<'a> {
 
     /// Payload types of a struct (named fields, positionally matched) or an
     /// enum case, for call patterns.
-    fn payload_tys(&mut self, path: &Path, atom: TypeId) -> Option<Vec<Ty>> {
+    fn payload_tys(&mut self, _path: &Path, atom: TypeId) -> Option<Vec<Ty>> {
         let def = self.decls.defs_of_atoms.get(&atom).copied()?;
         if let Some(shape) = self.decls.structs.get(&def).cloned() {
             let mut out = Vec::with_capacity(shape.fields.len());
@@ -3092,27 +3641,18 @@ impl<'a> Bodies<'a> {
             }
             return Some(out);
         }
-        if let Some(shape) = self.decls.enums.get(&def).cloned() {
-            let tail = path.segments.last()?;
-            let case = shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
-            let payload = match &case.2 {
-                EnumPayload::None => Vec::new(),
-                EnumPayload::Tuple(types) => {
-                    let mut out = Vec::with_capacity(types.len());
-                    for ty in types {
-                        out.push(self.solve_here(ty)?);
-                    }
-                    out
-                },
-                EnumPayload::Struct(fields) => {
-                    let mut out = Vec::with_capacity(fields.len());
-                    for field in fields {
-                        out.push(self.solve_here(&field.ty)?);
-                    }
-                    out
-                },
-            };
-            return Some(payload);
+        // A minted tuple-payload case carries no struct shape; its
+        // payload types come from the case table in declaration order.
+        let tuple_payload = match self.decls.cases.get(&def).map(|c| &c.payload) {
+            Some(EnumPayload::Tuple(types)) => Some(types.clone()),
+            _ => None,
+        };
+        if let Some(types) = tuple_payload {
+            let mut out = Vec::with_capacity(types.len());
+            for ty in &types {
+                out.push(self.solve_here(ty)?);
+            }
+            return Some(out);
         }
         None
     }
@@ -3161,6 +3701,25 @@ impl<'a> Bodies<'a> {
             .members(ty)
             .iter()
             .any(|atom| self.decls.universe.fn_sig(*atom).is_some())
+    }
+
+    /// The per-element expected types of one expected tuple type: the
+    /// expectation must be a single tuple atom of the construction's
+    /// arity (a union of tuples or a wider member set carries no
+    /// element-wise expectation).
+    fn expected_tuple_elems(&mut self, expected: Ty, arity: usize) -> Option<Vec<Ty>> {
+        let members = self.decls.universe.members(expected).to_vec();
+        let [only] = members.as_slice() else {
+            return None;
+        };
+        let elements = self.tuple_elements(*only)?;
+        if elements.len() != arity {
+            return None;
+        }
+        elements
+            .iter()
+            .map(|e| self.decls.universe.atom_ty(*e).ok())
+            .collect()
     }
 
     fn tuple_elements(&self, atom: TypeId) -> Option<Vec<TypeId>> {
@@ -3223,6 +3782,14 @@ impl<'a> Bodies<'a> {
         self.decls.universe.empty_ty()
     }
 
+    /// The empty-typed value of an errored expression.
+    fn empty_val(&mut self) -> Val {
+        Val {
+            ty: self.empty(),
+            diverges: false,
+        }
+    }
+
     fn fn_atom_of(&mut self, sig: &FnSig) -> Val {
         let mut param_tys = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
@@ -3263,6 +3830,14 @@ impl<'a> Bodies<'a> {
 }
 
 // ---- free helpers -----------------------------------------------------------
+
+/// The single identifier of a one-segment path expression, if it is one.
+fn single_path_ident(expr: &Expr) -> Option<&Ident> {
+    match expr {
+        Expr::Path { path, .. } if path.segments.len() == 1 => path.segments.first(),
+        _ => None,
+    }
+}
 
 fn generic_of(param: &TypeParam) -> GenericParam {
     GenericParam {

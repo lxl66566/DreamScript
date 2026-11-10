@@ -1,17 +1,17 @@
 # DreamScript 工作设计决策（中文镜像）
 
-状态：本文件是全部语言决策（42 个决策点：A1-A3、B1-B9、C1-C5、D1-D3、E1-E5、F1-F7、G1-G4、H1-H6）的权威工作记录中文版，由作者于 2026-11-08 定案，提取自 `design/` 冻结档案。Phase 4 实现工作以本文件为依据；`design/` 目录是只读档案，仅供交叉查阅 — 永不修改，除非本文档某条规则确实不够用，否则不必阅读它。研究笔记（`design/en/research/01-06`）是原始证据，实现不需要。两版内容分歧时以英文版 `docs/en/design-decisions.md` 为准。
+状态：本文件是全部语言决策（44 个决策点：A1-A3、B1-B9、C1-C5、D1-D3、E1-E5、F1-F9、G1-G4、H1-H6）权威工作记录的中文版，由作者于 2026-11-08 定案，提取自 `design/` 冻结档案，2026-11-10 修订（E4/F2/F5/F7/F8：`or` 运算符退役、裸 `return` 采纳、反自然语言表层守卫定案），并于 2026-11-10 再次修订（B3/F2/F6/F7/G3/G4/H6/6.1 加新增 F9，语法表层采纳：插值即字符串上下文加定案转义集、带列表字面量的声明/构造故事、fn 唯一命名声明加 `unit`、接收者拼写、双命名空间、脚本入口、`##` 分隔符、sigil 形式导入、糖账目重算）。全部 Phase 4 实现工作以英文版为依据；`design/` 目录是只读档案，仅供交叉查阅 — 永不修改，除非本文档某条规则确实不够用，否则不必阅读它。研究笔记（`design/en/research/01-06`）是原始证据，实现不需要。档案的种子语料清单不在本文件重现：它们以已定表层移植到 `conformance/`（附逐文件移植说明），其运行时编码固定在 ds-abi/ds-vm 测试中。两版内容分歧时以英文版 `docs/en/design-decisions.md` 为准。
 
 来源映射（各节对应的档案文件）：§2 `design/en/design/08-decisions.md`；§3 `design/en/design/01-types.md`；§4 `design/en/design/02-linearity-ownership.md`；§5 `design/en/design/03-effects-errors-async.md`；§6 `design/en/design/04-syntax.md`；§7 `design/en/design/05-generics-metaprogramming.md`；§8 `design/en/design/06-modules-tooling.md`；§9 `design/en/design/07-runtime.md`；各决策点的详细理由在 `design/en/design/09-decision-rationale.md`；总工作表是 `design/en/design/00-decision-map.md`。
 
 ## 0. 作者补充（design/author_say.md）— 约束性
 
 1. 主要方向遵循 Phase 3 决策记录（08）及其理由文档（09），已全部提取到本文档。
-2. 大小写绝不能成为语法的定死特征：任何语法构造都不得用标识符大小写区分（例如类型不要求首字母大写）。类型作者倾向于小写拼写（`int`、`string`、`list`、`file`）。本文档与档案中的代码使用大写类型名，仅为目录示例；实现时统一归一为小写。大小写在语言任何位置都不承载语法含义。
+2. 大小写绝不能成为语法的定死特征：任何语法构造都不得用标识符大小写区分（例如类型不要求首字母大写）。类型上作者偏好小写拼写（`int`、`string`、`list`、`file`）。本文档与档案中的代码使用大写类型名，仅为目录示例；实现时统一归一为小写。大小写在语言任何位置都不承载语法含义。
 
 ## 1. 已定语言（总览）
 
-DreamScript 是一门独立通用解释型语言（通过平台包实现嵌入），采用混合集合论类型 — 名义标签在并、交、差之下组合，`is` 收窄，`T?` 是 `T | none` 的别名 — 以双向检查加必需的边界签名与流收窄进行检查，具备带五个特例的通用结构化相等。值默认是仿射的，带可选的 `~Copyable` 线性资源层（`deinit`、幻影状态）、二等参数传递模式（借用 / `mut` / 消费）、独占窗口可变性和线性可变 COW 集合；内存是 Perceus 引用计数，带块复用，架在每帧 arena 之上，无 GC。多态是带两两不相交实例头的连贯集合论 trait，单一泛型函数体携带证据字与内联缓存；元编程是无宏的 comptime 反射。错误是返回类型中的联合成员，由 `?` / `or` / `.err` 处理，另有不可捕获的 trap；并发是强制 nursery 中的 VM 纤程，在线性/不可变的可发送性基底上做 fork-join 并行；效果隐藏在表层之下，运行时是证据传递的 handler 运行时加能力参数式 IO。表层是 TS 风格花括号加全量 UFCS、const 箭头函数、Rust 形状的模式匹配（带差集诊断）、Kotlin 插值，语法糖预算 22 特性 / 35 单位（Kotlin 上限是 38 / 74-76）。模块是 definition < file < package < module 分层，带生成的 `.dsi` 接口且无导入期执行；包是 blake3 哈希级联清单加内容寻址存储，带零配置脚本模式；FFI 是线性 C 句柄。执行是三层流水线 — 类型化寄存器 VM、copy-and-patch JIT、Cranelift/wasm — 并带规格保证的自递归与互递归尾调用。
+DreamScript 是一门独立通用解释型语言（通过平台包实现嵌入），采用混合集合论类型 — 名义标签在并、交、差之下组合，`is` 收窄，`T?` 是 `T | none` 的别名 — 以双向检查加必需的边界签名与流收窄进行检查，具备带五个特例的通用结构化相等。值默认是仿射的，带可选的 `~Copyable` 线性资源层（`deinit`、幻影状态）、二等参数传递模式（借用 / `mut` / 消费）、独占窗口可变性和线性可变 COW 集合；内存是 Perceus 引用计数，带块复用，架在每帧 arena 之上，无 GC。多态是带两两不相交实例头的连贯集合论 trait，单一泛型函数体携带证据字与内联缓存；元编程是无宏的 comptime 反射。错误是返回类型中的联合成员，由 `?`、`.err`/`.ok` 差集 handler 与 `unwrap_or`/`ok_or` 提取族处理，另有不可捕获的 trap；并发是强制 nursery 中的 VM 纤程，在线性/不可变的可发送性基底上做 fork-join 并行；效果隐藏在表层之下，运行时是证据传递的 handler 运行时加能力参数式 IO。表层是 TS 风格花括号加全量 UFCS、`fn` 声明加 const 箭头 lambda、Rust 形状的模式匹配（带差集诊断）、Kotlin 插值，语法糖预算 22 特性 / 34 单位（Kotlin 上限是 38 / 74-76）。模块是 definition < file < package < module 分层，带生成的 `.dsi` 接口且无导入期执行；包是 blake3 哈希级联清单铺在内容寻址存储之上，带零配置脚本模式；FFI 是线性 C 句柄。执行是三层流水线 — 类型化寄存器 VM、copy-and-patch JIT、Cranelift/wasm — 并带规格保证的自递归与互递归尾调用。
 
 ## 2. 身份与兼容性
 
@@ -42,19 +42,19 @@ const a: animal = dog{}                // 按声明名义子类型；`dog | cat`
 顶层与公开签名必需，并在那里锚定集合代数；局部绑定、lambda 与 match 分支由双向传播推断。收窄经由 `is` 测试、none 测试与 match 分支单调进行；重置只发生在赋值处（在不可变默认下罕见）。`?` 传播检查是对着写下的返回联合做集合包含。已知限制：不能穿过联合类型的可变字段收窄。
 
 ```ts
-const get_port = (j: json) -> int | missing | bad_port {
-  const pv = j.fields.get("port")   // 推断：int | none
+fn get_port(j: json) -> int | missing | bad_port {
+  const pv = j.fields.get("port")   // 推断：json | none；下方 is 测试收窄为 int
   if pv is int && pv >= 1 && pv <= 65535 { pv } else { return bad_port{ got: -1 } }
 }
 ```
 
 ### B3 — 名义 struct/enum 加匿名元组
 
-命名数据用名义 struct 与 enum（声明式布局，各一个 type_id，允许 tuple-enum）；临时聚合用匿名元组加解构；支持 record punning（字段名简写）。匿名 record 字面量（`const point = { x: 1, y: 2 }`）是编译器合成的糖，铺在一个名义 record 之上 — 推断故事稳定后作为增量特性再加入。row 类型对数据一律否决。
+命名数据用名义 struct 与 enum（声明式布局，各一个 type_id，允许 tuple-enum）；临时聚合用匿名元组加解构；支持 record punning（字段名简写）。enum 块是唯一的载荷 case 声明形式；独立 `tag x;` 声明单元 tag；类型别名永不声明 case（2026-11-10）。构造形式按声明定死 — struct = 仅花括号形式，enum case = 仅调用形式，单元 tag = 裸形式 — 交叉拼写是检查器错误（Swift 与 Rust 都在声明处固定构造形式；交叉拼写在各处都是硬错误）。列表字面量 `[a, b, c]` 采纳进 v1；map 字面量随匿名 record 字面量保留位一起延迟，过渡期用 builder 调用。匿名 record 字面量（`const point = { x: 1, y: 2 }`）是编译器合成的糖，铺在一个名义 record 之上 — 推断故事稳定后作为增量特性再加入。row 类型对数据一律否决。
 
 ### B4 — `T?` 恰是 `T | none`
 
-`none` 是若干单元类型之一；可选、错误联合、枚举共享一套机制（`is`、`or`、match）。v1 无 `?.` 运算符（只有真实代码提出需求时才可能后加一个薄脱糖）。`T | none` 的 niche 装箱（压进一个槽）是合法的后续优化器 pass（引用永不为零）。已知限制：`V | none` 中 `V` 本身可为 `none` 时有歧义 — 恰在那类位置用显式包装（`found[v] | none`）。
+`none` 是若干单元类型之一；可选、错误联合、枚举共享一套机制（`is` 收窄、match、以及按 E4 与 `unwrap_or`/`ok_or` 提取族组合的 `?`）。v1 无 `?.` 运算符（只有真实代码提出需求时才可能后加一个薄脱糖）；`t | none` 上的 `??` 是唯一记录在案的运算符阀门（F8）。`T | none` 收进一个槽的 niche 装箱是合法的后续优化器 pass（引用永不为零）。已知限制：`V | none` 中 `V` 本身可为 `none` 时有歧义 — 恰在那类位置用显式包装（`found[v] | none`）。
 
 ### B7 — 数值：i64/f64 默认，溢出陷阱
 
@@ -76,7 +76,7 @@ const get_port = (j: json) -> int | missing | bad_port {
 
 ### B9 — 相等：通用结构化 `==` 加五个特例
 
-对所有数据的一套结构化 `==`，构造上全序（total），永不可被用户重载，不存在 `===`。五个特例：(1) 函数比较静态拒绝；(2) 浮点按位结构比较 — `nan == nan` 为真，字典键保持健全 — IEEE 语义走具名的 `is_float_eq` / `is_approx_eq`；(3) 可变单元与 `~Copyable` 资源按身份比较；(4) 操作数被借用，绝不被消费；(5) `hash` 必须与结构化相等一致。`ord` / `hash` / `show` 走派生；排序永远不能是结构化的。按类型的自定义值语义走具名方法（`equiv` 风格）。
+对所有数据的一套结构化 `==`，构造上全序（total），永不可被用户重载，不存在 `===`。五个特例：(1) 函数比较静态拒绝；(2) 浮点按位结构比较 — `nan == nan` 为真，字典键保持健全 — IEEE 语义走具名的 `is_float_eq` / `is_approx_eq`；(3) 可变单元与 `~Copyable` 资源按身份比较；(4) 操作数被借用，绝不被消费；(5) `hash` 必须与结构化相等一致。`Ord` / `hash` / `show` 以派生形式抵达；排序永远不能是结构化的。按类型的自定义值语义走具名方法（`equiv` 风格）。
 
 ## 4. 线性、所有权、内存、数据
 
@@ -93,7 +93,7 @@ const get_port = (j: json) -> int | missing | bad_port {
 ```ts
 fn len(s: str) -> int { ... }              // 默认：借用
 fn push(xs: mut list<int>, x: int) { ... } // 该调用的独占可变窗口
-fn consume(f: file) -> int { ... }         // 消费式移动
+fn consume(f: move file) -> int { ... }    // 消费式移动
 ```
 
 ### C3 — `const`/`var` 绑定，可变经由 `mut` 窗口
@@ -139,7 +139,7 @@ fn with_file(p: str, body: fn(mut file) -> t) -> t {
 
 ### E1 — v1 无效果语法，handler 形状的运行时，能力习语
 
-运行时从第一天起就是 handler 形状的：证据传递服务两个内部效果（`cancel`、`discontinue`），仅在 nursery 边界 — 尾续内部操作不分配；用户代码路径不变。触碰世界的标准库 API 遵循能力习语：脚本由 `ds` CLI 安装一个环境默认 handler，测试、嵌入与调度器选择则用显式能力参数 — 同一份代码可跑在阻塞、事件循环或自定义调度器上。用户自定义 handler（`with handler { op ask() => resume(42) }`）保留为 v2 增量逃生口，永不需要迁移。v2 激活时的常设类型义务：续体除非标注否则是仿射的（多射续体不得捕获线性值）；FFI 调用钉住纤程（已裁决问题 1）。
+运行时从第一天起就是 handler 形状的：证据传递服务两个内部效果（`cancel`、`discontinue`），仅在 nursery 边界 — 尾续内部操作不分配；用户代码路径不变。触碰世界的标准库 API 遵循能力习语：脚本由 `ds` CLI 安装一个环境默认 handler，测试、嵌入与调度器选择则用显式能力参数 — 同一份代码可跑在阻塞、事件循环或自定义调度器上。用户自定义 handler（`with handler { op ask() => resume(42) }`）保留为 v2 增量逃生口，永不需要迁移。v2 激活时的常设类型义务：续体除非标注否则是仿射的（多射续体不得捕获线性值）；FFI 调用钉住纤程（H5）。
 
 ### E2 — VM 纤程加强制 nursery
 
@@ -155,21 +155,22 @@ nursery {
 
 无数据竞争与可发送性是线性/不可变数据的静态推论（线性值按构造即 `sending`；不可变值按构造可共享）；缺的只是调度器。`par_map` / `par_reduce` fork-join 组合子跑在不可变或线性分区的输入上 — 确定可重放、按定理无锁、静态 RC 计数使 fork 侧快照廉价。actor 与监督层可日后作为库加入（监督者就是一个带重启策略的 nursery）。
 
-### E4 — 联合错误用 `?`/`or`/`.err` 处理，外加不可捕获的 trap
+### E4 — 联合错误用 `?`、`.err`/`.ok` 与提取族处理；`or` 于 2026-11-10 退役
 
-预期失败是联合成员，由三个令牌处理，其语义只在联合上陈述一次：`?`（受检包含的传播）、`or`（提取第一个想要的成员，右操作数惰性求值，带 `or return` / `or break` / `or continue` 提前退出形式）、`.err(h)` / `.ok(h)`（差集类型的 handler — 余留类型直接展示还剩什么）。bug 一律 `panic` 且不可捕获：纤程中止，帧遍历运行线性 deinit，trap 在 nursery 或监督者边界浮现。let-it-crash 监督是库模式。
+预期失败是联合成员，由令牌与方法处理，其语义只在联合上陈述一次：`?`（受检包含的传播）、`.err(h)` / `.ok(h)`（差集类型的 handler — 余留类型直接展示还剩什么）、以及 @std 提取族 — `unwrap_or(y)`、`unwrap_or_else(fn)`、`ok_or(e)`、`map_err(fn)` — 普通 UFCS 可调用的泛型函数，类型完全局部，与 `?` 组合实现提前退出。`or` 运算符退役：它把一个词重载在回退、提前退出、循环控制与联合合并之上，与布尔 `||` 冲突，并按上下文 wanted 成员推断定型（完整理由记录于 F8）。显式提前退出拼写是 `if x is none { return e }` 加收窄，裸 `return` 已采纳（F2）。bug 一律 `panic` 且不可捕获：纤程中止，帧遍历运行线性 deinit，trap 在 nursery 或监督者边界浮现。let-it-crash 监督是库模式。
 
 ```ts
 fn load_config(path: str) -> config | io_error | parse_error {
   const text = read_file(path)?        // `?`：ok 类型之外的成员提前返回
   parse_config(text)?
 }
-const cfg  = load_config("app.cfg") or default_config()
+const cfg  = load_config("app.cfg").err((_) => default_config())   // 错误联合回退，惰性 handler
 const cfg2 = load_config("app.cfg").err((e) => {   // 结果类型：(config | io_error | parse_error) - (io_error | parse_error) == config
-  log("config failed: ${e}")
+  log("config failed")                     // e 是联合类型；插值洞只接受原语或带 show 的类型（F6）
   default_config()
 })
-const port = cfg2.port or 8080                     // 可选就是 t | none：同样三个令牌
+const port = cfg2.port.unwrap_or(8080)             // 可选回退：t | none -> t，右操作数急切求值
+const name = row.get("name").ok_or(missing_field("name"))?   // 带新值提前退出；`?` 传播它
 ```
 
 ### E5 — nursery 范围的协作取消加消费即关闭
@@ -184,18 +185,18 @@ const port = cfg2.port or 8080                     // 可选就是 t | none：�
 
 ### F2 — 绑定、函数、标注、返回
 
-`const` / `var` 绑定（var 是可重绑定局部）。具名函数用 const 箭头声明，与绑定同形；定义名在自己体内可见（递归）。匿名 lambda `(x) => e`。参数 `name: t`，返回 `-> t`；联合返回解析为 `-> a | b`，无额外语法；`T?` 在一切标注位置合法。末表达式返回；提前退出走 `or return` / `or break` / `or continue`。`?` 保留给后缀传播；旧 README 的前缀 `?` 返回记号已退役。裸 `return` 关键字日后可作为纯增量加入。函数是值。
+`const` / `var` 绑定（var 是可重绑定局部）。具名函数是 `fn name(p) -> t { }` — 唯一的具名函数声明形式，用于顶层、trait/impl 成员、以及 trait 中的无体签名（`fn to_json(self) -> string`）；定义名在自己体内可见（递归）。const 箭头仅保留给匿名 lambda `(x) => e`（Rust：具名用 `fn`，闭包是表达式；TypeScript 的双拼写是要避免的样式战争）。`unit` 是单位类型在标注中的可选具名拼写；`()` 保持合法。参数 `name: t`，返回 `-> t`；联合返回解析为 `-> a | b`，无额外语法；`T?` 在一切标注位置合法。末表达式返回；提前退出走裸 `return`（2026-11-10 采纳 — B2 自己的示例已在用它而本节此前延迟它）与循环中的 `break` / `continue`。`?` 保留给后缀传播；旧 README 的前缀 `?` 返回记号已退役，`or` 提取运算符按 E4/F8 退役。函数是值。
 
 ```ts
-const parse_age = (s: string) -> int | parse_error {
+fn parse_age(s: string) -> int | parse_error {
   match s.trim().parse_int() {
     e if e is parse_error => bad_number(s),
     n                     => n,
   }
 }
-const parse_user = (row: row_t) -> user | parse_error {
-  const name = row.get("name") or return missing_field("name")
-  user { name, age: parse_age(row.get("age") or return missing_field("age"))? }
+fn parse_user(row: row_t) -> user | parse_error {
+  const name = row.get("name").ok_or(missing_field("name"))?
+  user { name, age: parse_age(row.get("age").ok_or(missing_field("age")))? }
 }
 ```
 
@@ -209,7 +210,7 @@ const parse_user = (row: row_t) -> user | parse_error {
 
 ### F5 — 固定 trait 驱动运算符集，冻结优先级
 
-固定令牌集映射到固定 trait（Add、Sub、Mul、…、Index）— 运算符调用就是 trait 方法调用，可内联缓存。一张冻结的 C 家族优先级表在教程中发布一次，永不扩展，永无用户自定义运算符；`Deref` 式强制转换被排除出用户表层。`==` 是 B9 的结构化相等且永不可重载；排序走 `ord` 派生。
+固定令牌集映射到固定 trait（Add、Sub、Mul、…、Index）— 运算符调用就是 trait 方法调用，可内联缓存。一张冻结的 C 家族优先级表在教程中发布一次，永不扩展，永无用户自定义运算符；词形运算符恰是 `in` 与 `is`（Kotlin 形状），布尔上下文一律 bool 类型，任何位置都无真值强制转换（F8）；`Deref` 式强制转换被排除出用户表层。`==` 是 B9 的结构化相等且永不可重载；排序走 `Ord` 派生。
 
 | 运算 | 陷阱（默认） | 回绕（显式） | 备注 |
 |---|---|---|---|
@@ -221,11 +222,29 @@ const parse_user = (row: row_t) -> user | parse_error {
 
 ### F6 — 字符串与字面量
 
-插值 `$x`（裸标识符）与 `${expr}`（表达式），在非字符串边界要求显式 `str()` 调用 — 无隐藏字符串化，`T?` 值的插值要求显式处理。原始字符串 `r"..."` 与按哈希计数的 `r#"..."#`（可嵌套到任意深度，一个构造同时服务 raw/多行/heredoc）。`'x'` 是 Unicode 标量 char；`b'x'` 是单字节。
+插值 `$x`（裸标识符）与 `${expr}`（表达式）；插值孔是显式字符串上下文 — `$e` 与 `${e}` 脱糖为 `str(e)`，操作数类型为原始类型（int、float、bool、char、string）或携带 `show` 时合法，联合或可选操作数是错误：先提取（B4/E4）。其余一切位置 — 运算符、实参、绑定 — 保持严格显式，隐式转换会在那里改变解析（Kotlin、Swift 与 Rust 的格式化孔都是字符串上下文）。转义集（2026-11-10）：`\n \t \r \\ \" \' \0 \u{...}`；原始字符串 `r"..."` 与按哈希计数的 `r#"..."#`（可嵌套到任意深度，一个构造同时服务 raw/多行/heredoc）不携带转义。`'x'` 是 Unicode 标量 char；`b'x'` 是单字节。
 
-### F7 — 语法糖预算：Balanced 档（22 特性 / 35 单位）
+### F7 — 语法糖预算：Balanced 档（22 特性 / 34 单位）
 
-对照 Kotlin 的 38 特性 / 74-76 成本单位上限；预留余量：16 特性 / 40-42 单位。包含行：换行终止语句（S1）；插值 `$x`/`${e}`（S1）；原始字符串 `r#"..."#`（S1）；后缀 `?`（S2）；`or` 提取 + `or return/break/continue`（S2）；`is` 收窄（S2）；`.err(h)`/`.ok(h)` 差集类型 handler（S2）；match/if 表达式带穷尽联合诊断（S2）；match 守卫（S1）；或模式（S1）；解构（S2）；具名 + 仅字面量默认参数（S2）；尾 lambda，仅限末参（S2）；UFCS（S2）；类型别名（S1）；和类型声明 `tag`/enum（S2）；派生属性 `#[derive(...)]`，`==` 自动（S2）；范围 `..`/`..=` + `in`（S1）；数值后缀 + 分隔符（S1）；`const`/`var` 之分（S1）；运算符重载 trait，固定集合与优先级（S2）；`T?` 别名（S2）。延迟增量行（按余量使用可能性排序）：`|>`（S1）、匿名 record 字面量（S2）、`@` 绑定器（S1）、vararg/spread（S1）、带标签 break/continue（S1）、lambda 简写 `it`（S1）。被集合类型与 UFCS 整体删除的 Kotlin 特性：`?.`、elvis、`!!`（由 `is`/`or` + none 类型取代）、smart cast（`is` 收窄）、中缀函数与扩展函数/属性（UFCS）、data class 合成（派生 + 结构化 `==`）、sealed 层级（封闭联合）、接收者 lambda DSL、主构造器、reified 类型参数、反引号标识符、`tailrec`（TCO 已保证）、context 参数（能力参数）。永久排除出用户表层：自由运算符重载与自定义运算符、Deref 强制转换、基于约定的私有性。
+对照 Kotlin 的 38 特性 / 74-76 成本单位上限；预留余量：16 特性 / 40-42 单位。包含行：换行终止语句（S1）；插值 `$x`/`${e}`（S1）；原始字符串 `r#"..."#`（S1）；列表字面量 `[a, b, c]`（S1，2026-11-10 采纳）；后缀 `?`（S2）；`is` 收窄（S2）；`.err(h)`/`.ok(h)` 差集类型 handler（S2）；match/if 表达式带穷尽联合诊断（S2）；match 守卫（S1）；或模式（S1）；解构（S2）；具名 + 仅字面量默认参数（S2）；尾 lambda，仅限末参（S2）；UFCS（S2）；类型别名（S1）；和类型声明 `tag`/enum（S2）；派生属性 `#[derive(...)]`（S2）；范围 `..`/`..=` + `in`（S1）；数值后缀 + 分隔符（S1）；`const`/`var` 之分（S1）；运算符重载 trait，固定集合与优先级（S2）；`T?` 别名（S2）。延迟增量行（按余量使用可能性排序）：`|>`（S1）、匿名 record 字面量（S2；map 字面量按 B3 随此保留位）、`@` 绑定器（S1）、`??` 作用于 `t | none`（S1）、带标签 break/continue（S1）、lambda 简写 `it`（S1）。被集合类型与 UFCS 整体删除的 Kotlin 特性：`?.`、elvis、`!!`（由 `is` 收窄、none 类型与提取族取代；`t | none` 上的 `??` 是记录在案的阀门）、smart cast（`is` 收窄）、中缀函数与扩展函数/属性（UFCS）、data class 合成（派生 + 结构化 `==`）、sealed 层级（封闭联合）、接收者 lambda DSL、主构造器、reified 类型参数、反引号标识符、`tailrec`（TCO 已保证）、context 参数（能力参数）。永久排除出用户表层：自由运算符重载与自定义运算符、Deref 强制转换、基于约定的私有性、布尔上下文的真值强制转换、链式比较、推导式语法、下标切片糖、vararg/spread 打包、以及 `in`/`is` 之外的词形运算符（F8）。fn 唯一命名声明（F2）与双命名空间拆分（F9）删除拼写而非增加糖。
+
+### F8 — 经方法与既有令牌提取；无自然语言运算符、无隐式强制转换（2026-11-10）
+
+`or` 运算符从表层退役。遍及记录与语料它承载六种行为 — 可选回退、错误联合回退、带新值的提前退出、落到发散被调方的回退、不同类型操作数的联合合并（`done or last` 产出 `page | net_err`）、以及循环控制 — 由上下文 wanted 成员推断定型，且是与布尔 `||` 冲突的词；档案里布尔测试上的 `is ... or return` 就是已经在滑动的边界。替代物铺在既有令牌加一个很小的 @std 族上：可选回退 `x.unwrap_or(y)` 与惰性 `x.unwrap_or_else(fn)`；带新值提前退出 `x.ok_or(e)?` 与 `x.map_err(fn)?`；错误联合与发散回退 `x.err(h)`；联合合并 `match done { p => p, none => last }`；循环控制 `if x is none { break }`。裸 `return` 随退役进入表层（B2 示例已在用它而 F2 此前延迟它 — 以采纳解决）。若语料证据日后显示可选回退配得上一运算符，`??` 限定于 `t | none` 是唯一记录在案的延迟增量（S1）；任何英语单词永不再进入运算符集。
+
+随附自然语言语法审计采纳的守则，评审时即约束：运算符保持 C 家族符号，`in` 与 `is` 是仅有的词形；布尔上下文（`if`/`while` 条件、`&&`/`||`/`!` 操作数）一律 bool 类型，任何位置对联合、可选、数字、字符串都无真值强制转换；链式比较永久排除；推导式语法永久排除（D3 组合子表层已覆盖）；下标是单元素 Index 访问，无切片糖（字符串切片按 B8 是受检库调用，其余集合同此）；vararg/spread 打包从延迟增量清单退役（显式 list 实参与 `concat` 已覆盖）。结构性已删除、记录备查的隐患：可变默认参数因默认值仅限字面量而不可能；混合数值算术是报出转换的错误（B7）。`is` 是 Kotlin 形状的类型收窄（非 Python 身份比较），`in` 是 Kotlin 形状的成员测试；两个拼写都保留。
+
+### F9 — 双命名空间：类型与值（2026-11-10）
+
+类型与值在两个命名空间中解析。构造器 — 花括号构造、裸 tag、泛型应用构造器如 `list[page]()` — 在类型命名空间解析；函数在值命名空间解析；同时出现在两个命名空间的调用形式名字是歧义错误，绝不是优先级搜索（F3 规则）。`map` struct 与 `map` 函数共存（Rust 在独立命名空间中解析类型路径与值路径，struct 与函数自由重名；C++ 更繁的全命名空间机制是过度工程的反例）；enum case 对函数的调用形式冲突是残余的错误类别。
+
+### 6.1 实现归一的表层拼写（语料采纳；待 M2 锁定）
+
+种子语料（`conformance/`）在记录未细化表层之处使用的拼写；为实现采纳，M2 检查时锁定或修订：trait 成员签名的接收者免标注且定型为 `Self` — 借用模式用裸 `self`，独占窗口用 `mut self`（按 C2），无 `&Self`/`&mut self`；其余参数可在标注中使用 `Self`；`self` 作为类型名退役（2026-11-10；Rust 先例 — 没有主流 trait 系统让接收者重述自己的类型）；派生是属性 `#[derive(hash, show, ord)]`（按 F7 派生行）；泛型值声明用 `struct stack[t]`，函数式 `push/pop` 返回更新后的值（按 D2；原地字段赋值未决）；函数上的泛型子句拼写为 `[t: c]`；空可变集合以 `list[page]()` 构造（最终标准库拼写归 M3 定）；v2 `with handler` 块按 E1 出 v1 范围，语料中保持注释。
+
+解析器裁决（ds-parse 落地 3167597）：泛型应用规范为方括号 `list[int]`；角括号形式 `list<int>`（出现在 C2 的前表层示例文本中）作为解析器宽容被接受，但格式化器永不输出。块体成员、match 分支、struct/enum 字段规范为换行分隔；按 F1 处处接受尾逗号。参数模式位于标注内部（`f: mut file`）并带前导裸模式简写（`mut self`）（按 C2）；`move` 与 `comptime` 是上下文关键字；trait/impl 成员是 `fn` 声明，trait 中无体（const 箭头具名成员按 F2 退役）；类型层 case 引用、元组类型 `(a, t?)`、外来类型 `c["sqlite3"]` 解析为类型形式；`is` 右侧是类型表达式（它吃掉 `|`/`&`）；C 家族 `&&`/`||`/`!`/`&`/`^`/`|` 在固定运算符集中；普通字符串单行且块注释不嵌套；顶层 `fn` 是唯一的具名函数声明（const 箭头具名声明按 F2 退役），顶层表达式语句按 G3 拒绝，脚本模式下入口文件除外（G3）；`none`、`self`、`Self` 非保留字。M1 时标识符为 ASCII。
+
+解析器裁决，审计第 3 轮：`in` 按 F5 绑定在比较级（`x in xs && flag` 读作 `(x in xs) && flag`，绝不是 `x in (xs && flag)`）且允许裸范围作右侧（`x in a..b`）；孤立的 `\r` 在字符串、插值孔与 char 字面量中恰如在代码中一样被拒绝（唯原始字符串可携带）；换行分支分隔覆盖表达式体分支，不限于块体分支；trait 与 impl 成员清单恰如 struct/enum 体一样接受逗号分隔与尾逗号；impl 成员仅是 `fn` 声明 — 裸 `const x = 1` 或 const 箭头成员是解析诊断（DS1010），绝不静默丢弃；插值孔绝不跨换行（普通字符串保持单行）；F7 的具名 + 仅字面量默认参数已落地：调用点在位置实参之后取具名实参（`f(x: 1)`；重名是 DS1011，具名后再位置被拒绝），签名取仅字面量默认值（`x: int = 0`，允许 `-lit` 负数；其余一切，包括插值字符串，是 DS1012）；扁平运算符链（包括堆叠一元与后缀链）上限 128 项（DS1009），因为丢弃更深的 `Box` 链会溢出调用方栈。
 
 ## 7. 多态与元编程
 
@@ -258,7 +277,7 @@ impl Draw for Circle & ~Shadowed { ... }    // 需要刻意重叠时，用否定
 
 ### G3 — definition < file < package < module；无导入期执行
 
-四层：definition（可见性与身份单位）、file（命名空间拼写）、package/目录（编译单位 — 同一包内文件共享一个命名空间，包内零 import）、module（`ds.pkg` 清单：依赖与分发单位）。包内环合法（整包不动点解析）；跨包环是链接错误，其诊断建议把共享抽象移入基础包。生成的 `.dsi` 接口文件是可评审的 API 表面（`ds info` 生成；".dsi 无变化通常即安全重构"）。模块体是纯编译期声明 — 无导入期执行，无一例外；这一条规则同时买到包内环容忍、安全热重载与惰性依赖驱动加载。`///|` 是可选的显式块分隔符，给工具亚文件粒度；无论有无分隔符，顶层定义都与顺序无关，无分隔符的文件就是一个块。
+四层：definition（可见性与身份单位）、file（命名空间拼写）、package/目录（编译单位 — 同一包内文件共享一个命名空间，包内零 import）、module（`ds.pkg` 清单：依赖与分发单位）。包内环合法（整包不动点解析）；跨包环是链接错误，其诊断建议把共享抽象移入基础包。生成的 `.dsi` 接口文件是可评审的 API 表面（`ds info` 生成；".dsi 无变化通常即安全重构"）。模块体是纯编译期声明 — 无导入期执行，无一例外；这一条规则同时买到包内环容忍、安全热重载与惰性依赖驱动加载。脚本入口例外（2026-11-10）：仅脚本模式下，入口文件的顶层语句合法并编译进合成的 `main` — Node 与 Bun 执行入口文件顶层语句，宪章的脚本目标指向前者且仅限入口文件 — 导入的文件与包成员保持纯声明体，保证在它保护的一切地方成立。块分隔符（2026-11-10 重拼）是顶层的行首 `##`，行余下部分为分隔符文本；`///|` 退役，`///` 成为保留的文档注释前缀（设计待定；今天仅是 trivia）。无论有无分隔符，顶层定义都与顺序无关，无分隔符的文件就是一个块。
 
 **G3.5 — dsmod 字节码契约（约束性）。** 定宽、位置无关、可 mmap 的模块格式：
 
@@ -274,7 +293,7 @@ sections    blocks | constants | type metadata | effect rows | debug spans (可�
 
 ### G4 — private / `pub(pkg)` / `pub` 加选择性导入
 
-definition 默认私有；`pub(pkg)` 对整包开放（含包自身的测试）且永不进入 `.dsi`；`pub` 对依赖方开放并进入 `.dsi`。导入按符号选择、可别名、可按目标条件化，并可用 `pub import` 再导出：
+definition 默认私有；`pub(pkg)` 对整包开放（含包自身的测试）且永不进入 `.dsi`；`pub` 对依赖方开放并进入 `.dsi`。导入按符号选择、可别名、可按目标条件化，并可用 `pub import` 再导出；拼写统一为 sigil 形式 — `import @std/csv (reader)`，路径加可选选择/别名 — 引号形式退役（2026-11-10）：
 
 ```text
 import acme/pipeline/schema (Row, parse_row)
@@ -291,9 +310,11 @@ pub import acme/pipeline/api (parse_row)
 
 叠加于上：平台是导出 effect handler 的普通包，按构建目标选择 — `platform "std" provides <console, fsys, net, time>`（`ds` CLI 即默认平台）、`platform "web"`、`platform "embed"`（宿主调入，不提供任何东西）；检查器验证用户代码的效果用法是平台声明 row 的子集。wasm/WIT 是 tier-3 部署目标，不是 FFI 架构。dsmod 的 FFI-USED 标志声明加载时需要 dlopen。
 
+**H5.5 — std/builtin/平台三层（约束性）。** 三层，各带成员判据。(a) VM 内核原生（保留的 `builtin` 模块）：ds 源码无法表达的不可再简原语 — 针对 VM 内部的操作（驻留字符串、对象存储），lower 契约本身需要它们；纯函数或错误联合全函数，绝不触碰世界（当前成员：str_* 转换与字符串操作）。(b) `@std`：普通 ds 源码包 — DreamScript 自身可表达的一切都落在这里（D3 组合子在泛型/M6 允许后抵达），脚本模式的裸限定符导入在这里解析。(c) 平台：世界表面（console、fsys、net、time）作为按 H5/E1 的 effect handler，按构建目标选择；`ds` CLI 是默认平台提供者。触碰世界的原生是 M3 过渡形态的平台 handler：M3 的单 builtin 模块（原生 0-24）混合了各层，如今原生注册表携带两个原生模块 — `builtin`（纯内核）与 `std`（默认平台的 console/fsys/net 表面）— 因此构造 VM 的库嵌入者除非安装平台，否则拿不到世界表面；原生在 M7 handler 运行时存在时（E1）迁移为 effect handler 形态，原生索引在那之前冻结。
+
 ### H6 — 哈希存储内核加零配置脚本模式；五项强制工具链承诺
 
-**包栈。** `ds.pkg` 清单以 `name = { ver, hash }` 声明依赖，hash 是对该包内容（含其依赖哈希）的 blake3 — 身份传递式流动，不存在 lockfile（清单即锁）。MVS 解析（取声明最小值的最大者；多版本共存按构造成立）。按输出哈希键控的全局内容寻址存储，兼作字节码缓存（工件即 dsmod 文件）。按 target triple 的 bin-first 工件，对照存储哈希校验。可选 FHS profile 链接器（`ds link`；Windows 用 scoop shim，不用符号链接）。registry 延迟到存储上的静态 JSON 索引，直至生态规模需要。
+**包栈。** `ds.pkg` 清单以 `name = { ver, hash }` 声明依赖，hash 是对该包内容（含其依赖哈希）的 blake3 — 身份传递式流动，不存在 lockfile（清单即锁）。MVS 解析（取声明最小值的最大者；多版本共存按构造成立）。按输出哈希键控的全局内容寻址存储，兼作字节码缓存（工件即 dsmod 文件）。按 target triple 的 bin-first 工件，对照存储哈希校验。可选 FHS profile 链接器（`ds link`；Windows 用 scoop shim，不用符号链接）。registry 裁决：registry 是仅持有包元数据的 git 仓库，可配置为本地路径或远程 URL；依赖解析读索引元数据（name -> versions -> 清单哈希与工件 URL），从存储按内容寻址获取工件，并对照 blake3 哈希级联校验（清单仍是锁；MVS 不变）。依赖绝不通过克隆或追踪依赖方自身的 VCS 工作树解析 — 无分支头，无可变伪版本；git 仓库是元数据传输，不是身份来源，哈希钉定才是。本地 git 索引使离线与私有 registry 成为一等公民。
 
 ```text
 name    = "pipeline"
@@ -307,19 +328,24 @@ x86_64-pc-windows-msvc = { url = ".../pipeline-0.4.0-x86_64-pc-windows-msvc.dsmo
 script = "build.ds"         # 可见 #OUT#、#TMP#、#ARCH#
 ```
 
-**脚本模式。** `ds run script.ds` 零配置；裸限定符标准库导入（`import "@std/csv"`）；`ds save` 把脚本用过的东西冻结进生成的 `ds.pkg`。长成包的脚本获得清单而不丢失文件。
+```text
+index/<a>/<ab>/<pkg>.json   # 每包一个元数据文件：versions -> 清单哈希 + 工件 URL
+git history                 # 元数据审计日志 — 仅元数据，绝非依赖来源
+```
 
-**五项强制工具链承诺，自第一天约束。** (1) 编译器即查询库：编译器是记忆化查询的库（`ds-check`）— parse、block_index、resolve、type_of、effects_of、linearity_check、lower — 由 LSP、REPL 与热重载共同消费；失效粒度为 `///|` 块加包粒（包内环被禁的第二个理由）。(2) `ds fmt` 零选项，实现为编译器组件；块感知格式化器独立格式化各块，兼作 LSP 的输入时格式化路径。(3) 结构化诊断加双跨度线性错误 — 机器可读建议、`--error-format=json`、跨度在类型化 AST 层计算；线性诊断类别渲染"此处被移动 / 此处再次使用"成对输出：
+**脚本模式。** `ds run script.ds` 零配置；裸限定符标准库导入用 sigil 形式（`import @std/csv (reader)`；引号拼写退役，G4）；`ds save` 把脚本用过的东西冻结进生成的 `ds.pkg`。长成包的脚本获得清单而不丢失文件。
+
+**五项强制工具链承诺，自第一天约束。** (1) 编译器即查询库：编译器是记忆化查询的库（`ds-check`）— parse、block_index、resolve、type_of、effects_of、linearity_check、lower — 由 LSP、REPL 与热重载共同消费；失效粒度为 `##` 分隔块加包粒（跨包环被禁的第二个理由）。(2) `ds fmt` 零选项，实现为编译器组件；块感知格式化器独立格式化各块，兼作 LSP 的输入时格式化路径。(3) 结构化诊断加双跨度线性错误 — 机器可读建议、`--error-format=json`、跨度在类型化 AST 层计算；线性诊断类别渲染"此处被移动 / 此处再次使用"成对输出：
 
 ```text
-error[DS2001]: value `h` was consumed here
+error[DS3001]: value `h` was consumed here
   --> src/pipeline.ds:41:15
    |  41 |  let rows = Csv.read(h)     ^ `h` moved (file is ~Copyable)
    |  42 |  Log.write(h.path)          used again here after move
 help: clone the path before the move            (suggestion emitted as JSON too)
 ```
 
-(4) 线性感知 REPL：打印推断类型与 effect row；跑在同一字节码 IR 上；会话持有的线性上下文配显式 `:drop` 与 `:reset` 清除 — 提示符处的线性值永不被悄悄丢弃。(5) Erlang 双版本代码槽热重载：运行时持有逐模块版本槽（current + old，至多两个存活）；`ds dev --hot` 重编译变更块并换槽；旧版本帧在其下一次跨模块调用处退役（DreamScript 一切跨模块调用都全限定，Erlang 的要求被平凡满足）；堆值对新定义做类型检查；effect handler 捕获其安装时的代码版本。无导入期执行正是其健全性来源。双槽运行时必须从第一天存在 — 后补是被点名的错误。
+(4) 线性感知 REPL：打印推断类型与 effect row；跑在同一字节码 IR 上；会话持有的线性上下文配显式 `:drop` 与 `:reset` 清除 — 提示符处的线性值永不被悄悄丢弃。(5) Erlang 双版本代码槽热重载：运行时持有逐模块版本槽（current + old，至多两个存活）；`ds dev --hot` 重编译变更块并换槽；旧版本帧在其下一次跨模块调用处退役（一切跨模块调用都全限定，Erlang 的要求被平凡满足）；堆值对新定义做类型检查；effect handler 捕获其安装时的代码版本。无导入期执行正是其健全性来源。双槽运行时必须从第一天存在 — 后补是被点名的错误。
 
 ## 9. 运行时
 
@@ -335,7 +361,7 @@ help: clone the path before the move            (suggestion emitted as JSON too)
 
 ### H1 — 共享单一 lower 的三层流水线
 
-Tier 1：类型化寄存器 VM，computed-goto uop 循环，未装箱帧 — 目标 3-10x of C。Tier 2：copy-and-patch stencil — 每个 uop 一段 x86-64 片段，构建期由 LLVM 从含 VM 头的主模板发射，洞为帧槽偏移与常量，按 u16/u64 补丁；比 LLVM -O0 快约 14% 且编译速度约 100 倍；目标 1.5-3x；每单位微秒级。Tier 3：字节码 → 类型化 SSA → Cranelift CLIF，或 wasm 3.0（`return_call` 携带 TCO）；目标 1-2x 原生 / 1.5-2.5x wasm。一套 uop 与一条字节码到 SSA 的 lower 被所有 tier 共享，尽早建成。tier 迁移是原地 J 变体 opcode 重写（一次派发）；OSR 化归为编译循环体 — 无帧变换机制。任何数据路径无守卫；仅有的出口是 (i) 调试器断点（从 JIT 元数据物化帧）、(ii) 逐函数入口的栈上限比较、(iii) effect handler 进入（一次控制转移）、(iv) B7 的冷溢出边 — 因此没有 deopt 悬崖。短脚本（<0.2s）从不支付分层代价且仍达 3-10x。无验证 stencil 构建的平台只发 tier1（CPython 的 opt-in 姿态）。记录在案的后路：若逐架构 stencil 工具链被证不可接受，退回单一 method-JIT tier（H1b）。
+Tier 1：类型化寄存器 VM，computed-goto uop 循环，未装箱帧 — 目标 3-10x of C。Tier 2：copy-and-patch stencil — 每个 uop 一段 x86-64 片段，构建期由 LLVM 从含 VM 头的主模板发射，洞为帧槽偏移与常量，按 u16/u64 补丁；比 LLVM -O0 快约 14% 且编译速度约 100 倍；目标 1.5-3x；每单位微秒级。Tier 3：字节码 → 类型化 SSA → Cranelift CLIF，或 wasm 3.0（`return_call` 携带 TCO）；目标 1-2x 原生 / 1.5-2.5x wasm。一套 uop 与一条字节码到 SSA 的 lower 被所有 tier 共享，尽早建成。tier 迁移是原地 J 变体 opcode 重写（一次派发）；OSR 化归为编译循环体 — 无帧变换机制。任何数据路径无守卫；仅有的出口是 (i) 调试器断点（从 JIT 元数据物化帧）、(ii) 逐入口的栈上限比较、(iii) effect handler 进入（一次控制转移）、(iv) B7 的冷溢出边 — 因此没有 deopt 悬崖。短脚本（<0.2s）从不支付分层代价且仍达 3-10x。无验证 stencil 构建的平台只发 tier1（CPython 的 opt-in 姿态）。记录在案的后路：若逐架构 stencil 工具链被证不可接受，退回单一 method-JIT tier（H1b）。
 
 ```text
 ; stencil ADDI64_rr，洞以 <H> 标记；无类型检查、无 RC 调用、无错误胶水
@@ -366,20 +392,7 @@ even:
 
 无 hidden class/map 及其迁移（字段偏移是字节码立即数，`FIELD_LOAD %dst, %obj, #12`）；无字段访问内联缓存或反馈向量；数据路径无类型守卫与 deopt 帧；无投机记录；无侧 trace 与 trace 链接；分层预算化归为普通热度计数器。这将约六个投机子系统折叠为两个工件 — 一个 stencil 补丁器与一条 lower pass — 释放动态 VM 分层风险约 70%。以内联缓存形式残存者，均为纯性能提示、无正确性角色：动态/trait 调用点的 1-2 项按 type-id 键控 IC、按模块版本计数器键控的热重载模块全局缓存、逐帧 effect handler 操作表。
 
-## 10. 已裁决的开放问题
-
-1. **FFI 钉住** — 见 H5。
-2. **nursery 形状与令牌集** — 块形式 `nursery { ... }` 内含 `spawn { ... }` 子表达式；令牌定案：后缀 `?`（受检包含，无隐式转换）、`or`（首个被wanted成员提取，右操作数惰性，`or return`/`or break`/`or continue`）、`is`（收窄）、`.err(h)`/`.ok(h)`（差集类型）。v1 无 `?.`。
-3. **`.err` 差集类型后路** — 失效：B1(c) 已采纳，差集类型按设计成立。
-4. **纤程与隐藏生成器** — v0 隐藏迭代协议是不涉纤程的线性游标；纤程存在后隐藏下层可采用同一设施。允许并分阶段安排共享的 VM 机制；两种情况下用户表层完全相同。
-5. **生成器箭头 `-*>'`（历史 README）** — 退役；1.0 无公开生成器语法。
-6. **作用域具名实例** — 延迟增量，1.0 之后；除非不相交头解析被证明确实妨碍库作者才提前；任何未来糖中歧义仍是错误。
-7. **不相交算法与终止性** — 实现自定义，要求固定：链接时对最终实例环境检查；重叠错误指名两个头与见证值类型；满足自身的条件实例被结构环检查拒绝。
-8. **浮点相等** — 按位结构（自反、全序、字典安全）；IEEE 语义走具名 `is_float_eq` / `is_approx_eq`。
-9. **comptime 在 v1** — 分阶段：内建派生先行，comptime 求值器加反射在 1.0 前。
-10. **match 的 `@` 绑定器** — v1 排除；延迟增量，若被需求则需设计仿射重绑定语义。
-
-## 11. 分阶段（v0 → 1.0）
+## 10. 分阶段（v0 → 1.0）
 
 有序；每步落在前一步上，无语言改动的重写。
 
@@ -391,228 +404,8 @@ even:
 6. 派生；然后 comptime 求值器与反射 API（1.0 前）。
 7. 自第一天起兑现工具链承诺，与它们消费的查询编译器一同排程：`ds fmt`、结构化诊断、REPL、双槽热重载。
 8. Tier 2 copy-and-patch（x86-64，然后 aarch64；其余平台仅 tier1）、尽早建字节码到 SSA lower、tier 3 按需。
-9. 核心稳定后的延迟增量清单（见 §12）；借用推断、TRMC、融合升级作为零语言改动的纯优化落地。
+9. 核心稳定后的延迟增量清单（见 §11）；借用推断、TRMC、融合升级作为零语言改动的纯优化落地。
 
-## 12. 延迟增量清单与记录在案的后路
+## 11. 延迟增量清单与记录在案的后路
 
-延迟增量（按余量使用可能性排序）：`|>`、匿名 record 字面量、`@` 绑定器、vararg/spread；随后是 `?.` 脱糖、`throws(...)` 糖、用户自定义 handler（`with handler`）、作用域具名实例、裸 `return` 关键字、带标签 break/continue、`it` 简写。纯优化项（零语言改动）：借用推断、完整复用配对、TRMC、融合升级、`T | none` niche 装箱、rope。记录在案的后路（命名风险成真时）：B1(b) 纯名义内核（若不相交机制拖期；错误处理退化为基于 match）；F1(b) Gleam/Roc 花括号标题行（若箭头赋值文法与解析器相搏）；H1(b) 单一 method-JIT tier（若逐架构 stencil 工具链被证不可接受）；C4(b) 分代引用（若仿射摩擦比预期更糟）。
-
-## 13. 种子测试语料
-
-按决策协议，所选 combo 的示例程序是语言的第一批测试语料，按目录顺序排列。移植说明：以下程序逐字引自档案；目录 01/02/03/05/06 早于 04 的表层决策，把它们变成测试时应移植到已定表层（const 箭头函数、`=>` 分支、已定令牌），并按 §0 将类型名归一为小写。
-
-### 13.1 类型 — "Hybrid"（配置解析器：tag、联合、收窄、错误集、结构化 ==）
-
-```ts
-tag IoErr; tag Missing; struct BadPort { got: Int }         // nominal atoms
-type CfgErr = IoErr | Missing | BadPort                     // set instruction over tags
-
-struct JsonObj { fields: Map[String, Json] }
-struct Config  { host: String, port: Int, retries: Int }
-
-const get_port = (j: Json) -> Int | Missing | BadPort {
-  const obj  = j is JsonObj or return Missing { key: "port" }
-  const pv   = obj.fields.get("port") or return Missing { key: "port" }   // T | none union
-  const p    = pv is Int or return BadPort { got: -1 }                    // narrows pv: Int
-  if p >= 1 && p <= 65535 { p } else { return BadPort { got: p } }
-}
-
-const load = (path: String) -> Config | CfgErr {
-  const text = read_file(path)?                              // CfgErr member propagates
-  const port = get_port(parse_json(text)?)?
-  Config { host: "localhost", port, retries: 3 }
-}
-
-const cfg = load("app.cfg").err((e) => {                     // exhaustive over the tag union:
-  match e {                                                  // result: Config - CfgErr == Config
-    b: BadPort => log("bad port ${b.got}"),
-    _          => log("config read failed"),
-  }
-  default_config()
-})
-
-const kv   = ("host", 8080)                                  // anonymous tuple (B3.d)
-const same = cfg == default_config()                         // universal structural == (B9.a)
-```
-
-### 13.2 线性 — "Modes and RC"（带 deinit 的线性 File、mut 窗口、COW、融合链）
-
-```ts
-struct File: ~Copyable {                 // C1.b linear resource layer (set-theoretic negation)
-  fd: RawFd
-  deinit { close(self.fd) }              // C5.c: runs exactly once, at unique death
-}
-fn read_u32(f: mut File) -> u32 | IoError {   // C2.d/C3.b: exclusive borrow for the call
-  const b = f.read_exact(4)?            // window on f; ? propagates IoError; b is a fresh linear buffer
-  b.to_u32_le()                         // b consumed here (affine move)
-}
-fn sum_file(path: Str) -> u32 | IoError {
-  const f = open(path)                  // unique owner; cannot be copied
-  var total: u32 = 0                    // C3.b: local var — the only rebindable binding
-  var n: u32 = 0
-  while n < 1000 { total += read_u32(f)?; n += 1 }   // ? moves the error out; f's deinit still runs
-  total                                 // f dies here: deinit closes fd (also on early return)
-}
-const words = "alpha beta gamma".split(' ')          // D2.b COW: "new" list, reuses when unique
-const lens  = words.map(w => w.len()).collect()      // D3.d: fused into one loop by the compiler
-const total = (sum_file("metrics.bin") or 0) + lens.len()  // D1.b: mutation only inside windows/locals
-```
-
-### 13.3 效果 — "Effect-ready"（cancel-on-failure 的 nursery fetchAll、联合错误、par 组合子）
-
-```ts
-fn fetchBody(url: Url): Page | NetErr {         // no io parameter: the stdlib default handler is ambient
-  const resp = fetch(url)?                      // performed through the default io handler (E1d runtime)
-  return Page(url, resp.consume())              // linear consume closes (E5b)
-}
-
-fn fetchAll(urls: List[Url]): List[Page] | NetErr {
-  val pages = Mut[List[Page]]()
-  nursery {                                     // internally: a handler for `cancel`/`discontinue`
-    for url in urls {
-      spawn {
-        match fetchBody(url) {
-          page    => pages.push(page)
-          error e => cancel(e)                  // evidence-dispatched internal effect, zero surface syntax
-        }
-      }
-    }
-  }
-  return pages.freeze()
-}
-
-fn withRetry(n: Int, url: Url): Page | NetErr { // plain function: loop + unions, no effects needed
-  var last = error NetErr.Timeout
-  for i in 0..n {
-    match fetchBody(url) { page => return page, error e => last = e }
-  }
-  return last
-}
-
-fn main(): void | NetErr {
-  const pages = fetchAll(URLS) or die("all fetches failed")
-  print("total: ${pages.par_map(fn(p) { p.size }).par_reduce(0, fn(a, b) { a + b })}")
-}
-
-// v2, additive with no migration — user handlers for final/tail-resumptive effects only:
-with handler { op ask() => resume(42) }
-```
-
-### 13.4 语法 — "TS-heart"（完整表层程序：守卫、`or return`、`?`、`.err`、插值、解构）
-
-```ts
-type ParseError = BadNumber(String) | MissingField(String)
-type IoError = NotFound | PermissionDenied
-
-struct User {
-  name: String,
-  age: Int,
-}
-
-const parse_age = (s: String) -> Int | ParseError {
-  match s.trim().parse_int() {
-    e if e is ParseError => BadNumber(s),   // guard + is: the union story, no wrappers
-    n                    => n,              // n : Int by set difference
-  }
-}
-
-const parse_user = (row: Row) -> User | ParseError {
-  const name = row.get("name") or return MissingField("name")
-  const age  = row.get("age")  or return MissingField("age")
-  User { name, age: parse_age(age)? }
-}
-
-const main = () -> () | IoError {
-  const rows = load_rows("users.csv")?
-  const cfg  = read_config("app.cfg").err((e) => {
-    println("config failed: ${e}")
-    default_config()
-  })
-  const (users, errors) = rows.map(parse_user).partition((r) => r is ParseError)
-
-  const total = users
-    .filter((u) => u.age >= 18)
-    .map((u) => u.age * 2)
-    .reduce(0, (a, b) => a + b)
-
-  for (u in users) println("user ${u.name} age ${u.age}")
-
-  match (total, errors.first()) {
-    (_, e) if e is ParseError => println("warning: ${e}"),
-    (0, _) => println("no valid users"),
-    (t, _) => println("total score: $t"),
-  }
-}
-```
-
-### 13.5 泛型 — "Coherent-traits"（`~Copyable` 泛型栈、不相交头拒绝、派生 + comptime schema）
-
-```ts
-// 1. polymorphic container API over affine elements
-type Stack[T] = { items: List[T] }
-impl[T: ~Copyable] Stack[T] {
-    fn push(&mut self, x: T) { self.items = cons(x, self.items) }  // consume-and-return
-    fn pop(&mut self) -> Option[T] { ... }
-}
-
-// 2. trait with disjoint instance heads
-trait Json { fn to_json(&self) -> String }
-impl Json for Int  { fn to_json(&self) -> String { ... } }
-impl Json for Bool { fn to_json(&self) -> String { ... } }
-impl[T: Json] Json for List[T] {                     // conditional head: an intersection arrow
-    fn to_json(&self) -> String { "[" + self.map(|x| x.to_json()).join(",") + "]" }
-}
-// impl Json for Int | Bool { ... }                  // REJECTED: head intersects both above
-
-// 3. derive + comptime reflection
-@derive(Hash, Show, ToJson)                          // one word, no macro system
-type Point = { x: Int, y: Int }
-fn schema(comptime T: type) -> String {              // user derive-like via reflection
-    var s = "{"
-    for f in fields(T) { s += f.name + ": " + type_name(f.type) + ", " }
-    return s + "}"
-}
-
-// 4. execution: one body per generic fn + evidence words
-let p  = max(p1, p2)            // evidence: static ref to impl Ord[Point] — constant operand
-let js = p.to_json()            // dynamic site: IC keyed by tag -> the unique impl
-```
-
-### 13.6 模块 — "Hash-core"（ds.pkg 清单、选择性导入、线性 sqlite 句柄绑定）
-
-```text
-// ds.pkg -- manifest is the lock; no lockfile anywhere
-name = "pipeline";  version = "0.4.0"
-[deps]  std = { ver = "1.2", hash = "blake3:9f2c..." }  csv = { ver = "0.7", hash = "blake3:1a88..." }
-[artifacts]  x86_64-pc-windows-msvc = { url = ".../pipeline.dsmod", hash = "blake3:77e0..." }
-
-// pipeline.ds -- imports (selective, aliased, conditional) over a package-local cycle
-import @std/csv (Reader)                       // namespace alias, MoonBit-style
-import acme/pipeline/schema (Row, parse_row)   // selective, from the generated .dsi surface
-import acme/pipeline/fs if os == "windows"
-
-///|  // FFI: linear handle, consumed exactly once
-extern fn sqlite3_open(path: *const c.Char) -> (c["sqlite3"] | c.Int)
-extern fn sqlite3_close(db: c["sqlite3"]) -> c.Int      // double-close: compile error
-```
-
-### 13.7 运行时 — `sum_to` uop 编码与互递归 `even`/`odd` 尾调用编码
-
-```text
-fn sum_to(n: i64) -> i64 { let mut acc = 0i64; while n > 0 { acc += n; n -= 1 }; acc }
-  0: FUNCF  frame=2            ; slots: r0=n:i64, r1=acc:i64 (static layout)
-  1: LDIMM  r1, 0:i64
-  2: LEI64  r2, r0, 0          ; unboxed bool
-  3: JMPIF_NOT r2 -> 6
-  4: ADDI64 r1, r1, r0         ; pure machine add, no tag work
-  5: SUBI64 r0, r0, 1 ; JMP 2
-  6: RET    r1
-
-; mutual tail calls (H2.a)
-even:
-  0: EQI64   r1, r0, 0
-  1: JMPIF   r1 -> 3
-  2: SUBI64  r3, r0, 1
-  3: CALLT   odd, nargs=1, src=r3    ; slide r3 into slot0, reuse frame
-  4: RET     true
-```
+延迟增量（按余量使用可能性排序）：`|>`、匿名 record 字面量（map 字面量按 B3 随此保留位）、`@` 绑定器、`t | none` 上的 `??`；随后 `?.` 脱糖、`throws(...)` 糖、用户自定义 handler（`with handler`）、作用域具名实例、带标签 break/continue、`it` 简写。已从本清单退役：vararg/spread（F8）；裸 `return` 已于 2026-11-10 采纳进表层（F2）。纯优化项（零语言改动）：借用推断、完整复用配对、TRMC、融合升级、`T | none` niche 装箱、rope。记录在案的后路（命名风险成真时）：B1(b) 纯名义内核（若不相交机制拖期；错误处理退化为基于 match）；F1(b) Gleam/Roc 花括号标题行（若箭头赋值文法与解析器相搏）；H1(b) 单一 method-JIT tier（若逐架构 stencil 工具链被证不可接受）；C4(b) 分代引用（若仿射摩擦比预期更糟）。

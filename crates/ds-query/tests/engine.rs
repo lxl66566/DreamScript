@@ -11,9 +11,9 @@ use ds_query::{
 
 /// A clean two-block file: block 0 spans `const a = 1`, block 1 starts at
 /// the separator line's newline (tree spans include it).
-const TWO_BLOCKS: &str = "const a = 1\n///|\nconst b = 2\n";
-const BLOCK0: &str = "const a = 1\n";
-const BLOCK1: &str = "\nconst b = 2\n";
+const TWO_BLOCKS: &str = "const a = 1\n##\nconst b = 2\n";
+const BLOCK0: &str = "const a = 1";
+const BLOCK1: &str = "\nconst b = 2";
 
 /// Test marker for the real TypeOf key, overridden with a compute that
 /// models an M2-style downstream query keyed by block, reading that
@@ -113,7 +113,7 @@ fn parse_and_block_index_produce_expected_values() {
     assert_eq!(index.blocks.len(), 2);
     assert_eq!(
         (index.blocks[0].span.start, index.blocks[0].span.end),
-        (0, 12)
+        (0, 11)
     );
     assert_eq!(&*db.get::<BlockSource>(index.blocks[0].id).unwrap(), BLOCK0);
     assert_eq!(&*db.get::<BlockSource>(index.blocks[1].id).unwrap(), BLOCK1);
@@ -142,7 +142,7 @@ fn query_computed_once_regardless_of_reader_count() {
 #[test]
 fn transitive_invalidation_reaches_exactly_the_dependents() {
     let mut db = db_with_downstream_queries();
-    let a = db.add_file("a.ds", "const a0 = 0\n///|\nconst a1 = 1\n");
+    let a = db.add_file("a.ds", "const a0 = 0\n##\nconst a1 = 1\n");
     let b = db.add_file("b.ds", "const b0 = 0\n");
 
     // Populate every memo.
@@ -153,13 +153,13 @@ fn transitive_invalidation_reaches_exactly_the_dependents() {
     let _ = db.get::<ParseFile>(b).unwrap();
 
     // Edit only block 1 of file a.
-    db.set_file_content(a, "const a0 = 0\n///|\nconst a1 = 99\n")
+    db.set_file_content(a, "const a0 = 0\n##\nconst a1 = 99\n")
         .unwrap();
 
     // Renewal-sensitive reader first: it drives the whole a-chain through
     // deep verification without recomputing itself.
     let text = db.get::<TypeOf>(DefId::new(0)).unwrap();
-    assert_eq!(&*text, "const a0 = 0\n");
+    assert_eq!(&*text, "const a0 = 0");
     let _ = db.get::<TypeOf>(DefId::new(1)).unwrap();
     let _ = db
         .get::<BlockSource>(BlockId { file: a, index: 0 })
@@ -196,14 +196,14 @@ fn separator_text_edit_renews_every_block() {
     // Editing a separator line's trailing text changes the file, the parse,
     // and every shifted span — but no block's text (whitespace before a
     // separator would belong to the preceding block, so edit only the text
-    // after `///|`), so no downstream query recomputes.
+    // after `##`), so no downstream query recomputes.
     let mut db = db_with_downstream_queries();
     let file = db.add_file("main.ds", TWO_BLOCKS);
 
     let _ = db.get::<TypeOf>(DefId::new(0)).unwrap();
     let _ = db.get::<TypeOf>(DefId::new(1)).unwrap();
 
-    db.set_file_content(file, "const a = 1\n///| section two\nconst b = 2\n")
+    db.set_file_content(file, "const a = 1\n## section two\nconst b = 2\n")
         .unwrap();
 
     let _ = db.get::<TypeOf>(DefId::new(0)).unwrap();
@@ -259,16 +259,16 @@ fn edited_file_yields_new_values() {
         BLOCK0
     );
 
-    db.set_file_content(file, "const a2 = 2\n///|\nconst b = 2\n")
+    db.set_file_content(file, "const a2 = 2\n##\nconst b = 2\n")
         .unwrap();
 
     assert_eq!(
         &*db.get::<ParseFile>(file).unwrap().source,
-        "const a2 = 2\n///|\nconst b = 2\n"
+        "const a2 = 2\n##\nconst b = 2\n"
     );
     assert_eq!(
         &*db.get::<BlockSource>(BlockId { file, index: 0 }).unwrap(),
-        "const a2 = 2\n"
+        "const a2 = 2"
     );
     assert_eq!(
         &*db.get::<BlockSource>(BlockId { file, index: 1 }).unwrap(),
@@ -279,7 +279,7 @@ fn edited_file_yields_new_values() {
 #[test]
 fn syntax_errors_are_data_not_engine_errors() {
     let mut db = Db::new();
-    let file = db.add_file("bad.ds", "const a = 1\n///|\nconst b = \"open\n");
+    let file = db.add_file("bad.ds", "const a = 1\n##\nconst b = \"open\n");
 
     // The parse query still yields a value: diagnostics ride along.
     let parse = db.get::<ParseFile>(file).unwrap();
@@ -292,28 +292,28 @@ fn syntax_errors_are_data_not_engine_errors() {
     assert_eq!(index.blocks.len(), 2);
     assert_eq!(
         &*db.get::<BlockSource>(index.blocks[0].id).unwrap(),
-        "const a = 1\n"
+        "const a = 1"
     );
     assert_eq!(
         &*db.get::<BlockSource>(index.blocks[1].id).unwrap(),
-        "const b = \"open\n"
+        "\nconst b = \"open\n"
     );
 }
 
 #[test]
 fn broken_file_does_not_poison_other_blocks_and_healing_renews() {
     let mut db = db_with_downstream_queries();
-    let broken = "const a = 1\n///|\nconst b = \"open\n";
+    let broken = "const a = 1\n##\nconst b = \"open\n";
     let file = db.add_file("main.ds", broken);
 
     // Downstream of the intact block works over the scan fallback.
     let text = db.get::<TypeOf>(DefId::new(0)).unwrap();
-    assert_eq!(&*text, "const a = 1\n");
+    assert_eq!(&*text, "const a = 1");
     let _ = db.get::<TypeOf>(DefId::new(1)).unwrap();
     assert_eq!(db.compute_count(&QueryKey::TypeOf(DefId::new(0))), 1);
 
     // Heal block 1: the parse succeeds and the index switches to tree spans.
-    db.set_file_content(file, "const a = 1\n///|\nconst b = \"closed\"\n")
+    db.set_file_content(file, "const a = 1\n##\nconst b = \"closed\"\n")
         .unwrap();
     let parse = db.get::<ParseFile>(file).unwrap();
     assert!(parse.ast.is_some());
@@ -345,7 +345,7 @@ fn conformance_file_parses_and_edits_block_grain() {
 
     // Append a second block: the original block's text is untouched.
     let mut edited = TYPES.to_owned();
-    edited.push_str("///|\nconst conformance_probe = 1\n");
+    edited.push_str("##\nconst conformance_probe = 1\n");
     db.set_file_content(file, &edited).unwrap();
 
     let renewed = db.get::<BlockSource>(BlockId { file, index: 0 }).unwrap();

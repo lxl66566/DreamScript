@@ -89,6 +89,43 @@ const GENERICS_AMBIENT: &str = concat!(
     "extern fn str[t] (v: t) -> string\n",
 );
 
+/// Ambient for pattern_dispatch: the primitives, println, and the record's
+/// row-typed read_file against the file's own error taxonomy.
+const PATTERN_DISPATCH_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "trait Copyable { }\n",
+    "extern fn read_file (path: string) -> string | io_error\n",
+    "extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs per the tuples_surface list: the primitives,
+/// the list type, and the one list length read the tuple items build
+/// against.
+const TUPLES_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "extern fn list_len[t] (xs: list[t]) -> int\n",
+);
+
+/// Ambient stdlib stubs per the lists_surface list: the checked list
+/// reads the literal and the constructor build against.
+const LISTS_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "extern fn list_len[t] (xs: list[t]) -> int\n",
+    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
+    "extern fn println (msg: string) -> ()\n",
+);
+
 fn items_of(ast: &Ast) -> Vec<&Item> {
     ast.blocks.iter().flat_map(|b| b.items.iter()).collect()
 }
@@ -159,6 +196,37 @@ fn types_hybrid_typecheck_items_pass() {
     // else (load, cfg's `.err` handler, kv, same) checks clean.
     let rejects = gate("../../conformance/types_hybrid.ds", TYPES_AMBIENT);
     assert_eq!(rejects, [] as [(String, String, ds_diag::Diagnostic); 0]);
+}
+
+/// The tutorial-pass regressions: every item (typecheck and run) checks
+/// clean under the record-shaped ambient — the bare-tag arms credit
+/// exhaustiveness, the or-pattern of unit tags is one member set, and
+/// the tail `?` over the contained parse union is the return itself.
+#[test]
+fn pattern_dispatch_items_check_clean() {
+    let rejects = gate(
+        "../../conformance/pattern_dispatch.ds",
+        PATTERN_DISPATCH_AMBIENT,
+    );
+    assert_eq!(rejects, [] as [(String, String, ds_diag::Diagnostic); 0]);
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/pattern_dispatch.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", PATTERN_DISPATCH_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    assert!(
+        checked.diags.is_empty(),
+        "{}",
+        checked
+            .diags
+            .iter()
+            .map(|d| format!("{} {}", d.code.as_str(), d.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 #[test]
@@ -313,7 +381,7 @@ fn gate_full(
     (rejects, all, lin, source)
 }
 
-/// The 13.2 file checks fully clean: typecheck and run items (which must
+/// linearity_modes_rc.ds checks fully clean: typecheck and run items (which must
 /// typecheck from M2 per the cumulation rules) produce no diagnostic of
 /// either pass, and the recorded facts match the record's own annotations
 /// ("b consumed here", "f dies here: deinit closes fd").
@@ -422,6 +490,95 @@ fn linearity_negative_rejects_render_recorded_shapes() {
     assert_eq!(diag.labels[1].label, "used again here after move");
 }
 
+/// lists_surface.ds: the list-literal and `list[t]()` constructor round —
+/// every typecheck and run item checks clean under the list ambient
+/// stubs, and the reject item reports exactly its mixed-element error.
+#[test]
+fn lists_surface_items_check_with_the_mixed_rejection() {
+    let rejects = gate("../../conformance/lists_surface.ds", LISTS_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "reject-mixed");
+    assert!(what.contains("DS2001"), "the reject text names the code");
+    assert_eq!(diag.code.as_str(), "DS2001");
+    assert!(
+        diag.message.contains("list literal mixes element types"),
+        "the mixed-element rejection: {}",
+        diag.message
+    );
+
+    // every other item checks clean under the same stubs
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/lists_surface.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", LISTS_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
+}
+
+/// tuples_surface.ds: the anonymous-tuple round — every typecheck and
+/// run item checks clean under the tuple ambient stubs, and the reject
+/// item reports exactly its unproven-member rejection: a declaration
+/// destructuring over a union would bind one member's types with no
+/// coverage proof [B3, F4].
+#[test]
+fn tuples_surface_items_check_with_the_union_destructure_rejection() {
+    let rejects = gate("../../conformance/tuples_surface.ds", TUPLES_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "reject-union-destructure");
+    assert!(what.contains("DS2001"), "the reject text names the code");
+    assert_eq!(diag.code.as_str(), "DS2001");
+    assert!(
+        diag.message.contains("needs one tuple of 2 element(s)"),
+        "the unproven-member rejection: {}",
+        diag.message
+    );
+
+    // every other item checks clean under the same stubs
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/tuples_surface.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", TUPLES_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
+}
+
 /// No affine diagnostic may land outside `reject` items (whose text names
 /// the code) or later-milestone items, in any corpus file. Header stages
 /// pair with items by declared name: files with comment-only header items
@@ -431,12 +588,15 @@ fn linearity_negative_rejects_render_recorded_shapes() {
 fn affine_diagnostics_stay_in_reject_or_later_milestone_items() {
     let corpus = [
         ("../../conformance/types_hybrid.ds", SWEEP_AMBIENT),
+        ("../../conformance/pattern_dispatch.ds", SWEEP_AMBIENT),
         ("../../conformance/linearity_modes_rc.ds", LINEARITY_AMBIENT),
         (
             "../../conformance/linearity_negative.ds",
             LINEARITY_NEG_AMBIENT,
         ),
         ("../../conformance/effects_nursery.ds", SWEEP_AMBIENT),
+        ("../../conformance/lists_surface.ds", LISTS_AMBIENT),
+        ("../../conformance/tuples_surface.ds", TUPLES_AMBIENT),
         ("../../conformance/syntax_ts_heart.ds", SWEEP_AMBIENT),
         (
             "../../conformance/generics_coherent_traits.ds",

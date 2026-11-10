@@ -1,0 +1,24 @@
+// seed: R5 grammar round surface — line-initial ## separators, byte
+// literals, anonymous tuple expressions/patterns, enum blocks with
+// payload cases, and the @ sigil import form in one block chain.
+enum level { debug, warn(int), fatal(string) }
+
+fn pair(s: string, n: int) -> (string, int) {
+  (s, n)
+}
+
+fn main() -> () {
+  const t = ("db", 8080)
+  const (host, port) = pair("db", 8080)
+  const one = (7,)
+  const (seven,) = one
+  match t {
+    (h, p) => println("${h}:${p}"),
+  }
+  const sep = b'\n'
+  const unit = ()
+  println("${host} ${port} ${seven}")
+}
+##
+import @std/csv (reader)
+tag ready

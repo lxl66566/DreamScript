@@ -1,0 +1,4 @@
+// `self` as a type name [record 6.1]: the receiver type is spelled `Self`.
+
+tag int
+fn f(x: self) -> int { 1 }

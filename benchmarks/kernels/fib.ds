@@ -1,0 +1,10 @@
+// Kernel: naive recursive fib — call overhead and integer add per call.
+// fib(34) keeps every intermediate far inside i64 and f64-exact range.
+
+fn fib(n: int) -> int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() -> () {
+  println("result: ${fib(34)}")
+}

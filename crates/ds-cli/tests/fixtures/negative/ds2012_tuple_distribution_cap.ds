@@ -9,4 +9,4 @@ tag int
 type u = a | b | c | d
 const v: u = a
 const big = (v, v, v, v, v, v, v)
-const f = (t: (u, u, u, u, u, u, u)) -> int { 1 }
+fn f(t: (u, u, u, u, u, u, u)) -> int { 1 }

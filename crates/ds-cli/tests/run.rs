@@ -147,13 +147,14 @@ fn parity_module(depth: i64) -> Module {
 }
 
 /// A one-function module whose main calls a foreign module that is never
-/// installed.
+/// installed (`dep`, deliberately not the reserved `std` platform module
+/// the run path installs).
 fn foreign_callee_module() -> Module {
     let main = Function::new(
         "main",
         layout(&[I64], 0, 1),
         vec![Constant::I64(5), Constant::FuncRef {
-            module: "std".into(),
+            module: "dep".into(),
             func: 0,
         }],
         vec![
@@ -299,7 +300,7 @@ fn foreign_callee_reports_the_missing_module() {
     assert!(!ok, "unresolved callee exits nonzero");
     assert_eq!(out, "");
     assert!(
-        err.contains("module `std` is not installed"),
+        err.contains("module `dep` is not installed"),
         "stderr: {err}"
     );
 }

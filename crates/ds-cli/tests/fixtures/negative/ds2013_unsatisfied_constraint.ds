@@ -2,6 +2,6 @@
 
 tag int
 trait show {
-  const text = (self: self) -> int
+  fn text(self) -> int
 }
-const f = (x: int) -> int { x.text() }
+fn f(x: int) -> int { x.text() }

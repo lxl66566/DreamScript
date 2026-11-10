@@ -3,14 +3,14 @@
 //! This module defines the micro-operation set once, as a Rust enum. Every
 //! tier consumes exactly this set: the tier-1 dispatch loop (`ds-vm`), the
 //! copy-and-patch stencil source (one stencil per uop, one-to-one by
-//! construction [BL-5]), and the bytecode-to-SSA lowering [H1]. The tier-1
+//! construction, BL-5), and the bytecode-to-SSA lowering (H1). The tier-1
 //! reachable core is complete here by construction: constants, typed
 //! arithmetic, typed comparisons, control flow, calls, frame protocol, slot
 //! moves, ADT tag words, heap string loads and data ops, and multi-word
 //! returns. There are no dynamic "V" variants — every operand's type is a
-//! compile-time fact [BL-1].
+//! compile-time fact (BL-1).
 //!
-//! # Encoding: 32-bit fixed format [BL-1]
+//! # Encoding: 32-bit fixed format (BL-1)
 //!
 //! ```text
 //!  31         24 23         16 15                              0
@@ -20,13 +20,14 @@
 //! +-------------+-------------+---------------------------------+
 //! ```
 //!
-//! - The opcode byte [31:24] is a major/minor pair: major [31:28] selects the operation class
-//!   (operand shape), minor [27:24] the variant within it. [`Major`] lists the assigned majors; 14
-//!   of 16 are used, the rest are reserved growth budget (the M4 RC ops will take one).
-//! - `a` [23:16] is the primary slot operand: destination for data ops, the condition for
+//! - The opcode byte \[31:24] is a major/minor pair: major \[31:28] selects the operation class
+//!   (operand shape), minor \[27:24] the variant within it. [`Major`] lists the assigned majors; 14
+//!   of 16 are used. Major 0xE is the M4 RC pair RCINC/RCDEC, carried by [`rc::RcOp`] beside `Uop`
+//!   ([`Inst`] is the one-body-word union both majors decode into); 0xF stays reserved.
+//! - `a` \[23:16] is the primary slot operand: destination for data ops, the condition for
 //!   conditional jumps, the argument count for calls.
-//! - `bc` [15:0] is either two slot operands `b` [15:8] / `c` [7:0] (the three-register data ops
-//!   fill `a`, `b`, `c`) or one `d` [15:0] field: a constant-pool index ([`ConstIdx`]), a biased
+//! - `bc` \[15:0] is either two slot operands `b` \[15:8] / `c` \[7:0] (the three-register data ops
+//!   fill `a`, `b`, `c`) or one `d` \[15:0] field: a constant-pool index ([`ConstIdx`]), a biased
 //!   jump offset, or the frame slot count (FUNCF).
 //! - Every unused field bit must be zero ([`DecodeError::ReservedField`] on violation), so `decode`
 //!   is canonical: an encoding decodes to exactly one uop, and that uop re-encodes to the same
@@ -54,7 +55,7 @@
 //! | Frame (0xB)          | FUNCF                   | —        | —          | —          | frame slots
 //! | Halt (0xC)           | HALT                    | slot     | —          | —          | —
 //!
-//! # Immediates go through the constant pool [BL-1]
+//! # Immediates go through the constant pool (BL-1)
 //!
 //! The fixed format leaves 16 operand bits after the opcode and one slot
 //! operand. An i64 immediate needs 64 bits, an f64 needs 64, and even an
@@ -68,11 +69,11 @@
 //! fully-qualified cross-module calls [H6 item 5], the entry hot reload
 //! swaps). The uop contract fixes only the index shape: pool indices are u16
 //! ([`ConstIdx`]); the pool CONTAINER is a dsmod-format concern, not part of
-//! the ISA — the shipped format carries one pool per function [BL-7], and a
+//! the ISA — the shipped format carries one pool per function (BL-7), and a
 //! module-level pool remains representable at the format layer if a future
 //! revision chooses it.
 //!
-//! # Biased jump offsets [BL-1]
+//! # Biased jump offsets (BL-1)
 //!
 //! Conditional and unconditional jumps carry a signed displacement in the
 //! unsigned u16 `d` field, biased by [`BIAS_J`] in the LuaJIT `BCBIAS_J`
@@ -83,7 +84,7 @@
 //! of the field *is* the subtraction. A field of exactly [`BIAS_J`] is the
 //! zero offset (a jump to the next instruction).
 //!
-//! # XOR-negated pairs [BL-1]
+//! # XOR-negated pairs (BL-1)
 //!
 //! Comparison variants sit at adjacent minors within their major with the
 //! negation bit in the minor's lowest bit, so `opcode ^ 1` yields the
@@ -92,7 +93,7 @@
 //! [`Uop::negate`] is the semantic counterpart. The same free adjacency
 //! holds for the conditional jumps (JMPIF^1 == JMPIF_NOT): a branch-sense
 //! flip is a one-bit rewrite with no operand re-encoding, which is the
-//! foundation of the compare-and-branch fusion [BL-4].
+//! foundation of the compare-and-branch fusion (BL-4).
 //!
 //! # CALLT operands
 //!
@@ -100,10 +101,10 @@
 //! source span is not an instruction operand because the locked call ABI
 //! already fixes it: the staged arguments are the first `nargs` slots of the
 //! caller's outgoing-argument area ([`crate::slide_plan`]), so `src` is
-//! derived as `caller.arg_area().start`. The record's 13.7 spelling
+//! derived as `caller.arg_area().start`. The record's H2 spelling
 //! `CALLT odd, nargs=1, src=r3` names that derived slot (r3 is the arg-area
 //! slot of even's frame). RET likewise needs no extra convention: the return
-//! word overlays slot 0 [H2].
+//! word overlays slot 0 (H2).
 //!
 //! # Budgets and caps
 //!
@@ -116,14 +117,18 @@
 
 mod effects;
 mod encode;
+pub mod inst;
+pub mod rc;
 
 #[cfg(test)]
 mod tests;
 
 pub use effects::{Major, SlotList};
 pub use encode::{DecodeError, EncodeError};
+pub use inst::{Inst, InstDecodeError};
+pub use rc::{RC_MAJOR, RcDecodeError, RcOp};
 
-/// The jump-offset bias [BL-1]: the additive origin of the u16 jump field,
+/// The jump-offset bias (BL-1): the additive origin of the u16 jump field,
 /// in the LuaJIT `BCBIAS_J` style. Biased fields decode branch-free:
 /// `(field ^ BIAS_J) as i16` is the signed offset from the next pc.
 pub const BIAS_J: u16 = 0x8000;
@@ -134,14 +139,14 @@ pub const BIAS_J: u16 = 0x8000;
 pub const MAX_FRAME_SLOTS: u16 = 256;
 
 /// Index into a constant pool. The uop contract fixes the index shape (u16),
-/// not the container: the dsmod format carries one pool per function [BL-7].
+/// not the container: the dsmod format carries one pool per function (BL-7).
 /// Pool entries are: i64 (KIMM), any other constant word (KCONST: f64, bool,
 /// reference, unit), or a FuncRef (CALL/CALLT: module index + function index
 /// [H6 item 5]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConstIdx(pub u16);
 
-/// One micro-operation [BL-5]. Slot operands are frame-slot indices (slot 0
+/// One micro-operation (BL-5). Slot operands are frame-slot indices (slot 0
 /// is the first parameter); jump targets are absolute instruction indices —
 /// encoding resolves them to biased offsets. Each variant documents its
 /// major.minor opcode.
@@ -160,19 +165,19 @@ pub enum Uop {
     /// separate opcode keeps KCONST's purity-table entry true.
     Kstr { dst: u8, kidx: ConstIdx },
     /// `0x1.0` — `slots[dst] = slots[lhs] + slots[rhs]`, i64, traps on
-    /// overflow [B7].
+    /// overflow (B7).
     AddI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x1.1` — `slots[dst] = slots[lhs] - slots[rhs]`, i64, traps on
-    /// overflow [B7].
+    /// overflow (B7).
     SubI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x1.2` — `slots[dst] = slots[lhs] * slots[rhs]`, i64, traps on
-    /// overflow [B7].
+    /// overflow (B7).
     MulI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x1.3` — `slots[dst] = slots[lhs] / slots[rhs]`, i64, traps on
-    /// zero divide and on `MIN / -1` overflow [B7].
+    /// zero divide and on `MIN / -1` overflow (B7).
     DivI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x1.4` — `slots[dst] = slots[lhs] % slots[rhs]`, i64, traps on zero
-    /// divide and on `MIN % -1` overflow [B7].
+    /// divide and on `MIN % -1` overflow (B7).
     ModI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x2.0` — `slots[dst] = slots[lhs] + slots[rhs]`, f64.
     AddF64 { dst: u8, lhs: u8, rhs: u8 },
@@ -196,7 +201,7 @@ pub enum Uop {
     /// `0x3.5` — `slots[dst] = slots[lhs] > slots[rhs]`.
     GtI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x4.0` — `slots[dst] = slots[lhs] == slots[rhs]`, f64 bit-structural
-    /// equality [resolved question 8]; `0x4.0 ^ 1 == 0x4.1` (NEQF64).
+    /// equality (B9); `0x4.0 ^ 1 == 0x4.1` (NEQF64).
     EqF64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x4.1` — `slots[dst] = slots[lhs] != slots[rhs]`, f64.
     NeqF64 { dst: u8, lhs: u8, rhs: u8 },
@@ -225,18 +230,18 @@ pub enum Uop {
     /// `concat(slots[lhs], slots[rhs])`. Allocating, so impure for the
     /// same reason as KSTR: reordering or duplicating an allocation breaks
     /// M4's dup/drop placement. M3 extension, justified: concatenation is
-    /// the primitive interpolation lowers onto [F6], and no existing uop
+    /// the primitive interpolation lowers onto (F6), and no existing uop
     /// builds a new string.
     StrCat { dst: u8, lhs: u8, rhs: u8 },
     /// `0x6.0` — `slots[dst] = (slots[src] == tag)`, unboxed bool: reads the
-    /// tag word of a tag+payload union [BL-2] and compares its discriminant
+    /// tag word of a tag+payload union (BL-2) and compares its discriminant
     /// against immediate tag id `tag` (in the `c` field). `0x6.0 ^ 1 ==
     /// 0x6.1`.
     TagTest { dst: u8, src: u8, tag: u8 },
     /// `0x6.1` — `slots[dst] = (slots[src] != tag)`: the negated tag test.
     TagTestNot { dst: u8, src: u8, tag: u8 },
     /// `0x6.2` — `slots[dst] = tag`: writes the discriminant word of a
-    /// tag+payload union [BL-2]. Payload words are the immediately following
+    /// tag+payload union (BL-2). Payload words are the immediately following
     /// slots, filled by ordinary slot ops; fusing construction into a
     /// payloaded TAG_NEW is a BL-4 superinstruction decision from profile
     /// data, not a new uop.
@@ -263,14 +268,14 @@ pub enum Uop {
     /// area [BL-6, H2]. The VM re-checks `nargs` against the callee's
     /// layout.
     Call { callee: ConstIdx, nargs: u8 },
-    /// `0xA.1` — tail call [H2]: slide the staged arguments into slots
+    /// `0xA.1` — tail call (H2): slide the staged arguments into slots
     /// `0..nargs` per [`crate::slide_plan`], rewrite the metadata word in
     /// place, and enter the callee. The stack never grows at any depth. The
     /// VM re-checks `nargs` against the callee's layout. The slide source is
     /// derived from the caller layout (see module docs).
     Callt { callee: ConstIdx, nargs: u8 },
     /// `0xA.2` — return `slots[src]`; the word overlays slot 0 of the
-    /// caller's outgoing-argument area [H2].
+    /// caller's outgoing-argument area (H2).
     Ret { src: u8 },
     /// `0xA.3` — return the `n` consecutive slots starting at `src`: the
     /// span is placed at overlay words `0..n` (the caller's
@@ -295,7 +300,7 @@ pub enum Uop {
     Halt { slot: u8 },
 }
 
-/// The biased u16 field for a jump from pc to `target` [BL-1]:
+/// The biased u16 field for a jump from pc to `target` (BL-1):
 /// `field = (target - next_pc) + BIAS_J`. Errors when the displacement
 /// exceeds the signed 16-bit window.
 // the bias trick is a guarded bit-level reinterpretation: the range check
@@ -310,7 +315,7 @@ pub fn jump_field(target: u32, pc: u32) -> Result<u16, EncodeError> {
     Ok((i64::from(BIAS_J) + offset) as u16)
 }
 
-/// The jump target of a biased field at pc [BL-1]:
+/// The jump target of a biased field at pc (BL-1):
 /// `target = pc + 1 + (field ^ BIAS_J) as i16`. Errors when the biased
 /// offset cannot be a valid pc (below zero or past u32 range; only
 /// reachable for a corrupted stream, since encode validates).

@@ -1,6 +1,6 @@
 # DreamScript working design decisions
 
-Status: this file is the authoritative working record of every language decision (42 points: A1-A3, B1-B9, C1-C5, D1-D3, E1-E5, F1-F7, G1-G4, H1-H6), recorded by the author 2026-11-08 and extracted from the frozen archive in `design/`. All Phase 4 implementation work reads this file; the `design/` directory is a read-only archive kept for cross-reference only — never modify it, and do not read it unless a rule here is genuinely insufficient. Research notes (`design/en/research/01-06`) are raw evidence, not needed for implementation.
+Status: this file is the authoritative working record of every language decision (44 points: A1-A3, B1-B9, C1-C5, D1-D3, E1-E5, F1-F9, G1-G4, H1-H6), recorded by the author 2026-11-08, extracted from the frozen archive in `design/`, amended 2026-11-10 (E4/F2/F5/F7/F8: the `or` operator retired, bare `return` adopted, anti-prose surface guards pinned), and amended 2026-11-10 again (B3/F2/F6/F7/G3/G4/H6/6.1 plus new F9, the syntax-surface adoption: interpolation as a string context with the pinned escape set, the declaration/construction story with the list literal, fn-only declarations with `unit`, the receiver spelling, two namespaces, script entry, the `##` separator, sigil-form imports, ledger recompute). All Phase 4 implementation work reads this file; the `design/` directory is a read-only archive kept for cross-reference only — never modify it, and do not read it unless a rule here is genuinely insufficient. Research notes (`design/en/research/01-06`) are raw evidence, not needed for implementation. The archive's seed-corpus listings are not reproduced here: they are ported to the decided surface in `conformance/` (with per-file porting notes), and their runtime encodings are pinned in ds-abi/ds-vm tests.
 
 Source map (archive files backing each section): §2 `design/en/design/08-decisions.md`; §3 `design/en/design/01-types.md`; §4 `design/en/design/02-linearity-ownership.md`; §5 `design/en/design/03-effects-errors-async.md`; §6 `design/en/design/04-syntax.md`; §7 `design/en/design/05-generics-metaprogramming.md`; §8 `design/en/design/06-modules-tooling.md`; §9 `design/en/design/07-runtime.md`; per-point rationale lives in `design/en/design/09-decision-rationale.md`; the master worksheet is `design/en/design/00-decision-map.md`.
 
@@ -11,7 +11,7 @@ Source map (archive files backing each section): §2 `design/en/design/08-decisi
 
 ## 1. The decided language (summary)
 
-DreamScript is a standalone general-purpose interpreted language (embeddable via platform packages) with hybrid set-theoretic types — nominal tags composing under union, intersection, and difference, `is` narrowing, `T?` as an alias for `T | none` — checked bidirectionally with required boundary signatures and flow refinement, and universal structural equality with five carve-outs. Values are affine by default with an opt-in `~Copyable` linear resource layer (`deinit`, phantom states), second-class parameter modes (borrow / `mut` / consume), exclusion-window mutation, and linear-mutable COW collections; memory is Perceus reference counting with block reuse over per-frame arenas, no GC. Polymorphism is coherent set-theoretic traits with pairwise-disjoint instance heads, one generic body carrying evidence words and inline caches; metaprogramming is comptime reflection without macros. Errors are union members handled by `?` / `or` / `.err` beside an unhandleable trap; concurrency is VM fibers in mandatory nurseries with fork-join parallelism on the linear/immutable sendability substrate; effects stay beneath the surface over an evidence-passing handler runtime with capability-parameter IO. The surface is TS-family braces with full UFCS, const-arrow functions, Rust-shaped matching with set-difference diagnostics, Kotlin interpolation, under a 22-feature / 35-unit sugar budget (Kotlin's ceiling is 38 / 74-76). Modules are definition < file < package < module with generated `.dsi` interfaces and no import-time execution; packages are blake3 hash-cascade manifests over a content-addressed store with a zero-config script mode; FFI is linear C handles. Execution is a three-tier pipeline — typed register VM, copy-and-patch JIT, Cranelift/wasm — with spec-guaranteed self-and-mutual tail calls.
+DreamScript is a standalone general-purpose interpreted language (embeddable via platform packages) with hybrid set-theoretic types — nominal tags composing under union, intersection, and difference, `is` narrowing, `T?` as an alias for `T | none` — checked bidirectionally with required boundary signatures and flow refinement, and universal structural equality with five carve-outs. Values are affine by default with an opt-in `~Copyable` linear resource layer (`deinit`, phantom states), second-class parameter modes (borrow / `mut` / consume), exclusion-window mutation, and linear-mutable COW collections; memory is Perceus reference counting with block reuse over per-frame arenas, no GC. Polymorphism is coherent set-theoretic traits with pairwise-disjoint instance heads, one generic body carrying evidence words and inline caches; metaprogramming is comptime reflection without macros. Errors are union members handled by `?`, the `.err`/`.ok` difference handlers, and the `unwrap_or`/`ok_or` extraction family beside an unhandleable trap; concurrency is VM fibers in mandatory nurseries with fork-join parallelism on the linear/immutable sendability substrate; effects stay beneath the surface over an evidence-passing handler runtime with capability-parameter IO. The surface is TS-family braces with full UFCS, `fn` declarations with const-arrow lambdas, Rust-shaped matching with set-difference diagnostics, Kotlin interpolation, under a 22-feature / 34-unit sugar budget (Kotlin's ceiling is 38 / 74-76). Modules are definition < file < package < module with generated `.dsi` interfaces and no import-time execution; packages are blake3 hash-cascade manifests over a content-addressed store with a zero-config script mode; FFI is linear C handles. Execution is a three-tier pipeline — typed register VM, copy-and-patch JIT, Cranelift/wasm — with spec-guaranteed self-and-mutual tail calls.
 
 ## 2. Identity and compatibility
 
@@ -42,19 +42,19 @@ Constraints: the disjointness/emptiness checker over nominal atoms is load-beari
 Top-level and public signatures are required and anchor the set algebra; locals, lambdas, and match arms are inferred bidirectionally. Refinement narrows monotonically through `is` tests, none tests, and match arms; resets happen only at assignment (rare under immutability). The `?` propagation check is set containment against the written return union. Known limit: no narrowing through mutable fields of union-typed values.
 
 ```ts
-const get_port = (j: json) -> int | missing | bad_port {
-  const pv = j.fields.get("port")   // inferred: int | none
+fn get_port(j: json) -> int | missing | bad_port {
+  const pv = j.fields.get("port")   // inferred: json | none; the is-test below narrows to int
   if pv is int && pv >= 1 && pv <= 65535 { pv } else { return bad_port{ got: -1 } }
 }
 ```
 
 ### B3 — nominal structs/enums plus anonymous tuples
 
-Named data is nominal structs and enums (declared layouts, one type_id each, tuple-enums allowed); ad-hoc aggregates are anonymous tuples with destructuring; record punning supported. Anonymous record literals (`const point = { x: 1, y: 2 }`) are compiler-synthesized sugar over a nominal record — deferred additive until the inference story settles. Row types are rejected for data.
+Named data is nominal structs and enums (declared layouts, one type_id each, tuple-enums allowed); ad-hoc aggregates are anonymous tuples with destructuring; record punning supported. Enum blocks are the only payload-case declaration form; standalone `tag x;` declares unit tags; type aliases never declare cases (2026-11-10). Construction is fixed per declaration — struct = brace form only, enum case = call form only, unit tag = bare — and cross-spellings are checker errors (Swift and Rust fix the construction form at the declaration; cross-spelling is a hard error in both). The list literal `[a, b, c]` is adopted for v1; the map literal stays deferred with the anonymous-record-literal reservation, builder calls interim. Anonymous record literals (`const point = { x: 1, y: 2 }`) are compiler-synthesized sugar over a nominal record — deferred additive until the inference story settles. Row types are rejected for data.
 
 ### B4 — `T?` is exactly `T | none`
 
-`none` is a unit type among several; optionals, error unions, and enums share one mechanism (`is`, `or`, match). No `?.` operator in v1 (a thin desugar may be added later only if real code demands). Niche packing of `T | none` into one slot is a legal later optimizer pass (references are never zero). Known limit: `V | none` where `V` can itself be `none` is ambiguous — use an explicit wrapper (`found[v] | none`) at exactly those sites.
+`none` is a unit type among several; optionals, error unions, and enums share one mechanism (`is` narrowing, match, and `?` composed with the `unwrap_or`/`ok_or` extraction family per E4). No `?.` operator in v1 (a thin desugar may be added later only if real code demands); `??` on `t | none` is the single recorded operator valve (F8). Niche packing of `T | none` into one slot is a legal later optimizer pass (references are never zero). Known limit: `V | none` where `V` can itself be `none` is ambiguous — use an explicit wrapper (`found[v] | none`) at exactly those sites.
 
 ### B7 — numerics: i64/f64 defaults, trapping overflow
 
@@ -93,7 +93,7 @@ Three modes fixed at the definition site — default borrow (immutable), `mut` (
 ```ts
 fn len(s: str) -> int { ... }              // default: borrow
 fn push(xs: mut list<int>, x: int) { ... } // exclusive mutable window for the call
-fn consume(f: file) -> int { ... }         // consuming move
+fn consume(f: move file) -> int { ... }    // consuming move
 ```
 
 ### C3 — `const`/`var` bindings, mutation through `mut` windows
@@ -139,7 +139,7 @@ Errors are storable data (nursery collection, supervision, caching), one predict
 
 ### E1 — no effect syntax in v1, handler-shaped runtime, capability idiom
 
-The runtime is handler-shaped from day one: evidence passing serves the two internal effects (`cancel`, `discontinue`) at nursery boundaries — tail-resumptive internal ops allocate nothing; user-facing code paths are unchanged. World-touching stdlib APIs follow the capability idiom: an ambient default handler installed by the `ds` CLI for scripts, and an explicit capability parameter for tests, embedding, and scheduler selection — the same code runs over blocking, event-loop, or custom schedulers. User-defined handlers (`with handler { op ask() => resume(42) }`) stay a v2 additive escape hatch, never a migration. Standing typing obligations for whenever v2 activates: resumptions are affine unless marked (no linear value captured in a multi-shot continuation); FFI calls pin the fiber (resolved question 1).
+The runtime is handler-shaped from day one: evidence passing serves the two internal effects (`cancel`, `discontinue`) at nursery boundaries — tail-resumptive internal ops allocate nothing; user-facing code paths are unchanged. World-touching stdlib APIs follow the capability idiom: an ambient default handler installed by the `ds` CLI for scripts, and an explicit capability parameter for tests, embedding, and scheduler selection — the same code runs over blocking, event-loop, or custom schedulers. User-defined handlers (`with handler { op ask() => resume(42) }`) stay a v2 additive escape hatch, never a migration. Standing typing obligations for whenever v2 activates: resumptions are affine unless marked (no linear value captured in a multi-shot continuation); FFI calls pin the fiber (H5).
 
 ### E2 — VM fibers with a mandatory nursery
 
@@ -155,21 +155,22 @@ nursery {
 
 Race-freedom and sendability are static consequences of linear/immutable data (a linear value is `sending` by construction; an immutable value is shareable); the missing piece is only a scheduler. `par_map` / `par_reduce` fork-join combinators over immutable or linear-partitioned inputs — deterministic, replayable, lock-free by theorem, cheap fork-side snapshots via static RC counts. Actor and supervision layers can be added later as libraries (a supervisor is a nursery with a restart policy).
 
-### E4 — union errors with `?`/`or`/`.err`, plus an unhandleable trap
+### E4 — union errors with `?`, `.err`/`.ok`, and the extraction family; `or` retired 2026-11-10
 
-Expected failures are union members handled by three tokens whose semantics are stated once over unions: `?` (propagation with checked containment), `or` (extract the first wanted member, right operand evaluated lazily, with `or return` / `or break` / `or continue` early-exit forms), `.err(h)` / `.ok(h)` (set-difference-typed handlers — the remainder type shows what is left). Bugs `panic` unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Let-it-crash supervision is a library pattern.
+Expected failures are union members handled by tokens and methods whose semantics are stated once over unions: `?` (propagation with checked containment), `.err(h)` / `.ok(h)` (set-difference-typed handlers — the remainder type shows what is left), and the @std extraction family — `unwrap_or(y)`, `unwrap_or_else(fn)`, `ok_or(e)`, `map_err(fn)` — plain UFCS-callable generic functions with fully local typing, composed with `?` for early exits. The `or` operator is retired: it overloaded one word across fallback, early exit, loop control, and union coalescing, collided with boolean `||`, and typed by contextual wanted-member inference (F8 records the full rationale). The explicit early-exit spelling is `if x is none { return e }` with refinement, and bare `return` is adopted (F2). Bugs `panic` unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Let-it-crash supervision is a library pattern.
 
 ```ts
 fn load_config(path: str) -> config | io_error | parse_error {
   const text = read_file(path)?        // `?`: members outside the ok-type return early
   parse_config(text)?
 }
-const cfg  = load_config("app.cfg") or default_config()
+const cfg  = load_config("app.cfg").err((_) => default_config())   // error-union fallback, lazy handler
 const cfg2 = load_config("app.cfg").err((e) => {   // result type: (config | io_error | parse_error) - (io_error | parse_error) == config
-  log("config failed: ${e}")
+  log("config failed")                     // e is a union; interpolation holes take primitives or show (F6)
   default_config()
 })
-const port = cfg2.port or 8080                     // option is t | none: the same three tokens
+const port = cfg2.port.unwrap_or(8080)             // option fallback: t | none -> t, eager right operand
+const name = row.get("name").ok_or(missing_field("name"))?   // early exit with a new value; `?` propagates it
 ```
 
 ### E5 — nursery-scoped cooperative cancellation plus consume-to-close
@@ -184,18 +185,18 @@ Every block opens with a visible token; line-oriented grammar, no layout state; 
 
 ### F2 — bindings, functions, annotations, returns
 
-`const` / `var` bindings (var is the rebindable local). Named functions as const-arrow declarations, uniform with bindings; the defined name is in scope inside its own body (recursion). Anonymous lambdas `(x) => e`. Parameters `name: t`, returns `-> t`; union returns parse as `-> a | b` with no extra syntax; `T?` is legal in every annotation position. Final-expression returns; early exits via `or return` / `or break` / `or continue`. `?` is reserved for postfix propagation; the old README's prefix-`?` return marker is retired. A bare `return` keyword may be added later as a pure additive. Functions are values.
+`const` / `var` bindings (var is the rebindable local). Named functions are `fn name(p) -> t { }` — the only named-function declaration, at top level, as trait/impl members, and bodiless in trait signatures (`fn to_json(self) -> string`); the defined name is in scope inside its own body (recursion). Const-arrow remains only for anonymous lambdas `(x) => e` (Rust: `fn` for named, closures as expressions; TypeScript's dual spelling is the avoided style war). `unit` is an optional named spelling for the unit type in annotations; `()` stays legal. Parameters `name: t`, returns `-> t`; union returns parse as `-> a | b` with no extra syntax; `T?` is legal in every annotation position. Final-expression returns; early exits via bare `return` (adopted 2026-11-10 — B2's own example already used it while this section deferred it) and via `break` / `continue` in loops. `?` is reserved for postfix propagation; the old README's prefix-`?` return marker is retired, and the `or` extraction operator is retired per E4/F8. Functions are values.
 
 ```ts
-const parse_age = (s: string) -> int | parse_error {
+fn parse_age(s: string) -> int | parse_error {
   match s.trim().parse_int() {
     e if e is parse_error => bad_number(s),
     n                     => n,
   }
 }
-const parse_user = (row: row_t) -> user | parse_error {
-  const name = row.get("name") or return missing_field("name")
-  user { name, age: parse_age(row.get("age") or return missing_field("age"))? }
+fn parse_user(row: row_t) -> user | parse_error {
+  const name = row.get("name").ok_or(missing_field("name"))?
+  user { name, age: parse_age(row.get("age").ok_or(missing_field("age")))? }
 }
 ```
 
@@ -209,7 +210,7 @@ Arms `pat => expr` separated by commas; guards `pat if cond`; or-patterns `a | b
 
 ### F5 — fixed trait-driven operator set, frozen precedence
 
-A fixed token set maps to fixed traits (Add, Sub, Mul, ..., Index) — an operator call is a trait-method call, inline-cacheable. One frozen C-family precedence table published once in the tutorial, never extended, no user-defined operators ever; `Deref`-style coercions are excluded from the user surface. `==` is B9's structural equality and never overloadable; ordering goes through the `Ord` derive.
+A fixed token set maps to fixed traits (Add, Sub, Mul, ..., Index) — an operator call is a trait-method call, inline-cacheable. One frozen C-family precedence table published once in the tutorial, never extended, no user-defined operators ever; word-form operators are exactly `in` and `is` (Kotlin-shaped) and boolean contexts are bool-typed with no truthiness coercion anywhere (F8); `Deref`-style coercions are excluded from the user surface. `==` is B9's structural equality and never overloadable; ordering goes through the `Ord` derive.
 
 | Operation | Trapping (default) | Wrapping (explicit) | Notes |
 |---|---|---|---|
@@ -221,19 +222,29 @@ A fixed token set maps to fixed traits (Add, Sub, Mul, ..., Index) — an operat
 
 ### F6 — strings and literals
 
-Interpolation `$x` (bare identifier) and `${expr}` (expressions), with an explicit `str()` call at the non-string boundary — no hidden stringification, `T?`-valued interpolations require explicit handling. Raw strings `r"..."` and hash-counted `r#"..."#` (nest to any depth, serve raw/multiline/heredoc needs in one construct). `'x'` is a Unicode scalar char; `b'x'` is a single byte.
+Interpolation `$x` (bare identifier) and `${expr}` (expressions); the hole is an explicit string context — `$e` and `${e}` desugar to `str(e)`, legal when the operand type is a primitive (int, float, bool, char, string) or carries `show`, while a union or optional operand is an error: extract first (B4/E4). Every other position — operators, arguments, bindings — stays strictly explicit, where an implicit conversion would change resolution (Kotlin, Swift, and Rust format holes are all string contexts). Escape set (2026-11-10): `\n \t \r \\ \" \' \0 \u{...}`; raw strings `r"..."` and hash-counted `r#"..."#` (nest to any depth, serve raw/multiline/heredoc needs in one construct) carry no escapes. `'x'` is a Unicode scalar char; `b'x'` is a single byte.
 
-### F7 — sugar budget: Balanced tier (22 features / 35 units)
+### F7 — sugar budget: Balanced tier (22 features / 34 units)
 
-Against Kotlin's 38 features / 74-76 cost-unit ceiling; headroom reserved: 16 features / 40-42 units. Included rows: newline-terminated statements (S1); interpolation `$x`/`${e}` (S1); raw strings `r#"..."#` (S1); postfix `?` (S2); `or` extraction + `or return/break/continue` (S2); `is` narrowing (S2); `.err(h)`/`.ok(h)` difference-typed handlers (S2); match/if expressions with exhaustive-union diagnostics (S2); match guards (S1); or-patterns (S1); destructuring (S2); named + literal-only default arguments (S2); trailing lambda, last argument only (S2); UFCS (S2); type aliases (S1); sum-type declaration `tag`/enum (S2); derive attribute `#[derive(...)]` with auto `==` (S2); ranges `..`/`..=` + `in` (S1); numeric suffixes + separators (S1); `const`/`var` split (S1); operator-overload traits, fixed set and precedence (S2); `T?` alias (S2). Deferred-additive rows (in headroom order of likelihood): `|>` (S1), anonymous record literals (S2), `@` binders (S1), vararg/spread (S1), labeled break/continue (S1), lambda shorthand `it` (S1). Kotlin features deleted wholesale by set typing and UFCS: `?.`, elvis, `!!` (replaced by `is`/`or` + none-typing), smart casts (`is` narrowing), infix functions and extension functions/properties (UFCS), data-class synthesis (derives + structural `==`), sealed hierarchies (closed unions), receiver-lambda DSLs, primary constructors, reified type parameters, backtick identifiers, `tailrec` (TCO is guaranteed), context parameters (capability parameters). Excluded from user surface permanently: free operator overloading and custom operators, Deref coercions, convention-based privacy.
+Against Kotlin's 38 features / 74-76 cost-unit ceiling; headroom reserved: 16 features / 40-42 units. Included rows: newline-terminated statements (S1); interpolation `$x`/`${e}` (S1); raw strings `r#"..."#` (S1); list literals `[a, b, c]` (S1, adopted 2026-11-10); postfix `?` (S2); `is` narrowing (S2); `.err(h)`/`.ok(h)` difference-typed handlers (S2); match/if expressions with exhaustive-union diagnostics (S2); match guards (S1); or-patterns (S1); destructuring (S2); named + literal-only default arguments (S2); trailing lambda, last argument only (S2); UFCS (S2); type aliases (S1); sum-type declaration `tag`/enum (S2); derive attribute `#[derive(...)]` (S2); ranges `..`/`..=` + `in` (S1); numeric suffixes + separators (S1); `const`/`var` split (S1); operator-overload traits, fixed set and precedence (S2); `T?` alias (S2). Deferred-additive rows (in headroom order of likelihood): `|>` (S1), anonymous record literals (S2; the map literal rides this reservation per B3), `@` binders (S1), `??` fallback on `t | none` (S1), labeled break/continue (S1), lambda shorthand `it` (S1). Kotlin features deleted wholesale by set typing and UFCS: `?.`, elvis, `!!` (replaced by `is` narrowing, none-typing, and the extraction family; `??` on `t | none` is the recorded valve), smart casts (`is` narrowing), infix functions and extension functions/properties (UFCS), data-class synthesis (derives + structural `==`), sealed hierarchies (closed unions), receiver-lambda DSLs, primary constructors, reified type parameters, backtick identifiers, `tailrec` (TCO is guaranteed), context parameters (capability parameters). Excluded from user surface permanently: free operator overloading and custom operators, Deref coercions, convention-based privacy, truthiness coercion in boolean contexts, chained comparisons, comprehension syntax, subscript slicing sugar, vararg/spread packing, and word-form operators beyond `in`/`is` (F8). Fn-only named declarations (F2) and the two-namespace split (F9) delete spellings rather than add sugar.
+
+### F8 — extraction through methods and existing tokens; no prose operators or implicit coercions (2026-11-10)
+
+The `or` operator is retired from the surface. Across the record and corpus it carried six behaviors — option fallback, error-union fallback, early exit with a new value, fallback onto a diverging callee, union coalescing of differently-typed operands (`done or last` producing `page | net_err`), and loop control — typed by contextual wanted-member inference, under a word colliding with boolean `||`; the archive's `is ... or return` over a boolean test was the boundary already sliding. The replacements live on tokens that already exist plus one small @std family: option fallback `x.unwrap_or(y)` with the lazy `x.unwrap_or_else(fn)`; early exit with a new value `x.ok_or(e)?` and `x.map_err(fn)?`; error-union and diverging fallback `x.err(h)`; union coalescing `match done { p => p, none => last }`; loop control `if x is none { break }`. Bare `return` enters the surface with the retirement (the B2 example already used it while F2 deferred it — resolved by adoption). If corpus evidence later shows the option fallback deserves an operator, `??` restricted to `t | none` is the single recorded deferred additive (S1); no English word ever re-enters the operator set.
+
+Guards adopted with the accompanying prose-syntax audit, binding at review: operators stay C-family symbols with `in` and `is` as the only word forms; boolean contexts (`if`/`while` conditions, `&&`/`||`/`!` operands) are bool-typed, with no truthiness coercion of unions, options, numbers, or strings anywhere; chained comparisons are excluded permanently; comprehension syntax is excluded permanently (the D3 combinator surface covers it); subscripts are single-element Index access with no slicing sugar (string slices are checked library calls per B8, and other collections follow); vararg/spread packing is retired from the deferred-additive backlog (explicit list arguments and `concat` cover it). Hazards already deleted structurally, recorded for completeness: mutable default arguments are impossible because defaults are literal-only, and mixed numeric arithmetic is an error naming the conversion (B7). `is` is Kotlin-shaped type narrowing (not Python identity comparison) and `in` is Kotlin-shaped membership; both spellings stand.
+
+### F9 — two namespaces: types and values (2026-11-10)
+
+Types and values resolve in two namespaces. Constructors — brace construction, bare tags, generic-application constructors such as `list[page]()` — resolve in the type namespace; functions resolve in the value namespace; a call-form name present in both namespaces is an ambiguity error, never a priority search (F3's rule). The `map` struct and the `map` function coexist (Rust resolves type paths and value paths in separate namespaces, so a struct and a function share a name freely; C++'s fuller namespace machinery is the over-engineered counterexample); a call-form collision between an enum case and a function is the residual error class.
 
 ### 6.1 Implementation-normalized surface spellings (corpus-adopted; to be locked at M2)
 
-Spellings the seed corpus (`conformance/`) uses where the record under-specifies the surface; adopted for implementation, locked or revised at M2 checking: trait member signatures spell the receiver as an ordinary leading parameter `(self: self, ...)` per C2 modes (no `&Self`/`&mut self`); derives are attributes `#[derive(hash, show, ord)]` per F7's derive row; generic value declarations use `struct stack[t]` with functional `push/pop` returning updated values per D2 (in-place field assignment is undecided); generic clauses on functions are spelled `[t: c]`; empty mutable collections construct as `list[page]()` (final stdlib spelling owned at M3); a v2 `with handler` block is out of v1 scope per E1 and stays commented in the corpus.
+Spellings the seed corpus (`conformance/`) uses where the record under-specifies the surface; adopted for implementation, locked or revised at M2 checking: trait member signatures spell the receiver exempt from annotation and typed `Self` — plain `self` for the borrow mode, `mut self` for the exclusive window per C2, no `&Self`/`&mut self`; other parameters may use `Self` in their annotations; `self` as a type name is retired (2026-11-10; Rust precedent — no mainstream trait system makes the receiver restate its own type); derives are attributes `#[derive(hash, show, ord)]` per F7's derive row; generic value declarations use `struct stack[t]` with functional `push/pop` returning updated values per D2 (in-place field assignment is undecided); generic clauses on functions are spelled `[t: c]`; empty mutable collections construct as `list[page]()` (final stdlib spelling owned at M3); a v2 `with handler` block is out of v1 scope per E1 and stays commented in the corpus.
 
-Parser rulings (ds-parse landed 3167597): generic application is canonically square brackets `list[int]`; the angle form `list<int>` (which appears in C2's pre-surface example text) is accepted as parser laxity but never emitted by the formatter. Block-bodied members, match arms, and struct/enum fields are canonically newline-separated; trailing commas are accepted everywhere per F1. Parameter modes live inside the annotation (`f: mut file`) with a leading bare-mode shorthand (`mut self`) per C2; `move` and `comptime` are contextual keywords; trait/impl members are const-arrow declarations bodiless in traits; type-level case references, tuple types `(a, t?)`, and foreign types `c["sqlite3"]` parse as type forms; the `is` right-hand side is a type expression (it consumes `|`/`&`); C-family `&&`/`||`/`!`/`&`/`^`/`|` are in the fixed operator set; ordinary strings are single-line and block comments do not nest; top-level `fn` is accepted as a superset of const-arrow declarations while top-level expression statements are rejected per G3; `none`, `self`, `Self` are not reserved. Identifiers are ASCII at M1. The 13.7 sum_to sketch carries an erratum (its `JMPIF_NOT` exit polarity would leave the loop on iteration one, and its single scratch slot aliases the 0/1 constants); the corrected executable encoding is pinned in ds-abi/ds-vm tests.
+Parser rulings (ds-parse landed 3167597): generic application is canonically square brackets `list[int]`; the angle form `list<int>` (which appears in C2's pre-surface example text) is accepted as parser laxity but never emitted by the formatter. Block-bodied members, match arms, and struct/enum fields are canonically newline-separated; trailing commas are accepted everywhere per F1. Parameter modes live inside the annotation (`f: mut file`) with a leading bare-mode shorthand (`mut self`) per C2; `move` and `comptime` are contextual keywords; trait/impl members are `fn` declarations, bodiless in traits (const-arrow named members retire per F2); type-level case references, tuple types `(a, t?)`, and foreign types `c["sqlite3"]` parse as type forms; the `is` right-hand side is a type expression (it consumes `|`/`&`); C-family `&&`/`||`/`!`/`&`/`^`/`|` are in the fixed operator set; ordinary strings are single-line and block comments do not nest; top-level `fn` is the only named-function declaration (const-arrow named declarations retire per F2) while top-level expression statements are rejected per G3 except in the entry file under script mode (G3); `none`, `self`, `Self` are not reserved. Identifiers are ASCII at M1.
 
-Parser rulings, audit round 3: `in` binds at comparison level per F5 (`x in xs && flag` reads `(x in xs) && flag`, never `x in (xs && flag)`) and keeps a bare range as its right side (`x in a..b`); a lone `\r` is rejected inside strings, interpolation holes, and char literals exactly as in code (raw strings alone may carry it); newline arm separation covers expression-bodied arms, not just block-bodied ones; trait and impl member lists accept comma separators and trailing commas exactly like struct/enum bodies; impl members are `fn` declarations or const-arrow lambdas — a plain `const x = 1` member is a parse diagnostic (DS1010), never a silent drop; an interpolation hole never crosses a newline (ordinary strings stay single-line); F7's named + literal-only default arguments landed: call sites take named arguments after positional ones (`f(x: 1)`; a duplicate name is DS1011 and positional-after-named is rejected) and signatures take literal-only defaults (`x: int = 0`, with `-lit` negatives admitted; anything else, including an interpolating string, is DS1012); flat operator chains (including stacked unary and postfix chains) are capped at 128 terms (DS1009) because dropping a deeper `Box` chain overflows the caller's stack.
+Parser rulings, audit round 3: `in` binds at comparison level per F5 (`x in xs && flag` reads `(x in xs) && flag`, never `x in (xs && flag)`) and keeps a bare range as its right side (`x in a..b`); a lone `\r` is rejected inside strings, interpolation holes, and char literals exactly as in code (raw strings alone may carry it); newline arm separation covers expression-bodied arms, not just block-bodied ones; trait and impl member lists accept comma separators and trailing commas exactly like struct/enum bodies; impl members are `fn` declarations only — a plain `const x = 1` or const-arrow member is a parse diagnostic (DS1010), never a silent drop; an interpolation hole never crosses a newline (ordinary strings stay single-line); F7's named + literal-only default arguments landed: call sites take named arguments after positional ones (`f(x: 1)`; a duplicate name is DS1011 and positional-after-named is rejected) and signatures take literal-only defaults (`x: int = 0`, with `-lit` negatives admitted; anything else, including an interpolating string, is DS1012); flat operator chains (including stacked unary and postfix chains) are capped at 128 terms (DS1009) because dropping a deeper `Box` chain overflows the caller's stack.
 
 ## 7. Polymorphism and metaprogramming
 
@@ -266,7 +277,7 @@ Every generic function is represented exactly once in bytecode with its constrai
 
 ### G3 — definition < file < package < module; no import-time execution
 
-Four layers: definitions (visibility and identity unit), files (namespace spelling), packages/directories (the compilation unit — files in one package share one namespace with zero intra-package imports), and the module (`ds.pkg` manifest: dependency and distribution unit). Intra-package cycles are legal (whole-package fixpoint resolution); cross-package cycles are a link error whose diagnostic suggests moving the shared abstraction to a base package. Generated `.dsi` interface files are the reviewable API surface (`ds info` generates them; "if nothing in .dsi changes it is typically a safe refactoring"). Module bodies are pure compile-time declarations — no import-time execution, period; this one rule buys intra-package cycle tolerance, safe hot reload, and lazy dependency-driven loading. `///|` is an optional explicit block separator giving tooling sub-file granularity; top-level definitions are order-independent with or without it, and a file without separators is one block.
+Four layers: definitions (visibility and identity unit), files (namespace spelling), packages/directories (the compilation unit — files in one package share one namespace with zero intra-package imports), and the module (`ds.pkg` manifest: dependency and distribution unit). Intra-package cycles are legal (whole-package fixpoint resolution); cross-package cycles are a link error whose diagnostic suggests moving the shared abstraction to a base package. Generated `.dsi` interface files are the reviewable API surface (`ds info` generates them; "if nothing in .dsi changes it is typically a safe refactoring"). Module bodies are pure compile-time declarations — no import-time execution, period; this one rule buys intra-package cycle tolerance, safe hot reload, and lazy dependency-driven loading. Script-entry exception (2026-11-10): in script mode only, top-level statements of the entry file are legal and compile into a synthesized `main` — Node and Bun execute entry-file top-level statements, and the charter's scripting goal points there for entry files only — while imported files and package members keep pure-declaration bodies, so the guarantee holds everywhere it protects. The block separator (re-spelled 2026-11-10) is a line-initial `##` at top level, the rest of the line being separator text; `///|` is retired and `///` becomes the reserved doc-comment prefix (design pending; trivia-only today). Top-level definitions are order-independent with or without separators, and a file without separators is one block.
 
 **G3.5 — the dsmod bytecode contract (binding).** Fixed-width, position-independent, mmap-able module format:
 
@@ -282,7 +293,7 @@ Cache at `$DS_CACHE/ir/<triple>/<blake3-of-source+deps>.dsmod`; mmap the hit pat
 
 ### G4 — private / `pub(pkg)` / `pub` plus selective imports
 
-Definitions are private by default; `pub(pkg)` opens them package-wide (including the package's own tests) and never enters the `.dsi`; `pub` opens them to dependents and enters the `.dsi`. Imports are symbol-selective with aliasing, conditional per target, and re-exportable via `pub import`:
+Definitions are private by default; `pub(pkg)` opens them package-wide (including the package's own tests) and never enters the `.dsi`; `pub` opens them to dependents and enters the `.dsi`. Imports are symbol-selective with aliasing, conditional per target, and re-exportable via `pub import`; the spelling is unified on the sigil form — `import @std/csv (reader)`, a path with optional select/alias — and the quoted form is retired (2026-11-10):
 
 ```text
 import acme/pipeline/schema (Row, parse_row)
@@ -299,9 +310,11 @@ Foreign resources are opaque linear handles (`~Copyable`): double-free is a comp
 
 Layered on top: platforms are ordinary packages exporting effect handlers, selectable per build target — `platform "std" provides <console, fsys, net, time>` (the `ds` CLI is the default platform), `platform "web"`, `platform "embed"` (host calls in, provides nothing); the checker verifies user code's effect usage is a subset of the platform's declared row. wasm/WIT is a tier-3 deployment target, not an FFI architecture. The dsmod FFI-USED flag declares dlopen needs at load time.
 
+**H5.5 — the std/builtin/platform layering (binding).** Three layers, each with a membership criterion. (a) VM core natives (the reserved `builtin` module): the irreducible primitives ds source cannot express — operations against VM internals (interned strings, the object store) that the lowering contract itself needs; pure or error-union-total, never world-touching (current members: the str_* conversions and the string ops). (b) `@std`: an ordinary ds-source package — everything expressible in DreamScript itself lands here (the D3 combinators arrive once generics/M6 allow), and script mode's bare-specifier imports resolve here. (c) Platforms: the world surface (console, fsys, net, time) as effect handlers per H5/E1, selected per build target; the `ds` CLI is the default platform provider. World-touching natives are the M3 stopgap form of platform handlers: the M3 single builtin module (natives 0-24) mixed the layers, and the native registry now carries two native modules — `builtin` (the pure core) and `std` (the default platform's console/fsys/net surface) — so a library embedder constructing a VM gets no world surface unless it installs a platform; the natives migrate to effect-handler form at M7 when the handler runtime exists (E1), with native indices frozen until then.
+
 ### H6 — hash-store core plus zero-config script mode; five mandatory tooling commitments
 
-**Package stack.** `ds.pkg` manifests declare deps as `name = { ver, hash }` where hash is blake3 over the package content including its dependency hashes — identity flows transitively, no lockfile exists (the manifest is the lock). MVS resolution (pick the max of declared minima; multi-version coexistence by construction). A global content-addressed store keyed by output hash, doubling as the bytecode cache (artifacts are dsmod files). Bin-first per-triple artifacts verified against store hashes. Optional FHS profile linker (`ds link`; scoop shims on Windows, not symlinks). Registry deferred to a static JSON index over the store until ecosystem size demands it.
+**Package stack.** `ds.pkg` manifests declare deps as `name = { ver, hash }` where hash is blake3 over the package content including its dependency hashes — identity flows transitively, no lockfile exists (the manifest is the lock). MVS resolution (pick the max of declared minima; multi-version coexistence by construction). A global content-addressed store keyed by output hash, doubling as the bytecode cache (artifacts are dsmod files). Bin-first per-triple artifacts verified against store hashes. Optional FHS profile linker (`ds link`; scoop shims on Windows, not symlinks). Registry ruling: the registry is a git repository holding package metadata only, configurable as a local path or a remote URL; dependency resolution reads the index metadata (name -> versions -> manifest hashes and artifact URLs), fetches artifacts content-addressed from the store, and verifies them against the blake3 hash cascade (the manifest stays the lock; MVS unchanged). Dependencies are never resolved by cloning or tracking a VCS working tree of the dependency itself — no branch heads, no mutable pseudo-versions; a git repository is the metadata transport, not the source of identity, hash pinning is. A local git index makes offline and private registries first-class.
 
 ```text
 name    = "pipeline"
@@ -315,9 +328,14 @@ x86_64-pc-windows-msvc = { url = ".../pipeline-0.4.0-x86_64-pc-windows-msvc.dsmo
 script = "build.ds"         # sees #OUT#, #TMP#, #ARCH#
 ```
 
-**Script mode.** `ds run script.ds` with zero config; bare-specifier std imports (`import "@std/csv"`); `ds save` freezes what the script used into a generated `ds.pkg`. Scripts that outgrow themselves gain a manifest without losing their file.
+```text
+index/<a>/<ab>/<pkg>.json   # one metadata file per package: versions -> manifest hash + artifact URLs
+git history                 # the metadata audit log — metadata only, never a dependency source
+```
 
-**Five mandatory tooling commitments, binding from day one.** (1) Compiler-as-query-library: the compiler is a library (`ds-check`) of memoized queries — parse, block_index, resolve, type_of, effects_of, linearity_check, lower — consumed by LSP, REPL, and hot reload alike; invalidation at `///|` block grain plus package grain (the second reason package cycles are banned). (2) `ds fmt` with zero options, implemented as a compiler component; the block-aware formatter formats blocks independently and is also the LSP's on-type-formatting path. (3) Structured diagnostics with two-span linear errors — machine-readable suggestions, `--error-format=json`, spans computed at typed-AST level; the linear diagnostic class renders "moved here / used again here" pairs:
+**Script mode.** `ds run script.ds` with zero config; bare-specifier std imports in the sigil form (`import @std/csv (reader)`; the quoted spelling is retired, G4); `ds save` freezes what the script used into a generated `ds.pkg`. Scripts that outgrow themselves gain a manifest without losing their file.
+
+**Five mandatory tooling commitments, binding from day one.** (1) Compiler-as-query-library: the compiler is a library (`ds-check`) of memoized queries — parse, block_index, resolve, type_of, effects_of, linearity_check, lower — consumed by LSP, REPL, and hot reload alike; invalidation at `##` separator-block grain plus package grain (the second reason cross-package cycles are banned). (2) `ds fmt` with zero options, implemented as a compiler component; the block-aware formatter formats blocks independently and is also the LSP's on-type-formatting path. (3) Structured diagnostics with two-span linear errors — machine-readable suggestions, `--error-format=json`, spans computed at typed-AST level; the linear diagnostic class renders "moved here / used again here" pairs:
 
 ```text
 error[DS3001]: value `h` was consumed here
@@ -374,20 +392,7 @@ Per-frame bump arenas for non-escaping temporaries (mark/save at entry, bump all
 
 No hidden classes/maps or transitions (field offsets are bytecode immediates, `FIELD_LOAD %dst, %obj, #12`); no field-access inline caches or feedback vectors; no type guards or deopt frames on the data path; no speculation recording; no side traces or trace linking; tiering budgets reduce to plain hotness counters. This collapses roughly six speculation subsystems into two artifacts — a stencil patcher and a lowering pass — freeing ~70% of dynamic-VM tiering risk. What survives in IC form, perf-hint-only with no correctness role: 1-2 entry type-id-keyed ICs at dynamic/trait call sites, hot-reload module-global caches keyed on a module version counter, per-frame effect-handler operation tables.
 
-## 10. Resolved open questions
-
-1. **FFI pinning** — see H5.
-2. **Nursery shape and token set** — block form `nursery { ... }` containing `spawn { ... }` child expressions; tokens finalized: postfix `?` (checked containment, no implicit conversions), `or` (first-wanted-member extraction, lazy right operand, `or return`/`or break`/`or continue`), `is` (narrowing), `.err(h)`/`.ok(h)` (set-difference-typed). No `?.` in v1.
-3. **`.err` difference-typing fallback** — moot: B1(c) is adopted, difference typing stands as designed.
-4. **Fibers vs hidden generators** — the v0 hidden iteration protocol is a linear cursor with no fiber involvement; once fibers exist the hidden lowering may adopt the same facility. One shared VM mechanism is permitted and staged; the user surface is identical either way.
-5. **Generator arrow `-*>'` (historical README)** — retired; no public generator syntax in 1.0.
-6. **Scoped named instances** — deferred additive, post-1.0 unless disjoint-head resolution demonstrably fails library authors earlier; ambiguity remains an error in any future sugar.
-7. **Disjointness algorithm and termination** — implementation-defined with fixed requirements: link-time check over the final instance environment; overlap errors name both heads and a witness value type; self-satisfying conditional instances rejected by a structural cycle check.
-8. **Float equality** — bit-structural (reflexive, total, dict-safe); IEEE semantics via named `is_float_eq` / `is_approx_eq`.
-9. **Comptime in v1** — staged: built-in derives first, comptime evaluator plus reflection before 1.0.
-10. **`@` binders in match** — excluded from v1; deferred additive with affine re-binding semantics to be designed if demanded.
-
-## 11. Staging (v0 → 1.0)
+## 10. Staging (v0 → 1.0)
 
 Ordered; each step lands on the previous one with no language-change rewrites.
 
@@ -399,228 +404,9 @@ Ordered; each step lands on the previous one with no language-change rewrites.
 6. Derives; then the comptime evaluator and reflection API (before 1.0).
 7. Tooling commitments from day one, sequenced with the query compiler they consume: `ds fmt`, structured diagnostics, REPL, two-slot hot reload.
 8. Tier 2 copy-and-patch (x86-64, then aarch64; tier-1-only elsewhere), bytecode-to-SSA lowering built early, tier 3 on demand.
-9. Deferred-additive backlog after the core is stable (see §12); borrow inference, TRMC, and fusion upgrades land as pure optimization with zero language change.
+9. Deferred-additive backlog after the core is stable (see §11); borrow inference, TRMC, and fusion upgrades land as pure optimization with zero language change.
 
-## 12. Deferred-additive backlog and recorded fallbacks
+## 11. Deferred-additive backlog and recorded fallbacks
 
-Deferred additive (in headroom order of likelihood): `|>`, anonymous record literals, `@` binders, vararg/spread; then `?.` desugar, `throws(...)` sugar, user-defined handlers (`with handler`), scoped named instances, bare `return` keyword, labeled break/continue, `it` shorthand. Pure-optimization items (no language change): borrow inference, full reuse pairing, TRMC, fusion upgrades, `T | none` niche packing, rope. Recorded fallbacks if named risks materialize: B1(b) nominal-only core (if disjointness machinery slips schedule; error handling degrades to match-based); F1(b) Gleam/Roc brace headlines (if the arrow-assignment grammar fights the parser); H1(b) single method-JIT tier (if the per-arch stencil toolchain proves unacceptable); C4(b) generational references (if affine friction proves worse than expected).
+Deferred additive (in headroom order of likelihood): `|>`, anonymous record literals (the map literal rides this reservation per B3), `@` binders, `??` on `t | none`; then `?.` desugar, `throws(...)` sugar, user-defined handlers (`with handler`), scoped named instances, labeled break/continue, `it` shorthand. Retired from this backlog: vararg/spread (F8); bare `return` was adopted into the surface 2026-11-10 (F2). Pure-optimization items (no language change): borrow inference, full reuse pairing, TRMC, fusion upgrades, `T | none` niche packing, rope. Recorded fallbacks if named risks materialize: B1(b) nominal-only core (if disjointness machinery slips schedule; error handling degrades to match-based); F1(b) Gleam/Roc brace headlines (if the arrow-assignment grammar fights the parser); H1(b) single method-JIT tier (if the per-arch stencil toolchain proves unacceptable); C4(b) generational references (if affine friction proves worse than expected).
 
-## 13. Seed test corpus
-
-Per the decision protocol, the chosen combos' example programs are the language's first test corpus, in catalog order. Porting notes: the programs below are quoted verbatim from the archive; catalogs 01/02/03/05/06 predate the 04 surface decisions, so port them to the decided surface (const-arrow functions, `=>` arms, decided tokens) when turning them into tests, and normalize type names to lowercase per §0.
-
-### 13.1 Types — "Hybrid" (config parser: tags, unions, narrowing, error sets, structural ==)
-
-```ts
-tag IoErr; tag Missing; struct BadPort { got: Int }         // nominal atoms
-type CfgErr = IoErr | Missing | BadPort                     // set instruction over tags
-
-struct JsonObj { fields: Map[String, Json] }
-struct Config  { host: String, port: Int, retries: Int }
-
-const get_port = (j: Json) -> Int | Missing | BadPort {
-  const obj  = j is JsonObj or return Missing { key: "port" }
-  const pv   = obj.fields.get("port") or return Missing { key: "port" }   // T | none union
-  const p    = pv is Int or return BadPort { got: -1 }                    // narrows pv: Int
-  if p >= 1 && p <= 65535 { p } else { return BadPort { got: p } }
-}
-
-const load = (path: String) -> Config | CfgErr {
-  const text = read_file(path)?                              // CfgErr member propagates
-  const port = get_port(parse_json(text)?)?
-  Config { host: "localhost", port, retries: 3 }
-}
-
-const cfg = load("app.cfg").err((e) => {                     // exhaustive over the tag union:
-  match e {                                                  // result: Config - CfgErr == Config
-    b: BadPort => log("bad port ${b.got}"),
-    _          => log("config read failed"),
-  }
-  default_config()
-})
-
-const kv   = ("host", 8080)                                  // anonymous tuple (B3.d)
-const same = cfg == default_config()                         // universal structural == (B9.a)
-```
-
-### 13.2 Linearity — "Modes and RC" (linear File with deinit, mut windows, COW, fused chains)
-
-```ts
-struct File: ~Copyable {                 // C1.b linear resource layer (set-theoretic negation)
-  fd: RawFd
-  deinit { close(self.fd) }              // C5.c: runs exactly once, at unique death
-}
-fn read_u32(f: mut File) -> u32 | IoError {   // C2.d/C3.b: exclusive borrow for the call
-  const b = f.read_exact(4)?            // window on f; ? propagates IoError; b is a fresh linear buffer
-  b.to_u32_le()                         // b consumed here (affine move)
-}
-fn sum_file(path: Str) -> u32 | IoError {
-  const f = open(path)                  // unique owner; cannot be copied
-  var total: u32 = 0                    // C3.b: local var — the only rebindable binding
-  var n: u32 = 0
-  while n < 1000 { total += read_u32(f)?; n += 1 }   // ? moves the error out; f's deinit still runs
-  total                                 // f dies here: deinit closes fd (also on early return)
-}
-const words = "alpha beta gamma".split(' ')          // D2.b COW: "new" list, reuses when unique
-const lens  = words.map(w => w.len()).collect()      // D3.d: fused into one loop by the compiler
-const total = (sum_file("metrics.bin") or 0) + lens.len()  // D1.b: mutation only inside windows/locals
-```
-
-### 13.3 Effects — "Effect-ready" (nursery fetchAll with cancel-on-failure, union errors, par combinators)
-
-```ts
-fn fetchBody(url: Url): Page | NetErr {         // no io parameter: the stdlib default handler is ambient
-  const resp = fetch(url)?                      // performed through the default io handler (E1d runtime)
-  return Page(url, resp.consume())              // linear consume closes (E5b)
-}
-
-fn fetchAll(urls: List[Url]): List[Page] | NetErr {
-  val pages = Mut[List[Page]]()
-  nursery {                                     // internally: a handler for `cancel`/`discontinue`
-    for url in urls {
-      spawn {
-        match fetchBody(url) {
-          page    => pages.push(page)
-          error e => cancel(e)                  // evidence-dispatched internal effect, zero surface syntax
-        }
-      }
-    }
-  }
-  return pages.freeze()
-}
-
-fn withRetry(n: Int, url: Url): Page | NetErr { // plain function: loop + unions, no effects needed
-  var last = error NetErr.Timeout
-  for i in 0..n {
-    match fetchBody(url) { page => return page, error e => last = e }
-  }
-  return last
-}
-
-fn main(): void | NetErr {
-  const pages = fetchAll(URLS) or die("all fetches failed")
-  print("total: ${pages.par_map(fn(p) { p.size }).par_reduce(0, fn(a, b) { a + b })}")
-}
-
-// v2, additive with no migration — user handlers for final/tail-resumptive effects only:
-with handler { op ask() => resume(42) }
-```
-
-### 13.4 Syntax — "TS-heart" (the full surface program: guards, `or return`, `?`, `.err`, interpolation, destructuring)
-
-```ts
-type ParseError = BadNumber(String) | MissingField(String)
-type IoError = NotFound | PermissionDenied
-
-struct User {
-  name: String,
-  age: Int,
-}
-
-const parse_age = (s: String) -> Int | ParseError {
-  match s.trim().parse_int() {
-    e if e is ParseError => BadNumber(s),   // guard + is: the union story, no wrappers
-    n                    => n,              // n : Int by set difference
-  }
-}
-
-const parse_user = (row: Row) -> User | ParseError {
-  const name = row.get("name") or return MissingField("name")
-  const age  = row.get("age")  or return MissingField("age")
-  User { name, age: parse_age(age)? }
-}
-
-const main = () -> () | IoError {
-  const rows = load_rows("users.csv")?
-  const cfg  = read_config("app.cfg").err((e) => {
-    println("config failed: ${e}")
-    default_config()
-  })
-  const (users, errors) = rows.map(parse_user).partition((r) => r is ParseError)
-
-  const total = users
-    .filter((u) => u.age >= 18)
-    .map((u) => u.age * 2)
-    .reduce(0, (a, b) => a + b)
-
-  for (u in users) println("user ${u.name} age ${u.age}")
-
-  match (total, errors.first()) {
-    (_, e) if e is ParseError => println("warning: ${e}"),
-    (0, _) => println("no valid users"),
-    (t, _) => println("total score: $t"),
-  }
-}
-```
-
-### 13.5 Generics — "Coherent-traits" (`~Copyable` generic stack, disjoint-head rejection, derive + comptime schema)
-
-```ts
-// 1. polymorphic container API over affine elements
-type Stack[T] = { items: List[T] }
-impl[T: ~Copyable] Stack[T] {
-    fn push(&mut self, x: T) { self.items = cons(x, self.items) }  // consume-and-return
-    fn pop(&mut self) -> Option[T] { ... }
-}
-
-// 2. trait with disjoint instance heads
-trait Json { fn to_json(&self) -> String }
-impl Json for Int  { fn to_json(&self) -> String { ... } }
-impl Json for Bool { fn to_json(&self) -> String { ... } }
-impl[T: Json] Json for List[T] {                     // conditional head: an intersection arrow
-    fn to_json(&self) -> String { "[" + self.map(|x| x.to_json()).join(",") + "]" }
-}
-// impl Json for Int | Bool { ... }                  // REJECTED: head intersects both above
-
-// 3. derive + comptime reflection
-@derive(Hash, Show, ToJson)                          // one word, no macro system
-type Point = { x: Int, y: Int }
-fn schema(comptime T: type) -> String {              // user derive-like via reflection
-    var s = "{"
-    for f in fields(T) { s += f.name + ": " + type_name(f.type) + ", " }
-    return s + "}"
-}
-
-// 4. execution: one body per generic fn + evidence words
-let p  = max(p1, p2)            // evidence: static ref to impl Ord[Point] — constant operand
-let js = p.to_json()            // dynamic site: IC keyed by tag -> the unique impl
-```
-
-### 13.6 Modules — "Hash-core" (ds.pkg manifest, selective imports, linear sqlite handle binding)
-
-```text
-// ds.pkg -- manifest is the lock; no lockfile anywhere
-name = "pipeline";  version = "0.4.0"
-[deps]  std = { ver = "1.2", hash = "blake3:9f2c..." }  csv = { ver = "0.7", hash = "blake3:1a88..." }
-[artifacts]  x86_64-pc-windows-msvc = { url = ".../pipeline.dsmod", hash = "blake3:77e0..." }
-
-// pipeline.ds -- imports (selective, aliased, conditional) over a package-local cycle
-import @std/csv (Reader)                       // namespace alias, MoonBit-style
-import acme/pipeline/schema (Row, parse_row)   // selective, from the generated .dsi surface
-import acme/pipeline/fs if os == "windows"
-
-///|  // FFI: linear handle, consumed exactly once
-extern fn sqlite3_open(path: *const c.Char) -> (c["sqlite3"] | c.Int)
-extern fn sqlite3_close(db: c["sqlite3"]) -> c.Int      // double-close: compile error
-```
-
-### 13.7 Runtime — `sum_to` uop encoding and the mutual `even`/`odd` tail-call encoding
-
-```text
-fn sum_to(n: i64) -> i64 { let mut acc = 0i64; while n > 0 { acc += n; n -= 1 }; acc }
-  0: FUNCF  frame=2            ; slots: r0=n:i64, r1=acc:i64 (static layout)
-  1: LDIMM  r1, 0:i64
-  2: LEI64  r2, r0, 0          ; unboxed bool
-  3: JMPIF_NOT r2 -> 6
-  4: ADDI64 r1, r1, r0         ; pure machine add, no tag work
-  5: SUBI64 r0, r0, 1 ; JMP 2
-  6: RET    r1
-
-; mutual tail calls (H2.a)
-even:
-  0: EQI64   r1, r0, 0
-  1: JMPIF   r1 -> 3
-  2: SUBI64  r3, r0, 1
-  3: CALLT   odd, nargs=1, src=r3    ; slide r3 into slot0, reuse frame
-  4: RET     true
-```

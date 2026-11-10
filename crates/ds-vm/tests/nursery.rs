@@ -1,0 +1,609 @@
+//! Nursery fixtures [E2, E5]: hand-assembled programs over the host face
+//! (`open_root_nursery`/`spawn_fiber_in`/`join_nursery`/`teardown_nursery`)
+//! and the debug join native (`nursery_join`, builtin 26). What the
+//! fixtures pin:
+//!
+//! - join: children run in spawn order, their final values come back in spawn order, and the
+//!   consumed nursery refuses a second join.
+//! - first failure: a child dying trapped raises the cancel flag; a sibling looping on a backward
+//!   jump stops at its next back-edge (`Cancelled`), and the boundary reports per-child outcomes.
+//! - preemption points: the flag is observed only at taken backward branches — a straight-line
+//!   child finishes its in-flight work and lands (`Completed`) under the flag.
+//! - the ledger: a child that trapped under an earlier host drive is unioned out at the join and
+//!   cancels the rest.
+//! - bare detach: a bare host spawn routes into the live root nursery; with none live the host is
+//!   the supervisor and the spawn detaches.
+//! - the debug join native: parks the joiner, drives the nursery, answers the failed-children
+//!   count; a child joining its own nursery traps; a bogus id bounces the none tag.
+//! - teardown: a nursery with a suspended child drives it to death under the cancel flag,
+//!   deterministically, before releasing slots.
+//! - per-fiber TCO: a tail-looping nursery child runs unbounded iterations at a constant segment.
+
+use ds_vm::{
+    ChildOutcome, Const, FiberId, FiberState, FunctionDef, JoinOutcome, ModuleRegistry,
+    ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
+    abi::{
+        ConstIdx, FrameLayout, SlotType,
+        SlotType::{I64, Raw},
+        uop::Uop,
+    },
+    assemble,
+    native::{
+        BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_NURSERY_JOIN, PLATFORM_CANCELLED,
+        PLATFORM_NONE,
+    },
+};
+
+fn k(idx: u16) -> ConstIdx {
+    ConstIdx(idx)
+}
+
+fn builtin(index: u32) -> Const {
+    Const::FuncRef {
+        module: "builtin".into(),
+        func: index,
+    }
+}
+
+/// A same-module callee by function-table index (the fixture module "nb").
+fn nb_ref(index: u32) -> Const {
+    Const::FuncRef {
+        module: "nb".into(),
+        func: index,
+    }
+}
+
+fn def(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    pool: Vec<Const>,
+    body: &[Uop],
+) -> FunctionDef {
+    FunctionDef {
+        name: name.into(),
+        layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
+        pool,
+        code: assemble(body).expect("fixture body encodes"),
+    }
+}
+
+/// `() -> int`: 1 / 0 — dies trapped at the DIVI64.
+fn trap_child_def() -> FunctionDef {
+    def(
+        "trap_child",
+        &[I64, I64],
+        0,
+        0,
+        vec![Const::I64(1), Const::I64(0)],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Kimm { dst: 0, kidx: k(0) },
+            Uop::Kimm { dst: 1, kidx: k(1) },
+            Uop::DivI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// `() -> int`: add one and jump back — the backward-branch looper only
+/// the cancel flag can stop.
+fn loop_forever_def() -> FunctionDef {
+    def("loop_forever", &[I64, I64], 0, 0, vec![Const::I64(1)], &[
+        Uop::Funcf { frame_slots: 2 },
+        Uop::Kimm { dst: 1, kidx: k(0) },
+        Uop::AddI64 {
+            dst: 0,
+            lhs: 0,
+            rhs: 1,
+        },
+        Uop::Jmp { target: 2 },
+    ])
+}
+
+/// How many straight-line adds `straight_def` runs: enough work that a
+/// mid-flight cut would change the answer.
+const STRAIGHT_STEPS: u32 = 40;
+
+/// `(v: int) -> int`: `v + STRAIGHT_STEPS`, no jump at all — the linear
+/// consume in flight.
+fn straight_def() -> FunctionDef {
+    let mut body = vec![Uop::Funcf { frame_slots: 2 }, Uop::Kimm {
+        dst: 1,
+        kidx: k(0),
+    }];
+    for _ in 0..STRAIGHT_STEPS {
+        body.push(Uop::AddI64 {
+            dst: 0,
+            lhs: 0,
+            rhs: 1,
+        });
+    }
+    body.push(Uop::Ret { src: 0 });
+    def("straight", &[I64, I64], 1, 0, vec![Const::I64(1)], &body)
+}
+
+/// `(n, acc: int) -> int`: the tail loop — CALLT self, frame reused.
+fn spin_def() -> FunctionDef {
+    def(
+        "spin",
+        &[I64, I64, I64, SlotType::Bool, Raw, Raw],
+        2,
+        2,
+        vec![Const::I64(1), Const::I64(0), nb_ref(3)],
+        &[
+            Uop::Funcf { frame_slots: 6 },
+            Uop::Kimm { dst: 2, kidx: k(1) },
+            Uop::EqI64 {
+                dst: 3,
+                lhs: 0,
+                rhs: 2,
+            },
+            Uop::Jmpif {
+                cond: 3,
+                target: 10,
+            },
+            Uop::Kimm { dst: 2, kidx: k(0) },
+            Uop::SubI64 {
+                dst: 4,
+                lhs: 0,
+                rhs: 2,
+            },
+            Uop::AddI64 {
+                dst: 5,
+                lhs: 1,
+                rhs: 2,
+            },
+            Uop::Callt {
+                callee: k(2),
+                nargs: 2,
+            },
+            Uop::Ret { src: 0 }, // unreachable under the tail call
+            Uop::Ret { src: 0 },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// `(v: int) -> int`: yield `v` (park), then return `v + 1` — the re-entry
+/// answer slot stays `Raw`, so the bounce tag lands without a trap.
+fn half_def() -> FunctionDef {
+    def(
+        "half",
+        &[I64, I64, Raw],
+        1,
+        1,
+        vec![Const::I64(1), builtin(BUILTIN_FIBER_YIELD)],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Kimm { dst: 1, kidx: k(0) },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Call {
+                callee: k(1),
+                nargs: 1,
+            },
+            Uop::AddI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// `(nursery: int) -> t`: call `nursery_join(nursery)` and return its
+/// answer word — the failed count, or the bounce tag. Spawned detached it
+/// is the in-language joiner; spawned into the same nursery it is the
+/// self-join trap.
+fn joiner_def() -> FunctionDef {
+    def(
+        "joiner",
+        &[I64, Raw],
+        1,
+        1,
+        vec![builtin(BUILTIN_NURSERY_JOIN)],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// `(v: int) -> int`: echo.
+fn plain_def() -> FunctionDef {
+    def("plain", &[I64], 1, 0, vec![], &[
+        Uop::Funcf { frame_slots: 1 },
+        Uop::Ret { src: 0 },
+    ])
+}
+
+/// `(fiber: int) -> int`: resume `fiber` with 0 and return its answer word
+/// — the in-language resumer that can outlive its resumee.
+fn resume_like_def() -> FunctionDef {
+    def(
+        "resume_like",
+        &[I64, Raw, Raw],
+        1,
+        2,
+        vec![Const::I64(0), builtin(BUILTIN_FIBER_RESUME)],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Kimm { dst: 2, kidx: k(0) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// The fixture module. Function indices are pool-FuncRef contract:
+/// 0 trap_child, 1 loop_forever, 2 straight, 3 spin, 4 half, 5 joiner,
+/// 6 plain, 7 resume_like.
+fn nb_registry() -> ModuleRegistry {
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("nb", vec![
+            trap_child_def(),
+            loop_forever_def(),
+            straight_def(),
+            spin_def(),
+            half_def(),
+            joiner_def(),
+            plain_def(),
+            resume_like_def(),
+        ])
+        .expect("valid fixture module"),
+    );
+    reg
+}
+
+/// The first nursery a fresh VM opens: pool slot 0.
+fn root_id(nursery: NurseryId) -> i64 {
+    i64::from(nursery.0)
+}
+
+#[test]
+fn join_returns_final_values_in_spawn_order() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let c1 = vm
+        .spawn_fiber_in(n, "nb", "plain", &[Value::I64(11)])
+        .expect("spawn c1");
+    let c2 = vm
+        .spawn_fiber_in(n, "nb", "plain", &[Value::I64(22)])
+        .expect("spawn c2");
+    let c3 = vm
+        .spawn_fiber_in(n, "nb", "plain", &[Value::I64(33)])
+        .expect("spawn c3");
+    assert_eq!((c1, c2, c3), (FiberId(1), FiberId(2), FiberId(3)));
+    // spawn order drives everything: entry order and value order match it
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Joined(vec![
+            Value::I64(11),
+            Value::I64(22),
+            Value::I64(33)
+        ]))
+    );
+    for c in [c1, c2, c3] {
+        assert_eq!(vm.fiber_state(c), Some(FiberState::Dead));
+    }
+    assert_eq!(vm.nursery_state(n), Some(NurseryState::Dead));
+    // the consumed nursery refuses a second join
+    assert_eq!(
+        vm.join_nursery(n),
+        Err(Trap::UnknownCallee {
+            module: "nursery".into(),
+            func: n.0,
+        })
+    );
+}
+
+#[test]
+fn first_failure_cancels_a_looping_sibling() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let failing = vm
+        .spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn");
+    let looper = vm
+        .spawn_fiber_in(n, "nb", "loop_forever", &[])
+        .expect("spawn looper");
+    vm.spawn_fiber_in(n, "nb", "plain", &[Value::I64(7)])
+        .expect("spawn lander");
+    // the looper has no exit but the cancel flag: a passing join proves it
+    // stopped at its first back-edge after the failure
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![
+            ChildOutcome::Trapped(Trap::DivideByZero),
+            ChildOutcome::Cancelled,
+            ChildOutcome::Completed(Value::I64(7)),
+        ]))
+    );
+    assert_eq!(vm.fiber_state(failing), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(looper), Some(FiberState::Dead));
+    assert_eq!(vm.nursery_cancelled(n), Some(true), "the flag stays up");
+}
+
+#[test]
+fn cancellation_is_observed_only_at_backward_branches() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    vm.spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn");
+    let linear = vm
+        .spawn_fiber_in(n, "nb", "straight", &[Value::I64(5)])
+        .expect("spawn straight");
+    // the straight-line child runs after the flag is up: no backward
+    // branch anywhere in it, so the in-flight consume finishes and lands
+    let expect = Value::I64(5 + i64::from(STRAIGHT_STEPS));
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![
+            ChildOutcome::Trapped(Trap::DivideByZero),
+            ChildOutcome::Completed(expect),
+        ]))
+    );
+    assert_eq!(vm.fiber_state(linear), Some(FiberState::Dead));
+}
+
+#[test]
+fn a_child_trapped_before_join_cancels_the_rest() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let failing = vm
+        .spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn");
+    let looper = vm
+        .spawn_fiber_in(n, "nb", "loop_forever", &[])
+        .expect("spawn looper");
+    // the host drives the child to its trap before any join: the ledger
+    // records it and the flag goes up at death
+    assert_eq!(
+        vm.resume_fiber(failing, Value::I64(0)),
+        Err(Trap::DivideByZero)
+    );
+    // a child spawned after the flag is up and driven directly by the host
+    // dies at its first back-edge with the cancel sentinel
+    let late = vm
+        .spawn_fiber_in(n, "nb", "loop_forever", &[])
+        .expect("spawn late looper");
+    assert_eq!(
+        vm.resume_fiber(late, Value::I64(0)),
+        Ok(Value::Tag(PLATFORM_CANCELLED))
+    );
+    assert_eq!(vm.fiber_state(late), Some(FiberState::Dead));
+    // the join collects all three from the ledger in spawn order
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![
+            ChildOutcome::Trapped(Trap::DivideByZero),
+            ChildOutcome::Cancelled,
+            ChildOutcome::Cancelled,
+        ]))
+    );
+    assert_eq!(vm.fiber_state(failing), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(looper), Some(FiberState::Dead));
+}
+
+#[test]
+fn bare_host_spawns_route_into_the_live_root_nursery() {
+    let mut vm = Vm::new(nb_registry());
+    // no live root nursery: the host is the supervisor, the spawn detaches
+    let detached = vm
+        .spawn_fiber("nb", "plain", &[Value::I64(7)])
+        .expect("bare spawn");
+    assert_eq!(vm.fiber_nursery(detached), None);
+    assert_eq!(vm.resume_fiber(detached, Value::I64(0)), Ok(Value::I64(7)));
+    // a live root nursery: the same bare spawn is born its child
+    let n = vm.open_root_nursery();
+    let routed = vm
+        .spawn_fiber("nb", "plain", &[Value::I64(9)])
+        .expect("bare spawn under a root");
+    assert_eq!(vm.fiber_nursery(routed), Some(n));
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Joined(vec![Value::I64(9)]))
+    );
+    // consumed: bare spawns detach again
+    let after = vm
+        .spawn_fiber("nb", "plain", &[Value::I64(1)])
+        .expect("bare spawn after close");
+    assert_eq!(vm.fiber_nursery(after), None);
+}
+
+#[test]
+fn the_debug_join_native_answers_the_failed_count() {
+    let mut vm = Vm::new(nb_registry());
+    // the joiner spawns before the root opens: bare, so it joins n rather
+    // than being canceled as a child of it
+    let joiner = vm
+        .spawn_fiber("nb", "joiner", &[Value::I64(root_id(NurseryId(0)))])
+        .expect("spawn joiner");
+    let n = vm.open_root_nursery();
+    assert_eq!(n, NurseryId(0));
+    let failing = vm
+        .spawn_fiber_in(n, "nb", "trap_child", &[])
+        .expect("spawn");
+    vm.spawn_fiber_in(n, "nb", "plain", &[Value::I64(1)])
+        .expect("spawn lander");
+    // in-language: the joiner parks at nursery_join, the dispatcher drives
+    // the children (first failure cancels the rest), and the count rides
+    // the re-entry back to the parked call
+    assert_eq!(vm.resume_fiber(joiner, Value::I64(0)), Ok(Value::I64(1)));
+    assert_eq!(vm.fiber_state(joiner), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(failing), Some(FiberState::Dead));
+    assert_eq!(vm.nursery_state(n), Some(NurseryState::Dead));
+}
+
+#[test]
+fn the_debug_join_native_answers_zero_when_all_join() {
+    let mut vm = Vm::new(nb_registry());
+    let joiner = vm
+        .spawn_fiber("nb", "joiner", &[Value::I64(root_id(NurseryId(0)))])
+        .expect("spawn joiner");
+    let n = vm.open_root_nursery();
+    vm.spawn_fiber_in(n, "nb", "plain", &[Value::I64(3)])
+        .expect("spawn");
+    vm.spawn_fiber_in(n, "nb", "plain", &[Value::I64(4)])
+        .expect("spawn");
+    assert_eq!(vm.resume_fiber(joiner, Value::I64(0)), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.nursery_state(n),
+        Some(NurseryState::Dead),
+        "the native join consumes the nursery like the host face"
+    );
+}
+
+#[test]
+fn a_fiber_joining_its_own_nursery_traps() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let child = vm
+        .spawn_fiber_in(n, "nb", "joiner", &[Value::I64(root_id(n))])
+        .expect("spawn self-joiner");
+    // the child's own join attempt would deadlock the driver on itself:
+    // the trap rides the boundary out like any child failure
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Failed(vec![ChildOutcome::Trapped(
+            Trap::UnknownCallee {
+                module: "nursery".into(),
+                func: n.0,
+            }
+        )]))
+    );
+    assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
+}
+
+#[test]
+fn a_bogus_nursery_id_bounces_the_none_tag() {
+    let mut vm = Vm::new(nb_registry());
+    let joiner = vm
+        .spawn_fiber("nb", "joiner", &[Value::I64(99)])
+        .expect("spawn joiner");
+    // the checked-read convention: no switch, the bounce word is the call's
+    // answer and the fiber returns it
+    assert_eq!(
+        vm.resume_fiber(joiner, Value::I64(0)),
+        Ok(Value::Tag(PLATFORM_NONE))
+    );
+}
+
+#[test]
+fn teardown_drives_suspended_children_under_the_cancel_flag() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let half = vm
+        .spawn_fiber_in(n, "nb", "half", &[Value::I64(5)])
+        .expect("spawn half");
+    let looper = vm
+        .spawn_fiber_in(n, "nb", "loop_forever", &[])
+        .expect("spawn looper");
+    // park the first child mid-flight at its yield
+    assert_eq!(vm.resume_fiber(half, Value::I64(0)), Ok(Value::I64(5)));
+    assert_eq!(vm.fiber_state(half), Some(FiberState::Suspended));
+    // teardown: the flag goes up first, then each child in spawn order —
+    // the suspended one is bounced back in (none tag) and lands, the
+    // looper stops at its first back-edge
+    assert_eq!(
+        vm.teardown_nursery(n),
+        Ok(vec![
+            ChildOutcome::Completed(Value::I64(6)),
+            ChildOutcome::Cancelled,
+        ])
+    );
+    assert_eq!(vm.fiber_state(half), Some(FiberState::Dead));
+    assert_eq!(vm.fiber_state(looper), Some(FiberState::Dead));
+    assert_eq!(vm.nursery_state(n), Some(NurseryState::Dead));
+    assert_eq!(
+        vm.teardown_nursery(n),
+        Err(Trap::UnknownCallee {
+            module: "nursery".into(),
+            func: n.0,
+        })
+    );
+}
+
+#[test]
+fn per_child_tco_stays_intact_inside_a_nursery() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    let spin = vm
+        .spawn_fiber_in(n, "nb", "spin", &[Value::I64(1_000_000), Value::I64(0)])
+        .expect("spawn spin");
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Joined(vec![Value::I64(1_000_000)]))
+    );
+    // the tail loop never grew the segment: high-water == entry frame, one
+    // chunk — and the join observed no cancel (there was no back-edge)
+    assert_eq!(vm.fiber_max_len(spin), Some(8));
+    assert_eq!(vm.fiber_chunk_count(spin), Some(1));
+    assert_eq!(vm.fiber_state(spin), Some(FiberState::Dead));
+}
+
+#[test]
+fn join_survives_a_child_left_parked_on_a_dead_resumer() {
+    let mut vm = Vm::new(nb_registry());
+    let n = vm.open_root_nursery();
+    // the resumer is driven first: it resumes the half-fiber (which yields
+    // back), returns, and dies — leaving the half parked at its yield with
+    // a dead resumer, the leftover pattern
+    let resumer = vm
+        .spawn_fiber_in(n, "nb", "resume_like", &[Value::I64(2)])
+        .expect("spawn resumer");
+    assert_eq!(resumer, FiberId(1));
+    let half = vm
+        .spawn_fiber_in(n, "nb", "half", &[Value::I64(5)])
+        .expect("spawn half");
+    assert_eq!(half, FiberId(2));
+    // the join drives the leftover next: its yield and its completion both
+    // deliver to the driver (the resumer is gone), never into a corpse
+    assert_eq!(
+        vm.join_nursery(n),
+        Ok(JoinOutcome::Joined(vec![Value::I64(5), Value::I64(6)]))
+    );
+}
+
+#[test]
+fn absent_nurseries_name_themselves_in_the_trap() {
+    let mut vm = Vm::new(nb_registry());
+    let bogus = NurseryId(99);
+    assert_eq!(
+        vm.join_nursery(bogus),
+        Err(Trap::UnknownCallee {
+            module: "nursery".into(),
+            func: 99,
+        })
+    );
+    assert_eq!(
+        vm.teardown_nursery(bogus),
+        Err(Trap::UnknownCallee {
+            module: "nursery".into(),
+            func: 99,
+        })
+    );
+    assert_eq!(
+        vm.spawn_fiber_in(bogus, "nb", "plain", &[]),
+        Err(Trap::UnknownCallee {
+            module: "nursery".into(),
+            func: 99,
+        })
+    );
+}

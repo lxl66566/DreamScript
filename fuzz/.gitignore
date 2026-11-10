@@ -3,3 +3,11 @@ corpus
 artifacts
 coverage
 Cargo.lock
+# libFuzzer residue when runs bypass the artifact dir; seeds under
+# corpus/ are force-added by explicit path.
+fuzz-*.log
+crash-*
+timeout-*
+oom-*
+slow-unit-*
+leak-*

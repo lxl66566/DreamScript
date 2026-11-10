@@ -1,0 +1,35 @@
+// source: frozen archive catalog 06-modules-tooling (seed corpus)
+// purpose: ds.pkg manifest as the lock, selective and conditional imports, linear sqlite handle binding
+// items:
+// ds-pkg-manifest: stage: m7
+// import-std-csv: stage: m7
+// import-schema: stage: m7
+// import-fs-conditional: stage: m7
+// sqlite3-open: stage: m7
+// sqlite3-close: stage: m7
+// double-close: stage: reject linear handle consumed by the first close; the second close is use-after-move (checking binds at m7) [C1, C5, H5]
+
+// ds.pkg preserved as the record's reference text: the manifest is the lock, no lockfile anywhere [H6].
+// ds.pkg is manifest syntax, not .ds syntax; it is parsed by ds-pkg (M7), never by ds-parse.
+//   name = "pipeline"
+//   version = "0.4.0"
+//   [deps]
+//   std = { ver = "1.2", hash = "blake3:9f2c..." }
+//   csv = { ver = "0.7", hash = "blake3:1a88..." }
+//   [artifacts]
+//   x86_64-pc-windows-msvc = { url = ".../pipeline-0.4.0-x86_64-pc-windows-msvc.dsmod", hash = "blake3:77e0..." }
+
+import @std/csv (reader)
+import acme/pipeline/schema (row, parse_row)
+import acme/pipeline/fs if os == "windows"
+
+##
+
+extern fn sqlite3_open(path: *const c.char) -> c["sqlite3"] | c.int
+extern fn sqlite3_close(db: c["sqlite3"]) -> c.int
+
+const double_close = (path: string) -> () | c.int {
+  const db = sqlite3_open(path)?
+  sqlite3_close(db)
+  sqlite3_close(db)
+}

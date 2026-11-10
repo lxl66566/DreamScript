@@ -1,4 +1,4 @@
-//! Encoded fixture programs: the record's section 13.7 (canonical ds-abi
+//! Encoded fixture programs: the canonical ds-abi
 //! hand encodings), the wide-callee CALLT regression, two-slot module swaps,
 //! trap/backtrace behavior, and the float/conversion uops.
 
@@ -51,7 +51,7 @@ fn registry(module: &str, pool: &[Const], defs: Vec<FunctionDef>) -> ModuleRegis
 }
 
 /// `fn sum_to(n: i64) -> i64 { let mut acc = 0; while n > 0 { acc += n; n -= 1 }; acc }`
-/// — the record's 13.7 shape, adapted from ds-abi's canonical hand encoding
+/// — the canonical shape, adapted from ds-abi's hand encoding
 /// with two executable corrections (ds-abi's tests only round-trip the
 /// words, never run them): the loop exit jumps with JMPIF, because the
 /// locked JMPIF_NOT semantics ("jump when the condition is false") would
@@ -101,7 +101,7 @@ fn sum_to_100_returns_5050() {
     assert_eq!(result, Value::I64(5050));
 }
 
-/// Mutual tail calls, the canonical ds-abi encoding of the record's 13.7
+/// Mutual tail calls, the canonical ds-abi encoding
 /// (H2.a): slots [n, t, scratch, staged], pool k0=0, k1=1, k2=true,
 /// k3=FuncRef odd, k4=FuncRef even, k5=false. KCONST supplies the base-case
 /// bools directly.
@@ -502,7 +502,7 @@ fn float_uops_execute_with_bit_structural_equality() {
                 dst: 2,
                 lhs: 0,
                 rhs: 1,
-            }, // NaN == NaN by bits [resolved question 8]
+            }, // NaN == NaN by bits [B9]
             Uop::Halt { slot: 2 },
         ]),
         def("icvt", &[I64, F64, F64, Bool], 1, 0, &[

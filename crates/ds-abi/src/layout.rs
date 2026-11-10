@@ -1,4 +1,4 @@
-//! Typed frame layouts [BL-6] and the slot-overlay geometry [H2].
+//! Typed frame layouts (BL-6) and the slot-overlay geometry (H2).
 //!
 //! Physical frame layout, one contiguous span per frame (the drawing grows
 //! toward the callee; only the relative order is normative):
@@ -48,7 +48,7 @@
 //!
 //! - CALL: the callee's metadata word lands in the caller's call word (`callee_fp = fp + 1 +
 //!   B_caller`), so callee param slot j coincides with caller outgoing-arg slot j (`callee_fp + 1 +
-//!   j == fp + 2 + B_caller + j`) with no argument copying [H2].
+//!   j == fp + 2 + B_caller + j`) with no argument copying (H2).
 //! - CALLT: fp is unchanged, and the two ends of the argument slide use different owners' mappings.
 //!   The destination slot j is the callee's own body position `fp + 1 + j` — unconditionally, below
 //!   the callee's call word, never mapped through the caller's body, so a wide callee (`params_len
@@ -70,29 +70,29 @@
 //!
 //! - A normal call writes the callee's metadata word into the caller's call word, so callee slot 0
 //!   coincides with caller outgoing-arg slot 0: the callee's argument slots overlay the caller's
-//!   outgoing-argument area with no argument copying [H2].
+//!   outgoing-argument area with no argument copying (H2).
 //! - A tail call (CALLT) keeps the same fp: the staged arguments slide down to slots `0..n`
 //!   ([`crate::slide_plan`]), the metadata word is updated in place, and control jumps through the
-//!   callee's [`crate::EntryDescriptor`]. The stack never grows at any depth [H2].
+//!   callee's [`crate::EntryDescriptor`]. The stack never grows at any depth (H2).
 //! - Every frame reserves the metadata word and the call word uniformly (a zero-argument call still
 //!   needs the call word to host the callee's metadata), so [`FrameLayout::frame_size`] is `slots +
 //!   2` words for every function and stack arithmetic has no per-function special cases.
 
-/// The static type of one frame slot; raw unboxed values in slots [BL-2].
+/// The static type of one frame slot; raw unboxed values in slots (BL-2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SlotType {
     /// 32-bit integer (explicit-width locals, FFI); one word.
     I32,
-    /// 64-bit integer, the `int` default [B7]; one word.
+    /// 64-bit integer, the `int` default (B7); one word.
     I64,
-    /// 64-bit float, the `float` default [B7]; one word.
+    /// 64-bit float, the `float` default (B7); one word.
     F64,
     /// Unboxed boolean; one word.
     Bool,
     /// Raw reference to an RC-managed heap object; never null, which leaves
-    /// the null niche free for `T | none` packing, a legal later pass [B4].
+    /// the null niche free for `T | none` packing, a legal later pass (B4).
     Ref,
-    /// Tag word of an unboxed tag+payload union [BL-2]: a bare discriminant
+    /// Tag word of an unboxed tag+payload union (BL-2): a bare discriminant
     /// in one slot. A payloaded variant's fields occupy the immediately
     /// following slots, typed structurally by the same [`FrameLayout`]; a
     /// unit tag carries no payload slots.
@@ -123,12 +123,12 @@ pub enum LayoutError {
     },
 }
 
-/// The static layout of one function's frame [BL-6]: ordered slot types
+/// The static layout of one function's frame (BL-6): ordered slot types
 /// (parameters, then locals, then the outgoing-argument area), the
 /// argument-area slot range (the overlay region), and the frame size.
 ///
 /// `ds-lower` assigns this layout per function; the dsmod per-function
-/// frame-slot-type table [BL-7] is its serialized form.
+/// frame-slot-type table (BL-7) is its serialized form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameLayout {
     slots: Vec<SlotType>,

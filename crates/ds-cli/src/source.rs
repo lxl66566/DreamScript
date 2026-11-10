@@ -6,9 +6,11 @@
 //! what this pipeline records.
 //!
 //! Lowering's contract is the M3 subset: monomorphic const-arrow
-//! functions, the covered builtin natives, early exits, interpolation,
-//! and tail positions. Constructs outside it fail with a structured
-//! diagnostic naming the construct and the seam it needs.
+//! functions, rebindable `var` locals with assignment and `while` loops,
+//! UFCS dot-calls onto resolved free functions (F3), the covered builtin
+//! natives, early exits, interpolation, and tail positions. Constructs
+//! outside it fail with a structured diagnostic naming the construct and
+//! the seam it needs.
 
 use std::path::Path;
 
@@ -17,15 +19,16 @@ use ds_check::{Analyzed, Ty};
 use ds_diag::{Diagnostic, ErrorCode, Files, render};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::Hash128;
-use ds_parse::{ItemKind, Pattern, parse};
+use ds_parse::{ItemKind, Pattern, parse, parse_script};
 use ds_vm::abi::{
     SlotType,
     SlotType::{Bool, F64, I64},
 };
 
-/// The reserved native module's name: a source file with this stem would
-/// shadow every pool FuncRef the lowered bodies emit.
-const RESERVED_MODULE: &str = "builtin";
+/// The reserved native module stems: a source file with either stem would
+/// shadow pool FuncRefs the lowered bodies emit (the VM's `builtin` core
+/// and the `std` platform module).
+const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 
 /// How one `--args` value stages onto the entry's parameter words.
 #[derive(Clone, Copy, Debug)]
@@ -68,8 +71,11 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
         let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         asts.push(parse(&files, id).expect("the ambient parses"));
     }
+    // The given file is the entry: script mode folds its top-level
+    // statements into a synthesized `main` (the ambient stays
+    // pure-declaration, like every imported file).
     let id = files.add_source(path.to_string_lossy().into_owned(), &source);
-    asts.push(match parse(&files, id) {
+    asts.push(match parse_script(&files, id) {
         Ok(ast) => ast,
         Err(diags) => return Err(reject(&files, &diags, "the source has syntax errors")),
     });
@@ -116,8 +122,8 @@ fn lower_error(files: &Files, error: &LowerError) -> anyhow::Error {
     }
 }
 
-/// The module name: the file's stem. `builtin` is reserved for the
-/// natives module.
+/// The module name: the file's stem. `builtin` and `std` are reserved
+/// for the native modules.
 fn module_name(path: &Path) -> Result<String> {
     let name = path
         .file_stem()
@@ -125,9 +131,9 @@ fn module_name(path: &Path) -> Result<String> {
     if name.is_empty() {
         return Err(anyhow!("`{}` has no module name to derive", path.display()));
     }
-    if name == RESERVED_MODULE {
+    if RESERVED_MODULES.contains(&name.as_str()) {
         return Err(anyhow!(
-            "`{stem}` is the reserved natives module; rename the source file",
+            "`{stem}` is a reserved native module name (`builtin`, `std`); rename the source file",
             stem = path.display()
         ));
     }

@@ -1,4 +1,4 @@
-// source: docs/en/design-decisions.md section 13.2 (linearity: modes and RC)
+// source: frozen archive catalog 02-linearity-ownership (seed corpus)
 // purpose: linear file with deinit, mut parameter windows, affine buffer move, COW split, fused map chain
 // items:
 // raw_fd: stage: typecheck
@@ -18,12 +18,12 @@ struct file: ~Copyable {
   deinit { close(self.fd) }
 }
 
-const read_u32 = (f: mut file) -> u32 | io_error {
+fn read_u32(f: mut file) -> u32 | io_error {
   const b = f.read_exact(4)?
   b.to_u32_le()
 }
 
-const sum_file = (path: string) -> u32 | io_error {
+fn sum_file(path: string) -> u32 | io_error {
   const f = open(path)
   var total: u32 = 0
   var n: u32 = 0
@@ -34,6 +34,6 @@ const sum_file = (path: string) -> u32 | io_error {
   total
 }
 
-const words = "alpha beta gamma".split(' ')
+const words = ["alpha", "beta", "gamma"]
 const lens = words.map((w) => w.len()).collect()
-const total = (sum_file("metrics.bin") or 0) + lens.len()
+const total = sum_file("metrics.bin").err((_: io_error) => 0) + lens.len()

@@ -1,4 +1,4 @@
-//! File-IO natives: hand-assembled fixtures over the builtin native
+//! File-IO natives: hand-assembled fixtures over the std platform native
 //! module's `world`-effect surface (`read_file`, `write_file`,
 //! `file_exists`, `fs_list`, `file_size`). Golden coverage: byte-exact
 //! string round trips through the two-word tag+payload spans, the
@@ -9,8 +9,8 @@
 //!
 //! Layout conventions (the contract ds-lower targets): every fallible
 //! native's result is a uniform two-word span [BL-2] on the caller's
-//! argument slots 0 and 1 — word 0 the discriminant (`BUILTIN_IO_OK` /
-//! `BUILTIN_IO_ERR`), word 1 the payload — so a caller of one sizes its
+//! argument slots 0 and 1 — word 0 the discriminant (`PLATFORM_IO_OK` /
+//! `PLATFORM_IO_ERR`), word 1 the payload — so a caller of one sizes its
 //! overlay area to two; the overlay slots declare `Raw` because the same
 //! words stage arguments first.
 
@@ -25,8 +25,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_FILE_EXISTS, BUILTIN_FILE_SIZE, BUILTIN_FS_LIST, BUILTIN_IO_ERR, BUILTIN_IO_OK,
-        BUILTIN_PRINTLN, BUILTIN_READ_FILE, BUILTIN_WRITE_FILE,
+        PLATFORM_IO_ERR, PLATFORM_IO_OK, STD_FILE_EXISTS, STD_FILE_SIZE, STD_FS_LIST,
+        STD_PLATFORM_MODULE, STD_PRINTLN, STD_READ_FILE, STD_WRITE_FILE, std_platform_module,
     },
 };
 
@@ -34,9 +34,9 @@ fn k(idx: u16) -> ConstIdx {
     ConstIdx(idx)
 }
 
-fn builtin(index: u32) -> Const {
+fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: "builtin".into(),
+        module: STD_PLATFORM_MODULE.into(),
         func: index,
     }
 }
@@ -46,12 +46,12 @@ fn builtin(index: u32) -> Const {
 /// wrapper (function-table index 5).
 fn pool() -> Vec<Const> {
     vec![
-        builtin(BUILTIN_READ_FILE),   // k0
-        builtin(BUILTIN_WRITE_FILE),  // k1
-        builtin(BUILTIN_FILE_EXISTS), // k2
-        builtin(BUILTIN_FS_LIST),     // k3
-        builtin(BUILTIN_FILE_SIZE),   // k4
-        builtin(BUILTIN_PRINTLN),     // k5
+        platform(STD_READ_FILE),   // k0
+        platform(STD_WRITE_FILE),  // k1
+        platform(STD_FILE_EXISTS), // k2
+        platform(STD_FS_LIST),     // k3
+        platform(STD_FILE_SIZE),   // k4
+        platform(STD_PRINTLN),     // k5
         Const::FuncRef {
             module: "io".into(),
             func: 5, // k6: tail_read
@@ -70,6 +70,9 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 
 fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
+    // the whole surface here is the platform's: the std platform table is
+    // the host's to install (`Vm::new` only adds the builtin core)
+    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
     reg.install(ModuleVersion::new("io", defs).expect("valid fixture module"));
     reg
 }
@@ -90,7 +93,7 @@ fn read_text() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: BUILTIN_IO_ERR,
+            tag: PLATFORM_IO_ERR,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -116,7 +119,7 @@ fn roundtrip() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: BUILTIN_IO_ERR,
+            tag: PLATFORM_IO_ERR,
         },
         Uop::Jmpif {
             cond: 2,
@@ -130,7 +133,7 @@ fn roundtrip() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: BUILTIN_IO_ERR,
+            tag: PLATFORM_IO_ERR,
         },
         Uop::Jmpif {
             cond: 2,
@@ -174,7 +177,7 @@ fn list_names() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: BUILTIN_IO_ERR,
+            tag: PLATFORM_IO_ERR,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -197,7 +200,7 @@ fn size() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: BUILTIN_IO_ERR,
+            tag: PLATFORM_IO_ERR,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -324,7 +327,7 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     // the fixture halts on the tag word: the run result is the io_err tag
     assert_eq!(
         vm.run("io", "read_text", &args),
-        Ok(Value::Tag(BUILTIN_IO_ERR))
+        Ok(Value::Tag(PLATFORM_IO_ERR))
     );
 
     // through `ask` the payload reaches the caller: the OS error message
@@ -333,7 +336,7 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     let mut vm = Vm::new(io_registry());
     vm.capture_output();
     let args = [string(&mut vm, missing.to_str().unwrap())];
-    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(BUILTIN_IO_ERR)));
+    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(PLATFORM_IO_ERR)));
     let printed = String::from_utf8_lossy(vm.captured_output()).into_owned();
     assert!(
         printed.starts_with("read_file ") && printed.contains("absent.txt"),
@@ -350,7 +353,7 @@ fn read_file_through_a_tail_call_delivers_the_full_span_to_the_caller() {
     let mut vm = Vm::new(io_registry());
     vm.capture_output();
     let args = [string(&mut vm, file.to_str().unwrap())];
-    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(BUILTIN_IO_OK)));
+    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(PLATFORM_IO_OK)));
     assert_eq!(vm.captured_output(), b"tail content\n");
 }
 
@@ -365,7 +368,7 @@ fn a_root_tail_call_to_a_fallible_native_returns_the_head_word_only() {
     let args = [string(&mut vm, file.to_str().unwrap())];
     assert_eq!(
         vm.run("io", "tail_read", &args),
-        Ok(Value::Tag(BUILTIN_IO_OK))
+        Ok(Value::Tag(PLATFORM_IO_OK))
     );
 }
 
@@ -399,7 +402,14 @@ fn fs_lists_sorted_entry_names() {
     let elems = vm.objects().list_at(list).expect("a list object").to_vec();
     let names = elems
         .iter()
-        .map(|&e| vm.objects().str_at(e).expect("string elements").to_owned())
+        .map(|e| match e {
+            Value::Ref(id) => vm
+                .objects()
+                .str_at(*id)
+                .expect("string elements")
+                .to_owned(),
+            other => panic!("string elements, got {other:?}"),
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         names,
@@ -411,7 +421,7 @@ fn fs_lists_sorted_entry_names() {
     let args = [string(&mut vm, dir.path().join("nope").to_str().unwrap())];
     assert_eq!(
         vm.run("io", "list_names", &args),
-        Ok(Value::Tag(BUILTIN_IO_ERR))
+        Ok(Value::Tag(PLATFORM_IO_ERR))
     );
 }
 
@@ -426,7 +436,7 @@ fn file_size_reports_bytes_and_io_err() {
     assert_eq!(vm.run("io", "size", &present), Ok(Value::I64(1024)));
     assert_eq!(
         vm.run("io", "size", &absent),
-        Ok(Value::Tag(BUILTIN_IO_ERR))
+        Ok(Value::Tag(PLATFORM_IO_ERR))
     );
 }
 

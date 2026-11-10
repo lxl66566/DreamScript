@@ -1,0 +1,37 @@
+// Kernel: build strings then reprocess them — interpolation with two holes,
+// concat, trim, char_at scanning, substring cuts, parse_int. Pieces are
+// always three digits plus ';', so the joined length is known arithmetic
+// (len is not in the lowered subset) and every parse_int sees clean digits.
+// Accumulators seed with one space (the empty string literal is outside the
+// M3 contract) and trim removes it, mirrored exactly in the peer kernels.
+
+extern fn str_int (v: int) -> string
+
+const main = () -> () {
+  var s: string = " "
+  var piece: string = " "
+  var gi: int = 0
+  while gi < 25 {
+    piece = " "
+    var k: int = 0
+    while k < 1000 {
+      const v = (gi * 1000 + k) * 37 % 900 + 100
+      piece = "${piece}${str_int(v)};"
+      k += 1
+    }
+    s = s.concat(piece.trim())
+    gi += 1
+  }
+  s = s.trim()
+  var sum: int = 0
+  var start: int = 0
+  var j: int = 0
+  while j < 100000 {
+    if s.char_at(j) == ";" {
+      sum += s.substring(start, j).parse_int()
+      start = j + 1
+    }
+    j += 1
+  }
+  println("result: ${str_int(sum)} ${str_int(100000)}")
+}

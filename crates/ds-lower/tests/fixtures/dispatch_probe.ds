@@ -1,0 +1,164 @@
+// source: conformance/pattern_dispatch.ds, the tutorial-pass regressions
+// purpose: bare-tag match arms dispatch by value in either arm order, an
+//          or-pattern of unit tags is one dispatch set, a tail `?`, a
+//          mid-block `return e?`, a branch-final `?`, and a strict-sub-union
+//          `return e` all return through the return union
+// items:
+// int: stage: run
+// string: stage: run
+// on: stage: run
+// off: stage: run
+// sw: stage: run
+// show: stage: run
+// show_rev: stage: run
+// timeout: stage: run
+// refused: stage: run
+// ready: stage: run
+// outcome: stage: run
+// brief: stage: run
+// io_error: stage: run
+// parse_error: stage: run
+// config: stage: run
+// parse_step: stage: run
+// load_config: stage: run
+// eager: stage: run
+// describe: stage: run
+// show_eager: stage: run
+// wide: stage: run
+// show_wide: stage: run
+// branchy: stage: run
+// picky: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag on
+tag off
+type sw = on | off
+
+extern fn println (msg: string) -> ()
+
+fn show(s: sw) -> () {
+  match s {
+    on => println("ON"),
+    off => println("OFF"),
+  }
+}
+
+fn show_rev(s: sw) -> () {
+  match s {
+    off => println("rev-OFF"),
+    on => println("rev-ON"),
+  }
+}
+
+tag timeout
+tag refused
+tag ready
+type outcome = timeout | refused | ready
+
+fn brief(e: outcome) -> () {
+  match e {
+    timeout | refused => println("net-err"),
+    ready => println("ready"),
+  }
+}
+
+tag io_error
+tag parse_error
+struct config { host: string, port: int }
+
+fn parse_step(s: string) -> config | parse_error {
+  if s == "ok" { config { host: "h", port: 1 } } else { parse_error }
+}
+
+fn load_config(text: string) -> config | io_error | parse_error {
+  parse_step(text)?
+}
+
+fn eager(text: string) -> config | parse_error {
+  if text == "ok" {
+    return parse_step(text)?
+  }
+  parse_step(text)?
+}
+
+fn show_eager(text: string) -> () {
+  match eager(text) {
+    parse_error => println("eager-parse"),
+    c => println(c.host),
+  }
+}
+
+// the operand union is one member short of the declared return: each
+// member re-spans into the return union's region and exits
+fn wide(text: string) -> config | io_error | parse_error {
+  if text == "ok" {
+    return parse_step(text)
+  }
+  parse_step(text)
+}
+
+fn show_wide(text: string) -> () {
+  match wide(text) {
+    io_error => println("wide-io"),
+    parse_error => println("wide-parse"),
+    c => println(c.host),
+  }
+}
+
+// branch-final `?` in the function's final expression, if and match
+fn branchy(text: string) -> config | parse_error {
+  if text == "ok" {
+    parse_step(text)?
+  } else {
+    parse_step(text)?
+  }
+}
+
+fn picky(gate: sw, text: string) -> config | parse_error {
+  match gate {
+    on => parse_step(text)?,
+    off => parse_step(text)?,
+  }
+}
+
+fn describe(text: string) -> string {
+  match load_config(text) {
+    io_error => "io",
+    parse_error => "parse",
+    c => c.host,
+  }
+}
+
+fn main() -> () {
+  show(on)
+  show(off)
+  show_rev(on)
+  show_rev(off)
+  brief(timeout)
+  brief(refused)
+  brief(ready)
+  println(describe("ok"))
+  println(describe("bad"))
+  show_eager("ok")
+  show_eager("bad")
+  show_wide("ok")
+  show_wide("bad")
+  match branchy("ok") {
+    parse_error => println("branchy-parse"),
+    c => println(c.host),
+  }
+  match branchy("bad") {
+    parse_error => println("branchy-parse"),
+    c => println(c.host),
+  }
+  match picky(on, "ok") {
+    parse_error => println("picky-parse"),
+    c => println(c.host),
+  }
+  match picky(off, "bad") {
+    parse_error => println("picky-parse"),
+    c => println(c.host),
+  }
+}

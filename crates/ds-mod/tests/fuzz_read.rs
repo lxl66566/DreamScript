@@ -67,6 +67,29 @@ fn random_bytes_never_panic() {
     }
 }
 
+/// Every committed seed of the cargo-fuzz corpus holds the property. Only
+/// `*.dsmod` files are seeds; extension-less files in the directory are
+/// local campaign outputs and are skipped so the run stays deterministic.
+#[test]
+fn corpus_seeds_never_panic_and_stay_canonical() {
+    const DIR: &str = "../../fuzz/corpus/fuzz_read_dsmod";
+    let mut seeds: Vec<_> = std::fs::read_dir(DIR)
+        .unwrap_or_else(|err| panic!("{DIR}: {err}"))
+        .map(|entry| entry.expect("readable dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "dsmod"))
+        .collect();
+    seeds.sort();
+    assert!(
+        seeds.len() >= 49,
+        "the committed seed corpus must be present (found {})",
+        seeds.len()
+    );
+    for path in seeds {
+        let bytes = std::fs::read(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        property(&bytes);
+    }
+}
+
 #[test]
 fn mutated_valid_modules_never_panic() {
     for seed in 1..=fuzz_runs() {

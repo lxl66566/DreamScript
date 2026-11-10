@@ -1,12 +1,12 @@
 //! The TCP net natives: the network half of the platform surface.
 //!
-//! Five natives in the builtin table (indices 20-24, the table contract in
-//! `native`'s module docs): `net_connect`, `net_send`, `net_recv`,
-//! `net_close`, and `http_get`. They answer with the uniform two-word
-//! tag+payload span [BL-2] — the shared success marker on word 0, the
-//! payload on word 1 — and failures carry the [`BUILTIN_NET_ERR`] tag with
-//! the message `Ref` as payload, shaped `"op target: detail"` like the
-//! file natives' `io_err` messages.
+//! Five natives in the std platform table (indices 20-24, the table
+//! contract in `native`'s module docs): `net_connect`, `net_send`,
+//! `net_recv`, `net_close`, and `http_get`. They answer with the uniform
+//! two-word tag+payload span [BL-2] — the shared success marker on word 0,
+//! the payload on word 1 — and failures carry the [`PLATFORM_NET_ERR`]
+//! tag with the message `Ref` as payload, shaped `"op target: detail"`
+//! like the file natives' `io_err` messages.
 //!
 //! # Connection handles and lifetime
 //!
@@ -55,7 +55,7 @@ use std::{
 use ds_abi::SlotType;
 
 use crate::{
-    native::{BUILTIN_NET_ERR, NativeResult, OutputSink},
+    native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ERR},
     object::Objects,
     value::Value,
     vm::Trap,
@@ -202,7 +202,7 @@ fn normalize(err: io::Error, timeout: Duration) -> io::Error {
 /// The `net_err` span: the message `Ref` as the payload word.
 fn net_err(objects: &mut Objects, op: &str, target: &str, detail: &str) -> NativeResult {
     NativeResult::Tag {
-        tag: BUILTIN_NET_ERR,
+        tag: PLATFORM_NET_ERR,
         payload: Value::Ref(objects.alloc_str(format!("{op} {target}: {detail}"))),
     }
 }
@@ -210,7 +210,7 @@ fn net_err(objects: &mut Objects, op: &str, target: &str, detail: &str) -> Nativ
 /// The `ok` span: the success value as the payload word.
 fn ok(payload: Value) -> NativeResult {
     NativeResult::Tag {
-        tag: crate::native::BUILTIN_IO_OK,
+        tag: PLATFORM_IO_OK,
         payload,
     }
 }

@@ -11,13 +11,13 @@ const CLEAN: &str = concat!(
     "}\n",
     "extern fn open_handle (p: string) -> handle\n",
     "extern fn take_handle (move h: handle) -> int\n",
-    "///|\n",
-    "const good = (p: string) -> int {\n",
+    "##\n",
+    "fn good(p: string) -> int {\n",
     "  const h = open_handle(p)\n",
     "  take_handle(h)\n",
     "}\n",
-    "///|\n",
-    "const bad = (p: string) -> int {\n",
+    "##\n",
+    "fn bad(p: string) -> int {\n",
     "  const h = open_handle(p)\n",
     "  take_handle(h)\n",
     "  take_handle(h)\n",
@@ -72,8 +72,8 @@ fn an_edit_recomputes_and_a_unchanged_renewal_is_a_hit() {
     // Breaking the second block re-derives the file's parse and the
     // check: the definition's facts change with it.
     let broken = CLEAN.replace(
-        "  take_handle(h)\n}\n///|",
-        "  take_handle(h)\n  take_handle(h)\n}\n///|",
+        "  take_handle(h)\n}\n##",
+        "  take_handle(h)\n  take_handle(h)\n}\n##",
     );
     db.set_file_content(file, &broken).unwrap();
     let after = db.get::<LinearityCheck>(def(0, 1)).unwrap();
@@ -90,7 +90,7 @@ fn an_edit_recomputes_and_a_unchanged_renewal_is_a_hit() {
 #[test]
 fn a_file_that_fails_to_parse_yields_empty_facts() {
     let mut db = Db::new();
-    db.add_file("t.ds", "const a = (p: string) -> int {\n  (\n}\n");
+    db.add_file("t.ds", "fn a(p: string) -> int {\n  (\n}\n");
     let out = db.get::<LinearityCheck>(def(0, 0)).unwrap();
     assert!(out.diags.is_empty());
     assert!(out.moves.is_empty());

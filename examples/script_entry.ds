@@ -1,0 +1,26 @@
+// Script entry: the file's top-level statements compile into a
+// synthesized `main` while the declarations beside them stay
+// pure-declaration. Imported files keep that rule unconditionally.
+
+fn bump(n: int) -> int { n + 1 }
+
+const base = 40
+var total = 0
+while total < 3 {
+  total += 1
+}
+println("total: ${total}")
+
+tag small
+tag large
+const size = if base < 50 { small } else { large }
+match size {
+  small => println("size: small"),
+  large => println("size: large"),
+}
+
+if size is small {
+  println("bumped: ${bump(base)}")
+  return
+}
+println("unreachable")

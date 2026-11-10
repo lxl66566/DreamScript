@@ -1,0 +1,7 @@
+error[DS2015]: `self` is retired as a type name; the receiver type is spelled `Self`
+ --> tests/fixtures/negative/ds2015_lowercase_self_type.ds:4:9
+  |
+4 | fn f(x: self) -> int { 1 }
+  |         ^^^^ type name `self`
+  |
+  = help: replace with `Self`

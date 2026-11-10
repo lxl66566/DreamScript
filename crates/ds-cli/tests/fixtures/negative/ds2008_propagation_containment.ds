@@ -3,5 +3,5 @@
 tag string
 tag wire_err
 extern fn fetch_text (path: string) -> string | wire_err
-const emit = (s: string) -> () { () }
-const load = (path: string) -> () { emit(fetch_text(path)?) }
+fn emit(s: string) -> () { () }
+fn load(path: string) -> () { emit(fetch_text(path)?) }

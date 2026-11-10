@@ -1,0 +1,47 @@
+// source: the ranges + for item of the plan's near-term queue (2026-11-10 tutorial-gap round)
+// purpose: for-in over int ranges (empty, single-step inclusive, exclusive and inclusive bounds, non-constant ends, wildcard patterns) and x in a..b / a..=b membership
+// items:
+// empty_total: stage: run
+// steps: stage: run
+// within: stage: run
+// main: stage: run
+
+fn empty_total() -> int {
+  var acc: int = 0
+  // a 0..0 range runs zero iterations; 0..=0 runs exactly one
+  for i in 0..0 {
+    acc += 100
+  }
+  for i in 0..=0 {
+    acc += 1
+  }
+  acc
+}
+
+fn steps() -> int {
+  var acc: int = 0
+  // the exclusive end is not a step; the inclusive end is
+  for i in 1..4 {
+    acc += i
+  }
+  for i in 1..=4 {
+    acc += i
+  }
+  acc
+}
+
+fn within(x: int, n: int) -> bool {
+  x in 1..n
+}
+
+fn main() -> () {
+  println("empty_total: ${empty_total()}")
+  println("steps: ${steps()}")
+  var hits: int = 0
+  for _ in 0..3 {
+    hits += 2
+  }
+  println("hits: ${hits}")
+  println("within: ${within(3, 10)}")
+  println("without: ${within(10, 10)}")
+}

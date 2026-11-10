@@ -13,6 +13,11 @@ readme.workspace       = true
 [lints]
 workspace = true
 
+[features]
+# The RC balance tripwires: hard asserts on rc underflow/overflow, the
+# ds-rt diag discipline (debug assertions otherwise).
+diag = []
+
 [dependencies]
 ds-abi = { path = "../ds-abi" }
 ds-mod = { path = "../ds-mod" }

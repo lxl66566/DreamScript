@@ -1,7 +1,8 @@
-//! Name resolution over the parsed surface [G3, F3]: collection into one
-//! package namespace, local scoping and shadowing, UFCS tier order,
-//! trait-path qualification, whole-package cycles, duplicate and unknown
-//! diagnostics, and a full pass over `conformance/types_hybrid.ds`.
+//! Name resolution over the parsed surface [G3, F3, F9]: collection into
+//! the package's type and value namespaces, local scoping and shadowing,
+//! UFCS tier order, trait-path qualification, whole-package cycles,
+//! duplicate and unknown diagnostics, the call-form ambiguity between the
+//! namespaces, and a full pass over `conformance/types_hybrid.ds`.
 
 use ds_check::{DefKind, DotRes, MethodOwner, Package, Res};
 use ds_diag::{Diagnostic, ErrorCode, FileId, Files, Span};
@@ -12,7 +13,7 @@ const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 /// Ambient stdlib stubs for the corpus file, mirroring conformance/README.md's
 /// types_hybrid ambient list (`read_file`, `parse_json`, `log`,
 /// `default_config`, the `map`/`list` types) plus the primitive type names
-/// and the `str`/`get` calls the file makes; the M3 stdlib owns their real
+/// and the `get` call the file makes; the M3 stdlib owns their real
 /// spellings.
 const AMBIENT: &str = concat!(
     "tag int\n",
@@ -20,12 +21,11 @@ const AMBIENT: &str = concat!(
     "tag string\n",
     "struct list[t]\n",
     "struct map[k, v]\n",
-    "const read_file = (path: string) -> string { \"\" }\n",
-    "const parse_json = (text: string) -> string { \"\" }\n",
-    "const str = (t: string) -> string { \"\" }\n",
-    "const log = (msg: string) -> () { }\n",
-    "const default_config = () -> config { config { host: \"h\", port: 1, retries: 1 } }\n",
-    "const get = (m: map[string, string], key: string) -> string { \"\" }\n",
+    "fn read_file(path: string) -> string { \"\" }\n",
+    "fn parse_json(text: string) -> string { \"\" }\n",
+    "fn log(msg: string) -> () { }\n",
+    "fn default_config() -> config { config { host: \"h\", port: 1, retries: 1 } }\n",
+    "fn get(m: map[string, string], key: string) -> string { \"\" }\n",
 );
 
 struct Fixture {
@@ -128,12 +128,12 @@ fn collects_every_declaration_kind() {
         "struct rec { a: unit_one }\n",
         "enum choice { yes, no }\n",
         "type alias_one = unit_one\n",
-        "trait pretty { const show = (self: self) -> unit_one }\n",
+        "trait pretty { fn show(self) -> unit_one }\n",
         "fn plain(x: unit_one) -> unit_one { x }\n",
         "extern fn foreign(x: unit_one) -> unit_one\n",
         "const binding = 1\n",
         "var mutable_binding = 2\n",
-        "impl rec { const helper = (self: rec) -> unit_one { self.a } }\n",
+        "impl rec { fn helper(self) -> unit_one { self.a } }\n",
     ));
     for (name, kind) in [
         ("unit_one", DefKind::Tag),
@@ -141,12 +141,19 @@ fn collects_every_declaration_kind() {
         ("choice", DefKind::Enum),
         ("alias_one", DefKind::TypeAlias),
         ("pretty", DefKind::Trait),
-        ("plain", DefKind::Fn),
+        // A bodied `fn` converts onto the const-declaration node, so its
+        // def is the function-binding kind; externs stay DefKind::Fn.
+        ("plain", DefKind::Const),
         ("foreign", DefKind::Fn),
         ("binding", DefKind::Const),
         ("mutable_binding", DefKind::Var),
     ] {
-        let id = f.package.lookup(name).unwrap_or_else(|| panic!("{name}"));
+        let id = if kind.in_type_namespace() {
+            f.package.lookup_type(name)
+        } else {
+            f.package.lookup_value(name)
+        }
+        .unwrap_or_else(|| panic!("{name}"));
         assert_eq!(f.package.def(id).kind, kind, "{name}");
         assert_eq!(f.package.def(id).name, name);
     }
@@ -155,7 +162,7 @@ fn collects_every_declaration_kind() {
     assert_eq!(show.len(), 1);
     assert_eq!(
         f.package.method(show[0]).owner,
-        MethodOwner::Trait(f.package.lookup("pretty").unwrap())
+        MethodOwner::Trait(f.package.lookup_type("pretty").unwrap())
     );
     let helper = f.package.method_candidates("helper");
     assert_eq!(helper.len(), 1);
@@ -201,15 +208,15 @@ fn locals_shadow_and_nest() {
     let f = resolve_one(concat!(
         "tag t\n",
         "const one = ()\n",
-        "const outer = (x: t) -> t {\n",
+        "fn outer(x: t) -> t {\n",
         "  const y = x\n",
         "  {\n",
         "    const x = y\n",
         "    x\n",
         "  }\n",
         "}\n",
-        "const rec = (n: t) -> t { rec(n) }\n",
-        "const shadow = (one: t) -> t { one }\n",
+        "fn rec(n: t) -> t { rec(n) }\n",
+        "fn shadow(one: t) -> t { one }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -230,7 +237,7 @@ fn locals_shadow_and_nest() {
     let rec_use = span_in(src, file, "rec(n)", 0, "rec");
     assert_eq!(
         *uses.get(rec_use).unwrap(),
-        Res::Def(f.package.lookup("rec").unwrap())
+        Res::Def(f.package.lookup_value("rec").unwrap())
     );
     // A param may shadow a package name.
     let shadow_use = span_of(src, file, "one", 2);
@@ -247,8 +254,8 @@ fn same_scope_redefinition_is_an_error() {
         "t.ds",
         concat!(
             "tag t\n",
-            "const dup_params = (x: t, x: t) -> t { x }\n",
-            "const dup_locals = () -> t {\n",
+            "fn dup_params(x: t, x: t) -> t { x }\n",
+            "fn dup_locals() -> t {\n",
             "  const a = t\n",
             "  const a = a\n",
             "  a\n",
@@ -270,16 +277,16 @@ fn same_scope_redefinition_is_an_error() {
 fn ufcs_free_functions_win() {
     let f = resolve_one(concat!(
         "tag t\n",
-        "trait len_t { const len = (self: self) -> t }\n",
-        "const len = (xs: t) -> t { xs }\n",
-        "const caller = (xs: t) -> t { xs.len() }\n",
+        "trait len_t { fn len(self) -> t }\n",
+        "fn len(xs: t) -> t { xs }\n",
+        "fn caller(xs: t) -> t { xs.len() }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
     let span = span_in(f.source(0), file_of(&f, 0), "xs.len()", 0, "len");
     match uses.get(span) {
         Some(Res::Dot(DotRes::Free { func, fed_param })) => {
-            assert_eq!(*func, f.package.lookup("len").unwrap());
+            assert_eq!(*func, f.package.lookup_value("len").unwrap());
             assert_eq!(
                 *fed_param, 0,
                 "the receiver feeds the first data parameter [F3]"
@@ -293,10 +300,10 @@ fn ufcs_free_functions_win() {
 fn ufcs_method_tier_registers_candidates() {
     let f = resolve_one(concat!(
         "tag t\n",
-        "trait ord { const cmp = (self: self, other: self) -> t }\n",
-        "trait show { const cmp = (self: self) -> t }\n",
-        "impl ord for t { const cmp = (self: self, other: self) -> t { t } }\n",
-        "const caller = (x: t) -> t { x.cmp(x) }\n",
+        "trait ord { fn cmp(self, other: Self) -> t }\n",
+        "trait show { fn cmp(self) -> t }\n",
+        "impl ord for t { fn cmp(self, other: Self) -> t { t } }\n",
+        "fn caller(x: t) -> t { x.cmp(x) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -311,8 +318,8 @@ fn ufcs_method_tier_registers_candidates() {
                 .map(|&id| f.package.method(id).owner)
                 .collect();
             assert_eq!(owners, vec![
-                MethodOwner::Trait(f.package.lookup("ord").unwrap()),
-                MethodOwner::Trait(f.package.lookup("show").unwrap())
+                MethodOwner::Trait(f.package.lookup_type("ord").unwrap()),
+                MethodOwner::Trait(f.package.lookup_type("show").unwrap())
             ]);
         },
         other => panic!("method tier expected: {other:?}"),
@@ -325,8 +332,8 @@ fn ufcs_unresolved_lists_tiers_in_order() {
         "t.ds",
         concat!(
             "tag t\n",
-            "const len = (xs: t) -> t { xs }\n",
-            "const caller = (xs: t) -> t { xs.lenn() }\n",
+            "fn len(xs: t) -> t { xs }\n",
+            "fn caller(xs: t) -> t { xs.lenn() }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -354,11 +361,11 @@ fn ufcs_unresolved_lists_tiers_in_order() {
 fn trait_path_qualification_resolves_directly() {
     let f = resolve_one(concat!(
         "tag t\n",
-        "trait ord { const cmp = (self: self, other: self) -> t }\n",
+        "trait ord { fn cmp(self, other: Self) -> t }\n",
         "trait empty { }\n",
-        "const caller = (x: t) -> t { ord::cmp(x, x) }\n",
-        "const not_trait = (x: t) -> t { t::cmp(x, x) }\n",
-        "const no_member = (x: t) -> t { empty::cmp(x, x) }\n",
+        "fn caller(x: t) -> t { ord::cmp(x, x) }\n",
+        "fn not_trait(x: t) -> t { t::cmp(x, x) }\n",
+        "fn no_member(x: t) -> t { empty::cmp(x, x) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     let file = file_of(&f, 0);
@@ -368,7 +375,7 @@ fn trait_path_qualification_resolves_directly() {
         Some(Res::TraitMethod(id)) => {
             assert_eq!(
                 f.package.method(*id).owner,
-                MethodOwner::Trait(f.package.lookup("ord").unwrap())
+                MethodOwner::Trait(f.package.lookup_type("ord").unwrap())
             );
         },
         other => panic!("Trait::f qualifies directly [F3]: {other:?}"),
@@ -396,8 +403,8 @@ fn two_file_mutual_references_resolve() {
     // Intra-package cycles are legal [G3]: resolution is name lookup over
     // the complete tables, not dependency ordering.
     let f = fixture(&[
-        ("a.ds", "tag t\nconst even = (n: t) -> t { odd(n) }\n"),
-        ("b.ds", "const odd = (n: t) -> t { even(n) }\n"),
+        ("a.ds", "tag t\nfn even(n: t) -> t { odd(n) }\n"),
+        ("b.ds", "fn odd(n: t) -> t { even(n) }\n"),
     ]);
     assert_eq!(f.collect, Vec::new());
     for index in 0..2 {
@@ -421,9 +428,9 @@ fn unknown_names_suggest_nearest() {
         concat!(
             "tag t\n",
             "tag string\n",
-            "const read_file = (p: string) -> string { p }\n",
-            "const typo = () -> t { red_file() }\n",
-            "const typo_type = (x: strng) -> t { t }\n",
+            "fn read_file(p: string) -> string { p }\n",
+            "fn typo() -> t { red_file() }\n",
+            "fn typo_type(x: strng) -> t { t }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -456,8 +463,8 @@ fn unknown_names_suggest_nearest() {
 fn handler_forms_resolve_without_names() {
     let f = resolve_one(concat!(
         "tag t\n",
-        "const h = (e: t) -> t { e.err((x: t) -> t { x }) }\n",
-        "const k = (e: t) -> t { e.ok((x: t) -> t { x }) }\n",
+        "fn h(e: t) -> t { e.err((x: t) -> t { x }) }\n",
+        "fn k(e: t) -> t { e.ok((x: t) -> t { x }) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -478,8 +485,8 @@ fn bare_field_access_and_punning() {
     let f = resolve_one(concat!(
         "tag t\n",
         "struct rec { got: t }\n",
-        "const bare = (p: rec) -> t { p.got }\n",
-        "const punned = (got: t) -> rec { rec { got } }\n",
+        "fn bare(p: rec) -> t { p.got }\n",
+        "fn punned(got: t) -> rec { rec { got } }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -493,7 +500,7 @@ fn bare_field_access_and_punning() {
     );
     // Punning is a value use of the field name.
     let punned_use = span_in(src, file, "rec { got }", 0, "got");
-    let punned_bind = span_in(src, file, "const punned = (got: t)", 0, "got");
+    let punned_bind = span_in(src, file, "fn punned(got: t)", 0, "got");
     assert_eq!(
         uses.get(punned_use),
         Some(&Res::Local { bind: punned_bind })
@@ -507,7 +514,7 @@ fn patterns_bind_scopes_and_flag_duplicates() {
         concat!(
             "tag t\n",
             "tag stop\n",
-            "const m = (x: t) -> t {\n",
+            "fn m(x: t) -> t {\n",
             "  match x {\n",
             "    a | a => a,\n",
             "    b => {\n",
@@ -537,9 +544,9 @@ fn type_variables_scope_to_their_generics() {
         "t.ds",
         concat!(
             "tag u\n",
-            "const id = [t] (x: t) -> t { x }\n",
-            "const dup_tparams = [t, t] (x: t) -> t { x }\n",
-            "const outside = (y: t) -> u { u }\n",
+            "fn id[t](x: t) -> t { x }\n",
+            "fn dup_tparams[t, t](x: t) -> t { x }\n",
+            "fn outside(y: t) -> u { u }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -580,11 +587,12 @@ fn conformance_types_hybrid_resolves_fully() {
             other => panic!("{target} should resolve to a stub def: {other:?}"),
         }
     }
-    // `str(b.got)` resolves; `.err(...)` is the handler form; `.get(...)`
-    // is a UFCS free-fn call; the punned `port` field uses the local.
+    // the interpolation hole's receiver resolves through the arm
+    // binding; `.err(...)` is the handler form; `.get(...)` is a UFCS
+    // free-fn call; the punned `port` field uses the local.
     assert!(matches!(
-        uses.get(span_in(src, file, "str(", 0, "str")),
-        Some(Res::Def(_))
+        uses.get(span_in(src, file, "b.got", 0, "b")),
+        Some(Res::Local { .. })
     ));
     assert_eq!(
         uses.get(span_in(src, file, ".err(", 0, "err")),
@@ -611,7 +619,7 @@ fn conformance_types_hybrid_resolves_fully() {
     assert_eq!(
         uses.get(span_in(src, file, "| cfg_err", 0, "cfg_err"))
             .cloned(),
-        Some(Res::Def(f.package.lookup("cfg_err").unwrap()))
+        Some(Res::Def(f.package.lookup_type("cfg_err").unwrap()))
     );
     // The stubs themselves resolve too (they reference `config`).
     let (_, stub_diags) = f.resolve(0);
@@ -620,5 +628,112 @@ fn conformance_types_hybrid_resolves_fully() {
         uses.len() > 40,
         "a full pass records every use: {}",
         uses.len()
+    );
+}
+
+/// The namespace split [F9]: a same-named struct and function coexist —
+/// collection accepts both, the brace form resolves the struct, a bare
+/// use resolves the function, and the UFCS dot position (a function
+/// position) resolves the function. Calling the shared name is the
+/// collision error of the next test.
+#[test]
+fn same_named_struct_and_function_coexist() {
+    let f = resolve_one(concat!(
+        "tag int\n",
+        "struct page { body: int }\n",
+        "fn page(other: page) -> int { other.body }\n",
+        "fn brace(n: int) -> page { page { body: n } }\n",
+        "fn ufcs(n: int) -> int { n.page() }\n",
+        "const bare = page\n",
+    ));
+    let src = f.source(0);
+    let file = file_of(&f, 0);
+    let (uses, diags) = f.resolve(0);
+    assert!(diags.is_empty(), "{diags:?}");
+    // The brace head resolves the struct.
+    assert_eq!(
+        uses.get(span_in(src, file, "{ page {", 0, "page")),
+        Some(&Res::Def(f.package.lookup_type("page").unwrap()))
+    );
+    // The dot position is a function position: the value namespace.
+    match uses.get(span_in(src, file, ".page()", 0, "page")) {
+        Some(Res::Dot(DotRes::Free { func, .. })) => {
+            assert_eq!(*func, f.package.lookup_value("page").unwrap());
+        },
+        other => panic!(".page should hit the free tier: {other:?}"),
+    }
+    // A bare use of a same-named pair is value-first [F9].
+    assert_eq!(
+        uses.get(span_in(src, file, "const bare = page", 0, "page")),
+        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
+    );
+}
+
+/// The residual error class [F9]: a call-form name present in BOTH
+/// namespaces is an ambiguity error naming both declarations; nothing
+/// resolves. A bare use of the same name is not a call form — the value
+/// declaration wins it.
+#[test]
+fn call_form_collision_is_an_ambiguity_error() {
+    let f = resolve_one(concat!(
+        "tag int\n",
+        "tag page\n",
+        "fn page(n: int) -> int { n }\n",
+        "const bare = page\n",
+        "fn caller(n: int) -> int { page(n) }\n",
+    ));
+    let src = f.source(0);
+    let file = file_of(&f, 0);
+    let (uses, diags) = f.resolve(0);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let diag = &diags[0];
+    assert_eq!(diag.code, ErrorCode::AmbiguousCall);
+    assert_eq!(
+        diag.message,
+        "call-form `page` is ambiguous between the value `page` and the tag `page` [F9]"
+    );
+    assert_eq!(diag.labels.len(), 3, "the use plus both declarations");
+    // The call records the value declaration (the checker types through;
+    // the fatal ambiguity is the single diagnostic), never the type.
+    assert_eq!(
+        uses.get(span_in(src, file, "page(n)", 0, "page")),
+        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
+    );
+    // The bare use is value-first [F9]: the function binding.
+    assert_eq!(
+        uses.get(span_in(src, file, "const bare = page", 0, "page")),
+        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
+    );
+}
+
+/// Constructor positions resolve against the type namespace only [F9]:
+/// the generic-application head and its bracketed argument are type uses,
+/// and a struct pattern's head is a constructor reference.
+#[test]
+fn constructor_positions_resolve_against_types() {
+    let f = resolve_one(concat!(
+        "tag int\n",
+        "struct page { body: int }\n",
+        "struct list[t]\n",
+        "fn make() -> list[page] { list[page]() }\n",
+        "fn pat(p: page | int) -> int { match p { page { body } => body, n => n } }\n",
+    ));
+    let src = f.source(0);
+    let file = file_of(&f, 0);
+    let (uses, diags) = f.resolve(0);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(
+        uses.get(span_in(src, file, "list[page]()", 0, "list")),
+        Some(&Res::Def(f.package.lookup_type("list").unwrap()))
+    );
+    assert_eq!(
+        uses.get(span_in(src, file, "list[page]()", 0, "page")),
+        Some(&Res::Def(f.package.lookup_type("page").unwrap())),
+        "the bracketed argument is a type use"
+    );
+    assert_eq!(
+        uses.get(span_in(src, file, "page { body } =>", 0, "page")),
+        Some(&Res::Def(f.package.lookup_type("page").unwrap())),
+        "pattern paths are constructor references"
     );
 }

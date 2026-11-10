@@ -9,11 +9,28 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ds-abi = { path = "../crates/ds-abi" }
 ds-check = { path = "../crates/ds-check" }
 ds-diag = { path = "../crates/ds-diag" }
 ds-mod = { path = "../crates/ds-mod" }
 ds-parse = { path = "../crates/ds-parse" }
 ds-query = { path = "../crates/ds-query" }
+
+[[bin]]
+name = "fuzz_parse"
+path = "fuzz_targets/fuzz_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Not a fuzz target: regenerates valid .dsmod corpus seeds (see the
+# file's header comment).
+[[bin]]
+name = "gen_dsmod_seeds"
+path = "tools/gen_dsmod_seeds.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "fuzz_check"

@@ -8,19 +8,19 @@ tag string
 trait Copyable { }
 
 trait enc {
-  const encode = (self: self) -> string
+  fn encode(self) -> string
 }
 impl enc for int {
-  const encode = (self: self) -> string { "" }
+  fn encode(self) -> string { "" }
 }
 impl enc for int | bool {
-  const encode = (self: self) -> string { "" }
+  fn encode(self) -> string { "" }
 }
 
 struct conn: ~Copyable { path: string }
 extern fn open_conn (p: string) -> conn
 extern fn send (move c: conn) -> ()
-const use_twice = (p: string) -> () {
+fn use_twice(p: string) -> () {
   const c = open_conn(p)
   send(c)
   send(c)

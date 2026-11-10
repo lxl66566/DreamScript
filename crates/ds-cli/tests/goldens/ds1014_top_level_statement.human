@@ -1,0 +1,5 @@
+error[DS1014]: top-level statements are legal only in the entry file under script mode; wrap them in a function body, or run the file as the entry with `ds run`
+ --> tests/fixtures/negative/ds1014_top_level_statement.ds:6:1
+  |
+6 | answer
+  | ^^^^^^ here

@@ -1,0 +1,27 @@
+// The list surface: literals build lists element by element, the
+// `list[t]()` constructor spellings the empty form, and the checked read
+// extracts through the `.ok`/`.err` handler chain.
+
+fn main() -> () {
+  const xs = [1, 2, 3]
+  const words = ["alpha", "beta", "gamma"]
+  const empty = list[int]()
+  println("ints ${sum(xs)} ${list_len(empty)}")
+  println("words ${list_len(words)} ${head_word(words)}")
+}
+
+fn sum(xs: list[int]) -> int {
+  var total: int = 0
+  var i: int = 0
+  while i < list_len(xs) {
+    const cell = list_get(xs, i)
+    total += cell.ok((x: int) => x).err((_: none) => 0)
+    i += 1
+  }
+  total
+}
+
+fn head_word(xs: list[string]) -> string {
+  const cell = list_get(xs, 0)
+  cell.ok((w: string) => w).err((_: none) => "?")
+}

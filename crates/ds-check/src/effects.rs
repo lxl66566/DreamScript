@@ -72,7 +72,7 @@ use std::collections::HashMap;
 use ds_diag::Span;
 use ds_parse::{
     AssignOp, Ast, BinaryOp, BlockExpr, CallArg, Expr, FnDecl, Ident, ImplDecl, Item, ItemKind,
-    LocalDecl, MatchArm, OrTail, Path, Pattern, StmtKind, StrPart, TraitDecl, TraitMember, UnaryOp,
+    LocalDecl, MatchArm, Path, Pattern, StmtKind, StrPart, TraitDecl, TraitMember, UnaryOp,
 };
 
 use crate::resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions};
@@ -510,7 +510,7 @@ impl Walker<'_, '_> {
     /// (externs and trait signatures have none, so they carry exactly
     /// their declared row).
     fn fn_decl(&mut self, f: &FnDecl) {
-        let Some(def) = self.package.lookup(&f.name.name) else {
+        let Some(def) = self.package.lookup_value(&f.name.name) else {
             return;
         };
         self.enter(Node::Def(def));
@@ -563,7 +563,7 @@ impl Walker<'_, '_> {
     /// default body when present; impl bodies flow in through
     /// [`Walker::impl_decl`].
     fn trait_decl(&mut self, t: &TraitDecl) {
-        let Some(trait_def) = self.package.lookup(&t.name.name) else {
+        let Some(trait_def) = self.package.lookup_type(&t.name.name) else {
             return;
         };
         for member in &t.members {
@@ -642,7 +642,7 @@ impl Walker<'_, '_> {
     fn pattern_defs(&self, pat: &Pattern, out: &mut Vec<DefId>) {
         match pat {
             Pattern::Binding { name, .. } => {
-                if let Some(def) = self.package.lookup(&name.name) {
+                if let Some(def) = self.package.lookup_value(&name.name) {
                     if !out.contains(&def) {
                         out.push(def);
                     }
@@ -685,7 +685,7 @@ impl Walker<'_, '_> {
             Expr::Lambda { body, .. } => self.expr(body, mask),
             Expr::Path { path, .. } => self.path(path, mask),
             Expr::Struct { path, fields, .. } => self.struct_lit(path, fields, mask),
-            Expr::Tuple { items, .. } => self.elements(items, mask),
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => self.elements(items, mask),
             Expr::Paren { inner, .. } => self.expr(inner, mask),
             Expr::Range { start, end, .. } => {
                 self.expr(start, mask);
@@ -711,7 +711,6 @@ impl Walker<'_, '_> {
             Expr::Binary {
                 op, left, right, ..
             } => self.binary(*op, left, right, mask),
-            Expr::Or { left, right, .. } => self.or(left, right, mask),
             Expr::Assign {
                 op, left, right, ..
             } => self.assign(*op, left, right, mask),
@@ -805,29 +804,6 @@ impl Walker<'_, '_> {
             if handled { mask.union(EffectRow::of(Effect::Error)) } else { mask },
         );
         self.use_res(name.span, mask);
-    }
-
-    /// The `or` extraction [E4]: the left operand's failure members are
-    /// consumed, so its call edges carry `error` masked off; `or return`
-    /// hands the failure out, contributing `error` intrinsically.
-    fn or(&mut self, left: &Expr, right: &OrTail, mask: EffectRow) {
-        let consumed = mask.union(EffectRow::of(Effect::Error));
-        match right {
-            OrTail::Expr(tail) => {
-                self.expr(left, consumed);
-                self.expr(tail, mask);
-            },
-            OrTail::Return { expr, .. } => {
-                self.expr(left, consumed);
-                if let Some(e) = expr {
-                    self.expr(e, mask);
-                }
-                self.intrinsic(Effect::Error);
-            },
-            OrTail::Break(_) | OrTail::Continue(_) => {
-                self.expr(left, consumed);
-            },
-        }
     }
 
     fn assign(&mut self, op: AssignOp, left: &Expr, right: &Expr, mask: EffectRow) {

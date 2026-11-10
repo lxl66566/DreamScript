@@ -1,0 +1,138 @@
+//! The ranges + for end-to-end probe: `for x in a..b` / `a..=b` lowers
+//! as a counted loop with one induction slot (the endpoints evaluate
+//! once, the binder names the induction word), and `x in a..b` lowers as
+//! two once-evaluated comparisons joined by jumps. The run proves empty
+//! ranges, single-step inclusive ranges, the exclusive/inclusive bound
+//! difference, non-constant ends, wildcard patterns, and membership at
+//! and past both edges; a non-`int` width range stays an honest lowering
+//! boundary (the checker accepts it, the uop contract does not).
+
+use ds_check::analyze;
+use ds_diag::{Files, human};
+use ds_lower::{LowerError, lower};
+use ds_mod::{Hash128, read, write};
+use ds_parse::parse;
+use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+
+const SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "tag bool\n",
+    "extern fn println (msg: string) -> ()\n",
+    "\n",
+    "fn main() -> () {\n",
+    "  var acc: int = 0\n",
+    "  // empty: zero iterations\n",
+    "  for i in 0..0 {\n",
+    "    acc += 100\n",
+    "  }\n",
+    "  // single step: the inclusive end runs once\n",
+    "  for i in 0..=0 {\n",
+    "    acc += i + 1\n",
+    "  }\n",
+    "  // exclusive: the end is not a step\n",
+    "  for i in 1..5 {\n",
+    "    acc += i\n",
+    "  }\n",
+    "  // inclusive: the end is a step\n",
+    "  for i in 1..=5 {\n",
+    "    acc += i\n",
+    "  }\n",
+    "  println(\"acc: ${acc}\")\n",
+    "  // non-constant end and a wildcard pattern\n",
+    "  var hits: int = 0\n",
+    "  for _ in 0..acc {\n",
+    "    hits += 2\n",
+    "  }\n",
+    "  println(\"hits: ${hits}\")\n",
+    "  // membership, both spellings and both edges\n",
+    "  println(\"in: ${3 in 1..5}\")\n",
+    "  println(\"low: ${0 in 1..5}\")\n",
+    "  println(\"high: ${5 in 1..5}\")\n",
+    "  println(\"edge: ${5 in 1..=5}\")\n",
+    "}\n",
+);
+
+fn build(source: &str, name: &str) -> Vm {
+    let mut files = Files::new();
+    let id = files.add_source(name, source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
+        .expect("the probe lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    Vm::new(registry)
+}
+
+#[test]
+fn for_over_a_range_runs_every_step_and_in_tests_both_edges() {
+    let mut vm = build(SOURCE, "range_for");
+    vm.capture_output();
+    assert_eq!(
+        vm.run("range_for", "main", &[]),
+        Ok(Value::I64(0)),
+        "the unit entry result"
+    );
+    // acc: 1 (single step) + 10 (1..5) + 15 (1..=5) = 26; hits: 2 * 26
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        concat!(
+            "acc: 26\n",
+            "hits: 52\n",
+            "in: true\n",
+            "low: false\n",
+            "high: false\n",
+            "edge: true\n",
+        )
+    );
+}
+
+/// Same-width ranges of non-`int` integer types type-check [B7] but stay
+/// a named lowering boundary: only the ambient `int` width is in the M3
+/// uop contract.
+#[test]
+fn a_non_int_width_range_stays_a_named_lowering_boundary() {
+    let source = concat!(
+        "tag u32\n",
+        "fn main(a: u32) -> () {\n",
+        "  for i in a..a { }\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("width_range.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "same-width integer ranges check clean"
+    );
+    let err = match lower(
+        "width_range",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("the uop contract has no width arithmetic"),
+    };
+    assert!(
+        matches!(err, LowerError::Unsupported { .. }),
+        "an unsupported boundary, not a miscompile"
+    );
+    assert!(err.to_string().contains("non-`int` widths"));
+}

@@ -1,6 +1,6 @@
 //! Encoded programs: the constant pool [BL-1, BL-7] and assembled bodies.
 
-use ds_abi::uop::{EncodeError, Uop};
+use ds_abi::{EncodeError, Inst};
 
 /// What kind of entry a pool index holds; [`Const::kind`] is its witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,18 +79,19 @@ pub struct FunctionDef {
     pub code: Vec<u32>,
 }
 
-/// Assembles a uop body into its canonical 32-bit word stream [BL-1],
-/// resolving jump targets against each instruction's pc. The inverse —
-/// `Uop::decode` — runs in the dispatcher and at module load.
+/// Assembles an instruction body (uops and the 0xE RC pair alike) into its
+/// canonical 32-bit word stream [BL-1], resolving jump targets against each
+/// instruction's pc. The inverse — [`Inst::decode`] — runs in the dispatcher
+/// and at module load.
 ///
 /// # Errors
 ///
 /// Propagates [`EncodeError`] when a jump displacement exceeds the biased
 /// u16 window (the only operand an assembler can get wrong; all others are
 /// typed fields).
-pub fn assemble(body: &[Uop]) -> Result<Vec<u32>, EncodeError> {
+pub fn assemble<I: Into<Inst> + Copy>(body: &[I]) -> Result<Vec<u32>, EncodeError> {
     body.iter()
         .enumerate()
-        .map(|(pc, u)| u.encode(u32::try_from(pc).expect("pc fits u32")))
+        .map(|(pc, inst)| Into::<Inst>::into(*inst).encode(u32::try_from(pc).expect("pc fits u32")))
         .collect()
 }

@@ -58,7 +58,7 @@ impl fmt::Display for TargetClass {
 pub struct Flags(u8);
 
 impl Flags {
-    /// The module performs dlopen at load time [H5].
+    /// The module performs dlopen at load time (H5).
     pub const FFI_USED: u8 = 1 << 1;
     /// The module carries JIT metadata (debugger frame materialization).
     pub const HAS_JIT_METADATA: u8 = 1 << 2;

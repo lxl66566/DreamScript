@@ -1,0 +1,37 @@
+// source: enum-block payload-case story [B3]
+// purpose: minted bare and tuple-payload cases constructed, dispatched, and
+//          compared end-to-end on the tier-1 VM
+// items:
+// int: stage: run
+// verdict: stage: run
+// of: stage: run
+// main: stage: run
+
+tag int
+tag bool
+tag string
+
+enum verdict {
+  ok_v
+  fail_v(int)
+}
+
+extern fn println (s: string) -> ()
+
+fn of(n: int) -> verdict {
+  if n >= 60 { ok_v } else { fail_v(n) }
+}
+
+fn main() -> bool {
+  match of(80) {
+    ok_v => println("pass"),
+    _    => println("fail"),
+  }
+  match of(10) {
+    ok_v => println("pass"),
+    _    => println("fail"),
+  }
+  const same = of(10) == of(10)
+  println("same ${same}")
+  same
+}

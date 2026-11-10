@@ -1,7 +1,7 @@
 //! Expression, statement, block, and pattern rendering.
 //!
-//! Precedence levels mirror the grammar chain (assign 1, or 2, range 3,
-//! is/in 4, `||` 5, `&&` 6, `|` 7, `^` 8, `&` 9, cmp 10, shift 11, add 12,
+//! Precedence levels mirror the grammar chain (assign 1, range 3, is/in 4,
+//! `||` 5, `&&` 6, `|` 7, `^` 8, `&` 9, cmp 10, shift 11, add 12,
 //! mul 13, unary 14, postfix 15, primary 16). A child renders parenthesized
 //! when its level falls below the slot's minimum, which equals the grammar
 //! level of the slot's sub-rule — so trees re-parse to themselves.
@@ -12,8 +12,8 @@
 //! and there is no wrapping — long lines stay long.
 
 use ds_parse::{
-    AssignOp, BinaryOp, BlockExpr, Expr, Ident, Literal, LocalDecl, MatchArm, OrTail, Param,
-    Pattern, Stmt, UnaryOp,
+    AssignOp, BinaryOp, BlockExpr, Expr, Ident, Literal, LocalDecl, MatchArm, Param, Pattern, Stmt,
+    UnaryOp,
 };
 
 use crate::{
@@ -189,7 +189,6 @@ pub(crate) fn write_local(ctx: &Ctx, out: &mut String, base: usize, l: &LocalDec
 fn prec(e: &Expr) -> u8 {
     match e {
         Expr::Assign { .. } => 1,
-        Expr::Or { .. } => 2,
         Expr::Range { .. } => 3,
         Expr::Is { .. } => 4,
         Expr::Binary { op, .. } => match op {
@@ -285,7 +284,7 @@ fn starts_minus(e: &Expr) -> bool {
 /// Renders one side of a binary at chain level `k`, inserting parentheses
 /// exactly when a flat rendering would re-associate. Legal flat operands come
 /// from the grammar's chain: same-level left folds and every tighter level
-/// (`p < 4` marks the looser `is`/`or`/range shapes that only parens produce).
+/// (`p < 4` marks the looser `is`/range shapes that only parens produce).
 fn write_bin_child(ctx: &Ctx, out: &mut String, base: usize, e: &Expr, k: u8, left: bool) {
     let p = prec(e);
     let parens = if left { p < 4 || (p >= 5 && p < k) } else { p <= 3 || (p >= 5 && p <= k) };
@@ -316,6 +315,16 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
         Expr::Struct { path, fields, .. } => {
             out.push_str(&path.text());
             write_struct_fields(ctx, out, fields);
+        },
+        Expr::List { items, .. } => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_expr(ctx, out, base, item);
+            }
+            out.push(']');
         },
         Expr::Tuple {
             items,
@@ -451,26 +460,10 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             out.push_str(if *inclusive { "..=" } else { ".." });
             write_expr_min(ctx, out, base, end, 5);
         },
-        Expr::Or { left, right, .. } => {
-            write_expr_min(ctx, out, base, left, 2);
-            out.push_str(" or ");
-            match &**right {
-                OrTail::Expr(e2) => write_expr_min(ctx, out, base, e2, 3),
-                OrTail::Return { expr, .. } => {
-                    out.push_str("return");
-                    if let Some(v) = expr {
-                        out.push(' ');
-                        write_expr(ctx, out, base, v);
-                    }
-                },
-                OrTail::Break(_) => out.push_str("break"),
-                OrTail::Continue(_) => out.push_str("continue"),
-            }
-        },
         Expr::Assign {
             op, left, right, ..
         } => {
-            write_expr_min(ctx, out, base, left, 2);
+            write_expr_min(ctx, out, base, left, 3);
             out.push(' ');
             out.push_str(assign_op_str(*op));
             out.push(' ');

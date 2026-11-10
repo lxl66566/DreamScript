@@ -1,0 +1,29 @@
+// Anonymous tuples: frame-span aggregates with destructuring in
+// bindings and match arms. Every element is one frame word, so a tuple
+// never allocates.
+
+fn endpoint(host: string, port: int) -> (string, int) {
+  (host, port)
+}
+
+fn port_of(pair: (string, int)) -> int {
+  const (_, port) = pair
+  port
+}
+
+fn main() -> () {
+  const t = ("host", 8080)
+  const (name, port) = t
+  println("${name}:${port}")
+  println("port ${port_of(endpoint("db.local", 5432))}")
+  match t {
+    (host, prt) => println("matched ${host} ${prt}"),
+  }
+  const tagged = ("unit", ())
+  const (label, _) = tagged
+  println("label ${label}")
+  const one = (7,)
+  const (seven,) = one
+  println("seven ${seven}")
+  println(if t == ("host", 8080) { "equal" } else { "unequal" })
+}

@@ -79,7 +79,7 @@ pub struct Db {
     reverse: HashMap<Dependency, HashSet<QueryKey>>,
     computes: HashMap<QueryKind, ComputeFn>,
     compute_counts: HashMap<QueryKey, usize>,
-    /// The declared effect rows the effects pass reads [E1]: the ambient
+    /// The declared effect rows the effects pass reads (E1): the ambient
     /// stdlib table, later merged with M7's platform declarations. Fixed
     /// for the database's life, so no memo can go stale against it.
     declared_rows: ds_check::DeclaredRows,
@@ -93,9 +93,9 @@ impl Db {
     /// [`QueryKey::EffectsOf`] registered: `ds-parse` for the tree and
     /// diagnostics, the tree's block spans for the index, the block-text
     /// seam for sources, the ds-check collection and resolution passes
-    /// over the registered files [G3], the bidirectional check sliced per
-    /// definition [B2], the M2 affine pass [C1, C5] per definition, and
-    /// the ds-check effects pass over the registered files [E1] (see the
+    /// over the registered files (G3), the bidirectional check sliced per
+    /// definition (B2), the M2 affine pass [C1, C5] per definition, and
+    /// the ds-check effects pass over the registered files (E1) (see the
     /// crate docs).
     #[must_use]
     pub fn new() -> Self {
@@ -110,7 +110,7 @@ impl Db {
         db
     }
 
-    /// A database whose effects pass reads `rows` [E1]: the stdlib ambient
+    /// A database whose effects pass reads `rows` (E1): the stdlib ambient
     /// registers its world-touching functions' rows here. The table is an
     /// immutable input — set it before the first query; [`Db::new`] gives
     /// every ambient name the pure row.
@@ -280,13 +280,13 @@ impl Ctx<'_> {
     }
 
     /// The number of registered files: the package grain of the M2
-    /// checker queries [G3].
+    /// checker queries (G3).
     #[must_use]
     pub fn file_count(&self) -> usize {
         self.db.changed_at.len()
     }
 
-    /// The declared effect rows the effects pass reads [E1]: the
+    /// The declared effect rows the effects pass reads (E1): the
     /// database's ambient row table.
     #[must_use]
     pub fn declared_rows(&self) -> &ds_check::DeclaredRows {

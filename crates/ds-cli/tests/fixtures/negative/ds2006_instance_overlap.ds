@@ -3,11 +3,11 @@
 tag int
 tag bool
 trait enc {
-  const encode = (self: self) -> int
+  fn encode(self) -> int
 }
 impl enc for int {
-  const encode = (self: self) -> int { 1 }
+  fn encode(self) -> int { 1 }
 }
 impl enc for int | bool {
-  const encode = (self: self) -> int { 2 }
+  fn encode(self) -> int { 2 }
 }

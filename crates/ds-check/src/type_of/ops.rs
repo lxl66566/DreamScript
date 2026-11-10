@@ -94,6 +94,13 @@ impl Bodies<'_> {
     }
 
     pub(crate) fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Val {
+        // `x in a..b` / `x in a..=b`: the range fixes the element type
+        // instead of a collection's [F7].
+        if op == BinaryOp::In
+            && let Expr::Range { start, end, .. } = peel_paren(right)
+        {
+            return self.in_range(left, start, end, span);
+        }
         let left_val = self.expr(left, None);
         // `a && b`: b sees a's narrowing [B2] — `x is int && x >= 1` types
         // the comparison against the narrowed x.
@@ -371,6 +378,86 @@ impl Bodies<'_> {
                     diverges: false,
                 }
             },
+        }
+    }
+
+    /// Types one range's endpoints and returns the element type both
+    /// agree on: integers of one width. Mixed widths name the
+    /// conversion; a float or non-numeric endpoint is rejected [B7].
+    pub(crate) fn range_element(&mut self, start: &Expr, end: &Expr, span: Span) -> Option<Ty> {
+        let start_val = self.expr(start, None);
+        let end_val = self.expr(end, None);
+        match (
+            numeric_class(&self.decls.universe, start_val.ty),
+            numeric_class(&self.decls.universe, end_val.ty),
+        ) {
+            (Some((NumericClass::Int, a)), Some((NumericClass::Int, b))) => {
+                if a == b {
+                    return Some(start_val.ty);
+                }
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "mixed integer widths `{a}` and `{b}`; conversions are explicit [B7]: \
+                         `{a}(x)`"
+                    ),
+                    span,
+                    "width mismatch",
+                );
+            },
+            _ => {
+                let s = self.decls.universe.render(start_val.ty);
+                let e = self.decls.universe.render(end_val.ty);
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "range endpoints are integers, `{s}` and `{e}` given; conversions are \
+                         explicit [B7]"
+                    ),
+                    span,
+                    "not integer endpoints",
+                );
+            },
+        }
+        None
+    }
+
+    /// Range membership [F7]: the operand must carry the range's integer
+    /// type; the result is bool.
+    fn in_range(&mut self, left: &Expr, start: &Expr, end: &Expr, span: Span) -> Val {
+        let bool_ty = self.bool_ty();
+        let Some(element) = self.range_element(start, end, span) else {
+            let _ = self.expr(left, None);
+            return Val {
+                ty: bool_ty,
+                diverges: false,
+            };
+        };
+        let left_val = self.expr(left, None);
+        let element_name = numeric_class(&self.decls.universe, element)
+            .filter(|(class, _)| *class == NumericClass::Int)
+            .map(|(_, name)| name.to_owned());
+        let ok = numeric_class(&self.decls.universe, left_val.ty)
+            .zip(element_name.as_deref())
+            .is_some_and(|((lclass, lname), ename)| lclass == NumericClass::Int && lname == ename);
+        if !ok {
+            let rendered = self.decls.universe.render(left_val.ty);
+            let suggestion = element_name
+                .map(|name| format!(": `{name}(x)`"))
+                .unwrap_or_default();
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "range membership needs the range's integer type, `{rendered}` given; \
+                     conversions are explicit [B7]{suggestion}"
+                ),
+                span,
+                "operand mismatch",
+            );
+        }
+        Val {
+            ty: bool_ty,
+            diverges: false,
         }
     }
 }

@@ -1,0 +1,10 @@
+error[DS2016]: the receiver is spelled `self` or `mut self` with no annotation; it is typed `Self`
+ --> tests/fixtures/negative/ds2016_annotated_receiver.ds:6:17
+  |
+6 |   fn text(self: self) -> int
+  |                 ^^^^ annotated receiver
+error[DS2016]: the receiver is spelled `self` or `mut self` with no annotation; it is typed `Self`
+ --> tests/fixtures/negative/ds2016_annotated_receiver.ds:9:17
+  |
+9 |   fn text(self: self) -> int { 1 }
+  |                 ^^^^ annotated receiver

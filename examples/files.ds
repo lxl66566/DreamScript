@@ -3,17 +3,15 @@
 // the round trip by content. The path is fixed relative to the current
 // directory.
 
-extern fn str_int (v: int) -> string
-extern fn str_bool (v: bool) -> string
 
-const main = () -> () {
+fn main() -> () {
   const path = "ds_files_example.txt"
   const text = "files round trip"
   write_file(path, text)
   const back = read_file(path)
   println("read back: ${back}")
-  println("size: ${str_int(file_size(path))}")
-  println("exists: ${str_bool(file_exists(path))}")
+  println("size: ${file_size(path)}")
+  println("exists: ${file_exists(path)}")
   if back == text {
     println("round trip ok")
   } else {

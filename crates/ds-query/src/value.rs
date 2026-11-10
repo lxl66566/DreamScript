@@ -49,7 +49,7 @@ pub struct BlockInfo {
     pub id: BlockId,
     /// Byte range of the block within the file. Tree-derived when the parse
     /// succeeded (item extents per the grammar's `file_block` spans); the
-    /// `///|` text-scan extents when it failed.
+    /// `##` text-scan extents when it failed.
     pub span: Span,
 }
 
@@ -57,7 +57,7 @@ pub struct BlockInfo {
 /// file's blocks in source order, mapping byte spans to blocks.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BlockIndexOutput {
-    /// Blocks in source order; every file has at least one [G3].
+    /// Blocks in source order; every file has at least one (G3).
     pub blocks: Box<[BlockInfo]>,
 }
 
@@ -111,7 +111,7 @@ impl Eq for LinearityOutput {}
 
 /// Result of the [`Resolve`](crate::QueryKey::Resolve) query: one
 /// package's collected namespace, per-file resolutions, and the
-/// collection and resolution diagnostics [G3].
+/// collection and resolution diagnostics (G3).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ResolveOutput {
     /// The package namespace every file of the package declared into.
@@ -125,7 +125,7 @@ pub struct ResolveOutput {
 }
 
 /// Result of the [`TypeOf`](crate::QueryKey::TypeOf) query: one
-/// definition's typed story, sliced out of the package check [B2].
+/// definition's typed story, sliced out of the package check (B2).
 ///
 /// The slice is defined by primary spans, like
 /// [`LinearityOutput`](crate::LinearityOutput): a diagnostic belongs to
@@ -143,23 +143,25 @@ pub struct TypeOfOutput {
 
 /// Computed value of one query, stored in the memo table.
 ///
-/// [`non_exhaustive`] because later milestones add their payload variants
+/// `non_exhaustive` because later milestones add their payload variants
 /// when they land.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum QueryValue {
-    /// Value of [`QueryKey::ParseFile`].
+    /// Value of [`QueryKey::ParseFile`](crate::QueryKey::ParseFile).
     ParseFile(ParseOutput),
-    /// Value of [`QueryKey::BlockIndex`].
+    /// Value of [`QueryKey::BlockIndex`](crate::QueryKey::BlockIndex).
     BlockIndex(BlockIndexOutput),
-    /// Value of [`QueryKey::BlockSource`]: the block's source text.
+    /// Value of [`QueryKey::BlockSource`](crate::QueryKey::BlockSource): the
+    /// block's source text.
     BlockSource(Arc<str>),
-    /// Value of [`QueryKey::Resolve`].
+    /// Value of [`QueryKey::Resolve`](crate::QueryKey::Resolve).
     Resolve(ResolveOutput),
-    /// Value of [`QueryKey::TypeOf`].
+    /// Value of [`QueryKey::TypeOf`](crate::QueryKey::TypeOf).
     TypeOf(TypeOfOutput),
-    /// Value of [`QueryKey::LinearityCheck`].
+    /// Value of [`QueryKey::LinearityCheck`](crate::QueryKey::LinearityCheck).
     LinearityCheck(LinearityOutput),
-    /// Value of [`QueryKey::EffectsOf`]: the definition's effect row.
+    /// Value of [`QueryKey::EffectsOf`](crate::QueryKey::EffectsOf): the
+    /// definition's effect row.
     EffectRow(EffectRow),
 }

@@ -33,7 +33,7 @@ const PRELUDE: &str = concat!(
 
 fn case(body: &str) -> (ds_check::Checked, ds_check::Linearity) {
     check(&format!(
-        "{PRELUDE}const go = (p: string) -> int {{\n{body}\n}}\n"
+        "{PRELUDE}fn go(p: string) -> int {{\n{body}\n}}\n"
     ))
 }
 
@@ -47,7 +47,7 @@ fn expect_one(lin: &ds_check::Linearity) -> &Diagnostic {
 #[test]
 fn moved_then_used_renders_the_two_span_golden() {
     let body = concat!(
-        "const go = (p: string) -> int {\n",
+        "fn go(p: string) -> int {\n",
         "  const h = open_handle(p)\n",
         "  take_handle(h)\n",
         "  take_handle(h)\n",
@@ -87,13 +87,29 @@ fn copyable_bindings_reuse_freely() {
     // `int` and `string` are tags, and tags copy: two consuming calls on
     // one binding are two copies, and no drop is owed.
     let source = format!(
-        "{PRELUDE}const go = (p: string) -> int {{\n  var n = share_handle(open_handle(p))\n  n \
-         += share_handle(open_handle(p))\n  take_handle(open_handle(p))\n  n\n}}\n"
+        "{PRELUDE}fn go(p: string) -> int {{\n  var n = share_handle(open_handle(p))\n  n += \
+         share_handle(open_handle(p))\n  take_handle(open_handle(p))\n  n\n}}\n"
     );
     let (checked, lin) = check(&source);
     assert!(checked.diags.iter().all(|d| d.code.as_str() != "DS3001"));
     assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
     assert!(lin.drops.is_empty(), "copyable bindings owe no drop");
+}
+
+#[test]
+fn a_bare_ident_hole_is_a_consuming_use() {
+    // `$h` is a value use like `${h}`: reading a moved binding through a
+    // hole reports the same moved-then-used diagnostic
+    let (checked, lin) = case(concat!(
+        "  const h = open_handle(p)\n",
+        "  take_handle(h)\n",
+        "  const s = \"v=$h\"\n",
+        "  0\n",
+    ));
+    assert!(checked.diags.iter().all(|d| d.code.as_str() == "DS2001"));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
 }
 
 #[test]
@@ -217,9 +233,9 @@ fn a_move_inside_a_loop_reports_the_re_executing_path() {
 #[test]
 fn a_move_inside_a_for_body_reports_the_re_executing_path() {
     let source = format!(
-        "{PRELUDE}struct list[t]\nextern fn single (v: int) -> list[int]\nconst go = (p: string) \
-         -> int {{\nconst h = open_handle(p)\nvar n = 0\nfor x in single(3) {{\ntake_handle(h)\nn \
-         += x\n}}\nn\n
+        "{PRELUDE}struct list[t]\nextern fn single (v: int) -> list[int]\nfn go(p: string) -> int \
+         {{\nconst h = open_handle(p)\nvar n = 0\nfor x in single(3) {{\ntake_handle(h)\nn += \
+         x\n}}\nn\n
 }}\n"
     );
     let (_, lin) = check(&source);
@@ -282,7 +298,7 @@ fn a_struct_with_a_linear_field_is_itself_linear() {
         "{PRELUDE}struct wrapper {{
   h: handle
 }}
-const go = (p: string) -> int {{
+fn go(p: string) -> int {{
   const w = wrapper {{ h: open_handle(p) }}
   take_wrapper(w)
   take_wrapper(w)
@@ -303,7 +319,7 @@ fn linear_generic_parameter_flows_from_the_marker_bound() {
         "tag int\n",
         "trait Copyable { }\n",
         "extern fn take[t] (move x: t) -> int\n",
-        "const go = [t: ~Copyable] (move x: t) -> int {\n",
+        "fn go[t: ~Copyable](move x: t) -> int {\n",
         "  take(x)\n",
         "  take(x)\n",
         "}\n",
@@ -318,7 +334,7 @@ fn linear_generic_parameter_flows_from_the_marker_bound() {
 fn a_copyable_generic_parameter_flows_from_the_default() {
     let source = concat!(
         "tag int\n",
-        "const go = [t] (x: t) -> int {\n",
+        "fn go[t](x: t) -> int {\n",
         "  take(x)\n",
         "  take(x)\n",
         "}\n",
@@ -355,8 +371,8 @@ fn structural_equality_and_is_borrow_their_operands() {
 #[test]
 fn a_top_level_linear_definition_consumed_twice_across_items() {
     let source = format!(
-        "{PRELUDE}const h = open_handle(\"a\")\nconst first = () -> int {{ take_handle(h) \
-         }}\nconst second = () -> int {{ take_handle(h) }}\n"
+        "{PRELUDE}const h = open_handle(\"a\")\nfn first() -> int {{ take_handle(h) }}\nfn \
+         second() -> int {{ take_handle(h) }}\n"
     );
     let (_, lin) = check(&source);
     let diag = expect_one(&lin);
@@ -392,8 +408,7 @@ fn consume_mode_parameter_double_consume_renders_the_two_span_golden() {
     // state [C2]: the first consuming call moves it, the second is a
     // use-after-move with the same golden as locals.
     let source = format!(
-        "{PRELUDE}const twice = (move h: handle) -> int {{\n  take_handle(h)\n  \
-         take_handle(h)\n}}\n"
+        "{PRELUDE}fn twice(move h: handle) -> int {{\n  take_handle(h)\n  take_handle(h)\n}}\n"
     );
     let (checked, lin) = check(&source);
     assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
@@ -570,7 +585,7 @@ fn projecting_a_linear_field_kills_the_receiver_binding() {
   h: handle
 }}
 extern fn open_holder (p: string) -> holder
-const go = (p: string) -> int {{
+fn go(p: string) -> int {{
   const w = open_holder(p)
   const inner = w.h
   take_handle(inner)
@@ -610,7 +625,7 @@ fn destructuring_after_a_projection_move_fires_on_the_source() {
   b: handle
 }}
 extern fn open_pair (p: string) -> pair
-const go = (p: string) -> int {{
+fn go(p: string) -> int {{
   const q = open_pair(p)
   take_handle(q.a)
   const pair {{ a, b }} = q
@@ -633,7 +648,7 @@ fn destructuring_moves_the_source_into_its_pattern_binders() {
   b: handle
 }}
 extern fn open_pair (p: string) -> pair
-const go = (p: string) -> int {{
+fn go(p: string) -> int {{
   const q = open_pair(p)
   const pair {{ a, b }} = q
   take_handle(a)

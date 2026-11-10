@@ -3,9 +3,7 @@
 use ds_diag::{ErrorCode, Span};
 use pest::iterators::Pair;
 
-use super::{
-    Ctx, empty_block, inner, inner_or_break, is_op_rule, is_operand_rule, join, or_tail_span,
-};
+use super::{Ctx, empty_block, inner, inner_or_break, is_op_rule, is_operand_rule, join};
 use crate::{Rule, ast::*};
 
 impl Ctx<'_> {
@@ -14,7 +12,6 @@ impl Ctx<'_> {
     pub(super) fn expr(&mut self, p: Pair<'_, Rule>) -> Expr {
         match p.as_rule() {
             Rule::assign_lvl | Rule::nos_assign => self.assign(p),
-            Rule::or_lvl | Rule::nos_or => self.or_expr(p),
             Rule::range_lvl | Rule::nos_range | Rule::in_rhs | Rule::nos_in_rhs => self.range(p),
             Rule::isin_lvl | Rule::nos_isin => self.isin(p),
             Rule::logor_lvl | Rule::nos_logor => self.fold_binary(p, BinaryOp::Or),
@@ -81,6 +78,14 @@ impl Ctx<'_> {
                 .next()
                 .map_or(Expr::Break(self.span(&p)), |c| self.lambda_form(c)),
             Rule::lambda_paren | Rule::lambda_bare => self.lambda_form(p),
+            Rule::list_lit => {
+                let span = self.span(&p);
+                let items = inner(&p)
+                    .filter(|c| c.as_rule() == Rule::expr)
+                    .map(|c| self.expr(c))
+                    .collect();
+                Expr::List { span, items }
+            },
             Rule::paren_tuple => self.tuple(p),
             Rule::if_expr => self.if_expr(p),
             Rule::match_expr => self.match_expr(p),
@@ -175,37 +180,6 @@ impl Ctx<'_> {
             };
         }
         acc
-    }
-
-    fn or_expr(&mut self, p: Pair<'_, Rule>) -> Expr {
-        let span = self.span(&p);
-        let children: Vec<Pair<'_, Rule>> =
-            inner(&p).filter(|c| c.as_rule() != Rule::kw_or).collect();
-        if self.chain_guard(children.len(), span) {
-            return Expr::Break(span);
-        }
-        let mut iter = children.into_iter();
-        let first = iter.next().map_or(Expr::Break(span), |c| self.expr(c));
-        let mut acc = first;
-        for c in iter {
-            let tail = self.or_tail(c);
-            let s = join(acc.span(), or_tail_span(&tail));
-            acc = Expr::Or {
-                span: s,
-                left: Box::new(acc),
-                right: Box::new(tail),
-            };
-        }
-        acc
-    }
-
-    fn or_tail(&mut self, p: Pair<'_, Rule>) -> OrTail {
-        match self.expr(p) {
-            Expr::Return { span, expr } => OrTail::Return { span, expr },
-            Expr::Break(span) => OrTail::Break(span),
-            Expr::Continue(span) => OrTail::Continue(span),
-            e => OrTail::Expr(e),
-        }
     }
 
     fn range(&mut self, p: Pair<'_, Rule>) -> Expr {

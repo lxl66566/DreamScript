@@ -1,0 +1,109 @@
+// source: tutorial verification pass 2026-11-10 (implementation-plan Open threads A/B/C)
+// purpose: the pipeline bugs the pass found: bare-tag match arms, or-patterns of unit tags, tail-? and branch-final ? over a contained union, mid-block return-? over a contained union, a strict-sub-union return, a strict-sub-union binding and assignment
+// items:
+// on: stage: typecheck
+// off: stage: typecheck
+// sw: stage: typecheck
+// show: stage: run
+// show_rev: stage: run
+// timeout: stage: typecheck
+// refused: stage: typecheck
+// ready: stage: typecheck
+// outcome: stage: typecheck
+// brief: stage: run
+// io_error: stage: typecheck
+// parse_error: stage: typecheck
+// config: stage: typecheck
+// parse_config: stage: typecheck
+// load_config: stage: run
+// eager: stage: typecheck
+// forward: stage: typecheck
+// branchy: stage: typecheck
+// store: stage: typecheck
+
+// A: a bare unit-tag arm is a member test, not a binding catchall — the
+// scrutinee's value picks the arm, in either arm order
+tag on
+tag off
+type sw = on | off
+
+fn show(s: sw) -> () {
+  match s {
+    on => println("ON"),
+    off => println("OFF"),
+  }
+}
+
+fn show_rev(s: sw) -> () {
+  match s {
+    off => println("OFF"),
+    on => println("ON"),
+  }
+}
+
+// B: an or-pattern of unit tags is one member set binding nothing
+tag timeout
+tag refused
+tag ready
+type outcome = timeout | refused | ready
+
+fn brief(e: outcome) -> () {
+  match e {
+    timeout | refused => println("net-err"),
+    ready => println("ready"),
+  }
+}
+
+// C: a tail `?` whose operand union is contained in the return union is
+// the return itself (E4's canonical load_config shape); parse_config is
+// this file's stand-in for the record's parser
+tag io_error
+tag parse_error
+struct config { host: string, port: int }
+
+extern fn parse_config (text: string) -> config | parse_error
+
+fn load_config(path: string) -> config | io_error | parse_error {
+  const text = read_file(path)?
+  parse_config(text)?
+}
+
+// D: a mid-block `return e?` types its operand against the declared
+// return union, the same anchor the final expression carries
+fn eager(path: string) -> config | io_error | parse_error {
+  if path == "x" {
+    return load_config(path)?
+  }
+  load_config(path)?
+}
+
+// E: a mid-block `return e` whose operand union is a strict subset of
+// the declared return re-spans per member into the return union
+fn forward(text: string) -> config | io_error | parse_error {
+  if text == "x" {
+    return parse_config(text)
+  }
+  parse_config(text)
+}
+
+// F: if/match branch-final `?` splits against the declared return, the
+// same anchor the final expression carries
+fn branchy(text: string) -> config | parse_error {
+  if text == "x" {
+    parse_config(text)?
+  } else {
+    parse_config(text)?
+  }
+}
+
+// G: a strict-sub-union initializer widens into the annotated binding,
+// and the assignment widens over the old value
+fn store(text: string) -> () {
+  var kept: config | io_error | parse_error = parse_config(text)
+  kept = parse_config(text)
+  match kept {
+    io_error => (),
+    parse_error => (),
+    c => (),
+  }
+}

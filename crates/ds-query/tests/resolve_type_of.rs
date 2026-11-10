@@ -9,12 +9,12 @@ use ds_query::{Db, DefId, PackageId, Resolve, TypeOf};
 /// the first), and block 1 declares a distinct binding.
 const PKG: &str = concat!(
     "tag int\n",
-    "///|\n",
-    "const size = (s: int) -> int { 1 }\n",
-    "///|\n",
+    "##\n",
+    "fn size(s: int) -> int { 1 }\n",
+    "##\n",
     "const other = 2\n",
-    "///|\n",
-    "const size = (s: int) -> int { 3 }\n",
+    "##\n",
+    "fn size(s: int) -> int { 3 }\n",
 );
 
 /// `(file << 8) | block`: the placeholder `DefId` packing.
@@ -73,8 +73,8 @@ fn an_edit_recomputes_the_changed_story_and_renews_the_rest() {
     // block 2 renews (its value recomputes to an equal one and its
     // change-revision stays put).
     let broken = PKG.replace(
-        "const size = (s: int) -> int { 1 }",
-        "const size = (s: int) -> int { \"x\" }",
+        "fn size(s: int) -> int { 1 }",
+        "fn size(s: int) -> int { \"x\" }",
     );
     db.set_file_content(file, &broken).unwrap();
 

@@ -1,7 +1,7 @@
 //! Validating reader: rejects every corruption class with a typed
 //! [`ReadError`] that maps to a structured ds-diag [`Diagnostic`].
 
-use ds_abi::{FrameLayout, Uop};
+use ds_abi::{FrameLayout, Inst};
 use ds_diag::{Diagnostic, ErrorCode, FileId, Span};
 
 use crate::{
@@ -106,6 +106,19 @@ pub enum ReadError {
         /// Directory-declared payload length.
         len: usize,
     },
+    /// The directory's kinds are not in the writer's canonical order
+    /// (DS4008). Transposed rows with equal-length payloads still tile, but
+    /// the writer re-emits canonical order, so accepting them would break
+    /// byte stability.
+    #[error("section {kind} at byte {at} is out of canonical order (expected {expected})")]
+    NonCanonicalSectionOrder {
+        /// The kind found at the off-position.
+        kind: SectionKind,
+        /// The kind the canonical order places at that position.
+        expected: SectionKind,
+        /// Offset of the offending kind byte.
+        at: usize,
+    },
 }
 
 impl ReadError {
@@ -120,7 +133,8 @@ impl ReadError {
             Self::UnknownSectionKind { .. }
             | Self::DuplicateSection { .. }
             | Self::MissingSection { .. }
-            | Self::SectionOverrun { .. } => ErrorCode::ModuleSectionMalformed,
+            | Self::SectionOverrun { .. }
+            | Self::NonCanonicalSectionOrder { .. } => ErrorCode::ModuleSectionMalformed,
             Self::UnknownFlags { .. }
             | Self::UnexpectedEof { .. }
             | Self::MalformedUleb { .. }
@@ -141,7 +155,8 @@ impl ReadError {
             | Self::MalformedUleb { at }
             | Self::InvalidUtf8 { at }
             | Self::Malformed { at, .. }
-            | Self::UnknownSectionKind { at, .. } => Some(*at),
+            | Self::UnknownSectionKind { at, .. }
+            | Self::NonCanonicalSectionOrder { at, .. } => Some(*at),
             Self::HashMismatch { .. }
             | Self::DuplicateSection { .. }
             | Self::MissingSection { .. } => None,
@@ -165,7 +180,8 @@ impl ReadError {
 /// Parses and validates a dsmod module from `bytes`.
 ///
 /// Validates the magic, format version, target class, flags, ULEB bounds,
-/// section framing, and every payload. The checked source hash is verified
+/// section framing (canonical kind order, bounds, tiling), and every
+/// payload. The checked source hash is verified
 /// separately by [`read_checked`], because the source bytes are not part of
 /// the module file.
 ///
@@ -209,10 +225,10 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
     }
     let source_hash = p.hash16()?;
 
-    // Section directory.
+    // Section directory: (kind byte offset, kind, payload offset, length).
     let section_count = p.count()?;
     let mut sections: [Option<(usize, usize)>; 5] = [None; 5];
-    let mut entries: Vec<(SectionKind, usize, usize)> = Vec::new();
+    let mut entries: Vec<(usize, SectionKind, usize, usize)> = Vec::new();
     for _ in 0..section_count {
         let at = p.abs();
         let tag = p.u8()?;
@@ -225,12 +241,12 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
             return Err(ReadError::DuplicateSection { kind });
         }
         sections[kind.index()] = Some((offset, len));
-        entries.push((kind, offset, len));
+        entries.push((at, kind, offset, len));
     }
     let dir_end = p.abs();
 
     // Framing: every section lives after the directory and inside the file.
-    for &(kind, offset, len) in &entries {
+    for &(_, kind, offset, len) in &entries {
         let end = offset.checked_add(len);
         if offset < dir_end || end.is_none_or(|end| end > bytes.len()) {
             return Err(ReadError::SectionOverrun { kind, offset, len });
@@ -246,12 +262,23 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
             return Err(ReadError::MissingSection { kind });
         }
     }
+    // Canonical kind order: the writer emits kinds in `SectionKind::ALL`
+    // order (DebugSpans last and optional), and the entry count here is 4
+    // or 5, so the directory must match that order position for position.
+    // Transposed rows with equal-length payloads still tile below, but the
+    // writer re-emits canonical order, so they must not be accepted.
+    for (position, &(at, kind, ..)) in entries.iter().enumerate() {
+        let expected = SectionKind::ALL[position];
+        if kind != expected {
+            return Err(ReadError::NonCanonicalSectionOrder { kind, expected, at });
+        }
+    }
     // Canonical layout: payloads tile the region after the directory
     // exactly, in directory order, with no gaps, no overlaps, and no
     // trailing bytes. This is the writer's layout, so any accepted file is
     // byte-identical to its re-serialization by construction.
     let mut expected = dir_end;
-    for &(_, offset, len) in &entries {
+    for &(_, _, offset, len) in &entries {
         if offset != expected {
             return Err(ReadError::Malformed {
                 at: offset,
@@ -352,9 +379,9 @@ fn parse_constant(p: &mut Cursor<'_>) -> Result<Constant, ReadError> {
     }
 }
 
-/// Parses the blocks payload, version 1 [BL-7]: per-function records, each
-/// validated through [`Function::new`] — every code word must decode to a
-/// uop at its pc, and every jump must land inside the function's own body.
+/// Parses the blocks payload, version 1 (BL-7): per-function records, each
+/// validated through [`Function::new`] — every code word must decode at
+/// its pc, and every jump must land inside the function's own body.
 fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let at = p.abs();
@@ -388,14 +415,16 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
             let at = p.abs();
             let word = p.u32le()?;
             let pc = u32::try_from(pc).expect("pc fits u32");
-            let uop = Uop::decode(pc, word)
-                .map_err(|_| malformed(at, "code word does not decode to a uop"))?;
-            if let Some(target) = jump_target_of(uop) {
-                if usize::try_from(target).unwrap_or(usize::MAX) >= code_count {
-                    return Err(malformed(at, "jump target escapes the function body"));
+            let inst = Inst::decode(pc, word)
+                .map_err(|_| malformed(at, "code word does not decode to an instruction"))?;
+            if let Inst::Uop(uop) = inst {
+                if let Some(target) = jump_target_of(uop) {
+                    if usize::try_from(target).unwrap_or(usize::MAX) >= code_count {
+                        return Err(malformed(at, "jump target escapes the function body"));
+                    }
                 }
             }
-            code.push(uop);
+            code.push(inst);
         }
         // Entry-descriptor placeholder word pair: zero on disk; the loader
         // fills the tier pointers at install time.

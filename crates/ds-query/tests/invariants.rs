@@ -15,10 +15,10 @@
 //!   because a recomputed-equal block source renews its dependents.
 //!
 //! The oracle models the REAL tree-split semantics (see `FileModel`): the
-//! newline terminating a separator line opens the following block, horizontal
-//! whitespace before a separator closes the preceding block, and text after
-//! `///|` belongs to no block. Every sweep pins the engine's block texts
-//! against that model, so a parse/index divergence fails loudly.
+//! newline terminating a separator line opens the following block, a block's
+//! extent ends at its last content byte, and text after `##` belongs to no
+//! block. Every sweep pins the engine's block texts against that model, so a
+//! parse/index divergence fails loudly.
 //!
 //! The cargo-fuzz target `fuzz_query_engine` drives the same op vocabulary
 //! with coverage feedback; this file is the seeded, fully-checked mirror.
@@ -135,22 +135,22 @@ fn linearity_of_def(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Quer
 /// separator lines. `block_text` reproduces the engine's tree-split text
 /// exactly, which is what renewal locality is measured against:
 ///
-/// * the newline terminating a separator line opens the following block (every block but the first
-///   starts with `\n`);
-/// * horizontal whitespace before a separator closes the preceding block (indenting `///|` extends
-///   the previous block's text);
-/// * text after `///|` belongs to no block;
-/// * the last block runs to end of file.
+/// * the newline terminating a separator line opens the following block (every non-empty block but
+///   the first starts with `\n`);
+/// * the newline ending a block's last line belongs to no block (the separator's `sep_unit` claims
+///   it ahead of `block_sep`), so an extent ends at the body's last content byte;
+/// * text after `##` belongs to no block;
+/// * an empty body is an empty extent (consecutive separators hold a zero-width block).
 struct FileModel {
     bodies: Vec<String>,
     /// `seps[i]` sits between `bodies[i]` and `bodies[i + 1]`; each is
-    /// optional indentation, `///|`, optional trailing text, and a newline.
+    /// `##`, optional trailing text, and a newline.
     seps: Vec<String>,
 }
 
 impl FileModel {
     fn new(bodies: Vec<String>) -> Self {
-        let seps = vec!["///|\n".to_owned(); bodies.len() - 1];
+        let seps = vec!["##\n".to_owned(); bodies.len() - 1];
         Self { bodies, seps }
     }
 
@@ -171,22 +171,19 @@ impl FileModel {
 
     /// The engine's text of block `i` (tree spans; all sources parse clean).
     fn block_text(&self, i: usize) -> String {
+        let body = &self.bodies[i];
+        if body.is_empty() {
+            return String::new();
+        }
         let mut text = if i == 0 {
             String::new()
         } else {
             // The newline of separator line i-1 opens this block.
             "\n".to_owned()
         };
-        text.push_str(&self.bodies[i]);
-        if let Some(sep) = self.seps.get(i) {
-            // Horizontal whitespace before the next separator closes it —
-            // except for the file's empty leading block, whose extent stays
-            // empty because the grammar's top-level `sp` eats that
-            // whitespace before the first `file_block` can.
-            if i != 0 || !self.bodies[0].is_empty() {
-                text.push_str(sep_indent(sep));
-            }
-        }
+        // The newline ending the body's last line belongs to no block.
+        let core = body.strip_suffix('\n').expect("bodies are whole lines");
+        text.push_str(core);
         text
     }
 
@@ -195,13 +192,6 @@ impl FileModel {
             .map(|i| self.block_text(i))
             .collect()
     }
-}
-
-/// The leading horizontal whitespace of a separator line (`sep` always ends
-/// with `///|\n`, possibly after trailing separator text).
-fn sep_indent(sep: &str) -> &str {
-    let head = &sep[..sep.len() - "///|\n".len()];
-    &head[..head.len() - head.trim_start().len()]
 }
 
 /// One tracked query: engine key plus the typed read used to observe it.
@@ -361,18 +351,16 @@ impl Harness {
         (file, self.commit(file))
     }
 
-    /// Re-styles one separator line's surroundings: indentation (which joins
-    /// the PREVIOUS block's text — the real tree-split semantics) and
-    /// trailing text after `///|` (which belongs to no block, so every block
-    /// text holds while all later spans shift).
+    /// Re-styles one separator line: trailing text after `##` belongs to no
+    /// block, so every block text holds while the file bytes and all later
+    /// spans shift.
     fn restyle_separator(&mut self, rng: &mut Rng, file: usize) -> (usize, bool) {
         if self.files[file].seps.is_empty() {
             return (file, self.commit(file)); // one block: nothing outside blocks
         }
         let at = rng.below(self.files[file].seps.len());
-        let indent = if rng.below(2) == 0 { "  " } else { "" };
         let note = if rng.below(2) == 0 { " section" } else { "" };
-        self.files[file].seps[at] = format!("{indent}///|{note}\n");
+        self.files[file].seps[at] = format!("##{note}\n");
         (file, self.commit(file))
     }
 
@@ -397,7 +385,7 @@ impl Harness {
         }
         self.files[file].bodies[at] = head;
         self.files[file].bodies.insert(at + 1, tail);
-        self.files[file].seps.insert(at, "///|\n".to_owned());
+        self.files[file].seps.insert(at, "##\n".to_owned());
         (file, self.commit(file))
     }
 

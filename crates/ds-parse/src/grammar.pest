@@ -9,9 +9,9 @@
 // ===== spacing, comments, newlines =====
 
 nl = _{ "\r\n" | "\n" }
-// `///|` is the block separator, never a comment (checked before "//" so
-// separator lines survive spacing rules that eat comments).
-line_comment = @{ !("///|") ~ "//" ~ (!nl ~ ANY)* }
+// `///` is the reserved doc-comment prefix: trivia today, like any other
+// `//` comment; the doc-comment system itself is future work.
+line_comment = @{ "//" ~ (!nl ~ ANY)* }
 block_comment = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 comment = _{ line_comment | block_comment }
 // Horizontal spacing: never crosses a newline (a line comment does not
@@ -21,6 +21,10 @@ h = _{ (" " | "\t" | block_comment | line_comment)* }
 sp = _{ (h ~ nl)* ~ h }
 // At least one newline, plus surrounding comments.
 nlreq = _{ (h ~ nl)+ ~ h }
+// Top-level spacing: like `sp`, but never consumes the newline that opens
+// a `##` separator line (the separator claims that newline, so it is
+// provably at column 0).
+top_gap = _{ (h ~ nl ~ !("##"))* ~ h }
 
 // ===== identifiers and keywords =====
 
@@ -39,7 +43,6 @@ kw_in       = @{ "in" ~ !ident_cont }
 kw_break    = @{ "break" ~ !ident_cont }
 kw_continue = @{ "continue" ~ !ident_cont }
 kw_return   = @{ "return" ~ !ident_cont }
-kw_or       = @{ "or" ~ !ident_cont }
 kw_is       = @{ "is" ~ !ident_cont }
 kw_struct   = @{ "struct" ~ !ident_cont }
 kw_enum     = @{ "enum" ~ !ident_cont }
@@ -58,7 +61,7 @@ kw_true     = @{ "true" ~ !ident_cont }
 kw_false    = @{ "false" ~ !ident_cont }
 
 keyword = _{ kw_const | kw_var | kw_fn | kw_if | kw_else | kw_match | kw_while
-           | kw_for | kw_in | kw_break | kw_continue | kw_return | kw_or | kw_is
+           | kw_for | kw_in | kw_break | kw_continue | kw_return | kw_is
            | kw_struct | kw_enum | kw_tag | kw_type | kw_trait | kw_impl
            | kw_import | kw_pub | kw_extern | kw_mut | kw_nursery | kw_spawn
            | kw_defer | kw_true | kw_false }
@@ -147,7 +150,7 @@ type_args = _{ type_args_bracket | type_args_angle }
 type_args_bracket = { "[" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ "]" }
 type_args_angle = { "<" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ ">" }
 // A type argument is a type, or a string literal naming an opaque foreign
-// type (`c["sqlite3"]`, the extern surface of section 13.6) [H5].
+// type (`c["sqlite3"]`, the extern surface ) [H5].
 type_arg = _{ type_expr | foreign_name }
 foreign_name = _{ string_lit | raw_hashed | raw_zero }
 
@@ -179,9 +182,7 @@ expr = { assign_lvl }
 // table (which lists plain assignment only): the conformance corpus's
 // arithmetic demos use them, and they cost no new precedence slot.
 assign_op = { "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "=" }
-assign_lvl = { or_lvl ~ (h ~ assign_op ~ sp ~ or_lvl)* }
-
-or_lvl = { range_lvl ~ (h ~ kw_or ~ sp ~ range_lvl)* }
+assign_lvl = { range_lvl ~ (h ~ assign_op ~ sp ~ range_lvl)* }
 
 range_op = { "..=" | ".." }
 range_lvl = { logor_lvl ~ (h ~ range_op ~ sp ~ logor_lvl)? }
@@ -222,6 +223,11 @@ postfix_index = { h ~ "[" ~ sp ~ expr ~ sp ~ "]" }
 postfix_try = { h ~ "?" }
 postfix_dot = { sp ~ "." ~ h ~ field_name }
 // A keyword is a legal field name after `.` (the record uses `f.type`).
+
+// A list literal `[a, b, c]` [F7, B3]: newline-crossing spacing like
+// every bracketed form; the empty `[]` types only against an expected
+// `list[t]` (bidirectional inference, the checker's).
+list_lit = { "[" ~ sp ~ (expr ~ (sp ~ "," ~ sp ~ expr)* ~ h ~ ","?)? ~ sp ~ "]" }
 
 // F7: call arguments are positional or named (`f(x: 1)`); named arguments
 // follow positional ones. Duplicate names and positional-after-named are
@@ -290,15 +296,14 @@ defer_expr = { kw_defer ~ sp ~ block_expr }
 
 literal = _{ float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false }
 
-primary = { struct_lit | lambda | paren_tuple | control | literal | block_expr | path_atom }
+primary = { struct_lit | lambda | list_lit | paren_tuple | control | literal | block_expr | path_atom }
 path_atom = { path }
 
 // `expr_nos`: same chain with struct literals and trailing lambda blocks
 // banned at every operand head, for `if`/`while`/`match`/`for` headers.
 expr_nos = { nos_assign }
 
-nos_assign = { nos_or ~ (h ~ assign_op ~ sp ~ nos_or)* }
-nos_or = { nos_range ~ (h ~ kw_or ~ sp ~ nos_range)* }
+nos_assign = { nos_range ~ (h ~ assign_op ~ sp ~ nos_range)* }
 nos_range = { nos_logor ~ (h ~ range_op ~ sp ~ nos_logor)? }
 nos_logor = { nos_logand ~ (h ~ "||" ~ sp ~ nos_logand)* }
 nos_logand = { nos_isin ~ (h ~ "&&" ~ sp ~ nos_isin)* }
@@ -316,7 +321,7 @@ nos_mul = { nos_unary ~ (h ~ mul_op ~ sp ~ nos_unary)* }
 nos_unary = { (neg_op ~ sp)* ~ nos_postfix }
 nos_postfix = { primary_nos ~ nos_postfix_op* }
 nos_postfix_op = _{ postfix_call | postfix_index | postfix_try | postfix_dot }
-primary_nos = { lambda | paren_tuple | control | literal | block_expr | path_atom }
+primary_nos = { lambda | list_lit | paren_tuple | control | literal | block_expr | path_atom }
 
 // ===== items and file structure =====
 
@@ -380,10 +385,19 @@ impl_member = _{ fn_item | local }
 // Like trait member lists: comma or newline separators, trailing comma OK.
 impl_body = { "{" ~ sp ~ (impl_member ~ (decl_sep ~ impl_member)* ~ decl_sep?)? ~ sp ~ "}" }
 
-// G3: a file is `///|`-separated blocks; a file without separators is one
-// block. The rest of a separator line is separator text.
-file = { SOI ~ sp ~ file_blocks? ~ sp ~ EOI }
+// G3: a file is `##`-separated blocks; a file without separators is one
+// block. A separator is a line-initial `##` only (column 0): mid-line or
+// indented `##` is a parse error, never a separator. The rest of a
+// separator line is separator text. A top-level expression is the
+// script-entry statement form: it parses here, and the library mode
+// rejects it as a structured diagnostic — only the entry file compiles
+// under script mode.
+file = { SOI ~ top_gap ~ file_blocks? ~ top_gap ~ EOI }
 file_blocks = { file_block ~ (sep_unit ~ file_block)* ~ sep_unit? }
-file_block = { item? ~ (nlreq ~ item)* ~ nlreq? }
-sep_unit = _{ sp ~ block_sep ~ &(nl | EOI) }
-block_sep = @{ "///|" ~ (!nl ~ ANY)* }
+file_block = { file_item? ~ (nlreq ~ file_item)* }
+file_item = _{ item | expr }
+// `sep_unit` consumes the newline(s) ending the previous block's last
+// line, so `block_sep` always starts at column 0; `&(SOI)` admits a file
+// that opens with a separator.
+sep_unit = _{ ( (h ~ nl)+ | &(SOI) ) ~ block_sep ~ &(nl | EOI) }
+block_sep = @{ "##" ~ (!nl ~ ANY)* }

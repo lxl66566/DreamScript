@@ -2,9 +2,9 @@
 //! enums, tags, aliases, traits, impls.
 //!
 //! Canonical-form decisions taken here (see also the crate docs):
-//! - trait/impl members always render as `fn name(params) -> ret { ... }`; the AST erases the
-//!   `const name = (params) -> ...` const-arrow spelling, and one canonical form beats source
-//!   peeking.
+//! - named functions render as `fn name(params) -> ret { ... }`: trait/impl members are FnDecls,
+//!   and a top-level `fn` converts onto the const-declaration node, whose converted shape (one
+//!   immutable name bound to one block-bodied lambda) renders back as the fn spelling [F2].
 //! - generic application renders with square brackets (`list[int]`), never the angle form the
 //!   parser tolerates.
 //! - block-bodied members (struct/enum/trait/impl) render newline-separated without commas when
@@ -12,8 +12,9 @@
 //!   (block-bodied followers).
 
 use ds_parse::{
-    Attribute, EnumCase, EnumDecl, EnumPayload, FieldDecl, FnDecl, ImplDecl, ImportDecl, Item,
-    ItemKind, StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, TypeAliasDecl, Vis,
+    Attribute, EnumCase, EnumDecl, EnumPayload, Expr, FieldDecl, FnDecl, ImplDecl, ImportDecl,
+    Item, ItemKind, LocalDecl, Pattern, StructDecl, StructMember, TagDecl, TraitDecl, TraitMember,
+    TypeAliasDecl, Vis,
 };
 
 use crate::{
@@ -37,7 +38,7 @@ pub(crate) fn write_item(ctx: &Ctx, out: &mut String, base: usize, item: &Item) 
     }
     match &item.kind {
         ItemKind::Import(d) => write_import(ctx, out, base, d),
-        ItemKind::Local(l) => write_local(ctx, out, base, l),
+        ItemKind::Local(l) => write_top_local(ctx, out, base, l),
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
             if matches!(item.kind, ItemKind::ExternFn(_)) {
                 out.push_str("extern ");
@@ -58,6 +59,44 @@ fn write_vis(out: &mut String, vis: Vis) {
         Vis::Pub(_) => "pub",
         Vis::PubPkg(_) => "pub(pkg)",
     });
+}
+
+/// A top-level binding: the converted `fn` shape — one immutable name,
+/// no binding annotation, one block-bodied lambda — renders back as the
+/// fn declaration it spells [F2]; every other binding keeps its
+/// const/var form.
+fn write_top_local(ctx: &Ctx, out: &mut String, base: usize, l: &LocalDecl) {
+    if let (
+        Pattern::Binding { name, .. },
+        false,
+        None,
+        Expr::Lambda {
+            generics,
+            params,
+            ret,
+            arrow: false,
+            body,
+            ..
+        },
+    ) = (&l.pat, l.mutable, &l.ty, &l.init)
+    {
+        out.push_str("fn ");
+        out.push_str(&name.name);
+        write_generics(ctx, out, generics);
+        write_params(ctx, out, params);
+        if let Some(ret) = ret {
+            out.push_str(" -> ");
+            write_ty(ctx, out, ret);
+        }
+        out.push(' ');
+        if let Expr::Block(b) = &**body {
+            write_block(ctx, out, base, b);
+        } else {
+            write_expr(ctx, out, base, body);
+        }
+        return;
+    }
+    write_local(ctx, out, base, l);
 }
 
 fn write_attr(out: &mut String, a: &Attribute) {

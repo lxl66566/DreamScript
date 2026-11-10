@@ -166,6 +166,65 @@ fn unknown_section_kind_rejected() {
 }
 
 #[test]
+fn non_canonical_section_order_rejected() {
+    // Swap the kind bytes of directory rows 2 and 3 (type-metadata and
+    // effect-rows): identical two-byte payloads, so the file still tiles
+    // and both payloads parse — only the order differs from the writer's,
+    // and re-serialization would produce different bytes.
+    let mut bytes = module_bytes(false);
+    let (row_a, row_b) = (FIRST_KIND_BYTE + 6, FIRST_KIND_BYTE + 9);
+    bytes.swap(row_a, row_b);
+    let error = read(&bytes).expect_err("transposed directory rows");
+    assert_eq!(error, ReadError::NonCanonicalSectionOrder {
+        kind: SectionKind::EffectRows,
+        expected: SectionKind::TypeMetadata,
+        at: row_a,
+    });
+    assert_diagnostic(&error, ErrorCode::ModuleSectionMalformed);
+    assert_eq!(error.offset(), Some(row_a));
+    // Non-adjacent transposition (rows 0 and 3): unequal payload lengths,
+    // so tiling would also fail, but the kind order is checked first.
+    let mut bytes = module_bytes(false);
+    bytes.swap(FIRST_KIND_BYTE, FIRST_KIND_BYTE + 9);
+    let error = read(&bytes).expect_err("transposed end rows");
+    assert_eq!(error, ReadError::NonCanonicalSectionOrder {
+        kind: SectionKind::EffectRows,
+        expected: SectionKind::Blocks,
+        at: FIRST_KIND_BYTE,
+    });
+    // A five-section module (debug spans present): moving the strippable
+    // section off the last position is rejected the same way.
+    let mut bytes = module_bytes(true);
+    let row_c = FIRST_KIND_BYTE + 9;
+    bytes.swap(row_c, row_c + 3);
+    let error = read(&bytes).expect_err("debug spans out of last position");
+    assert_eq!(error, ReadError::NonCanonicalSectionOrder {
+        kind: SectionKind::DebugSpans,
+        expected: SectionKind::EffectRows,
+        at: row_c,
+    });
+    assert_diagnostic(&error, ErrorCode::ModuleSectionMalformed);
+}
+
+/// The campaign-found reproducer: a committed corpus seed with the
+/// type-metadata and effect-rows directory rows transposed over identical
+/// payloads. The seed must stay rejected; accepting it would break the
+/// byte-stable reader contract.
+#[test]
+fn fuzz_reproducer_section_row_swap_rejected() {
+    let path = "../../fuzz/corpus/fuzz_read_dsmod/section-row-swap.dsmod";
+    let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+    let error = read(&bytes).expect_err("row-swapped directory must be rejected");
+    assert_eq!(error, ReadError::NonCanonicalSectionOrder {
+        kind: SectionKind::EffectRows,
+        expected: SectionKind::TypeMetadata,
+        at: 57,
+    });
+    assert_diagnostic(&error, ErrorCode::ModuleSectionMalformed);
+    assert_eq!(error.offset(), Some(57));
+}
+
+#[test]
 fn gapped_section_layout_rejected() {
     let mut bytes = module_bytes(true);
     // Open a one-byte gap between the blocks and constants payloads by
@@ -213,7 +272,8 @@ fn bad_code_word_rejected() {
     use ds_abi::{FrameLayout, Uop, uop::ConstIdx};
     use ds_mod::Function;
     // One function whose code is [KIMM r0 <- k0; RET r0]: the RET word is
-    // the distinctive needle; corrupt its opcode byte to a reserved major.
+    // the distinctive needle; corrupt its opcode byte to the reserved
+    // major 0xF (0xE decodes: it is the RC pair).
     let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO).with_function(
         Function::new(
             "f",
@@ -235,10 +295,10 @@ fn bad_code_word_rejected() {
         .windows(4)
         .position(|w| w == needle)
         .expect("code word present");
-    bytes[pos] = 0xe0; // reserved major: no uop decodes
+    bytes[pos] = 0xf0; // reserved major: no instruction decodes
     let error = read(&bytes).expect_err("bad code word");
     assert!(matches!(error, ReadError::Malformed {
-        reason: "code word does not decode to a uop",
+        reason: "code word does not decode to an instruction",
         ..
     }));
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);

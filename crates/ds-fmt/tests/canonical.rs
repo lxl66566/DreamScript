@@ -135,16 +135,20 @@ fn inline_containers_stay_inline_multiline_open_up() {
 }
 
 #[test]
-fn const_arrow_members_render_as_fn() {
-    // The AST erases the const-arrow trait-member spelling (`const f = ...`);
-    // `fn` is the one canonical form (record: trait/impl members are
-    // const-arrow declarations, top-level `fn` is the accepted superset).
+fn converted_fns_render_as_fn() {
+    // A top-level `fn` converts onto the const-declaration node (one
+    // binding of one lambda); the formatter renders that shape back as
+    // the fn spelling — the one named-function form [F2].
+    assert_eq!(
+        fmt_once("t.ds", "fn  speak ( self ) ->  string { \"\" }\n"),
+        "fn speak(self) -> string { \"\" }\n"
+    );
     assert_eq!(
         fmt_once(
             "t.ds",
-            "trait animal {\n  const speak = (self) -> string { \"\" }\n}\n"
+            "fn push[t: ~Copyable] ( s: stack[t] ) -> stack[t] {\n  s\n}\n"
         ),
-        "trait animal {\n  fn speak(self) -> string { \"\" }\n}\n"
+        "fn push[t: ~Copyable](s: stack[t]) -> stack[t] {\n  s\n}\n"
     );
 }
 

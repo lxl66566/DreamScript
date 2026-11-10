@@ -1,4 +1,4 @@
-// source: docs/en/design-decisions.md section 13.6 (modules: hash core)
+// source: frozen archive catalog 06-modules-tooling (seed corpus)
 // purpose: ds.pkg manifest as the lock, selective and conditional imports, linear sqlite handle binding
 // items:
 // ds-pkg-manifest: stage: m7
@@ -23,12 +23,12 @@ import @std/csv (reader)
 import acme/pipeline/schema (row, parse_row)
 import acme/pipeline/fs if os == "windows"
 
-///|
+##
 
 extern fn sqlite3_open(path: *const c.char) -> c["sqlite3"] | c.int
 extern fn sqlite3_close(db: c["sqlite3"]) -> c.int
 
-const double_close = (path: string) -> () | c.int {
+fn double_close(path: string) -> () | c.int {
   const db = sqlite3_open(path)?
   sqlite3_close(db)
   sqlite3_close(db)

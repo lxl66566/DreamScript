@@ -1,7 +1,7 @@
 //! The in-memory module value: header data, functions, constants, and
 //! debug spans.
 
-use ds_abi::{EncodeError, FrameLayout, SlotType, Uop};
+use ds_abi::{EncodeError, FrameLayout, Inst, SlotType, Uop};
 
 use crate::{
     hash::Hash128,
@@ -71,24 +71,25 @@ pub enum FunctionError {
         /// The function's code length, in words.
         len: u32,
     },
-    /// The uop cannot be encoded at its pc (bias window overflow).
-    #[error("uop cannot be encoded at its pc: {0:?}")]
+    /// An instruction cannot be encoded at its pc (bias window overflow).
+    #[error("instruction cannot be encoded at its pc: {0:?}")]
     Encode(EncodeError),
 }
 
-/// One per-function record of the blocks payload [BL-7]: local name, frame
-/// layout, its constant pool, and the validated uop body.
+/// One per-function record of the blocks payload (BL-7): local name, frame
+/// layout, its constant pool, and the validated instruction body — uops
+/// interleaved with the 0xE RC pair (C4).
 ///
-/// Construction validates the body once: every uop encodes canonically at
+/// Construction validates the body once: every word encodes canonically at
 /// its pc, and every jump lands inside the function's own code. The writer
-/// serializes the stored uops back to words; the reader rebuilds through
-/// the same constructor, so both directions share one validation path.
+/// serializes the stored words back out; the reader rebuilds through the
+/// same constructor, so both directions share one validation path.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Function {
     name: String,
     layout: FrameLayout,
     constants: Vec<Constant>,
-    code: Vec<Uop>,
+    code: Vec<Inst>,
 }
 
 impl Function {
@@ -97,21 +98,25 @@ impl Function {
     /// # Errors
     ///
     /// Returns [`FunctionError::JumpEscapesBody`] when a jump target is at
-    /// or past the code length, and [`FunctionError::Encode`] when a uop
-    /// cannot be encoded at its pc.
+    /// or past the code length, and [`FunctionError::Encode`] when a word
+    /// cannot be encoded at its pc. The body accepts any mix of uops and
+    /// RC ops (a bare uop stream is the common pure-uop fixture).
     pub fn new(
         name: impl Into<String>,
         layout: FrameLayout,
         constants: Vec<Constant>,
-        code: Vec<Uop>,
+        code: impl IntoIterator<Item = impl Into<Inst>>,
     ) -> Result<Self, FunctionError> {
+        let code: Vec<Inst> = code.into_iter().map(Into::into).collect();
         let len = u32::try_from(code.len()).expect("code length fits u32");
-        for (pc, uop) in code.iter().enumerate() {
+        for (pc, inst) in code.iter().enumerate() {
             let pc = u32::try_from(pc).expect("pc fits u32");
-            uop.encode(pc).map_err(FunctionError::Encode)?;
-            if let Some(target) = jump_target_of(*uop) {
-                if target >= len {
-                    return Err(FunctionError::JumpEscapesBody { pc, target, len });
+            inst.encode(pc).map_err(FunctionError::Encode)?;
+            if let Inst::Uop(uop) = inst {
+                if let Some(target) = jump_target_of(*uop) {
+                    if target >= len {
+                        return Err(FunctionError::JumpEscapesBody { pc, target, len });
+                    }
                 }
             }
         }
@@ -130,7 +135,7 @@ impl Function {
         &self.name
     }
 
-    /// The static frame layout [BL-6].
+    /// The static frame layout (BL-6).
     #[must_use]
     pub fn layout(&self) -> &FrameLayout {
         &self.layout
@@ -142,9 +147,9 @@ impl Function {
         &self.constants
     }
 
-    /// The validated uop body; serializes to canonical 32-bit words.
+    /// The validated instruction body; serializes to canonical 32-bit words.
     #[must_use]
-    pub fn code(&self) -> &[Uop] {
+    pub fn code(&self) -> &[Inst] {
         &self.code
     }
 }

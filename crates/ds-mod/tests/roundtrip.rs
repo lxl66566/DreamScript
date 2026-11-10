@@ -218,7 +218,7 @@ fn tempfile_dir() -> ScratchDir {
     ScratchDir(path)
 }
 
-// The mutual `even`/`odd` of the record's 13.7 (H2's example), a local
+// The mutual `even`/`odd` of H2's example, a local
 // copy of ds-abi's locked fixture encodings (its test module is not
 // public). Slots: r0 = n, r1 = compare bool, r2 = constant scratch, r3 =
 // the outgoing argument (the slide source the ABI derives as the arg-area
@@ -347,8 +347,11 @@ fn even_odd_two_function_module_round_trips() {
     let (even, odd) = (&read_back.functions()[0], &read_back.functions()[1]);
     assert_eq!(even.name(), "even");
     assert_eq!(odd.name(), "odd");
-    assert_eq!(even.code(), even_code().as_slice());
-    assert_eq!(odd.code(), odd_code().as_slice());
+    let expected = |code: Vec<Uop>| -> Vec<ds_abi::Inst> {
+        code.into_iter().map(ds_abi::Inst::from).collect()
+    };
+    assert_eq!(even.code(), expected(even_code()).as_slice());
+    assert_eq!(odd.code(), expected(odd_code()).as_slice());
     assert_eq!(even.layout(), &even_odd_layout());
     assert_eq!(even.constants()[0], Constant::I64(0));
     assert_eq!(even.constants()[3], Constant::FuncRef {
@@ -357,10 +360,10 @@ fn even_odd_two_function_module_round_trips() {
     });
     assert_eq!(odd.constants()[2], Constant::Bool(false));
     // The tail-call word survived: CALLT with nargs 1 and pool index 3.
-    assert!(even.code().contains(&Uop::Callt {
+    assert!(even.code().contains(&ds_abi::Inst::Uop(Uop::Callt {
         callee: ConstIdx(3),
         nargs: 1
-    }));
+    })));
 }
 
 #[test]
@@ -379,7 +382,7 @@ fn empty_function_round_trips() {
     assert_eq!(write(&read_back), bytes);
     let function = &read_back.functions()[0];
     assert_eq!(function.name(), "nop");
-    assert_eq!(function.code(), &[Uop::Ret { src: 0 }]);
+    assert_eq!(function.code(), &[ds_abi::Inst::Uop(Uop::Ret { src: 0 })]);
     assert_eq!(function.layout().frame_size(), 2); // metadata + call words only
 }
 

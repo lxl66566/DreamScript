@@ -13,7 +13,7 @@ const SOURCE: &str = concat!(
     "tag p_none\n",
     "struct p_num { value: int }\n",
     "type probe = p_none | p_num\n",
-    "const find = (p: probe) -> int | none {\n",
+    "fn find(p: probe) -> int | none {\n",
     "  if p is p_num { p.value } else { none }\n",
     "}\n",
 );

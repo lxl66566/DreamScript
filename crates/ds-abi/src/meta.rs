@@ -1,7 +1,7 @@
-//! The frame metadata word [BL-6] and the tail-chain backtrace model [H2].
+//! The frame metadata word (BL-6) and the tail-chain backtrace model (H2).
 
 /// A code position: instruction index within a function's body. Multiply by
-/// 4 for the byte offset into the fixed-width 32-bit code stream [BL-1].
+/// 4 for the byte offset into the fixed-width 32-bit code stream (BL-1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CodePc(pub u32);
 
@@ -9,7 +9,7 @@ pub struct CodePc(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FuncId(pub u32);
 
-/// Model of the metadata word contents [BL-6]: return address, frame size,
+/// Model of the metadata word contents (BL-6): return address, frame size,
 /// TCO-chain state. One word group at the frame base (see the layout
 /// diagram in `layout.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct FrameMetadata {
     pub return_pc: CodePc,
     /// Total physical words of this frame ([`crate::FrameLayout::frame_size`]).
     pub frame_size: u32,
-    /// Tail-chain state for honest backtraces under TCO [H2].
+    /// Tail-chain state for honest backtraces under TCO (H2).
     pub tail: TailChain,
 }
 
@@ -26,14 +26,14 @@ impl FrameMetadata {
     /// CALLT metadata update: the frame is reused, so the return address is
     /// preserved (the tail call still returns to this frame's caller), the
     /// frame size becomes the callee's, and the tail chain grows by one
-    /// elided logical frame [H2].
+    /// elided logical frame (H2).
     pub fn enter_tail_call(&mut self, callee_frame_size: u32) {
         self.frame_size = callee_frame_size;
         self.tail.record_tail_call();
     }
 }
 
-/// Per-frame TCO-chain counter [H2]: how many logical frames this physical
+/// Per-frame TCO-chain counter (H2): how many logical frames this physical
 /// frame has elided via tail calls since the normal call that created it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TailChain {
@@ -69,7 +69,7 @@ impl TailChain {
 }
 
 /// One elided logical frame, recorded on the debug side chain when
-/// per-fiber debug recording is enabled [H2]. Self-contained, so records
+/// per-fiber debug recording is enabled (H2). Self-contained, so records
 /// can be read or truncated independently of each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ElisionRecord {

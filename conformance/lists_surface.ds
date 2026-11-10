@@ -1,0 +1,50 @@
+// source: the record's declaration/construction story (B3, F7) and F9's type-namespace constructor resolution, adopted 2026-11-10
+// purpose: list literals and the list[t]() empty constructor against the checked list surface
+// items:
+// page: stage: typecheck
+// sum_ints: stage: run
+// words_report: stage: run
+// empty_pages: stage: run
+// fresh_ints: stage: run
+// seeds_total: stage: run
+// reject-mixed: stage: reject the mixed-element literal names the offending item's type (DS2001) [B3]
+
+struct page { url: string }
+
+fn sum_ints() -> int {
+  const xs = [1, 2, 3]
+  var total: int = 0
+  var i: int = 0
+  while i < list_len(xs) {
+    const cell = list_get(xs, i)
+    total += cell.ok((x: int) => x).err((_: none) => 0)
+    i += 1
+  }
+  total
+}
+
+fn words_report() -> string {
+  const words = ["alpha", "beta", "gamma"]
+  const joined = list_concat(words, ["delta"])
+  const first = list_get(joined, 0)
+  first.ok((w: string) => w).err((_: none) => "?")
+}
+
+fn empty_pages() -> int {
+  const pages = list[page]()
+  list_len(pages)
+}
+
+fn fresh_ints() -> list[int] {
+  []
+}
+
+fn seeds_total() -> int {
+  const seeds: list[int] = [10, 20]
+  list_len(seeds) + list_len(fresh_ints())
+}
+
+fn reject_mixed() -> int {
+  const bad = [1, "a"]
+  0
+}

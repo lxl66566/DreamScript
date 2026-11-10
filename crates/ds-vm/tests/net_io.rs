@@ -1,4 +1,4 @@
-//! Net-IO natives: hand-assembled fixtures over the builtin native
+//! Net-IO natives: hand-assembled fixtures over the std platform native
 //! module's TCP surface (`net_connect`, `net_send`, `net_recv`,
 //! `net_close`, `http_get`). Golden coverage: a full connect/send/recv/
 //! close round trip against a local listener (hermetic — no external
@@ -10,8 +10,8 @@
 //!
 //! Layout conventions follow the file-IO fixtures: every net native's
 //! result is the two-word tag+payload span on the caller's overlay slots
-//! 0 and 1 — the failure tag is `BUILTIN_NET_ERR`, success reuses
-//! `BUILTIN_IO_OK` — and the overlay slots declare `Raw`.
+//! 0 and 1 — the failure tag is `PLATFORM_NET_ERR`, success reuses
+//! `PLATFORM_IO_OK` — and the overlay slots declare `Raw`.
 
 use std::{
     io::{Read, Write},
@@ -30,8 +30,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_HTTP_GET, BUILTIN_IO_OK, BUILTIN_NET_CLOSE, BUILTIN_NET_CONNECT, BUILTIN_NET_ERR,
-        BUILTIN_NET_RECV, BUILTIN_NET_SEND,
+        PLATFORM_IO_OK, PLATFORM_NET_ERR, STD_HTTP_GET, STD_NET_CLOSE, STD_NET_CONNECT,
+        STD_NET_RECV, STD_NET_SEND, STD_PLATFORM_MODULE, std_platform_module,
     },
 };
 
@@ -39,9 +39,9 @@ fn k(idx: u16) -> ConstIdx {
     ConstIdx(idx)
 }
 
-fn builtin(index: u32) -> Const {
+fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: "builtin".into(),
+        module: STD_PLATFORM_MODULE.into(),
         func: index,
     }
 }
@@ -50,12 +50,12 @@ fn builtin(index: u32) -> Const {
 /// recv cap immediate.
 fn pool() -> Vec<Const> {
     vec![
-        builtin(BUILTIN_NET_CONNECT), // k0
-        builtin(BUILTIN_NET_SEND),    // k1
-        builtin(BUILTIN_NET_RECV),    // k2
-        builtin(BUILTIN_NET_CLOSE),   // k3
-        builtin(BUILTIN_HTTP_GET),    // k4
-        Const::I64(4096),             // k5: net_recv max_bytes in `echo`
+        platform(STD_NET_CONNECT), // k0
+        platform(STD_NET_SEND),    // k1
+        platform(STD_NET_RECV),    // k2
+        platform(STD_NET_CLOSE),   // k3
+        platform(STD_HTTP_GET),    // k4
+        Const::I64(4096),          // k5: net_recv max_bytes in `echo`
     ]
 }
 
@@ -70,6 +70,9 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 
 fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
+    // the whole surface here is the platform's: the std platform table is
+    // the host's to install (`Vm::new` only adds the builtin core)
+    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
     reg.install(ModuleVersion::new("net", defs).expect("valid fixture module"));
     reg
 }
@@ -91,7 +94,7 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: BUILTIN_NET_ERR,
+            tag: PLATFORM_NET_ERR,
         },
         Uop::Jmpif {
             cond: 5,
@@ -107,7 +110,7 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: BUILTIN_NET_ERR,
+            tag: PLATFORM_NET_ERR,
         },
         Uop::Jmpif {
             cond: 5,
@@ -122,7 +125,7 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: BUILTIN_NET_ERR,
+            tag: PLATFORM_NET_ERR,
         },
         Uop::Jmpif {
             cond: 5,
@@ -137,7 +140,7 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: BUILTIN_NET_ERR,
+            tag: PLATFORM_NET_ERR,
         },
         Uop::Jmpif {
             cond: 5,
@@ -200,7 +203,7 @@ fn recv_payload() -> FunctionDef {
             Uop::TagTest {
                 dst: 5,
                 src: 6,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 5,
@@ -216,7 +219,7 @@ fn recv_payload() -> FunctionDef {
             Uop::TagTest {
                 dst: 5,
                 src: 6,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 5,
@@ -231,7 +234,7 @@ fn recv_payload() -> FunctionDef {
             Uop::TagTest {
                 dst: 5,
                 src: 6,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 5,
@@ -264,7 +267,7 @@ fn stale_send() -> FunctionDef {
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 4,
@@ -279,7 +282,7 @@ fn stale_send() -> FunctionDef {
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 4,
@@ -294,7 +297,7 @@ fn stale_send() -> FunctionDef {
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: BUILTIN_NET_ERR,
+                tag: PLATFORM_NET_ERR,
             },
             Uop::Jmpif {
                 cond: 4,
@@ -455,9 +458,13 @@ fn a_refused_port_yields_the_net_err_message() {
         .run("net", "connect_payload", &args)
         .expect("the span overlays without a trap");
     let message = payload_string(&mut vm, result);
+    // Only the OS message text is locale-dependent; the operation+target
+    // prefix and the `(os error N)` code suffix are stable. WSAECONNREFUSED
+    // is 10061, ECONNREFUSED is 111.
+    let refused = if cfg!(windows) { "(os error 10061)" } else { "(os error 111)" };
     assert!(
-        message.starts_with("net_connect 127.0.0.1:") && message.contains("refused"),
-        "the message names the operation and target: {message:?}"
+        message.starts_with("net_connect 127.0.0.1:") && message.ends_with(refused),
+        "the message names the operation, target, and refusal code: {message:?}"
     );
 }
 
@@ -572,12 +579,12 @@ fn a_stale_handle_is_unknown_after_close() {
     // and a close of the same handle fails the same way
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(0)]),
-        Ok(Value::Tag(BUILTIN_NET_ERR))
+        Ok(Value::Tag(PLATFORM_NET_ERR))
     );
     // a handle that was never opened too
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(999)]),
-        Ok(Value::Tag(BUILTIN_NET_ERR))
+        Ok(Value::Tag(PLATFORM_NET_ERR))
     );
 }
 
@@ -622,6 +629,6 @@ fn connection_handles_are_vm_state_not_run_state() {
     // and closing the second handle succeeds
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(1)]),
-        Ok(Value::Tag(BUILTIN_IO_OK))
+        Ok(Value::Tag(PLATFORM_IO_OK))
     );
 }

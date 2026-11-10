@@ -10,7 +10,16 @@
 //! bracket classes; remaining structural failures map onto the pest
 //! furthest-failure position.
 //!
-//! # Newline sensitivity [F1]
+//! # Script entry (G3)
+//!
+//! Module bodies are pure declarations; the one exception is the entry file
+//! under script mode, whose top-level statements fold into one synthesized
+//! `main` binding ([`parse_script`]). Library mode ([`parse`]) accepts the
+//! same grammar and rejects top-level statements with a structured
+//! diagnostic, so every non-entry path through the pipeline stays
+//! pure-declaration.
+//!
+//! # Newline sensitivity (F1)
 //!
 //! Statements are newline-terminated; there are no semicolons. A binary
 //! operator must sit on the same line as its left operand, so `a +\nb`
@@ -18,9 +27,9 @@
 //! open on the next line (method chains); calls, indexes, and `?` must open
 //! on the same line as their operand.
 //!
-//! # File structure [G3]
+//! # File structure (G3)
 //!
-//! A file is a `Vec` of `///|`-separated [`Block`]s; a file without
+//! A file is a `Vec` of `##`-separated [`Block`]s; a file without
 //! separators is one block. Top-level definitions are order-independent
 //! data; no ordering validation happens here.
 //!
@@ -63,7 +72,7 @@ mod pest_gen {
 pub use ast::{
     AssignOp, Ast, Attribute, BinaryOp, Block, BlockExpr, CallArg, EnumCase, EnumDecl, EnumPayload,
     Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath, ImportSel, Item, ItemKind,
-    Literal, LocalDecl, MatchArm, OrTail, Param, ParamMode, Path, Pattern, Stmt, StmtKind, StrPart,
+    Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, Stmt, StmtKind, StrPart,
     StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, Trivia, TriviaKind, Type,
     TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
 };
@@ -86,6 +95,30 @@ pub(crate) use pest_gen::Rule;
 /// Never panics on invalid source; panics only if `file` was never registered
 /// in `files` (an upstream contract violation, delegated to [`Files`]).
 pub fn parse(files: &Files, file: FileId) -> Result<Ast, Vec<Diagnostic>> {
+    parse_mode(files, file, false)
+}
+
+/// Parses one registered source file as the script entry: same grammar as
+/// [`parse`], plus the script-mode fold — the entry file's top-level
+/// statements (expression statements and non-function `const`/`var`
+/// bindings) become the body of one synthesized `main` binding, so the
+/// declarations beside them stay pure-declaration and every later pass
+/// (resolve, check, lower) sees the same shape a written `fn main() -> ()
+/// { ... }` produces. A file whose statements would collide with a
+/// written `main` is a diagnostic. Everything else — imported files,
+/// package members — must go through [`parse`], which rejects top-level
+/// statements outright.
+///
+/// # Panics
+///
+/// Same contract as [`parse`].
+pub fn parse_script(files: &Files, file: FileId) -> Result<Ast, Vec<Diagnostic>> {
+    parse_mode(files, file, true)
+}
+
+/// Shared body of the two parse modes; `script` threads the entry-file
+/// flag through to the conversion fold.
+fn parse_mode(files: &Files, file: FileId, script: bool) -> Result<Ast, Vec<Diagnostic>> {
     let src = files.source(file);
     if let Some(diags) = lexscan::scan(file, src) {
         return Err(diags);
@@ -93,7 +126,7 @@ pub fn parse(files: &Files, file: FileId) -> Result<Ast, Vec<Diagnostic>> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(PARSE_STACK)
-            .spawn_scoped(scope, || run_grammar(file, src))
+            .spawn_scoped(scope, || run_grammar(file, src, script))
             .expect("spawning the parse thread cannot fail");
         // A pest panic would be a parser bug; surface it as a diagnostic
         // instead of unwinding through the caller.
@@ -109,9 +142,9 @@ pub fn parse(files: &Files, file: FileId) -> Result<Ast, Vec<Diagnostic>> {
 /// Stack size for the grammar thread.
 const PARSE_STACK: usize = 8 << 20;
 
-fn run_grammar(file: FileId, src: &str) -> Result<Ast, Vec<Diagnostic>> {
+fn run_grammar(file: FileId, src: &str, script: bool) -> Result<Ast, Vec<Diagnostic>> {
     match DsParser::parse(Rule::file, src) {
-        Ok(pairs) => convert::convert(file, src, pairs),
+        Ok(pairs) => convert::convert(file, src, pairs, script),
         Err(err) => Err(vec![pest_error(file, src, err)]),
     }
 }

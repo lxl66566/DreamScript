@@ -46,11 +46,12 @@ fn type_of_block(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryEr
     Ok(QueryValue::BlockSource(text))
 }
 
-/// Ground truth of the two synthetic files: block bodies plus the leading
-/// spaces of each separator line (the only edits outside blocks).
+/// Ground truth of the two synthetic files: block bodies plus the trailing
+/// text of each separator line (the only edits outside blocks).
 struct Model {
     bodies: [Vec<String>; 2],
-    spaces: [Vec<u8>; 2],
+    /// Per separator line: `true` appends ` s` after the `##` marker.
+    notes: [Vec<bool>; 2],
 }
 
 impl Model {
@@ -58,8 +59,7 @@ impl Model {
         let mut out = String::new();
         for (i, body) in self.bodies[file].iter().enumerate() {
             if i > 0 {
-                out.push_str(&" ".repeat(usize::from(self.spaces[file][i - 1])));
-                out.push_str("///|\n");
+                out.push_str(if self.notes[file][i - 1] { "## s\n" } else { "##\n" });
             }
             out.push_str(body);
         }
@@ -111,7 +111,7 @@ fuzz_target!(|data: &[u8]| {
             ],
             vec!["let d = 3;\n".to_owned(), "let e = 4;\n".to_owned()],
         ],
-        spaces: [vec![0, 0], vec![0]],
+        notes: [vec![false, false], vec![false]],
     };
     let mut db = model.db();
     for (step, &byte) in data.iter().enumerate().take(256) {
@@ -123,8 +123,8 @@ fuzz_target!(|data: &[u8]| {
                 model.bodies[file][at] = format!("let v{step}_{byte} = {};\n", byte % 97);
             },
             3 => {
-                if let Some(spaces) = model.spaces[file].first_mut() {
-                    *spaces ^= 2; // indent/unindent a separator: layout shift
+                if let Some(note) = model.notes[file].first_mut() {
+                    *note ^= true; // restyle a separator: layout shift
                 }
             },
             4 => {
@@ -143,14 +143,14 @@ fuzz_target!(|data: &[u8]| {
                     }
                     model.bodies[file][at] = head;
                     model.bodies[file].insert(at + 1, tail);
-                    model.spaces[file].insert(at, 0);
+                    model.notes[file].insert(at, false);
                 }
             },
             5 if model.bodies[file].len() > 1 => {
                 let at = usize::from(byte >> 3) % (model.bodies[file].len() - 1);
                 let tail = model.bodies[file].remove(at + 1);
                 model.bodies[file][at] += &tail;
-                model.spaces[file].remove(at);
+                model.notes[file].remove(at);
             },
             _ => {}, // no-op edit: same content pushed again
         }

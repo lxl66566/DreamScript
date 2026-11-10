@@ -43,10 +43,12 @@
 //! 4 = FuncRef (uleb-length module name, empty for the enclosing module,
 //! then a uleb function index within that module's blocks payload).
 //!
-//! Section payloads tile the region after the directory exactly, in
+//! The section directory lists kinds in the writer's canonical order
+//! (blocks, constants, type metadata, effect rows, then optionally debug
+//! spans), and payloads tile the region after the directory exactly, in
 //! directory order: no gaps, no overlaps, no trailing bytes. This is the
-//! writer's layout, and the reader enforces it, so every accepted file is
-//! byte-identical to its re-serialization by construction.
+//! writer's layout, and the reader enforces both, so every accepted file
+//! is byte-identical to its re-serialization by construction.
 //!
 //! # Locked now, completed later
 //!
@@ -84,10 +86,11 @@
 //!                      install time
 //! ```
 //!
-//! Read-side validation: every code word must decode to a uop at its pc
-//! (reserved opcode bytes, non-canonical field bits, and undecodable bias
-//! fields are DS4004), and every jump target must land strictly inside the
-//! function's own body. FUNCF-vs-layout agreement, slot-range checking,
+//! Read-side validation: every code word must decode at its pc — uops and
+//! the 0xE RC pair alike (reserved opcode bytes, non-canonical field bits,
+//! and undecodable bias fields are DS4004) — and every jump target must
+//! land strictly inside the function's own body. FUNCF-vs-layout
+//! agreement, slot-range checking,
 //! and pool-index resolution are loader/VM concerns, not format concerns.
 //!
 //! # Two-hook collector interface [C4, H4]

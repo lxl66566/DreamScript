@@ -6,7 +6,7 @@
 //! over encoded programs. It executes the one instruction contract every
 //! tier shares — `ds-abi`'s [`Uop`] set [BL-5] — from its canonical 32-bit
 //! word encoding [BL-1], and proves the locked slot-overlay call ABI with
-//! hand-assembled fixture programs (the record's section 13.7 `sum_to` and
+//! hand-assembled fixture programs (the canonical `sum_to` and
 //! mutual `even`/`odd`).
 //!
 //! How the contract maps onto this crate:
@@ -51,33 +51,50 @@
 //!   never interned), EQSTR/NEQSTR compare contents, not identity. No reclamation happens in M3 —
 //!   objects live for the VM's lifetime; M4's Perceus placement pass inserts dup/drop uops and
 //!   precise RC over this same table.
-//! - Builtins. `println`, `print`, and the typed `str` conversions are native (Rust) functions in
-//!   one reserved `builtin` module ([`crate::native::BUILTIN_MODULE`]) that every VM installs into
-//!   its registry. A pool `FuncRef { module: "builtin", func: i }` resolves through the same path
-//!   as any uop callee, so `CALL` is the only call mechanism. A native call never pushes a frame:
-//!   it reads the caller's staged overlay words and overlays its result on argument slot 0 where a
-//!   RET would. Chosen over a dedicated uop per builtin because CALL already is the ISA's
-//!   function-call mechanism — a uop per builtin grows the locked opcode set for every stdlib
-//!   addition, while the native-module route adds builtins as table entries with arity and typing
-//!   checks in one place. The file-IO natives (`read_file`, `write_file`, `file_exists`, `fs_list`,
-//!   `file_size`) are the first `world`-effect platform surface: the fallible ones answer with a
-//!   two-word tag+payload span over the caller's overlay slots, with the result-span and platform
-//!   tag-id conventions documented in `native`'s module docs.
+//! - Builtins. Native (Rust) functions live in two reserved modules: the `builtin` core
+//!   ([`crate::native::BUILTIN_MODULE`], the pure `str` conversions and string ops) that every VM
+//!   installs into its registry, and the `std` platform module
+//!   ([`crate::native::STD_PLATFORM_MODULE`], the `world`-effect surface — console, file IO, net
+//!   IO) that the host providing a platform installs explicitly. A pool `FuncRef { module, func: i
+//!   }` resolves through the same path as any uop callee, so `CALL` is the only call mechanism. A
+//!   native call never pushes a frame: it reads the caller's staged overlay words and overlays its
+//!   result on argument slot 0 where a RET would. Chosen over a dedicated uop per builtin because
+//!   CALL already is the ISA's function-call mechanism — a uop per builtin grows the locked opcode
+//!   set for every stdlib addition, while the native-module route adds builtins as table entries
+//!   with arity and typing checks in one place. The fallible natives answer with a two-word
+//!   tag+payload span over the caller's overlay slots, with the result-span and platform tag-id
+//!   conventions documented in `native`'s module docs.
 //! - Multi-word values. BL-2 values (payloaded unions, structs) span consecutive slots. RETSPAN
 //!   returns such a span: the words land on the caller's outgoing-argument slots `0..n`, whose
 //!   width the lowering must size for the widest callee result it calls (the VM re-checks). Frames
 //!   whose overlay words carry more than one call shape — staged arguments of one type, then a
 //!   result span of another — declare those slots `SlotType::Raw`: every write accepts, every read
 //!   checks the value's concrete type, and call sites check the staged value words.
+//! - Fibers. The VM owns a single-threaded fiber pool [E2]: each fiber's value-stack segment is a
+//!   chunk list that grows by chunk append, never realloc, so frame addresses stay stable [H2]; TCO
+//!   holds per fiber; a switch swaps segment/call-chain ownership (O(1), no copying); a fiber
+//!   completing at its entry frame marks itself dead and switches back to its resumer. The debug
+//!   surface is the builtin control pair (`fiber_yield`/`fiber_resume`) plus
+//!   [`Vm::spawn_fiber`]/[`Vm::resume_fiber`].
+//! - Nurseries. Fibers spawn into a nursery (the child-of link) [E2]; the join driver drives
+//!   children to death in spawn order and unions per-child outcomes out at the boundary; a first
+//!   failure raises the nursery's cancel flag, observed only at taken backward branches [E5] — a
+//!   linear consume in flight is never interrupted; teardown drives live children to death under
+//!   the flag before releasing the nursery. The debug surface is `nursery_join` (builtin 26, the
+//!   failed-children count) plus the host face [`Vm::open_root_nursery`]/[`Vm::spawn_fiber_in`]/
+//!   [`Vm::join_nursery`]/[`Vm::teardown_nursery`]; the in-language `nursery`/`spawn` surface lands
+//!   with the checker/lowerer rounds.
 
 // Bracketed decision IDs ([H2], [BL-6], ...) cite the design record in
 // docs/en/design-decisions.md; they are references, not doc links.
 #![allow(rustdoc::broken_intra_doc_links)]
 
+pub mod fiber;
 pub mod loader;
 pub mod module;
 pub mod native;
 mod net;
+pub mod nursery;
 pub mod object;
 pub mod program;
 pub mod value;
@@ -85,9 +102,11 @@ pub mod vm;
 
 /// The locked contracts this VM implements, re-exported for callers.
 pub use ds_abi as abi;
+pub use fiber::{FIBER_ROOT, FiberId, FiberState};
 pub use loader::{LoadError, install as install_dsmod};
 pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion};
-pub use native::{NativeFunction, NativeResult, OutputSink};
+pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
+pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
 pub use program::{Const, ConstKind, FunctionDef, assemble};
 pub use value::{Value, Word};
 pub use vm::{BacktraceFrame, Trap, Vm};

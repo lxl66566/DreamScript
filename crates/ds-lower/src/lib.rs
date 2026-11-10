@@ -23,12 +23,21 @@
 //!    words and result spans, per BL-6, and any overlay word that carries more than one word type
 //!    over the frame's lifetime is `SlotType::Raw`.
 //!
-//! Early exits lower exactly as the golden ds-vm fixtures do: `or return`
-//! and `?` emit TAG_TEST + JMPIF, then either construct the alternative
-//! or re-span the propagated member into the enclosing return union with
-//! RETSPAN. Interpolation lowers to `str_*` builtin calls chained with
-//! STRCAT. Tail positions lower to CALLT (the stack never grows [H2]) and
-//! final expressions to RET/RETSPAN.
+//! Early exits lower exactly as the golden ds-vm fixtures do: `?` and the
+//! extraction handlers emit TAG_TEST + JMPIF, then either construct the
+//! alternative or re-span the propagated member into the enclosing return
+//! union with RETSPAN. Interpolation lowers to `str_*` builtin calls
+//! chained with STRCAT. Tail positions lower to CALLT (the stack never
+//! grows [H2]) and final expressions to RET/RETSPAN.
+//!
+//! # The Perceus placement pass (C4, rides the walk)
+//!
+//! The walk in [`func`] is also the forward pass of the dup/drop placement
+//! ([`place`]): every Ref-typed word owns a reference count, and both the
+//! placed sequence returned per function ([`Lowered::placed`]) and the
+//! module's executable code interleave `RcOp::Inc`/`Dec` with the runnable
+//! uops — the 0xE words ride beside the uops, and the tier-1 VM executes
+//! them over its counted heap blocks.
 //!
 //! # ds-check seam (additive, consumed here)
 //!
@@ -41,10 +50,12 @@
 mod error;
 mod func;
 mod native;
+mod place;
 mod shape;
 
 use std::collections::HashMap;
 
+use ds_abi::{RcOp, Uop};
 use ds_check::Analyzed;
 use ds_mod::{Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Item, ItemKind, Pattern};
@@ -52,12 +63,26 @@ pub use error::LowerError;
 use func::{FnLower, Plan};
 use shape::Shapes;
 
+/// One op of a function body: a runnable micro-operation or a placed
+/// reference-counting op (C4). The module's executable code carries the
+/// same sequence, so this type is the placement contract the VM stream
+/// agrees with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacedOp {
+    /// A runnable micro-operation.
+    Uop(Uop),
+    /// A placed reference-counting op.
+    Rc(RcOp),
+}
+
 /// The lowered module plus the tables callers need: the function table's
-/// names in index order, and the module-wide tag ids.
+/// names in index order, the module-wide tag ids, and each function's
+/// placed op sequence.
 pub struct Lowered {
     module: Module,
     functions: Vec<String>,
     tags: HashMap<String, u8>,
+    placed: Vec<Vec<PlacedOp>>,
 }
 
 impl Lowered {
@@ -87,6 +112,15 @@ impl Lowered {
     #[must_use]
     pub fn tag(&self, name: &str) -> Option<u8> {
         self.tags.get(name).copied()
+    }
+
+    /// One function's placed op sequence: the runnable uops plus the
+    /// placed RC ops (dup/drop) at their exact positions — the artifact
+    /// the M4 placement contract pins and the VM seam will splice in.
+    #[must_use]
+    pub fn placed(&self, name: &str) -> Option<&[PlacedOp]> {
+        self.function_index(name)
+            .and_then(|index| self.placed.get(index as usize).map(Vec::as_slice))
     }
 }
 
@@ -120,7 +154,16 @@ pub fn lower(
     if !plan.has_main() {
         return Err(LowerError::NoMain);
     }
-    let (functions, shapes) = lower_all(&plan, analyzed)?;
+    // the affine facts the placement pass consumes: last uses and moves
+    // come from the checker (C1), never re-derived here
+    let lin = ds_check::linearity_check(
+        asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        &analyzed.decls,
+        &analyzed.checked,
+    );
+    let (functions, placed, shapes) = lower_all(&plan, analyzed, &lin)?;
     let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
     for function in functions {
         module = module.with_function(function);
@@ -129,6 +172,7 @@ pub fn lower(
         module,
         functions: plan.names(),
         tags: shapes.tag_names(),
+        placed,
     })
 }
 
@@ -160,17 +204,25 @@ fn plan_item<'a>(item: &'a Item, plan: &mut Plan<'a>, analyzed: &Analyzed) {
     plan.push(name.name.clone(), def, local);
 }
 
+/// What lowering every planned function yields: the module's functions,
+/// each function's placed op sequence, and the shared shape tables.
+type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
+
 /// Lowers every planned function; each one's resolutions come from its
 /// own file (the bundle is keyed by file id).
 fn lower_all<'b>(
     plan: &Plan<'_>,
     analyzed: &'b Analyzed,
-) -> Result<(Vec<ds_mod::Function>, Shapes<'b>), LowerError> {
+    lin: &ds_check::Linearity,
+) -> Result<LowerAll<'b>, LowerError> {
     let mut shapes = Shapes::new(analyzed);
     let mut functions = Vec::with_capacity(plan.functions().len());
+    let mut placed = Vec::with_capacity(plan.functions().len());
     for planned in plan.functions() {
         let res = &analyzed.resolutions[planned.local.span.file.as_u32() as usize];
-        functions.push(FnLower::lower(analyzed, res, plan, &mut shapes, planned)?);
+        let (function, ops) = FnLower::lower(analyzed, res, plan, &mut shapes, lin, planned)?;
+        functions.push(function);
+        placed.push(ops);
     }
-    Ok((functions, shapes))
+    Ok((functions, placed, shapes))
 }

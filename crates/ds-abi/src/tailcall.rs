@@ -1,4 +1,4 @@
-//! The CALLT argument slide [H2]: the heart of the slot-overlay ABI.
+//! The CALLT argument slide (H2): the heart of the slot-overlay ABI.
 
 use std::ops::Range;
 
@@ -151,7 +151,7 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 }
 
 /// Computes the CALLT argument slide from the caller's frame layout to a
-/// callee's [H2]. Pure: a compile-time fact between two static layouts,
+/// callee's (H2). Pure: a compile-time fact between two static layouts,
 /// checked again by the VM at hand-assembled call sites.
 ///
 /// The staged arguments are the first `callee.params_len()` slots of the
@@ -164,7 +164,7 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 /// ([`SlideError::TypeMismatch`]).
 ///
 /// Cost: n word copies at displacement [`SlidePlan::delta`] — the O(delta)
-/// argument slide plus a jump of [H2]; the stack never grows at any depth,
+/// argument slide plus a jump of (H2); the stack never grows at any depth,
 /// in any tier. Argument words move as raw words: a tail call moving
 /// arguments transfers ownership with zero RC traffic.
 // caller/callee is this contract's domain vocabulary, not a naming slip.
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn mutual_even_odd_slide_matches_the_record_encoding() {
-        // even/odd from the record's section 13.7: one i64 param, one bool
+        // even/odd, the record's H2 example: one i64 param, one bool
         // temp, one staged outgoing i64 ("slide r3 into slot0").
         let even = layout(vec![I64, Bool, I64], 1, 1);
         let odd = layout(vec![I64, Bool, I64], 1, 1);

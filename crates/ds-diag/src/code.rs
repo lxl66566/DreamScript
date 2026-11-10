@@ -102,12 +102,18 @@ error_codes! {
     UnbalancedDelimiter => "DS1008", Parse,
     /// Source nests deeper than the parser's fixed limit.
     NestingTooDeep => "DS1009", Parse,
-    /// An impl member is neither a `fn` nor a const-arrow lambda.
+    /// A trait or impl member is not a `fn` declaration.
     InvalidImplMember => "DS1010", Parse,
     /// One call passes two values for the same named argument.
     DuplicateArgument => "DS1011", Parse,
-    /// A default argument value is not a literal [F7].
+    /// A default argument value is not a literal (F7).
     NonLiteralDefault => "DS1012", Parse,
+    /// A top-level named const-arrow lambda; `fn` is the only named-function declaration.
+    NamedConstLambda => "DS1013", Parse,
+    /// A top-level statement outside the entry file's script mode.
+    TopLevelStatement => "DS1014", Parse,
+    /// Script statements synthesize `main`; the entry file already declares `main`.
+    ScriptMainConflict => "DS1015", Parse,
 
     /// Value's type is not contained in the expected type.
     TypeMismatch => "DS2001", Type,
@@ -137,6 +143,10 @@ error_codes! {
     UnsatisfiedConstraint => "DS2013", Type,
     /// Several trait instances match one dot-call; the message names the competing heads.
     AmbiguousCall => "DS2014", Type,
+    /// `self` used as a type name; the receiver type is spelled `Self`.
+    LowercaseSelfType => "DS2015", Type,
+    /// The receiver parameter carries an annotation; spell it `self` or `mut self`.
+    AnnotatedReceiver => "DS2016", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -192,6 +202,9 @@ mod tests {
             ("InvalidImplMember", "DS1010", ErrorClass::Parse),
             ("DuplicateArgument", "DS1011", ErrorClass::Parse),
             ("NonLiteralDefault", "DS1012", ErrorClass::Parse),
+            ("NamedConstLambda", "DS1013", ErrorClass::Parse),
+            ("TopLevelStatement", "DS1014", ErrorClass::Parse),
+            ("ScriptMainConflict", "DS1015", ErrorClass::Parse),
             ("TypeMismatch", "DS2001", ErrorClass::Type),
             ("InferenceFailed", "DS2002", ErrorClass::Type),
             ("NonExhaustiveMatch", "DS2003", ErrorClass::Type),
@@ -206,6 +219,8 @@ mod tests {
             ("TupleDistributionCap", "DS2012", ErrorClass::Type),
             ("UnsatisfiedConstraint", "DS2013", ErrorClass::Type),
             ("AmbiguousCall", "DS2014", ErrorClass::Type),
+            ("LowercaseSelfType", "DS2015", ErrorClass::Type),
+            ("AnnotatedReceiver", "DS2016", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
@@ -236,7 +251,7 @@ mod tests {
     /// Machine checks the snapshot cannot express alone: every code string is
     /// a well-formed `DSnnnn`, its number sits inside its class's thousands
     /// range, strings are unique, `ALL` is strictly ascending, and the table
-    /// is terminal at DS4008.
+    /// is terminal at DS4009.
     #[test]
     fn all_codes_well_formed_in_range_unique_and_ascending() {
         let mut prev = 0;

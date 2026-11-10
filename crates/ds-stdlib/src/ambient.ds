@@ -1,10 +1,12 @@
 // The stdlib ambient: the checked-declaration layer of the M3 stdlib (the
-// runtime half is the ds-vm builtin native module). Registered as a package
-// member before the user's sources; the package namespace is single [G3],
-// so every name carries one meaning and no name here may be redeclared by
-// a corpus file. Per-file types (config, io_err, file, url, net_err, ord,
-// json, the stack API) stay file-owned: failure sets ride the `error`
-// effect row (declared_rows), never a file-owned union.
+// runtime half is two native modules — the ds-vm builtin core, and the
+// std platform natives the host installs). Registered as a package member
+// before the user's sources; the package namespace is two [G3, F9] —
+// types and values — so `struct map` and `fn map` coexist, and a name may
+// be redeclared by a corpus file only in the other namespace. Per-file
+// types (config, io_err, file, url, net_err, ord, json, the stack API)
+// stay file-owned: failure sets ride the `error` effect row
+// (declared_rows), never a file-owned union.
 
 trait Copyable { }
 
@@ -19,11 +21,6 @@ tag u32
 struct list[t]
 struct map[k, v]
 
-struct bad_number[t]
-struct missing_field[t]
-tag not_found
-tag permission_denied
-
 // A text row: keyed lookup over strings (get feeds the first parameter).
 type row = map[string, string]
 
@@ -31,14 +28,25 @@ type row = map[string, string]
 struct response
 
 extern fn get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 extern fn head[t] (xs: list[t]) -> t?
 extern fn tail[t] (xs: list[t]) -> list[t]
+extern fn list_new[t] () -> list[t]
+extern fn list_len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn join (parts: list[string], sep: string) -> string
 extern fn len[t] (xs: t) -> int
 extern fn trim (s: string) -> string
 extern fn parse_int (s: string) -> int
 extern fn split (s: string, sep: char) -> list[string]
+extern fn substring (s: string, start: int, end: int) -> string
+extern fn concat (a: string, b: string) -> string
+extern fn to_upper (s: string) -> string
+extern fn to_lower (s: string) -> string
+extern fn char_at (s: string, i: int) -> string
 extern fn collect[t] (xs: list[t]) -> list[t]
 extern fn first[t] (xs: list[t]) -> t?
 extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]

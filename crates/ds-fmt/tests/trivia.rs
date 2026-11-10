@@ -1,5 +1,5 @@
 //! Trivia edge suite: comment attachment, blank-line collapsing, doc-comment
-//! travel, `///|` separator recovery, and the nothing-is-dropped guarantee.
+//! travel, `##` separator recovery, and the nothing-is-dropped guarantee.
 
 mod common;
 
@@ -129,34 +129,28 @@ fn block_comments_on_their_own_line() {
 
 #[test]
 fn separators_recovered_verbatim() {
+    assert_eq!(fmt_once("t.ds", "tag a\n##\ntag b\n"), "tag a\n##\ntag b\n");
+    // Separator text after the marker is preserved.
     assert_eq!(
-        fmt_once("t.ds", "tag a\n///|\ntag b\n"),
-        "tag a\n///|\ntag b\n"
-    );
-    // Text and column preserved.
-    assert_eq!(
-        fmt_once("t.ds", "tag a\n  ///| section two\ntag b\n"),
-        "tag a\n  ///| section two\ntag b\n"
+        fmt_once("t.ds", "tag a\n## section two\ntag b\n"),
+        "tag a\n## section two\ntag b\n"
     );
     // Blank lines around a separator collapse to one each side.
     assert_eq!(
-        fmt_once("t.ds", "tag a\n\n\n///| s\n\n\ntag b\n"),
-        "tag a\n\n///| s\n\ntag b\n"
+        fmt_once("t.ds", "tag a\n\n\n## s\n\n\ntag b\n"),
+        "tag a\n\n## s\n\ntag b\n"
     );
     // A comment in the gap belongs to the following block's content.
     assert_eq!(
-        fmt_once("t.ds", "tag a\n///|\n// lead\ntag b\n"),
-        "tag a\n///|\n// lead\ntag b\n"
+        fmt_once("t.ds", "tag a\n##\n// lead\ntag b\n"),
+        "tag a\n##\n// lead\ntag b\n"
     );
 }
 
 #[test]
 fn separator_only_and_empty_blocks() {
-    assert_eq!(fmt_once("t.ds", "///|\n"), "///|\n");
-    assert_eq!(
-        fmt_once("t.ds", "///|\n///|\ntag a\n"),
-        "///|\n///|\ntag a\n"
-    );
+    assert_eq!(fmt_once("t.ds", "##\n"), "##\n");
+    assert_eq!(fmt_once("t.ds", "##\n##\ntag a\n"), "##\n##\ntag a\n");
     assert_eq!(fmt_once("t.ds", ""), "");
     assert_eq!(fmt_once("t.ds", "  \n\n\t\n"), "");
 }
@@ -174,7 +168,7 @@ fn nothing_dropped_over_the_corpus() {
     // Every `//` and `/*` byte of the source must survive formatting: the
     // formatter may move comments, never lose them.
     for src in [
-        "tag a\n// one\n\n\n/* two */\n///|\n// three\ntag b\n// eof\n",
+        "tag a\n// one\n\n\n/* two */\n##\n// three\ntag b\n// eof\n",
         "fn f() {\n// a\nconst x = 1 // b\n// c\n}\n// after\n",
     ] {
         let out = fmt_once("t.ds", src);

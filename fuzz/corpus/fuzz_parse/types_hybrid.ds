@@ -1,0 +1,59 @@
+// source: frozen archive catalog 01-types (seed corpus)
+// purpose: config parser exercising enum-minted cases, set-typed errors, is-narrowing, bare return, ?, .err, structural ==
+// items:
+// json: stage: typecheck
+// cfg_err: stage: typecheck
+// config: stage: typecheck
+// get_port: stage: run
+// load: stage: run
+// cfg: stage: run
+// kv: stage: run
+// same: stage: run
+
+// the json value family: bare and payload cases minted by one enum [B3]
+enum json {
+  json_null
+  json_bool
+  json_num { value: float }
+  json_str { value: string }
+  json_arr { items: list[json] }
+  json_obj { fields: map[string, json] }
+}
+
+// the config error family: two bare cases and one payload case; case
+// names enter the tag namespace, so `int | missing | bad_port` is a set
+// expression over them exactly like over standalone tags
+enum cfg_err {
+  io_err
+  missing
+  bad_port { got: int }
+}
+
+struct config { host: string, port: int, retries: int }
+
+fn get_port(j: json) -> int | missing | bad_port {
+  if j is json_obj {
+    const pv = j.fields.get("port")
+    if pv is none { return missing }
+    if pv is int && pv >= 1 && pv <= 65535 { pv } else { bad_port(got: -1) }
+  } else {
+    missing
+  }
+}
+
+fn load(path: string) -> config | cfg_err {
+  const text = read_file(path)?
+  const port = get_port(parse_json(text)?)?
+  config { host: "localhost", port, retries: 3 }
+}
+
+const cfg = load("app.cfg").err((e) => {
+  match e {
+    b if b is bad_port => log("bad port ${b.got}"),
+    _                  => log("config read failed"),
+  }
+  default_config()
+})
+
+const kv = ("host", 8080)
+const same = cfg == default_config()

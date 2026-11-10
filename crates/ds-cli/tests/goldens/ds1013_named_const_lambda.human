@@ -1,0 +1,5 @@
+error[DS1013]: a top-level binding cannot name a lambda; `greet` is a function, so declare it `fn name(params) -> ret { ... }`
+ --> tests/fixtures/negative/ds1013_named_const_lambda.ds:5:1
+  |
+5 | const greet = (name: int) -> int { name }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ here

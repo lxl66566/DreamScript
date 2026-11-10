@@ -3,10 +3,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use ds_abi::{
-    EntryDescriptor,
-    uop::{DecodeError, Uop},
-};
+use ds_abi::{EntryDescriptor, Inst, InstDecodeError, Uop};
 
 use crate::{
     native::NativeFunction,
@@ -26,8 +23,8 @@ pub enum ModuleBuildError {
         func: String,
         /// The instruction index of the malformed word.
         pc: u32,
-        /// Why the word does not decode.
-        cause: DecodeError,
+        /// Why the word does not decode (uops outside 0xE, RC ops inside).
+        cause: InstDecodeError,
     },
     /// A `FUNCF` word disagrees with the function's frame layout slot count.
     FuncfMismatch {
@@ -162,11 +159,18 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
     }
     for (pc, &word) in def.code.iter().enumerate() {
         let pc = u32::try_from(pc).expect("pc fits u32");
-        let op = Uop::decode(pc, word).map_err(|cause| ModuleBuildError::BodyDecode {
+        let inst = Inst::decode(pc, word).map_err(|cause| ModuleBuildError::BodyDecode {
             func: def.name.clone(),
             pc,
             cause,
         })?;
+        let op = match inst {
+            Inst::Uop(op) => op,
+            // the 0xE RC pair (C4): no pool, no layout fact to check —
+            // the slot addressing traps at run time like every other
+            // operand
+            Inst::Rc(_) => continue,
+        };
         if let Uop::Funcf { frame_slots } = op {
             if usize::from(frame_slots) != def.layout.slots().len() {
                 return Err(ModuleBuildError::FuncfMismatch {
@@ -333,7 +337,7 @@ impl ModuleRegistry {
 
 #[cfg(test)]
 mod tests {
-    use ds_abi::uop::Uop;
+    use ds_abi::uop::{DecodeError, Uop};
 
     use super::*;
     use crate::program::assemble;
@@ -370,20 +374,48 @@ mod tests {
 
     #[test]
     fn non_canonical_body_words_are_rejected_at_load() {
-        // reserved major 0xE: decode fails, so the loader refuses the stream
+        // reserved major 0xF: decode fails, so the loader refuses the stream
         let mut def = empty_def("bad");
-        def.code = vec![0xe0_00_00_00];
+        def.code = vec![0xf0_00_00_00];
         assert_eq!(
             ModuleVersion::new("m", vec![def]).unwrap_err(),
             ModuleBuildError::BodyDecode {
                 func: "bad".into(),
                 pc: 0,
-                cause: DecodeError::UnknownOpcode {
-                    major: 0xe,
+                cause: InstDecodeError::Uop(DecodeError::UnknownOpcode {
+                    major: 0xf,
                     minor: 0
-                },
+                }),
             }
         );
+        // inside the RC major, a noncanonical field bit is the RC error
+        let mut def = empty_def("bad");
+        def.code = vec![0xe0_00_01_00];
+        assert_eq!(
+            ModuleVersion::new("m", vec![def]).unwrap_err(),
+            ModuleBuildError::BodyDecode {
+                func: "bad".into(),
+                pc: 0,
+                cause: InstDecodeError::Rc(ds_abi::RcDecodeError::ReservedField),
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_rc_words_load_beside_the_uops() {
+        // the 0xE pair loads as part of the body (C4): no pool operand,
+        // no layout fact; the word stream carries both majors
+        let mut def = empty_def("rc");
+        def.layout =
+            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::Ref], 0, 0).expect("valid layout");
+        def.code = assemble(&[
+            Inst::Uop(Uop::Funcf { frame_slots: 1 }),
+            Inst::Rc(ds_abi::RcOp::Inc { src: 0 }),
+            Inst::Rc(ds_abi::RcOp::Dec { src: 0 }),
+        ])
+        .expect("the words encode");
+        let version = ModuleVersion::new("m", vec![def]).expect("the RC words load");
+        assert_eq!(version.functions().len(), 1);
     }
 
     #[test]
@@ -441,7 +473,7 @@ mod tests {
 
     #[test]
     fn assemble_and_load_round_trip_the_record_sum_to_body() {
-        // the record's 13.7 sum_to body, with the executable corrections of
+        // the canonical sum_to body, with the executable corrections of
         // the fixture suite: JMPIF exit, separate constant scratch slots
         let body = [
             Uop::Funcf { frame_slots: 5 },

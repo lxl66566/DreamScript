@@ -1,0 +1,5 @@
+// A lambda named at the top level [F2]: `fn` is the only named-function
+// declaration; the message suggests the spelling.
+
+tag int
+const greet = (name: int) -> int { name }

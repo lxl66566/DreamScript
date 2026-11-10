@@ -1,0 +1,186 @@
+//! The enum-block declaration story [B3]: cases mint into the tag
+//! namespace like standalone tags, the enum name is the union of its
+//! cases, construction is fixed per declaration with cross-spellings as
+//! structured checker errors, and qualified case paths test the case's
+//! own atom.
+
+use ds_check::type_check;
+use ds_diag::Files;
+use ds_parse::parse;
+
+/// Checks one self-contained source, returning its diagnostics.
+fn diags(source: &str) -> Vec<ds_diag::Diagnostic> {
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).unwrap_or_else(|d| panic!("parses: {d:?}"));
+    type_check(&files, &[ast]).diags
+}
+
+/// Asserts the source checks clean, printing any diagnostics.
+fn clean(source: &str) {
+    let found = diags(source);
+    assert!(
+        found.is_empty(),
+        "{}",
+        found
+            .iter()
+            .map(|d| format!("{} {}", d.code.as_str(), d.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// The (code, message) pairs of a source's diagnostics.
+fn codes(source: &str) -> Vec<(&'static str, String)> {
+    diags(source)
+        .iter()
+        .map(|d| (d.code.as_str(), d.message.clone()))
+        .collect()
+}
+
+#[test]
+fn cases_mint_into_the_tag_namespace_like_tags() {
+    // A union alias over enum-minted atoms behaves exactly like one over
+    // standalone tags and structs: construction, narrowing, matching.
+    clean(concat!(
+        "tag int\n",
+        "tag string\n",
+        "enum read_err {\n",
+        "  timeout\n",
+        "  bad_port { got: int }\n",
+        "  bad_msg(string)\n",
+        "}\n",
+        "type err = timeout | bad_port | bad_msg\n",
+        "fn mk() -> err { bad_port(got: -1) }\n",
+        "fn msg() -> err { bad_msg(\"nan\") }\n",
+        "fn wait(e: err) -> int {\n",
+        "  match e {\n",
+        "    timeout => 0,\n",
+        "    other if other is bad_port => other.got,\n",
+        "    _ => 0,\n",
+        "  }\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn the_enum_name_is_the_union_of_its_cases() {
+    // The enum name narrows and carries exhaustiveness as a union would.
+    clean(concat!(
+        "tag int\n",
+        "enum mark { red, blue { n: int } }\n",
+        "fn f(m: mark) -> int {\n",
+        "  if m is blue { m.n } else { 0 }\n",
+        "}\n",
+        "fn g(m: mark) -> int {\n",
+        "  match m { red => 0, blue { n } => n }\n",
+        "}\n",
+        "type with_mark = mark | int\n",
+        "fn h(x: with_mark) -> int {\n",
+        "  match x { mark => 1, _ => 0 }\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn construction_forms_check_clean_per_declaration() {
+    // struct = brace form; payload case = call form (named or
+    // positional); bare case = bare.
+    clean(concat!(
+        "tag int\n",
+        "enum e { a, b { x: int }, c(int) }\n",
+        "struct s { y: int }\n",
+        "const v1 = a\n",
+        "const v2 = b(x: 1)\n",
+        "const v3 = c(2)\n",
+        "const v4 = s { y: 3 }\n",
+    ));
+}
+
+#[test]
+fn brace_form_on_a_case_is_the_cross_spelling() {
+    let found = codes("tag int\nenum e { b { x: int } }\nconst v = b { x: 1 }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2001");
+    assert!(found[0].1.contains("is an enum case"), "{}", found[0].1);
+}
+
+#[test]
+fn a_payload_case_used_bare_is_the_cross_spelling() {
+    let found = codes("tag int\nenum e { b { x: int } }\nconst v = b\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2002");
+    assert!(
+        found[0].1.contains("construct it by call form"),
+        "{}",
+        found[0].1
+    );
+}
+
+#[test]
+fn call_forms_on_bare_cases_and_structs_stay_rejected() {
+    // A bare case and a plain struct keep the existing "type called as a
+    // function" error; a named argument against a tuple payload names no
+    // field.
+    let found = codes("tag int\nenum e { a, c(int) }\nstruct s { y: int }\nconst v1 = a()\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2002");
+    let found = codes("tag int\nenum e { a, c(int) }\nstruct s { y: int }\nconst v1 = s(1)\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2002");
+    let found = codes("tag int\nenum e { a, c(int) }\nconst v1 = c(x: 1)\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2001");
+    assert!(found[0].1.contains("has no field"), "{}", found[0].1);
+}
+
+#[test]
+fn a_case_name_colliding_with_a_value_declaration_is_ambiguous_at_call_form() {
+    // F9's residual class: a call-form name in both namespaces is
+    // DS2014, naming both declarations.
+    let found = codes(concat!(
+        "tag int\n",
+        "enum e { make(int) }\n",
+        "fn make(n: int) -> int { n }\n",
+        "const v = make(1)\n",
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2014");
+}
+
+#[test]
+fn duplicate_case_names_report_both_spans() {
+    let found = codes("enum e { a, a }\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2005");
+}
+
+#[test]
+fn qualified_case_paths_test_the_case_atom() {
+    clean(concat!(
+        "tag int\n",
+        "enum e { a(int) }\n",
+        "fn f(x: e) -> int {\n",
+        "  match x {\n",
+        "    e::a(n) => n,\n",
+        "    _ => 0,\n",
+        "  }\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn generic_enums_keep_the_opaque_atom_until_substitution_lands() {
+    // A generic enum still checks as before (an applied atom); its case
+    // names do not mint, so a use reports the unknown name.
+    clean("tag int\nenum opt[t] { some(t) }\nfn f(x: opt[int]) -> int { 0 }\n");
+    let found = codes("tag int\nenum opt[t] { some(t) }\nconst v = some\n");
+    // The resolver reports the unknown name and the checker's value walk
+    // follows with its unresolvable-value note, as for any unknown name.
+    assert!(
+        found
+            .iter()
+            .any(|(code, msg)| *code == "DS2004" && msg.contains("some")),
+        "{found:?}"
+    );
+}
