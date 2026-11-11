@@ -90,15 +90,30 @@ Lists and tuples: `[1, 2, 3]` is a `list[int]` literal; the empty mutable collec
 fn add(a: int, b: int) -> int { a + b }
 ```
 
-Parameters are `name: t`, returns are `-> t`, union returns parse as `-> a | b`, and `T?` is legal in any annotation. The body's final expression is the return value; `return e` exits early; `break` and `continue` serve loops; `unit` optionally names the unit type and `()` stays legal, and a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions and anchor the set algebra; locals, lambdas, and match arms are inferred. Functions are values.
+Parameters are `name: t`, returns are `-> t`, union returns parse as `-> a | b`, and `T?` is legal in any annotation. The body's final expression is the return value; `return e` exits early; `break` and `continue` serve loops; `unit` optionally names the unit type and `()` stays legal, and a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions and anchor the set algebra; locals, lambdas, and match arms are inferred.
 
 Anonymous functions are const-arrow lambdas, the only other function spelling — a binding inside any block names one, while top level names functions with `fn` only:
 
 ```ts
 fn doubled(xs: list[int]) -> list[int] {
   const double = (x: int) => x * 2
-  xs.map(double)
+  const out = xs.map(double)
+  out
 }
+```
+
+Functions are values end to end: a named fn binds and passes like any value, a `fn(t) -> r` parameter or return names a fn type, and any callable inhabits the slot — a named fn, a lambda, or a capturing closure — with one call spelling at the use site. A fn-typed return builds factories: `(k: int) => (x: int) => x + k` makes add-k functions.
+
+```ts
+fn apply(f: fn(int) -> int, v: int) -> int { f(v) }
+fn inc(x: int) -> int { x + 1 }
+
+const k = 10
+const g = inc // a named fn binds like any value
+const a = apply(g, 4) // and fills the fn-typed parameter
+const b = apply((x: int) => x * k, 4) // so does a capturing closure
+const biased = [1, 2].map((x: int) => x + k)
+const raised = [1, 2].map(inc) // one combinator parameter, every callable
 ```
 
 UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first, then trait methods, `trait::f(x)` qualification as the escape hatch, and true ambiguity a compile error. Capability parameters (IO and the like) are named and excluded from the dot position: `println(io, msg)` can never be written `msg.println()` with `io` hidden.

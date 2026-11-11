@@ -23,9 +23,9 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
     for url in urls {
       spawn {
         match fetch_body(url) {
-          timeout => cancel(timeout),
-          refused => cancel(refused),
-          p       => pages.list_push(p),
+          timeout => cancel(timeout)
+          refused => cancel(refused)
+          p => pages.list_push(p)
         }
       }
     }
@@ -51,8 +51,8 @@ fn with_retry(n: int, url: url) -> page | net_err {
     }
   }
   match done {
-    none => last,
-    p => p,
+    none => last
+    p => p
   }
 }
 

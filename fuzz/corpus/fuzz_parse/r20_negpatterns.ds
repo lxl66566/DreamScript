@@ -1,0 +1,16 @@
+// seed: R20 diagnostic surface — a '-' before a non-numeric pattern
+// literal is a structured parse diagnostic (the sign could only be
+// dropped silently otherwise), so this seed parses to Err by design:
+// mutations around it exercise the diagnostic path of the convert pass,
+// never a silently positive literal. Int/float keep cooking the sign.
+
+fn negated(v: bool | char | byte | string) -> int {
+  match v {
+    -true => 1,
+    -'a' => 2,
+    -b'x' => 3,
+    -"s" => 4,
+    -r"raw" => 5,
+    _ => 0,
+  }
+}

@@ -11,7 +11,8 @@
 //! callable-defaulted fn-typed parameter slot (the closure-capable
 //! surface the callable_e2e suite runs end to end). The refusals here
 //! pin the boundary that stays: a closure in a var binding, a lambda
-//! capturing a closure, and an omitted default on a callable value.
+//! capturing a closure, and an omitted default on a callable value
+//! (the last refused by the checker's indirect-call arity check).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -201,16 +202,28 @@ fn main() -> int {
     );
 }
 
-/// A call through a callable value that omits a defaulted parameter has
-/// no staging path for it (defaults on callable values wait on the
-/// defaults round; named top-level functions stage theirs).
+/// A call through a callable value that omits a defaulted parameter is
+/// refused by the indirect-call arity check (DS2007): the fn-typed value
+/// carries no staging path for defaults (named top-level functions stage
+/// theirs).
 #[test]
 fn an_omitted_default_on_a_callable_value_refuses() {
-    refused(
-        "tag int\nfn main() -> int {
+    let source = "tag int\nfn main() -> int {
   const f: fn(int, int) -> int = (x: int, y: int = 2) => x + y
   f(1)
-}",
-        "pass every argument explicitly",
+}";
+    let mut files = Files::new();
+    let id = files.add_source("refusal_probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    let rendered = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|diag| human(diag, &files))
+        .collect::<String>();
+    assert!(
+        rendered.contains("DS2007"),
+        "the indirect-call arity check refuses the probe: {rendered}"
     );
 }

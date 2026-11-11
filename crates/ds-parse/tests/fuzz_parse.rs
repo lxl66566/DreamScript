@@ -119,3 +119,44 @@ fn corpus_seeds_and_mutations_never_panic() {
         }
     }
 }
+
+/// Bracket nesting around and past the scanner's depth guard (40):
+/// random bytes almost never build deep nesting, so the guard's
+/// diagnostic path needs these. Below the limit the balanced shapes
+/// parse; at and past it the guard reports instead of overflowing the
+/// parse stack. Truncated variants cover the two-span diagnostic.
+#[test]
+fn nested_delimiters_never_panic() {
+    let balanced = |open: &str, close: &str, depth: usize| {
+        format!(
+            "fn f() -> int {{\n  {}1{}\n}}\n",
+            open.repeat(depth),
+            close.repeat(depth),
+        )
+    };
+    for depth in [1usize, 8, 39, 40, 41, 200] {
+        for (open, close) in [("(", ")"), ("[", "]"), ("{", "}")] {
+            let source = balanced(open, close, depth);
+            property(source.as_bytes());
+            let mut truncated = source.clone();
+            truncated.truncate(truncated.len() / 2);
+            property(truncated.as_bytes());
+        }
+    }
+    // Interpolation holes nest inside strings; each hole is a frame.
+    for holes in [1usize, 3, 20, 60] {
+        let mut source = String::from("fn f() -> string {\n  \"");
+        for _ in 0..holes {
+            source.push_str("${1 + ");
+        }
+        source.push('1');
+        for _ in 0..holes {
+            source.push_str(" + 2}\"");
+        }
+        source.push_str("\n}\n");
+        property(source.as_bytes());
+        let mut truncated = source.clone();
+        truncated.truncate(truncated.len() / 2);
+        property(truncated.as_bytes());
+    }
+}

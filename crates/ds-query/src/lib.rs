@@ -1,5 +1,5 @@
 //! Memoized query engine for DreamScript: the compiler as a query library
-//! [H6 item 1]. Every consumer — CLI, LSP, REPL, hot reload, formatter —
+//! (H6 item 1). Every consumer — CLI, LSP, REPL, hot reload, formatter —
 //! reads compiler data through [`Db`] and nowhere else.
 //!
 //! # Model

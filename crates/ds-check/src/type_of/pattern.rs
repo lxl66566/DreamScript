@@ -1,4 +1,4 @@
-//! Pattern typing [F4]: coverage as atom sets for exhaustive matching and
+//! Pattern typing (F4): coverage as atom sets for exhaustive matching and
 //! arm remainder typing, binder collection through the same walk, and the
 //! case/enum pattern tables.
 

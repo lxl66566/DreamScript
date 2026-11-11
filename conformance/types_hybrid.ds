@@ -46,8 +46,8 @@ fn load(path: string) -> config | io_err | cfg_err {
 
 const cfg = load("app.cfg").err((e) => {
   match e {
-    b if b is bad_port => log("bad port ${b.got}"),
-    _                  => log("config read failed"),
+    b if b is bad_port => log("bad port ${b.got}")
+    _ => log("config read failed")
   }
   default_config()
 })

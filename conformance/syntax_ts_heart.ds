@@ -11,8 +11,8 @@
 enum parse_error { bad_number(string), missing_field(string) }
 
 struct user {
-  name: string,
-  age: int,
+  name: string
+  age: int
 }
 
 // F6 byte literal: `b'x'` is pinned to the ambient's `tag byte` atom, so
@@ -21,8 +21,8 @@ const sep = b'\n'
 
 fn parse_age(s: string) -> int | parse_error {
   match s.trim().parse_int() {
-    parse_err => bad_number(s),
-    n         => n,
+    parse_err => bad_number(s)
+    n => n
   }
 }
 
@@ -52,8 +52,8 @@ fn main() -> () | io_err {
   }
 
   match (total, errors.first()) {
-    (_, e) if e is parse_error => println("warning: ${str(e)}"),
-    (0, _)                     => println("no valid users"),
-    (t, _)                     => println("total score: ${t}"),
+    (_, e) if e is parse_error => println("warning: ${str(e)}")
+    (0, _) => println("no valid users")
+    (t, _) => println("total score: ${t}")
   }
 }

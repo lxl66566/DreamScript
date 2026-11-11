@@ -434,6 +434,9 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             write_expr(ctx, out, base, value);
             out.push(']');
         },
+        // A fn type in the constructor brackets renders through the type
+        // writer, the annotation spelling.
+        Expr::FnType { ty, .. } => write_ty(ctx, out, ty),
         Expr::Try { expr, .. } => {
             write_expr_min(ctx, out, base, expr, 15);
             out.push('?');

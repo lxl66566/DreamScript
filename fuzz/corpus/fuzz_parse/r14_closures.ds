@@ -1,0 +1,26 @@
+// seed: R14 closure round surface — capturing and non-capturing lambdas,
+// trailing-block arguments reading enclosing locals, the curried factory
+// in named and value form, fn-typed parameters, and a returned closure
+// outliving its frame.
+
+fn apply(f: fn() -> int) -> int {
+  f()
+}
+
+fn twice(x: int, f: fn(int) -> int) -> int {
+  f(x) + f(x)
+}
+
+fn make_adder(base: int) -> fn(int) -> int {
+  (y: int) => base + y
+}
+
+fn main() -> () {
+  const pick = 7
+  const captured = apply() { pick + 1 }
+  const curried = make_adder(pick)
+  const by_value = (b: int) => (y: int) => b + y
+  const shown = twice(pick, (x: int) => x * 2)
+  const stored = () => pick * 2
+  println("${captured} ${curried(1)} ${by_value(3)(2)} ${shown} ${stored()}")
+}

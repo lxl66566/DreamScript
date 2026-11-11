@@ -1,31 +1,31 @@
-//! Surface type expressions over atoms and trait constraints [B1].
+//! Surface type expressions over atoms and trait constraints (B1).
 //!
 //! Expressions are the durable written form (field signatures, annotations).
 //! [`crate::Universe::solve`] evaluates them into canonical solved types;
 //! difference and negation nodes never survive solving, and tuple products
-//! distribute over unions element-wise [B3].
+//! distribute over unions element-wise (B3).
 
 use crate::atom::{TraitId, TypeId};
 
 /// A type expression: unions, intersections, differences of nominal atoms,
-/// plus trait constraints [B1]. [`TypeExpr::Not`] is the complement of a
-/// marker trait such as `~Copyable` [C1]; [`TypeExpr::Diff`] is compile-time
-/// only and erases entirely [B1].
+/// plus trait constraints (B1). [`TypeExpr::Not`] is the complement of a
+/// marker trait such as `~Copyable` (C1); [`TypeExpr::Diff`] is compile-time
+/// only and erases entirely (B1).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeExpr {
     /// A nominal atom by identity.
     Atom(TypeId),
-    /// A trait used as a type: the set of its member atoms [B1].
+    /// A trait used as a type: the set of its member atoms (B1).
     Trait(TraitId),
-    /// A negated constraint: the complement of a trait's members [C1].
+    /// A negated constraint: the complement of a trait's members (C1).
     Not(TraitId),
     /// Union.
     Union(Box<Self>, Box<Self>),
     /// Intersection.
     Inter(Box<Self>, Box<Self>),
-    /// Difference `a & ~b`; erases at solving [B1].
+    /// Difference `a & ~b`; erases at solving (B1).
     Diff(Box<Self>, Box<Self>),
-    /// An anonymous tuple `(t0, t1, ...)` [B3]. Solving distributes the
+    /// An anonymous tuple `(t0, t1, ...)` (B3). Solving distributes the
     /// product over union elements into one structural atom per combination,
     /// so `(a | b, c)` solves to `(a, c) | (b, c)`.
     Tuple(Vec<Self>),
@@ -68,7 +68,7 @@ impl TypeExpr {
         Self::Diff(Box::new(self), Box::new(other))
     }
 
-    /// An anonymous tuple of the given elements [B3].
+    /// An anonymous tuple of the given elements (B3).
     #[must_use]
     pub fn tuple(elements: Vec<Self>) -> Self {
         Self::Tuple(elements)

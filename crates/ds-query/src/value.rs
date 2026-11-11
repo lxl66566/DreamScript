@@ -69,7 +69,7 @@ pub struct BlockIndexOutput {
 /// Result of the [`LinearityCheck`](crate::QueryKey::LinearityCheck)
 /// query: the linearity facts of one definition — the diagnostics and
 /// placements whose spans address its block, sliced out of the package
-/// pass [C1, C5].
+/// pass (C1, C5).
 ///
 /// The slice is defined by primary spans: a diagnostic belongs to the
 /// definition its primary label addresses, so the two-span `DS3001`

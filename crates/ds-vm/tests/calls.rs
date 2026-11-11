@@ -399,3 +399,140 @@ fn garbage_callable_words_trap_honestly() {
         })
     );
 }
+
+/// The `lib` module's constant-answering `work`, installed twice with
+/// different pools: the hot-reload body a CACHED call site must pick up.
+fn answer_lib(answer: i64) -> ModuleVersion {
+    ModuleVersion::new("lib", vec![def(
+        "work",
+        &[I64],
+        1,
+        0,
+        vec![Const::I64(answer)],
+        &[
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Kimm { dst: 0, kidx: k(0) },
+            Uop::Ret { src: 0 },
+        ],
+    )])
+    .expect("valid lib module")
+}
+
+/// An `app` entry whose body stages its argument and CALLs (or CALLTs)
+/// `lib.work` through a pool FuncRef: the call site the inline cache
+/// keys on.
+fn caller_module(tail: bool) -> ModuleVersion {
+    let call = if tail {
+        Uop::Callt {
+            callee: k(0),
+            nargs: 1,
+        }
+    } else {
+        Uop::Call {
+            callee: k(0),
+            nargs: 1,
+        }
+    };
+    ModuleVersion::new("app", vec![def(
+        "main",
+        &[I64, I64],
+        1,
+        1,
+        vec![Const::FuncRef {
+            module: "lib".into(),
+            func: 0,
+        }],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Mov { dst: 1, src: 0 },
+            call,
+            Uop::Ret { src: 1 },
+        ],
+    )])
+    .expect("valid app module")
+}
+
+/// A cached CALL/CALLT site must not outlive an install: the site's key
+/// (caller function, pc) is untouched by a hot-reload swap of the TARGET
+/// module, so only the generation stamp saves the second run from the
+/// first install's callee.
+#[test]
+fn call_site_cache_redirects_after_a_target_swap() {
+    for tail in [false, true] {
+        let mut reg = ModuleRegistry::new();
+        reg.install(answer_lib(7));
+        reg.install(caller_module(tail));
+        let mut vm = Vm::new(reg);
+        assert_eq!(vm.run("app", "main", &[Value::I64(0)]), Ok(Value::I64(7)));
+        vm.install_module(answer_lib(9));
+        assert_eq!(
+            vm.run("app", "main", &[Value::I64(0)]),
+            Ok(Value::I64(9)),
+            "the cached site re-resolves through the target's current slot"
+        );
+    }
+}
+
+/// The cache keys a site on the FUNCTION, not its module version: two
+/// same-shaped functions in one module — identical bodies, call sites at
+/// identical pcs, different callees — must never serve each other's
+/// resolution. (A version-keyed cache cross-serves here by construction.)
+#[test]
+fn call_site_cache_keys_the_site_on_the_function_not_the_module() {
+    fn adder(name: &str, addend: i64) -> ModuleVersion {
+        ModuleVersion::new(name, vec![def(
+            "work",
+            &[I64, I64],
+            1,
+            0,
+            vec![Const::I64(addend)],
+            &[
+                Uop::Funcf { frame_slots: 2 },
+                Uop::Kimm { dst: 1, kidx: k(0) },
+                Uop::AddI64 {
+                    dst: 0,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Uop::Ret { src: 0 },
+            ],
+        )])
+        .expect("valid adder module")
+    }
+    fn site(name: &str, callee: &str) -> FunctionDef {
+        def(
+            name,
+            &[I64, I64],
+            1,
+            1,
+            vec![Const::FuncRef {
+                module: callee.into(),
+                func: 0,
+            }],
+            &[
+                Uop::Funcf { frame_slots: 2 },
+                Uop::Mov { dst: 1, src: 0 },
+                Uop::Call {
+                    callee: k(0),
+                    nargs: 1,
+                },
+                Uop::Ret { src: 1 },
+            ],
+        )
+    }
+    let mut reg = ModuleRegistry::new();
+    reg.install(adder("one", 1));
+    reg.install(adder("two", 2));
+    reg.install(
+        ModuleVersion::new("app", vec![site("f", "one"), site("g", "two")])
+            .expect("valid app module"),
+    );
+    let mut vm = Vm::new(reg);
+    assert_eq!(vm.run("app", "f", &[Value::I64(10)]), Ok(Value::I64(11)));
+    assert_eq!(
+        vm.run("app", "g", &[Value::I64(10)]),
+        Ok(Value::I64(12)),
+        "the same-pc site in the sibling function resolves its own callee"
+    );
+    assert_eq!(vm.run("app", "f", &[Value::I64(10)]), Ok(Value::I64(11)));
+}

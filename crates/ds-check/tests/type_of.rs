@@ -1236,6 +1236,71 @@ fn duplicate_inherent_method_keeps_the_first_signature() {
 }
 
 #[test]
+fn same_name_inherent_methods_select_by_owner() {
+    // Two owner types share one method name: each dot-call binds its own
+    // owner's signature — distinct returns prove no cross-binding — a
+    // generic owner accepts its applications, and a receiver the owner
+    // does not cover reports at the dot [F3].
+    clean(concat!(
+        "struct counter { ticks: int }\n",
+        "struct timer { laps: int }\n",
+        "impl counter { fn peek(self) -> int { 1 } }\n",
+        "impl timer { fn peek(self) -> int { 2 } }\n",
+        "fn use(c: counter, t: timer) -> int { c.peek() + t.peek() }\n",
+    ));
+    // timer.peek returns string: the sum reports the arithmetic meeting,
+    // proving t.peek() bound timer's signature and c.peek() counter's.
+    assert_eq!(
+        check(concat!(
+            "struct counter { ticks: int }\n",
+            "struct timer { laps: int }\n",
+            "impl counter { fn peek(self) -> int { 1 } }\n",
+            "impl timer { fn peek(self) -> string { \"t\" } }\n",
+            "fn use(c: counter, t: timer) -> int { c.peek() + t.peek() }\n",
+        )),
+        ["DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]"]
+    );
+    // A generic impl owns the bare constructor; applications of it accept.
+    clean(concat!(
+        "struct box[t]\n",
+        "impl[t] box[t] { fn size(self) -> int { 1 } }\n",
+        "fn use(b: box[int]) -> int { b.size() }\n",
+    ));
+    // The receiver must be contained in the owner: a wrong type and an
+    // unnarrowed union both report at the dot.
+    assert_eq!(
+        check(concat!(
+            "struct counter { ticks: int }\n",
+            "impl counter { fn peek(self) -> int { 1 } }\n",
+            "fn wrong(x: int) -> int { x.peek() }\n",
+        )),
+        ["DS2013 no method `peek` accepts receiver `int`"]
+    );
+    let union = check(concat!(
+        "struct counter { ticks: int }\n",
+        "impl counter { fn peek(self) -> int { 1 } }\n",
+        "fn use(c: int | counter) -> int { c.peek() }\n",
+    ));
+    assert_eq!(
+        union.len(),
+        1,
+        "the unnarrowed union reports once: {union:?}"
+    );
+    assert!(
+        union[0].contains("no method `peek` accepts receiver"),
+        "{union:?}"
+    );
+    // Narrowing restores the call.
+    clean(concat!(
+        "struct counter { ticks: int }\n",
+        "impl counter { fn peek(self) -> int { 1 } }\n",
+        "fn use(c: int | counter) -> int {\n",
+        "  if c is counter { c.peek() } else { 0 }\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn top_level_destructuring_patterns_type_their_binders() {
     // A top-level tuple/struct-pun pattern declares package defs whose
     // types memoize like any single-name binding [G3] — uses far from the
@@ -1261,4 +1326,221 @@ fn top_level_destructuring_patterns_type_their_binders() {
         )),
         ["DS2001 `lambda body` has type `string`, not contained in `int` [B2]"]
     );
+}
+
+/// The inference-hole boundary of `?` [E4]: the split needs a known
+/// return union, so a lambda whose return is inferred — no annotation, or
+/// a bare type-variable expectation from a generic callee's `r` — reports
+/// honestly instead of binding the whole union; the declared-return
+/// spelling keeps the split. Deferring through a placeholder variable
+/// would mistype mid-body uses (the binding would carry the error
+/// members), so the rejection is the principled M2 answer.
+#[test]
+fn question_marks_need_a_known_return_union() {
+    // Declared returns split cleanly, in value and argument position.
+    clean(concat!(
+        "extern fn read (p: string) -> string | io_err\n",
+        "fn g() -> string | io_err {\n",
+        "  const h = (p: string) -> string | io_err { read(p)? }\n",
+        "  h(\"x\")\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "extern fn read (p: string) -> string | io_err\n",
+        "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+        "fn g(xs: list[string]) -> list[string | io_err] {\n",
+        "  map(xs, (w: string) -> string | io_err { read(w)? })\n",
+        "}\n",
+    ));
+    // An inferred return cannot split: the report names the missing
+    // return union (never "outside a function" — a function encloses).
+    let stray = "DS2008 `?` needs an enclosing return union to propagate into [E4]";
+    assert_eq!(
+        check(concat!(
+            "extern fn read (p: string) -> string | io_err\n",
+            "fn g() -> string | io_err {\n",
+            "  const h = (p: string) => read(p)?\n",
+            "  h(\"x\")\n",
+            "}\n",
+        )),
+        [stray]
+    );
+    // The bare type-variable expectation (a generic callee's `r`) is the
+    // same hole: the expectation is not a union to split against — and the
+    // missing union is the ONLY diagnostic: the empty `r` wrapping into
+    // `list[empty]` at the boundary consumed the poisoned call without
+    // re-reporting.
+    assert_eq!(
+        check(concat!(
+            "extern fn read (p: string) -> string | io_err\n",
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn g(xs: list[string]) -> list[string] {\n",
+            "  map(xs, (w: string) => read(w)?)\n",
+            "}\n",
+        )),
+        [stray]
+    );
+}
+
+/// The expression-error epoch: once an expression reports, its enclosing
+/// positions consume the poisoned value without re-reporting — the root
+/// cause stands alone. Sibling positions keep their own errors.
+#[test]
+fn root_expression_errors_do_not_cascade_upward() {
+    // The DS2008 inside the lambda body must not re-surface as a
+    // `list[empty]` containment at the function boundary.
+    assert_eq!(
+        check(concat!(
+            "extern fn read (p: string) -> string | io_err\n",
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn g(xs: list[string]) -> list[string] {\n",
+            "  map(xs, (w: string) => read(w)?)\n",
+            "}\n",
+        )),
+        ["DS2008 `?` needs an enclosing return union to propagate into [E4]"]
+    );
+    // An errored initializer reports once; the empty-type fallback at the
+    // binding is not a second error.
+    assert_eq!(
+        check(concat!(
+            "fn f(x: int | string) -> int {\n",
+            "  const y = 1 + \"s\"\n",
+            "  y\n",
+            "}\n",
+        )),
+        ["DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]"]
+    );
+    // The wrapper shapes: a poisoned operand silences the operator's own
+    // complaint, and the field/method/call reports over it.
+    assert_eq!(check("fn f(x: int) -> bool { 1 + \"s\" == x }\n"), [
+        "DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]"
+    ]);
+    assert_eq!(check("fn f(c: config) -> int { (1 + \"s\").port }\n"), [
+        "DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]"
+    ]);
+}
+
+#[test]
+fn sibling_positions_keep_their_own_errors() {
+    // One bad sibling reports its root; the good sibling's mismatch is an
+    // independent error and still reports.
+    assert_eq!(
+        check(concat!(
+            "extern fn two (a: int, b: int) -> int\n",
+            "fn f() -> int {\n",
+            "  two(1 + \"s\", \"t\")\n",
+            "}\n",
+        )),
+        [
+            "DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]",
+            "DS2001 `argument` has type `string`, not contained in `int` [B2]"
+        ]
+    );
+    // Two bad siblings each report their own root.
+    assert_eq!(
+        check(concat!(
+            "extern fn two (a: int, b: int) -> int\n",
+            "fn f() -> int {\n",
+            "  two(1 + \"s\", 2 + \"u\")\n",
+            "}\n",
+        )),
+        [
+            "DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]",
+            "DS2001 arithmetic needs numeric operands, `int` and `string` given [B7]"
+        ]
+    );
+}
+
+/// A provably-disjoint `is` test computes a constant false: in value or
+/// assert position it is a compile error (mirroring the constant `==`
+/// carve-out), while condition positions refine legitimately — a disjoint
+/// test narrows the kept branch to empty, which is sound dead code, and a
+/// match arm covering nothing is the exhaustiveness story.
+#[test]
+fn always_false_is_tests_report_only_in_value_position() {
+    // Value position: the test can never hold.
+    assert_eq!(
+        check(concat!(
+            "fn f(x: string) -> bool {\n",
+            "  const b = x is io_err\n",
+            "  b\n",
+            "}\n",
+        )),
+        ["DS2001 the `is` test against `io_err` is always false over `string` [B2]"]
+    );
+    // The operand's flow-refined current type is what the test meets: in
+    // the else branch `x` is narrowed away from int, so `is int` there is
+    // still honest refinement (condition), but its value use reports.
+    assert_eq!(
+        check(concat!(
+            "fn f(x: int | string) -> bool {\n",
+            "  if x is int { true } else { x is io_err }\n",
+            "}\n",
+        )),
+        ["DS2001 the `is` test against `io_err` is always false over `string` [B2]"]
+    );
+    // Condition positions stay quiet: if, while, and match guards.
+    clean("fn f(x: string) -> int {\n  if x is io_err { 1 } else { 0 }\n}\n");
+    clean(concat!(
+        "fn f(x: string) -> int {\n",
+        "  var n = 0\n",
+        "  while x is io_err { n = n + 1 }\n",
+        "  n\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "fn f(x: string) -> int {\n",
+        "  match x { s if s is io_err => 0, _ => 1 }\n",
+        "}\n",
+    ));
+    // A test that CAN hold never reports, in any position.
+    clean("fn f(x: int | string) -> bool { x is int }\n");
+    clean("fn f(x: int | string) -> int {\n  if x is int { 1 } else { 0 }\n}\n");
+}
+
+/// The universe predeclares `none` as its distinguished unit atom [B4]; a
+/// `tag none` (or a unit enum case `none`) restates that atom instead of
+/// minting a second — every written `none`, in type and value position,
+/// keeps solving. Before the alias the refused mint silently orphaned the
+/// declaration's def and `int | none` / `is none` stopped solving.
+#[test]
+fn none_restatement_maps_onto_the_predeclared_atom() {
+    clean(concat!(
+        "tag none\n",
+        "fn f(x: int | none) -> int {\n",
+        "  if x is none { 0 } else { x }\n",
+        "}\n",
+        "const a = none\n",
+        "fn g() -> none { a }\n",
+    ));
+    clean(concat!(
+        "enum opt { none, some }\n",
+        "fn f(x: int | none) -> int {\n",
+        "  if x is none { 0 } else { x }\n",
+        "}\n",
+        "const a = none\n",
+        "fn g() -> none { a }\n",
+    ));
+    // Optional sugar still meets the predeclared member.
+    clean("tag none\nfn f(x: int?) -> int | none { x }\n");
+}
+
+/// The script-entry fold's synthesized `main` checks through a lambda node
+/// the user never wrote; its boundary label names the script entry, not a
+/// lambda (a written fn keeps the lambda-body label since every fn
+/// converts onto the const-of-lambda node).
+#[test]
+fn script_entry_value_tail_names_the_script_main_body() {
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", &format!("{PRELUDE}1\n\"tail\"\n"));
+    let ast = ds_parse::parse_script(&files, file)
+        .unwrap_or_else(|diags| panic!("should parse: {diags:?}"));
+    let diags = type_check(&files, &[ast])
+        .diags
+        .iter()
+        .map(|d| format!("{} {}", d.code.as_str(), d.message))
+        .collect::<Vec<_>>();
+    assert_eq!(diags, [
+        "DS2001 `script main body` has type `string`, not contained in `()` [B2]"
+    ]);
 }

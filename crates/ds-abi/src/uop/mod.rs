@@ -69,7 +69,7 @@
 //! any other constant (f64, bool, reference, unit), KSTR materializes a pool
 //! string as a heap string reference, and CALL/CALLT reference
 //! callees as pool entries (a FuncRef: module index + function index for
-//! fully-qualified cross-module calls [H6 item 5], the entry hot reload
+//! fully-qualified cross-module calls (H6 item 5), the entry hot reload
 //! swaps). The uop contract fixes only the index shape: pool indices are u16
 //! ([`ConstIdx`]); the pool CONTAINER is a dsmod-format concern, not part of
 //! the ISA — the shipped format carries one pool per function (BL-7), and a
@@ -161,7 +161,7 @@ pub const MAX_FRAME_SLOTS: u16 = 256;
 /// not the container: the dsmod format carries one pool per function (BL-7).
 /// Pool entries are: i64 (KIMM), any other constant word (KCONST: f64, bool,
 /// reference, unit), or a FuncRef (CALL/CALLT: module index + function index
-/// [H6 item 5]).
+/// (H6 item 5)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConstIdx(pub u16);
 
@@ -280,7 +280,7 @@ pub enum Uop {
     /// `0x7.0` — `slots[dst] = slots[src] as f64`, i64 to f64.
     CvtI2F { dst: u8, src: u8 },
     /// `0x7.1` — `slots[dst] = slots[src] as i64`, f64 to i64, traps when
-    /// the value is out of i64 range [B7 explicit conversions].
+    /// the value is out of i64 range (B7 explicit conversions).
     CvtF2I { dst: u8, src: u8 },
     /// `0x8.0` — `slots[dst] = slots[src]`, one raw word.
     Mov { dst: u8, src: u8 },
@@ -305,7 +305,7 @@ pub enum Uop {
     /// VM re-checks `nargs` against the callee's layout. The slide source is
     /// derived from the caller layout (see module docs).
     Callt { callee: ConstIdx, nargs: u8 },
-    /// `0xA.4` — CALLG (the record's `CALL_GENERIC` emission form [H3]):
+    /// `0xA.4` — CALLG (the record's `CALL_GENERIC` emission form (H3)):
     /// call the pool FuncRef `callee`, the ONE body of a generic function,
     /// with `nargs` real arguments staged in the outgoing-argument area
     /// followed by the call's evidence words at overlay positions
@@ -320,7 +320,7 @@ pub enum Uop {
     /// convention: each evidence word is an i64 pool constant, a
     /// statically-resolved instance reference ([`BuiltinInstance`]); the
     /// future runtime-resolved shape (a slot keyed by the runtime tag,
-    /// later patched into a 1-2 entry inline cache [H3]) stages through
+    /// later patched into a 1-2 entry inline cache (H3)) stages through
     /// the same overlay positions, so the layout admits both.
     Callg { callee: ConstIdx, nargs: u8 },
     /// `0xA.6` — CALLS (the callable-word call form, F2): call the function
@@ -362,7 +362,7 @@ pub enum Uop {
 }
 
 /// The statically-resolved instance reference one CALLG evidence word
-/// carries [H3]: the builtin instance the call's receiver addresses.
+/// carries (H3): the builtin instance the call's receiver addresses.
 /// Lowering mints an i64 pool constant from this enumeration; the
 /// callee's one body dispatches on it (`len` answers per instance; the
 /// container reads and counts record the instance and stay

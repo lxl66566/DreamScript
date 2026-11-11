@@ -133,6 +133,8 @@ pub const POSITIVE: &[&str] = &[
     "type t = a | b & c - d\n",
     "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
     "type h = fn(a: int) -> int\n",
+    "fn f() { const fns = list[fn(int) -> int]()\n const m = map[string, fn(int) -> int]()\n \
+     const n = list[list[fn() -> int]]()\n}\n",
     "fn main() -> () | io_error { 0 }\n",
     "type e = badnumber(string) | missingfield(string)\n",
     "enum color { red, green(int), blue { shade: int } }\n",
@@ -658,6 +660,10 @@ fn norm_expr(e: &mut Expr) {
             norm_ident(head);
             norm_expr(key);
             norm_expr(value);
+        },
+        Expr::FnType { span, ty } => {
+            z(span);
+            norm_ty(ty);
         },
         Expr::Try { span, expr } | Expr::Unary { span, expr, .. } => {
             z(span);

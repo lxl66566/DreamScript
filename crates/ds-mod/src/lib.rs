@@ -95,7 +95,7 @@
 //! agreement, slot-range checking,
 //! and pool-index resolution are loader/VM concerns, not format concerns.
 //!
-//! # Two-hook collector interface [C4, H4]
+//! # Two-hook collector interface (C4, H4)
 //!
 //! The two reserved u64 hook slots plus the activity flag commit the H4(d)
 //! two-hook collector interface (cycle-candidate registration, weak refs)
@@ -130,7 +130,7 @@ pub use module::{Constant, DebugSpan, Function, FunctionError, Module};
 pub use read::{ReadError, read, read_checked};
 pub use write::write;
 
-/// Magic bytes every dsmod file starts with: NUL + `DSM`, four bytes [G3.5].
+/// Magic bytes every dsmod file starts with: NUL + `DSM`, four bytes (G3.5).
 pub const MAGIC: [u8; 4] = *b"\0DSM";
 
 /// The dsmod format version this crate reads and writes.

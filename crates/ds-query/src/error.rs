@@ -11,7 +11,7 @@ use crate::key::{BlockId, DefId, QueryKey};
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum QueryError {
     /// A query transitively read its own in-flight result. Query-level
-    /// non-termination is an engine error [H6 item 1]; `path` lists the full
+    /// non-termination is an engine error (H6 item 1); `path` lists the full
     /// cycle, starting and ending at the repeated key. Intra-package
     /// definition cycles are different — legal language semantics resolved
     /// by whole-package fixpoint at M2 (G3), no concern of this engine.

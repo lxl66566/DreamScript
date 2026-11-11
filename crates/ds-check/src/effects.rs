@@ -1,7 +1,7 @@
 //! The `effects_of` pass: per-definition effect rows over the parsed and
-//! resolved surface [B5, B7, E1, E2, E4].
+//! resolved surface (B5, B7, E1, E2, E4).
 //!
-//! v1 has no effect syntax [E1] — rows are computed, never written. The
+//! v1 has no effect syntax (E1) — rows are computed, never written. The
 //! computation is a pure walk over the package's trees and the resolution
 //! side table [`crate::resolve`]: it emits no diagnostics, and unresolved
 //! names contribute nothing (the ambient row table [`DeclaredRows`] is the
@@ -14,26 +14,26 @@
 //! A row is the union of the definition's declared row, its body's
 //! intrinsic contributions, and one edge per resolved call or value use,
 //! unioning the callee's row. `?` and `or return` contribute `error`
-//! [E4]; trapping integer defaults contribute `trap` [B7]; a `nursery`
-//! block contributes `cancel | discontinue` [E1, E2] — the internal
+//! (E4); trapping integer defaults contribute `trap` (B7); a `nursery`
+//! block contributes `cancel | discontinue` (E1, E2) — the internal
 //! effects its boundary dispatches evidence for. The E4 consuming forms
 //! mask their operand's `error`: a plain `or` extracts the wanted member
 //! and `.err(h)`/`.ok(h)` handle the failure set, so their operand's call
 //! edges carry `error` subtracted; `or return` additionally contributes
 //! `error` because the early exit hands the failure out. Lambda bodies
 //! contribute in place — combinators and spawn blocks run them inside the
-//! enclosing definition's dynamic extent [D3, E2]. Rows grow monotonically
+//! enclosing definition's dynamic extent (D3, E2). Rows grow monotonically
 //! over the call graph to a least fixpoint, so recursion and
-//! intra-package cycles terminate by construction [G3].
+//! intra-package cycles terminate by construction (G3).
 //!
 //! # Over-approximation, deliberate
 //!
 //! Rows never miss an effect but may carry more: trapping operators
 //! contribute `trap` without solved operand types (floats never trap
-//! [B7] — the checker's per-expression types are not exposed to this
+//! (B7) — the checker's per-expression types are not exposed to this
 //! pass); a method call unions every registered candidate and a trait
-//! member's row unions every impl body [F3]; a match scrutinee keeps its
-//! operand's `error` since arms may hand it on; `deinit` blocks [C5] are
+//! member's row unions every impl body (F3); a match scrutinee keeps its
+//! operand's `error` since arms may hand it on; `deinit` blocks (C5) are
 //! walked by no definition — their effects ride with the value's owning
 //! function once the affine pass places deaths (M4). Supersets fail
 //! closed: M7's platform subset check may over-reject, never silently
@@ -51,7 +51,7 @@
 //!     "net.ds",
 //!     concat!(
 //!         "extern fn fetch (u: int) -> int | io_err\n",
-//!         "const body = (u: int) -> int { fetch(u)? }\n",
+//!         "fn body(u: int) -> int { fetch(u)? }\n",
 //!     ),
 //! );
 //! let ast = parse(&files, file).expect("parses");
@@ -77,24 +77,24 @@ use ds_parse::{
 
 use crate::resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions};
 
-/// One named effect. The vocabulary is the record's set: `error` [B5, E4]
+/// One named effect. The vocabulary is the record's set: `error` (B5, E4)
 /// — union-member failure a definition can hand to its caller; `trap`
-/// [B7, E4] — the unhandleable bug boundary of panics and trapping
-/// integer defaults; `world` [E1] — the world-touching capability surface,
+/// (B7, E4) — the unhandleable bug boundary of panics and trapping
+/// integer defaults; `world` (E1) — the world-touching capability surface,
 /// entering through [`DeclaredRows`] until M7's platform declaration
-/// supplies it; `cancel` and `discontinue` [E1] — the two internal effects
+/// supplies it; `cancel` and `discontinue` (E1) — the two internal effects
 /// a `nursery` boundary dispatches evidence for.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Effect {
-    /// Union-member failure handed to a caller [B5, E4].
+    /// Union-member failure handed to a caller (B5, E4).
     Error,
-    /// The unhandleable bug boundary [B7, E4].
+    /// The unhandleable bug boundary (B7, E4).
     Trap,
-    /// The world-touching capability surface [E1].
+    /// The world-touching capability surface (E1).
     World,
-    /// The nursery cancellation internal effect [E1, E2].
+    /// The nursery cancellation internal effect (E1, E2).
     Cancel,
-    /// The nursery discontinue internal effect [E1].
+    /// The nursery discontinue internal effect (E1).
     Discontinue,
 }
 
@@ -194,7 +194,7 @@ impl std::ops::BitOrAssign for EffectRow {
 }
 
 /// Rows the embedding surface declares for ambient functions — externs,
-/// the stdlib, platform capabilities [E1, H5]. v1 has no effect syntax, so
+/// the stdlib, platform capabilities (E1, H5). v1 has no effect syntax, so
 /// this table is the only row input the surface cannot express; M7's
 /// `platform "..." provides <...>` declaration is its source. Applied by
 /// name; a declared row is a lower bound on the computed row. Absent names
@@ -351,7 +351,7 @@ const fn traps_assign(op: AssignOp) -> bool {
 /// Pure by contract: no diagnostics are emitted or consumed — a
 /// resolution failure leaves the failing name contributing nothing, and
 /// rows are computed whatever the file's items check like. The package is
-/// every tree passed here, in order [G3]. `T: Borrow<Ast>` lets callers
+/// every tree passed here, in order (G3). `T: Borrow<Ast>` lets callers
 /// pass owned trees or shared arcs (Borrow is the reflexive bound).
 #[must_use]
 pub fn effects_of<T>(asts: &[T], declared: &DeclaredRows) -> Effects
@@ -584,7 +584,7 @@ impl Walker<'_, '_> {
     /// One impl block: inherent functions register as methods; a
     /// trait-impl function is an anonymous node flowing into the trait
     /// member it implements, so a call through the trait unions every
-    /// impl body [F3].
+    /// impl body (F3).
     fn impl_decl(&mut self, imp: &ImplDecl) {
         let trait_def = imp
             .trait_ref
@@ -661,7 +661,13 @@ impl Walker<'_, '_> {
     /// flow and never masked.
     fn expr(&mut self, e: &Expr, mask: EffectRow) {
         match e {
-            Expr::Literal { .. } | Expr::RawStr { .. } | Expr::Break(_) | Expr::Continue(_) => {},
+            // A fn type in the constructor brackets is a type spelling; it
+            // carries no value effects.
+            Expr::Literal { .. }
+            | Expr::RawStr { .. }
+            | Expr::Break(_)
+            | Expr::Continue(_)
+            | Expr::FnType { .. } => {},
             Expr::Str { parts, .. } => self.string(parts, mask),
             Expr::Lambda { body, .. } => self.expr(body, mask),
             Expr::Path { path, .. } => self.path(path, mask),
@@ -784,7 +790,7 @@ impl Walker<'_, '_> {
     }
 
     /// A dot use: the `.err`/`.ok` handler forms consume the receiver's
-    /// failure members [E4]; every other dot names a callee (a free
+    /// failure members (E4); every other dot names a callee (a free
     /// function the receiver feeds, or the method candidates).
     fn field(&mut self, recv: &Expr, name: &Ident, mask: EffectRow) {
         let handled = matches!(self.res.get(name.span), Some(Res::Handler));

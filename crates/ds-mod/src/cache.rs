@@ -1,11 +1,11 @@
-//! Content-addressed cache path layout [G3.5].
+//! Content-addressed cache path layout (G3.5).
 
 use std::path::{Path, PathBuf};
 
 use crate::hash::Hash128;
 
 /// Derives the cache location of a module artifact:
-/// `<cache_root>/ir/<target_triple>/<hex-hash>.dsmod` [G3.5].
+/// `<cache_root>/ir/<target_triple>/<hex-hash>.dsmod` (G3.5).
 ///
 /// Pure function: resolving the `$DS_CACHE` root is the CLI layer's job,
 /// not this crate's. `source_hash` is the caller-computed cache key

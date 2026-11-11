@@ -18,7 +18,7 @@ struct file: ~Copyable {
   deinit { close(self.fd) }
 }
 
-fn read_u32(f: mut file) -> u32 | io_error {
+fn read_u32(mut f: file) -> u32 | io_error {
   const b = f.read_exact(4)?
   b.to_u32_le()
 }

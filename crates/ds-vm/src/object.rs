@@ -564,6 +564,14 @@ impl Objects {
         }
     }
 
+    /// Whether `obj` names a live string object holding exactly `text`:
+    /// the KSTR pool-const cache's hit validation — a cached id stays
+    /// servable only while its content still matches, so a dead or
+    /// recycled id never serves.
+    pub(crate) fn is_live_str_with(&self, obj: u32, text: &str) -> bool {
+        matches!(self.table.get(obj as usize), Some(Object::Str(s)) if &*s.text == text)
+    }
+
     /// Whether two key words name the same key: string references compare
     /// by content (one key per content, whatever object carries it),
     /// every other word by identity — mixed kinds never match.

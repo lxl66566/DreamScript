@@ -52,10 +52,8 @@ use std::{
     time::Duration,
 };
 
-use ds_abi::SlotType;
-
 use crate::{
-    native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ERR},
+    native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ERR, i64_arg, ref_arg},
     object::Objects,
     value::Value,
     vm::Trap,
@@ -222,25 +220,8 @@ pub(crate) fn net_connect_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let host = objects
-        .str_at(match args {
-            [Value::Ref(host), _] => *host,
-            _ => {
-                return Err(Trap::SlotTypeMismatch {
-                    slot: 0,
-                    expected: SlotType::Ref,
-                    actual: args.first().map_or(SlotType::I64, Value::slot_type),
-                })
-            },
-        })?
-        .to_owned();
-    let Value::I64(port) = args[1] else {
-        return Err(Trap::SlotTypeMismatch {
-            slot: 1,
-            expected: SlotType::I64,
-            actual: args[1].slot_type(),
-        });
-    };
+    let host = objects.str_at(ref_arg(args, 0)?)?.to_owned();
+    let port = i64_arg(args, 1)?;
     let Some(port) = u16::try_from(port).ok() else {
         return Ok(net_err(
             objects,
@@ -269,25 +250,8 @@ pub(crate) fn net_send_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let Value::I64(conn) = args[0] else {
-        return Err(Trap::SlotTypeMismatch {
-            slot: 0,
-            expected: SlotType::I64,
-            actual: args[0].slot_type(),
-        });
-    };
-    let data = objects
-        .str_at(match args {
-            [_, Value::Ref(data)] => *data,
-            _ => {
-                return Err(Trap::SlotTypeMismatch {
-                    slot: 1,
-                    expected: SlotType::Ref,
-                    actual: args[1].slot_type(),
-                })
-            },
-        })?
-        .to_owned();
+    let conn = i64_arg(args, 0)?;
+    let data = objects.str_at(ref_arg(args, 1)?)?.to_owned();
     match objects.net().send(conn, data.as_bytes()) {
         // the payload word is the inert unit word, like write_file's
         Ok(()) => Ok(ok(Value::I64(0))),
@@ -308,20 +272,8 @@ pub(crate) fn net_recv_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let Value::I64(conn) = args[0] else {
-        return Err(Trap::SlotTypeMismatch {
-            slot: 0,
-            expected: SlotType::I64,
-            actual: args[0].slot_type(),
-        });
-    };
-    let Value::I64(max) = args[1] else {
-        return Err(Trap::SlotTypeMismatch {
-            slot: 1,
-            expected: SlotType::I64,
-            actual: args[1].slot_type(),
-        });
-    };
+    let conn = i64_arg(args, 0)?;
+    let max = i64_arg(args, 1)?;
     if max < 1 {
         return Ok(net_err(
             objects,
@@ -364,13 +316,7 @@ pub(crate) fn net_close_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let Value::I64(conn) = args[0] else {
-        return Err(Trap::SlotTypeMismatch {
-            slot: 0,
-            expected: SlotType::I64,
-            actual: args[0].slot_type(),
-        });
-    };
+    let conn = i64_arg(args, 0)?;
     match objects.net().close(conn) {
         Ok(()) => Ok(ok(Value::I64(0))),
         Err(err) => Ok(net_err(
@@ -390,18 +336,7 @@ pub(crate) fn http_get_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let url = objects
-        .str_at(match args {
-            [Value::Ref(url)] => *url,
-            _ => {
-                return Err(Trap::SlotTypeMismatch {
-                    slot: 0,
-                    expected: SlotType::Ref,
-                    actual: args.first().map_or(SlotType::I64, Value::slot_type),
-                })
-            },
-        })?
-        .to_owned();
+    let url = objects.str_at(ref_arg(args, 0)?)?.to_owned();
     let detail = http_get(objects, &url);
     match detail {
         Ok(body) => Ok(ok(Value::Ref(objects.alloc_str(body)))),
@@ -462,6 +397,8 @@ fn http_get(objects: &mut Objects, url: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use ds_abi::SlotType;
+
     use super::*;
 
     /// The timeout discipline: a never-answering socket yields the
@@ -481,5 +418,49 @@ mod tests {
         let mut conns = Connections::default();
         let err = conns.close(7).expect_err("handle 7 was never opened");
         assert_eq!(err.to_string(), "unknown connection 7");
+    }
+
+    /// A wrong-typed argument names its own slot: the trap cites the
+    /// offending index's word kind (never another argument's), and a
+    /// missing argument answers the trap instead of indexing out of
+    /// bounds. No case reaches a socket.
+    #[test]
+    fn type_mismatches_name_the_offending_slot() {
+        let mut objects = Objects::new();
+        let mut out = OutputSink::Captured(Vec::new());
+        // net_connect(host, port): the port word is wrong, not the host's
+        let host = objects.intern("example.invalid");
+        assert_eq!(
+            net_connect_fn(&mut objects, &mut out, &[
+                Value::Ref(host),
+                Value::Bool(true)
+            ]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 1,
+                expected: SlotType::I64,
+                actual: SlotType::Bool,
+            })
+        );
+        // net_send(conn, data): the data word is wrong, and a missing one
+        // answers the same trap instead of panicking on args[1]
+        for args in [vec![Value::I64(0), Value::I64(7)], vec![Value::I64(0)]] {
+            assert_eq!(
+                net_send_fn(&mut objects, &mut out, &args),
+                Err(Trap::SlotTypeMismatch {
+                    slot: 1,
+                    expected: SlotType::Ref,
+                    actual: SlotType::I64,
+                })
+            );
+        }
+        // http_get(url): the single argument names itself
+        assert_eq!(
+            http_get_fn(&mut objects, &mut out, &[Value::I64(1)]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 0,
+                expected: SlotType::Ref,
+                actual: SlotType::I64,
+            })
+        );
     }
 }

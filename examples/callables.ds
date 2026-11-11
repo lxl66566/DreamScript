@@ -1,0 +1,48 @@
+// The callable surface: a named fn binds and passes like any value, a
+// fn(int) -> int parameter names a slot every callable inhabits (a named
+// fn or a capturing closure arrive through one call spelling), and a
+// fn-typed return builds factories. list[fn(int) -> int]() collects the
+// scalar callable words — named fns and non-capturing lambdas; closures
+// and unproven callable parameters stay outside collections (their Ref
+// word cannot prove scalar provenance at the element staging).
+
+fn apply(f: fn(int) -> int, v: int) -> int {
+  f(v)
+}
+
+fn inc(x: int) -> int {
+  x + 1
+}
+
+fn make_adder(k: int) -> fn(int) -> int {
+  (x: int) => x + k
+}
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn double_port(s: string) -> string | parse_err {
+  const n = s.parse_int()?
+  "port ${n * 2}"
+}
+
+fn main() -> () {
+  const g = inc
+  const raised = [1, 2].map(inc)
+  println("named ${apply(g, 4)} ${at(raised, 1)}")
+  const k = 10
+  println("closure ${apply((x: int) => x * k, 4)}")
+  const add5 = make_adder(5)
+  println("factory ${add5(37)}")
+  var fns = list[fn(int) -> int]()
+  fns.list_push(inc)
+  fns.list_push((x: int) => x * 3)
+  const cell = list_get(fns, 0)
+  const first = cell.ok((f: fn(int) -> int) => f(41)).err((_: none) => -1)
+  println("fns ${len(fns)} ${first}")
+  const label = double_port("34")
+  println("parsed ${label.err((_: parse_err) => "?")}")
+  println("fallback ${"x".parse_int().err((_: parse_err) => 7) + 1}")
+}

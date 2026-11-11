@@ -127,6 +127,22 @@ const TUPLES_AMBIENT: &str = concat!(
 /// items carry their own fn-typed parameters and lambdas.
 const CLOSURES_AMBIENT: &str = concat!("tag int\n", "tag string\n", "trait Copyable { }\n");
 
+/// Ambient for inherent_impls: the primitives alone; the file owns its
+/// receiver types and their impls.
+const INHERENT_AMBIENT: &str = concat!("tag int\n", "trait Copyable { }\n");
+
+/// Ambient for toplevel_consumption: the primitives plus the Copyable
+/// marker the file's linear struct subtracts — and one top-level consumer
+/// of the corpus file's `far_seed`, added before the corpus file itself:
+/// the cross-file order-independence pin (an earlier file's binding
+/// consuming a later file's, typed under the binding's home-file
+/// resolutions).
+const TOPLEVEL_AMBIENT: &str = concat!(
+    "tag int\n",
+    "trait Copyable { }\n",
+    "const echo = digest_of(far_seed)\n",
+);
+
 /// Ambient stdlib stubs per the lists_surface list: the checked list
 /// reads the literal and the constructor build against.
 const LISTS_AMBIENT: &str = concat!(
@@ -715,6 +731,11 @@ fn affine_diagnostics_stay_in_reject_or_later_milestone_items() {
             GENERICS_AMBIENT,
         ),
         ("../../conformance/modules_hash_core.ds", SWEEP_AMBIENT),
+        ("../../conformance/inherent_impls.ds", INHERENT_AMBIENT),
+        (
+            "../../conformance/toplevel_consumption.ds",
+            concat!("tag int\n", "trait Copyable { }\n"),
+        ),
     ];
     for (corpus, ambient) in corpus {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(corpus);
@@ -804,4 +825,98 @@ fn closures_surface_items_check_clean() {
         rejects.is_empty(),
         "the closures surface declares no reject item"
     );
+}
+
+/// inherent_impls.ds: the owner-typed inherent surface — two owners share
+/// one method name, every typecheck item (the dot-calls and the Self-bound
+/// field reads included) checks clean, and the one rejection is the
+/// wrong-receiver dot-call; execution refuses at lowering until impl
+/// bodies dispatch (the trait-dispatch phase 3 seam).
+#[test]
+fn inherent_impls_items_check_with_the_wrong_receiver_rejection() {
+    let rejects = gate("../../conformance/inherent_impls.ds", INHERENT_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "wrong-receiver");
+    assert!(what.contains("DS2013"), "the reject text names the code");
+    assert_eq!(diag.code.as_str(), "DS2013");
+    assert_eq!(
+        diag.message, "no method `peek` accepts receiver `int`",
+        "the owner filter rejects at the dot"
+    );
+
+    // every other item checks clean under the same stubs
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/inherent_impls.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", INHERENT_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
+}
+
+/// toplevel_consumption.ds: order-independent top-level consumption — the
+/// consumer may be declared before the value it consumes, the moved-twice
+/// reject carries its two-span pair inside one item, and the gate's
+/// ambient (an earlier file) consumes the corpus's own `far_seed`, so the
+/// whole two-file package checks clean: the cross-file direction of the
+/// home-file typing fix, with linearity running package-wide over both.
+#[test]
+fn toplevel_consumption_checks_with_cross_file_consumer_clean() {
+    let (rejects, ..) = gate_full(
+        "../../conformance/toplevel_consumption.ds",
+        TOPLEVEL_AMBIENT,
+    );
+    assert_eq!(
+        rejects.len(),
+        1,
+        "the moved-twice reject item carries its affine diagnostic"
+    );
+    let (id, what, diag) = &rejects[0];
+    assert_eq!(id, "twice");
+    assert!(what.contains("DS3001"), "{id}: {what}");
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `seed3` is no longer usable");
+    assert_eq!(
+        diag.labels.len(),
+        2,
+        "the moved/used pair is two spans, both inside the item"
+    );
+
+    // The reject aside, the whole two-file package (ambient consumer
+    // included) checks and linearity-checks clean: the earlier file's
+    // `echo` consumes the later corpus file's `far_seed`.
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/toplevel_consumption.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", TOPLEVEL_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let (checked, lin) = ds_check::linearity::check(&files, &asts);
+    let mut all = checked.diags.iter().chain(lin.diags.iter());
+    let only = all.next().expect("the reject is present");
+    assert_eq!(
+        all.count(),
+        0,
+        "the moved-twice reject is the only diagnostic in the two-file package"
+    );
+    assert_eq!(only.code.as_str(), "DS3001");
 }

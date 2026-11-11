@@ -24,7 +24,7 @@
 //! 4. Two-word entry descriptor. Every function has an [`EntryDescriptor`] `{tier1_prologue_ptr,
 //!    tier2_code_ptr}`. Word 0 is written once at module load; word 1 flips from the null sentinel
 //!    to compiled code exactly once when the callee compiles (one-way [`Tier`] flip). The flip
-//!    shares its invalidation story with hot reload [H6 item 5]: a reload publishes a fresh
+//!    shares its invalidation story with hot reload (H6 item 5): a reload publishes a fresh
 //!    descriptor in the second module slot; old frames retire at their next cross-module call.
 //! 5. Tail-chain backtraces. The metadata word carries a per-frame TCO-chain counter
 //!    ([`TailChain`]). A backtrace renders the count directly; when debug recording is enabled,

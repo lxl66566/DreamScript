@@ -1,0 +1,23 @@
+// seed: R20 literal surface — byte, char, raw, and interpolated string
+// literals in expression positions, negated numeric pattern literals that
+// cook the sign in, and literal match arms alongside binders and guards.
+
+fn pick(v: int | string) -> string {
+  match v {
+    -1 => "minus one",
+    -1.5 => "minus three halves",
+    "raw" => "named",
+    _ => "other",
+  }
+}
+
+fn main() -> () {
+  const c = 'x'
+  const b = b'\n'
+  const r = r#"no $ escapes"#
+  const t = "free $holes"
+  const mixed = "char ${c} byte ${b} raw ${r} ${t}"
+  println(mixed)
+  println(pick(-1))
+  println(pick("raw"))
+}

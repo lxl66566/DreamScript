@@ -94,6 +94,23 @@ sum 15 joined alphabeta
 }
 
 #[test]
+fn callables_pass_named_fns_closures_and_collections() {
+    // the callable words end to end: a named fn value and a capturing
+    // closure arrive through the fn-typed parameter (the callable-
+    // defaulted slot), the factory's fn-typed return builds an add-k
+    // closure, the fn collection stores the scalar callable words
+    // (named fns and non-capturing lambdas — closures and unproven
+    // callable parameters stay refused at the element staging), the
+    // read-back `.ok` handler calls its element through a fn-typed
+    // parameter, and the parse extracts through `?` into arithmetic
+    // beside the `.err` fallback
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("callables.ds"))),
+        "named 5 3\nclosure 40\nfactory 42\nfns 2 42\nparsed port 68\nfallback 8\n0\n"
+    );
+}
+
+#[test]
 fn tuples_destructure_in_bindings_and_match_arms() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("tuples.ds"))),
@@ -110,59 +127,39 @@ fn strings_print_every_conversion() {
 }
 
 #[test]
-fn mutation_checks_clean_and_refuses_at_the_fallible_native_seam() {
-    // the ambient's success-typed parse_int makes the example's fallback
-    // spelling check clean, and the run refuses at the honest M7 platform
-    // seam: the fallible native's two-word runtime span has no
-    // source-level union shape to land in yet (the pre-upgrade run,
-    // before the ambient carried the failure union, printed the full
-    // green demo)
-    let out = ds()
-        .arg("run")
-        .arg(example("mutation.ds"))
-        .output()
-        .expect("the binary runs");
-    assert_eq!(out.status.code(), Some(1), "the refusal exits 1: {out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        stderr.contains("error[DS4009]: a fallible native call is outside the M3 runtime contract"),
-        "the seam refusal: {stderr}"
-    );
-    assert!(
-        stderr.contains("const port = \"8080\".parse_int().err((_: parse_err) => 0)"),
-        "the refusal names the extraction spelling: {stderr}"
+fn mutation_runs_the_fallible_parse_extraction() {
+    // the ambient's success-typed parse_int answers its failure union at
+    // run level (the two-word platform span re-spans into the call's
+    // union): the `.err` fallback extracts the port and it flows into
+    // arithmetic
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("mutation.ds"))),
+        "total: 10\nname: DREAMSCRIPT\nfirst: a\nport + total: 8090\njoined: abc\nslot: 7\n0\n"
     );
 }
 
 #[test]
-fn files_round_trip_checks_clean_and_refuses_at_the_fallible_native_seam() {
+fn files_round_trip_runs_through_the_success_typed_read() {
     // the round trip's read leg rides the ambient's string | io_err
-    // signature (handled through .err), so the run refuses at the same
-    // M7 platform seam before any byte is written — the seam the
-    // success-typed ambient upgrade recorded
+    // signature: the `.err` handler extracts at run level, and the
+    // written file landing before the read proves the legs ordered
     let dir = env::temp_dir().join("ds_cli_files_example");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("the temp dir creates");
-    let out = ds()
+    let mut command = ds();
+    command
         .arg("run")
         .arg(example("files.ds"))
-        .current_dir(&dir)
-        .output()
-        .expect("the binary runs");
-    assert_eq!(out.status.code(), Some(1), "the refusal exits 1: {out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        stderr.contains("error[DS4009]: a fallible native call is outside the M3 runtime contract"),
-        "the seam refusal: {stderr}"
+        .current_dir(&dir);
+    assert_eq!(
+        run_ok(&mut command),
+        "read back: files round trip\nsize: 16\nexists: true\nround trip ok\n0\n"
     );
     assert!(
-        stderr.contains("const back = read_file(path).err((_: io_err) => \"\")"),
-        "the refusal names the read leg: {stderr}"
+        dir.join("ds_files_example.txt").exists(),
+        "the write leg landed the file before the read"
     );
-    assert!(
-        !dir.join("ds_files_example.txt").exists(),
-        "the refusal happens before any byte is written"
-    );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

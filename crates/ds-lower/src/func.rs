@@ -415,7 +415,13 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
         }
     };
     match e {
-        Expr::Literal { .. } | Expr::RawStr { .. } | Expr::Break(_) | Expr::Continue(_) => {},
+        // a fn type in the constructor brackets is a type spelling; it
+        // names no value
+        Expr::Literal { .. }
+        | Expr::RawStr { .. }
+        | Expr::Break(_)
+        | Expr::Continue(_)
+        | Expr::FnType { .. } => {},
         Expr::Str { parts, .. } => {
             for part in parts {
                 match part {
@@ -1541,6 +1547,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     e.span(),
                     "a map type application",
                     "the application `map[k, v]` constructs only in call position — `map[k, v]()`",
+                ))
+            },
+            Expr::FnType { .. } => {
+                return Err(LowerError::unsupported(
+                    e.span(),
+                    "a fn type in value position",
+                    "a fn type is a type spelling for the constructor brackets — `list[fn(int) -> \
+                     int]()`",
                 ))
             },
             Expr::Index { .. } | Expr::Range { .. } => {
@@ -4126,8 +4140,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let (what, reason) = if let NativeShape::Fallible { .. } = native.shape {
                 (
                     "a tail call to a fallible native",
-                    "the platform failure span has no source-level return type; keep the call out \
-                     of tail position",
+                    "CALLT-to-fallible stays unsupported: the two-word platform span re-spans \
+                     into the call's union at the call site, and the tail transfer leaves no \
+                     position for it; keep the call out of tail position",
                 )
             } else {
                 (
@@ -4399,11 +4414,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// One fallible native call: the two-word platform span (discriminant
-    /// at overlay word 0, payload at word 1) lands like any call result;
-    /// success extracts the payload into the call's result temp, failure
+    /// at overlay word 0, payload at word 1) lands like any call result.
+    /// The success-typed ambient spelling types the call site as the
+    /// failure union itself, so the span re-spans into that union per
+    /// member ([`fn fallible_native_union`](Self::fallible_native_union));
+    /// a total spelling (the ambient's `fs_list`/`write_file` rows)
+    /// extracts the payload into the call's result temp, and failure
     /// prints `<prefix><message>` through println and halts on the
-    /// discriminant. The print-and-halt is the M3 stand-in for the
-    /// unhandled-failure handler the `error` row has no source syntax for.
+    /// discriminant — the M3 stand-in for the unhandled-failure handler
+    /// the `error` row has no source syntax for.
     fn fallible_native_result(
         &mut self,
         native: &'static Native,
@@ -4412,6 +4431,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         err_prefix: &'static str,
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
+        if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
+            return self.fallible_native_union(native, ty, payload, staged);
+        }
         if self.shapes.words(ty)? != [payload] {
             return Err(LowerError::unsupported(
                 no_span(),
@@ -4497,6 +4519,143 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => PlaceShape::Span(ty),
         };
         Ok(Place { base, shape })
+    }
+
+    /// One fallible native call over the success-typed ambient spelling:
+    /// the checked call type is the failure union itself (`string |
+    /// io_err`, `int | parse_err`), so the two-word platform span
+    /// re-spans into it — success constructs the payload member from
+    /// overlay word 1, failure the one unit-tag error member — the same
+    /// span-to-union discipline the checked reads use
+    /// ([`fn checked_native_result`](Self::checked_native_result)). The
+    /// union must carry exactly one member that holds the native's one
+    /// payload word and exactly one payload-less error member beside it
+    /// (the native answers one failure discriminant; which error member
+    /// that is rides the ambient signature). The error member has no
+    /// field for the failure message, so a `Ref` payload's native-born
+    /// message count dies inside the failure arm; a scalar payload's
+    /// failure word is inert (parse_int hands back the staged input's
+    /// alias, a word the caller still owns and the arm never reads).
+    fn fallible_native_union(
+        &mut self,
+        native: &'static Native,
+        ty: Ty,
+        payload: SlotType,
+        staged: &[SlotType],
+    ) -> Result<Place, LowerError> {
+        let shape = self.shapes.shape(ty)?;
+        let Shape::Union(u) = &*shape else {
+            return Err(mismatch("a fallible native's union result"));
+        };
+        let success: Vec<_> = u
+            .members
+            .iter()
+            .filter(|m| m.fields.len() == 1 && m.fields[0].slot == payload)
+            .collect();
+        let failure: Vec<_> = u.members.iter().filter(|m| m.fields.is_empty()).collect();
+        if success.len() + failure.len() != u.members.len() {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a fallible native call",
+                "the union's success member must be exactly the native's one payload word and \
+                 every other member a payload-less error tag; wider success values and \
+                 error-carried payloads have no re-span yet",
+            ));
+        }
+        let [ok] = success.as_slice() else {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a fallible native call",
+                "the union must carry exactly one member that holds the native's payload word",
+            ));
+        };
+        let [err] = failure.as_slice() else {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a fallible native call",
+                "the union must carry exactly one payload-less error member; the native answers \
+                 one failure discriminant",
+            ));
+        };
+        self.overlay_site(staged, &[SlotType::Tag, payload]);
+        // the failure path lands a message `Ref` in word 1 whatever the
+        // payload kind (io failures allocate one; parse_int hands back
+        // the staged input's alias), so the word's classification mixes
+        self.overlay_len = self.overlay_len.max(2);
+        if self.overlay.len() < self.overlay_len {
+            self.overlay.resize(self.overlay_len, HashSet::new());
+        }
+        self.overlay[1].insert(SlotType::Ref);
+        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+        });
+        self.rc.native_done(&mut self.code);
+        let result = self.temp_span(ty)?;
+        let ok_lbl = self.label();
+        let join = self.label();
+        let cond = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::TagTest {
+            dst: Slot::body(cond),
+            src: Slot::overlay(0),
+            tag: PLATFORM_IO_OK,
+        });
+        self.emit(Op::Jmpif {
+            cond: Slot::body(cond),
+            target: ok_lbl,
+        });
+        // path-fork: failure and ok each write the span with their own
+        // value
+        let base = self.rc.save();
+        let tag = self.shapes.tag_id(err.atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(result.base),
+            tag,
+        });
+        self.zero_init_member(result.base, &u.words, &err.fields)?;
+        if payload == SlotType::Ref {
+            // the failure message's native-born count has no member field
+            // to live in: adopt it off the overlay and drop it here
+            let message = self.temp_word(SlotType::Ref)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(message),
+                src: Slot::overlay(1),
+            });
+            self.rc.produced(message, None);
+            self.rc.discard(&mut self.code, &[message]);
+        }
+        let arm_err = self.rc.take();
+        let err_jmp = self.code.len();
+        self.emit(Op::Jmp { target: join });
+        self.rc.restore(base);
+        self.bind_label(ok_lbl);
+        let tag = self.shapes.tag_id(ok.atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(result.base),
+            tag,
+        });
+        self.zero_init_member(result.base, &u.words, &ok.fields)?;
+        let [field] = ok.fields.as_slice() else {
+            return Err(mismatch("a fallible native's payload member"));
+        };
+        self.emit(Op::Mov {
+            dst: Slot::body(result.base + field.word),
+            src: Slot::overlay(1),
+        });
+        if field.slot == SlotType::Ref {
+            self.rc.produced(result.base + field.word, None);
+        }
+        let arm_ok = self.rc.take();
+        let dying = self.rc.reconcile(&[(arm_err, false), (arm_ok, false)]);
+        if let [err, ok] = &dying[..] {
+            let mut epilogue = Vec::new();
+            Placement::emit_drops(&mut epilogue, err);
+            self.splice(epilogue, err_jmp);
+            self.arm_epilogue(ok);
+        }
+        self.bind_label(join);
+        Ok(result)
     }
 
     /// Records the words a fallible native's result span lands on: word 0
@@ -5200,7 +5359,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// `e?`: every propagated member re-spans into the enclosing return
-    /// union via RETSPAN [E4]; the kept set extracts in place.
+    /// union via RETSPAN [E4]; the kept set extracts in place. Each exit
+    /// forks the ownership map — the exit's own drops fire from its
+    /// snapshot, and the continuation keeps the kept set's counts (the
+    /// exits diverge, so they constrain nothing after the `?`).
     fn try_value(&mut self, e: &Expr, ty: Ty) -> Result<Place, LowerError> {
         let Expr::Try { expr, .. } = e else {
             return Err(mismatch("a `?` propagation"));
@@ -5229,9 +5391,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.emit(Op::Jmp {
             target: continue_lbl,
         });
+        let base = self.rc.save();
         for (member, exit) in propagated.iter().zip(exits) {
             self.bind_label(exit);
             self.respan_exit(&src.place, *member)?;
+            // the exit dropped from its own fork of the post-call state;
+            // the next exit forks from the same place
+            self.rc.restore(base.clone());
         }
         self.bind_label(continue_lbl);
         // the kept set: one member extracts to its payload word

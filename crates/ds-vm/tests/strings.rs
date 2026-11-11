@@ -17,7 +17,7 @@
 use ds_vm::{
     Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
-        ConstIdx, FrameLayout, SlideError, SlotType,
+        ConstIdx, FrameLayout, Inst, RcOp, SlideError, SlotType,
         SlotType::{Bool, I64, Raw, Ref, Tag},
         uop::Uop,
     },
@@ -679,4 +679,49 @@ fn repeated_char_indexed_access_serves_one_boundary_map() {
     }
     // and len agrees over the same map after it exists
     assert_eq!(vm.run("st", "measure", &[text]), Ok(Value::I64(4)));
+}
+
+/// KSTR over the pool-const intern cache: two loads of one pool constant
+/// share a single object within the run, and the cache holds no claim of
+/// its own — after the body's own decs balance the loads, the heap drains
+/// exactly as an uncached run would, on the first run and again on the
+/// refill of the second (a dead cached id re-validates to a miss).
+#[test]
+fn kstr_pool_consts_share_one_object_and_the_cache_claim_releases() {
+    let pool = vec![Const::Str("kstr".into())];
+    let body: [Inst; 7] = [
+        Uop::Funcf { frame_slots: 3 }.into(),
+        Uop::Kstr { dst: 1, kidx: k(0) }.into(),
+        Uop::Kstr { dst: 2, kidx: k(0) }.into(),
+        Uop::EqStr {
+            dst: 0,
+            lhs: 1,
+            rhs: 2,
+        }
+        .into(),
+        RcOp::Dec { src: 1 }.into(),
+        RcOp::Dec { src: 2 }.into(),
+        Uop::Ret { src: 0 }.into(),
+    ];
+    let def = FunctionDef {
+        name: "shared_k".into(),
+        layout: FrameLayout::new(vec![Bool, Ref, Ref], 0, 0).expect("valid fixture layout"),
+        pool,
+        code: assemble(&body).expect("fixture body encodes"),
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.install(ModuleVersion::new("st", vec![def]).expect("valid fixture module"));
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("st", "shared_k", &[]),
+        Ok(Value::Bool(true)),
+        "the two loads of one pool constant are one object"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "no claim outlives the drive: the heap drained"
+    );
+    // the refill of the second run releases again
+    assert_eq!(vm.run("st", "shared_k", &[]), Ok(Value::Bool(true)));
+    assert!(vm.objects().is_empty());
 }

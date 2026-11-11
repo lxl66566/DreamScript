@@ -1,0 +1,45 @@
+// seed: R15 refinement surface — &&-chain conditions whose else branch
+// must narrow nothing (two and three conjuncts, one deliberate DS2001 in
+// each else), single-conjunct else inversion, literal and never-covering
+// match arms around a wildcard, and a forward-referenced top-level
+// binding read around ?/return in the same body.
+
+fn chain(x: int | string, y: int | string) -> string {
+  if x is int && y is string { "both" } else { x }
+}
+
+fn chain3(x: int | string, y: int | string, z: int | string) -> string {
+  if x is int && y is int && z is int { "all" } else { x }
+}
+
+fn single(x: int | none) -> int {
+  if x is none { later } else { x + 1 }
+}
+
+fn literal_arms(v: int | string) -> string {
+  match v {
+    0 => "zero",
+    "ok" => "fine",
+    _ => "other",
+  }
+}
+
+fn guarded_arm(v: int | string) -> string {
+  match v {
+    n if n is int => "narrowed",
+    _ => "wide",
+  }
+}
+
+fn forward_ref(mid: int | string) -> int | none {
+  const early = later
+  if mid is string { return none }
+  early
+}
+
+fn main() -> () {
+  println(chain(1, "s"))
+  println(single(none))
+}
+
+const later = -1

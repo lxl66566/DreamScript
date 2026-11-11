@@ -4,7 +4,7 @@ Cross-language kernel suite: matched programs in DreamScript and peer scripting 
 
 ## Kernels
 
-Each kernel lives in `kernels/` as `<name>.ds`, `.py`, `.lua`, `.mjs`, plus a committed `<name>.golden` holding the one expected final line. The kernels mirror each other operation for operation; every program prints exactly one `result:` line and that line is identical across all four languages — that identity is the correctness golden.
+Each kernel lives in `kernels/` as `<name>.ds`, `.py`, `.lua`, `.mjs`, plus a committed `<name>.golden` holding the one expected final line. The kernels mirror each other operation for operation; every program prints exactly one `result:` line and that line is identical across all four languages — that identity is the correctness golden. The `.ds` kernels sit at `ds fmt`'s canonical form (all nine verified unchanged; the CI ds-fmt job gates them alongside examples/), so run the formatter after editing one.
 
 - `fib` — naive recursive fib(34): call overhead and integer add per call.
 - `loops-arith` — 10^7 hot var-mutation iterations of a Lehmer generator (mul, mod, parity branch, accumulator): integer arithmetic and loop dispatch.

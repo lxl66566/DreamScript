@@ -4,23 +4,25 @@
 
 fn bump(n: int) -> int { n + 1 }
 
-const base = 40
-var total = 0
-while total < 3 {
-  total += 1
-}
-println("total: ${total}")
-
 tag small
 tag large
-const size = if base < 50 { small } else { large }
-match size {
-  small => println("size: small"),
-  large => println("size: large"),
-}
+fn main() -> () {
+  const base = 40
+  var total = 0
+  while total < 3 {
+    total += 1
+  }
+  println("total: ${total}")
 
-if size is small {
-  println("bumped: ${bump(base)}")
-  return
+  const size = if base < 50 { small } else { large }
+  match size {
+    small => println("size: small")
+    large => println("size: large")
+  }
+
+  if size is small {
+    println("bumped: ${bump(base)}")
+    return
+  }
+  println("unreachable")
 }
-println("unreachable")

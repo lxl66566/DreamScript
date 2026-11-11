@@ -1,0 +1,27 @@
+// seed: R16 width shapes — a many-argument call staging a wide frame,
+// wide tuple bindings and destructuring, and the three-member union
+// under .err whose handled member's payload word shape diverges from
+// the retained set, both directions.
+
+struct bad_port { port: int }
+struct missing { name: string }
+
+fn wide(a: int, b: string, c: bool, d: char, e: byte, f: float, g: int, h: string) -> string {
+  "${a} ${b} ${c} ${d} ${e} ${f} ${g} ${h}"
+}
+
+fn keep_name(v: bad_port | missing | none) -> string {
+  v.err((_: bad_port) => missing { name: "handled" }).unwrap_or(missing { name: "anon" }).name
+}
+
+fn keep_port(v: bad_port | missing | none) -> int {
+  v.err((_: missing) => bad_port { port: 0 }).unwrap_or(bad_port { port: 99 }).port
+}
+
+fn main() -> () {
+  const row = (1, "two", false, 'c', b'x', 2.5, 7, "eight")
+  const (a, b, c, d, e, f, g, h) = row
+  println(wide(a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h))
+  println(keep_name(missing { name: "kept" }))
+  println(keep_port(bad_port { port: 7 }))
+}

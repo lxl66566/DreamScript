@@ -1,4 +1,4 @@
-//! The one pattern-binder collection [F4]: every name a binding pattern
+//! The one pattern-binder collection (F4): every name a binding pattern
 //! binds, as (name span, name) pairs in walk order.
 //!
 //! Declaration-side passes — package def collection, const registration,

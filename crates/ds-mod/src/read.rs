@@ -336,7 +336,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
 }
 
 /// Like [`read`], then verifies the checked source hash against `source`
-/// (PEP 552 style hash validation, never mtime) [G3.5].
+/// (PEP 552 style hash validation, never mtime) (G3.5).
 ///
 /// # Errors
 ///

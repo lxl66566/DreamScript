@@ -1,7 +1,7 @@
-//! Package-level name resolution over the parsed surface [G3, F3, F9].
+//! Package-level name resolution over the parsed surface (G3, F3, F9).
 //!
 //! A [`Package`] collects the declarations of its files into TWO
-//! namespaces [G3, F9]: a type namespace (structs, enums, enum cases,
+//! namespaces (G3, F9): a type namespace (structs, enums, enum cases,
 //! tags, aliases, traits) and a value namespace (functions, const/var
 //! bindings). Files in
 //! one package share both, there are zero intra-package imports, and
@@ -11,7 +11,7 @@
 //! not dependency ordering; the "whole-package fixpoint" of the record is
 //! exactly this two-pass shape).
 //!
-//! # Namespace split [F9]
+//! # Namespace split (F9)
 //!
 //! Constructor positions resolve against the TYPE namespace only: brace
 //! construction (`user { ... }`), bare tag references, pattern paths, and
@@ -26,21 +26,22 @@
 //! error. `struct map` and `fn map` therefore coexist, each resolving in
 //! its own positions.
 //!
-//! # Method tier [F3]
+//! # Method tier (F3)
 //!
 //! UFCS resolution is fixed: a dot-call `x.f(args)` feeds the receiver to
 //! the first parameter of a FREE function named `f` if one exists (the
 //! dot position is a function position — the VALUE namespace only), else
 //! the registered method candidates (trait members, plus inherent impl
-//! fns); `Trait::f(x)` qualifies directly. Trait methods are REGISTERED
-//! here only — selection among candidates is the checker's type-directed
-//! work, and F3's true-ambiguity error therefore lives there too, never as
-//! a priority search here. The fed parameter index is recorded (always 0
-//! today — capability parameters have no syntax yet, so the first
-//! parameter IS the first data parameter; the checker enforces the
-//! exclusion once they do).
+//! fns keyed by their target type — different owners may share one
+//! method name); `Trait::f(x)` qualifies directly. Trait methods are
+//! REGISTERED here only — selection among candidates is the checker's
+//! type-directed work, and F3's true-ambiguity error therefore lives
+//! there too, never as a priority search here. The fed parameter index is
+//! recorded (always 0 today — capability parameters have no syntax yet,
+//! so the first parameter IS the first data parameter; the checker
+//! enforces the exclusion once they do).
 //!
-//! # Local scoping [F2]
+//! # Local scoping (F2)
 //!
 //! Params, lets, lambda parameters, match-arm binders, and for-patterns
 //! bind into lexical scopes. Same-scope redefinition is an error (both
@@ -50,16 +51,16 @@
 //! function is in scope inside its own body via the package table
 //! (recursion). Generic parameters bind in a separate type-variable scope
 //! stack for type positions; a trait member's signatures additionally bind
-//! `Self` as the self type [F2, record 6.1]. Or-pattern alternatives rebind
+//! `Self` as the self type (F2, record 6.1). Or-pattern alternatives rebind
 //! identical names into one arm scope without error; whether alternatives
-//! must bind the SAME set is the checker's [F4].
+//! must bind the SAME set is the checker's (F4).
 //!
 //! # Positions that do not resolve here
 //!
 //! Bare field accesses (`x.f` without a call) are struct-owned and
 //! type-directed — the checker resolves them. `.err(h)`/`.ok(h)` are
 //! decided surface handler forms [section 10 item 2], not names, and are
-//! recorded as [`Res::Handler`]. Imports [G4] are M7: their aliases do not
+//! recorded as [`Res::Handler`]. Imports (G4) are M7: their aliases do not
 //! enter the namespace yet. Multi-segment paths beyond `Trait::f` are
 //! module paths, also M7. Enum case tails (`net_err::timeout`) resolve
 //! their head; case-name existence is the checker's.
@@ -75,7 +76,7 @@
 //! let mut files = Files::new();
 //! let file = files.add_source(
 //!     "m.ds",
-//!     "tag timeout\nconst wait = (t: timeout) -> timeout { t }\n",
+//!     "tag timeout\nfn wait(t: timeout) -> timeout { t }\n",
 //! );
 //! let ast = parse(&files, file)?;
 //!
@@ -119,7 +120,7 @@ pub enum DefKind {
     /// A named function or extern function.
     Fn,
     /// A `const` binding (const-arrow functions included — they are
-    /// bindings whose value is a function [F2]).
+    /// bindings whose value is a function (F2)).
     Const,
     /// A `var` binding.
     Var,
@@ -127,19 +128,19 @@ pub enum DefKind {
     Struct,
     /// An enum.
     Enum,
-    /// A unit tag [B1].
+    /// A unit tag (B1).
     Tag,
-    /// A case minted by an enum block [B3]: a member of the tag
+    /// A case minted by an enum block (B3): a member of the tag
     /// namespace like a tag, constructed per its payload.
     Case,
-    /// A trait [B6].
+    /// A trait (B6).
     Trait,
-    /// A type alias [F7].
+    /// A type alias (F7).
     TypeAlias,
 }
 
 impl DefKind {
-    /// Whether the kind declares into the type namespace [F9]; the rest
+    /// Whether the kind declares into the type namespace (F9); the rest
     /// declare into the value namespace.
     #[must_use]
     pub const fn in_type_namespace(self) -> bool {
@@ -202,13 +203,19 @@ impl MethodId {
 }
 
 /// Which declaration a registered method belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MethodOwner {
     /// A trait member function; trait impls do not re-register — the
     /// trait's own signature already provides the candidate name.
     Trait(DefId),
-    /// A function of an inherent impl (`impl t { fn ... }`).
-    Inherent,
+    /// A function of an inherent impl (`impl t { fn ... }`), owned by the
+    /// impl's target TYPE. The owner travels as its name, not its DefId:
+    /// registration runs at collection, which may precede the target's
+    /// declaring file (G3), and type names are package-unique (the first
+    /// def wins), so the name IS the owner identity. The checker resolves
+    /// the name to the owner's atom at call sites and selects by
+    /// (owner, name) (F3).
+    Inherent(String),
 }
 
 /// One registered method: a trait member or an inherent impl function.
@@ -233,16 +240,16 @@ pub enum Res {
         /// Span of the introducing binder.
         bind: Span,
     },
-    /// The `Trait::f` escape hatch [F3]: the named trait's member.
+    /// The `Trait::f` escape hatch (F3): the named trait's member.
     TraitMethod(MethodId),
-    /// The callee name of a UFCS dot-call [F3].
+    /// The callee name of a UFCS dot-call (F3).
     Dot(DotRes),
     /// The `.err(h)`/`.ok(h)` handler surface form [section 10 item 2];
     /// no name sits behind it.
     Handler,
 }
 
-/// The resolution of a dot-call's method position [F3].
+/// The resolution of a dot-call's method position (F3).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DotRes {
     /// The free-function tier won: the receiver feeds parameter
@@ -291,7 +298,7 @@ impl Resolutions {
 }
 
 /// A package: the declarations of its files in the type and value
-/// namespaces [G3, F9], plus the method-tier registries [F3]. Collection
+/// namespaces (G3, F9), plus the method-tier registries (F3). Collection
 /// (`add_file`) is order-independent; use resolution (`resolve`) runs
 /// against the complete tables, which is what makes intra-package
 /// definition cycles legal.
@@ -305,7 +312,7 @@ pub struct Package {
     method_index: HashMap<String, Vec<MethodId>>,
 }
 
-/// Resolves one package [G3]: collects every file's declarations into one
+/// Resolves one package (G3): collects every file's declarations into one
 /// namespace, then resolves every file's name uses against the complete
 /// tables — collection is order-independent and resolution runs last,
 /// which is what makes intra-package definition cycles legal. The
@@ -342,7 +349,7 @@ impl Package {
     /// Collects one parsed file's declarations into the namespace,
     /// returning duplicate-definition diagnostics as they are met (both
     /// spans named; the first definition is the secondary label). Imports
-    /// contribute nothing yet [G4, M7].
+    /// contribute nothing yet (G4, M7).
     pub fn add_file(&mut self, ast: &Ast) -> Vec<Diagnostic> {
         self.files.push(ast.file);
         let mut diags = Vec::new();
@@ -390,13 +397,13 @@ impl Package {
         &self.methods[id.index() as usize]
     }
 
-    /// The definition of a type-namespace name, if any [F9].
+    /// The definition of a type-namespace name, if any (F9).
     #[must_use]
     pub fn lookup_type(&self, name: &str) -> Option<DefId> {
         self.type_names.get(name).copied()
     }
 
-    /// The definition of a value-namespace name, if any [F9].
+    /// The definition of a value-namespace name, if any (F9).
     #[must_use]
     pub fn lookup_value(&self, name: &str) -> Option<DefId> {
         self.value_names.get(name).copied()
@@ -487,15 +494,16 @@ impl Package {
                 // Trait impls do not re-register: the trait's signatures
                 // already provide the candidate names.
                 if imp.trait_ref.is_none() {
+                    let owner = inherent_owner(&imp.target);
                     for f in &imp.fns {
-                        self.register_method(&f.name, MethodOwner::Inherent, diags);
+                        self.register_method(&f.name, MethodOwner::Inherent(owner.clone()), diags);
                     }
                 }
             },
         }
     }
 
-    /// Declares one name into its kind's namespace [F9]; a duplicate
+    /// Declares one name into its kind's namespace (F9); a duplicate
     /// WITHIN that namespace reports both spans and keeps the first
     /// definition — the same name in the other namespace coexists.
     fn declare(&mut self, name: &Ident, kind: DefKind, diags: &mut Vec<Diagnostic>) -> DefId {
@@ -534,10 +542,11 @@ impl Package {
     }
 
     /// Registers one method name; a same-name same-owner registration is a
-    /// duplicate (two inherent impls, or one trait declaring a member
+    /// duplicate (two impls of one type, or one trait declaring a member
     /// twice) that reports both spans and keeps the first — the discipline
-    /// of [`Self::declare`]. Two traits may share a method name; call
-    /// sites disambiguate by receiver [F3].
+    /// of [`Self::declare`]. Different owners may share a method name —
+    /// two traits, or two inherent impls on different target types; call
+    /// sites disambiguate by receiver (F3).
     fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) {
         if let Some(&id) = self.method_index.get(&name.name).and_then(|ids| {
             ids.iter()
@@ -872,6 +881,9 @@ impl FileResolver<'_> {
             Expr::MapApply {
                 head, key, value, ..
             } => self.map_apply_use(head, key, value),
+            // A fn type in the constructor brackets resolves its param and
+            // return types as type uses.
+            Expr::FnType { ty, .. } => self.type_(ty),
             Expr::Try { expr, .. } | Expr::Unary { expr, .. } => self.expr(expr),
             Expr::Is { expr, ty, .. } => {
                 self.expr(expr);
@@ -943,8 +955,8 @@ impl FileResolver<'_> {
     /// namespace comes next, and the type namespace last — a bare tag is a
     /// value-producing constructor, and a struct/enum/trait name reached
     /// here still resolves so the checker words its "type used as a value"
-    /// error [F9]. Bare `none` is the universe's distinguished unit atom
-    /// [B4], not a package name; the checker types it directly, so it
+    /// error (F9). Bare `none` is the universe's distinguished unit atom
+    /// (B4), not a package name; the checker types it directly, so it
     /// records nothing here.
     fn name_use(&mut self, name: &Ident) {
         let res = if let Some(bind) = self.lookup_local(&name.name) {
@@ -962,7 +974,7 @@ impl FileResolver<'_> {
         self.uses.insert(name.span, res);
     }
 
-    /// The callee of a call form [F9]: locals first (an indirect call of a
+    /// The callee of a call form (F9): locals first (an indirect call of a
     /// bound function value), then the value namespace, then the type
     /// namespace (a constructor call — tag or payload construction).
     /// Present in BOTH namespaces the call is ambiguous — an error naming
@@ -997,7 +1009,7 @@ impl FileResolver<'_> {
     }
 
     /// A call-form name present in both namespaces: DS2014, naming both
-    /// declarations [F9].
+    /// declarations (F9).
     fn namespace_collision(&mut self, name: &Ident, value: DefId, ty: DefId) {
         let value_def = self.package.def(value);
         let ty_def = self.package.def(ty);
@@ -1018,7 +1030,7 @@ impl FileResolver<'_> {
         );
     }
 
-    /// A generic-application constructor `list[page]()` [F9]: the head
+    /// A generic-application constructor `list[page]()` (F9): the head
     /// resolves in the type namespace and the bracketed arguments are type
     /// uses. A head that names no type is an ordinary index expression
     /// (`xs[i]`), whose typing is the checker's.
@@ -1033,7 +1045,7 @@ impl FileResolver<'_> {
         }
     }
 
-    /// The map constructor's type application `map[k, v]` [F9, B3]: the
+    /// The map constructor's type application `map[k, v]` (F9, B3): the
     /// head is a type use and the two bracketed arguments are type uses,
     /// the list application's own convention.
     fn map_apply_use(&mut self, head: &Ident, key: &Expr, value: &Expr) {
@@ -1043,8 +1055,9 @@ impl FileResolver<'_> {
     }
 
     /// One bracketed constructor argument: a type spelled in expression
-    /// position — a path is a type use, a tuple walks its items, anything
-    /// else falls back to the expression walk.
+    /// position — a path is a type use, a tuple walks its items, a fn type
+    /// walks its param and return types, anything else falls back to the
+    /// expression walk.
     fn ctor_type_arg(&mut self, arg: &Expr) {
         match arg {
             Expr::Path { path, .. } if path.segments.len() == 1 => {
@@ -1056,12 +1069,13 @@ impl FileResolver<'_> {
                     self.ctor_type_arg(item);
                 }
             },
+            Expr::FnType { ty, .. } => self.type_(ty),
             _ => self.expr(arg),
         }
     }
 
     /// A path expression: one segment is a name use; `Trait::f` qualifies
-    /// directly [F3]; longer paths are module paths [G4, M7].
+    /// directly (F3); longer paths are module paths (G4, M7).
     fn path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => self.name_use(only),
@@ -1144,8 +1158,8 @@ impl FileResolver<'_> {
         }
     }
 
-    /// A brace-construction head `user { ... }` [F9]: the type namespace
-    /// only; longer paths are module paths [G4, M7].
+    /// A brace-construction head `user { ... }` (F9): the type namespace
+    /// only; longer paths are module paths (G4, M7).
     fn ctor_path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => {
@@ -1169,10 +1183,10 @@ impl FileResolver<'_> {
         }
     }
 
-    /// A UFCS dot-call's method position [F3]: free functions first, then
+    /// A UFCS dot-call's method position (F3): free functions first, then
     /// registered methods; the `.err`/`.ok` handler forms are surface
     /// syntax, not names. The dot is a function position, so the free
-    /// tier searches the VALUE namespace only [F9].
+    /// tier searches the VALUE namespace only (F9).
     fn dot_use(&mut self, name: &Ident) {
         if name.name == "err" || name.name == "ok" {
             self.uses.insert(name.span, Res::Handler);
@@ -1293,13 +1307,13 @@ impl FileResolver<'_> {
 
     /// Binds a pattern's binders into the current scope and resolves its
     /// case paths. `or_rebind` allows identical rebinding across
-    /// or-pattern alternatives [F4].
+    /// or-pattern alternatives (F4).
     fn bind_pattern(&mut self, pat: &Pattern, or_rebind: bool) {
         self.pattern_at(pat, or_rebind, false);
     }
 
     /// A match-arm pattern: sub-patterns are member tests first, bindings
-    /// second [F9].
+    /// second (F9).
     fn arm_pattern(&mut self, pat: &Pattern) {
         self.pattern_at(pat, false, true);
     }
@@ -1354,7 +1368,7 @@ impl FileResolver<'_> {
         }
     }
 
-    /// The type-namespace entry a bare arm identifier names [F9]: the
+    /// The type-namespace entry a bare arm identifier names (F9): the
     /// predeclared `none`, a constructor type's def, or nothing (a
     /// binding). Traits and aliases are sets, not constructors.
     fn arm_tag(&self, name: &Ident, arm: bool) -> ArmTag {
@@ -1370,7 +1384,7 @@ impl FileResolver<'_> {
             .map_or(ArmTag::Binding, ArmTag::Def)
     }
 
-    /// Pattern paths are constructor references [F9]: the type namespace
+    /// Pattern paths are constructor references (F9): the type namespace
     /// only.
     fn pattern_path(&mut self, path: &Path) {
         let candidates = || {
@@ -1533,12 +1547,25 @@ fn single_path_ident(expr: &Expr) -> Option<&Ident> {
 
 impl MethodDecl {
     /// The human-readable owner name for diagnostics: the trait's name or
-    /// `inherent`.
+    /// the inherent impl's target type.
     fn owner_name(&self, package: &Package) -> String {
-        match self.owner {
-            MethodOwner::Trait(id) => package.def(id).name.clone(),
-            MethodOwner::Inherent => "an inherent impl".to_owned(),
+        match &self.owner {
+            MethodOwner::Trait(id) => package.def(*id).name.clone(),
+            MethodOwner::Inherent(target) => format!("inherent impl `{target}`"),
         }
+    }
+}
+
+/// The owner identity of an inherent impl: the target's head path name
+/// (`impl stack[t]` owns `stack`). Any other written target (a union, a
+/// qualified path) keys by its rendered spelling; such an owner names no
+/// single declared type, so its methods match no receiver and the call
+/// reports at the dot — the honest refusal.
+fn inherent_owner(target: &Type) -> String {
+    match target {
+        Type::Paren { inner, .. } => inherent_owner(inner),
+        Type::Path { path, .. } if path.segments.len() == 1 => path.segments[0].name.clone(),
+        other => crate::decls::render_type(other),
     }
 }
 

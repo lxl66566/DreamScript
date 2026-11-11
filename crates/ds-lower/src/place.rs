@@ -41,6 +41,12 @@
 //!
 //! * A use inside a loop of a reference produced outside it never drops at the use (the use
 //!   re-executes per iteration); the count dies at the frame exit or the owning binder's scope end.
+//! * A word owned at a loop entry is loop-carried: no in-body death site kills it (the claim exists
+//!   once but the body replays, so an in-body death would dec once per iteration — the head-reset
+//!   word re-stamped by its own overwrite defeated the depth guard above). An overwrite inside the
+//!   body rolls the slot's content over — the store's dec consumes the previous content's count
+//!   while the word stays owned for the back-edge join — and the final content dies where the
+//!   carried claim dies, past the loop.
 //! * A second copy of a word whose count already forwarded at this same use (`f(s, s)`) dups: the
 //!   callee drops each parameter once, so every handed word needs a count of its own.
 //! * A word still owned at a loop back-edge with no binder left inside the body leaks until frame
@@ -100,6 +106,11 @@ pub(crate) struct Placement {
     forwarded: HashSet<u8>,
     /// Loop nesting depth of the current walk position.
     loop_depth: usize,
+    /// The words owned at each enclosing loop's entry: a loop-carried
+    /// word's claim survives the whole body (every in-body death site is
+    /// suppressed), its content rolls over at in-body overwrites, and the
+    /// final content dies past the join.
+    loop_claims: Vec<HashSet<u8>>,
     /// Staged Ref words a native borrow must drop after its call.
     native_pending: Vec<u8>,
     /// Whether the walk's current path exited the frame since the last
@@ -132,6 +143,7 @@ impl Placement {
             seen: HashMap::new(),
             forwarded: HashSet::new(),
             loop_depth: 0,
+            loop_claims: Vec::new(),
             native_pending: Vec::new(),
             diverged: false,
         }
@@ -223,7 +235,10 @@ impl Placement {
 
     /// Whether the word's current use is its death: the checker-recorded
     /// latest use of every alias, reached, without a loop re-execution in
-    /// between. Anonymous words (no binder) die at first consumption.
+    /// between. Anonymous words (no binder) die at first consumption. A
+    /// loop-carried word never dies in-body: its content's count rolls
+    /// over at the next overwrite and the carried claim dies past the
+    /// loop.
     fn dies_at(&self, word: u8) -> bool {
         let Some(owned) = self.owned.get(&word) else {
             return false;
@@ -231,10 +246,18 @@ impl Placement {
         if self.loop_depth > owned.depth {
             return false;
         }
+        if self.loop_carried(word) {
+            return false;
+        }
         match self.death.get(&word) {
             Some(death) => self.seen.get(&word).is_some_and(|seen| seen == death),
             None => self.binders.get(&word).is_none_or(HashSet::is_empty),
         }
+    }
+
+    /// Whether an enclosing loop carried `word` in from outside its body.
+    fn loop_carried(&self, word: u8) -> bool {
+        self.loop_claims.iter().any(|claims| claims.contains(&word))
     }
 
     // ---- copies, reads, and drops ---------------------------------------------------
@@ -273,10 +296,17 @@ impl Placement {
 
     /// A `var` re-assignment overwrites `words`: the replaced references
     /// die before the store threads (the store site the M3 comment pins).
+    /// A loop-carried word's dec is a rollover, not a claim death: the
+    /// body re-executes, so the word keeps its claim for the back-edge
+    /// join — each iteration's dec consumes the previous content's count
+    /// and the final content dies past the loop.
     pub(crate) fn store_over(&mut self, code: &mut Vec<Op>, words: &[u8]) {
         for &word in words {
-            if self.owned.contains_key(&word) {
-                self.drop_word(code, word);
+            if let Some(owned) = self.owned.get(&word).copied() {
+                Self::emit_drop(code, word, owned.deinit);
+                if !self.loop_carried(word) {
+                    self.owned.remove(&word);
+                }
             }
         }
     }
@@ -379,12 +409,16 @@ impl Placement {
     // ---- loops and branches ----------------------------------------------------------
 
     /// Enters a loop body: uses at the deeper depth never kill productions
-    /// born outside.
+    /// born outside, and the words owned here become the loop's carried
+    /// claims — their in-body deaths stay suppressed so a loop-carried
+    /// slot keeps exactly one live claim across every iteration.
     pub(crate) fn loop_enter(&mut self) {
+        self.loop_claims.push(self.owned.keys().copied().collect());
         self.loop_depth += 1;
     }
 
     pub(crate) fn loop_exit(&mut self) {
+        self.loop_claims.pop();
         self.loop_depth -= 1;
     }
 
@@ -620,6 +654,49 @@ mod tests {
         let mut code = Vec::new();
         rc.read(&mut code, &[4]);
         assert_eq!(code.len(), 1, "outside the loop the same use is the death");
+    }
+
+    /// A loop-carried word (owned at loop entry, overwritten in-body): the
+    /// overwrite's dec rolls the slot's content over while the claim
+    /// survives for the back-edge join, no other in-body death site fires,
+    /// and the exit decs the final content exactly once.
+    #[test]
+    fn a_loop_carried_word_rolls_over_without_dying_in_the_body() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let use_at = binder_span(50);
+        rc.last_use.insert(b, (use_at, true));
+        rc.produced(4, None);
+        rc.bound(b, &[4], None);
+        rc.loop_enter();
+        // the head overwrite: one dec for the previous content, claim kept
+        let mut code = Vec::new();
+        rc.store_over(&mut code, &[4]);
+        assert_eq!(
+            code,
+            vec![Op::RcDec { src: Slot::body(4) }],
+            "the overwrite still decs the content it replaces"
+        );
+        assert!(
+            rc.owned.contains_key(&4),
+            "the carried claim survives the overwrite for the join"
+        );
+        // the in-body re-production re-stamps the slot at the body depth
+        rc.produced(4, None);
+        // the binder's textual last use inside the body is NOT a death
+        rc.use_of(b, use_at);
+        let mut code = Vec::new();
+        rc.read(&mut code, &[4]);
+        assert!(code.is_empty(), "a carried word never dies in-body");
+        // past the loop the surviving claim drops exactly once
+        rc.loop_exit();
+        let mut code = Vec::new();
+        rc.exit(&mut code, &[]);
+        assert_eq!(
+            code,
+            vec![Op::RcDec { src: Slot::body(4) }],
+            "the final content dies at the frame exit"
+        );
     }
 
     /// Fork/join: words owned on every arm survive the join; one-arm words

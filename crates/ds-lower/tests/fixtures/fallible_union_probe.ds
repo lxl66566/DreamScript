@@ -1,0 +1,69 @@
+// purpose: the success-typed fallible natives at run level — the
+// two-word platform span re-spans into the call's own union per member
+// (read_file over string | io_err, parse_int over int | parse_err), so
+// ?, .ok, .err, and match extract real values; the error members carry
+// no payload field, so the failure arm drops the io message's
+// native-born count while the parse failure's handed-back input alias
+// is never claimed (the input survives the failing parse and reads
+// again).
+
+tag int
+tag string
+tag bool
+tag io_err
+tag parse_err
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn read_file (path: string) -> string | io_err
+extern fn write_file (path: string, contents: string) -> ()
+extern fn parse_int (s: string) -> int | parse_err
+
+// .err over the read: the fallback widens into the result, both arms of
+// the platform span feed it
+fn read_or_empty(path: string) -> string {
+  read_file(path).err((_: io_err) => "")
+}
+
+// `?` propagation: the read's kept side binds (string sits outside the
+// return union), the parse's whole union rides `return e?` — the fully
+// contained case where the return itself is the extraction
+fn load_count(path: string) -> int | io_err | parse_err {
+  const text = read_file(path)?
+  return text.parse_int()?
+}
+
+// the union value is a first-class binding: match splits it, the
+// catchall binder refines to the success member
+fn spell(path: string) -> string {
+  const cell = load_count(path)
+  match cell {
+    io_err => "io",
+    parse_err => "parse",
+    n => "count ${n}"
+  }
+}
+
+// parse_int chains: .ok composes with .err over the same union
+fn parse_chain(w: string) -> int {
+  w.parse_int().ok((n: int) => n).err((_: parse_err) => 0)
+}
+
+// a failing parse hands the input's alias back in the span's dead word;
+// the input must survive it — the second parse reads it again
+fn parse_twice(w: string) -> int {
+  const first = w.parse_int().err((_: parse_err) => 0)
+  first + w.parse_int().err((_: parse_err) => -1)
+}
+
+fn main(path: string, bad: string, missing: string) -> bool {
+  write_file(path, "17")
+  write_file(bad, "not a number")
+  const back = read_file(path)
+  println("back ${back.err((_: io_err) => "?")}")
+  println("empty ${read_or_empty(missing)}")
+  println("spell ${spell(path)} ${spell(bad)} ${spell(missing)}")
+  println("chain ${parse_chain("34") + 1} ${parse_chain("x") + 1}")
+  println("twice ${parse_twice("7")} ${parse_twice("x")}")
+  back.err((_: io_err) => "") == "17" && read_or_empty(missing) == "" && spell(path) == "count 17" && spell(bad) == "parse" && spell(missing) == "io" && parse_chain("34") == 34 && parse_chain("x") == 0 && parse_twice("7") == 14 && parse_twice("x") == -1
+}

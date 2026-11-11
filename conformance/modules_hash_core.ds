@@ -25,10 +25,10 @@ import acme/pipeline/fs if os == "windows"
 
 ##
 
-extern fn sqlite3_open(path: *const c.char) -> c["sqlite3"] | c.int
-extern fn sqlite3_close(db: c["sqlite3"]) -> c.int
+extern fn sqlite3_open(path: *const c::char) -> c["sqlite3"] | c::int
+extern fn sqlite3_close(db: c["sqlite3"]) -> c::int
 
-fn double_close(path: string) -> () | c.int {
+fn double_close(path: string) -> () | c::int {
   const db = sqlite3_open(path)?
   sqlite3_close(db)
   sqlite3_close(db)

@@ -27,9 +27,9 @@ struct handle: ~Copyable {
   deinit { drop_handle(self.fd) }
 }
 
-extern fn open_handle (p: string) -> handle
-extern fn drop_handle (fd: int) -> ()
-extern fn close_handle (move h: handle) -> ()
+extern fn open_handle(p: string) -> handle
+extern fn drop_handle(fd: int) -> ()
+extern fn close_handle(move h: handle) -> ()
 
 fn moved_then_used(p: string) -> () {
   const h = open_handle(p)
@@ -43,8 +43,8 @@ fn moved_across_arms(p: string, s: ready | later) -> int {
     ready => {
       close_handle(h)
       1
-    },
-    later => 2,
+    }
+    later => 2
   }
   h.fd
 }
@@ -68,7 +68,7 @@ struct slot: ~Copyable {
   inner: handle
 }
 
-extern fn open_slot (p: string) -> slot
+extern fn open_slot(p: string) -> slot
 
 fn param_moved_then_used(move h: handle) -> () {
   close_handle(h)

@@ -1,0 +1,25 @@
+// source: G3 order-independent top levels plus the R26 package-wide linearity passes, corpus coverage this round
+// purpose: top-level bindings consume linear values in any declaration order (the same-file analog of cross-file consumption; the gate's second file carries the cross-file consumer), and a twice-consumed seed reports its moved/used pair
+// items:
+// blob: stage: typecheck
+// digest-of: stage: typecheck
+// early: stage: typecheck
+// late-seed: stage: typecheck
+// seed3: stage: typecheck
+// twice: stage: reject DS3001 value `seed3` is no longer usable
+// far-seed: stage: typecheck
+
+struct blob: ~Copyable { n: int }
+extern fn digest_of(move b: blob) -> int
+
+// the consumer is declared before the value it consumes [G3]
+const early = digest_of(late_seed)
+const late_seed = blob { n: 1 }
+const seed3 = blob { n: 2 }
+
+// one item, both spans: the tuple initializer moves seed3 twice
+const twice = (digest_of(seed3), digest_of(seed3))
+
+// consumed by the gate's second file (the cross-file direction); unused
+// at check time under the single-file ambient
+const far_seed = blob { n: 4 }

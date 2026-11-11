@@ -30,3 +30,15 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: cargo test
         run: cargo nextest run --all-features --locked --no-tests pass && cargo test --all-features --locked --doc
+
+  ds-fmt:
+    name: ds fmt --check examples, kernels, and conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: dtolnay/rust-toolchain@stable
+      # Every .ds source in the repo (examples, benchmark kernels, and
+      # the conformance corpus) must sit at `ds fmt`'s canonical form.
+      - run: cargo build --locked -p ds-cli
+      - run: target/debug/ds fmt --check examples/*.ds benchmarks/kernels/*.ds conformance/*.ds

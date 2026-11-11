@@ -1,13 +1,13 @@
-//! Set-theoretic type core over nominal and structural atoms [B1, B3].
+//! Set-theoretic type core over nominal and structural atoms (B1, B3).
 //!
 //! Declarations are nominal — every tag, struct, and enum gets one
 //! [`TypeId`] — and distinct atoms denote disjoint value sets. Anonymous
-//! tuples `(t0, t1, ...)` are the structural exception [B3]: the universe
+//! tuples `(t0, t1, ...)` are the structural exception (B3): the universe
 //! mints one atom per distinct element-atom list, hash-consed so tuple
 //! equality is structural. The type language above the atoms is
 //! set-theoretic: unions `|`, intersections `&`, differences `-`, and
 //! negated marker-trait constraints `~T` are ordinary type expressions
-//! ([`TypeExpr`]). `none` is a distinguished unit atom [B4], so `T?` is
+//! ([`TypeExpr`]). `none` is a distinguished unit atom (B4), so `T?` is
 //! exactly `T | none` ([`Universe::optional`]) and optionals, error unions,
 //! and enums share one mechanism.
 //!
@@ -16,14 +16,14 @@
 //! Every type expression is *solved* against the current state of a
 //! [`Universe`] into one canonical form: the sorted, deduplicated set of the
 //! atoms it denotes, hash-consed so [`Ty`] handle equality is set equality.
-//! This is the entire normal form — the decision recorded here for [B1]
+//! This is the entire normal form — the decision recorded here for (B1)
 //! ("difference types are compile-time only and erase entirely"):
 //!
 //! * difference nodes never survive solving: `a - b` lowers to the solved shape of `a` minus `b`'s
 //!   members ([`Universe::diff`]);
 //! * negated constraints never survive either: `~T` solves to the complement of `T`'s members over
 //!   the universe's atoms;
-//! * tuple products distribute over unions element-wise [B3]: `(a | b, c)` solves to `(a, c) | (b,
+//! * tuple products distribute over unions element-wise (B3): `(a | b, c)` solves to `(a, c) | (b,
 //!   c)`, one structural atom per combination, so every minted tuple atom is a product of single
 //!   atoms and distinct atoms stay disjoint — the `()` of the surface is the arity-0 atom, a
 //!   sibling of `none`, never its alias;
@@ -36,7 +36,7 @@
 //! query layer owns that invalidation). Minted handles stay valid and
 //! immutable forever.
 //!
-//! # Decision procedures [B1, B6, section 10 item 7]
+//! # Decision procedures (B1, B6, section 10 item 7)
 //!
 //! * [`Universe::is_empty`]: empty iff the solved member set is empty. An intersection of distinct
 //!   nominal atoms is empty, an atom minus itself is empty, `t & ~t` is empty, and a union is empty
@@ -47,11 +47,11 @@
 //!   is disjoint, because then no combination mints the same atom; arity mismatch is trivially
 //!   disjoint.
 //! * [`Universe::contains`]: `contains(sup, sub)` is the subset check `sub <= sup`; `?` propagation
-//!   checks containment against the written return union [B2]. For tuples this is exact
+//!   checks containment against the written return union (B2). For tuples this is exact
 //!   element-wise containment after distribution: `(a, b) <= (a | a', b)` because the superset's
 //!   combinations cover the subset's.
 //! * [`Universe::witness`]: for a non-empty overlap, a concrete witness value type — an atom plus
-//!   one level of field/case shape, and recursively for tuple elements [B3] — which B6 overlap
+//!   one level of field/case shape, and recursively for tuple elements (B3) — which B6 overlap
 //!   errors must name alongside both heads.
 //!
 //! Termination: every procedure is grounded in a finite atom universe. Each

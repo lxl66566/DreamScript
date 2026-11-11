@@ -1,0 +1,30 @@
+// source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed this round)
+// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); execution refuses at lowering until impl-body dispatch lands (the trait-dispatch phase 3 seam)
+// items:
+// counter: stage: typecheck
+// timer: stage: typecheck
+// impl-counter: stage: typecheck
+// impl-timer: stage: typecheck
+// use-both: stage: typecheck
+// use-fields: stage: typecheck
+// wrong-receiver: stage: reject DS2013 no method `peek` accepts receiver `int`
+
+struct counter { ticks: int }
+struct timer { laps: int }
+impl counter { fn peek(self) -> int { 1 } }
+impl timer { fn peek(self) -> int { 2 } }
+
+// the two owners share the method name; each dot-call selects its own
+// owner's signature [F3]
+fn use_both(c: counter, t: timer) -> int {
+  c.peek() + t.peek()
+}
+
+// the receiver binds Self: field access through it checks
+fn use_fields(c: counter) -> int {
+  c.peek() + c.ticks
+}
+
+fn wrong_receiver(x: int) -> int {
+  x.peek()
+}

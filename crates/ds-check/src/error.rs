@@ -39,7 +39,7 @@ pub enum Error {
     /// An instance id outside the environment's table.
     #[error("instance id {0:?} is not declared in this environment")]
     UnknownInstance(InstanceId),
-    /// Two instances of one trait have intersecting heads [B6]. `head_a` is
+    /// Two instances of one trait have intersecting heads (B6). `head_a` is
     /// the earlier-declared head (at declaration, the existing instance's).
     #[error("instances of trait {trait_id:?} overlap: {head_a:?} & {head_b:?}")]
     InstanceOverlap {
@@ -53,14 +53,14 @@ pub enum Error {
         witness: Witness,
     },
     /// A conditional instance's condition resolution reaches back to itself,
-    /// directly or transitively [B6, section 10 item 7]. The path starts and
+    /// directly or transitively (B6, section 10 item 7). The path starts and
     /// ends at the same instance.
     #[error("conditional instance cycle: {cycle:?}")]
     ConditionCycle {
         /// The cycle path in edge order, start repeated at the end.
         cycle: Vec<InstanceId>,
     },
-    /// Instance lookup found multiple heads containing one query [B6]; with
+    /// Instance lookup found multiple heads containing one query (B6); with
     /// coherence enforced this is impossible for non-empty queries.
     #[error("ambiguous instances of trait {trait_id:?} for {queried:?}")]
     AmbiguousResolution {
@@ -75,7 +75,7 @@ pub enum Error {
     #[error("instance head {0:?} is empty")]
     EmptyInstanceHead(Ty),
     /// A tuple distribution whose combination count exceeds the solver's
-    /// cap [B3]; names the tuple and each element position's member count.
+    /// cap (B3); names the tuple and each element position's member count.
     /// Checked before any atom is minted, so an adversarial product is this
     /// error, never an out-of-memory abort.
     #[error(

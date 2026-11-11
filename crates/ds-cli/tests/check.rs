@@ -46,14 +46,16 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
 ///   propagation pair) — the io failure, `default_config`, and the config type ride the ambient.
 /// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
-///   the derive engine behind `json for point`).
+///   the derive engine behind `json for point`); the expression-error epoch keeps each root alone
+///   (the unresolved `fields`' not-callable and iteration follow-ons no longer print).
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
 ///   wants narrowing); `read_config`/`default_config`/`load_rows` resolve through the ambient.
 /// * linearity_modes_rc: run items only — `open`/`read_exact` absence (their signatures cannot name
 ///   the file's own `file` struct; the dot-callee resolution failure reports alone since the
 ///   root-cause-first fix) and `u32`'s distinct width [B7] (the `.err` fallback meets
-///   `lens.len()`'s int — the retired `or` hid that width meeting).
+///   `lens.len()`'s int — the retired `or` hid that width meeting); the epoch suppresses the
+///   `empty`-typed follow-ons those roots used to print.
 /// * effects_nursery: zero noise — `urls` and the net failure taxonomy are ambient, and the
 ///   fetch/retry matches use member-test arms plus the leftover page binder.
 /// * range_for: zero noise — the for-over-range and `in` membership items are self-contained under
@@ -63,9 +65,9 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
-    assert_corpus_clean("generics_coherent_traits.ds", 8);
-    assert_corpus_clean("syntax_ts_heart.ds", 8);
-    assert_corpus_clean("linearity_modes_rc.ds", 10);
+    assert_corpus_clean("generics_coherent_traits.ds", 6);
+    assert_corpus_clean("syntax_ts_heart.ds", 5);
+    assert_corpus_clean("linearity_modes_rc.ds", 8);
     assert_corpus_clean("effects_nursery.ds", 0);
     assert_corpus_clean("range_for.ds", 0);
     assert_corpus_clean("pattern_dispatch.ds", 0);
@@ -80,10 +82,20 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // the one error is the file's own reject item (the non-optional
     // unwrap_or receiver); the run items ride the checked list reads
     assert_corpus_clean("extraction_family.ds", 1);
-    // zero noise — the defaults call and the widened argument shapes
-    // are self-contained under the ambient; the inline-member items
-    // check clean and their lowering refusal is the e2e pin
-    assert_corpus_clean("calls_surface.ds", 0);
+    // the one error is the file's own reject item (the extra argument at
+    // an indirect fn-typed call); the defaults call and the widened
+    // argument shapes are self-contained under the ambient, and the
+    // inline-member items check clean with their lowering refusal as the
+    // e2e pin
+    assert_corpus_clean("calls_surface.ds", 1);
+    // the one error is the file's own reject item (the wrong-receiver
+    // dot-call); the dot-calls and field reads check clean and execution
+    // refuses at lowering until impl bodies dispatch (the phase 3 seam)
+    assert_corpus_clean("inherent_impls.ds", 1);
+    // the one error is the file's own reject item (the twice-consumed
+    // seed's moved/used pair); the reversed-order and cross-file
+    // consumption shapes ride the gate's two-file harness
+    assert_corpus_clean("toplevel_consumption.ds", 1);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

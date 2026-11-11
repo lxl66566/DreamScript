@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// The tier state of one function entry. The flip is one-way: a compiled
 /// entry never returns to interpreted. A recompiled function (hot reload)
 /// gets a fresh [`EntryDescriptor`] in the second module slot instead of a
-/// backward flip [H6 item 5].
+/// backward flip (H6 item 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// Only word 0 (`tier1_prologue_ptr`) is valid; calls enter tier 1.
@@ -46,7 +46,7 @@ pub enum TierFlipError {
 ///   `ds-jit`'s concern, not this descriptor's.
 ///
 /// Cross-module calls resolve through the two-version module slot table
-/// [H6 item 5]: a hot reload publishes a fresh descriptor (fresh word 0) in
+/// (H6 item 5): a hot reload publishes a fresh descriptor (fresh word 0) in
 /// the second slot, and frames still on the old version retire at their
 /// next cross-module call — the same invalidation story as the tier flip.
 #[derive(Debug)]

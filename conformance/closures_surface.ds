@@ -19,7 +19,7 @@ fn twice(x: int, f: fn(int) -> int) -> int {
 }
 
 fn call_with_block() -> int {
-  apply() { 42 }
+  apply { 42 }
 }
 
 fn call_with_lambda() -> int {
@@ -42,5 +42,5 @@ fn call_passed() -> int {
 
 fn capture_over_local() -> int {
   const base = 7
-  apply() { base + 1 }
+  apply { base + 1 }
 }

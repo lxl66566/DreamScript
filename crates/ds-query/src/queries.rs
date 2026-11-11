@@ -27,7 +27,7 @@
 //!   grain — and on registration, through the file-set input `package_asts` also reads — the check
 //!   is package-wide, so block-grain renewal would under-approximate it.
 //! * `linearity_check` reads the parse result and the block index of the definition's file and runs
-//!   the M2 affine pass [C1, C5] over that file as a single-file package, then slices out the
+//!   the M2 affine pass (C1, C5) over that file as a single-file package, then slices out the
 //!   definition's facts. The dependency is the whole parse, so this query invalidates at file
 //!   grain: the pass is a package fixpoint (cross-item moves are legal inside a file), so
 //!   block-grain renewal would under-approximate it. The block-grain seam stays what the M3
@@ -246,7 +246,7 @@ pub(crate) fn block_source(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValu
     Ok(QueryValue::BlockSource(Arc::from(text)))
 }
 
-/// Runs the M2 affine pass [C1, C5] over one definition's file and slices
+/// Runs the M2 affine pass (C1, C5) over one definition's file and slices
 /// the definition's facts out of it. `DefId` packs `(file, block)` until
 /// the real definition table lands, so the definition is its block and its
 /// facts are those addressing the block's span.

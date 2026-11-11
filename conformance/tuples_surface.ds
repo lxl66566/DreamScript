@@ -22,7 +22,7 @@ fn swap(a: int, b: string) -> (string, int) {
 
 fn arm_sum(t: (int, int)) -> int {
   match t {
-    (a, b) => a + b,
+    (a, b) => a + b
   }
 }
 

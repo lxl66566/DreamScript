@@ -580,6 +580,42 @@ fn list_literals_parse_items_and_stay_distinct_from_generic_lambdas() {
 }
 
 #[test]
+fn constructor_brackets_admit_fn_types() {
+    // `list[fn(int) -> int]()` keeps the indexed-callee shape, the bracket
+    // holding the fn-type node instead of a value spelling
+    let ast = ok("const fns = list[fn(int) -> int]()\n");
+    let Expr::Call { callee, .. } = init_expr(&ast) else {
+        panic!("constructor call");
+    };
+    assert!(
+        matches!(&**callee, Expr::Index { index, .. }
+            if matches!(&**index, Expr::FnType { ty, .. } if matches!(**ty, Type::Fn { .. }))),
+        "the list bracket holds the fn type"
+    );
+    // the map application admits one in either argument position
+    let ast = ok("const m = map[fn(int) -> int, string]()\n");
+    let Expr::Call { callee, .. } = init_expr(&ast) else {
+        panic!("map constructor call");
+    };
+    assert!(
+        matches!(&**callee, Expr::MapApply { key, .. }
+            if matches!(&**key, Expr::FnType { .. })),
+        "the map key position holds the fn type"
+    );
+    // a fn type never parses outside the constructor brackets: `fn` heads
+    // no value expression
+    let (code, ..) = err("const bad = fn(int) -> int\n");
+    assert_eq!(
+        code,
+        ErrorCode::UnexpectedToken,
+        "a bare fn type is no value"
+    );
+    // malformed fn types report at their own spans (pairing, not a fn error)
+    let (code, ..) = err("const bad = list[fn(int -> int]()\n");
+    assert_eq!(code, ErrorCode::UnbalancedDelimiter);
+}
+
+#[test]
 fn map_applications_take_exactly_two_type_arguments() {
     // the two-argument form parses as the map application, call position
     // or bare (the call makes the outer expression a call)
@@ -779,6 +815,7 @@ parses! {
     type_set_algebra => "type t = a | b & c - d\n",
     negation => "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
     fn_types => "type h = fn(a: int) -> int\n",
+    fn_type_ctor_args => "fn f() { const fns = list[fn(int) -> int]()\n const m = map[string, fn(int) -> int]()\n const n = list[list[fn() -> int]]()\n}\n",
     unit_type => "fn main() -> () | io_error { 0 }\n",
     case_type_refs => "type e = badnumber(string) | missingfield(string)\n",
     enum_decl => "enum color { red, green(int), blue { shade: int } }\n",

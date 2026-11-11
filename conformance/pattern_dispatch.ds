@@ -25,15 +25,15 @@ type sw = on | off
 
 fn show(s: sw) -> () {
   match s {
-    on => println("ON"),
-    off => println("OFF"),
+    on => println("ON")
+    off => println("OFF")
   }
 }
 
 fn show_rev(s: sw) -> () {
   match s {
-    off => println("OFF"),
-    on => println("ON"),
+    off => println("OFF")
+    on => println("ON")
   }
 }
 
@@ -44,8 +44,8 @@ type outcome = timeout | refused | ready
 
 fn brief(e: outcome) -> () {
   match e {
-    timeout | refused => println("net-err"),
-    ready => println("ready"),
+    timeout | refused => println("net-err")
+    ready => println("ready")
   }
 }
 
@@ -55,7 +55,7 @@ fn brief(e: outcome) -> () {
 // the ambient's read_file signature
 tag parse_error
 
-extern fn parse_config (text: string) -> config | parse_error
+extern fn parse_config(text: string) -> config | parse_error
 
 fn load_config(path: string) -> config | io_err | parse_error {
   const text = read_file(path)?
@@ -96,8 +96,8 @@ fn store(text: string) -> () {
   var kept: config | io_err | parse_error = parse_config(text)
   kept = parse_config(text)
   match kept {
-    io_err => (),
-    parse_error => (),
-    c => (),
+    io_err => ()
+    parse_error => ()
+    c => ()
   }
 }

@@ -1,4 +1,4 @@
-//! The @std extraction family [E4]: `unwrap_or`, `unwrap_or_else`,
+//! The @std extraction family (E4): `unwrap_or`, `unwrap_or_else`,
 //! `ok_or`, and `map_err` — plain UFCS-callable functions whose calls
 //! type fully locally against the checked receiver, composed with `?`
 //! for early exits.
@@ -10,7 +10,7 @@
 //! calls by rule instead. The family routes by name the same way the
 //! lowerer's native table routes — the ambient occupies the value
 //! namespace, and redeclaring a family name alongside it is a
-//! duplicate-definition error [G3]; without the ambient, a same-named
+//! duplicate-definition error (G3); without the ambient, a same-named
 //! generic function of the same arity rides the family rules.
 
 /// One family member: which local typing rule its calls carry.

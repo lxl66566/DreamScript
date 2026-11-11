@@ -2,7 +2,7 @@
 //! given sources register in a query database and every check runs as a
 //! memoized query — parse (syntax errors are data), resolve, the
 //! bidirectional type check with refinement (B2), the affine pass
-//! [C1, C5], and the effect rows (E1) (computed, informational until the
+//! (C1, C5), and the effect rows (E1) (computed, informational until the
 //! M7 platform check decides what they forbid). Diagnostics print through
 //! the ds-diag renderers; the exit code is 0 when nothing fatal was
 //! reported.

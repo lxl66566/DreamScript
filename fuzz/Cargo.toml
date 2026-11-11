@@ -15,6 +15,7 @@ ds-diag = { path = "../crates/ds-diag" }
 ds-mod = { path = "../crates/ds-mod" }
 ds-parse = { path = "../crates/ds-parse" }
 ds-query = { path = "../crates/ds-query" }
+ds-vm = { path = "../crates/ds-vm" }
 
 [[bin]]
 name = "fuzz_parse"
@@ -49,6 +50,13 @@ bench = false
 [[bin]]
 name = "fuzz_query_engine"
 path = "fuzz_targets/fuzz_query_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_vm"
+path = "fuzz_targets/fuzz_vm.rs"
 test = false
 doc = false
 bench = false

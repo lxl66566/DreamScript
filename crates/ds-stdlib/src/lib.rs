@@ -1,5 +1,5 @@
 //! The DreamScript stdlib ambient: the checked-declaration layer that
-//! makes corpus sources check clean as-is [M3]. The runtime half of the
+//! makes corpus sources check clean as-is (M3). The runtime half of the
 //! stdlib is the H5.5 two-module native layer — the ds-vm `builtin` core
 //! (pure primitives, in every VM) and the `std` platform native module
 //! (console/file/net, installed by the host that provides the platform)
@@ -15,10 +15,10 @@
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
 //!   parse, resolve, the declaration tables, the bidirectional check. A file that redeclares an
-//!   ambient name in the same namespace is a duplicate-definition error [G3, F9], so self-contained
+//!   ambient name in the same namespace is a duplicate-definition error (G3, F9), so self-contained
 //!   packages check with `--no-ambient`.
 //! * [`declared_rows`]: the [`ds_check::DeclaredRows`] table of the ambient functions — the
-//!   effect-row surface v1 has no syntax for [E1]. The rows enter through the ds-query database's
+//!   effect-row surface v1 has no syntax for (E1). The rows enter through the ds-query database's
 //!   ambient-rows seam and are a lower bound on the computed row; M7's platform declarations merge
 //!   through the same seam.
 //!
@@ -33,7 +33,7 @@
 //!
 //! # Two-namespace consequences
 //!
-//! The package namespace is two [G3, F9] — types and values — so the
+//! The package namespace is two (G3, F9) — types and values — so the
 //! ambient's `struct map[k, v]` and the list-transform function
 //! `fn map[t, r]` coexist: brace and type positions resolve the struct,
 //! the dot position resolves the function. Consequences that remain:
@@ -45,7 +45,7 @@
 //!   `parse_err` — the discriminants the platform natives answer), so `read_file`, `parse_int`,
 //!   `load_rows`, `read_config`, and `fetch` return real success unions.
 //! * `max` carries no bound: the `[t: ord]` constraint needs a stdlib-owned `ord` trait, and the
-//!   corpus declares its own. Likewise `u32` is a distinct atom [B7] (mixed-width arithmetic is the
+//!   corpus declares its own. Likewise `u32` is a distinct atom (B7) (mixed-width arithmetic is the
 //!   corpus's staged noise), and `close` takes `int` because `raw_fd` is a file-owned alias of it.
 
 #![warn(missing_docs)]
@@ -59,17 +59,17 @@ pub const AMBIENT_FILE: &str = "std/ambient.ds";
 /// surface. Register it as a package member before the user's files.
 pub const AMBIENT_SOURCE: &str = include_str!("ambient.ds");
 
-/// The ambient functions' declared effect rows [E1] — the failure and
+/// The ambient functions' declared effect rows (E1) — the failure and
 /// world capabilities the v1 surface has no syntax for. Applied by name;
 /// a declared row is a lower bound on the computed row.
 ///
 /// * `error`: failure handed to the caller — the parse and IO readers.
 /// * `world`: the world-touching capability surface — IO and logging.
-/// * `trap`: the unhandleable boundary [B7] — `die`.
-/// * `cancel`: the nursery's internal effect [E1, E2] — `cancel`.
+/// * `trap`: the unhandleable boundary (B7) — `die`.
+/// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 ///
 /// Every other ambient function is row-pure: the combinators run their
-/// lambdas inside the enclosing definition's extent [D3], which the
+/// lambdas inside the enclosing definition's extent (D3), which the
 /// effects pass already accounts for.
 #[must_use]
 pub fn declared_rows() -> DeclaredRows {
@@ -106,7 +106,7 @@ mod tests {
     /// The ambient parses clean and collects with no duplicate definition:
     /// every corpus file shares this member's namespaces. `map` rides both:
     /// the struct in the type namespace, the transform in the value
-    /// namespace [F9].
+    /// namespace (F9).
     #[test]
     fn ambient_collects_into_one_clean_package() {
         let mut files = ds_diag::Files::new();

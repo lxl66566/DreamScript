@@ -219,10 +219,17 @@ postfix_lvl = { primary ~ postfix_op* }
 postfix_op = _{ postfix_call | postfix_lambda | postfix_index | postfix_try | postfix_dot }
 postfix_call = { h ~ "(" ~ sp ~ args ~ sp ~ ")" }
 postfix_lambda = { h ~ block_expr }
-postfix_index = { h ~ "[" ~ sp ~ expr ~ sp ~ "]" }
+postfix_index = { h ~ "[" ~ sp ~ ctor_arg ~ sp ~ "]" }
 postfix_try = { h ~ "?" }
 postfix_dot = { sp ~ "." ~ h ~ field_name }
 // A keyword is a legal field name after `.` (the record uses `f.type`).
+
+// A constructor bracket's content: a type spelled as an expression, or
+// the one type form no expression can spell — a fn type [F2]
+// (`list[fn(int) -> int]()`). `fn` is reserved and heads no expression,
+// so the ordered alternative cannot misfire on an ordinary index or map
+// application.
+ctor_arg = _{ fn_type | expr }
 
 // A list literal `[a, b, c]` [F7, B3]: newline-crossing spacing like
 // every bracketed form; the empty `[]` types only against an expected
@@ -299,9 +306,9 @@ literal = _{ float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit
 // The map constructor's two-argument type application `map[k, v]` [F9,
 // B3]: pinned to the head spelled `map`, so no other expression head takes
 // a two-element bracket — arbitrary two-parameter type application stays
-// out of call position. The bracketed arguments are type spellings parsed
-// as expressions, the list application's `[t]` convention.
-map_apply = { map_head ~ h ~ "[" ~ sp ~ expr ~ sp ~ "," ~ sp ~ expr ~ sp ~ ","? ~ sp ~ "]" }
+// out of call position. The bracketed arguments are type spellings
+// parsed as expressions, the list application's `[t]` convention.
+map_apply = { map_head ~ h ~ "[" ~ sp ~ ctor_arg ~ sp ~ "," ~ sp ~ ctor_arg ~ sp ~ ","? ~ sp ~ "]" }
 map_head = @{ "map" ~ !ident_cont }
 
 primary = { struct_lit | lambda | list_lit | paren_tuple | control | literal | block_expr | map_apply | path_atom }

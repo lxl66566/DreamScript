@@ -2,12 +2,13 @@
 
 // Property: the full checker pipeline never panics on arbitrary source
 // bytes: parse, then the bidirectional check with the affine pass, then
-// the effects walk. Semantic wrongness is fine (diagnostics exist for
-// that); a panic, debug-assert trip, or hang is not. Declared ambient
+// the effects walk, then both ds-diag renderers over every diagnostic
+// produced along the way. Semantic wrongness is fine (diagnostics exist
+// for that); a panic, debug-assert trip, or hang is not. Declared ambient
 // rows derived from the input exercise `effects_of`'s union edges, not
 // just the empty-row walk.
 use ds_check::{DeclaredRows, Effect, EffectRow, check, effects_of};
-use ds_diag::Files;
+use ds_diag::{Files, render};
 use ds_parse::parse;
 use libfuzzer_sys::fuzz_target;
 
@@ -54,11 +55,22 @@ fuzz_target!(|data: &[u8]| {
     let source = String::from_utf8_lossy(data);
     let mut files = Files::new();
     let file = files.add_source("fuzz.ds", &source);
-    let Ok(ast) = parse(&files, file) else {
-        return;
+    let ast = match parse(&files, file) {
+        Ok(ast) => ast,
+        Err(diags) => {
+            // Parse diagnostics render too: the renderer must survive
+            // real pipeline output, not just hand-built fixtures.
+            for diag in &diags {
+                std::hint::black_box(render::human(diag, &files));
+            }
+            return;
+        },
     };
     let effects = effects_of(&[&ast], &declared_rows(data));
     let (checked, linearity) = check(&files, &[ast]);
+    for diag in &checked.diags {
+        std::hint::black_box(render::human(diag, &files));
+    }
     std::hint::black_box((
         checked.diags.len(),
         linearity.moves.len(),

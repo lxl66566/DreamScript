@@ -1,5 +1,5 @@
 //! The atom registry, the hash-consed solved types, and the decision
-//! procedures [B1]. The normal-form decision and the termination argument are
+//! procedures (B1). The normal-form decision and the termination argument are
 //! documented at the crate root.
 
 use std::{
@@ -41,7 +41,7 @@ pub(crate) const MAX_TUPLE_COMBINATIONS: usize = 4096;
 ///
 /// Nominal atoms come from declarations; anonymous tuple atoms are minted
 /// structurally on demand ([`Universe::solve`] on [`TypeExpr::Tuple`]) and
-/// hash-consed on their element-atom lists [B3].
+/// hash-consed on their element-atom lists (B3).
 pub struct Universe {
     atoms: Vec<AtomDecl>,
     traits: Vec<TraitDecl>,
@@ -55,7 +55,7 @@ pub struct Universe {
 }
 
 impl Universe {
-    /// An empty universe with only the `none` atom declared [B4].
+    /// An empty universe with only the `none` atom declared (B4).
     #[must_use]
     pub fn new() -> Self {
         let none = AtomDecl {
@@ -79,19 +79,19 @@ impl Universe {
 
     // ---- declarations ----------------------------------------------------
 
-    /// Declares a unit tag: `tag io_err` [B1]. Inhabited by the tag itself.
+    /// Declares a unit tag: `tag io_err` (B1). Inhabited by the tag itself.
     pub fn declare_tag(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Unit)
     }
 
-    /// Declares a struct by reserving its identity [B1, B3]; the field
+    /// Declares a struct by reserving its identity (B1, B3); the field
     /// signature follows via [`Universe::set_struct_fields`], so recursive
     /// shapes can reference the returned id.
     pub fn declare_struct(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Reserved)
     }
 
-    /// Declares an enum by reserving its identity [B3]; the case signature
+    /// Declares an enum by reserving its identity (B3); the case signature
     /// follows via [`Universe::set_enum_cases`].
     pub fn declare_enum(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Reserved)
@@ -140,7 +140,7 @@ impl Universe {
         }
     }
 
-    /// Declares a trait [B6]; member atoms follow via
+    /// Declares a trait (B6); member atoms follow via
     /// [`Universe::impl_trait`].
     pub fn declare_trait(&mut self, name: &str) -> Result<TraitId, Error> {
         if self.atom_names.contains_key(name) || self.trait_names.contains_key(name) {
@@ -203,15 +203,15 @@ impl Universe {
 
     /// Solves an expression into its canonical form over the current universe
     /// state: the sorted, deduplicated set of atoms it denotes. Difference
-    /// and negation nodes erase here [B1], and tuple products distribute over
-    /// unions element-wise into structural atoms [B3].
+    /// and negation nodes erase here (B1), and tuple products distribute over
+    /// unions element-wise into structural atoms (B3).
     ///
     /// Solving is one structural fold over the finite expression tree; every
     /// step is a finite set operation over the universe's atoms, so the
     /// procedure always terminates (crate-root termination argument). A tuple
     /// mints one atom per element combination — at most the product of the
     /// element set sizes, each an existing atom, and never more than
-    /// [`MAX_TUPLE_COMBINATIONS`] (past that, a typed cap error).
+    /// `MAX_TUPLE_COMBINATIONS` (past that, a typed cap error).
     pub fn solve(&mut self, expr: &TypeExpr) -> Result<Ty, Error> {
         match expr {
             TypeExpr::Atom(id) => self.atom_ty(*id),
@@ -244,7 +244,7 @@ impl Universe {
     }
 
     /// Solves a tuple by distributing the product over the elements' solved
-    /// sets [B3]; the combinations themselves are [`Universe::product`],
+    /// sets (B3); the combinations themselves are [`Universe::product`],
     /// which enforces the distribution cap.
     fn tuple_solve(&mut self, elements: &[TypeExpr]) -> Result<Ty, Error> {
         let mut solved = Vec::with_capacity(elements.len());
@@ -255,7 +255,7 @@ impl Universe {
     }
 
     /// The structural atom of one element-atom list, minting it if absent
-    /// [B3]. Hash-consed on the list, so tuple atom identity is structural
+    /// (B3). Hash-consed on the list, so tuple atom identity is structural
     /// equality: same arity and same atoms position-wise. Elements must
     /// already be declared atoms (each a single atom by construction, since
     /// only [`Universe::tuple_solve`] mints tuples).
@@ -289,7 +289,7 @@ impl Universe {
     }
 
     /// The structural atom of one generic application: a declared
-    /// constructor plus its argument types as solved sets [B3]. Hash-consed
+    /// constructor plus its argument types as solved sets (B3). Hash-consed
     /// on `(constructor, arguments)`, so application identity is structural
     /// equality. Unlike tuples, applications stay opaque to the set algebra
     /// — a container does not distribute over a union argument — which is
@@ -322,7 +322,7 @@ impl Universe {
     }
 
     /// The structural atom of one function type: solved parameter types plus
-    /// the solved return type [F2]. Hash-consed on the signature, so two
+    /// the solved return type (F2). Hash-consed on the signature, so two
     /// written forms of one signature mint one atom — the identity the
     /// checker decomposes at call sites and lambda checks.
     pub fn fn_atom(&mut self, params: &[Ty], ret: Ty) -> Result<TypeId, Error> {
@@ -393,14 +393,14 @@ impl Universe {
     }
 
     /// Difference lowers to the solved shape of `a` minus `b`'s members,
-    /// exactly `a & ~b`; no difference node survives [B1].
+    /// exactly `a & ~b`; no difference node survives (B1).
     pub fn diff(&mut self, a: Ty, b: Ty) -> Ty {
         let rest = diff_slices(self.members(a), self.members(b));
         self.intern(rest)
     }
 
     /// Complement over the universe's current atoms: `~t`. Member slices
-    /// are sorted (see [`Universe::intern`]), so membership tests binary
+    /// are sorted (see `Universe::intern`), so membership tests binary
     /// search instead of scanning.
     pub fn complement(&mut self, t: Ty) -> Ty {
         let members = self.members(t);
@@ -411,7 +411,7 @@ impl Universe {
         self.intern(rest)
     }
 
-    /// `T?` is exactly `T | none` [B4]; optionals, error unions, and enums
+    /// `T?` is exactly `T | none` (B4); optionals, error unions, and enums
     /// share one mechanism.
     pub fn optional(&mut self, t: Ty) -> Ty {
         let with_none = union_slices(self.members(t), &[TypeId::NONE]);
@@ -419,7 +419,7 @@ impl Universe {
     }
 
     /// The tuple product of solved element types: one minted structural
-    /// atom per element-atom combination, unioned [B3] — `(a | b, c)` is
+    /// atom per element-atom combination, unioned (B3) — `(a | b, c)` is
     /// `(a, c) | (b, c)`. The empty list of elements is the unit atom
     /// `()`, the arity-0 product with exactly one combination.
     pub fn product(&mut self, elements: &[Ty]) -> Result<Ty, Error> {
@@ -454,7 +454,7 @@ impl Universe {
     }
 
     /// The unit type `()`: the arity-0 tuple atom, a sibling of `none`
-    /// with exactly one inhabitant [B3].
+    /// with exactly one inhabitant (B3).
     pub fn unit_ty(&mut self) -> Ty {
         self.product(&[])
             .unwrap_or_else(|_| self.intern(Vec::new()))
@@ -462,7 +462,7 @@ impl Universe {
 
     // ---- decision procedures ------------------------------------------------
 
-    /// A type is empty iff its solved member set is empty [B1]. An
+    /// A type is empty iff its solved member set is empty (B1). An
     /// intersection of distinct nominal atoms, an atom minus itself, `t &
     /// ~t`, and a union of empty members all reduce to the empty set.
     #[must_use]
@@ -470,14 +470,14 @@ impl Universe {
         self.members(t).is_empty()
     }
 
-    /// Disjointness: `a` and `b` are disjoint iff `a & b` is empty [B1].
+    /// Disjointness: `a` and `b` are disjoint iff `a & b` is empty (B1).
     #[must_use]
     pub fn is_disjoint(&self, a: Ty, b: Ty) -> bool {
         is_disjoint_slices(self.members(a), self.members(b))
     }
 
     /// Containment: `contains(sup, sub)` holds iff `sub <= sup`. `?`
-    /// propagation checks this against the written return union [B2].
+    /// propagation checks this against the written return union (B2).
     #[must_use]
     pub fn contains(&self, sup: Ty, sub: Ty) -> bool {
         is_subset(self.members(sub), self.members(sup))

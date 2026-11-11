@@ -66,7 +66,6 @@
 //! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) | reserved |
 //! | 30    | `map_get[k, v] (map, key: value) -> v \| none` (generic; CALLG) | reserved |
 //! | 31    | `map_set (map, key, value) -> unit` | reserved |
-
 //! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) | reserved |
 //! | 33    | `head[t] (xs: list) -> t \| none` (generic; CALLG) | reserved |
 //! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) | reserved |
@@ -319,7 +318,6 @@ pub const BUILTIN_FIBER_RESUME: u32 = 25;
 /// single-threaded driver would deadlock on itself.
 pub const BUILTIN_NURSERY_JOIN: u32 = 26;
 
-/// `println(msg: string) -> unit`.
 /// `list_push(xs: list, x: value) -> unit` — the construction append
 /// list literals lower to: one element word onto a list the constructing
 /// frame uniquely owns. The element parameter is `Raw`, the one native
@@ -389,6 +387,8 @@ pub const BUILTIN_FILTER: u32 = 39;
 /// init seeding the accumulator and an empty list answering it; the ONE
 /// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_REDUCE: u32 = 40;
+
+/// `println(msg: string) -> unit`.
 pub const STD_PRINTLN: u32 = 0;
 /// `print(msg: string) -> unit`.
 pub const STD_PRINT: u32 = 1;
@@ -872,11 +872,26 @@ fn max_fn(
     match args {
         [Value::I64(a), Value::I64(b)] => Ok(NativeResult::Word(Value::I64((*a).max(*b)))),
         [Value::F64(a), Value::F64(b)] => Ok(NativeResult::Word(Value::F64((*a).max(*b)))),
-        _ => Err(Trap::SlotTypeMismatch {
-            slot: 0,
-            expected: SlotType::I64,
-            actual: args.first().map_or(SlotType::I64, Value::slot_type),
-        }),
+        _ => {
+            // the pair must agree on one numeric kind: name the word that
+            // breaks it at its own index — the first non-numeric word, or
+            // the second of a mixed int/float pair — citing the other
+            // side's kind as expected
+            let offender = args
+                .iter()
+                .position(|a| !matches!(a, Value::I64(_) | Value::F64(_)))
+                .unwrap_or(1);
+            let expected = args
+                .iter()
+                .enumerate()
+                .find(|(i, a)| *i != offender && matches!(a, Value::I64(_) | Value::F64(_)))
+                .map_or(SlotType::I64, |(_, a)| a.slot_type());
+            Err(Trap::SlotTypeMismatch {
+                slot: u8::try_from(offender).expect("slot index fits u8"),
+                expected,
+                actual: args.get(offender).map_or(SlotType::I64, Value::slot_type),
+            })
+        },
     }
 }
 
@@ -1395,7 +1410,7 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// (`map`, `filter`, `reduce`) append past the closes.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
-    vec![
+    let fns = vec![
         reserved_entry(builtin_reserved_0),
         reserved_entry(builtin_reserved_1),
         NativeFunction {
@@ -1545,7 +1560,11 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_38),
         reserved_entry(builtin_reserved_39),
         reserved_entry(builtin_reserved_40),
-    ]
+    ];
+    // install-time guard (debug builds): the pinned index run ends at
+    // BUILTIN_REDUCE, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_REDUCE as usize + 1);
+    fns
 }
 
 /// The std platform native table, the world surface a platform-providing
@@ -1554,7 +1573,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
 /// indices (2-4, 10-19) stay as reserved trap entries.
 #[must_use]
 pub fn std_platform_module() -> Vec<NativeFunction> {
-    vec![
+    let fns = vec![
         NativeFunction {
             name: "println",
             params: &[SlotType::Ref],
@@ -1652,7 +1671,11 @@ pub fn std_platform_module() -> Vec<NativeFunction> {
             control: None,
             func: crate::net::http_get_fn,
         },
-    ]
+    ];
+    // install-time guard (debug builds): the pinned index run ends at
+    // STD_HTTP_GET, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), STD_HTTP_GET as usize + 1);
+    fns
 }
 
 /// Where print/println write: process stdout by default, a captured buffer
@@ -1698,18 +1721,22 @@ impl OutputSink {
     }
 }
 
-fn ref_arg(args: &[Value], index: usize) -> Result<u32, Trap> {
+/// Reads the `Ref` word at `index`, refusing like a mismatched slot with
+/// the offending argument's own kind (never another argument's).
+pub(crate) fn ref_arg(args: &[Value], index: usize) -> Result<u32, Trap> {
     match args.get(index) {
         Some(Value::Ref(id)) => Ok(*id),
         _ => Err(Trap::SlotTypeMismatch {
             slot: u8::try_from(index).expect("slot index fits u8"),
             expected: SlotType::Ref,
-            actual: args.first().map_or(SlotType::I64, Value::slot_type),
+            actual: args.get(index).map_or(SlotType::I64, Value::slot_type),
         }),
     }
 }
 
-fn i64_arg(args: &[Value], index: usize) -> Result<i64, Trap> {
+/// Reads the `i64` word at `index`, refusing with the offending
+/// argument's own kind.
+pub(crate) fn i64_arg(args: &[Value], index: usize) -> Result<i64, Trap> {
     match args.get(index) {
         Some(Value::I64(v)) => Ok(*v),
         _ => Err(Trap::SlotTypeMismatch {
@@ -2109,6 +2136,33 @@ mod tests {
                 _ => panic!("a string ref"),
             }),
             Ok("false")
+        );
+    }
+
+    #[test]
+    fn wrong_typed_arguments_name_their_own_slot() {
+        let mut objects = Objects::new();
+        let mut out = OutputSink::Captured(Vec::new());
+        let s = objects.intern("x");
+        // ref_arg at index 1: concat's second word is the offender, so
+        // the trap names its kind, not the first argument's
+        assert_eq!(
+            concat_fn(&mut objects, &mut out, &[Value::Ref(s), Value::I64(5)]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 1,
+                expected: SlotType::Ref,
+                actual: SlotType::I64,
+            })
+        );
+        // max's pair must agree on one numeric kind: the bool word at
+        // index 1 breaks the int pair, cited with the other side's kind
+        assert_eq!(
+            max_fn(&mut objects, &mut out, &[Value::I64(1), Value::Bool(true)]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 1,
+                expected: SlotType::I64,
+                actual: SlotType::Bool,
+            })
         );
     }
 

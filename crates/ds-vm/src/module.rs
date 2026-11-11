@@ -285,6 +285,12 @@ pub struct ModuleRegistry {
     /// assigns module indices, mirroring the pool FuncRef's name-keyed
     /// interim.
     id_names: Vec<String>,
+    /// Bumped by every install (module version or native table): the
+    /// version stamp the CALL-site inline cache validates against. Any
+    /// swap redirects subsequent calls through the current slot, so one
+    /// monotonic counter covering both tables is the whole invalidation
+    /// story — a stamped hit is a resolution no install has undone.
+    generation: u64,
 }
 
 impl ModuleRegistry {
@@ -316,7 +322,17 @@ impl ModuleRegistry {
         if !self.id_names.iter().any(|n| n == &installed.name) {
             self.id_names.push(installed.name.clone());
         }
+        self.generation += 1;
         installed
+    }
+
+    /// The install generation: the version stamp inline caches validate
+    /// against. Every install (version swap or native-table replacement)
+    /// bumps it, so a cache hit whose stamp matches resolved against the
+    /// registry's exact current state.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The module id a scalar FuncRef word addresses (F2): assigned at
@@ -354,6 +370,17 @@ impl ModuleRegistry {
         }
     }
 
+    /// Whether a uop module under `module`'s current slot would resolve
+    /// `func`: the shadow check the generic-call site runs per call,
+    /// without materializing a version handle.
+    #[must_use]
+    pub fn has_uop(&self, module: &str, func: u32) -> bool {
+        match self.modules.get(module) {
+            Some(slots) => usize::try_from(func).is_ok_and(|i| i < slots.current.functions.len()),
+            None => false,
+        }
+    }
+
     /// A module's two slots, if the module is loaded.
     #[must_use]
     pub fn slots(&self, module: &str) -> Option<&ModuleSlots> {
@@ -367,6 +394,7 @@ impl ModuleRegistry {
     /// live frames).
     pub fn install_native(&mut self, name: &str, functions: Vec<NativeFunction>) {
         self.natives.insert(name.to_owned(), Arc::new(functions));
+        self.generation += 1;
     }
 
     /// Resolves a pool FuncRef against the native modules: the function
@@ -376,6 +404,13 @@ impl ModuleRegistry {
     pub fn resolve_native(&self, module: &str, func: u32) -> Option<&NativeFunction> {
         let fns = self.natives.get(module)?;
         (usize::try_from(func).is_ok_and(|i| i < fns.len())).then(|| &fns[func as usize])
+    }
+
+    /// The native module table a pool FuncRef addresses, if installed: the
+    /// shared handle the CALL-site inline cache stores for a native callee.
+    #[must_use]
+    pub fn native_table(&self, module: &str) -> Option<&Arc<Vec<NativeFunction>>> {
+        self.natives.get(module)
     }
 }
 

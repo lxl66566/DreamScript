@@ -5,7 +5,7 @@ use core::fmt;
 
 use crate::hash::Hash128;
 
-/// The compilation target a dsmod artifact carries [G3.5].
+/// The compilation target a dsmod artifact carries (G3.5).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TargetClass {
     /// Tier-1 typed register bytecode.
@@ -49,7 +49,7 @@ impl fmt::Display for TargetClass {
     }
 }
 
-/// Header flags bitset, byte 6 [G3.5]: STRIP, FFI_USED, HAS_JIT_METADATA.
+/// Header flags bitset, byte 6 (G3.5): STRIP, FFI_USED, HAS_JIT_METADATA.
 ///
 /// Named methods keep call sites free of raw boolean noise; unknown bits are
 /// rejected at read time because a bit only gains meaning together with a
@@ -120,7 +120,7 @@ impl Flags {
 }
 
 /// One dependency entry of the header's dep list: a package name plus its
-/// 16-byte content hash [G3.5, H6].
+/// 16-byte content hash (G3.5, H6).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Dep {
     /// Dependency package name.
@@ -129,7 +129,7 @@ pub struct Dep {
     pub content_hash: Hash128,
 }
 
-/// The five section kinds of the section directory [G3.5].
+/// The five section kinds of the section directory (G3.5).
 ///
 /// Blocks, type metadata, and effect rows are versioned placeholder
 /// payloads completed at M2/M3; constants are locked now; debug spans are
@@ -209,7 +209,7 @@ impl fmt::Display for SectionKind {
 }
 
 /// The reserved two-hook collector interface committed in the header from
-/// byte one [C4, H4]: two u64 hook slots (cycle-candidate registration,
+/// byte one (C4, H4): two u64 hook slots (cycle-candidate registration,
 /// weak refs) plus an activity flag.
 ///
 /// The interface is dormant: current writers store zeros, and only

@@ -1,4 +1,4 @@
-//! Witness value types for non-empty overlaps [B6].
+//! Witness value types for non-empty overlaps (B6).
 
 use crate::{
     atom::{AtomKind, Field, TypeId},
@@ -9,7 +9,7 @@ use crate::{
 /// One payload field of a witness, with its solved type.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WitnessField {
-    /// Field name; `None` for positional payload slots [B3].
+    /// Field name; `None` for positional payload slots (B3).
     pub name: Option<String>,
     /// Solved type of the field.
     pub ty: Ty,
@@ -19,11 +19,11 @@ pub struct WitnessField {
 /// type: an atom plus one level of field/case shape. Field types are shown,
 /// not recursively expanded, so recursive shapes terminate; B6 overlap errors
 /// name both heads plus one of these. Tuple witnesses carry the element
-/// witnesses themselves [B3]: element atoms are minted strictly before their
+/// witnesses themselves (B3): element atoms are minted strictly before their
 /// tuple, so the recursion terminates.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Witness {
-    /// A unit tag (including `none`): the tag is the witness [B1].
+    /// A unit tag (including `none`): the tag is the witness (B1).
     Unit {
         /// The witnessed atom.
         atom: TypeId,
@@ -44,7 +44,7 @@ pub enum Witness {
         /// One entry per case field, in declaration order.
         fields: Vec<WitnessField>,
     },
-    /// An anonymous tuple [B3]: the atom plus one witness per element, in
+    /// An anonymous tuple (B3): the atom plus one witness per element, in
     /// position order. `()` carries no elements.
     Tuple {
         /// The witnessed atom.
@@ -55,7 +55,7 @@ pub enum Witness {
 }
 
 impl Universe {
-    /// Produces a witness for a non-empty type [B6]: deterministically the
+    /// Produces a witness for a non-empty type (B6): deterministically the
     /// earliest-declared member that is shallowly inhabited, with one level
     /// of field/case shape.
     ///
@@ -129,7 +129,7 @@ impl Universe {
     }
 
     /// Renders a witness as `atom`, `atom{f: t, ...}`, `atom.case{t, ...}`,
-    /// or `(w0, w1, ...)` for tuples [B3], for diagnostics.
+    /// or `(w0, w1, ...)` for tuples (B3), for diagnostics.
     #[must_use]
     pub fn render_witness(&self, witness: &Witness) -> String {
         match witness {

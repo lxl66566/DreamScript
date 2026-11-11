@@ -1,4 +1,4 @@
-//! The F5 operator table, checked over solved operands [B7]: trapping
+//! The F5 operator table, checked over solved operands (B7): trapping
 //! defaults need no checker action (the VM traps); wrapping forms are
 //! integer-only; mixed int/float arithmetic is an error suggesting the
 //! explicit conversion; `==` is B9's structural equality with its
@@ -10,6 +10,15 @@ use super::*;
 impl Bodies<'_> {
     pub(crate) fn unary(&mut self, op: UnaryOp, operand: &Expr, span: Span) -> Val {
         let val = self.expr(operand, None);
+        // A poisoned operand already reported its root cause; the
+        // operator's own shape complaint would be a cascade.
+        if val.poisoned {
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        }
         let class = numeric_class(&self.decls.universe, val.ty);
         match op {
             UnaryOp::Neg => {
@@ -17,6 +26,7 @@ impl Bodies<'_> {
                     Val {
                         ty: val.ty,
                         diverges: false,
+                        poisoned: false,
                     }
                 } else {
                     self.error(
@@ -31,6 +41,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 }
             },
@@ -38,6 +49,7 @@ impl Bodies<'_> {
                 Some((NumericClass::Int, _)) => Val {
                     ty: val.ty,
                     diverges: false,
+                    poisoned: false,
                 },
                 Some((NumericClass::Float, _)) => {
                     self.error(
@@ -49,6 +61,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 },
                 None => {
@@ -64,6 +77,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 },
             },
@@ -73,6 +87,7 @@ impl Bodies<'_> {
                     Val {
                         ty: bool_ty,
                         diverges: false,
+                        poisoned: false,
                     }
                 } else {
                     self.error(
@@ -87,6 +102,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 }
             },
@@ -123,14 +139,17 @@ impl Bodies<'_> {
             left.span(),
             right.span(),
             span,
+            left_val.poisoned || right_val.poisoned,
         )
     }
 
     /// The F5 operator table, checked over solved operands: trapping
-    /// defaults need no checker action (the VM traps [B7]); wrapping forms
+    /// defaults need no checker action (the VM traps (B7)); wrapping forms
     /// are integer-only; mixed int/float arithmetic is an error suggesting
     /// the explicit conversion; `==` is B9's structural equality with its
-    /// carve-outs.
+    /// carve-outs. A poisoned operand (its subtree already reported)
+    /// suppresses the operator's own complaint — the root cause stands
+    /// alone.
     pub(crate) fn binary_val(
         &mut self,
         op: BinaryOp,
@@ -139,11 +158,19 @@ impl Bodies<'_> {
         left_span: Span,
         right_span: Span,
         span: Span,
+        poisoned: bool,
     ) -> Val {
         use BinaryOp::{
             Add, And, BitAnd, BitOr, BitXor, Div, Eq, Ge, Gt, In, Le, Lt, Mul, Ne, Or, Rem, Shl,
             Shr, Sub, WrapAdd, WrapMul, WrapSub,
         };
+        if poisoned {
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        }
         let l = numeric_class(&self.decls.universe, left).map(|(c, n)| (c, n.to_owned()));
         let r = numeric_class(&self.decls.universe, right).map(|(c, n)| (c, n.to_owned()));
         let same =
@@ -156,6 +183,7 @@ impl Bodies<'_> {
                     return Val {
                         ty: left,
                         diverges: false,
+                        poisoned: false,
                     }; // string concat
                 }
                 match (&l, &r) {
@@ -164,6 +192,7 @@ impl Bodies<'_> {
                             Val {
                                 ty: left,
                                 diverges: false,
+                                poisoned: false,
                             }
                         } else {
                             self.error(
@@ -178,6 +207,7 @@ impl Bodies<'_> {
                             Val {
                                 ty: self.empty(),
                                 diverges: false,
+                                poisoned: false,
                             }
                         }
                     },
@@ -187,6 +217,7 @@ impl Bodies<'_> {
                         Val {
                             ty: left,
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     (Some((NumericClass::Float, _)), Some((NumericClass::Float, _))) => {
@@ -199,6 +230,7 @@ impl Bodies<'_> {
                         Val {
                             ty: self.empty(),
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     (Some((lc, ln)), Some((_rc, rn))) => {
@@ -234,6 +266,7 @@ impl Bodies<'_> {
                         Val {
                             ty: self.empty(),
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     _ => {
@@ -250,6 +283,7 @@ impl Bodies<'_> {
                         Val {
                             ty: self.empty(),
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                 }
@@ -265,6 +299,7 @@ impl Bodies<'_> {
                     Val {
                         ty: left,
                         diverges: false,
+                        poisoned: false,
                     }
                 } else if !class_ok(&l) || !class_ok(&r) {
                     let what = if integer_only { "integers" } else { "numbers" };
@@ -283,6 +318,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 } else {
                     self.error(
@@ -294,48 +330,18 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 }
             },
-            Eq | Ne => {
-                // Structural equality over all data [B9]; carve-outs: (1)
-                // function comparison rejected statically; disjoint
-                // operands make the comparison constant, rejected as dead.
-                if self.fn_typed(left) || self.fn_typed(right) {
-                    self.error(
-                        ErrorCode::TypeMismatch,
-                        "function comparison is rejected [B9 carve-out 1]".to_owned(),
-                        span,
-                        "function operand",
-                    );
-                    return Val {
-                        ty: self.empty(),
-                        diverges: false,
-                    };
-                }
-                if self.decls.universe.is_disjoint(left, right) {
-                    self.error(
-                        ErrorCode::TypeMismatch,
-                        format!(
-                            "`{}` and `{}` share no member; `==` would be constant [B9]",
-                            self.decls.universe.render(left),
-                            self.decls.universe.render(right)
-                        ),
-                        span,
-                        "always unequal",
-                    );
-                }
-                Val {
-                    ty: bool_ty,
-                    diverges: false,
-                }
-            },
+            Eq | Ne => self.equality_val(left, right, span),
             Lt | Le | Gt | Ge => {
                 let orderable = matches!((&l, &r), (Some(_), Some(_))) && same;
                 if orderable {
                     Val {
                         ty: bool_ty,
                         diverges: false,
+                        poisoned: false,
                     }
                 } else {
                     self.error(
@@ -352,6 +358,7 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 }
             },
@@ -369,6 +376,7 @@ impl Bodies<'_> {
                 Val {
                     ty: bool_ty,
                     diverges: false,
+                    poisoned: false,
                 }
             },
             And | Or => {
@@ -388,17 +396,58 @@ impl Bodies<'_> {
                 Val {
                     ty: bool_ty,
                     diverges: false,
+                    poisoned: false,
                 }
             },
         }
     }
 
+    /// Structural equality over all data (B9); carve-outs: (1) function
+    /// comparison rejected statically; (2) disjoint operands make the
+    /// comparison constant, rejected as dead.
+    fn equality_val(&mut self, left: Ty, right: Ty, span: Span) -> Val {
+        if self.fn_typed(left) || self.fn_typed(right) {
+            self.error(
+                ErrorCode::TypeMismatch,
+                "function comparison is rejected [B9 carve-out 1]".to_owned(),
+                span,
+                "function operand",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        if self.decls.universe.is_disjoint(left, right) {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "`{}` and `{}` share no member; `==` would be constant [B9]",
+                    self.decls.universe.render(left),
+                    self.decls.universe.render(right)
+                ),
+                span,
+                "always unequal",
+            );
+        }
+        Val {
+            ty: self.bool_ty(),
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
     /// Types one range's endpoints and returns the element type both
     /// agree on: integers of one width. Mixed widths name the
-    /// conversion; a float or non-numeric endpoint is rejected [B7].
+    /// conversion; a float or non-numeric endpoint is rejected (B7). A
+    /// poisoned endpoint already reported and stays quiet.
     pub(crate) fn range_element(&mut self, start: &Expr, end: &Expr, span: Span) -> Option<Ty> {
         let start_val = self.expr(start, None);
         let end_val = self.expr(end, None);
+        if start_val.poisoned || end_val.poisoned {
+            return None;
+        }
         match (
             numeric_class(&self.decls.universe, start_val.ty),
             numeric_class(&self.decls.universe, end_val.ty),
@@ -434,7 +483,7 @@ impl Bodies<'_> {
         None
     }
 
-    /// Range membership [F7]: the operand must carry the range's integer
+    /// Range membership (F7): the operand must carry the range's integer
     /// type; the result is bool.
     fn in_range(&mut self, left: &Expr, start: &Expr, end: &Expr, span: Span) -> Val {
         let bool_ty = self.bool_ty();
@@ -443,6 +492,7 @@ impl Bodies<'_> {
             return Val {
                 ty: bool_ty,
                 diverges: false,
+                poisoned: false,
             };
         };
         let left_val = self.expr(left, None);
@@ -470,6 +520,7 @@ impl Bodies<'_> {
         Val {
             ty: bool_ty,
             diverges: false,
+            poisoned: false,
         }
     }
 }

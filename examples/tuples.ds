@@ -17,7 +17,7 @@ fn main() -> () {
   println("${name}:${port}")
   println("port ${port_of(endpoint("db.local", 5432))}")
   match t {
-    (host, prt) => println("matched ${host} ${prt}"),
+    (host, prt) => println("matched ${host} ${prt}")
   }
   const tagged = ("unit", ())
   const (label, _) = tagged

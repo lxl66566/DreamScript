@@ -38,7 +38,7 @@ pub enum Major {
     Ref = 0xd,
     /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
-    /// 0x7 — conversions: CVTI2F, CVTF2I [B7 explicit conversions].
+    /// 0x7 — conversions: CVTI2F, CVTF2I (B7 explicit conversions).
     Cvt = 0x7,
     /// 0x8 — slot moves: MOV.
     Mov = 0x8,

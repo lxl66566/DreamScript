@@ -657,7 +657,7 @@ impl Ctx {
         }
     }
 
-    /// A top-level `const`/`var` binding [F2]: the const-declaration node
+    /// A top-level `const`/`var` binding (F2): the const-declaration node
     /// stays the named-function representation downstream, but naming a
     /// lambda at the declaration site is retired — `fn` is the only
     /// named-function spelling, so a lambda initializer records DS1013 and
@@ -684,7 +684,7 @@ impl Ctx {
     /// A top-level `fn name(params) -> ret { body }` declaration converts
     /// onto the const-declaration node (a `const` of one lambda) — the
     /// shape the checker, lowerer, and entry staging consume; only the
-    /// source spelling is canonicalized [F2]. A bodiless `fn` (signature
+    /// source spelling is canonicalized (F2). A bodiless `fn` (signature
     /// position only) stays a [`FnDecl`].
     fn fn_item(&mut self, p: Pair<'_, Rule>) -> ItemKind {
         let fd = self.conv_fn(p.clone(), false);
@@ -814,7 +814,7 @@ impl Ctx {
         out
     }
 
-    /// Validates a default argument value as literal-only [F7]: any literal
+    /// Validates a default argument value as literal-only (F7): any literal
     /// (a plain string must be hole-free), or a `-`/`-%` applied to one
     /// numeric literal (a negative constant). Anything else records a
     /// diagnostic; the value still carries through.
@@ -1125,7 +1125,7 @@ impl Ctx {
     }
 
     /// Converts an impl-body `fn` declaration. A `const`/`var` member
-    /// (const-arrow included) retired with fn-only declarations [F2]: it
+    /// (const-arrow included) retired with fn-only declarations (F2): it
     /// records DS1010 and yields None — nothing is silently dropped.
     fn local_as_fn(&mut self, p: Pair<'_, Rule>) -> Option<FnDecl> {
         let local = self.conv_local(p);

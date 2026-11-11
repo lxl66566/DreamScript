@@ -3,7 +3,6 @@
 // file_exists over the same bytes, comparing the round trip by content.
 // The path is fixed relative to the current directory.
 
-
 fn main() -> () {
   const path = "ds_files_example.txt"
   const text = "files round trip"

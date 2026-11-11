@@ -382,7 +382,7 @@ pub struct ImplDecl {
     pub fns: Vec<FnDecl>,
 }
 
-/// A type expression [B1, B4].
+/// A type expression (B1, B4).
 #[derive(Clone, Debug)]
 pub enum Type {
     /// Nominal path, optionally generic: `list<int>`.
@@ -779,7 +779,7 @@ pub enum Expr {
         /// Index expression.
         index: Box<Expr>,
     },
-    /// The map constructor's type application `map[k, v]` [F9, B3]: the
+    /// The map constructor's type application `map[k, v]` (F9, B3): the
     /// one expression-position application with two type arguments, pinned
     /// to the head spelled `map` by the grammar — no other head takes a
     /// two-element bracket. Call position constructs the empty map
@@ -796,6 +796,17 @@ pub enum Expr {
         /// The value type argument.
         value: Box<Expr>,
     },
+    /// A fn type spelled in expression position: the constructor
+    /// brackets admit it (`list[fn(int) -> int]()`,
+    /// `map[string, fn(int) -> int]`) because `fn` heads no value
+    /// expression, so the node nests only inside those brackets. Value
+    /// positions reject it.
+    FnType {
+        /// Span of the fn type.
+        span: Span,
+        /// The fn type itself (always `Type::Fn`).
+        ty: Box<Type>,
+    },
     /// Postfix `?` propagation (E4).
     Try {
         /// Span of `e?`.
@@ -803,7 +814,7 @@ pub enum Expr {
         /// Operand.
         expr: Box<Expr>,
     },
-    /// Unary `-`, `-%`, `!` [F5, B7].
+    /// Unary `-`, `-%`, `!` (F5, B7).
     Unary {
         /// Span including the operator.
         span: Span,
@@ -895,7 +906,7 @@ pub enum Expr {
         /// Body.
         body: Box<Expr>,
     },
-    /// `return e?` — also the `or return e` tail [F2, E4].
+    /// `return e?` — also the `or return e` tail (F2, E4).
     Return {
         /// Span of the whole return.
         span: Span,
@@ -949,6 +960,7 @@ impl Expr {
             | Self::Field { span, .. }
             | Self::Index { span, .. }
             | Self::MapApply { span, .. }
+            | Self::FnType { span, .. }
             | Self::Try { span, .. }
             | Self::Unary { span, .. }
             | Self::Binary { span, .. }
@@ -1032,7 +1044,7 @@ pub enum Literal {
     Bool(bool),
 }
 
-/// Unary operator [F5, B7].
+/// Unary operator (F5, B7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UnaryOp {
     /// Negate (traps on int-min).

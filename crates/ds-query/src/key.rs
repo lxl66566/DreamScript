@@ -76,7 +76,7 @@ pub struct BlockId {
     pub index: u32,
 }
 
-/// Key of one memoized compiler query [H6 item 1].
+/// Key of one memoized compiler query (H6 item 1).
 ///
 /// The enum is `non_exhaustive`: `Lower` is the remaining placeholder,
 /// documented as such; asking the engine to compute it before its
@@ -108,7 +108,7 @@ pub enum QueryKey {
     /// the registered files, keyed by the definition's package index.
     EffectsOf(DefId),
     /// The linearity check of one definition (M2): the affine pass over
-    /// the definition's file, sliced to the definition's block [C1, C5].
+    /// the definition's file, sliced to the definition's block (C1, C5).
     LinearityCheck(DefId),
     /// Placeholder: lowering of one block (M3).
     Lower(BlockId),

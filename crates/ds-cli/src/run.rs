@@ -20,7 +20,7 @@ use ds_vm::{
 
 use crate::source;
 
-/// The CLI is the default platform provider [H5.5]: every run installs
+/// The CLI is the default platform provider (H5.5): every run installs
 /// the `std` platform natives (console, file, net) into its registry.
 /// This must precede [`Vm::install_dsmod`] — the loader validates pool
 /// FuncRefs at install time, so a world-native call site in the module

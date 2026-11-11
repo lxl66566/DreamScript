@@ -1,10 +1,10 @@
-//! The affine pass [C1, C5]: one intraprocedural forward walk computing
+//! The affine pass (C1, C5): one intraprocedural forward walk computing
 //! definite-initialization and last-use together.
 //!
 //! # Model
 //!
-//! Every binding carries a three-state lattice — [`State::Uninit`],
-//! [`State::Live`], [`State::Dead`] — through one forward walk per body. A
+//! Every binding carries a three-state lattice — `State::Uninit`,
+//! `State::Live`, `State::Dead` — through one forward walk per body. A
 //! *consuming* use of a non-copyable owned binding (a `move`-mode call
 //! argument, a struct-literal or tuple field it flows into, a lambda
 //! capture, a return value) moves it: the binding dies there and its deinit
@@ -17,7 +17,7 @@
 //! a later use really does execute on the moved path. `var` re-assignment
 //! re-initializes; the replaced value's death is the assignment itself.
 //!
-//! # Copyability [C1]
+//! # Copyability (C1)
 //!
 //! `~Copyable` subtracts the default copyability constraint, so everything
 //! copies by default. A type is non-copyable when any of its member atoms
@@ -30,7 +30,7 @@
 //! binding time ([`BinderFact`], in scope-sensitive positions), so this
 //! pass consumes recorded facts instead of re-solving types.
 //!
-//! # Modes [C2]
+//! # Modes (C2)
 //!
 //! Borrow and `mut` parameters are windows the caller retains, so their
 //! uses never move anything — in the callee's body or at the call site.
@@ -38,7 +38,7 @@
 //! (an indirect call through a fn-typed value) default to borrowing; the
 //! M4 runtime `rc==1` uniqueness checks close that gap.
 //!
-//! # deinit well-formedness [C5]
+//! # deinit well-formedness (C5)
 //!
 //! The static half: `deinit` is declared on `~Copyable` types only and at
 //! most once per struct. Every owned non-copyable binding either moves
@@ -48,7 +48,7 @@
 //!
 //! # Walk order
 //!
-//! Top-level bindings are evaluated on demand and order-independent [G3];
+//! Top-level bindings are evaluated on demand and order-independent (G3);
 //! their initializers walk in a first pass over each file's items so a
 //! linear definition consumed in one item and used in another is a move
 //! wherever the items sit. Function and impl bodies walk after them.
@@ -62,7 +62,7 @@
 //!   is the M4 Perceus placement pass).
 //! * Field projection out of a borrow/mut window never moves.
 //! * `defer` bodies walk at their source position; scope-exit semantics land with defer lowering
-//!   [E5, M3].
+//!   (E5, M3).
 //! * The loop audit checks one re-execution round (the condition and body of `while`, the body of
 //!   `for`) against the merged state; a use the forward walk already reported is never reported
 //!   twice.
@@ -97,7 +97,7 @@ use crate::{
 };
 
 /// Affine facts of one local binder, recorded by the bidirectional walk at
-/// the binding site [C1] and consumed here.
+/// the binding site (C1) and consumed here.
 #[derive(Clone, Copy, Debug)]
 pub struct BinderFact {
     /// Whether uses of the binding copy freely; the `~Copyable` marker, a
@@ -121,7 +121,7 @@ pub struct Move {
 }
 
 /// One scope-exit death of a live owned non-copyable binding: where the
-/// runtime half (M4) must run deinit on every path [C5].
+/// runtime half (M4) must run deinit on every path (C5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropSite {
     /// The binder's name span.
@@ -149,16 +149,16 @@ pub struct LastUse {
 pub struct Linearity {
     /// Diagnostics in walk order.
     pub diags: Vec<Diagnostic>,
-    /// Consuming uses of owned non-copyable bindings [C1].
+    /// Consuming uses of owned non-copyable bindings (C1).
     pub moves: Vec<Move>,
-    /// Scope-exit deaths of live owned non-copyable bindings [C5].
+    /// Scope-exit deaths of live owned non-copyable bindings (C5).
     pub drops: Vec<DropSite>,
     /// The final use of every tracked binding.
     pub last_uses: Vec<LastUse>,
 }
 
-/// The full static check of one package: bidirectional types [B2] then the
-/// affine pass [C1, C5]. Callers wanting every diagnostic read both lists.
+/// The full static check of one package: bidirectional types (B2) then the
+/// affine pass (C1, C5). Callers wanting every diagnostic read both lists.
 #[must_use]
 pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
     let crate::type_of::Analyzed {
@@ -399,7 +399,7 @@ type States = HashMap<Place, State>;
 
 /// The forward walker. One instance covers one package; top-level
 /// bindings' states persist across items so a value consumed in one item
-/// and used in another is still a move [G3, C1].
+/// and used in another is still a move (G3, C1).
 struct Lin<'a> {
     package: &'a Package,
     decls: &'a Decls,
@@ -419,12 +419,12 @@ struct Lin<'a> {
     /// The last use per binding: (use span, borrowed).
     last_use: HashMap<Place, (Span, bool)>,
     /// Capture depth: inside a lambda or spawn body, every use of a
-    /// binding from an outer epoch is a capture and moves it [C1].
+    /// binding from an outer epoch is a capture and moves it (C1).
     epoch: usize,
 }
 
 impl<'a> Lin<'a> {
-    /// First pass: one file's top-level binder patterns come live [G3].
+    /// First pass: one file's top-level binder patterns come live (G3).
     /// Every file registers before any walk pass.
     fn register_top_bindings(&mut self, ast: &'a Ast) {
         for block in &ast.blocks {
@@ -490,7 +490,7 @@ impl<'a> Lin<'a> {
     }
 
     /// One function body: parameters bind (owned only in `move` mode
-    /// [C2]), the body walks, and live owned parameters drop at the end.
+    /// (C2)), the body walks, and live owned parameters drop at the end.
     fn fn_decl(&mut self, f: &'a FnDecl) {
         self.scopes.push(Vec::new());
         for param in &f.params {
@@ -502,7 +502,7 @@ impl<'a> Lin<'a> {
         self.drop_scope(f.body.as_ref().map_or(f.name.span, |b| b.span));
     }
 
-    /// The declarative deinit checks [C5]: `deinit` lives on `~Copyable`
+    /// The declarative deinit checks (C5): `deinit` lives on `~Copyable`
     /// declarations only, and at most once per struct.
     fn deinit_shape(&mut self, s: &'a StructDecl) {
         let linear = s.supers.iter().any(linear_marker);
@@ -574,7 +574,7 @@ impl<'a> Lin<'a> {
         }
     }
 
-    /// Pattern binders as top-level definitions [G3]: owned, copyable from
+    /// Pattern binders as top-level definitions (G3): owned, copyable from
     /// the memoized top-level types, no scope-exit death.
     fn bind_pattern_defs(&mut self, pat: &'a Pattern) {
         for (_, name) in Self::pattern_binders(pat) {
@@ -603,7 +603,7 @@ impl<'a> Lin<'a> {
     }
 
     /// Records the scope-exit deaths of one scope's live owned
-    /// non-copyable binders [C5], in bind order.
+    /// non-copyable binders (C5), in bind order.
     fn drop_scope(&mut self, at: Span) {
         let places = self.scopes.pop().unwrap_or_default();
         if self.audit {
@@ -628,7 +628,7 @@ impl<'a> Lin<'a> {
     // ---- the read/move core -----------------------------------------------------
 
     /// One use of a binding: checks initialization and liveness, records
-    /// the last use, and moves when the use is consuming [C1].
+    /// the last use, and moves when the use is consuming (C1).
     fn read(&mut self, place: Place, at: Span, consuming: bool) {
         let Some(info) = self.info.get(&place).copied() else {
             return;
@@ -703,7 +703,9 @@ impl<'a> Lin<'a> {
     /// structural comparison). Returns whether every path exits early.
     fn expr(&mut self, e: &'a Expr, consuming: bool) -> bool {
         match e {
-            Expr::Literal { .. } | Expr::RawStr { .. } => false,
+            // A fn type in the constructor brackets is a pure type
+            // spelling; no binding use.
+            Expr::Literal { .. } | Expr::RawStr { .. } | Expr::FnType { .. } => false,
             Expr::Str { parts, .. } => {
                 for part in parts {
                     match part {
@@ -1215,7 +1217,7 @@ impl<'a> Lin<'a> {
     }
 
     /// Walks one call's arguments per the callee's parameter modes: an
-    /// argument consumes its binding only in `move` mode [C2].
+    /// argument consumes its binding only in `move` mode (C2).
     fn sig_call(
         &mut self,
         sig: &FnSig,
@@ -1299,7 +1301,7 @@ fn moved_diag(name: &str, at: Span, moved_at: Span) -> Diagnostic {
 }
 
 /// Live after a join only when live on every path; the first move wins
-/// the reported span [C1].
+/// the reported span (C1).
 fn merge_states(a: &States, b: &States) -> States {
     let mut out = a.clone();
     for (place, state) in b {

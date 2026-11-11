@@ -1,12 +1,12 @@
 //! The `type_of` pass: bidirectional checking with monotone flow refinement
-//! [B2].
+//! (B2).
 //!
 //! # Engine shape
 //!
-//! Boundary anchoring per [B2]: top-level signatures are REQUIRED and the
+//! Boundary anchoring per (B2): top-level signatures are REQUIRED and the
 //! set algebra checks against them by containment; locals, lambdas, and
 //! match arms infer. Inference failure is a compile error — there is no
-//! `any` fallback anywhere [B1]. Every type is a solved [`Ty`] from the
+//! `any` fallback anywhere (B1). Every type is a solved [`Ty`] from the
 //! package universe; nothing unsolved ever enters an environment.
 //!
 //! The engine is one expression walk `expr(e, expected) -> Val`. The
@@ -22,7 +22,7 @@
 //! Refinement is a per-binder overlay `refined: binder span -> Ty` over
 //! declared types, narrowed monotonically by intersection: `is` tests,
 //! none-comparisons, and match-arm patterns (through the scrutinee binder
-//! and the arm's pattern coverage) [B2]. The overlay resets at assignment
+//! and the arm's pattern coverage) (B2). The overlay resets at assignment
 //! and at loop entry (sound: refined is always contained in declared, so
 //! the declared type is a legal widening). Known limit, from the record:
 //! no narrowing through mutable fields of union-typed values.
@@ -32,7 +32,7 @@
 //! `?` splits its operand against the success context: at an expected type
 //! the members outside it propagate, elsewhere the members INSIDE the
 //! enclosing return union propagate — either way every propagated member
-//! must be contained in the written return union [DS2008]. `or` extracts
+//! must be contained in the written return union (DS2008). `or` extracts
 //! the wanted members (the right operand's type for a plain tail, the
 //! return union for `or return`); `.err(h)`/`.ok(h)` are difference-typed:
 //! the handled set is the handler parameter when annotated, otherwise
@@ -64,17 +64,23 @@ use crate::{
     universe::Ty,
 };
 
-/// A typed expression: its solved type and whether evaluation always exits
-/// early (return/break/continue), so arm unification can skip it.
+/// A typed expression: its solved type, whether evaluation always exits
+/// early (return/break/continue), so arm unification can skip it, and
+/// whether its own subtree already reported a diagnostic.
 #[derive(Clone, Copy, Debug)]
 pub struct Val {
     /// The solved type of the expression.
     pub ty: Ty,
     /// Whether every path through the expression exits early.
     pub diverges: bool,
+    /// Whether any diagnostic was reported inside this expression: the
+    /// expression-error epoch. Enclosing positions consume a poisoned
+    /// value without re-reporting, so the root cause stands alone;
+    /// sibling positions check their own subtree and stay honest.
+    pub poisoned: bool,
 }
 
-/// One local binding: declared type plus assignability [C3].
+/// One local binding: declared type plus assignability (C3).
 #[derive(Clone, Copy, Debug)]
 struct Binding {
     ty: Ty,
@@ -103,7 +109,7 @@ struct Narrow {
 }
 
 /// The result of one package check: diagnostics in walk order plus the
-/// memoized type of every top-level binding [G3].
+/// memoized type of every top-level binding (G3).
 #[derive(Default)]
 pub struct Checked {
     /// All diagnostics of collection, resolution, declaration, and bodies.
@@ -111,29 +117,29 @@ pub struct Checked {
     /// The solved type of every top-level const/var binding.
     pub def_types: HashMap<DefId, Ty>,
     /// Affine facts of every local binder, keyed by binder span: the
-    /// copyability its type had at the binding site [C1]. The linearity
+    /// copyability its type had at the binding site (C1). The linearity
     /// pass consumes this; top-level bindings derive theirs from
     /// `def_types` directly.
     pub binders: HashMap<Span, crate::linearity::BinderFact>,
     /// The checked `Val` of every expression, keyed by its span: the solved
     /// type AT THAT USE SITE (flow-refined inside `is` tests and match arms
-    /// [B2]) plus the early-exit flag. The lowering pass [M3] consumes this
+    /// (B2)) plus the early-exit flag. The lowering pass (M3) consumes this
     /// side table instead of re-deriving types; entries are recorded in
     /// walk order and a re-walk overwrites them.
     pub expr_types: HashMap<Span, Val>,
     /// The instantiation of every generic call, keyed by the call's span:
     /// the solved type of each generic parameter, in declaration order
-    /// [H3]. Recorded only when every parameter solves (no `any` fallback
-    /// [B1]); the lowering pass [M3] mints the CALLG evidence words from
+    /// (H3). Recorded only when every parameter solves (no `any` fallback
+    /// (B1)); the lowering pass (M3) mints the CALLG evidence words from
     /// it.
     pub generic_calls: HashMap<Span, Vec<Ty>>,
     /// The solved dispatch of every trait-method call whose instance the
-    /// environment statically resolved, keyed by the call's span [B6].
+    /// environment statically resolved, keyed by the call's span (B6).
     /// The lowering pass mints the CALLG evidence word from it.
     pub trait_calls: HashMap<Span, TraitCall>,
 }
 
-/// One trait-method call's solved dispatch [B6]: the selected trait member
+/// One trait-method call's solved dispatch (B6): the selected trait member
 /// plus the unique instance whose head contains the receiver's type,
 /// recorded at the call's own span. A site satisfied only through an
 /// in-scope assumption (the receiver's type is a bound type variable)
@@ -187,7 +193,7 @@ pub struct TypedPackage {
 /// the typed result. Every `Ty` inside `Checked` was minted by
 /// `decls.universe`, so consumers must pass the bundle along unchanged —
 /// a second pass over the same sources mints an unrelated universe. The
-/// affine pass [C1] and the lowering pass [M3] consume exactly these.
+/// affine pass (C1) and the lowering pass (M3) consume exactly these.
 pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
     let (package, resolutions, mut diags) = crate::resolve_package(asts);
     let (decls, checked) = check_bodies(files, asts, &package, &resolutions);
@@ -208,7 +214,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
     }
 }
 
-/// Checks a resolved package [B2]: builds the declaration tables and
+/// Checks a resolved package (B2): builds the declaration tables and
 /// body-checks every item against the package namespace and per-file
 /// resolutions from
 /// [`resolve_package`](crate::resolve_package). `asts` and `resolutions`
@@ -286,6 +292,7 @@ where
             assumption_marks: Vec::new(),
             ret: None,
             loop_depth: 0,
+            cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
         };
@@ -323,7 +330,7 @@ struct Bodies<'a> {
     res: &'a Resolutions,
     /// Every file's resolutions, aligned with the trees by position; a
     /// lazily typed top-level binding walks under its OWN file's table
-    /// [G3], no matter which file's body triggered the memo fill.
+    /// (G3), no matter which file's body triggered the memo fill.
     resolutions: &'a [Resolutions],
     res_by_file: &'a HashMap<ds_diag::FileId, usize>,
     decls: &'a mut Decls,
@@ -334,13 +341,13 @@ struct Bodies<'a> {
     trait_calls: &'a mut HashMap<Span, TraitCall>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
-    /// copyability constraint (`[t: ~Copyable]`) [C1]; the binder facts
+    /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
     /// consult them while recording.
     linear_vars: HashMap<TypeId, bool>,
     /// Declared types of locals, keyed by binder span; snapshot/restore
     /// at scope boundaries runs through its undo log, never a clone.
     locals: ScopedMap<Binding>,
-    /// The refinement overlay, keyed by binder span [B2].
+    /// The refinement overlay, keyed by binder span (B2).
     refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
     type_vars: Vec<HashMap<String, Ty>>,
@@ -351,7 +358,12 @@ struct Bodies<'a> {
     /// The enclosing return union; `None` outside function bodies.
     ret: Option<Ty>,
     loop_depth: usize,
-    /// Cycle guard for order-independent top-level typing [G3].
+    /// Depth of condition positions being walked (if/match-guard/while
+    /// conditions). An `is` test there refines legitimately — a disjoint
+    /// test narrows a branch to empty, which is sound dead code — so the
+    /// always-false diagnostic fires only at value/assert depth.
+    cond_depth: usize,
+    /// Cycle guard for order-independent top-level typing (G3).
     visiting: Vec<DefId>,
     /// Whether the failed solve just below already reported the tuple
     /// distribution cap precisely; the generic fallbacks around
@@ -360,7 +372,7 @@ struct Bodies<'a> {
 }
 
 impl Bodies<'_> {
-    /// Binds one local and records its affine facts [C1]: copyability of
+    /// Binds one local and records its affine facts (C1): copyability of
     /// the solved type under the in-scope generic bounds.
     fn bind_local(&mut self, span: Span, binding: Binding) {
         let copyable = crate::linearity::ty_copyable(self.decls, binding.ty, &self.linear_vars);
@@ -457,7 +469,7 @@ impl Bodies<'_> {
     }
 
     /// A top-level binding: its initializer is typed (memoized for
-    /// order-independent uses [G3]); a written annotation anchors the check.
+    /// order-independent uses (G3)); a written annotation anchors the check.
     /// A destructuring pattern declares many defs — the memo and the cycle
     /// guard cover them all, so tuple/or/struct binders receive types like
     /// any other top-level name.
@@ -518,7 +530,7 @@ impl Bodies<'_> {
         self.visiting.truncate(visiting);
     }
 
-    /// One named function declaration: boundary-anchored [B2]. `self_ty`
+    /// One named function declaration: boundary-anchored (B2). `self_ty`
     /// binds `Self` inside trait/impl scopes, where the first parameter
     /// named `self` is the receiver — exempt from annotation and typed
     /// `Self` [record 6.1].
@@ -619,12 +631,13 @@ impl Bodies<'_> {
     /// A block whose final expression carries an expected type — the
     /// function-body anchor: a tail `?` splits its operand against the
     /// return union there, so a fully-contained operand yields itself
-    /// instead of propagating everything [E4].
+    /// instead of propagating everything (E4).
     fn block_expected(&mut self, block: &BlockExpr, expected: Option<Ty>) -> Val {
         let saved = self.snapshot();
         let mut val = Val {
             ty: self.unit(),
             diverges: false,
+            poisoned: false,
         };
         let (head, last) = match block.stmts.split_last() {
             Some((last, head)) => (head, Some(last)),
@@ -655,13 +668,14 @@ impl Bodies<'_> {
                 Val {
                     ty: self.unit(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             ds_parse::StmtKind::Expr(expr) => self.expr(expr, None),
         }
     }
 
-    /// A statement-level binding: locals infer [B2].
+    /// A statement-level binding: locals infer (B2).
     fn local_stmt(&mut self, local: &LocalDecl) {
         let mut val = self.expr(&local.init, None);
         if let Some(ann) = &local.ty {
@@ -680,7 +694,13 @@ impl Bodies<'_> {
                 );
             }
         }
-        if self.decls.universe.is_empty(val.ty) && !val.diverges && !self.take_solve_reported() {
+        // A poisoned initializer already reported why its type is empty;
+        // only a clean-but-empty initializer is its own root cause.
+        if self.decls.universe.is_empty(val.ty)
+            && !val.diverges
+            && !val.poisoned
+            && !self.take_solve_reported()
+        {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the initializer's type is empty; inference found no inhabitant [B1]".to_owned(),
@@ -694,7 +714,14 @@ impl Bodies<'_> {
     // ---- expressions ----------------------------------------------------------
 
     fn expr(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
-        let val = self.expr_inner(e, expected);
+        // Expression-error epoch: a diagnostic pushed anywhere inside this
+        // expression poisons its value — every enclosing position consumes
+        // it without re-reporting (the containment helpers and the
+        // operand-shape checks), so a root cause stands alone instead of
+        // cascading into "empty"/wrapper-type mismatches above it.
+        let before = self.diags.len();
+        let mut val = self.expr_inner(e, expected);
+        val.poisoned |= self.diags.len() > before;
         self.expr_types.insert(e.span(), val);
         val
     }
@@ -751,6 +778,7 @@ impl Bodies<'_> {
                 Val {
                     ty,
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::List { .. } => self.list_expr(e, expected),
@@ -775,6 +803,7 @@ impl Bodies<'_> {
                         return Val {
                             ty: self.empty(),
                             diverges: false,
+                            poisoned: false,
                         };
                     }
                 }
@@ -787,6 +816,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::MapApply { span, .. } => {
@@ -801,26 +831,77 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
+                }
+            },
+            // A fn type is a type spelling, never a value; the constructor
+            // brackets consume it before value typing, so this arm holds
+            // the boundary for any other position.
+            Expr::FnType { span, .. } => {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "a fn type is a type spelling, not a value; it belongs in a constructor's \
+                     brackets — `list[fn(int) -> int]()` [F2, F9]"
+                        .to_owned(),
+                    *span,
+                    "fn type outside a type application",
+                );
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
                 }
             },
             Expr::Try { expr, span } => self.try_expr(expr, expected, *span),
             Expr::Unary { op, expr, span } => self.unary(*op, expr, *span),
             Expr::Is { expr, ty, .. } => {
-                let _ = self.expr(expr, None);
-                if self.solve_here(ty).is_none() && !self.take_solve_reported() {
+                let operand = self.expr(expr, None);
+                let Some(solved) = self.solve_here(ty) else {
+                    if !self.take_solve_reported() {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "the `is` test against `{}` does not solve",
+                                decls::render_type(ty)
+                            ),
+                            ty.span(),
+                            "unsolvable test type",
+                        );
+                    }
+                    return Val {
+                        ty: self.bool_ty(),
+                        diverges: false,
+                        poisoned: false,
+                    };
+                };
+                // A provably-disjoint test computes a constant false, so in
+                // value/assert position it is a compile error — the same
+                // ruling as the constant `==` [B9 carve-out 2]. In
+                // condition position (if/match guard/while, any depth) the
+                // test refines legitimately: the kept branch narrows to
+                // empty, which is sound dead code, and a match arm covering
+                // nothing is the exhaustiveness story.
+                if self.cond_depth == 0
+                    && !operand.poisoned
+                    && !self.decls.universe.is_empty(operand.ty)
+                    && !self.decls.universe.is_empty(solved)
+                    && self.decls.universe.is_disjoint(operand.ty, solved)
+                {
                     self.error(
                         ErrorCode::TypeMismatch,
                         format!(
-                            "the `is` test against `{}` does not solve",
-                            decls::render_type(ty)
+                            "the `is` test against `{}` is always false over `{}` [B2]",
+                            self.decls.universe.render(solved),
+                            self.decls.universe.render(operand.ty)
                         ),
                         ty.span(),
-                        "unsolvable test type",
+                        "always false",
                     );
                 }
                 Val {
                     ty: self.bool_ty(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::Binary {
@@ -840,6 +921,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::Assign {
@@ -857,7 +939,9 @@ impl Bodies<'_> {
                 span,
             } => self.match_expr(scrutinee, arms, *span, expected),
             Expr::While { cond, body, .. } => {
+                self.cond_depth += 1;
                 let cond_val = self.expr(cond, None);
+                self.cond_depth -= 1;
                 self.expect_bool(cond_val, cond.span());
                 let saved = self.snapshot();
                 self.refined.clear();
@@ -868,6 +952,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.unit(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::For {
@@ -886,6 +971,7 @@ impl Bodies<'_> {
                     None => Val {
                         ty: self.unit(),
                         diverges: false,
+                        poisoned: false,
                     },
                 };
                 match self.ret {
@@ -902,6 +988,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: true,
+                    poisoned: false,
                 }
             },
             Expr::Break(span) | Expr::Continue(span) => {
@@ -916,6 +1003,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: true,
+                    poisoned: false,
                 }
             },
             Expr::Nursery { body, .. } | Expr::Spawn { body, .. } => {
@@ -926,6 +1014,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.unit(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::Defer { body, .. } => {
@@ -933,6 +1022,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.unit(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
             Expr::Block(block) => self.block_expected(block, expected),
@@ -963,7 +1053,7 @@ impl Bodies<'_> {
     }
 
     /// The atom a literal names, by name, through the package universe
-    /// [B7]: the numeric vocabulary is declared data, never builtin
+    /// (B7): the numeric vocabulary is declared data, never builtin
     /// identity — inference never falls back.
     fn named_ty(&mut self, span: Span, name: &str, what: &str) -> Val {
         if let Some(ty) = self
@@ -975,6 +1065,7 @@ impl Bodies<'_> {
             Val {
                 ty,
                 diverges: false,
+                poisoned: false,
             }
         } else {
             self.error(
@@ -988,12 +1079,13 @@ impl Bodies<'_> {
             Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }
         }
     }
 
     /// Interpolated strings: every hole is an explicit string context
-    /// [F6] — a printable primitive (bool, char, float, int, string)
+    /// (F6) — a printable primitive (bool, char, float, int, string)
     /// converts through `str(e)` implicitly; every other operand needs
     /// extraction or the `show` derive (the M6 seam).
     fn string_expr(&mut self, span: Span, parts: &[StrPart]) -> Val {
@@ -1002,24 +1094,28 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         for part in parts {
-            let (hole_span, hole_ty) = match part {
+            let (hole_span, hole_val) = match part {
                 StrPart::Text { .. } => continue,
-                StrPart::Expr { span, expr } => (*span, self.expr(expr, Some(string_ty)).ty),
+                StrPart::Expr { span, expr } => (*span, self.expr(expr, Some(string_ty))),
                 StrPart::Ident { name, .. } => {
                     let val = self.ident_hole_value(name);
                     self.expr_types.insert(name.span, val);
-                    (name.span, val.ty)
+                    (name.span, val)
                 },
             };
-            if self.printable_hole(hole_ty) {
+            if self.printable_hole(hole_val.ty) {
                 continue;
             }
-            if self.decls.universe.is_empty(hole_ty) {
-                continue; // the operand's own walk already reported
+            // An empty or poisoned hole is an already-reported operand,
+            // never a new mismatch: the cascade stays with its root cause.
+            if self.decls.universe.is_empty(hole_val.ty) || hole_val.poisoned {
+                continue;
             }
+            let hole_ty = hole_val.ty;
             let note = if self.decls.universe.members(hole_ty).len() == 1 {
                 "the `show` derive arrives with M6"
             } else {
@@ -1041,10 +1137,11 @@ impl Bodies<'_> {
         Val {
             ty: string_ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
-    /// One hole operand under the printable rule [F6]: the string
+    /// One hole operand under the printable rule (F6): the string
     /// context itself, or exactly one printable primitive atom.
     fn printable_hole(&self, ty: Ty) -> bool {
         let [atom] = self.decls.universe.members(ty) else {
@@ -1060,24 +1157,27 @@ impl Bodies<'_> {
 
     /// The value type of a bare `$name` hole: the single-segment path
     /// resolution, recorded at the name's own span so the lowerer reads
-    /// it there [F6].
+    /// it there (F6).
     fn ident_hole_value(&mut self, name: &Ident) -> Val {
         if let Some(res) = self.res.get(name.span) {
             match res {
                 Res::Local { bind } => Val {
                     ty: self.local_ty(*bind).unwrap_or_else(|| self.empty()),
                     diverges: false,
+                    poisoned: false,
                 },
                 Res::Def(def) => self.def_value(*def, name.span),
                 Res::TraitMethod(_) | Res::Dot(_) | Res::Handler => Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 },
             }
         } else if name.name == "none" && !self.package.declares("none") {
             Val {
                 ty: self.none_ty(),
                 diverges: false,
+                poisoned: false,
             }
         } else {
             self.error(
@@ -1089,6 +1189,7 @@ impl Bodies<'_> {
             Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }
         }
     }
@@ -1100,17 +1201,20 @@ impl Bodies<'_> {
                     Res::Local { bind } => Val {
                         ty: self.local_ty(*bind).unwrap_or_else(|| self.empty()),
                         diverges: false,
+                        poisoned: false,
                     },
                     Res::Def(def) => self.def_value(*def, only.span),
                     Res::TraitMethod(_) | Res::Dot(_) | Res::Handler => Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     },
                 }
             } else if only.name == "none" && !self.package.declares("none") {
                 Val {
                     ty: self.none_ty(),
                     diverges: false,
+                    poisoned: false,
                 }
             } else {
                 self.error(
@@ -1122,6 +1226,7 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 }
             }
         } else {
@@ -1134,6 +1239,7 @@ impl Bodies<'_> {
             Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }
         }
     }
@@ -1154,11 +1260,13 @@ impl Bodies<'_> {
                     Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     }
                 },
                 None => Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 },
             },
             DefKind::Tag => match self.decls.atoms.get(&def).copied() {
@@ -1169,10 +1277,12 @@ impl Bodies<'_> {
                         .atom_ty(atom)
                         .unwrap_or_else(|_| self.empty()),
                     diverges: false,
+                    poisoned: false,
                 },
                 None => Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 },
             },
             DefKind::Case => {
@@ -1199,6 +1309,7 @@ impl Bodies<'_> {
                     return Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     };
                 }
                 match self.decls.atoms.get(&def).copied() {
@@ -1209,10 +1320,12 @@ impl Bodies<'_> {
                             .atom_ty(atom)
                             .unwrap_or_else(|_| self.empty()),
                         diverges: false,
+                        poisoned: false,
                     },
                     None => Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     },
                 }
             },
@@ -1230,18 +1343,20 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
         }
     }
 
     /// The memoized type of a top-level binding, typed lazily so
-    /// order-independent uses work [G3].
+    /// order-independent uses work (G3).
     fn const_ty(&mut self, def: DefId, span: Span) -> Val {
         if let Some(&ty) = self.def_types.get(&def) {
             return Val {
                 ty,
                 diverges: false,
+                poisoned: false,
             };
         }
         let Some(local) = self.decls.consts.get(&def).cloned() else {
@@ -1257,6 +1372,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         if self.visiting.contains(&def) {
@@ -1272,6 +1388,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         self.top_level_local(&local);
@@ -1283,11 +1400,13 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
     fn lambda(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
         let Expr::Lambda {
+            span,
             generics,
             params,
             ret,
@@ -1298,8 +1417,14 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
+        // The script-entry fold's synthesized `main` reaches here as a
+        // lambda the user never wrote; its own span is empty (no real node
+        // owns an empty span — the synthesis's alias guard), so the
+        // boundary label names the script entry, not a lambda.
+        let body_label = if span.start == span.end { "script main body" } else { "lambda body" };
         let expected_sig = expected.and_then(|ty| self.decompose_fn(ty));
         self.push_generics(&generics.iter().map(generic_of).collect::<Vec<_>>());
         let saved = self.snapshot();
@@ -1353,7 +1478,7 @@ impl Bodies<'_> {
         let fn_ret = match fn_ret_expected {
             Some(r) if !expected_is_var => {
                 if !body_val.diverges {
-                    self.expect_contains(body_val, r, body.span(), "lambda body");
+                    self.expect_contains(body_val, r, body.span(), body_label);
                 }
                 r
             },
@@ -1373,6 +1498,7 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -1381,6 +1507,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let [only] = path.segments.as_slice() else {
@@ -1393,12 +1520,14 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let Some(def) = self.package.lookup_type(&only.name) else {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }; // resolver reported
         };
         // An enum case constructs by call form only [B3]; the brace form
@@ -1421,6 +1550,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         let Some(shape) = self.decls.structs.get(&def).cloned() else {
@@ -1433,6 +1563,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         // Substitute the constructor's parameters: from an expected
@@ -1502,11 +1633,13 @@ impl Bodies<'_> {
                             Res::Local { bind } => Val {
                                 ty: self.local_ty(*bind).unwrap_or_else(|| self.empty()),
                                 diverges: false,
+                                poisoned: false,
                             },
                             Res::Def(def) => self.def_value(*def, name.span),
                             _ => Val {
                                 ty: self.empty(),
                                 diverges: false,
+                                poisoned: false,
                             },
                         };
                         self.expect_contains(val, field_ty, name.span, "field value");
@@ -1565,10 +1698,11 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
-    /// One list literal `[a, b, c]` [F7, B3]. Bidirectional: an expected
+    /// One list literal `[a, b, c]` (F7, B3). Bidirectional: an expected
     /// `list[t]` fixes the element type and every item checks against it;
     /// without one, the first item fixes the type and a later item
     /// outside it is the mixed-element error. The empty literal has no
@@ -1579,6 +1713,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let Some(list_def) = self.package.lookup_type("list") else {
@@ -1588,6 +1723,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }; // the resolver reported the unknown type
         };
         let expected_elem = expected.and_then(|exp| {
@@ -1612,6 +1748,7 @@ impl Bodies<'_> {
                 return Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 };
             };
             elem
@@ -1652,10 +1789,11 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
-    /// One generic-application constructor call `list[page]()` [F9, B3]:
+    /// One generic-application constructor call `list[page]()` (F9, B3):
     /// the head resolved in the type namespace, so the bracketed form is
     /// a type application, never an index. Returns `None` when the head
     /// names no type — the ordinary index error reports instead.
@@ -1755,10 +1893,11 @@ impl Bodies<'_> {
         Some(Val {
             ty,
             diverges: false,
+            poisoned: false,
         })
     }
 
-    /// The map constructor call `map[k, v]()` [F9, B3]: the mirror of the
+    /// The map constructor call `map[k, v]()` (F9, B3): the mirror of the
     /// list constructor over the two-argument application of the map
     /// struct. Construction takes no value arguments — the builder call
     /// (`map_set`) fills the map, the interim the record pins while the
@@ -1868,13 +2007,15 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
     /// The bracketed argument of a type application: a type spelled in
-    /// expression position [F9] — a path, a parenthesized form, a tuple of
-    /// the same, or a nested generic application (`list[string]`,
-    /// `map[string, int]`) whose own bracketed arguments recurse.
+    /// expression position (F9) — a path, a parenthesized form, a tuple of
+    /// the same, a fn type (`fn(int) -> int`), or a nested generic
+    /// application (`list[string]`, `map[string, int]`) whose own bracketed
+    /// arguments recurse.
     fn ctor_type_arg(arg: &Expr) -> Option<Type> {
         match arg {
             Expr::Path { span, path, .. } if path.segments.len() == 1 => Some(Type::Path {
@@ -1882,6 +2023,7 @@ impl Bodies<'_> {
                 path: path.clone(),
                 args: Vec::new(),
             }),
+            Expr::FnType { ty, .. } => Some((**ty).clone()),
             Expr::Paren { inner, .. } => Self::ctor_type_arg(inner),
             Expr::Tuple { items, span, .. } => Some(Type::Tuple {
                 span: *span,
@@ -1944,6 +2086,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let callee = peel_paren(callee);
@@ -1999,6 +2142,7 @@ impl Bodies<'_> {
                             return Val {
                                 ty: self.empty(),
                                 diverges: false,
+                                poisoned: false,
                             };
                         }
                         let callee_val = self.def_value(def, only.span);
@@ -2017,7 +2161,7 @@ impl Bodies<'_> {
         self.indirect_call(callee_val, args, trailing.as_deref(), *span)
     }
 
-    /// Constructs one minted enum case by call form [B3]: positional
+    /// Constructs one minted enum case by call form (B3): positional
     /// arguments fill tuple-payload slots and named arguments fill
     /// named-payload fields; the result is the case's own atom set.
     fn case_call(
@@ -2043,6 +2187,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         let case_name = self.package.def(def).name.clone();
@@ -2067,6 +2212,7 @@ impl Bodies<'_> {
                 return Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 };
             },
         };
@@ -2162,6 +2308,7 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -2173,6 +2320,18 @@ impl Bodies<'_> {
         span: Span,
     ) -> Val {
         let Some((param_tys, ret)) = self.decompose_fn(callee.ty) else {
+            // A poisoned callee already reported; "not callable" on top of
+            // it would be a cascade. The arguments still walk.
+            if callee.poisoned {
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                };
+            }
             self.error(
                 ErrorCode::InferenceFailed,
                 format!(
@@ -2188,6 +2347,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let mut all: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
@@ -2199,16 +2359,17 @@ impl Bodies<'_> {
         Val {
             ty: ret,
             diverges: false,
+            poisoned: false,
         }
     }
 
     /// Calls one package function by definition: instantiates generics by
     /// structural argument matching (the M2 half of one-body generics
-    /// [H3]).
+    /// (H3)).
     /// Calls one package function by definition: instantiates generics by
     /// structural argument matching (the M2 half of one-body generics
-    /// [H3]); named arguments fill their parameter's slot and literal-only
-    /// defaults cover omissions [F7].
+    /// (H3)); named arguments fill their parameter's slot and literal-only
+    /// defaults cover omissions (F7).
     fn call_def(
         &mut self,
         def: DefId,
@@ -2238,6 +2399,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         // The E4 extraction family types by rule against the checked
@@ -2252,6 +2414,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         self.check_mut_window_args(&slots, &sig.params);
@@ -2281,6 +2444,7 @@ impl Bodies<'_> {
             return Val {
                 ty: ret,
                 diverges: false,
+                poisoned: false,
             };
         }
         // Generic: mint fresh variables, bind non-lambda arguments by
@@ -2424,10 +2588,11 @@ impl Bodies<'_> {
         Val {
             ty: ret,
             diverges: false,
+            poisoned: false,
         }
     }
 
-    /// Maps call arguments onto signature parameter slots [F7]: positional
+    /// Maps call arguments onto signature parameter slots (F7): positional
     /// arguments in order, named arguments by parameter name, the trailing
     /// lambda at the next open position; omissions must carry a literal
     /// default. `None` returns after diagnosing.
@@ -2545,7 +2710,7 @@ impl Bodies<'_> {
     }
 
     /// Checks filled slots against their parameter types and omitted ones
-    /// against their written literal defaults [F7].
+    /// against their written literal defaults (F7).
     fn check_slots(
         &mut self,
         slots: &[Option<&Expr>],
@@ -2573,7 +2738,7 @@ impl Bodies<'_> {
     }
 
     /// A `mut` window parameter over a copyable binding takes only a
-    /// `var` receiver [D2, C3]: copyable Ref words alias with no
+    /// `var` receiver (D2, C3): copyable Ref words alias with no
     /// checker-visible trace, so exclusivity is proven by spelling the
     /// binder `var`. `~Copyable` receivers keep their linearity proof and
     /// fresh rvalues are uniquely owned by construction, so only a const
@@ -2656,11 +2821,12 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
-        let trait_id = match self.package.method(method).owner {
-            MethodOwner::Trait(def) => self.decls.traits.get(&def).copied(),
-            MethodOwner::Inherent => None,
+        let trait_id = match &self.package.method(method).owner {
+            MethodOwner::Trait(def) => self.decls.traits.get(def).copied(),
+            MethodOwner::Inherent(_) => None,
         };
         let Some(recv) = args.first() else {
             self.error(
@@ -2672,6 +2838,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let recv_val = self.expr(&recv.value, None);
@@ -2683,6 +2850,7 @@ impl Bodies<'_> {
                 return Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 };
             }
             self.record_solved_dispatch(method, recv_val.ty, span);
@@ -2712,6 +2880,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         match res {
@@ -2740,14 +2909,16 @@ impl Bodies<'_> {
                 Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 }
             },
         }
     }
 
-    /// Method-candidate selection [F3, B6]: candidates narrow by receiver
-    /// type through the instance environment (or an in-scope assumption);
-    /// survivors beyond one are true ambiguity, never a priority order.
+    /// Method-candidate selection (F3, B6): candidates narrow by receiver
+    /// type — trait members through the instance environment (or an
+    /// in-scope assumption), inherent members by owner type; survivors
+    /// beyond one are true ambiguity, never a priority order.
     fn method_select(
         &mut self,
         recv: &Expr,
@@ -2763,25 +2934,41 @@ impl Bodies<'_> {
             let Some(sig) = self.member_sig(candidate) else {
                 continue
             };
-            let trait_id = match self.package.method(candidate).owner {
-                MethodOwner::Trait(def) => self.decls.traits.get(&def).copied(),
-                MethodOwner::Inherent => None,
-            };
-            match trait_id {
-                Some(trait_id) => {
+            match &self.package.method(candidate).owner {
+                MethodOwner::Trait(def) => {
+                    let Some(trait_id) = self.decls.traits.get(def).copied() else {
+                        continue;
+                    };
                     if self.trait_satisfied_quiet(trait_id, recv_val.ty) {
                         survivors.push((candidate, sig));
                     }
                 },
-                None => survivors.push((candidate, sig)),
+                MethodOwner::Inherent(target) => {
+                    if self.inherent_accepts(target, recv_val.ty) {
+                        survivors.push((candidate, sig));
+                    }
+                },
             }
         }
         if survivors.is_empty() {
+            // A poisoned receiver already reported; "no method accepts
+            // `<empty>`" on top of it would be a cascade. The arguments
+            // still walk so their own errors surface.
+            if recv_val.poisoned {
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                };
+            }
             let trait_names: Vec<String> = candidates
                 .iter()
-                .filter_map(|c| match self.package.method(*c).owner {
-                    MethodOwner::Trait(def) => Some(self.package.def(def).name.clone()),
-                    MethodOwner::Inherent => None,
+                .filter_map(|c| match &self.package.method(*c).owner {
+                    MethodOwner::Trait(def) => Some(self.package.def(*def).name.clone()),
+                    MethodOwner::Inherent(_) => None,
                 })
                 .collect();
             self.error(
@@ -2804,7 +2991,7 @@ impl Bodies<'_> {
                     )
                 },
                 span,
-                "unimplemented trait",
+                if trait_names.is_empty() { "no accepting owner" } else { "unimplemented trait" },
             );
             for arg in args {
                 self.expr(&arg.value, None);
@@ -2812,15 +2999,16 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         if survivors.len() > 1 {
             let names: Vec<String> = candidates
                 .iter()
                 .filter(|c| self.member_sig(**c).is_some())
-                .map(|c| match self.package.method(*c).owner {
-                    MethodOwner::Trait(def) => format!("`{}`", self.package.def(def).name),
-                    MethodOwner::Inherent => "`inherent`".to_owned(),
+                .map(|c| match &self.package.method(*c).owner {
+                    MethodOwner::Trait(def) => format!("`{}`", self.package.def(*def).name),
+                    MethodOwner::Inherent(target) => format!("inherent `{target}`"),
                 })
                 .collect();
             self.error(
@@ -2840,11 +3028,36 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         let (method, sig) = survivors.remove(0);
         self.record_solved_dispatch(method, recv_val.ty, span);
         self.member_call(&sig, recv_val.ty, args, trailing, span)
+    }
+
+    /// Whether an inherent impl's owner accepts the receiver (F3): every
+    /// member of the receiver's type must be the owner's atom or an
+    /// application of it (a generic impl's constructor). The receiver is
+    /// contained in what the owner covers — the instance check's inherent
+    /// mirror, never the converse — so a union receiver narrows first and
+    /// a receiver the owner does not cover reports at the dot. An owner
+    /// naming no declared atom (an alias, a union target) accepts nothing.
+    fn inherent_accepts(&self, target: &str, recv: Ty) -> bool {
+        let Some(def) = self.package.lookup_type(target) else {
+            return false;
+        };
+        let Some(&owner) = self.decls.atoms.get(&def) else {
+            return false;
+        };
+        let universe = &self.decls.universe;
+        universe.members(recv).iter().all(|&member| {
+            member == owner
+                || matches!(
+                    universe.atom_decl(member),
+                    Ok(decl) if matches!(decl.kind, AtomKind::Apply(ctor, _) if ctor == owner)
+                )
+        })
     }
 
     /// Records one selected trait method's solved dispatch at the call's
@@ -2854,10 +3067,10 @@ impl Bodies<'_> {
     /// in-scope assumption records nothing — its dispatch is the
     /// runtime-resolved evidence form.
     fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
-        let MethodOwner::Trait(def) = self.package.method(method).owner else {
+        let MethodOwner::Trait(def) = &self.package.method(method).owner else {
             return;
         };
-        let Some(&trait_id) = self.decls.traits.get(&def) else {
+        let Some(&trait_id) = self.decls.traits.get(def) else {
             return;
         };
         let Some(instance) = self.solved_instance(trait_id, recv) else {
@@ -2902,10 +3115,11 @@ impl Bodies<'_> {
         Val {
             ty: ret,
             diverges: false,
+            poisoned: false,
         }
     }
 
-    /// `.err(h)`/`.ok(h)`: difference-typed handlers [E4]. The handled set
+    /// `.err(h)`/`.ok(h)`: difference-typed handlers (E4). The handled set
     /// is the handler's annotated parameter, or — unannotated — everything
     /// except what the handler's own result keeps of the operand.
     fn err_ok(&mut self, recv: &Expr, name: &str, args: &[ds_parse::CallArg], span: Span) -> Val {
@@ -2922,6 +3136,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         }
         let Expr::Lambda {
@@ -2940,6 +3155,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let annotated = handler_params
@@ -2964,7 +3180,10 @@ impl Bodies<'_> {
             self.decls.universe.diff(total, kept)
         };
         let overlap = self.decls.universe.inter(total, handled_set);
-        if self.decls.universe.is_empty(overlap) && !self.decls.universe.is_empty(total) {
+        if self.decls.universe.is_empty(overlap)
+            && !self.decls.universe.is_empty(total)
+            && !recv_val.poisoned
+        {
             self.error(
                 ErrorCode::TypeMismatch,
                 format!(
@@ -2980,7 +3199,10 @@ impl Bodies<'_> {
         let remainder = self.decls.universe.diff(total, handled_set);
         let result =
             if name == "ok" { self.decls.universe.union(remainder, body_ty) } else { remainder };
-        if self.decls.universe.is_empty(result) && !self.decls.universe.is_empty(total) {
+        if self.decls.universe.is_empty(result)
+            && !self.decls.universe.is_empty(total)
+            && !recv_val.poisoned
+        {
             self.error(
                 ErrorCode::InferenceFailed,
                 format!(
@@ -2994,6 +3216,7 @@ impl Bodies<'_> {
         Val {
             ty: result,
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -3007,7 +3230,7 @@ impl Bodies<'_> {
         (!sig.generics.is_empty() && sig.params.len() == 2).then_some(kind)
     }
 
-    /// One extraction-family call [E4]: the receiver and one argument,
+    /// One extraction-family call (E4): the receiver and one argument,
     /// typed locally against the checked receiver's members. The eager
     /// `unwrap_or` binds its fallback to the extracted type, the lazy
     /// `unwrap_or_else` checks a zero-parameter lambda against it, `ok_or`
@@ -3106,6 +3329,7 @@ impl Bodies<'_> {
                         Val {
                             ty: extracted,
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     Extraction::UnwrapOrElse => {
@@ -3151,6 +3375,7 @@ impl Bodies<'_> {
                         Val {
                             ty: extracted,
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     Extraction::OkOr => {
@@ -3158,6 +3383,7 @@ impl Bodies<'_> {
                         Val {
                             ty: self.decls.universe.union(extracted, arg_val.ty),
                             diverges: false,
+                            poisoned: false,
                         }
                     },
                     Extraction::MapErr => unreachable!("the optional arm owns three of four"),
@@ -3237,16 +3463,26 @@ impl Bodies<'_> {
                 Val {
                     ty: result,
                     diverges: false,
+                    poisoned: false,
                 }
             },
         }
     }
 
-    /// Bare field access `x.f`: struct-owned, type-directed [F3]; on a
+    /// Bare field access `x.f`: struct-owned, type-directed (F3); on a
     /// generic application through the constructor's shape and the
     /// application's argument substitution.
     fn field_access(&mut self, recv: &Expr, name: &Ident) -> Val {
         let recv_val = self.expr(recv, None);
+        // A poisoned receiver already reported; a field-access complaint
+        // over its (empty or wrapper) type would be a cascade.
+        if recv_val.poisoned {
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        }
         let members = self.decls.universe.members(recv_val.ty).to_vec();
         let Some(single) = members.first().filter(|_| members.len() == 1) else {
             self.error(
@@ -3261,6 +3497,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let kind = self
@@ -3284,6 +3521,7 @@ impl Bodies<'_> {
                     return Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     };
                 }
             },
@@ -3294,6 +3532,7 @@ impl Bodies<'_> {
                     return Val {
                         ty: self.empty(),
                         diverges: false,
+                        poisoned: false,
                     };
                 },
             },
@@ -3303,6 +3542,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         let Some(field) = shape.fields.iter().find(|f| f.name.name == name.name) else {
@@ -3310,6 +3550,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             };
         };
         self.type_vars.push(subst);
@@ -3319,6 +3560,7 @@ impl Bodies<'_> {
             Val {
                 ty,
                 diverges: false,
+                poisoned: false,
             }
         } else {
             if !self.take_solve_reported() {
@@ -3332,6 +3574,7 @@ impl Bodies<'_> {
             Val {
                 ty: self.empty(),
                 diverges: false,
+                poisoned: false,
             }
         }
     }
@@ -3350,7 +3593,7 @@ impl Bodies<'_> {
     }
 
     /// `e?` propagation: the success part survives, every propagated member
-    /// must be contained in the written return union [B2, E4].
+    /// must be contained in the written return union (B2, E4).
     fn try_expr(&mut self, operand: &Expr, expected: Option<Ty>, span: Span) -> Val {
         let val = self.expr(operand, None);
         let total = val.ty;
@@ -3367,21 +3610,28 @@ impl Bodies<'_> {
                 (ok, propagated)
             },
             (None, None) => {
+                // No return union to split against: a top-level
+                // initializer (no enclosing function), a fn without a
+                // declared return, or a lambda whose return is inferred
+                // (no annotation, or a bare type-variable expectation
+                // from a generic callee) — the split needs a known
+                // destination, never a silent whole-union bind.
                 self.error(
                     ErrorCode::PropagationNotContained,
-                    "`?` outside a function has nothing to propagate into [E4]".to_owned(),
+                    "`?` needs an enclosing return union to propagate into [E4]".to_owned(),
                     span,
                     "stray propagation",
                 );
                 return Val {
                     ty: self.empty(),
                     diverges: false,
+                    poisoned: false,
                 };
             },
         };
         if let Some(ret) = ret {
             let escape = self.decls.universe.diff(propagated, ret);
-            if !self.decls.universe.is_empty(escape) {
+            if !self.decls.universe.is_empty(escape) && !val.poisoned {
                 self.error(
                     ErrorCode::PropagationNotContained,
                     format!(
@@ -3394,7 +3644,8 @@ impl Bodies<'_> {
                 );
             }
         }
-        if self.decls.universe.is_empty(ok) && !self.decls.universe.is_empty(total) {
+        if self.decls.universe.is_empty(ok) && !self.decls.universe.is_empty(total) && !val.poisoned
+        {
             self.error(
                 ErrorCode::InferenceFailed,
                 format!(
@@ -3408,6 +3659,7 @@ impl Bodies<'_> {
         Val {
             ty: ok,
             diverges: false,
+            poisoned: val.poisoned,
         }
     }
 
@@ -3431,6 +3683,7 @@ impl Bodies<'_> {
             return Val {
                 ty: unit,
                 diverges: false,
+                poisoned: false,
             };
         };
         let (declared, bind_span, mutable) = match &res {
@@ -3468,6 +3721,7 @@ impl Bodies<'_> {
                 left.span(),
                 right.span(),
                 span,
+                right_val.poisoned,
             );
             self.expect_contains(result, declared, span, "compound assignment");
         }
@@ -3478,11 +3732,12 @@ impl Bodies<'_> {
         Val {
             ty: unit,
             diverges: false,
+            poisoned: false,
         }
     }
 
     /// `?` in a branch-final position splits against the expected type
-    /// when one flows in [E4]: a branch-final expression is the enclosing
+    /// when one flows in (E4): a branch-final expression is the enclosing
     /// function's final expression when the if/match itself is last.
     fn if_expr(
         &mut self,
@@ -3491,7 +3746,9 @@ impl Bodies<'_> {
         else_: Option<&Expr>,
         expected: Option<Ty>,
     ) -> Val {
+        self.cond_depth += 1;
         let cond_val = self.expr(cond, None);
+        self.cond_depth -= 1;
         self.expect_bool(cond_val, cond.span());
         let narrows = self.harvest(cond);
         // The else path runs on ¬(a∧b∧…) = ¬a∨¬b∨…: when the condition is
@@ -3533,6 +3790,7 @@ impl Bodies<'_> {
             Val {
                 ty: unit,
                 diverges: false,
+                poisoned: false,
             }
         };
         if then_val.diverges {
@@ -3544,6 +3802,7 @@ impl Bodies<'_> {
         Val {
             ty: self.decls.universe.union(then_val.ty, else_val.ty),
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -3580,7 +3839,9 @@ impl Bodies<'_> {
                 self.bind_local(span, Binding { ty, mutable: false });
             }
             if let Some(guard) = &arm.guard {
+                self.cond_depth += 1;
                 let guard_val = self.expr(guard, None);
+                self.cond_depth -= 1;
                 self.expect_bool(guard_val, guard.span());
                 for narrow in self.harvest(guard) {
                     self.apply_narrow(&narrow);
@@ -3614,6 +3875,7 @@ impl Bodies<'_> {
             return Val {
                 ty: self.empty(),
                 diverges: true,
+                poisoned: false,
             };
         }
         let mut ty = self.empty();
@@ -3623,6 +3885,7 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -3645,6 +3908,7 @@ impl Bodies<'_> {
             return Val {
                 ty: unit,
                 diverges: false,
+                poisoned: false,
             };
         }
         let iter_val = self.expr(iter, None);
@@ -3655,19 +3919,24 @@ impl Bodies<'_> {
             args.first().copied()
         })();
         let Some(element_ty) = element_ty else {
-            self.error(
-                ErrorCode::InferenceFailed,
-                format!(
-                    "iteration needs one collection type, `{}` given; the stdlib traits arrive at \
-                     M3",
-                    self.decls.universe.render(iter_val.ty)
-                ),
-                span,
-                "not iterable",
-            );
+            // A poisoned iterable already reported; the collection-shape
+            // complaint on top of it would be a cascade.
+            if !iter_val.poisoned {
+                self.error(
+                    ErrorCode::InferenceFailed,
+                    format!(
+                        "iteration needs one collection type, `{}` given; the stdlib traits \
+                         arrive at M3",
+                        self.decls.universe.render(iter_val.ty)
+                    ),
+                    span,
+                    "not iterable",
+                );
+            }
             return Val {
                 ty: unit,
                 diverges: false,
+                poisoned: false,
             };
         };
         let saved = self.snapshot();
@@ -3680,6 +3949,7 @@ impl Bodies<'_> {
         Val {
             ty: unit,
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -3688,7 +3958,7 @@ impl Bodies<'_> {
     // ---- refinement ---------------------------------------------------------
 
     /// Narrows harvested from a condition: `is` tests and none-comparisons
-    /// over local paths [B2].
+    /// over local paths (B2).
     fn harvest(&mut self, cond: &Expr) -> Vec<Narrow> {
         let mut out = Vec::new();
         self.harvest_into(peel_paren(cond), &mut out);
@@ -3782,7 +4052,9 @@ impl Bodies<'_> {
     }
 
     fn expect_contains(&mut self, val: Val, expected: Ty, span: Span, what: &str) -> bool {
-        if val.diverges || self.decls.universe.contains(expected, val.ty) {
+        // A poisoned operand already reported its root cause; a boundary
+        // mismatch on top of it would be a cascade.
+        if val.diverges || val.poisoned || self.decls.universe.contains(expected, val.ty) {
             true
         } else {
             self.diags.push(
@@ -3801,7 +4073,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One generic call's argument against its solved parameter type [B2]:
+    /// One generic call's argument against its solved parameter type (B2):
     /// the structural binder stays silent on a constructor mismatch (it
     /// binds nothing for `list_len("words")`), so the solved parameter has
     /// to contain the argument or the mismatch reports. A parameter that
@@ -3814,9 +4086,11 @@ impl Bodies<'_> {
         expected: Ty,
         span: Span,
     ) -> bool {
-        // An empty side is an already-reported operand, never a new
-        // mismatch: the cascade stays with its root cause.
+        // An empty side is an already-reported operand, and a poisoned one
+        // reported inside its own subtree — never a new mismatch: the
+        // cascade stays with its root cause.
         if val.diverges
+            || val.poisoned
             || self.decls.universe.is_empty(val.ty)
             || self.decls.universe.is_empty(expected)
             || self.decls.universe.contains(expected, val.ty)
@@ -3874,7 +4148,7 @@ impl Bodies<'_> {
 
     fn expect_bool(&mut self, val: Val, span: Span) -> bool {
         let bool_ty = self.bool_ty();
-        if val.diverges || self.decls.universe.contains(bool_ty, val.ty) {
+        if val.diverges || val.poisoned || self.decls.universe.contains(bool_ty, val.ty) {
             true
         } else {
             self.error(
@@ -4222,7 +4496,7 @@ impl Bodies<'_> {
     }
 
     /// Whether a trait holds for a type: an in-scope assumption, or a
-    /// unique containing instance head [B6]. Diagnoses on failure.
+    /// unique containing instance head (B6). Diagnoses on failure.
     fn trait_satisfied(&mut self, trait_id: TraitId, ty: Ty, span: Span) -> bool {
         if self.trait_satisfied_quiet(trait_id, ty) {
             return true;
@@ -4252,7 +4526,7 @@ impl Bodies<'_> {
         self.solved_instance(trait_id, ty).is_some()
     }
 
-    /// The unique containing instance for a receiver type [B6], when the
+    /// The unique containing instance for a receiver type (B6), when the
     /// environment statically solved one; `None` for an unsatisfied trait,
     /// a site only an in-scope assumption covers, or the impossible
     /// multi-head answer over a coherent environment.
@@ -4538,6 +4812,7 @@ impl Bodies<'_> {
         Val {
             ty: self.empty(),
             diverges: false,
+            poisoned: false,
         }
     }
 
@@ -4568,6 +4843,7 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
+            poisoned: false,
         }
     }
 

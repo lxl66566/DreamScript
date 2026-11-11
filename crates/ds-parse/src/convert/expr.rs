@@ -136,13 +136,14 @@ impl Ctx {
                 let span = self.span(&p);
                 let mut children = inner(&p);
                 let head = children.next().filter(|c| c.as_rule() == Rule::map_head);
-                let mut args = children.filter(|c| c.as_rule() == Rule::expr);
+                let mut args =
+                    children.filter(|c| matches!(c.as_rule(), Rule::expr | Rule::fn_type));
                 match (head, args.next(), args.next()) {
                     (Some(head), Some(key), Some(value)) => Expr::MapApply {
                         span,
                         head: self.ident(head),
-                        key: Box::new(self.expr(key)),
-                        value: Box::new(self.expr(value)),
+                        key: Box::new(self.bracket_arg(key)),
+                        value: Box::new(self.bracket_arg(value)),
                     },
                     _ => Expr::Break(span),
                 }
@@ -270,7 +271,7 @@ impl Ctx {
     }
 
     /// Comparison level: `cmp_op` operands, plus `in` tails whose right side
-    /// is one optional bare range [F5].
+    /// is one optional bare range (F5).
     fn cmp(&mut self, p: Pair<'_, Rule>) -> Expr {
         let span = self.span(&p);
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
@@ -433,7 +434,7 @@ impl Ctx {
                     }
                 },
                 Rule::postfix_index => {
-                    let index = inner(&c).next().map(|e| Box::new(self.expr(e)));
+                    let index = inner(&c).next().map(|e| Box::new(self.bracket_arg(e)));
                     match index {
                         Some(index) => Expr::Index {
                             span: Span::new(self.file, start, end),
@@ -464,7 +465,22 @@ impl Ctx {
         acc
     }
 
-    /// Converts call arguments [F7]: named arguments (`f(x: 1)`) must follow
+    /// One constructor bracket's content: a fn type converts onto its
+    /// expression node, anything else is the expression walk.
+    fn bracket_arg(&mut self, p: Pair<'_, Rule>) -> Expr {
+        if p.as_rule() == Rule::fn_type {
+            let span = self.span(&p);
+            let ty = self.type_expr(p);
+            Expr::FnType {
+                span,
+                ty: Box::new(ty),
+            }
+        } else {
+            self.expr(p)
+        }
+    }
+
+    /// Converts call arguments (F7): named arguments (`f(x: 1)`) must follow
     /// positional ones, and a name may appear once. Both violations are
     /// diagnostics, not grammar failures.
     fn args(&mut self, p: &Pair<'_, Rule>) -> Vec<CallArg> {

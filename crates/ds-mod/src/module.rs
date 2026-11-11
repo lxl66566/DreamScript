@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// One entry of the locked constants payload: an i64, f64, bool, UTF-8
-/// string, or function reference [G3.5].
+/// string, or function reference (G3.5).
 ///
 /// f64 values are stored and restored by bit pattern, so NaN payloads
 /// survive a round trip unchanged.
@@ -296,13 +296,13 @@ impl Module {
         self
     }
 
-    /// The checked blake3-128 source hash [G3.5].
+    /// The checked blake3-128 source hash (G3.5).
     #[must_use]
     pub fn source_hash(&self) -> Hash128 {
         self.source_hash
     }
 
-    /// The reserved two-hook collector interface state [C4, H4].
+    /// The reserved two-hook collector interface state (C4, H4).
     #[must_use]
     pub fn collector(&self) -> CollectorHooks {
         self.collector
@@ -364,7 +364,7 @@ impl Module {
         self
     }
 
-    /// Whether the checked source hash matches `source` [G3.5]; identity is
+    /// Whether the checked source hash matches `source` (G3.5); identity is
     /// hash-based, never mtime.
     #[must_use]
     pub fn matches_source(&self, source: &[u8]) -> bool {

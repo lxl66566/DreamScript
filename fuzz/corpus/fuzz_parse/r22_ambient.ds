@@ -1,0 +1,37 @@
+// seed: R22 ambient-taxonomy surface — the ambient-owned failure names
+// (io_err, parse_err, net_err with timeout/refused members), the
+// success-typed fallible reads (read_file, parse_int, load_rows,
+// read_config, fetch) consumed through ?, match arms, .ok/.err handlers,
+// and the config/default_config rebuild. Names are ambient-declared; the
+// seed never redeclares them.
+
+fn read_env(path: string) -> int | parse_err | io_err {
+  const text = read_file(path)?
+  parse_int(trim(text))?
+}
+
+fn read_settings(path: string) -> config {
+  read_config(path).err((_: io_err) => default_config())
+}
+
+fn fetch_or_refuse(u: string) -> string | refused {
+  match fetch(u) {
+    timeout => refused,
+    resp => resp.consume(),
+  }
+}
+
+fn rows_of(path: string) -> list[row] | io_err {
+  load_rows(path)?
+}
+
+fn main() -> () {
+  const n = read_env("port.cfg").err((e) => {
+    match e {
+      parse_err => 80,
+      io_err => 8080,
+    }
+  })
+  const cfg = read_settings("app.cfg")
+  println("${n} ${cfg.host} ${urls.len()}")
+}

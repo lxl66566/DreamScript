@@ -168,7 +168,10 @@ fn collects_every_declaration_kind() {
     );
     let helper = f.package.method_candidates("helper");
     assert_eq!(helper.len(), 1);
-    assert_eq!(f.package.method(helper[0]).owner, MethodOwner::Inherent);
+    assert_eq!(
+        f.package.method(helper[0]).owner,
+        MethodOwner::Inherent("rec".to_owned())
+    );
     // Collection order-independence: use-before-declare resolves.
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -317,7 +320,7 @@ fn ufcs_method_tier_registers_candidates() {
             assert_eq!(candidates.len(), 2);
             let owners: Vec<_> = candidates
                 .iter()
-                .map(|&id| f.package.method(id).owner)
+                .map(|&id| f.package.method(id).owner.clone())
                 .collect();
             assert_eq!(owners, vec![
                 MethodOwner::Trait(f.package.lookup_type("ord").unwrap()),
@@ -773,5 +776,44 @@ fn duplicate_inherent_methods_report_both_spans() {
         shared.package.method_candidates("m").len(),
         2,
         "two traits share the name"
+    );
+}
+
+#[test]
+fn inherent_methods_key_by_owner_type() {
+    // The method tier's duplicate discipline keys an inherent method by
+    // its impl's target type, like a trait member keys by its trait: two
+    // owners may share one method name. Registration needs no lookup —
+    // the owner travels as its name — so an impl may sit in a file added
+    // before the target type's own file [G3].
+    let f = resolve_one(concat!(
+        "tag unit_one\n",
+        "struct a { v: unit_one }\n",
+        "struct b { v: unit_one }\n",
+        "impl a { fn m(self) -> unit_one { self.v } }\n",
+        "impl b { fn m(self) -> unit_one { self.v } }\n",
+    ));
+    assert!(f.collect.is_empty(), "{:?}", f.collect);
+    let candidates = f.package.method_candidates("m");
+    assert_eq!(candidates.len(), 2, "two owners share the name");
+    assert_eq!(
+        f.package.method(candidates[0]).owner,
+        MethodOwner::Inherent("a".to_owned())
+    );
+    assert_eq!(
+        f.package.method(candidates[1]).owner,
+        MethodOwner::Inherent("b".to_owned())
+    );
+
+    // The impl's file may be collected before the target's file.
+    let across = fixture(&[
+        ("a.ds", "impl late { fn m(self) -> late { self } }\n"),
+        ("b.ds", "tag late\n"),
+    ]);
+    assert!(across.collect.is_empty(), "{:?}", across.collect);
+    assert_eq!(
+        across.package.method_candidates("m").len(),
+        1,
+        "the forward reference registers"
     );
 }

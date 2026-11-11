@@ -60,7 +60,7 @@ struct Frame {
 
 /// The query database: the only owner of inputs and memos, and the only path
 /// to compiler data for every consumer (CLI, LSP, REPL, hot reload,
-/// formatter) [H6 item 1].
+/// formatter) (H6 item 1).
 ///
 /// File inputs live in a [`Files`] registry whose ids are the engine's
 /// `FileId`s, so every span produced by a query addresses this registry
@@ -101,7 +101,7 @@ impl Db {
     /// diagnostics, the tree's block spans for the index, the block-text
     /// seam for sources, the ds-check collection and resolution passes
     /// over the registered files (G3), the bidirectional check sliced per
-    /// definition (B2), the M2 affine pass [C1, C5] per definition, and
+    /// definition (B2), the M2 affine pass (C1, C5) per definition, and
     /// the ds-check effects pass over the registered files (E1) (see the
     /// crate docs).
     #[must_use]

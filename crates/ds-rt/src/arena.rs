@@ -1,4 +1,4 @@
-//! Per-frame bump arena over an append-only chunk list [C4/H4].
+//! Per-frame bump arena over an append-only chunk list (C4/H4).
 
 use core::{
     alloc::Layout,
@@ -32,7 +32,7 @@ pub struct Mark {
     pub(crate) offset: usize,
 }
 
-/// A bump arena for non-escaping temporaries [C4/H4].
+/// A bump arena for non-escaping temporaries (C4/H4).
 ///
 /// Allocation is pointer addition in the current chunk. Growth appends a new
 /// chunk; existing chunks are never reallocated, so every address handed out
@@ -265,7 +265,7 @@ impl Arena {
     }
 
     /// Frees everything allocated after `mark` by resetting the bump cursor
-    /// [C4: "reclamation a restore on frame pop"].
+    /// (C4: "reclamation a restore on frame pop").
     ///
     /// Chunks appended after the mark's chunk are canonical ladder-sized ones
     /// (kept in the per-arena free list for reuse, which bounds the memory of

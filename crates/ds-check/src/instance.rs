@@ -1,9 +1,9 @@
-//! The trait instance environment and coherence checking [B6].
+//! The trait instance environment and coherence checking (B6).
 //!
 //! Traits are implemented by *instances* declared over type heads. The only
 //! coherence rule is pairwise disjointness of the heads of one trait: for
 //! every pair `H1`, `H2` of same-trait heads, `H1 & H2 = Empty` must hold
-//! [B6]. It is checked incrementally at declaration (per package [G3]) by
+//! (B6). It is checked incrementally at declaration (per package (G3)) by
 //! [`InstanceEnv::declare`] and again over the final environment at link
 //! time by [`InstanceEnv::check_all`]. There is no orphan rule: any package
 //! may declare an instance for any type, foreign included; no priority
@@ -12,7 +12,7 @@
 //! # Head normalization
 //!
 //! A declaration's head is a [`TypeExpr`], possibly a union. Written unions
-//! decompose recursively into per-branch instances before any check [B6]:
+//! decompose recursively into per-branch instances before any check (B6):
 //! `impl eq for int | string` becomes two instances. Every other expression
 //! is one branch whose head is its solved atom set ([`Universe::solve`]), so
 //! intersections and differences normalize away: `a & b` of distinct atoms
@@ -57,7 +57,7 @@
 //!
 //! The corpus rejection of `conformance/generics_coherent_traits.ds`: after
 //! `json` for `int` and `json` for `bool`, the union head decomposes and both
-//! branches overlap; the error names both heads and the witness `int` [B6].
+//! branches overlap; the error names both heads and the witness `int` (B6).
 //!
 //! ```
 //! use ds_check::{Error, InstanceDecl, InstanceEnv, TypeExpr, Universe};
@@ -148,7 +148,7 @@ pub struct InstanceDecl {
     /// The trait implemented.
     pub trait_id: TraitId,
     /// The head as written; unions decompose into per-branch instances at
-    /// declaration [B6].
+    /// declaration (B6).
     pub head: TypeExpr,
     /// Conditions; empty for an unconditional instance.
     pub conditions: Vec<Condition<TypeExpr>>,
@@ -254,14 +254,14 @@ impl CondEdges<'_> {
 
 /// The trait instance environment: per-branch instances in declaration
 /// order, with incremental (declaration) and final (link-time) coherence
-/// checking [B6]. Heads and conditions are solved snapshots against the
+/// checking (B6). Heads and conditions are solved snapshots against the
 /// universe state at their declaration; the written forms are stored
 /// alongside, and [`InstanceEnv::check_all`] re-solves them against the
 /// final universe before its passes.
 ///
 /// Per-package checking runs [`InstanceEnv::declare`] while building;
 /// cross-package link merges environments and runs [`InstanceEnv::check_all`]
-/// once over the closed set [G3].
+/// once over the closed set (G3).
 #[derive(Default)]
 pub struct InstanceEnv {
     instances: Vec<Instance>,
@@ -402,8 +402,8 @@ impl InstanceEnv {
         Ok(ids)
     }
 
-    /// Link-time check over the final closed environment [B6, section 10
-    /// item 7]: every head and condition is first re-solved against the
+    /// Link-time check over the final closed environment (B6, section 10
+    /// item 7): every head and condition is first re-solved against the
     /// current universe (stored heads are declaration-time snapshots, and a
     /// trait-as-type head widens when its trait gains members), then
     /// pairwise disjointness of same-trait heads runs over all pairs in
@@ -447,7 +447,7 @@ impl InstanceEnv {
         Ok(())
     }
 
-    /// Appends another environment's instances (link [G3]). The appended
+    /// Appends another environment's instances (link (G3)). The appended
     /// instances are renumbered, so previously held ids from `other` are
     /// invalid; callers re-query. Coherence over the merged set is
     /// [`InstanceEnv::check_all`]'s job.
@@ -458,7 +458,7 @@ impl InstanceEnv {
     /// Lookup: every instance of `trait_id` whose head contains the queried
     /// type ([`Universe::contains`], exact containment). Lookup-only: an
     /// instance's own conditions never filter it here, and there is no
-    /// selection policy [B6] — with coherent heads the answer is unique for
+    /// selection policy (B6) — with coherent heads the answer is unique for
     /// every non-empty query.
     #[must_use]
     pub fn resolve(&self, universe: &Universe, trait_id: TraitId, queried: Ty) -> Vec<InstanceId> {
@@ -508,7 +508,7 @@ impl InstanceEnv {
     }
 }
 
-/// Flattens written unions into branches [B6]: only `|` nodes split, so a
+/// Flattens written unions into branches (B6): only `|` nodes split, so a
 /// negated-constraint or trait-ref head stays one branch even when it solves
 /// to several atoms.
 fn collect_branches(expr: &TypeExpr, out: &mut Vec<TypeExpr>) {
@@ -522,7 +522,7 @@ fn collect_branches(expr: &TypeExpr, out: &mut Vec<TypeExpr>) {
 }
 
 /// Builds the overlap error for two same-trait heads that intersect, with a
-/// witness value type of the intersection [B6]; `None` when the heads are
+/// witness value type of the intersection (B6); `None` when the heads are
 /// disjoint. `head_a` is the earlier-declared head.
 fn overlap_error(
     universe: &mut Universe,

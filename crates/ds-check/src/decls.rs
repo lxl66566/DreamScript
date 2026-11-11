@@ -1,12 +1,12 @@
 //! Declaration pass: AST items into universe atoms, trait instances, and
-//! AST-shaped signature tables [B1, B3, B6, G3].
+//! AST-shaped signature tables (B1, B3, B6, G3).
 //!
-//! Collection is two-phase over the whole package [G3]: every type-level
+//! Collection is two-phase over the whole package (G3): every type-level
 //! name is reserved first (tags, structs, enums, aliases, traits), then
 //! shapes are filled, so intra- and cross-file declaration cycles resolve
 //! by construction. The universe carries what its set algebra can express:
 //! non-generic struct/enum shapes as solved field/case signatures (witness
-//! fidelity [B6]) and nominal identities for everything. What the algebra
+//! fidelity (B6)) and nominal identities for everything. What the algebra
 //! cannot express stays AST-shaped here and is solved per use by the
 //! checker (crate::type_of) against the use-site's scopes:
 //!
@@ -14,15 +14,15 @@
 //!   type variables, which have no [`crate::expr::TypeExpr`] form; the checker solves the written
 //!   fields with its own variable substitution;
 //! * function signatures — solved per call site, with the callee's generic parameters matched
-//!   structurally against the argument types (one-body generics, the M2 half of [H3]);
+//!   structurally against the argument types (one-body generics, the M2 half of (H3));
 //! * instance heads of generic impls — minted into the [`crate::instance::InstanceEnv`] as solved
-//!   singletons over freshly minted variable atoms, so coherence checking [B6] runs unchanged.
+//!   singletons over freshly minted variable atoms, so coherence checking (B6) runs unchanged.
 //!
 //! Instance-head resolution under substitution (`json for list[int]`
 //! because `json for int` exists) is deliberately not here: lookup stays
 //! containment-only, exact for concrete heads and conservative for
 //! variable heads; seeing through a conditional head is H3 checker work.
-//! The `~Copyable` marker bound on generic parameters [C1] is carried on
+//! The `~Copyable` marker bound on generic parameters (C1) is carried on
 //! the parameter and otherwise unchecked here; the affine pass owns it at
 //! M4.
 
@@ -50,7 +50,7 @@ pub struct GenericParam {
     /// Span of the name.
     pub span: Span,
     /// Declared bound (`t: json`), as written; `~Copyable` markers are the
-    /// affine layer's [C1, M4].
+    /// affine layer's (C1, M4).
     pub bound: Option<Type>,
 }
 
@@ -71,12 +71,12 @@ pub struct ParamSig {
     pub name: String,
     /// Span of the name.
     pub span: Span,
-    /// Passing mode [C2]; the affine pass reads it to decide which call
-    /// arguments consume their source binding [C1].
+    /// Passing mode (C2); the affine pass reads it to decide which call
+    /// arguments consume their source binding (C1).
     pub mode: ParamMode,
     /// Written type; absent for inferred lambda parameters.
     pub ty: Option<Type>,
-    /// Literal-only default [F7], as written.
+    /// Literal-only default (F7), as written.
     pub default: Option<Expr>,
 }
 
@@ -141,7 +141,7 @@ pub struct StructShape {
     /// Named fields, in declaration order.
     pub fields: Vec<FieldDecl>,
     /// Whether the declaration subtracts the copyability constraint
-    /// (`~Copyable` among the supers) [C1].
+    /// (`~Copyable` among the supers) (C1).
     pub linear: bool,
 }
 
@@ -153,11 +153,11 @@ pub struct EnumShape {
     /// Cases in declaration order: name, span, payload.
     pub cases: Vec<(String, Span, EnumPayload)>,
     /// Whether the declaration subtracts the copyability constraint
-    /// (`~Copyable` among the supers) [C1].
+    /// (`~Copyable` among the supers) (C1).
     pub linear: bool,
 }
 
-/// One case minted by a non-generic enum block [B3]: the case's def maps
+/// One case minted by a non-generic enum block (B3): the case's def maps
 /// back to its enum (the case table) and carries the written payload.
 #[derive(Clone, Debug)]
 pub struct CaseDecl {
@@ -171,9 +171,9 @@ pub struct CaseDecl {
 /// instance environment plus the AST-shaped shapes and signatures.
 #[derive(Default)]
 pub struct Decls {
-    /// The atom and trait registry [B1].
+    /// The atom and trait registry (B1).
     pub universe: Universe,
-    /// The trait instance environment [B6].
+    /// The trait instance environment (B6).
     pub instances: InstanceEnv,
     /// The declaring impl item's span for every declared instance, keyed
     /// by the instance the environment allocated (per-branch instances of
@@ -201,14 +201,14 @@ pub struct Decls {
     /// the handle per lookup and `ParamSig::default` carries an AST
     /// subtree — a per-call deep clone dominated the checker's hot path.
     pub fns: HashMap<DefId, Arc<FnSig>>,
-    /// Trait member signatures keyed by their registered method id [F3].
+    /// Trait member signatures keyed by their registered method id (F3).
     pub members: HashMap<MethodId, Arc<FnSig>>,
-    /// Member names of each trait, for impl signature matching [B6].
+    /// Member names of each trait, for impl signature matching (B6).
     pub trait_members: HashMap<DefId, Vec<String>>,
-    /// Inherent impl-function signatures keyed by method id [F3].
+    /// Inherent impl-function signatures keyed by method id (F3).
     pub inherent: HashMap<MethodId, Arc<FnSig>>,
     /// Top-level `const`/`var` initializers keyed by every name the
-    /// binding pattern declares (lazy memoized typing [G3]).
+    /// binding pattern declares (lazy memoized typing (G3)).
     pub consts: HashMap<DefId, LocalDecl>,
     /// Shared counter for minted type-variable tags (`$t#3`): instance
     /// declaration and body checking draw from it so the package universe
@@ -252,7 +252,7 @@ where
 
 use crate::resolve::Resolutions;
 
-/// The definition an item declares, in its kind's namespace [F9].
+/// The definition an item declares, in its kind's namespace (F9).
 fn item_def(package: &Package, item: &Item) -> Option<DefId> {
     let name = item_name(item);
     if matches!(
@@ -287,7 +287,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
     };
     match &item.kind {
         ItemKind::Tag(t) => {
-            if let Ok(id) = decls.universe.declare_tag(&t.name.name) {
+            if let Some(id) = declare_unit_name(decls, &t.name.name) {
                 decls.atoms.insert(def, id);
                 decls.defs_of_atoms.insert(id, def);
             }
@@ -346,12 +346,12 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                         continue;
                     };
                     let atom = match &case.payload {
-                        EnumPayload::None => decls.universe.declare_tag(&case.name.name),
+                        EnumPayload::None => declare_unit_name(decls, &case.name.name),
                         EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
-                            decls.universe.declare_struct(&case.name.name)
+                            decls.universe.declare_struct(&case.name.name).ok()
                         },
                     };
-                    if let Ok(id) = atom {
+                    if let Some(id) = atom {
                         decls.atoms.insert(case_def, id);
                         decls.defs_of_atoms.insert(id, case_def);
                     }
@@ -403,7 +403,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
 }
 
 /// Inherent impl functions register their signatures against the method
-/// registration their own span names [F3] — the same span discipline as
+/// registration their own span names (F3) — the same span discipline as
 /// the effects walk. Trait impls register nothing here: the trait's
 /// member signatures already provide the candidates, and the instance
 /// declaration is the shape pass's work. Call sites check against each
@@ -433,7 +433,7 @@ fn def_kind_is_binding(package: &Package, def: DefId) -> bool {
 }
 
 /// One top-level binding: every binder the pattern declares maps back to
-/// this initializer [G3] — a destructuring pattern declares many defs, so
+/// this initializer (G3) — a destructuring pattern declares many defs, so
 /// the item's own def is not the gate (a tuple pattern names no single
 /// def). The const-of-lambda registration is the single-name shape only:
 /// a lambda value binds one name.
@@ -556,7 +556,7 @@ fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec
     }
 }
 
-/// Whether a written type is the `~Copyable` marker [C1]: the negation of
+/// Whether a written type is the `~Copyable` marker (C1): the negation of
 /// the fixed `Copyable` trait name. The marker subtracts the default
 /// copyability constraint, so a declaration carrying it is linear.
 pub(crate) fn linear_marker(ty: &Type) -> bool {
@@ -570,7 +570,7 @@ pub(crate) fn linear_marker(ty: &Type) -> bool {
 }
 
 /// `struct dog: animal` nominal subtyping: every non-negated supertrait
-/// path registers the atom as a trait member [B1].
+/// path registers the atom as a trait member (B1).
 fn register_supers(package: &Package, supers: &[Type], atom: TypeId, decls: &mut Decls) {
     for super_ty in supers {
         if let Some(trait_id) = trait_of_type(package, super_ty, decls) {
@@ -716,6 +716,21 @@ fn atom_of_path(package: &Package, name: &Ident, decls: &mut Decls) -> Option<Ty
     decls.atoms.get(&def).copied()
 }
 
+/// Mints the unit atom for one tag (or unit enum case). The universe
+/// predeclares `none` as its distinguished unit atom (B4) with no def, so
+/// a `tag none` (or `enum e { none }`) restating the name maps onto the
+/// predeclared atom instead of minting a second — a skipped mint would
+/// silently orphan the def and every written `none` type or value would
+/// stop solving. Any other refused name is a collection-level duplicate
+/// that was already reported; the def keeps the first item's atom.
+fn declare_unit_name(decls: &mut Decls, name: &str) -> Option<TypeId> {
+    match decls.universe.declare_tag(name) {
+        Ok(id) => Some(id),
+        Err(_) if name == "none" => Some(TypeId::NONE),
+        Err(_) => None,
+    }
+}
+
 /// Converts one written type into a solved singleton [`TypeExpr`] for
 /// instance heads and conditions: unions stay unions in [`conv_head`],
 /// everything else becomes its solved atom set.
@@ -810,7 +825,7 @@ fn solve_written(
     })
 }
 
-/// Declares one impl's instances into the environment [B6]: mints variable
+/// Declares one impl's instances into the environment (B6): mints variable
 /// atoms for the generic parameters, converts the head (written unions
 /// decompose inside `declare`), attaches trait bounds as conditions, and
 /// maps coherence failures onto witness-carrying diagnostics. A failed
@@ -885,7 +900,7 @@ fn declare_instance(
 }
 
 /// Renders a coherence failure as one diagnostic naming the written head,
-/// the intersecting earlier head, and the witness value type [B6]; the
+/// the intersecting earlier head, and the witness value type (B6); the
 /// corpus's golden rejection pins this render.
 fn instance_diag(
     universe: &Universe,
@@ -929,7 +944,7 @@ fn instance_diag(
     }
 }
 
-/// The registered method id of one trait member [F3].
+/// The registered method id of one trait member (F3).
 fn member_id(package: &Package, trait_def: DefId, name: &str) -> Option<MethodId> {
     package
         .method_candidates(name)

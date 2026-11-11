@@ -1,4 +1,4 @@
-//! `ds fmt` as a compiler component [H6 item 2]: a block-aware, zero-option
+//! `ds fmt` as a compiler component (H6 item 2): a block-aware, zero-option
 //! formatter over the parse query. The public entry formats a whole file;
 //! internally every `##` block renders from its own AST plus trivia only
 //! (`render_block`), so the LSP on-type path can later format one block
