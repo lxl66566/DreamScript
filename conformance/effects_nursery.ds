@@ -1,22 +1,26 @@
 // source: frozen archive catalog 03-effects-errors-async (seed corpus)
-// purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, par combinators
+// purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, par combinators; the nursery and retry shapes lower (nursery_surface.ds and the gate's probes prove them), the fetch-driven items check clean and wait on their non-nursery seams
 // items:
 // url: stage: typecheck
 // page: stage: typecheck
-// fetch_body: stage: run
-// fetch_all: stage: run
-// with_retry: stage: run
-// main: stage: run
+// fetch_body: stage: typecheck
+// fetch_all: stage: typecheck
+// with_retry: stage: typecheck
+// main: stage: typecheck
 // v2-handler: stage: unresolved: user-defined handlers are a v2 additive escape hatch [E1], not parsed in v1
 
 type url = string
 struct page { url: url, body: string }
 
+// the fetch extern has no builtin seam (consume is the same shape of
+// callee), so the body refuses at lowering though it checks clean
 fn fetch_body(url: url) -> page | net_err {
   const resp = fetch(url)?
   page { url: url, body: resp.consume() }
 }
 
+// the return union's list member is a generic application word the M3
+// union region does not cover yet, on top of the fetch seam
 fn fetch_all(urls: list[url]) -> list[page] | net_err {
   var pages = list[page]()
   nursery {
@@ -33,6 +37,8 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
   pages
 }
 
+// the retry loop's shapes (for over a range, the leading-binding arm,
+// break) lower and run; only the fetch callee waits
 fn with_retry(n: int, url: url) -> page | net_err {
   var last: net_err = timeout
   var done: page? = none
@@ -56,6 +62,8 @@ fn with_retry(n: int, url: url) -> page | net_err {
   }
 }
 
+// main adds the ambient urls const (top-level values do not lower yet)
+// and the par_map/par_reduce combinators, both without natives
 fn main() -> () | net_err {
   const pages = fetch_all(urls).err((e: net_err) => die("all fetches failed"))
   print("total: ${str(pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b))}")

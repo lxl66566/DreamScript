@@ -96,7 +96,7 @@ fn separator_rest_of_line_is_text() {
     // Any bytes up to the newline are separator text, `#` included.
     let ast = ok("## one\ntag a\n## two: x, y\n");
     assert_eq!(ast.blocks.len(), 3);
-    assert!(ast.blocks[1].items.len() == 1);
+    assert_eq!(ast.blocks[1].items.len(), 1);
 }
 
 #[test]
@@ -627,7 +627,7 @@ fn map_applications_take_exactly_two_type_arguments() {
         head, key, value, ..
     } = &**callee
     else {
-        panic!("map application callee, got {:?}", callee);
+        panic!("map application callee, got {callee:?}");
     };
     assert_eq!(head.name, "map");
     assert!(
@@ -1272,7 +1272,7 @@ fn tuple_corners_split_grouping_one_element_and_unit() {
     let body = fn_body(&ast);
     let init = |i: usize| match &body.stmts[i].kind {
         StmtKind::Local(l) => &l.init,
-        _ => panic!("statement {i} is not a binding"),
+        StmtKind::Expr(_) => panic!("statement {i} is not a binding"),
     };
     assert!(
         matches!(init(0), Expr::Paren { .. }),

@@ -93,8 +93,8 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // e2e pin
     assert_corpus_clean("calls_surface.ds", 1);
     // the one error is the file's own reject item (the wrong-receiver
-    // dot-call); the dot-calls and field reads check clean and execution
-    // refuses at lowering until impl bodies dispatch (the phase 3 seam)
+    // dot-call); the dot-calls and field reads check clean and the
+    // member bodies dispatch through the inherent seam
     assert_corpus_clean("inherent_impls.ds", 1);
     // the one error is the file's own reject item (the twice-consumed
     // seed's moved/used pair); the reversed-order and cross-file

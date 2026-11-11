@@ -2,8 +2,9 @@
 //! `list[fn(int) -> int]()` and `map[string, fn(int) -> int]()` parse,
 //! solve, and type the element story — the fn-typed binding takes a named
 //! fn value, elements push, and read-back narrows to a callable binding.
-//! The element *runtime* story (closures in collections) is the
-//! callable-word ruling's lowering seam and stays refused there.
+//! The element *runtime* story runs for named fn values and
+//! non-capturing lambdas; a closure element stays refused at the
+//! callable-word seam (a capturing value is no scalar FuncRef).
 
 use ds_check::type_check;
 use ds_diag::Files;

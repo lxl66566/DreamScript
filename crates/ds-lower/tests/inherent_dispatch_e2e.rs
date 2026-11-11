@@ -1,0 +1,284 @@
+//! The inherent-impl dispatch surface end to end: a monomorphic inherent
+//! impl's member bodies enter the plan under the `<target>#<member>`
+//! mangle, and every solved inherent dot-call dispatches as a plain
+//! local call — the receiver's own type picked the body at check time,
+//! so no instance word and no dispatch uop exist. Refusals stay honest:
+//! a generic inherent impl's call sites refuse naming the runtime
+//! evidence seam, and a `mut self` receiver refuses through the
+//! non-borrow parameter mode.
+
+use ds_abi::Uop;
+use ds_check::analyze;
+use ds_diag::{Files, human};
+use ds_lower::{LowerError, Lowered, PlacedOp, lower};
+use ds_mod::{Hash128, read_checked, write};
+use ds_parse::parse;
+use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+
+const SOURCE: &str = include_str!("fixtures/inherent_impl_probe.ds");
+
+/// Parse -> check -> lower; panics with the rendered diagnostics when an
+/// earlier stage refuses.
+fn lower_probe() -> (String, Lowered) {
+    let mut files = Files::new();
+    let id = files.add_source("inherent_impl_probe.ds", SOURCE);
+    let asts = [parse(&files, id).expect("the fixture parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the fixture checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "inherent_impl_probe",
+        Hash128::compute(SOURCE.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the fixture lowers");
+    (SOURCE.to_owned(), lowered)
+}
+
+/// The lowered module installed into a fresh VM, output captured.
+fn run_lowered(source: &str, lowered: &Lowered) -> Vm {
+    let bytes = write(lowered.module());
+    let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    vm
+}
+
+/// One placed sequence's uop kinds, RC ops in place.
+fn shape(lowered: &Lowered, name: &str) -> Vec<String> {
+    let placed = lowered
+        .placed(name)
+        .unwrap_or_else(|| panic!("{name} is planned (table: {:?})", lowered.functions()));
+    placed
+        .iter()
+        .map(|op| match op {
+            PlacedOp::Uop(uop) => {
+                let repr = format!("{uop:?}");
+                repr.chars().take_while(char::is_ascii_alphabetic).collect()
+            },
+            PlacedOp::Rc(_) => "Rc".to_owned(),
+        })
+        .collect()
+}
+
+/// Parse -> check -> lower over an inline source; panics when an earlier
+/// stage refuses. Returns the lowerer's error when lowering refuses.
+fn lower_inline(name: &str, source: &str) -> Result<Lowered, LowerError> {
+    let mut files = Files::new();
+    let id = files.add_source(name, source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
+}
+
+/// The golden run: the two owners' `peek` bodies answer behind the same
+/// member name, the multi-argument member stages, the compositions with
+/// trait dispatch run in both directions (an inherent call inside the
+/// trait body, a trait-method call inside the inherent body), and the
+/// string-carrying receiver's Ref word balances — the heap drains.
+#[test]
+fn inherent_calls_run_end_to_end() {
+    let (source, lowered) = lower_probe();
+    let mut vm = run_lowered(&source, &lowered);
+    assert_eq!(
+        vm.run("inherent_impl_probe", "main", &[]),
+        Ok(Value::I64(0)),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        "seventicks=7\nbump=10\nlaps=9\nwrap=7\n".as_bytes()
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The inherent bodies enter the table under the two-part mangle; the
+/// trait impl's three-part mangle beside them proves the namespaces stay
+/// separate, and `#` sits outside the identifier charset, so no
+/// user-declared name collides.
+#[test]
+fn inherent_bodies_enter_the_table_under_mangled_identity() {
+    let (_, lowered) = lower_probe();
+    let table = lowered.functions();
+    for expected in [
+        "counter#peek",
+        "counter#bump",
+        "counter#describe",
+        "timer#peek",
+    ] {
+        assert!(
+            table.contains(&expected.to_owned()),
+            "{expected} planned (table: {table:?})"
+        );
+    }
+    assert!(
+        table.contains(&"shows#counter#show".to_owned()),
+        "the trait mangle stays three-part (table: {table:?})"
+    );
+}
+
+/// The call sites emit plain CALL — never CALLG, since no instance word
+/// exists for an inherent impl — and a tail-position inherent call
+/// lowers in place (CALL plus RET) like every member-call tail this
+/// round; the tail-callee recognizer takes free functions only.
+#[test]
+fn inherent_call_sites_emit_plain_call_and_in_place_tails() {
+    let (_, lowered) = lower_probe();
+    let main = shape(&lowered, "main");
+    assert!(main.iter().any(|k| k == "Call"), "plain calls: {main:?}");
+    assert!(
+        !main.iter().any(|k| k == "Callg"),
+        "no dispatch uop at an inherent site: {main:?}"
+    );
+    let wrap = shape(&lowered, "wrap");
+    assert!(
+        wrap.iter().any(|k| k == "Call"),
+        "the inherent tail lowers in place: {wrap:?}"
+    );
+    assert!(
+        !wrap.iter().any(|k| k == "Callg"),
+        "the in-place shape is a plain local call: {wrap:?}"
+    );
+}
+
+/// A generic inherent impl's member call refuses at lowering naming the
+/// runtime-evidence seam: no instance exists for an inherent impl, so no
+/// call site can stage what a generic body would demand.
+#[test]
+fn a_generic_inherent_impl_refuses_naming_the_runtime_evidence_seam() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "trait shows {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "impl shows for int {\n",
+        "  fn show(self) -> string { \"n=$self\" }\n",
+        "}\n",
+        "impl[t: shows] list[t] {\n",
+        "  fn inner(self) -> int { 1 }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const b = [1, 2]\n",
+        "  b.inner()\n",
+        "}\n",
+    );
+    let Err(err) = lower_inline("generic_inherent.ds", source) else {
+        panic!("a generic inherent impl must refuse this round")
+    };
+    assert!(
+        matches!(err, LowerError::Unsupported { .. }),
+        "an unsupported boundary: {err}"
+    );
+    assert!(
+        err.to_string().contains("a generic inherent impl"),
+        "the refusal names the runtime-evidence seam: {err}"
+    );
+}
+
+/// A `mut self` receiver refuses through the existing non-borrow
+/// parameter mode: the impl item plans, and the body's own parameter
+/// binding refuses before anything runs.
+#[test]
+fn a_mut_self_receiver_refuses_through_the_non_borrow_mode() {
+    let source = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn set(mut self) -> int { self.ticks }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const c = counter { ticks: 1 }\n",
+        "  c.set()\n",
+        "}\n",
+    );
+    let Err(err) = lower_inline("mut_self.ds", source) else {
+        panic!("a mut self receiver must refuse this round")
+    };
+    assert!(
+        matches!(err, LowerError::Unsupported { .. }),
+        "an unsupported boundary: {err}"
+    );
+    assert!(
+        err.to_string().contains("a non-borrow parameter mode"),
+        "the refusal names the parameter-mode boundary: {err}"
+    );
+}
+
+/// An omitted defaulted member parameter refuses at the call site: an
+/// impl member has no package def, so no default staging exists.
+#[test]
+fn an_omitted_defaulted_member_parameter_refuses() {
+    let source = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn bump(self, by: int = 3) -> int { self.ticks + by }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const c = counter { ticks: 1 }\n",
+        "  c.bump()\n",
+        "}\n",
+    );
+    let Err(err) = lower_inline("defaulted_member.ds", source) else {
+        panic!("an omitted defaulted member parameter must refuse this round")
+    };
+    assert!(
+        matches!(err, LowerError::Unsupported { .. }),
+        "an unsupported boundary: {err}"
+    );
+    assert!(
+        err.to_string().contains("a defaulted member parameter"),
+        "the refusal names the default-staging boundary: {err}"
+    );
+}
+
+/// The planned inherent body's uop surface is the ordinary local-callee
+/// frame: a `Ret` closes it, and no evidence parameter words exist (the
+/// CALL's argument count equals the declared parameter count).
+#[test]
+fn the_inherent_body_lowers_as_an_ordinary_local_frame() {
+    let (_, lowered) = lower_probe();
+    let placed = lowered.placed("counter#describe").expect("the body lowers");
+    assert!(
+        placed
+            .iter()
+            .any(|op| matches!(op, PlacedOp::Uop(Uop::Ret { .. }))),
+        "the body returns through Ret: {placed:?}"
+    );
+    let index = lowered
+        .function_index("timer#peek")
+        .expect("the body is planned");
+    let params = lowered.module().functions()[index as usize]
+        .layout()
+        .params_len();
+    assert_eq!(params, 1, "the receiver is the one declared parameter word");
+}

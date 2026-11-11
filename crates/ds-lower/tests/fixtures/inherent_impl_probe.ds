@@ -1,0 +1,61 @@
+// purpose: inherent-impl member dispatch end to end — monomorphic inherent
+// bodies enter the plan under the `<target>#<member>` mangle and
+// dot-calls dispatch as plain local calls: two owners share one member
+// name, a multi-argument member, a struct receiver reading scalar and
+// Ref fields through self, both compositions with trait dispatch (an
+// inherent call inside a trait-impl body, a trait-method call inside an
+// inherent body), and a tail-position call through a named wrapper.
+// items:
+// int: stage: run
+// string: stage: run
+// counter: stage: run
+// timer: stage: run
+// println: stage: run
+// concat: stage: run
+// shows: stage: run
+// counter-impl: stage: run
+// timer-impl: stage: run
+// shows-counter: stage: run
+// wrap: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct counter { ticks: int, label: string }
+struct timer { laps: int }
+
+extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl counter {
+  fn peek(self) -> int { self.ticks }
+  fn bump(self, by: int) -> int { self.ticks + by }
+  fn describe(self) -> string { concat(self.label, self.show()) }
+}
+
+impl timer {
+  fn peek(self) -> int { self.laps }
+}
+
+impl shows for counter {
+  fn show(self) -> string { "ticks=${self.peek()}" }
+}
+
+fn wrap(c: counter) -> int {
+  c.peek()
+}
+
+fn main() -> int {
+  const c = counter { ticks: 7, label: "seven" }
+  const t = timer { laps: 9 }
+  println(c.describe())
+  println("bump=${c.bump(3)}")
+  println("laps=${t.peek()}")
+  println("wrap=${wrap(c)}")
+  0
+}

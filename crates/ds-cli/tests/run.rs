@@ -350,3 +350,25 @@ fn platform_tags_in_run_results_decode_by_name() {
     assert!(ok, "a none result is a successful run (stderr: {err})");
     assert_eq!(out, "none\n");
 }
+
+#[test]
+fn run_refuses_an_order_hidden_overlap_at_check() {
+    // The pair declares clean in source order; the package-level
+    // coherence pass rejects it, so the run stops at the check, never
+    // at lowering or the missing entry.
+    let (ok, out, err) = ds_run(&[
+        "run",
+        "--no-ambient",
+        "tests/fixtures/negative/ds2006_late_bound_pair.ds",
+    ]);
+    assert!(!ok, "an incoherent package exits nonzero");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("DS2006"),
+        "the overlap reports at check: {err}"
+    );
+    assert!(
+        err.contains("the source does not check clean"),
+        "the refusal names the check stage: {err}"
+    );
+}

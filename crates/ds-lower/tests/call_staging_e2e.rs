@@ -67,14 +67,13 @@ fn refused(source: &str, seam: &str, needle: &str) -> LowerError {
             .map(|diag| human(diag, &files))
             .collect::<String>()
     );
-    let error = match lower(
+    let Err(error) = lower(
         "refusal_probe",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("the argument refuses at lowering"),
+    ) else {
+        panic!("the argument refuses at lowering");
     };
     let LowerError::Unsupported { span, .. } = &error else {
         panic!("the refusal is Unsupported, got {error:?}")
@@ -87,7 +86,8 @@ fn refused(source: &str, seam: &str, needle: &str) -> LowerError {
         .find(needle)
         .expect("the needle is in the probe source");
     assert_eq!(
-        span.start, offset as u32,
+        span.start,
+        u32::try_from(offset).expect("probe sources are tiny"),
         "the refusal reports at {needle:?}, not a sentinel span"
     );
     error

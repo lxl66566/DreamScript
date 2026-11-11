@@ -20,6 +20,13 @@
 //! traffic can never observe a half-dead block. No `&mut` borrow of the heap
 //! interior is live across user code - the same discipline the arena half
 //! follows.
+//!
+//! Two consumer surfaces over the same blocks: lexical scopes take
+//! [`Heap::alloc_box`] (the returned [`RcRef`] owns the count), while stores
+//! that keep their own id-to-block mapping (the VM's object table) take
+//! [`Heap::alloc_store`] and drive the count lifecycle through the split dec
+//! ([`Heap::rc_dec_count`] plus [`Heap::rc_dispose`]) so their own death order
+//! can run between the count reaching zero and the payload dying.
 
 use core::{
     alloc::Layout,
@@ -155,6 +162,25 @@ impl Heap {
     /// # Panics
     /// If the global allocator returns null or the block exceeds u32 bytes.
     pub fn alloc_box<T>(&self, value: T, deinit: Option<DeinitFn>) -> RcRef<'_, T> {
+        let header = self.alloc_store(value, deinit);
+        let (_, offset) = block_layout::<T>();
+        // SAFETY: the block carries at least the layout `block_layout`
+        // computed; `offset` is that same layout math, in-bounds and aligned.
+        let payload = unsafe { header.byte_add(offset) }.cast::<T>();
+        RcRef::new(self, header, payload)
+    }
+
+    /// Allocates `value` as a freshly unique counted block whose count
+    /// lifecycle the caller (a store, not a lexical scope) drives: the raw
+    /// form of [`Heap::alloc_box`]. The birth count is 1; a unique death the
+    /// store observes through [`Heap::rc_dec_count`] owes exactly one
+    /// [`Heap::rc_dispose`], which runs `deinit` and pools or releases the
+    /// block.
+    ///
+    /// # Panics
+    /// If the global allocator returns null or the block exceeds u32 bytes.
+    #[must_use = "the header is the block handle; losing it leaks the block"]
+    pub fn alloc_store<T>(&self, value: T, deinit: Option<DeinitFn>) -> NonNull<RcHeader> {
         let (layout, offset) = block_layout::<T>();
         let header = self.alloc_block(layout, deinit);
         // SAFETY: `alloc_block` returned a block of at least `layout.size()`
@@ -164,7 +190,47 @@ impl Heap {
         // SAFETY: `alloc_block` returned memory valid and aligned for the
         // payload layout computed above; the write initializes it.
         unsafe { payload.as_ptr().write(value) };
-        RcRef::new(self, header, payload)
+        header
+    }
+
+    /// The payload of the live block `header` names, borrowed from the heap:
+    /// block addresses are stable for the block's whole life.
+    ///
+    /// # Misuse contract
+    /// `header` must name a live block of this heap carrying a `T` payload;
+    /// the reference must not outlive the block's death, which only the
+    /// owning store or a dropping [`RcRef`] can drive.
+    #[must_use]
+    pub fn payload<T>(&self, header: NonNull<RcHeader>) -> &T {
+        let (_, offset) = block_layout::<T>();
+        // SAFETY: the block is live with an initialized `T` payload at
+        // `offset`; the reference borrows from `&self`, so only the owner's
+        // exclusive window (its `&mut`) can end the block's life.
+        unsafe { &*header.byte_add(offset).cast::<T>().as_ptr() }
+    }
+
+    /// The payload for store-driven in-place mutation. Takes `&mut self` so a
+    /// mutation window never overlaps a live [`Heap::payload`] borrow handed
+    /// out over the same heap.
+    ///
+    /// # Misuse contract
+    /// Same liveness discipline as [`Heap::payload`].
+    #[must_use]
+    pub fn payload_mut<T>(&mut self, header: NonNull<RcHeader>) -> &mut T {
+        let (_, offset) = block_layout::<T>();
+        // SAFETY: live block, initialized `T` payload at `offset`; `&mut self`
+        // makes the window exclusive over every accessor of this heap.
+        unsafe { &mut *header.byte_add(offset).cast::<T>().as_ptr() }
+    }
+
+    /// The live reference count of the block `header` names.
+    ///
+    /// # Misuse contract
+    /// `header` must name a live block of this heap.
+    #[must_use]
+    pub fn rc_count(&self, header: NonNull<RcHeader>) -> u32 {
+        // SAFETY: the header names a live block on this (owning) thread.
+        unsafe { (*header.as_ptr()).rc() }
     }
 
     /// Raw `rc_inc` (C4): one more owner for the block `header` names. The
@@ -195,9 +261,19 @@ impl Heap {
         self.dec(header, payload)
     }
 
-    /// The dec path the drop glue also takes; no `must_use` so drops can
-    /// ignore the death flag.
-    pub(crate) fn dec(&self, header: NonNull<RcHeader>, payload: NonNull<u8>) -> bool {
+    /// The count move of `rc_dec` without the death work: one owner drops, and
+    /// the returned flag names the unique death. The store-facing half of the
+    /// split dec - an owner that drives its own death order (extracting owned
+    /// words before the payload dies) gets `true` exactly once and owes one
+    /// matching [`Heap::rc_dispose`].
+    ///
+    /// # Panics (diag only)
+    /// On count underflow (double drop) or at death with a borrow outstanding.
+    ///
+    /// # Misuse contract
+    /// `header` must name a live block owned by this heap.
+    #[must_use = "the flag promises exactly one rc_dispose; ignoring it leaks the block"]
+    pub fn rc_dec_count(&self, header: NonNull<RcHeader>) -> bool {
         // SAFETY: the header names a live block this heap owns; confined to
         // this thread, and the borrow ends before any user code runs.
         let h = unsafe { &mut *header.as_ptr() };
@@ -207,18 +283,45 @@ impl Heap {
             h.assert_no_borrows();
         }
         h.rc -= 1;
-        if h.rc != 0 {
+        h.rc == 0
+    }
+
+    /// The death work of `rc_dec` for a block whose owner observed the unique
+    /// death ([`Heap::rc_dec_count`] returned `true`): the block's `deinit`
+    /// hook runs exactly once (C5), then the block threads to the reuse pool
+    /// or returns to the system allocator.
+    ///
+    /// # Misuse contract
+    /// One `rc_dispose` per observed unique death; a second one is a double
+    /// free.
+    pub fn rc_dispose<T>(&self, header: NonNull<RcHeader>) {
+        let (_, offset) = block_layout::<T>();
+        // SAFETY: same layout math as the allocation; in-bounds and aligned.
+        let payload = unsafe { header.byte_add(offset) }.cast::<u8>();
+        self.dispose(header, payload);
+    }
+
+    /// The dec path the drop glue also takes; no `must_use` so drops can
+    /// ignore the death flag.
+    pub(crate) fn dec(&self, header: NonNull<RcHeader>, payload: NonNull<u8>) -> bool {
+        if !self.rc_dec_count(header) {
             return false;
         }
-        // Unique death. Deinit runs while the block is dead but not yet
-        // pooled, so reentrant allocation can never hand it out; a panic in
-        // deinit leaks the block (sound: it is neither pooled nor freed).
-        let deinit = h.deinit;
+        self.dispose(header, payload);
+        true
+    }
+
+    /// The shared death tail: the block's `deinit` runs once while the block
+    /// is dead but not yet pooled, so reentrant allocation can never hand it
+    /// out; a panic in deinit leaks the block (sound: it is neither pooled nor
+    /// freed). Then the block threads to the pool or releases.
+    fn dispose(&self, header: NonNull<RcHeader>, payload: NonNull<u8>) {
+        // SAFETY: the header names a dead, allocated block this heap owns.
+        let deinit = unsafe { (*header.as_ptr()).deinit };
         if let Some(deinit) = deinit {
             deinit(payload);
         }
         self.thread_block(header);
-        true
     }
 
     /// Snapshot of both sides of the heap.

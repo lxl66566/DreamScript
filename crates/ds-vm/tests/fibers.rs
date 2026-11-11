@@ -16,6 +16,8 @@
 //!   frame addresses stable across growth.
 //! - the O(1) switch: a parked fiber's top-frame word keeps its address across switch round-trips —
 //!   no stack is ever copied.
+//! - the delivered count: a completing child's `Ref` answer keeps exactly its transferred count
+//!   over the dead child — the crossing mutates no count, and everything else in the child drained.
 //! - hosted-drive honesty: a generic combinator's lambda yielding under `Vm::call_hosted` refuses
 //!   the drive, and the interrupted fiber can never be re-entered — a second resume answers the
 //!   structured fiber refusal, not the sentinel return pc's InvalidPc lie.
@@ -632,4 +634,27 @@ fn a_refused_hosted_drive_leaves_the_fiber_never_resumable() {
             func: hosted.0,
         })
     );
+}
+
+/// A delivered `Ref` keeps exactly its transferred count over its dead
+/// child: the entry frame's KSTR claim rode out with the returned word
+/// (the crossing mutates no count), and everything else in the child
+/// drained at its death walk. A per-fiber heap split must keep this
+/// shape — the child's drain may not free the delivered word's object.
+#[test]
+fn a_delivered_ref_keeps_one_transferred_count_over_a_dead_child() {
+    let mut vm = Vm::new(fb_registry());
+    let child = vm
+        .spawn_fiber("fb", "join_child", &[])
+        .expect("spawn child");
+    let delivered = vm
+        .resume_fiber(child, Value::I64(0))
+        .expect("the child completes");
+    let Value::Ref(id) = delivered else {
+        panic!("a string ref, got {delivered:?}");
+    };
+    assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
+    assert_eq!(vm.objects().rc_at(id), Ok(1));
+    assert_eq!(vm.objects().str_at(id), Ok("done"));
+    assert_eq!(vm.objects().len(), 1, "only the delivered word stays live");
 }

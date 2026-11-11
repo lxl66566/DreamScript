@@ -1,0 +1,12 @@
+error[DS2006]: instance head `list[$u#2]` intersects the `list[$t#1]` instance; witness value type `list[int]`
+ --> tests/fixtures/negative/ds2006_late_bound_pair.ds:16:1
+   |
+16 | impl [u: shows] shows for list[u] {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ overlapping instance
+17 |   fn show(self) -> string { "two" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+18 | }
+   | ^
+   |
+   = note: the earlier instance's head covers `list[$t#1]`; two instances of one trait must be pairwise disjoint [B6]
+   = note: neither declaration could prove the pair; the closure pass over the closed instance set reports it

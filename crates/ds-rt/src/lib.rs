@@ -2,7 +2,7 @@
 //!
 //! Two halves over one per-fiber [`Heap`] owner:
 //!
-//! //! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry,
+//! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry,
 //!   bump alloc, restore on every pop path; chunk-append growth keeps captured
 //!   frame addresses stable; marks are per-fiber so fiber switching needs no
 //!   arena action. The arena module's docs carry the full contract mapping
@@ -19,13 +19,16 @@
 //! before destructive operations, and an Inko-style borrow counter that flags
 //! use during an exclusive window.
 //!
-//! VM seam (recorded deliberately): the VM's object store is a slab table
-//! indexed by `Value::Ref(u32)` words - it carries no inline headers yet, so
-//! the RC machinery here is exposed shape-agnostically (blocks are
-//! header-plus-payload allocations owned by [`Heap`], header layout committed
-//! as `repr(C)` with the dormant two-hook collector word). The ds-vm side -
-//! counts on table entries, or a migration to headered blocks - lands with the
-//! Perceus placement pass in ds-lower.
+//! VM seam: ds-vm's object store consumes the block half as its object
+//! substrate - the store keeps the stable id table (`Value::Ref(u32)` words
+//! index it), and every live id names a counted block here. The store drives
+//! count lifecycles through the raw surface ([`Heap::alloc_store`],
+//! [`Heap::rc_inc_raw`], [`Heap::rc_dec_count`] plus [`Heap::rc_dispose`],
+//! [`Heap::payload`]/[`Heap::payload_mut`]) so its own death order runs
+//! between the count reaching zero and the payload dying; the header layout
+//! is the committed `repr(C)` format carrying the dormant two-hook collector
+//! word. The arena half stays unconsumed until the temporaries stage lands
+//! (per-frame marks and chunk-append growth already fit the fiber substrate).
 //!
 //! Confinement: this crate is the unsafe core of the runtime (`ds-rt` in the
 //! implementation plan); the rest of the workspace consumes it through safe
@@ -47,4 +50,4 @@ mod rc;
 pub use arena::{Arena, ArenaStats, FIRST_CHUNK, MAX_CHUNK, MIN_ALIGN, Mark};
 pub use guard::RestoreOnDrop;
 pub use heap::{Heap, HeapStats, MAX_REUSE_CLASS, MIN_CLASS, POOL_DEPTH};
-pub use rc::{DeinitFn, ExclusiveBorrow, RcHeader, RcRef, SharedBorrow};
+pub use rc::{DeinitFn, ExclusiveBorrow, RcHeader, RcRef, SharedBorrow, drop_deinit};

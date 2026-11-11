@@ -470,37 +470,33 @@ impl Bodies<'_> {
         if start_val.poisoned || end_val.poisoned {
             return None;
         }
-        match (
+        if let (Some((NumericClass::Int, a)), Some((NumericClass::Int, b))) = (
             numeric_class(&self.decls.universe, start_val.ty),
             numeric_class(&self.decls.universe, end_val.ty),
         ) {
-            (Some((NumericClass::Int, a)), Some((NumericClass::Int, b))) => {
-                if a == b {
-                    return Some(start_val.ty);
-                }
-                self.error(
-                    ErrorCode::TypeMismatch,
-                    format!(
-                        "mixed integer widths `{a}` and `{b}`; conversions are explicit [B7]: \
-                         `{a}(x)`"
-                    ),
-                    span,
-                    "width mismatch",
-                );
-            },
-            _ => {
-                let s = self.decls.universe.render(start_val.ty);
-                let e = self.decls.universe.render(end_val.ty);
-                self.error(
-                    ErrorCode::TypeMismatch,
-                    format!(
-                        "range endpoints are integers, `{s}` and `{e}` given; conversions are \
-                         explicit [B7]"
-                    ),
-                    span,
-                    "not integer endpoints",
-                );
-            },
+            if a == b {
+                return Some(start_val.ty);
+            }
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "mixed integer widths `{a}` and `{b}`; conversions are explicit [B7]: `{a}(x)`"
+                ),
+                span,
+                "width mismatch",
+            );
+        } else {
+            let s = self.decls.universe.render(start_val.ty);
+            let e = self.decls.universe.render(end_val.ty);
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "range endpoints are integers, `{s}` and `{e}` given; conversions are \
+                     explicit [B7]"
+                ),
+                span,
+                "not integer endpoints",
+            );
         }
         None
     }

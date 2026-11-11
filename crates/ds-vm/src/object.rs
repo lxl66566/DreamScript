@@ -1,11 +1,16 @@
 //! The VM-side heap object store [BL-2]: the objects raw `Ref` words name.
 //!
-//! Strings and lists are counted heap blocks (C4): every object carries a
-//! precise non-atomic reference count, RCINC/RCDEC move it, and a count
-//! reaching zero frees the object — its slot enters a free list and the
-//! next allocation claims it (the dec-to-alloc pairing runs inside this
-//! table, so no alloc-at uop exists in the ISA). Free order is
-//! deterministic: drops happen in program order and the free list is
+//! Identity is the id table: a `Value::Ref(u32)` word is an index into
+//! `table`, and every live entry names one counted block of the ds-rt heap —
+//! header plus payload in one allocation, the `repr(C)` layout a later JIT
+//! can inline. The count lives in the block header, RCINC/RCDEC route
+//! through ds-rt's rc surface, and a count reaching zero frees the object:
+//! the id threads the table's free list (the next allocation claims it —
+//! the dec-to-alloc pairing runs inside this table, so no alloc-at uop
+//! exists in the ISA) while the block's memory pools in ds-rt's
+//! size-class freelist (LIFO, depth-capped) for the next compatible
+//! allocation, the `alloc_at` pattern. Free order is deterministic: drops
+//! happen in program order, and both free lists are
 //! last-freed-first-reused.
 //!
 //! A list is one object with its element words inline — the ruled shape;
@@ -21,12 +26,25 @@
 //! string removes its intern entry so the next load of the same content
 //! reborns a fresh object.
 //!
+//! The store drives each block's count lifecycle through ds-rt's split
+//! dec: a unique death observed at `rc_dec_count` runs the store's death
+//! work first (unbind the intern entry, extract the owned `Ref` words,
+//! thread the id) and owes exactly one `rc_dispose`, which drops the
+//! payload's Rust memory and pools the block. The death cascade runs on
+//! an explicit work stack — a composite's owned counts drop in a loop
+//! instead of native recursion, so a deeply nested structure dies in
+//! bounded stack (the heap bounds the stack, and the free order stays
+//! the recursive depth-first one: each owner's children fully before
+//! the next sibling).
+//!
 //! Counts are non-atomic: one `Objects` store belongs to one VM on one
-//! thread [C4]. The `diag` feature arms the balance tripwires (rc
-//! underflow/overflow asserts) the way `ds-rt`'s diag layer does;
-//! without it they stay debug assertions.
+//! thread [C4]. The `diag` feature arms ds-rt's balance tripwires (rc
+//! underflow/overflow asserts, the borrow-at-death check); the store
+//! holds no borrows, so a firing tripwire is a balance bug.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fmt, ptr::NonNull, time::Duration};
+
+use ds_rt::{Heap, RcHeader, drop_deinit};
 
 use crate::{
     net::Connections,
@@ -118,8 +136,10 @@ impl CharIndex {
     }
 }
 
-/// One heap object: live payloads, or a freed slot threading the free
-/// list.
+/// One heap object payload: the block body behind a live table id. One
+/// payload type serves every kind, so every block shares one layout —
+/// one payload offset, one class in ds-rt's reuse pool, one death hook
+/// (the payload's own drop glue through [`drop_deinit`]).
 #[derive(Debug)]
 enum Object {
     /// A string: the text plus its lazily built char-boundary map.
@@ -128,7 +148,7 @@ enum Object {
     /// the value a capturing lambda's slot holds.
     Closure(Closure),
     /// A list: one heap object — len, capacity, and the element words
-    /// inline in a single table entry. The one in-place mutation is the
+    /// inline in a single block payload. The one in-place mutation is the
     /// append behind list literals ([`Objects::push_list`], the
     /// compiler-disciplined construction append over a freshly built
     /// list); every other mutation stays reserved for the exclusive
@@ -143,18 +163,24 @@ enum Object {
     /// are one key), every other word by identity — so scalar and
     /// reference keys never collide across kinds.
     Map(Vec<(Value, Value)>),
-    /// A freed slot: the next freed slot's index, or [`NO_FREE`]. The
-    /// payload died when the slot freed, so its content was released.
+}
+
+/// One id-table entry: a live id names the header of its ds-rt block
+/// (the payload sits at the block's fixed payload offset, and the kind
+/// lives in the payload), or a freed id threads the free list.
+#[derive(Clone, Copy, Debug)]
+enum Slot {
+    Live(NonNull<RcHeader>),
     Free(u32),
 }
 
-/// The heap: the object table, its per-object reference counts, the free
-/// list threading freed slots, and the string intern map.
-#[derive(Debug, Default)]
+/// The heap: the id table over ds-rt's counted blocks, the table's free
+/// list threading freed ids, and the string intern map.
+#[derive(Default)]
 pub struct Objects {
     interned: HashMap<Box<str>, u32>,
-    table: Vec<Object>,
-    rc: Vec<u32>,
+    table: Vec<Slot>,
+    heap: Heap,
     free_head: Option<u32>,
     live: usize,
     /// The connection table of the net natives ([`crate::net`]): sockets
@@ -165,6 +191,29 @@ pub struct Objects {
     net: Connections,
 }
 
+impl fmt::Debug for Objects {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Objects")
+            .field("live", &self.live)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Objects {
+    /// The store dies whole: every live block disposes exactly once (its
+    /// payload's Rust memory drops, the block pools or releases), with no
+    /// count moves — sibling blocks are dying in the same walk, so owned
+    /// words owe nothing.
+    fn drop(&mut self) {
+        for slot in &mut self.table {
+            if let Slot::Live(header) = *slot {
+                self.heap.rc_dispose::<Object>(header);
+                *slot = Slot::Free(NO_FREE);
+            }
+        }
+    }
+}
+
 impl Objects {
     /// An empty heap.
     #[must_use]
@@ -172,7 +221,7 @@ impl Objects {
         Self::default()
     }
 
-    /// How many objects are live (a freed slot counts only when reused).
+    /// How many objects are live (a freed id counts only when reused).
     #[must_use]
     pub fn len(&self) -> usize {
         self.live
@@ -184,6 +233,22 @@ impl Objects {
         self.live == 0
     }
 
+    /// The payload of the live object `obj` names, if it names one.
+    fn payload_of(&self, obj: u32) -> Option<&Object> {
+        match self.table.get(obj as usize) {
+            Some(Slot::Live(header)) => Some(self.heap.payload::<Object>(*header)),
+            _ => None,
+        }
+    }
+
+    /// The block header of the live object `obj` names.
+    fn header_of(&self, obj: u32) -> Result<NonNull<RcHeader>, Trap> {
+        match self.table.get(obj as usize) {
+            Some(Slot::Live(header)) => Ok(*header),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// The live reference count of object `obj`.
     ///
     /// # Errors
@@ -191,32 +256,26 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no live object.
     #[must_use = "the count is the witness"]
     pub fn rc_at(&self, obj: u32) -> Result<u32, Trap> {
-        match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {
-                Ok(self.rc[obj as usize])
-            },
-            _ => Err(Trap::UnknownObject { obj }),
-        }
+        Ok(self.heap.rc_count(self.header_of(obj)?))
     }
 
-    /// Claims one slot for `object`: the free list first (the
-    /// dec-to-alloc pairing), the table tail otherwise. The birth count
-    /// is 1 — the caller owns the object.
+    /// Claims one id for a fresh block of `object`: the free list first
+    /// (the dec-to-alloc pairing), the table tail otherwise. The block's
+    /// birth count is 1 — the caller owns the object.
     fn alloc(&mut self, object: Object) -> u32 {
+        let header = self.heap.alloc_store(object, Some(drop_deinit::<Object>()));
         let id = if let Some(id) = self.free_head {
-            let Object::Free(next) = self.table[id as usize] else {
+            let Slot::Free(next) = self.table[id as usize] else {
                 unreachable!("the free list head is a freed slot");
             };
             self.free_head = (next != NO_FREE).then_some(next);
-            self.table[id as usize] = object;
+            self.table[id as usize] = Slot::Live(header);
             id
         } else {
             let id = u32::try_from(self.table.len()).expect("object table exceeds u32");
-            self.table.push(object);
-            self.rc.push(1);
+            self.table.push(Slot::Live(header));
             id
         };
-        self.rc[id as usize] = 1;
         self.live += 1;
         id
     }
@@ -282,104 +341,81 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no live object:
     /// hand-assembled code or a host argument carried a bogus `Ref` word.
     pub fn inc(&mut self, obj: u32) -> Result<(), Trap> {
-        match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {},
-            _ => return Err(Trap::UnknownObject { obj }),
-        }
-        let rc = &mut self.rc[obj as usize];
-        // u32::MAX doubles as the diag overflow tripwire; wrapping keeps
-        // the release build branch-free for a state only a balance bug
-        // reaches.
-        #[cfg(feature = "diag")]
-        assert!(*rc != u32::MAX, "ds-vm diag: rc overflow (unbalanced inc)");
-        #[cfg(not(feature = "diag"))]
-        debug_assert!(*rc != u32::MAX);
-        *rc = rc.wrapping_add(1);
+        self.heap.rc_inc_raw(self.header_of(obj)?);
         Ok(())
     }
 
     /// `rc_dec` (C4): one owner drops. A unique death frees the object —
-    /// a string releases its content and its intern entry, a list drops
-    /// one count per `Ref` element it holds — and threads the slot into
-    /// the free list (the next compatible allocation claims it).
+    /// a string unbinds its intern entry, a list drops one count per
+    /// `Ref` element it holds — and threads the id onto the free list
+    /// (the next compatible allocation claims it) while the block's
+    /// memory pools in ds-rt's size-class reuse.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no live object
-    /// (a double drop of a freed object lands here: the slot is `Free`).
+    /// (a double drop of a freed object lands here: the id is `Free`).
     pub fn dec(&mut self, obj: u32) -> Result<(), Trap> {
-        match self.table.get(obj as usize) {
-            Some(Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_)) => {},
-            _ => return Err(Trap::UnknownObject { obj }),
-        }
-        let rc = &mut self.rc[obj as usize];
-        #[cfg(feature = "diag")]
-        assert!(*rc > 0, "ds-vm diag: rc underflow (double drop)");
-        #[cfg(not(feature = "diag"))]
-        debug_assert!(*rc > 0);
-        *rc -= 1;
-        if *rc == 0 {
-            self.free(obj);
+        let header = self.header_of(obj)?;
+        if self.heap.rc_dec_count(header) {
+            self.free(obj, header);
         }
         Ok(())
     }
 
-    /// The unique death: releases the payload, unbinds the intern entry,
-    /// and threads the slot onto the free list. The death cascade runs on
-    /// an explicit work stack — a composite's owned counts drop in a loop
-    /// instead of native recursion, so a deeply nested structure dies in
-    /// bounded stack (the heap bounds the stack, and the free order stays
-    /// the recursive depth-first one: each owner's children fully before
+    /// The unique death: unbinds the intern entry, threads the id onto
+    /// the free list, extracts the payload's owned `Ref` words, then
+    /// disposes the block (ds-rt runs the payload's death hook and pools
+    /// the memory). The death cascade runs on an explicit work stack —
+    /// a composite's owned counts drop in a loop instead of native
+    /// recursion, so a deeply nested structure dies in bounded stack
+    /// (the heap bounds the stack, and the free order stays the
+    /// recursive depth-first one: each owner's children fully before
     /// the next sibling).
-    fn free(&mut self, obj: u32) {
-        let mut dying = vec![obj];
-        while let Some(id) = dying.pop() {
+    fn free(&mut self, obj: u32, header: NonNull<RcHeader>) {
+        let mut dying: Vec<(u32, NonNull<RcHeader>)> = vec![(obj, header)];
+        while let Some((id, header)) = dying.pop() {
             // an interned entry pointing here must not outlive the object:
             // the next intern of the same content allocates a fresh one
-            if let Object::Str(s) = &self.table[id as usize] {
+            if let Object::Str(s) = self.heap.payload::<Object>(header) {
                 if self.interned.get(&*s.text) == Some(&id) {
                     self.interned.remove(&*s.text);
                 }
             }
             let next = self.free_head.unwrap_or(NO_FREE);
             self.free_head = Some(id);
-            let taken = std::mem::replace(&mut self.table[id as usize], Object::Free(next));
+            self.table[id as usize] = Slot::Free(next);
             self.live -= 1;
-            // one owned count per Ref word drops here (C4): lists per
-            // element, maps per key and value word, closures per capture.
-            // The dec is inlined so a zero queues the object instead of
-            // recursing; a stored reference is live by construction, and
-            // the kind check keeps the double-drop tripwire
-            let words: Vec<Value> = match taken {
-                Object::List(elems) => elems,
+            // the owned words leave the payload before it dies, so the
+            // block's death hook drops only empty containers
+            let words: Vec<Value> = match self.heap.payload_mut::<Object>(header) {
+                Object::List(elems) => std::mem::take(elems),
                 Object::Map(pairs) => pairs
-                    .into_iter()
+                    .drain(..)
                     .flat_map(|(key, value)| [key, value])
                     .collect(),
-                Object::Closure(closure) => closure.captures,
-                Object::Str(_) | Object::Free(_) => Vec::new(),
+                Object::Closure(closure) => std::mem::take(&mut closure.captures),
+                Object::Str(_) => Vec::new(),
             };
-            let mut zeros: Vec<u32> = Vec::new();
+            // the block's death hook (the payload's own drop glue) runs,
+            // then the memory pools for the next compatible allocation
+            self.heap.rc_dispose::<Object>(header);
+            // one owned count per Ref word drops here (C4): lists per
+            // element, maps per key and value word, closures per capture.
+            // The dec is split so a zero queues the object instead of
+            // recursing; a stored reference is live by construction, and
+            // the id check keeps the double-drop tripwire
+            let mut zeros: Vec<(u32, NonNull<RcHeader>)> = Vec::new();
             for word in words {
                 let Value::Ref(child) = word else {
                     continue;
                 };
-                match self.table.get(child as usize) {
-                    Some(
-                        Object::Str(_) | Object::List(_) | Object::Map(_) | Object::Closure(_),
-                    ) => {},
+                let child_header = match self.table.get(child as usize) {
+                    Some(Slot::Live(header)) => *header,
                     _ => panic!("a stored element reference is live"),
-                }
-                #[cfg(feature = "diag")]
-                assert!(
-                    self.rc[child as usize] > 0,
-                    "ds-vm diag: rc underflow (double drop)"
-                );
-                #[cfg(not(feature = "diag"))]
-                debug_assert!(self.rc[child as usize] > 0);
-                self.rc[child as usize] -= 1;
-                if self.rc[child as usize] == 0 {
-                    zeros.push(child);
+                };
+                if self.heap.rc_dec_count(child_header) {
+                    zeros.push((child, child_header));
                 }
             }
             // reverse push pops in owned order: the first child's whole
@@ -400,7 +436,8 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no list object.
     pub fn push_list(&mut self, obj: u32, value: Value) -> Result<(), Trap> {
-        if !matches!(self.table.get(obj as usize), Some(Object::List(_))) {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) {
             return Err(Trap::UnknownObject { obj });
         }
         // the acquire happens before the store: a bogus element reference
@@ -408,10 +445,10 @@ impl Objects {
         if let Value::Ref(id) = value {
             self.inc(id)?;
         }
-        let Some(Object::List(elems)) = self.table.get_mut(obj as usize) else {
-            return Err(Trap::UnknownObject { obj });
-        };
-        elems.push(value);
+        match self.heap.payload_mut::<Object>(header) {
+            Object::List(elems) => elems.push(value),
+            _ => return Err(Trap::UnknownObject { obj }),
+        }
         Ok(())
     }
 
@@ -457,7 +494,7 @@ impl Objects {
     /// object: hand-assembled code or a host argument carried a bogus
     /// `Ref` word.
     pub fn str_at(&self, obj: u32) -> Result<&str, Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Str(s)) => Ok(&s.text),
             _ => Err(Trap::UnknownObject { obj }),
         }
@@ -501,12 +538,14 @@ impl Objects {
     /// Builds the char-boundary map of string object `obj` unless it
     /// already exists.
     fn ensure_char_index(&mut self, obj: u32) -> Result<(), Trap> {
-        if matches!(self.table.get(obj as usize), Some(Object::Str(s)) if s.chars.is_some()) {
+        let header = self.header_of(obj)?;
+        if matches!(self.heap.payload::<Object>(header), Object::Str(s) if s.chars.is_some()) {
             return Ok(());
         }
         let built = CharIndex::build(self.str_at(obj)?);
-        if let Some(Object::Str(s)) = self.table.get_mut(obj as usize) {
-            s.chars = Some(built);
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Str(s) => s.chars = Some(built),
+            _ => return Err(Trap::UnknownObject { obj }),
         }
         Ok(())
     }
@@ -515,7 +554,7 @@ impl Objects {
     /// caller built the map first (a char-indexed query's private
     /// invariant, not a promise to embedders).
     fn str_with_chars(&self, obj: u32) -> Result<(&str, &CharIndex), Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Str(s)) => Ok((
                 &s.text,
                 s.chars
@@ -532,7 +571,7 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no live list object.
     pub fn list_at(&self, obj: u32) -> Result<&[Value], Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::List(elems)) => Ok(elems),
             _ => Err(Trap::UnknownObject { obj }),
         }
@@ -558,7 +597,7 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no closure object
     /// (out of range, or the object is not a closure).
     pub fn closure_at(&self, obj: u32) -> Result<(FuncRef, &[Value]), Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Closure(closure)) => Ok((closure.func, &closure.captures)),
             _ => Err(Trap::UnknownObject { obj }),
         }
@@ -569,7 +608,7 @@ impl Objects {
     /// servable only while its content still matches, so a dead or
     /// recycled id never serves.
     pub(crate) fn is_live_str_with(&self, obj: u32, text: &str) -> bool {
-        matches!(self.table.get(obj as usize), Some(Object::Str(s)) if &*s.text == text)
+        matches!(self.payload_of(obj), Some(Object::Str(s)) if &*s.text == text)
     }
 
     /// Whether two key words name the same key: string references compare
@@ -577,11 +616,9 @@ impl Objects {
     /// every other word by identity — mixed kinds never match.
     fn key_matches(&self, stored: Value, probe: Value) -> bool {
         match (stored, probe) {
-            (Value::Ref(a), Value::Ref(b)) => {
-                match (self.table.get(a as usize), self.table.get(b as usize)) {
-                    (Some(Object::Str(x)), Some(Object::Str(y))) => x.text == y.text,
-                    _ => a == b,
-                }
+            (Value::Ref(a), Value::Ref(b)) => match (self.payload_of(a), self.payload_of(b)) {
+                (Some(Object::Str(x)), Some(Object::Str(y))) => x.text == y.text,
+                _ => a == b,
             },
             _ => stored == probe,
         }
@@ -600,9 +637,14 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
     pub fn set_map(&mut self, obj: u32, key: Value, value: Value) -> Result<(), Trap> {
-        if !matches!(self.table.get(obj as usize), Some(Object::Map(_))) {
-            return Err(Trap::UnknownObject { obj });
-        }
+        let header = match self.table.get(obj as usize) {
+            Some(Slot::Live(header))
+                if matches!(self.heap.payload::<Object>(*header), Object::Map(_)) =>
+            {
+                *header
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
         if let Some(at) = self.map_pair_at(obj, key)? {
             // the store acquires for the map first, whatever it replaces:
             // a value word arriving with its caller's count must not ride
@@ -610,10 +652,10 @@ impl Objects {
             if let Value::Ref(id) = value {
                 self.inc(id)?;
             }
-            let Object::Map(pairs) = &mut self.table[obj as usize] else {
-                return Err(Trap::UnknownObject { obj });
+            let old = match self.heap.payload_mut::<Object>(header) {
+                Object::Map(pairs) => std::mem::replace(&mut pairs[at].1, value),
+                _ => return Err(Trap::UnknownObject { obj }),
             };
-            let old = std::mem::replace(&mut pairs[at].1, value);
             if let Value::Ref(id) = old {
                 self.dec(id).expect("a stored pair reference is live");
             }
@@ -627,16 +669,16 @@ impl Objects {
         if let Value::Ref(id) = value {
             self.inc(id)?;
         }
-        let Object::Map(pairs) = &mut self.table[obj as usize] else {
-            return Err(Trap::UnknownObject { obj });
-        };
-        pairs.push((key, value));
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Map(pairs) => pairs.push((key, value)),
+            _ => return Err(Trap::UnknownObject { obj }),
+        }
         Ok(())
     }
 
     /// The entry position of `key` in map object `obj`, if present.
     fn map_pair_at(&self, obj: u32, key: Value) -> Result<Option<usize>, Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Map(pairs)) => Ok(pairs
                 .iter()
                 .position(|(stored, _)| self.key_matches(*stored, key))),
@@ -652,7 +694,7 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
     pub fn map_at(&self, obj: u32, key: Value) -> Result<Option<Value>, Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Map(pairs)) => Ok(pairs
                 .iter()
                 .find(|(stored, _)| self.key_matches(*stored, key))
@@ -667,7 +709,7 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
     pub fn map_pairs(&self, obj: u32) -> Result<&[(Value, Value)], Trap> {
-        match self.table.get(obj as usize) {
+        match self.payload_of(obj) {
             Some(Object::Map(pairs)) => Ok(pairs),
             _ => Err(Trap::UnknownObject { obj }),
         }
@@ -757,10 +799,10 @@ mod tests {
         );
     }
 
-    /// A count reaching zero frees the object: the slot reuses on the
-    /// next allocation, a freed reference names no object, and a dying
-    /// interned string unbinds its intern entry (the next load of the
-    /// same content reborns fresh).
+    /// A count reaching zero frees the object: the id reuses on the next
+    /// allocation, a freed reference names no object, and a dying interned
+    /// string unbinds its intern entry (the next load of the same content
+    /// reborns fresh).
     #[test]
     fn a_unique_death_frees_and_the_slot_reuses() {
         let mut objects = Objects::new();
@@ -770,10 +812,10 @@ mod tests {
         assert_eq!(objects.str_at(a), Err(Trap::UnknownObject { obj: a }));
         assert!(objects.is_empty(), "the heap drains");
         assert_eq!(objects.dec(a), Err(Trap::UnknownObject { obj: a }));
-        // the reborn literal is a fresh object — but the freed slot
-        // reuses for it (the dec-to-alloc pairing)
+        // the reborn literal is a fresh object — but the freed id reuses
+        // for it (the dec-to-alloc pairing)
         let b = objects.intern("gone");
-        assert_eq!(a, b, "the freed slot is claimed by the next allocation");
+        assert_eq!(a, b, "the freed id is claimed by the next allocation");
         assert_eq!(objects.str_at(b), Ok("gone"));
     }
 

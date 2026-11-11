@@ -9,15 +9,15 @@
 //! substitution, resolved from the checker-recorded bounds) ahead of
 //! the instance word, and the body's nested calls on the bound variable
 //! dispatch at runtime through the staged slot (the sentinel FuncRef
-//! the CALLG carries names the frame's evidence slot). Refusals stay
-//! honest: an inherent dot-call refuses at lowering (no instance
-//! exists for it), and the out-of-scope generic shapes refuse naming
-//! their seams.
+//! the CALLG carries names the frame's evidence slot). Inherent
+//! dot-calls no longer refuse here: the inherent dispatch surface has
+//! its own end-to-end suite, and the out-of-scope generic shapes still
+//! refuse naming their seams.
 
 use ds_abi::{ConstIdx, Uop};
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, Lowered, PlacedOp, lower};
+use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
@@ -238,20 +238,18 @@ fn user_instance_evidence_words_are_instance_ids() {
     );
 }
 
-/// An inherent dot-call refuses at lowering naming the seam: no instance
-/// exists for an inherent impl, so no solved dispatch records one.
+/// An inherent dot-call lowers this round: the body plans under its
+/// two-part mangle and the call site is a plain local call (the
+/// end-to-end run lives in the inherent dispatch suite).
 #[test]
-fn an_inherent_method_call_refuses_with_the_seam_named() {
+fn an_inherent_dot_call_lowers_through_the_local_callee_path() {
     let source = concat!(
         "tag int\n",
-        "tag string\n",
         "struct counter { ticks: int }\n",
-        "extern fn println (s: string) -> ()\n",
-        "extern fn str[t] (v: t) -> string\n",
         "impl counter { fn peek(self) -> int { self.ticks } }\n",
-        "fn main() -> () {\n",
+        "fn main() -> int {\n",
         "  const c = counter { ticks: 1 }\n",
-        "  println(str(c.peek()))\n",
+        "  c.peek()\n",
         "}\n",
     );
     let mut files = Files::new();
@@ -268,21 +266,17 @@ fn an_inherent_method_call_refuses_with_the_seam_named() {
             .map(|diag| human(diag, &files))
             .collect::<String>()
     );
-    let Err(err) = lower(
+    let lowered = lower(
         "inherent",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) else {
-        panic!("inherent bodies did not lower this round")
-    };
+    )
+    .expect("inherent bodies lower this round");
     assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
-    );
-    assert!(
-        err.to_string().contains("an inherent method call"),
-        "the refusal names the inherent boundary: {err}"
+        lowered.functions().contains(&"counter#peek".to_owned()),
+        "the inherent mangle is two-part (table: {:?})",
+        lowered.functions()
     );
 }
 
@@ -294,7 +288,7 @@ fn an_inherent_method_call_refuses_with_the_seam_named() {
 #[test]
 fn two_instantiations_run_through_one_generic_body() {
     let (_, lowered) = lower_generic();
-    let mut vm = run_lowered(&GENERIC_SOURCE, &lowered);
+    let mut vm = run_lowered(GENERIC_SOURCE, &lowered);
     assert_eq!(
         vm.run("generic_impl_probe", "main", &[]),
         Ok(Value::I64(0)),

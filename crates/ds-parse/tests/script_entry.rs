@@ -39,9 +39,10 @@ fn script(src: &str) -> Ast {
 fn err(src: &str, entry: bool) -> (ErrorCode, Vec<Location>, usize) {
     let mut files = Files::new();
     let file = files.add_source("t.ds", src);
-    let diags = match entry {
-        true => parse_script(&files, file).expect_err("should fail"),
-        false => parse(&files, file).expect_err("should fail"),
+    let diags = if entry {
+        parse_script(&files, file).expect_err("should fail")
+    } else {
+        parse(&files, file).expect_err("should fail")
     };
     let first = &diags[0];
     (
@@ -91,7 +92,7 @@ fn library_mode_rejects_a_top_level_statement() {
     assert_eq!(code, ErrorCode::TopLevelStatement);
     assert_eq!(labels, 1);
     assert_eq!((at[0].line, at[0].col), (1, 1));
-    assert!(script("answer\n").blocks.len() == 1);
+    assert_eq!(script("answer\n").blocks.len(), 1);
 }
 
 #[test]

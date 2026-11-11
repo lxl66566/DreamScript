@@ -262,19 +262,6 @@ fn name_of(index: usize, total: usize) -> String {
 /// 3=generic evidence instance, 4=small i64, 5=edge i64, 6=plain f64,
 /// 7=edge f64, 8=false, 9=true, 10=short string.
 fn build_pool(rng: &mut Stream, plan: &Plan, garbage: bool) -> Pool {
-    let mut constants: Vec<Constant> = vec![
-        Constant::I64(0),
-        Constant::I64(1),
-        Constant::I64(rng.below(5) as i64), // loop trip count, 0..=4
-        Constant::I64(rng.below(5) as i64), // generic evidence instance
-        Constant::I64(rng.below(32) as i64 - 16),
-        Constant::I64([i64::MIN, i64::MAX, 1_000_000][rng.below(3)]),
-        Constant::F64([0.5, -2.25, 17.25, 1e10][rng.below(4)]),
-        Constant::F64([f64::NAN, f64::INFINITY, f64::MAX, -0.0][rng.below(4)]),
-        Constant::Bool(false),
-        Constant::Bool(true),
-        Constant::Str(["", "a", "abcd", "hello world"][rng.below(4)].into()),
-    ];
     fn push(constants: &mut Vec<Constant>, module: &str, func: u32) -> u16 {
         constants.push(Constant::FuncRef {
             module: module.to_owned(),
@@ -283,9 +270,29 @@ fn build_pool(rng: &mut Stream, plan: &Plan, garbage: bool) -> Pool {
         u16::try_from(constants.len() - 1).expect("pools stay far below u16")
     }
 
+    let mut constants: Vec<Constant> = vec![
+        Constant::I64(0),
+        Constant::I64(1),
+        Constant::I64(i64::try_from(rng.below(5)).expect("rng bounds are tiny")), /* loop trip count, 0..=4 */
+        Constant::I64(i64::try_from(rng.below(5)).expect("rng bounds are tiny")), /* generic evidence instance */
+        Constant::I64(i64::try_from(rng.below(32)).expect("rng bounds are tiny") - 16),
+        Constant::I64([i64::MIN, i64::MAX, 1_000_000][rng.below(3)]),
+        Constant::F64([0.5, -2.25, 17.25, 1e10][rng.below(4)]),
+        Constant::F64([f64::NAN, f64::INFINITY, f64::MAX, -0.0][rng.below(4)]),
+        Constant::Bool(false),
+        Constant::Bool(true),
+        Constant::Str(["", "a", "abcd", "hello world"][rng.below(4)].into()),
+    ];
     let mut down = Vec::new();
     for j in 0..plan.index {
-        down.push((push(&mut constants, "", j as u32), j));
+        down.push((
+            push(
+                &mut constants,
+                "",
+                u32::try_from(j).expect("function tables are tiny"),
+            ),
+            j,
+        ));
     }
     let self_kidx = (plan.index == 0 && !plan.has_loop).then(|| push(&mut constants, "", 0));
     let fn_kidx = (!plan.has_loop).then(|| push(&mut constants, "", 0));
@@ -359,10 +366,10 @@ fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -
     if plan.has_loop {
         // the countdown: counter/one/zero/flag live in the reserved block
         let (c, one, zero, flag) = (
-            plan.body_span as u8,
-            (plan.body_span + 1) as u8,
-            (plan.body_span + 2) as u8,
-            (plan.body_span + 3) as u8,
+            u8::try_from(plan.body_span).expect("slot indices are tiny"),
+            u8::try_from(plan.body_span + 1).expect("slot indices are tiny"),
+            u8::try_from(plan.body_span + 2).expect("slot indices are tiny"),
+            u8::try_from(plan.body_span + 3).expect("slot indices are tiny"),
         );
         code.push(
             Uop::Kimm {
@@ -385,11 +392,11 @@ fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -
             }
             .into(),
         );
-        let head = code.len() as u32;
+        let head = u32::try_from(code.len()).expect("generated bodies are tiny");
         for _ in 0..loop_body {
             emit(&mut code, rng, &mut budgets);
         }
-        let tail = code.len() as u32;
+        let tail = u32::try_from(code.len()).expect("generated bodies are tiny");
         code.push(
             Uop::SubI64 {
                 dst: c,
@@ -444,7 +451,7 @@ fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -
         }
         .into(),
     );
-    debug_assert!(code.len() >= total as usize);
+    debug_assert!(code.len() >= total);
 
     let layout =
         FrameLayout::new(plan.slots.clone(), plan.params, plan.arg_area).expect("consistent");
@@ -471,25 +478,31 @@ fn emit_op(
     // rare kidx drift exercises the load-time pool checks without often
     // killing the whole install
     let drift = |kidx: u16, rng: &mut Stream| -> u16 {
-        if rng.below(128) == 0 { rng.below(pool.constants.len() + 4) as u16 } else { kidx }
+        if rng.below(128) == 0 {
+            u16::try_from(rng.below(pool.constants.len() + 4)).expect("pools stay far below u16")
+        } else {
+            kidx
+        }
     };
     let dst = |rng: &mut Stream| plan.dst(rng.below(plan.dst_span()));
     let src = |rng: &mut Stream| plan.src(rng.below(plan.slots.len()));
-    let pc = code.len() as u32;
+    let pc = u32::try_from(code.len()).expect("generated bodies are tiny");
     let pick = rng.below(66);
     let inst = match pick {
         0..=7 => Uop::Kimm {
             dst: plan.typed_dst(rng, SlotType::I64),
-            kidx: ConstIdx(drift(rng.below(6) as u16, rng)),
+            kidx: ConstIdx(drift(
+                u16::try_from(rng.below(6)).expect("rng bounds are tiny"),
+                rng,
+            )),
         },
         8..=11 => {
-            let base = 6 + rng.below(4) as u16; // f64/bool entries
-            let (kidx, want) = if rng.below(8) == 0 && pool.fn_kidx.is_some() {
-                (pool.fn_kidx.expect("checked"), SlotType::Fn)
-            } else if base < 8 {
-                (base, SlotType::F64)
-            } else {
-                (base, SlotType::Bool)
+            let base = 6 + u16::try_from(rng.below(4)).expect("rng bounds are tiny"); // f64/bool entries
+            let draw_fn = rng.below(8) == 0;
+            let (kidx, want) = match pool.fn_kidx {
+                Some(fn_kidx) if draw_fn => (fn_kidx, SlotType::Fn),
+                _ if base < 8 => (base, SlotType::F64),
+                _ => (base, SlotType::Bool),
             };
             Uop::Kconst {
                 dst: plan.typed_dst(rng, want),
@@ -565,11 +578,15 @@ fn emit_op(
         37 => Uop::ClosureNew {
             dst: plan.typed_dst(rng, SlotType::Ref),
             func: src(rng),
-            n: rng.below(3) as u8,
+            n: u8::try_from(rng.below(3)).expect("rng bounds are tiny"),
         },
         38..=40 => {
             // small module tags mostly; the platform band 250..=255 rarely
-            let tag = if rng.below(8) == 0 { 250 + rng.below(6) } else { rng.below(5) } as u8;
+            let tag = if rng.below(8) == 0 {
+                250 + u8::try_from(rng.below(6)).expect("rng bounds are tiny")
+            } else {
+                u8::try_from(rng.below(5)).expect("rng bounds are tiny")
+            };
             match pick {
                 38 => Uop::TagTest {
                     dst: plan.typed_dst(rng, SlotType::Bool),
@@ -617,7 +634,7 @@ fn emit_op(
             // live pc past the fixed-part `total`, and then pc+1 (the final
             // stop still to come) is the only safe landing
             let span = total.saturating_sub(pc + 1).max(1) as usize;
-            let target = pc + 1 + rng.below(span) as u32;
+            let target = pc + 1 + u32::try_from(rng.below(span)).expect("rng bounds are tiny");
             let cond = src(rng);
             match rng.below(3) {
                 0 => Uop::Jmp { target },
@@ -633,13 +650,13 @@ fn emit_op(
         63 => {
             // the span must fit the callee's own frame (a load-time fact);
             // a frame too small for the widest span falls back to a Ret
-            let n = 1 + rng.below(2) as u8;
+            let n = 1 + u8::try_from(rng.below(2)).expect("rng bounds are tiny");
             let max_src = plan.slots.len().saturating_sub(usize::from(n));
             if usize::from(n) > plan.slots.len() {
                 Uop::Ret { src: src(rng) }
             } else {
                 Uop::RetSpan {
-                    src: rng.below(max_src + 1) as u8,
+                    src: u8::try_from(rng.below(max_src + 1)).expect("slot indices are tiny"),
                     n,
                 }
             }
@@ -725,7 +742,7 @@ fn fallback_load(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan) {
     code.push(
         Uop::Kimm {
             dst: plan.dst(rng.below(plan.dst_span())),
-            kidx: ConstIdx(rng.below(6) as u16),
+            kidx: ConstIdx(u16::try_from(rng.below(6)).expect("rng bounds are tiny")),
         }
         .into(),
     );
@@ -770,7 +787,7 @@ fn emit_call(
     let nargs = if rng.below(4) > 0 {
         u8::try_from(params).expect("native arities are tiny")
     } else {
-        rng.below(4) as u8
+        u8::try_from(rng.below(4)).expect("rng bounds are tiny")
     };
     code.push(
         Uop::Call {
@@ -806,7 +823,7 @@ fn emit_callt(
     let nargs = if rng.below(4) > 0 {
         u8::try_from(params).expect("native arities are tiny")
     } else {
-        rng.below(4) as u8
+        u8::try_from(rng.below(4)).expect("rng bounds are tiny")
     };
     code.push(
         Uop::Callt {
@@ -819,7 +836,11 @@ fn emit_callt(
 
 fn emit_callg(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, pool: &Pool) {
     let (kidx, _index, params, evidence) = pool.generic;
-    let nargs = if rng.below(4) > 0 { params } else { rng.below(4) as u8 };
+    let nargs = if rng.below(4) > 0 {
+        params
+    } else {
+        u8::try_from(rng.below(4)).expect("rng bounds are tiny")
+    };
     if rng.below(2) == 0 {
         // stage a string receiver and valid instance evidence words so the
         // generic bodies (len[str] first) genuinely execute
@@ -827,7 +848,7 @@ fn emit_callg(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, pool: &Pool) 
         if usize::from(nargs) >= 1 && start < plan.slots.len() {
             code.push(
                 Uop::Kstr {
-                    dst: start as u8,
+                    dst: u8::try_from(start).expect("slot indices are tiny"),
                     kidx: ConstIdx(STR_KIDX),
                 }
                 .into(),
@@ -838,7 +859,7 @@ fn emit_callg(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, pool: &Pool) 
             if slot < plan.slots.len() {
                 code.push(
                     Uop::Kimm {
-                        dst: slot as u8,
+                        dst: u8::try_from(slot).expect("slot indices are tiny"),
                         kidx: ConstIdx(3),
                     }
                     .into(),
@@ -887,7 +908,7 @@ fn emit_calls(
     if rng.below(4) > 0 {
         code.push(
             Uop::Kconst {
-                dst: slot as u8,
+                dst: u8::try_from(slot).expect("slot indices are tiny"),
                 kidx: ConstIdx(fn_kidx),
             }
             .into(),
@@ -896,11 +917,11 @@ fn emit_calls(
     let nargs = if rng.below(4) > 0 {
         u8::try_from(plans[0].params).expect("worker params are tiny")
     } else {
-        rng.below(3) as u8
+        u8::try_from(rng.below(3)).expect("rng bounds are tiny")
     };
     code.push(
         Uop::Calls {
-            callee_slot: slot as u8,
+            callee_slot: u8::try_from(slot).expect("slot indices are tiny"),
             nargs,
         }
         .into(),
@@ -915,15 +936,15 @@ fn stage_native_args(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, params
         return; // area cannot hold the staged words; the call traps on layout
     }
     for i in 0..params {
-        let dst = (start + i) as u8;
+        let dst = u8::try_from(start + i).expect("slot indices are tiny");
         let inst = match rng.below(3) {
             0 => Uop::Kimm {
                 dst,
-                kidx: ConstIdx(rng.below(2) as u16),
+                kidx: ConstIdx(u16::try_from(rng.below(2)).expect("rng bounds are tiny")),
             },
             1 => Uop::Kconst {
                 dst,
-                kidx: ConstIdx(6 + rng.below(4) as u16),
+                kidx: ConstIdx(6 + u16::try_from(rng.below(4)).expect("rng bounds are tiny")),
             },
             _ => Uop::Kstr {
                 dst,

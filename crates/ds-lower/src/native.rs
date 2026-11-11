@@ -14,6 +14,7 @@ pub(crate) const PLATFORM_IO_OK: u8 = u8::MAX;
 /// The clean-join discriminant of the nursery boundary seam's answer
 /// span. The lowering never tests it (a clean join is the fall-through),
 /// so it stays mirror-only and pinned by the drift test.
+#[cfg_attr(not(test), expect(dead_code))]
 pub const NURSERY_BOUNDARY_OK: u8 = u8::MAX - 6;
 /// The first-failure discriminant of the nursery boundary seam's answer
 /// span; word 1 carries the failing child's error payload.

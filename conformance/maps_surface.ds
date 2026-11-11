@@ -1,5 +1,5 @@
 // source: the record's construction story (B3, F7) and D2's COW collections — the map literal rides the anonymous-record-literal reservation, builder calls interim
-// purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, and the entry count
+// purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, the entry count, and the report builder's string `+` operands over the concat call
 // items:
 // build_report: stage: run
 // overwritten: stage: run
@@ -7,6 +7,9 @@
 // get_spelling: stage: typecheck
 // reject-ctor-args: stage: reject the empty-map constructor takes no value arguments (DS2001)
 
+// the checked reads and their `.ok`/`.err` extraction run (the
+// map_probe fixture); the `+` operands over strings lower to the
+// concat native's own call shape, so the report chain runs
 fn build_report() -> string {
   var m = map[string, string]()
   map_set(m, "host", "localhost")

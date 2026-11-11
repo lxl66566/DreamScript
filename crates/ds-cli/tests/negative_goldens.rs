@@ -21,7 +21,10 @@
 //! signature-agreement round adds DS2018 (an impl member diverging from
 //! its trait member's registered signature); the trait-residuals round
 //! adds its inferred-return route and the generic-head route of DS2006
-//! (the instantiation probe's witness).
+//! (the instantiation probe's witness). The check_all wiring round adds
+//! DS2006's package-level route: the ordering-hidden generic pair whose
+//! bounds only a later impl intersects, reported by the closure pass
+//! over the closed instance set.
 
 use std::{
     env, fs,
@@ -76,6 +79,11 @@ const CASES: &[Case] = &[
         stem: "ds2006_generic_head_overlap",
         human: include_str!("goldens/ds2006_generic_head_overlap.human"),
         json: include_str!("goldens/ds2006_generic_head_overlap.json"),
+    },
+    Case {
+        stem: "ds2006_late_bound_pair",
+        human: include_str!("goldens/ds2006_late_bound_pair.human"),
+        json: include_str!("goldens/ds2006_late_bound_pair.json"),
     },
     Case {
         stem: "ds2008_propagation_containment",

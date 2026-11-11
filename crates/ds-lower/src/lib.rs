@@ -302,15 +302,19 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
 /// Collects one trait impl's member bodies into the plan (the trait
 /// dispatch seam): each member fn enters the function table under its
 /// mangled identity `<trait>#<target>#<member>` with the checker-solved
-/// return its FnDecl names. Inherent impls stay unplanned — no instance
-/// names their bodies, and their call sites keep refusing. A generic
-/// impl's bodies lower per resolved receiver type, which no static plan
-/// can name: the item is marked runtime-evidence territory and call
-/// sites dispatching into it refuse naming the seam.
+/// return its FnDecl names. A generic impl's bodies lower per resolved
+/// receiver type, which no static plan can name: the item is marked
+/// runtime-evidence territory and call sites dispatching into it refuse
+/// naming the seam. Inherent impls plan through their own mangle below.
 fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
-    let Some(trait_ref) = &imp.trait_ref else {
+    if imp.trait_ref.is_none() {
+        plan_inherent_impl(item, imp, plan, analyzed);
         return;
-    };
+    }
+    let trait_ref = imp
+        .trait_ref
+        .as_ref()
+        .expect("the trait arm sees the trait ref it checked for");
     let [only] = trait_ref.path.segments.as_slice() else {
         return;
     };
@@ -347,6 +351,41 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             body_expr,
             ret,
             evidence,
+        );
+    }
+}
+
+/// Collects one inherent impl's member bodies into the plan: each member
+/// fn enters the function table under the mangled identity
+/// `<target>#<member>` — one `#`-joined pair against the trait impls'
+/// three-part mangle, and `#` sits outside the identifier charset, so
+/// neither a user-declared name nor a trait-impl body collides. A
+/// monomorphic impl's body is a plain local function its call sites
+/// reach through the checker-recorded method id. A generic impl's bodies
+/// need runtime-resolved evidence no inherent call site can stage, so
+/// the item is marked runtime-evidence territory and call sites refuse
+/// naming the seam.
+fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
+    if !imp.generics.is_empty() {
+        plan.note_runtime_impl(item.span);
+        return;
+    }
+    for f in &imp.fns {
+        let Some(body) = &f.body else {
+            continue;
+        };
+        let Some(ret) = analyzed.decls.impl_fn_rets.get(&f.span).copied() else {
+            continue;
+        };
+        let name = format!("{}#{}", render_type(&imp.target), f.name.name);
+        plan.push_declared(
+            name,
+            item.span,
+            f.name.name.clone(),
+            Rc::new(f.params.clone()),
+            Rc::new(Expr::Block(body.clone())),
+            ret,
+            Rc::new(Vec::new()),
         );
     }
 }
@@ -398,6 +437,10 @@ fn lower_all<'b>(
     let mut index = 0;
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
+        // Any sentinel-spanned refusal that reached here without a
+        // node-observing re-point lands on the function being lowered:
+        // the sentinel renders against the first file's first line,
+        // which is the stdlib ambient in the CLI pipeline.
         let (function, ops) = FnLower::lower(
             analyzed,
             res,
@@ -406,7 +449,8 @@ fn lower_all<'b>(
             lin,
             &planned,
             u32::try_from(index).expect("function index fits u32"),
-        )?;
+        )
+        .map_err(|err| err.respanned(planned.lambda.span()))?;
         functions.push(function);
         placed.push(ops);
         index += 1;

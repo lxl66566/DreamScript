@@ -126,7 +126,7 @@ fn refused(source: &str, needle: &str) {
 #[test]
 fn spawns_join_in_spawn_order_over_a_shared_list() {
     let (vm, out) = run_main(
-        r#"
+        r"
 fn main() -> () {
   var xs = list[int]()
   nursery {
@@ -145,7 +145,7 @@ fn main() -> () {
     println(str_int(x))
   }
 }
-"#,
+",
         false,
     );
     assert_eq!(out, "3\n1\n2\n3\n");
@@ -485,14 +485,14 @@ fn main() -> () {
     let mut boundaries = 0;
     for f in lowered.module().functions() {
         let code = f.code();
-        for inst in code.iter() {
+        for inst in code {
             let Inst::Uop(uop) = inst else {
                 continue;
             };
             let (callee, nargs) = match uop {
-                ds_abi::Uop::Call { callee, nargs } => (callee, *nargs),
-                ds_abi::Uop::Callt { callee, nargs } => (callee, *nargs),
-                ds_abi::Uop::Callg { callee, nargs } => (callee, *nargs),
+                ds_abi::Uop::Call { callee, nargs }
+                | ds_abi::Uop::Callt { callee, nargs }
+                | ds_abi::Uop::Callg { callee, nargs } => (callee, *nargs),
                 _ => continue,
             };
             let ds_mod::Constant::FuncRef { module, func } = &f.constants()[usize::from(callee.0)]
@@ -512,7 +512,6 @@ fn main() -> () {
                     boundaries += 1;
                     assert_eq!(nargs, 2, "the boundary seam stages id plus mask");
                 },
-                44 => {},
                 _ => {},
             }
             if *func >= 41 && *func <= 44 {
@@ -534,7 +533,7 @@ fn main() -> () {
 #[test]
 fn the_script_entry_runs_nurseries_too() {
     let (_, out) = run_main(
-        r#"
+        r"
 var xs = list[int]()
 nursery {
   spawn {
@@ -542,7 +541,7 @@ nursery {
   }
 }
 println(str_int(xs.list_len()))
-"#,
+",
         true,
     );
     assert_eq!(out, "1\n");

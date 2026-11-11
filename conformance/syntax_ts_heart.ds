@@ -1,11 +1,11 @@
 // source: frozen archive catalog 04-syntax (seed corpus)
-// purpose: the full surface program: guards, bare return, ?, .err, interpolation, destructuring, tuple match
+// purpose: the full surface program: guards, bare return, ?, .err, interpolation, destructuring, tuple match; the row reads wait on the generic `get` callee's M6 dispatch seam
 // items:
 // parse_error: stage: typecheck
 // user: stage: typecheck
 // sep: stage: typecheck
 // parse_age: stage: run
-// parse_user: stage: run
+// parse_user: stage: typecheck
 // main: stage: run
 
 enum parse_error { bad_number(string), missing_field(string) }
@@ -26,6 +26,9 @@ fn parse_age(s: string) -> int | parse_error {
   }
 }
 
+// the row reads ride the ambient `get` extern, whose generic dispatch is
+// the M6 CALL_GENERIC seam maps_surface's get_spelling records; the
+// narrowing and `?` shapes around them check clean
 fn parse_user(row: row) -> user | parse_error {
   const name = row.get("name")
   if name is none { return missing_field("name") }

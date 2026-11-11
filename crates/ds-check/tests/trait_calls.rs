@@ -6,7 +6,7 @@
 //! runtime-resolved evidence form.
 
 use ds_check::{Analyzed, Res, analyze};
-use ds_diag::{Files, Span};
+use ds_diag::{Files, LabelStyle, Span};
 use ds_parse::{Ast, Expr, ItemKind, parse};
 
 fn analyze_source(name: &str, source: &str) -> (Ast, Analyzed) {
@@ -708,37 +708,61 @@ const ORDERED_AMBIGUITY_SOURCE: &str = concat!(
 
 /// The declaration probe proves a generic-generic overlap only through an
 /// existing atom satisfying both bounds; when the bound-providing impl
-/// is declared after both generics, no probe can prove the pair and the
-/// true conflict still surfaces at the call site as DS2010 — the
-/// declaration-order residual, pinned honestly.
+/// is declared after both generics, no per-declaration probe can prove
+/// the pair. The package-level closure pass re-solves the closed
+/// instance environment once declarations settle and reports the
+/// overlap at the later declaration — the first-error-only tradeoff.
 #[test]
-fn unprovable_generic_pair_defers_to_call_site_ambiguity() {
+fn ordered_generic_pair_closes_at_package_level() {
     let (ast, analyzed) = analyze_source("ordered_amb.ds", ORDERED_AMBIGUITY_SOURCE);
-    let ambiguity = analyzed
+    let overlap = analyzed
         .checked
         .diags
         .iter()
-        .find(|d| d.code.as_str() == "DS2010")
-        .expect("the ambiguity reports as DS2010");
+        .find(|d| d.code.as_str() == "DS2006")
+        .expect("the package-level pass reports the hidden pair as DS2006");
     assert!(
-        ambiguity
+        overlap
             .message
-            .contains("2 impls of `shows` accept receiver `list[int]`"),
-        "the message names the trait and receiver: {}",
-        ambiguity.message
+            .contains("instance head `list[$u#2]` intersects the `list[$t#1]` instance"),
+        "the message names both solved heads: {}",
+        overlap.message
     );
     assert!(
-        !analyzed
-            .checked
-            .diags
-            .iter()
-            .any(|d| d.code.as_str() == "DS2006"),
-        "no declaration-time overlap was provable"
+        overlap.message.contains("witness value type `list[int]`"),
+        "the witness is the shared instantiation: {}",
+        overlap.message
+    );
+    let impls = impl_spans(&ast);
+    let primary = overlap
+        .labels
+        .iter()
+        .find(|label| label.style == LabelStyle::Primary)
+        .expect("the overlap carries a primary label");
+    assert_eq!(
+        primary.span, impls[1],
+        "the report site is the later declaration of the overlapping pair"
     );
     let spans = call_spans(&ast);
     assert!(
         !analyzed.checked.trait_calls.contains_key(&spans[0]),
-        "the ambiguous call records no dispatch"
+        "the call site of an incoherent pair records no dispatch"
+    );
+    // The body check still walks an incoherent environment, so the call
+    // site keeps its follow-on ambiguity; the pair no longer depends on
+    // it to surface.
+    let follow_on = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2010")
+        .expect("the follow-on ambiguity still names the incoherent call");
+    assert!(
+        follow_on
+            .message
+            .contains("2 impls of `shows` accept receiver `list[int]`"),
+        "the ambiguity message keeps naming the trait and receiver: {}",
+        follow_on.message
     );
 }
 

@@ -836,8 +836,9 @@ fn item_declares(item: &Item) -> Option<String> {
 /// closures_surface.ds: lambda values in every argument shape —
 /// fn-typed parameters, trailing block and parenthesized arguments,
 /// let-stored and passed lambdas, a capturing lambda — all check clean
-/// [F2, F7]; the non-capturing shapes lower through CALLS, and the
-/// capturing shape waits on the closure-object round.
+/// [F2, F7]; every parenthesized shape lowers through CALLS (the
+/// capturing closure included), and the two trailing-block items wait
+/// on the block-argument round.
 #[test]
 fn closures_surface_items_check_clean() {
     let rejects = gate("../../conformance/closures_surface.ds", CLOSURES_AMBIENT);
@@ -864,8 +865,9 @@ fn nursery_surface_items_check_clean() {
 /// inherent_impls.ds: the owner-typed inherent surface — two owners share
 /// one method name, every typecheck item (the dot-calls and the Self-bound
 /// field reads included) checks clean, and the one rejection is the
-/// wrong-receiver dot-call; execution refuses at lowering until impl
-/// bodies dispatch (the trait-dispatch phase 3 seam).
+/// wrong-receiver dot-call; the member bodies plan under the
+/// `<target>#<member>` mangle and the dot-calls dispatch as plain
+/// local calls.
 #[test]
 fn inherent_impls_items_check_with_the_wrong_receiver_rejection() {
     let rejects = gate("../../conformance/inherent_impls.ds", INHERENT_AMBIENT);

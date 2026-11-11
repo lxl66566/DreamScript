@@ -1,0 +1,74 @@
+// purpose: string-operand `+` is the concat native's spelling — the two
+// Ref words stage as borrow windows and the CALL dispatches the native,
+// so an explicit `a.concat(b)` and `a + b` lower to the same code. The
+// probe covers return position, left-associative chains over literals
+// and a repeated binder, an interpolation hole as the left operand, var
+// accumulation through store_over in a loop, and the checked-read
+// report chain with the `.ok`/`.err` handlers inline in the chain.
+
+tag int
+tag string
+tag bool
+
+struct map[k, v]
+
+extern fn println(s: string) -> ()
+extern fn map_new() -> map[string, string]
+extern fn map_set(mut m: map[string, string], key: string, value: string) -> ()
+extern fn map_get[k, v](m: map[k, v], key: k) -> v | none
+
+fn main() -> bool {
+  println(plain())
+  println(chain())
+  println(holed("b"))
+  println(accumulated(3))
+  println(compounded(3))
+  println(report())
+  plain() == "ab" && chain() == "abcb" && holed("b") == "bxb" && accumulated(3) == "xxx" && compounded(3) == "sxxx" && report() == "localhost:?"
+}
+
+fn plain() -> string {
+  "a" + "b"
+}
+
+fn chain() -> string {
+  var b = "b"
+  "a" + b + "c" + b
+}
+
+fn holed(b: string) -> string {
+  "${b}x" + b
+}
+
+fn accumulated(rounds: int) -> string {
+  var s = ""
+  var i = 0
+  while i < rounds {
+    s = s + "x"
+    i = i + 1
+  }
+  s
+}
+
+fn compounded(rounds: int) -> string {
+  var s = "s"
+  var i = 0
+  while i < rounds {
+    s += "x"
+    i += 1
+  }
+  s
+}
+
+fn report() -> string {
+  var m = map[string, string]()
+  map_set(m, "host", "localhost")
+  const host = map_get(m, "host")
+  const user = map_get(m, "user")
+  host.ok((s: string) => s).err((_: none) => "?") + ":" + user.ok((s: string) => s).err((_: none) => "?")
+}
+
+fn seam_self_reference() -> string {
+  var b = "B"
+  b + "${b}x"
+}

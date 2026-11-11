@@ -51,6 +51,11 @@ pub enum Error {
         head_b: Ty,
         /// A witness value type in the intersection.
         witness: Witness,
+        /// The later-declared instance, the report site of the overlap.
+        /// At declaration time this is the prospective id of the branch
+        /// being declared; a failed declaration stores nothing, so only
+        /// a closure-pass error guarantees the id is in the environment.
+        later: InstanceId,
     },
     /// A conditional instance's condition resolution reaches back to itself,
     /// directly or transitively (B6, section 10 item 7). The path starts and

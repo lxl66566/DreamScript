@@ -16,11 +16,14 @@ workspace = true
 [features]
 # The RC balance tripwires: hard asserts on rc underflow/overflow, the
 # ds-rt diag discipline (debug assertions otherwise).
-diag = []
+# The RC balance tripwires: ds-rt's hard asserts on rc underflow/overflow
+# (the ds-rt diag layer) arm through this feature.
+diag = ["ds-rt/diag"]
 
 [dependencies]
 ds-abi = { path = "../ds-abi" }
 ds-mod = { path = "../ds-mod" }
+ds-rt = { path = "../ds-rt" }
 
 [dev-dependencies]
 criterion.workspace = true

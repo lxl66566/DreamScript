@@ -1,12 +1,12 @@
-// source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed this round)
-// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); execution refuses at lowering — inherent impl bodies stay outside the dispatch seam, the refusal names the UFCS alternative
+// source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed) plus its dispatch landing
+// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); the member bodies plan under the `<target>#<member>` mangle and the call sites dispatch as plain local calls
 // items:
 // counter: stage: typecheck
 // timer: stage: typecheck
-// impl-counter: stage: typecheck
-// impl-timer: stage: typecheck
-// use-both: stage: typecheck
-// use-fields: stage: typecheck
+// impl-counter: stage: run
+// impl-timer: stage: run
+// use-both: stage: run
+// use-fields: stage: run
 // wrong-receiver: stage: reject DS2013 no method `peek` accepts receiver `int`
 
 struct counter { ticks: int }

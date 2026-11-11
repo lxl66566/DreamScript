@@ -22,6 +22,12 @@
 //! because `shows for int` exists) is not here: lookup stays
 //! containment-only, and [`crate::instance_solve`] owns the unification
 //! and bound-recursion half at call sites.
+//!
+//! Coherence (B6) runs per declaration, then once more over the closed
+//! instance set after the last impl declares: a bound-providing impl
+//! landing after two generic impls it intersects can be proven by no
+//! declaration-time probe, so the closure pass re-solves the whole
+//! environment and reports the first overlap it finds.
 //! The `~Copyable` marker bound on generic parameters (C1) is carried on
 //! the parameter and otherwise unchecked here; the affine pass owns it at
 //! M4.
@@ -211,6 +217,11 @@ pub struct Decls {
     pub trait_generics: HashMap<DefId, Vec<String>>,
     /// Inherent impl-function signatures keyed by method id (F3).
     pub inherent: HashMap<MethodId, Arc<FnSig>>,
+    /// The impl item each inherent impl function lives in, keyed by its
+    /// registered method id: the mirror of [`Decls::instance_impls`] for
+    /// inherent dispatch — a solved inherent call site reaches its impl's
+    /// bodies through this tie, never through a package def.
+    pub inherent_impls: HashMap<MethodId, Span>,
     /// Top-level `const`/`var` initializers keyed by every name the
     /// binding pattern declares (lazy memoized typing (G3)).
     pub consts: HashMap<DefId, LocalDecl>,
@@ -258,7 +269,69 @@ where
             }
         }
     }
+    package_coherence(&mut decls, &mut diags);
     (decls, diags)
+}
+
+/// The package-level coherence pass: one closure run over the instance
+/// environment after every impl has declared (B6). A declaration-time
+/// probe proves a generic-generic pair only through bounds already
+/// inhabited at that moment, so a bound-providing impl declared after
+/// two generic impls it intersects hides the pair from every
+/// per-declaration probe; re-solving the closed set surfaces it here.
+/// First-error-only is the accepted tradeoff — per-declaration reporting
+/// stays complete, this pass catches only what declaration order hid.
+fn package_coherence(decls: &mut Decls, diags: &mut Vec<Diagnostic>) {
+    let Err(err) = decls.instances.check_all(&mut decls.universe) else {
+        return;
+    };
+    diags.push(match &err {
+        crate::Error::InstanceOverlap {
+            head_a,
+            head_b,
+            witness,
+            later,
+            ..
+        } => {
+            let diag = Diagnostic::error(
+                ErrorCode::InstanceOverlap,
+                format!(
+                    "instance head `{}` intersects the `{}` instance; witness value type `{}`",
+                    decls.universe.render(*head_b),
+                    decls.universe.render(*head_a),
+                    decls.universe.render_witness(witness)
+                ),
+            )
+            .with_note(format!(
+                "the earlier instance's head covers `{}`; two instances of one trait must be \
+                 pairwise disjoint [B6]",
+                decls.universe.render(*head_a)
+            ))
+            .with_note(
+                "neither declaration could prove the pair; the closure pass over the closed \
+                 instance set reports it"
+                    .to_owned(),
+            );
+            match decls.instance_impls.get(later) {
+                Some(span) => diag.with_primary(*span, "overlapping instance"),
+                None => diag,
+            }
+        },
+        crate::Error::ConditionCycle { cycle } => {
+            let diag = Diagnostic::error(
+                ErrorCode::ConditionCycle,
+                "a conditional instance's conditions reach back to itself [B6]",
+            );
+            match cycle.first().and_then(|id| decls.instance_impls.get(id)) {
+                Some(span) => diag.with_primary(*span, "cyclic instance"),
+                None => diag,
+            }
+        },
+        other => Diagnostic::error(
+            other.code(),
+            format!("instance environment closure rejected: {other}"),
+        ),
+    });
 }
 
 use crate::resolve::Resolutions;
@@ -290,7 +363,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
         return;
     }
     if let ItemKind::Impl(imp) = &item.kind {
-        reserve_impl_fns(package, imp, decls);
+        reserve_impl_fns(package, imp, item.span, decls);
         return;
     }
     let Some(def) = item_def(package, item) else {
@@ -424,7 +497,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
 /// declaration is the shape pass's work. Call sites check against each
 /// impl's own signature; a same-name second inherent impl never gets a
 /// registration (collection reports the duplicate and keeps the first).
-fn reserve_impl_fns(package: &Package, imp: &ImplDecl, decls: &mut Decls) {
+fn reserve_impl_fns(package: &Package, imp: &ImplDecl, impl_site: Span, decls: &mut Decls) {
     if imp.trait_ref.is_some() {
         return;
     }
@@ -436,6 +509,7 @@ fn reserve_impl_fns(package: &Package, imp: &ImplDecl, decls: &mut Decls) {
             .find(|&id| package.method(id).span == f.name.span)
         {
             decls.inherent.insert(method, Arc::new(FnSig::of(f)));
+            decls.inherent_impls.insert(method, impl_site);
         }
     }
 }

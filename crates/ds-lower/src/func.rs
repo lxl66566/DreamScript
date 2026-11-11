@@ -367,6 +367,11 @@ pub(crate) enum TraitDispatch {
     /// resolves at runtime from the frame's evidence slot the call site
     /// entering the body staged.
     Runtime { slot: u8 },
+    /// A solved inherent-method call site: the impl body's
+    /// function-table index. The receiver's own type picked the body at
+    /// check time, so the call dispatches like a plain local callee — no
+    /// instance word and no dispatch uop.
+    Inherent { index: u32 },
 }
 
 /// The module plan: lowered functions in function-table order.
@@ -748,15 +753,16 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
         },
         Expr::Nursery { body, .. } => cancel_operands(body, out),
         Expr::Block(block) => cancel_operands(block, out),
-        Expr::Lambda { .. } | Expr::Spawn { .. } | Expr::Defer { .. } => {},
-        Expr::Call { .. }
-        | Expr::Literal { .. }
+        Expr::Literal { .. }
         | Expr::RawStr { .. }
         | Expr::Path { .. }
         | Expr::FnType { .. }
         | Expr::Return { .. }
         | Expr::Break(_)
-        | Expr::Continue(_) => {},
+        | Expr::Continue(_)
+        | Expr::Lambda { .. }
+        | Expr::Spawn { .. }
+        | Expr::Defer { .. } => {},
     }
 }
 
@@ -810,11 +816,13 @@ fn stray_exit_expr(e: &Expr) -> Option<Span> {
         Expr::For { iter, body, .. } => stray_exit_expr(iter).or_else(|| stray_exit_expr(body)),
         Expr::Nursery { body, .. } => stray_exit(body),
         Expr::Block(block) => stray_exit(block),
-        Expr::Lambda { .. } | Expr::Spawn { .. } | Expr::Defer { .. } => None,
         Expr::Literal { .. }
         | Expr::RawStr { .. }
         | Expr::Path { .. }
         | Expr::FnType { .. }
+        | Expr::Lambda { .. }
+        | Expr::Spawn { .. }
+        | Expr::Defer { .. }
         | Expr::Break(_)
         | Expr::Continue(_) => None,
     }
@@ -1055,15 +1063,17 @@ impl PairWalk<'_> {
             }
         };
         match e {
-            // a value-site lambda is its own frame: no evidence reaches
-            // inside, so its runtime sites refuse at their own lowering
+            // a value-site lambda and a spawned block are their own
+            // frames: no evidence reaches inside, so their runtime sites
+            // refuse at their own lowering
             Expr::Literal { .. }
             | Expr::RawStr { .. }
             | Expr::Break(_)
             | Expr::Continue(_)
             | Expr::FnType { .. }
             | Expr::Path { .. }
-            | Expr::Lambda { .. } => {},
+            | Expr::Lambda { .. }
+            | Expr::Spawn { .. } => {},
             Expr::Str { parts, .. } => {
                 for part in parts {
                     if let StrPart::Expr { expr, .. } = part {
@@ -1160,10 +1170,6 @@ impl PairWalk<'_> {
             Expr::Nursery { body, .. } | Expr::Defer { body, .. } => {
                 block(self, body);
             },
-            // a spawned block is its own planned frame with no evidence
-            // slots, exactly a nested lambda's: its trait-call sites
-            // refuse at their own lowering
-            Expr::Spawn { .. } => {},
         }
     }
 }
@@ -2229,7 +2235,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     _ => (DataOp::ModI64, DataOp::ModI64),
                 };
                 let rhs = self.value(right)?;
-                let result = self.arith(int_op, float_op, &current, &rhs, left.span())?;
+                let result = if matches!(op, ds_parse::AssignOp::Add)
+                    && self.is_string_add(&current, &rhs)
+                {
+                    // string `+=` desugars like the binary arm: the
+                    // compound store re-stores the concat result, a
+                    // fresh Ref word
+                    self.concat_value(&current, &rhs, declared, left.span())?
+                } else {
+                    self.arith(int_op, float_op, &current, &rhs, left.span())?
+                };
                 TypedPlace {
                     place: result,
                     ty: declared,
@@ -2244,8 +2259,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
         };
         // the replaced reference dies before the store overwrites its word
-        // (compound stores re-store arithmetic results only, never Ref
-        // words — the string compound ops have no uop). A deinit value's
+        // (compound stores re-store arithmetic results or the string
+        // concat's fresh Ref word, never a borrowed operand). A deinit
+        // value's
         // claim fires first (C5): the hook runs while the old content's
         // counts are still live
         let claimed = self.deinit_claim(declared, e.span())?.is_some();
@@ -3125,7 +3141,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // members' tag ids are module-wide, so the union's tag slot
             // takes it and the dead payload words zero-init (the
             // construction convention)
-            let words = self.shapes.words(self.ret_ty)?.to_vec();
+            let words = self.shapes.words(self.ret_ty)?.clone();
             let fail = self.label();
             let disc = self.temp_word(SlotType::Bool)?;
             self.emit(Op::TagTest {
@@ -3891,8 +3907,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Binary operators: typed uops for scalars, short-circuit chains for
-    /// `&&`/`||`, memberwise chains for structural `==` [B9].
-    fn binary_value(&mut self, e: &Expr, _static_ty: Ty) -> Result<Place, LowerError> {
+    /// `&&`/`||`, memberwise chains for structural `==` [B9], and the
+    /// concat call for string `+` [B8].
+    fn binary_value(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {
         let Expr::Binary {
             op,
             left,
@@ -3931,6 +3948,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let rhs = self.value(right)?;
         let place = match op {
             BinaryOp::Eq | BinaryOp::Ne => self.eq_chain(&lhs, &rhs, e.span())?,
+            BinaryOp::Add if self.is_string_add(&lhs, &rhs) => {
+                self.concat_value(&lhs, &rhs, static_ty, *span)?
+            },
             BinaryOp::Add => self.arith(DataOp::AddI64, DataOp::AddF64, &lhs, &rhs, *span)?,
             BinaryOp::Sub => self.arith(DataOp::SubI64, DataOp::SubF64, &lhs, &rhs, *span)?,
             BinaryOp::Mul => self.arith(DataOp::MulI64, DataOp::MulF64, &lhs, &rhs, *span)?,
@@ -3992,6 +4012,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<Place, LowerError> {
         let op = self.pick_int_float(int_op, float_op, lhs, span)?;
         self.emit_data(op, lhs, rhs, span)
+    }
+
+    /// Both operands solve to the string atom: `+` is the concat
+    /// call's spelling [B8].
+    fn is_string_add(&self, lhs: &TypedPlace, rhs: &TypedPlace) -> bool {
+        self.shapes.builtin_instance(lhs.ty) == Some(BuiltinInstance::Str)
+            && self.shapes.builtin_instance(rhs.ty) == Some(BuiltinInstance::Str)
+    }
+
+    /// String `+` lowers to the concat native's own call shape: the two
+    /// Ref words stage as borrow windows, the CALL dispatches the
+    /// native, and the fresh result lands on a body temp — the same
+    /// staging and RC contract an explicit `a.concat(b)` lowers
+    /// through, so the operator is a spelling, never a second
+    /// operation.
+    fn concat_value(
+        &mut self,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
+        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
+        let native = crate::native::lookup("concat").unwrap_or_else(|| panic!("concat is tabled"));
+        for (index, word) in [l.slot, r.slot].into_iter().enumerate() {
+            self.emit(Op::Mov {
+                dst: Slot::overlay(u8::try_from(index).expect("two words fit u8")),
+                src: Slot::body(word),
+            });
+            self.rc.staged_native(word, false);
+        }
+        self.overlay_site(&[SlotType::Ref, SlotType::Ref], &[SlotType::Ref]);
+        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: 2,
+        });
+        self.rc.native_done(&mut self.code);
+        self.result_place(ty, &[SlotType::Ref], span)
     }
 
     /// Float remainder is a boundary, not a trap: the numeric table admits
@@ -5407,7 +5467,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 },
                 Some(Res::Dot(DotRes::Methods { candidates })) => {
                     let dispatch =
-                        self.resolve_trait_method(call_span, name.span, Some(recv), candidates)?;
+                        self.resolve_method_dispatch(call_span, name.span, Some(recv), candidates)?;
                     (
                         None,
                         name.span,
@@ -5444,7 +5504,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             };
             if let Some(what) = qualified {
                 let recv = args.first().map(|arg| &arg.value);
-                let dispatch = self.resolve_trait_method(call_span, what, recv, &[])?;
+                let dispatch = self.resolve_method_dispatch(call_span, what, recv, &[])?;
                 (
                     None,
                     what,
@@ -5490,10 +5550,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         // a trait-method dispatch names its impl body directly: the call
         // stages and transfers like a local callee, with the solved
-        // instance riding as the evidence word after the arguments
+        // instance riding as the evidence word after the arguments. An
+        // inherent dispatch is a plain local callee — the receiver's own
+        // type picked the body, so no evidence word exists
         let target = match &trait_dispatch {
-            Some(TraitDispatch::Static { index, .. }) => {
-                self.guard_trait_arity(*index, &arg_exprs, callee_span)?;
+            Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index }) => {
+                self.guard_member_arity(*index, &arg_exprs, callee_span)?;
                 Callee::Local(*index)
             },
             Some(TraitDispatch::Runtime { slot }) => Callee::Evidence(*slot),
@@ -5603,8 +5665,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // a trait-method dispatch names its impl body directly (or
         // resolves it at runtime): a trait tail stages like a local
         // callee; its evidence words and the CALLG run inside this
-        // frame, so the tail lowers in place
-        let trait_tail = trait_dispatch.is_some() && tail;
+        // frame, so the tail lowers in place. An inherent dispatch is
+        // excluded — it is a plain local callee, so even a future
+        // tail-recognized site takes the local transfer below
+        let trait_tail = matches!(
+            trait_dispatch,
+            Some(TraitDispatch::Static { .. } | TraitDispatch::Runtime { .. })
+        ) && tail;
         let native_tail_return = tail && !self.root && matches!(target, Callee::Builtin(_));
         // a closure-staging local tail lowers in place for the root frame
         // too: the callee reads the word during the call, so the count
@@ -5788,7 +5855,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 callee: kidx,
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
-        } else if trait_dispatch.is_some() {
+        } else if matches!(trait_dispatch, Some(TraitDispatch::Runtime { .. })) {
             // a nested runtime-resolved site: the sentinel FuncRef names
             // the frame's evidence slot and dispatches from it
             self.emit(Op::Callg {
@@ -5809,7 +5876,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // the tail position returns the call's result, the post-call
             // flush settles the borrow windows, and the return's exit
             // drops flush every other count the frame owes
-            self.emit_return(&place, ty)?;
+            self.emit_return(&place, ty, e.span())?;
             // an unreachable marker place; no code follows the return
             return Ok(Place {
                 base: 0,
@@ -6105,13 +6172,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(instance)
     }
 
-    /// A method-call site's solved trait dispatch [B6, H3]: the impl
-    /// body's function-table index plus the instance id the checker
-    /// recorded at the call's own span. An inherent survivor records no
-    /// dispatch (no instance exists for it), and a site satisfied only
-    /// through an in-scope assumption records none either — both refuse
-    /// naming the seam they wait on.
-    fn resolve_trait_method(
+    /// A method-call site's solved dispatch [B6, H3]: the impl body's
+    /// function-table index plus the instance id the checker recorded at
+    /// the call's own span. An inherent survivor resolves through its
+    /// own record below, and a site satisfied only through an in-scope
+    /// assumption records no instance — the latter refuses naming the
+    /// seam it waits on.
+    fn resolve_method_dispatch(
         &self,
         call: Span,
         what: Span,
@@ -6124,6 +6191,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 MethodOwner::Inherent(_)
             )
         }) && !candidates.is_empty();
+        if let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) {
+            return self.resolve_inherent_method(method, what);
+        }
         let Some(tc) = self.analyzed.checked.trait_calls.get(&call).cloned() else {
             // A bound-variable receiver inside a generic impl body: the
             // checker satisfied the call through the impl's own bound
@@ -6166,11 +6236,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 what,
                 if inherent_only { "an inherent method call" } else { "a trait-method call" },
                 if inherent_only {
-                    "inherent impl bodies wait on the dispatch seam; call the free function or use \
-                     UFCS this round [F3]"
+                    "the checker recorded no solved inherent dispatch for this site; report the \
+                     construct"
                 } else {
-                    "the checker recorded no solved instance for this site (an inherent survivor \
-                     or a bound-type receiver outside its generic impl body)"
+                    "the checker recorded no solved instance for this site (a bound-type receiver \
+                     outside its generic impl body)"
                 },
             ));
         };
@@ -6191,6 +6261,44 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             "the solving impl's body did not plan (no body, no solved return, or a shape over its \
              own type variables); report the construct",
         ))
+    }
+
+    /// A solved inherent-method call site: the impl body the
+    /// checker-recorded method id names, reached through the declaration
+    /// tables' method-to-impl-item map. The receiver's own type picked
+    /// the body at check time — no instance and no evidence word exist
+    /// for an inherent impl, so the call dispatches like a local callee.
+    fn resolve_inherent_method(
+        &self,
+        method: MethodId,
+        what: Span,
+    ) -> Result<TraitDispatch, LowerError> {
+        let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
+            return Err(LowerError::unsupported(
+                what,
+                "an inherent method call",
+                "the impl item owning the method is missing from the declaration tables; report \
+                 the construct",
+            ));
+        };
+        if self.plan.is_runtime_impl(impl_site) {
+            return Err(LowerError::unsupported(
+                what,
+                "an inherent method call",
+                "a generic inherent impl's body needs runtime-resolved evidence; that seam covers \
+                 trait impls this round — call the free function or use UFCS [F3]",
+            ));
+        }
+        let member = self.analyzed.package.method(method).name.clone();
+        match self.plan.impl_body(impl_site, &member) {
+            Some(index) => Ok(TraitDispatch::Inherent { index }),
+            None => Err(LowerError::unsupported(
+                what,
+                "an inherent method call",
+                "the impl's body did not plan (no body, no solved return, or a shape over its own \
+                 type variables); report the construct",
+            )),
+        }
     }
 
     /// The one runtime-evidence word a call site entering a generic impl
@@ -6268,11 +6376,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// A trait-method call's argument count against the impl body's
-    /// declared parameters: a defaulted member parameter has no staging
-    /// this round, so an omitted default refuses here instead of
-    /// trapping in the VM's arity check.
-    fn guard_trait_arity(
+    /// A member call's argument count against the impl body's declared
+    /// parameters (trait and inherent alike): a defaulted member
+    /// parameter has no staging this round, so an omitted default
+    /// refuses here instead of trapping in the VM's arity check.
+    fn guard_member_arity(
         &self,
         index: u32,
         arg_exprs: &[&Expr],
@@ -6284,7 +6392,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if arg_exprs.len() != decl.params.len() {
             return Err(LowerError::unsupported(
                 span,
-                "a defaulted trait-method parameter",
+                "a defaulted member parameter",
                 "stage every argument explicitly; default staging for member calls is not in the \
                  contract yet",
             ));
@@ -7503,7 +7611,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let members = self.members(src_ty);
         match members.as_slice() {
             [] => Err(mismatch("a `?` over an empty operand union")),
-            [_] => self.emit_return(&src.place, src_ty),
+            [_] => self.emit_return(&src.place, src_ty, operand.span()),
             _ => {
                 let mut exits = Vec::with_capacity(members.len());
                 for member in &members {
@@ -7746,7 +7854,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 } else {
                     // a missing else falls through to the unit return [B2]
                     let unit = self.unit_value(e.span())?;
-                    self.emit_return(&unit.place, unit.ty)
+                    self.emit_return(&unit.place, unit.ty, e.span())
                 };
                 let arm_else = self.rc.take();
                 // both arms exit the frame: each exit path dropped from
@@ -7763,7 +7871,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             _ => {
                 let tp = self.value(e)?;
-                self.emit_return(&tp.place, tp.ty)
+                self.emit_return(&tp.place, tp.ty, e.span())
             },
         }
     }
@@ -7796,11 +7904,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // it lowers, and the frame returns unit [F2].
                 self.local_stmt(local)?;
                 let unit = self.unit_value(block.span)?;
-                self.emit_return(&unit.place, unit.ty)
+                self.emit_return(&unit.place, unit.ty, block.span)
             },
             None => {
                 let unit = self.unit_value(block.span)?;
-                self.emit_return(&unit.place, unit.ty)
+                self.emit_return(&unit.place, unit.ty, block.span)
             },
         }
     }
@@ -7816,14 +7924,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Some(expr) => self.value(expr)?,
             None => self.unit_value(*span)?,
         };
-        self.emit_return(&tp.place, tp.ty)?;
+        self.emit_return(&tp.place, tp.ty, *span)?;
         self.unit_value(*span)
     }
 
     /// Returns one value in the enclosing function's return shape. The
     /// returned words transfer their references out with the frame; every
-    /// other still-owned reference drops right before the exit op.
-    fn emit_return(&mut self, place: &Place, src_ty: Ty) -> Result<(), LowerError> {
+    /// other still-owned reference drops right before the exit op. A
+    /// shape refusal over the return type re-points at `span` — the
+    /// expression whose value needs the return span — instead of the
+    /// type-keyed sentinel span.
+    fn emit_return(&mut self, place: &Place, src_ty: Ty, span: Span) -> Result<(), LowerError> {
+        self.emit_return_inner(place, src_ty)
+            .map_err(|err| err.respanned(span))
+    }
+
+    fn emit_return_inner(&mut self, place: &Place, src_ty: Ty) -> Result<(), LowerError> {
         // A returned value that is a part of a deinit-carrying value (a
         // scalar field read) leaves with the dying value's own word: the
         // claim the word anchors fires here, the struct's death staged

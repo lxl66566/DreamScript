@@ -137,6 +137,12 @@ pub struct Checked {
     /// environment statically resolved, keyed by the call's span (B6).
     /// The lowering pass mints the CALLG evidence word from it.
     pub trait_calls: HashMap<Span, TraitCall>,
+    /// The selected inherent method of every inherent-impl dot-call whose
+    /// owner covers the receiver, keyed by the call's own span (F3). The
+    /// lowering pass resolves the impl item through the declaration
+    /// tables' method-to-impl-item map; no instance exists for an
+    /// inherent impl, so nothing else records at the site.
+    pub inherent_calls: HashMap<Span, MethodId>,
     /// The solved tested type of every `is` expression that type-solves,
     /// keyed by the expression's span. The lowering pass reads the tested
     /// atom from it when the written type is not a nominal single-segment
@@ -218,6 +224,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
+        inherent_calls: checked.inherent_calls,
         is_tests: checked.is_tests,
     };
     Analyzed {
@@ -284,6 +291,7 @@ where
     let mut expr_types = HashMap::new();
     let mut generic_calls = HashMap::new();
     let mut trait_calls = HashMap::new();
+    let mut inherent_calls = HashMap::new();
     let mut is_tests = HashMap::new();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
@@ -298,6 +306,7 @@ where
             expr_types: &mut expr_types,
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
+            inherent_calls: &mut inherent_calls,
             is_tests: &mut is_tests,
             diags: Vec::new(),
             linear_vars: HashMap::new(),
@@ -322,6 +331,7 @@ where
         expr_types,
         generic_calls,
         trait_calls,
+        inherent_calls,
         is_tests,
     })
 }
@@ -356,6 +366,7 @@ struct Bodies<'a> {
     expr_types: &'a mut HashMap<Span, Val>,
     generic_calls: &'a mut HashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut HashMap<Span, TraitCall>,
+    inherent_calls: &'a mut HashMap<Span, MethodId>,
     is_tests: &'a mut HashMap<Span, Ty>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
@@ -890,49 +901,7 @@ impl Bodies<'_> {
                 items,
                 trailing_comma,
                 ..
-            } => {
-                if items.len() == 1 && !trailing_comma {
-                    return self.expr(&items[0], expected);
-                }
-                // Bidirectional against an expected tuple type: a
-                // single-member expectation of the pattern's arity feeds
-                // each element its expected type, so the
-                // expected-consuming forms (the empty list literal, a
-                // struct literal, a nested tuple, `?`) infer inside a
-                // tuple the way they do in a return position.
-                let expected_elems: Option<Vec<Ty>> =
-                    expected.and_then(|exp| self.expected_tuple_elems(exp, items.len()));
-                let mut elements = Vec::with_capacity(items.len());
-                for (index, item) in items.iter().enumerate() {
-                    let item_expected = expected_elems
-                        .as_ref()
-                        .and_then(|elems| elems.get(index).copied());
-                    elements.push(self.expr(item, item_expected).ty);
-                }
-                let ty = match self.decls.universe.product(&elements) {
-                    Ok(ty) => ty,
-                    Err(err) => {
-                        // The distribution cap is a real rejection, not an
-                        // inference fallback: render DS2012 instead of
-                        // degrading the whole expression to the empty type.
-                        self.error(
-                            ErrorCode::TupleDistributionCap,
-                            err.to_string(),
-                            e.span(),
-                            "tuple distribution cap",
-                        );
-                        // Downstream empty-type fallbacks must not re-report
-                        // this rejection as an inference hole.
-                        self.solve_reported = true;
-                        self.empty()
-                    },
-                };
-                Val {
-                    ty,
-                    diverges: false,
-                    poisoned: false,
-                }
-            },
+            } => self.tuple_expr(e, items, *trailing_comma, expected),
             Expr::List { .. } => self.list_expr(e, expected),
             Expr::Paren { inner, .. } => self.expr(inner, expected),
             Expr::Call { .. } => self.call(e),
@@ -1179,6 +1148,58 @@ impl Bodies<'_> {
                 }
             },
             Expr::Block(block) => self.block_expected(block, expected),
+        }
+    }
+
+    /// A tuple literal: one element without a trailing comma is a
+    /// parenthesized expression; the product type otherwise.
+    fn tuple_expr(
+        &mut self,
+        e: &Expr,
+        items: &[Expr],
+        trailing_comma: bool,
+        expected: Option<Ty>,
+    ) -> Val {
+        if items.len() == 1 && !trailing_comma {
+            return self.expr(&items[0], expected);
+        }
+        // Bidirectional against an expected tuple type: a
+        // single-member expectation of the pattern's arity feeds
+        // each element its expected type, so the
+        // expected-consuming forms (the empty list literal, a
+        // struct literal, a nested tuple, `?`) infer inside a
+        // tuple the way they do in a return position.
+        let expected_elems: Option<Vec<Ty>> =
+            expected.and_then(|exp| self.expected_tuple_elems(exp, items.len()));
+        let mut elements = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let item_expected = expected_elems
+                .as_ref()
+                .and_then(|elems| elems.get(index).copied());
+            elements.push(self.expr(item, item_expected).ty);
+        }
+        let ty = match self.decls.universe.product(&elements) {
+            Ok(ty) => ty,
+            Err(err) => {
+                // The distribution cap is a real rejection, not an
+                // inference fallback: render DS2012 instead of
+                // degrading the whole expression to the empty type.
+                self.error(
+                    ErrorCode::TupleDistributionCap,
+                    err.to_string(),
+                    e.span(),
+                    "tuple distribution cap",
+                );
+                // Downstream empty-type fallbacks must not re-report
+                // this rejection as an inference hole.
+                self.solve_reported = true;
+                self.empty()
+            },
+        };
+        Val {
+            ty,
+            diverges: false,
+            poisoned: false,
         }
     }
 
@@ -3240,16 +3261,21 @@ impl Bodies<'_> {
         })
     }
 
-    /// Records one selected trait method's solved dispatch at the call's
-    /// own span: the instance the environment resolved for the
-    /// receiver's type — a containing head, or a generic head that
-    /// unifies under provable bounds (B6). The solved instance is the
-    /// declared one; the recorded receiver type carries the
-    /// substitution. An inherent-impl survivor records nothing, and a
-    /// site satisfied only through an in-scope assumption with no
-    /// resolving instance records nothing — its dispatch is the
-    /// runtime-resolved evidence form.
+    /// Records one selected method's solved dispatch at the call's own
+    /// span. A trait survivor records the instance the environment
+    /// resolved for the receiver's type — a containing head, or a
+    /// generic head that unifies under provable bounds (B6) — where the
+    /// solved instance is the declared one and the recorded receiver
+    /// type carries the substitution. An inherent survivor records its
+    /// method id (the lowerer resolves the impl item through it, and no
+    /// instance exists). A site satisfied only through an in-scope
+    /// assumption with no resolving instance records nothing — its
+    /// dispatch is the runtime-resolved evidence form.
     fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
+        if matches!(&self.package.method(method).owner, MethodOwner::Inherent(_)) {
+            self.inherent_calls.insert(span, method);
+            return;
+        }
         let MethodOwner::Trait(def) = &self.package.method(method).owner else {
             return;
         };
@@ -3623,12 +3649,11 @@ impl Bodies<'_> {
                 });
                 let body_val = self.expr(body, None);
                 self.restore(saved);
-                let handled_set = match annotated {
-                    Some(written) => written,
-                    None => {
-                        let kept = self.decls.universe.inter(total, body_val.ty);
-                        self.decls.universe.diff(total, kept)
-                    },
+                let handled_set = if let Some(written) = annotated {
+                    written
+                } else {
+                    let kept = self.decls.universe.inter(total, body_val.ty);
+                    self.decls.universe.diff(total, kept)
                 };
                 let overlap = self.decls.universe.inter(total, handled_set);
                 if self.decls.universe.is_empty(overlap) && !self.decls.universe.is_empty(total) {

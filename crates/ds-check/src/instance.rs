@@ -4,13 +4,16 @@
 //! coherence rule is pairwise disjointness of the heads of one trait: for
 //! every pair `H1`, `H2` of same-trait heads, `H1 & H2 = Empty` must hold
 //! (B6). It is checked incrementally at declaration (per package (G3)) by
-//! [`InstanceEnv::declare`] and again over the final environment at link
-//! time by [`InstanceEnv::check_all`]. Heads the set algebra reads
+//! [`InstanceEnv::declare`] and again over the final environment — once
+//! the single package's declarations settle, and over every link merge —
+//! by [`InstanceEnv::check_all`]. Heads the set algebra reads
 //! disjoint because a generic head is opaque get the same rule through
 //! instantiation: the probe in `crate::instance_solve` grounds candidate
 //! instantiations and asks whether both heads serve one, so a concrete and
 //! a generic head (or two generic heads with intersecting bounds) are
-//! rejected at the later declaration. There is no orphan rule: any package
+//! rejected at the later declaration, or by the closure pass when the
+//! bounds only a later impl intersects could not prove the pair at
+//! either declaration. There is no orphan rule: any package
 //! may declare an instance for any type, foreign included; no priority
 //! machinery exists, so dispatch never depends on declaration order.
 //!
@@ -264,9 +267,9 @@ impl CondEdges<'_> {
 /// alongside, and [`InstanceEnv::check_all`] re-solves them against the
 /// final universe before its passes.
 ///
-/// Per-package checking runs [`InstanceEnv::declare`] while building;
-/// cross-package link merges environments and runs [`InstanceEnv::check_all`]
-/// once over the closed set (G3).
+/// Per-package checking runs [`InstanceEnv::declare`] while building; the
+/// package check then runs [`InstanceEnv::check_all`] once over its own
+/// closed set, and link merges run it again over the merged one (G3).
 #[derive(Default)]
 pub struct InstanceEnv {
     instances: Vec<Instance>,
@@ -352,6 +355,7 @@ impl InstanceEnv {
         // existing same-trait head, then new branches against each other
         // (duplicate branches like `int | int` overlap here). Decomposition
         // precedes the check, so errors name per-branch heads.
+        let first = self.instances.len();
         for (i, &head) in heads.iter().enumerate() {
             for inst in &self.instances {
                 if inst.trait_id == decl.trait_id {
@@ -363,12 +367,13 @@ impl InstanceEnv {
                         head,
                         &conditions,
                         decl.trait_id,
+                        InstanceId::from_raw(narrow(first + i)),
                     )? {
                         return Err(err);
                     }
                 }
             }
-            for &later in &heads[i + 1..] {
+            for (j, &later) in heads[i + 1..].iter().enumerate() {
                 if let Some(err) = overlap_error(
                     universe,
                     self,
@@ -377,13 +382,13 @@ impl InstanceEnv {
                     later,
                     &conditions,
                     decl.trait_id,
+                    InstanceId::from_raw(narrow(first + i + 1 + j)),
                 )? {
                     return Err(err);
                 }
             }
         }
 
-        let first = self.instances.len();
         for (expr, head) in branches.into_iter().zip(heads) {
             self.instances.push(Instance {
                 trait_id: decl.trait_id,
@@ -423,15 +428,17 @@ impl InstanceEnv {
         Ok(ids)
     }
 
-    /// Link-time check over the final closed environment (B6, section 10
+    /// Closure check over the final instance environment (B6, section 10
     /// item 7): every head and condition is first re-solved against the
     /// current universe (stored heads are declaration-time snapshots, and a
     /// trait-as-type head widens when its trait gains members), then
     /// pairwise disjointness of same-trait heads runs over all pairs in
     /// declaration order and the structural cycle check over every
-    /// instance. Per-package checking is [`InstanceEnv::declare`]'s
-    /// incremental rule; this pass catches what only the merged set — or the
-    /// grown universe — shows.
+    /// instance. Per-declaration checking is [`InstanceEnv::declare`]'s
+    /// incremental rule; this pass catches what only the closed set — or
+    /// the grown universe — shows, so it runs after the single package's
+    /// declarations settle and over cross-package link merges. It stops
+    /// at the first failure; per-declaration reporting stays complete.
     pub fn check_all(&self, universe: &mut Universe) -> Result<(), Error> {
         let mut solved_conditions = Vec::with_capacity(self.instances.len());
         let mut heads = Vec::with_capacity(self.instances.len());
@@ -459,6 +466,7 @@ impl InstanceEnv {
                         edges.heads[j],
                         edges.conditions[j],
                         a.trait_id,
+                        InstanceId::from_raw(narrow(j)),
                     )? {
                         return Err(err);
                     }
@@ -562,6 +570,7 @@ fn overlap_error(
     head_b: Ty,
     conds_b: &[Condition<Ty>],
     trait_id: TraitId,
+    later: InstanceId,
 ) -> Result<Option<Error>, Error> {
     let inter = if universe.is_disjoint(head_a, head_b) {
         let Some(shared) = crate::instance_solve::instantiation_overlap(
@@ -579,5 +588,6 @@ fn overlap_error(
         head_a,
         head_b,
         witness,
+        later,
     }))
 }

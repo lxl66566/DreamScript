@@ -126,18 +126,18 @@ impl Entry {
 /// bindings only — visibility or attributes mark a package declaration,
 /// and a lambda initializer is the named-function shape a written `fn`
 /// converts to. Everything else comes back unchanged.
-fn script_stmt_of(item: Item) -> Result<Stmt, Item> {
+fn script_stmt_of(item: Item) -> Result<Stmt, Box<Item>> {
     if !item.attrs.is_empty() || item.vis.is_some() {
-        return Err(item);
+        return Err(Box::new(item));
     }
     let ItemKind::Local(local) = item.kind else {
-        return Err(item);
+        return Err(Box::new(item));
     };
     if matches!(local.init, Expr::Lambda { .. }) {
-        return Err(Item {
+        return Err(Box::new(Item {
             kind: ItemKind::Local(local),
             ..item
-        });
+        }));
     }
     Ok(Stmt {
         span: item.span,
@@ -400,7 +400,7 @@ impl Ctx {
                     let entry = if self.script {
                         match script_stmt_of(item) {
                             Ok(stmt) => Entry::Stmt(stmt),
-                            Err(item) => Entry::Item(item),
+                            Err(item) => Entry::Item(*item),
                         }
                     } else {
                         Entry::Item(item)

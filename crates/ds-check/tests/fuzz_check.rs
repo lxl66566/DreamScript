@@ -6,6 +6,8 @@
 //! combinations, and two-file checks with rendering round out the random
 //! byte arm.
 
+use std::fmt::Write as _;
+
 use ds_check::{DeclaredRows, Effect, EffectRow, check, effects_of};
 use ds_diag::{Files, render};
 use ds_parse::parse;
@@ -206,17 +208,18 @@ fn nested_source(depth: usize) -> String {
         let n = format!("v{}", d + 1);
         match d % 3 {
             0 => {
-                src.push_str(&format!("  if {v} is int {{\n  const {n} = {v}\n"));
+                let _ = write!(src, "  if {v} is int {{\n  const {n} = {v}\n");
                 close.push("  } else {\n  \"out\"\n  }\n".to_owned());
             },
             1 => {
-                src.push_str(&format!(
+                let _ = write!(
+                    src,
                     "  match {v} {{\n  0 => {{\n  \"zero\"\n  }}\n  {n} => {{\n"
-                ));
+                );
                 close.push("  }\n  _ => {\n  \"other\"\n  }\n  }\n".to_owned());
             },
             _ => {
-                src.push_str(&format!("  for i{d} in 0..1 {{\n  const {n} = {v}\n"));
+                let _ = write!(src, "  for i{d} in 0..1 {{\n  const {n} = {v}\n");
                 close.push("  }\n".to_owned());
             },
         }

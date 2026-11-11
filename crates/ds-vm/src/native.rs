@@ -132,10 +132,11 @@
 //! empty string when the clamped range is empty or inverted, and
 //! `char_at` answers the empty string past either end.
 //!
-//! `concat` is the callable face of the `STRCAT` uop: lowering emits
-//! STRCAT at compiled call sites (one dispatch, no native call), and the
-//! native exists so a pool `FuncRef` naming `concat` behaves like any
-//! other builtin. `split` answers a list-object `Ref` (the same list kind
+//! `concat` is the callable face of the `STRCAT` uop: interpolation
+//! chains emit STRCAT directly, while both call spellings (`a.concat(b)`
+//! and string-operand `a + b`) stage the two Ref words and dispatch this
+//! native through CALL, so a pool `FuncRef` naming `concat` behaves like
+//! any other builtin. `split` answers a list-object `Ref` (the same list kind
 //! `fs_list` fills): the surface's `char` separator reaches runtime as a
 //! single-char string `Ref`, and an empty separator splits per character.
 //!

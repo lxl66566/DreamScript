@@ -22,6 +22,19 @@ use crate::heap::Heap;
 /// them through the same `rc_dec`).
 pub type DeinitFn = fn(NonNull<u8>);
 
+/// The standard `deinit` hook for a payload owning Rust memory: drops the
+/// payload in place at the unique death, so a pooled block never leaks it.
+/// Owners whose payload owns nothing pass `None` instead.
+#[must_use]
+pub fn drop_deinit<T>() -> DeinitFn {
+    fn drop_payload<T>(payload: NonNull<u8>) {
+        // SAFETY: the payload was written as `T` at allocation; the hook
+        // runs exactly once, at the unique death, before pooling.
+        unsafe { payload.cast::<T>().drop_in_place() };
+    }
+    drop_payload::<T>
+}
+
 /// Header of a reference-counted heap block. `repr(C)` because the layout is
 /// the committed format: `flags` is the two-hook collector word (cycle-candidate
 /// registration bit, weak-ref head) that H4 commits to carrying dormant - always

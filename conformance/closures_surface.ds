@@ -1,13 +1,13 @@
 // source: F2 "functions are values" and F7's trailing lambda, against the b07 callable-word seam audit 2026-11-10
-// purpose: lambda values in every argument shape typecheck; execution waits on the record's callable-word ruling
+// purpose: lambda values in every argument shape run through the callable words (fn-typed parameters, let-stored and passed lambdas, a capturing closure); the trailing-block sugar items wait on the block-argument round
 // items:
-// apply: stage: typecheck
-// twice: stage: typecheck
+// apply: stage: run
+// twice: stage: run
 // call_with_block: stage: typecheck
-// call_with_lambda: stage: typecheck
-// call_one_arg: stage: typecheck
-// call_stored: stage: typecheck
-// call_passed: stage: typecheck
+// call_with_lambda: stage: run
+// call_one_arg: stage: run
+// call_stored: stage: run
+// call_passed: stage: run
 // capture_over_local: stage: typecheck
 
 fn apply(f: fn() -> int) -> int {
@@ -18,6 +18,8 @@ fn twice(x: int, f: fn(int) -> int) -> int {
   f(x) + f(x)
 }
 
+// the trailing block argument is sugar that lowers in its own round; the
+// parenthesized spellings below (the capturing one included) run
 fn call_with_block() -> int {
   apply { 42 }
 }
@@ -40,6 +42,8 @@ fn call_passed() -> int {
   apply(g)
 }
 
+// the capture itself runs when spelled parenthesized; the block spelling
+// waits with call_with_block
 fn capture_over_local() -> int {
   const base = 7
   apply { base + 1 }

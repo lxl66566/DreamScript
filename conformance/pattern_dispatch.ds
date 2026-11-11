@@ -11,7 +11,7 @@
 // brief: stage: run
 // parse_error: stage: typecheck
 // parse_config: stage: typecheck
-// load_config: stage: run
+// load_config: stage: typecheck
 // eager: stage: typecheck
 // forward: stage: typecheck
 // branchy: stage: typecheck
@@ -57,6 +57,10 @@ tag parse_error
 
 extern fn parse_config(text: string) -> config | parse_error
 
+// the config struct's optional `port` field is outside the single-word
+// payload contract (the seam extraction_family records), and the file's
+// own parse_config extern has no native; the tail-? shape itself is the
+// fallible-union e2e's regression
 fn load_config(path: string) -> config | io_err | parse_error {
   const text = read_file(path)?
   parse_config(text)?

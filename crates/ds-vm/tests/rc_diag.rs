@@ -8,7 +8,7 @@
 #![cfg(feature = "diag")]
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -24,12 +24,12 @@ fn builtin(index: u32) -> Const {
     }
 }
 
-fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: Vec<Inst>) -> FunctionDef {
+fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Inst]) -> FunctionDef {
     FunctionDef {
         name: name.into(),
         layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
         pool: Vec::new(),
-        code: assemble(&body).expect("fixture body encodes"),
+        code: assemble(body).expect("fixture body encodes"),
     }
 }
 
@@ -42,7 +42,7 @@ fn registry() -> ModuleRegistry {
         &[SlotType::Ref, SlotType::I64, SlotType::Raw],
         0,
         1,
-        vec![
+        &[
             Uop::Funcf { frame_slots: 3 }.into(),
             Uop::Kstr { dst: 0, kidx: k(0) }.into(),
             Uop::Mov { dst: 2, src: 0 }.into(),
@@ -64,7 +64,7 @@ fn registry() -> ModuleRegistry {
         module: "rc".into(),
         func: 1,
     }];
-    let borrow = def("borrow", &[SlotType::Ref, SlotType::I64], 1, 1, vec![
+    let borrow = def("borrow", &[SlotType::Ref, SlotType::I64], 1, 1, &[
         Uop::Funcf { frame_slots: 2 }.into(),
         Uop::Kimm { dst: 1, kidx: k(0) }.into(),
         // the borrow parameter drops the handed count at its exit
@@ -73,7 +73,7 @@ fn registry() -> ModuleRegistry {
     ]);
     let mut borrow = borrow;
     borrow.pool = vec![Const::I64(0)];
-    let witness = def("witness", &[SlotType::Ref, SlotType::I64], 1, 0, vec![
+    let witness = def("witness", &[SlotType::Ref, SlotType::I64], 1, 0, &[
         Uop::Funcf { frame_slots: 2 }.into(),
         RcOp::Inc { src: 0 }.into(),
         RcOp::Inc { src: 0 }.into(),
@@ -83,7 +83,7 @@ fn registry() -> ModuleRegistry {
     ]);
     let mut witness = witness;
     witness.pool = vec![Const::I64(0)];
-    let killer = def("killer", &[SlotType::Ref, SlotType::I64], 0, 0, vec![
+    let killer = def("killer", &[SlotType::Ref, SlotType::I64], 0, 0, &[
         Uop::Funcf { frame_slots: 2 }.into(),
         Uop::Kstr { dst: 0, kidx: k(0) }.into(),
         RcOp::Dec { src: 0 }.into(),
@@ -124,7 +124,7 @@ fn a_map_of_strings_retains_and_frees_dec_per_element() {
         ],
         0,
         4,
-        vec![
+        &[
             Uop::Funcf { frame_slots: 8 }.into(),
             // the empty map, owned by this frame
             Uop::Call {
@@ -323,7 +323,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
     op!(Uop::Kimm { dst: 3, kidx: k(4) });
     op!(Uop::Kimm { dst: 7, kidx: k(5) });
     op!(Uop::Kimm { dst: 8, kidx: k(4) });
-    let head = b.len() as u32;
+    let head = u32::try_from(b.len()).expect("fixture code is tiny");
     op!(Uop::LtI64 {
         dst: 4,
         lhs: 3,
@@ -343,10 +343,10 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
             op!(Uop::Kstr { dst: 2, kidx: k(11) });
             let join_jmp = b.len();
             op!(Uop::Jmp { target: 0 });
-            let hit_at = b.len() as u32;
+            let hit_at = u32::try_from(b.len()).expect("fixture code is tiny");
             b[hit] = Uop::Jmpif { cond: 4, target: hit_at }.into();
             $hit_mov
-            let join_at = b.len() as u32;
+            let join_at = u32::try_from(b.len()).expect("fixture code is tiny");
             b[join_jmp] = Uop::Jmp { target: join_at }.into();
             op!(RcOp::Dec { src: 2 });
         }};
@@ -397,14 +397,14 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
     });
     let join2_jmp = b.len();
     op!(Uop::Jmp { target: 0 });
-    let hit2_at = b.len() as u32;
+    let hit2_at = u32::try_from(b.len()).expect("fixture code is tiny");
     b[hit2] = Uop::Jmpif {
         cond: 4,
         target: hit2_at,
     }
     .into();
     op!(Uop::Mov { dst: 2, src: 10 });
-    let join2_at = b.len() as u32;
+    let join2_at = u32::try_from(b.len()).expect("fixture code is tiny");
     b[join2_jmp] = Uop::Jmp { target: join2_at }.into();
     op!(RcOp::Dec { src: 2 });
     op!(Uop::Kimm { dst: 8, kidx: k(4) });
@@ -470,7 +470,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
         rhs: 8
     });
     op!(Uop::Jmp { target: head });
-    let end_at = b.len() as u32;
+    let end_at = u32::try_from(b.len()).expect("fixture code is tiny");
     b[end_jmp] = Uop::JmpifNot {
         cond: 4,
         target: end_at,
@@ -500,7 +500,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
         ],
         0,
         4,
-        b,
+        &b,
     );
     let mut reads = reads;
     reads.pool = vec![
@@ -558,7 +558,7 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
         ],
         0,
         3,
-        vec![
+        &[
             Uop::Funcf { frame_slots: 7 }.into(),
             // the string element, one claim owned by this frame
             Uop::Kstr { dst: 0, kidx: k(0) }.into(),
@@ -655,7 +655,7 @@ fn tail_and_collect_copies_balance_per_element() {
         ],
         0,
         3,
-        vec![
+        &[
             Uop::Funcf { frame_slots: 9 }.into(),
             // two string elements, each one claim owned by this frame
             Uop::Kstr { dst: 0, kidx: k(0) }.into(),
@@ -734,4 +734,85 @@ fn tail_and_collect_copies_balance_per_element() {
         vm.objects().is_empty(),
         "every copied, stored, and birth-claimed count dropped"
     );
+}
+
+/// The in-language spawn seam's copy-in is a counted fiber crossing [E2
+/// over C4]: `nursery_spawn` stages a closure word, the spawn core
+/// acquires one count per `Ref` capture for the child's entry frame, and
+/// the child's own exit drop balances it. The steady state is observable
+/// because the host-staged closure keeps no capture count of its own, so
+/// only the host's interned word's claim survives the round trip.
+#[test]
+fn a_spawn_copy_in_round_trips_one_captured_count() {
+    let mut reg = ModuleRegistry::new();
+    let mut main = def(
+        "main",
+        &[SlotType::Fn, SlotType::I64, SlotType::Raw, SlotType::Raw],
+        1,
+        2,
+        &[
+            Uop::Funcf { frame_slots: 4 }.into(),
+            // open: the fresh nursery's id lands on overlay word 0
+            Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 2 }.into(),
+            // spawn: (id, the closure word staged from the entry param)
+            Uop::Mov { dst: 2, src: 1 }.into(),
+            Uop::Mov { dst: 3, src: 0 }.into(),
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+            // boundary: (id, containment mask) — the join drives the
+            // child to death and its exit drop answers the copy-in
+            Uop::Mov { dst: 2, src: 1 }.into(),
+            Uop::Kimm { dst: 3, kidx: k(3) }.into(),
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            }
+            .into(),
+            Uop::Kimm { dst: 1, kidx: k(4) }.into(),
+            Uop::Ret { src: 1 }.into(),
+        ],
+    );
+    main.pool = vec![
+        builtin(ds_vm::native::BUILTIN_NURSERY_OPEN),
+        builtin(ds_vm::native::BUILTIN_NURSERY_SPAWN),
+        builtin(ds_vm::native::BUILTIN_NURSERY_BOUNDARY),
+        Const::I64(-1), // the mask contains every tag
+        Const::I64(0),
+    ];
+    let mut child = def("child", &[SlotType::Ref, SlotType::I64], 1, 0, &[
+        Uop::Funcf { frame_slots: 2 }.into(),
+        Uop::Kimm { dst: 1, kidx: k(0) }.into(),
+        RcOp::Dec { src: 0 }.into(),
+        Uop::Ret { src: 1 }.into(),
+    ]);
+    child.pool = vec![Const::I64(0)];
+    reg.install(ModuleVersion::new("rs", vec![main, child]).expect("valid spawn module"));
+    let mut vm = Vm::new(reg);
+    let captured = vm.intern_str("shared");
+    let closure = vm.alloc_closure(
+        FuncRef::new(vm.registry().module_id("rs").expect("installed"), 1),
+        vec![captured],
+    );
+    assert_eq!(
+        vm.run("rs", "main", &[closure]),
+        Ok(Value::I64(0)),
+        "the spawn and boundary seams ran clean under the tripwires"
+    );
+    let Value::Ref(id) = captured else {
+        panic!("an interned string ref");
+    };
+    // the host's lone claim remains: the copy-in acquired exactly one and
+    // the child's exit drop returned exactly one (the host-staged closure
+    // keeps no capture count of its own)
+    assert_eq!(vm.objects().rc_at(id), Ok(1));
+    assert_eq!(vm.objects().str_at(id), Ok("shared"));
+    assert_eq!(vm.objects().len(), 2, "the captured word and the closure");
 }

@@ -1,0 +1,21 @@
+// Two generic impls of one trait declare while no atom proves their
+// bounds, so no declaration-time probe can reject the pair; the later
+// `shows for int` then makes both serve `list[int]`. The package-level
+// coherence pass re-solves the closed instance environment after every
+// impl declares and reports the overlap at the later declaration [B6].
+
+tag int
+tag string
+struct list[t]
+trait shows {
+  fn show(self) -> string
+}
+impl [t: shows] shows for list[t] {
+  fn show(self) -> string { "one" }
+}
+impl [u: shows] shows for list[u] {
+  fn show(self) -> string { "two" }
+}
+impl shows for int {
+  fn show(self) -> string { "i" }
+}

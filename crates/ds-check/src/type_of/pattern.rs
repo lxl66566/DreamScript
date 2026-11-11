@@ -67,47 +67,7 @@ impl Bodies<'_> {
         match pat {
             Pattern::Wildcard(_) => covered.extend(members),
             Pattern::Binding { name, .. } => {
-                // A bare identifier in a test position names a member test
-                // when the type namespace carries it [F9]: bare tags are
-                // constructor values, so the type entry wins over any
-                // same-named local and nothing binds.
-                if arm {
-                    if let Some(atom) = self.unit_pattern_atom(&name.name) {
-                        self.case_cover(name.span, atom, &members, scrut, covered);
-                        return;
-                    }
-                }
-                let ty = match ann {
-                    Some(ann) => match self.solve_here(ann) {
-                        Some(solved) => {
-                            let refined = self.decls.universe.inter(scrut, solved);
-                            if self.decls.universe.is_empty(refined) {
-                                self.error(
-                                    ErrorCode::TypeMismatch,
-                                    format!(
-                                        "binding annotation `{}` intersects `{}` emptily",
-                                        decls::render_type(ann),
-                                        self.decls.universe.render(scrut)
-                                    ),
-                                    name.span,
-                                    "empty intersection",
-                                );
-                            }
-                            // An annotated binding is a narrowing filter:
-                            // it covers only its intersection, the way the
-                            // record's `.err` handler arms split the union
-                            // [E4, F4].
-                            covered.extend(self.decls.universe.members(refined).to_vec());
-                            refined
-                        },
-                        None => scrut,
-                    },
-                    None => scrut,
-                };
-                binders.push((name.name.clone(), name.span, ty));
-                if ann.is_none() {
-                    covered.extend(members);
-                }
+                self.pattern_binding(name, scrut, ann, &members, covered, binders, arm);
             },
             Pattern::Literal { span, lit } => {
                 let name = match lit {
@@ -345,6 +305,61 @@ impl Bodies<'_> {
                     covered.extend(sub_covered);
                 }
             },
+        }
+    }
+
+    /// The bare-identifier arm of pattern_walk: a member test by name in
+    /// an arm position, a whole-scrutinee binder otherwise.
+    fn pattern_binding(
+        &mut self,
+        name: &Ident,
+        scrut: Ty,
+        ann: Option<&Type>,
+        members: &[TypeId],
+        covered: &mut Vec<TypeId>,
+        binders: &mut Vec<(String, Span, Ty)>,
+        arm: bool,
+    ) {
+        // A bare identifier in a test position names a member test
+        // when the type namespace carries it [F9]: bare tags are
+        // constructor values, so the type entry wins over any
+        // same-named local and nothing binds.
+        if arm {
+            if let Some(atom) = self.unit_pattern_atom(&name.name) {
+                self.case_cover(name.span, atom, members, scrut, covered);
+                return;
+            }
+        }
+        let ty = match ann {
+            Some(ann) => match self.solve_here(ann) {
+                Some(solved) => {
+                    let refined = self.decls.universe.inter(scrut, solved);
+                    if self.decls.universe.is_empty(refined) {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "binding annotation `{}` intersects `{}` emptily",
+                                decls::render_type(ann),
+                                self.decls.universe.render(scrut)
+                            ),
+                            name.span,
+                            "empty intersection",
+                        );
+                    }
+                    // An annotated binding is a narrowing filter:
+                    // it covers only its intersection, the way the
+                    // record's `.err` handler arms split the union
+                    // [E4, F4].
+                    covered.extend(self.decls.universe.members(refined).to_vec());
+                    refined
+                },
+                None => scrut,
+            },
+            None => scrut,
+        };
+        binders.push((name.name.clone(), name.span, ty));
+        if ann.is_none() {
+            covered.extend(members);
         }
     }
 

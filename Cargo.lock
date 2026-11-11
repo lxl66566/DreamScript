@@ -388,6 +388,7 @@ dependencies = [
  "criterion",
  "ds-abi",
  "ds-mod",
+ "ds-rt",
  "tempfile",
 ]
 
