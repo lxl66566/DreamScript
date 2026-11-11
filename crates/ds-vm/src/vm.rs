@@ -59,7 +59,8 @@ use crate::{
     fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
     module::{ModuleRegistry, ModuleVersion},
     native::{
-        ControlNative, NativeFunction, NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
+        ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction, NativeResult,
+        OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
     },
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::Objects,
@@ -225,6 +226,22 @@ pub enum Trap {
     /// suspend, so the drive refuses instead of corrupting the frame
     /// chain; the frames stay for [`Vm::backtrace`].
     ReentrancyRefused,
+    /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
+    /// payload is the error value it handed `cancel`; the trap never
+    /// resumes — the trap path ledgers the outcome into the fiber's
+    /// nursery and raises the cancel flag, and the boundary seam unions
+    /// the payload out at the nursery's join.
+    NurseryCancelled {
+        /// The failing child's error value.
+        payload: Value,
+    },
+    /// A nursery boundary's first-failure payload sits outside the
+    /// caller's return-union containment set, so the join refuses to
+    /// union it out; the payload rides for the trap report.
+    NurseryUncontained {
+        /// The payload the boundary refused.
+        payload: Value,
+    },
 }
 
 /// One entry of the call-info stack: the frame base plus the module version
@@ -922,6 +939,20 @@ fn control_i64(
     }
 }
 
+/// Reads one staged word of any kind on overlay word `index` for a
+/// control native (the callable and cancel seams carry words whose kinds
+/// the call site proves, not the table).
+fn control_word(
+    stack: &Segment,
+    fp: usize,
+    caller: &FrameLayout,
+    index: usize,
+) -> Result<Value, Trap> {
+    let body_len = caller.slots().len() - caller.arg_area_len();
+    let slot = u8::try_from(caller.arg_area().start + index).expect("slot index fits u8");
+    read_value(stack, fp, slot, caller.slots(), body_len)
+}
+
 /// The pre-invocation width check for a native call: the callee's result
 /// must fit the overlay area that receives it. For a CALL that is the
 /// caller's staging area; for a CALLT the span lands on the ORIGINAL
@@ -1199,6 +1230,60 @@ impl Vm {
         args: &[Value],
     ) -> Result<FiberId, Trap> {
         let (version, func_id) = self.resolve_entry(module, func, args)?;
+        Ok(self.push_spawned(nursery, version, func_id, args))
+    }
+
+    /// Spawns a fiber from a callable word's own function [E2]: the
+    /// in-language `spawn` seam. The FuncRef resolves through the target
+    /// module's current slot; the callable's captures become the entry
+    /// arguments, so the entry checks of [`Vm::run`] apply verbatim.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownModule`] when the FuncRef's module id names no
+    /// installed module; the entry checks of [`Vm::run`] otherwise.
+    fn spawn_ref_into(
+        &mut self,
+        nursery: Option<NurseryId>,
+        fref: FuncRef,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
+        let name = self
+            .registry
+            .module_name(fref.module())
+            .ok_or(Trap::UnknownModule {
+                module: fref.module(),
+            })?;
+        let (version, func_id) =
+            self.registry
+                .resolve_indexed(name, fref.func())
+                .ok_or(Trap::UnknownCallee {
+                    module: name.to_owned(),
+                    func: fref.func(),
+                })?;
+        self.entry_checks(&version, func_id, args)?;
+        // each Ref argument acquires one count for the child's frame at
+        // the copy-in — the child's own exit drops balance it, precisely
+        // a closure call's capture copy-in
+        for &arg in args {
+            if let Value::Ref(id) = arg {
+                self.objects.inc(id)?;
+            }
+        }
+        Ok(self.push_spawned(nursery, version, func_id, args))
+    }
+
+    /// The pool-side half of every spawn: one pool entry with a fresh
+    /// entry frame, born ready and never started, plus the child-of
+    /// bookkeeping. The first switch into it runs its entry function; the
+    /// pool slot of a dead fiber is reused.
+    fn push_spawned(
+        &mut self,
+        nursery: Option<NurseryId>,
+        version: Arc<ModuleVersion>,
+        func_id: u32,
+        args: &[Value],
+    ) -> FiberId {
         let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
         // born into the pool: reuse a dead slot above the reserved root,
         // or grow the pool by one
@@ -1229,7 +1314,7 @@ impl Vm {
         if let Some(n) = nursery {
             self.nurseries[n.index()].push_child(id);
         }
-        Ok(id)
+        id
     }
 
     /// Drives one fiber slice from the host: enters `fiber` (Ready or
@@ -1338,6 +1423,15 @@ impl Vm {
         if let Some(id) = self.live_root_nursery() {
             return id;
         }
+        let id = self.open_fresh_nursery();
+        self.root_nursery = Some(id);
+        id
+    }
+
+    /// Opens a fresh nursery [E2]: the in-language `nursery` block's own
+    /// (never the root — bare host spawns route there alone). Dead slots
+    /// reuse like fiber slots.
+    fn open_fresh_nursery(&mut self) -> NurseryId {
         let slot = match self
             .nurseries
             .iter()
@@ -1351,9 +1445,7 @@ impl Vm {
         } else {
             self.nurseries[slot] = Nursery::open();
         }
-        let id = NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"));
-        self.root_nursery = Some(id);
-        id
+        NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"))
     }
 
     /// The root nursery while it is open.
@@ -1559,6 +1651,20 @@ impl Vm {
                     module: module.into(),
                     func: func.into(),
                 })?;
+        self.entry_checks(&version, func_id, args)?;
+        Ok((version, func_id))
+    }
+
+    /// The argument and frame checks every entry shares [E2]: arity,
+    /// argument word kinds (a Ref word against a Fn parameter is the
+    /// callable-defaulted slot), and the entry frame versus the stack
+    /// limit.
+    fn entry_checks(
+        &self,
+        version: &Arc<ModuleVersion>,
+        func_id: u32,
+        args: &[Value],
+    ) -> Result<(), Trap> {
         let target = &version.functions()[func_id as usize];
         if args.len() != target.layout.params_len() {
             return Err(Trap::ArityMismatch {
@@ -1588,7 +1694,7 @@ impl Vm {
                 limit: self.limit,
             });
         }
-        Ok((version, func_id))
+        Ok(())
     }
 
     /// Builds a fiber's entry frame in its own segment: metadata word,
@@ -1802,7 +1908,154 @@ impl Vm {
                 let (a, at) = self.switch_in(joiner, Value::I64(count));
                 Ok(SwitchOutcome::Entered(a, at))
             },
+            // the in-language seams [E2]: open, spawn, the boundary join,
+            // and cancel. The lowerer synthesizes every call site, so a
+            // staged id always names this frame's own open nursery; the
+            // guards answer the checked-read bounce tag (the native-table
+            // convention) for hand-assembled corruption.
+            ControlNative::NurseryOpen => {
+                let id = self.open_fresh_nursery();
+                overlay_native(
+                    NativeResult::Word(Value::I64(i64::from(id.0))),
+                    &mut self.stack,
+                    caller,
+                    fp,
+                );
+                Ok(SwitchOutcome::Bounced)
+            },
+            ControlNative::NurserySpawn => {
+                let id = control_i64(&self.stack, fp, caller, 0)?;
+                let word = control_word(&self.stack, fp, caller, 1)?;
+                let nursery = u32::try_from(id).ok().map(NurseryId).filter(|&n| {
+                    self.nurseries
+                        .get(n.index())
+                        .is_some_and(|nr| nr.state == NurseryState::Open)
+                });
+                let Some(nursery) = nursery else {
+                    overlay_native(
+                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
+                        &mut self.stack,
+                        caller,
+                        fp,
+                    );
+                    return Ok(SwitchOutcome::Bounced);
+                };
+                // the callable word: a scalar `Fn` names the child with no
+                // captures; a closure object's `Ref` carries them as the
+                // entry arguments
+                let (fref, args) = match word {
+                    Value::Fn(fref) => (fref, Vec::new()),
+                    Value::Ref(obj) => match self.objects.closure_at(obj) {
+                        Ok((fref, captures)) => (fref, captures.to_vec()),
+                        Err(e) => return Err(e),
+                    },
+                    staged => {
+                        return Err(Trap::CallLayout(SlideError::TypeMismatch {
+                            index: 1,
+                            staged: staged.slot_type(),
+                            expected: SlotType::Fn,
+                        }));
+                    },
+                };
+                self.spawn_ref_into(Some(nursery), fref, &args)?;
+                overlay_native(
+                    NativeResult::Word(Value::I64(0)),
+                    &mut self.stack,
+                    caller,
+                    fp,
+                );
+                Ok(SwitchOutcome::Bounced)
+            },
+            ControlNative::NurseryBoundary => {
+                let id = control_i64(&self.stack, fp, caller, 0)?;
+                let mask = control_i64(&self.stack, fp, caller, 1)?;
+                let nursery = u32::try_from(id).ok().map(NurseryId).filter(|&n| {
+                    self.nurseries
+                        .get(n.index())
+                        .is_some_and(|nr| nr.state == NurseryState::Open)
+                });
+                let Some(nursery) = nursery else {
+                    overlay_native(
+                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
+                        &mut self.stack,
+                        caller,
+                        fp,
+                    );
+                    return Ok(SwitchOutcome::Bounced);
+                };
+                if self.pool[self.current.index()].nursery == Some(nursery) {
+                    return Err(Trap::UnknownCallee {
+                        module: "nursery".into(),
+                        func: nursery.0,
+                    });
+                }
+                self.park_current(active, CodePc(pc + 1));
+                let joiner = self.current;
+                let outcomes = self.run_nursery_to_death(nursery, false);
+                // the first failure in spawn-drive order decides: a
+                // cancelled child with no trapped one before it cannot
+                // happen (the flag only rises at a trapped death)
+                match outcomes
+                    .iter()
+                    .find(|o| matches!(o, ChildOutcome::Trapped(_)))
+                {
+                    None => {
+                        let (a, at) = self.switch_in(joiner, Value::I64(0));
+                        self.overlay_boundary(&a, NURSERY_BOUNDARY_OK, Value::I64(0));
+                        Ok(SwitchOutcome::Entered(a, at))
+                    },
+                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => {
+                        // the staged mask is the caller's return-union
+                        // member containment set: an error the boundary
+                        // cannot union out refuses instead of corrupting
+                        // the union's tag space
+                        let contained = match payload {
+                            Value::Tag(tag) => *tag < 64 && (mask & (1i64 << *tag)) != 0,
+                            _ => false,
+                        };
+                        if !contained {
+                            // re-enter the joiner so the drive ends on it
+                            // and the trap attributes at the boundary; the
+                            // call site never reads the answer
+                            let _ = self.switch_in(joiner, Value::I64(0));
+                            return Err(Trap::NurseryUncontained { payload: *payload });
+                        }
+                        let (a, at) = self.switch_in(joiner, Value::I64(0));
+                        self.overlay_boundary(&a, NURSERY_BOUNDARY_ERR, *payload);
+                        Ok(SwitchOutcome::Entered(a, at))
+                    },
+                    Some(ChildOutcome::Trapped(trap)) => {
+                        // a real trap surfaces at the boundary: re-enter
+                        // the joiner first, so the drive ends on it and
+                        // the trap attributes there
+                        let _ = self.switch_in(joiner, Value::I64(0));
+                        Err(trap.clone())
+                    },
+                    Some(_) => unreachable!("the scan yields only trapped failures"),
+                }
+            },
+            ControlNative::NurseryCancel => {
+                // the fiber's deliberate failure: the trap path ledgers
+                // the outcome and raises the cancel flag; the call never
+                // answers
+                let payload = control_word(&self.stack, fp, caller, 0)?;
+                Err(Trap::NurseryCancelled { payload })
+            },
         }
+    }
+
+    /// Writes the boundary seam's two-word answer span onto the joiner's
+    /// call site: word 0 the discriminant, word 1 the payload. Runs
+    /// after the joiner's re-entry, so the current context is its frame.
+    fn overlay_boundary(&mut self, active: &Active, tag: u8, payload: Value) {
+        let fp = self.callinfo[self.callinfo.len() - 1].fp;
+        let f = &active.version.functions()[active.func as usize];
+        overlay_native(
+            NativeResult::Tag { tag, payload },
+            &mut self.stack,
+            &f.layout,
+            fp,
+        );
     }
 
     /// Runs an entry function to its `HALT` or entry-frame `RET` and reports

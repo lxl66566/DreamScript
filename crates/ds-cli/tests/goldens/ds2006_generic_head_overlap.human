@@ -1,0 +1,7 @@
+error[DS2006]: instance head `list[t]` intersects the `list[int]` instance; witness value type `list[int]`
+ --> tests/fixtures/negative/ds2006_generic_head_overlap.ds:19:27
+   |
+19 | impl [t: shows] shows for list[t] {
+   |                           ^^^^^^^ overlapping head
+   |
+   = note: the earlier instance's head covers `list[int]`; two instances of one trait must be pairwise disjoint [B6]

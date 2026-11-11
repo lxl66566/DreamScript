@@ -154,6 +154,44 @@ fn divergent_receiver_mode_refuses() {
 }
 
 #[test]
+fn inferred_return_agreeing_with_the_declared_return_stays_clean() {
+    let analyzed = analyze_source(
+        "inferred_clean.ds",
+        &format!("{SHOWS}impl shows for int {{\n  fn show(self) {{ \"i\" }}\n}}\n"),
+    );
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "an inferred body matching the declared return checks clean: {rendered:?}"
+    );
+}
+
+#[test]
+fn inferred_return_refuses_when_the_declared_return_disagrees() {
+    let analyzed = analyze_source(
+        "inferred_ret.ds",
+        &format!("{SHOWS}impl shows for int {{\n  fn show(self) {{ 1 }}\n}}\n"),
+    );
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2018")
+        .expect("the inferred divergence reports as DS2018");
+    assert!(
+        diag.message.contains(
+            "impl member `show`'s body returns `int`, the trait member declares `string`"
+        ),
+        "the message names the body's own type: {}",
+        diag.message
+    );
+    assert!(
+        diag.labels.len() == 2,
+        "the body plus the trait member signature"
+    );
+}
+
+#[test]
 fn trait_generic_arguments_substitute_positionally() {
     let source = concat!(
         "tag int\n",

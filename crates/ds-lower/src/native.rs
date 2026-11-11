@@ -11,6 +11,13 @@ use ds_abi::{BuiltinInstance, SlotType};
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share.
 pub(crate) const PLATFORM_IO_OK: u8 = u8::MAX;
+/// The clean-join discriminant of the nursery boundary seam's answer
+/// span. The lowering never tests it (a clean join is the fall-through),
+/// so it stays mirror-only and pinned by the drift test.
+pub const NURSERY_BOUNDARY_OK: u8 = u8::MAX - 6;
+/// The first-failure discriminant of the nursery boundary seam's answer
+/// span; word 1 carries the failing child's error payload.
+pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 
 /// The reserved FuncRef module name a runtime-resolved trait dispatch
 /// site inside a generic impl body carries [H3]: the FuncRef's `func`
@@ -296,6 +303,37 @@ pub(crate) const NATIVES: &[Native] = &[
             payload: SlotType::Ref,
             err_prefix: "net error: ",
         },
+    },
+    // The nursery surface's internal seams [E2]: no ambient spelling
+    // declares these, so no call site resolves them by name — the
+    // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.
+    // They sit here so the drift test pins the mirror against the VM
+    // tables. The boundary seam's two-word ok/err span is the checked
+    // shape (word 0 the discriminant, word 1 the payload); the nursery
+    // emission reads it directly, so no shared machinery ever stages it.
+    Native {
+        name: "nursery_open",
+        module: NativeModule::Builtin,
+        index: 41,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "nursery_spawn",
+        module: NativeModule::Builtin,
+        index: 42,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "nursery_boundary",
+        module: NativeModule::Builtin,
+        index: 43,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        name: "nursery_cancel",
+        module: NativeModule::Builtin,
+        index: 44,
+        shape: NativeShape::Total(SlotType::I64),
     },
 ];
 
@@ -627,5 +665,7 @@ mod drift {
             crate::shape::FIRST_RESERVED_TAG,
             ds_vm::native::PLATFORM_CANCELLED
         );
+        assert_eq!(NURSERY_BOUNDARY_OK, ds_vm::native::NURSERY_BOUNDARY_OK);
+        assert_eq!(NURSERY_BOUNDARY_ERR, ds_vm::native::NURSERY_BOUNDARY_ERR);
     }
 }

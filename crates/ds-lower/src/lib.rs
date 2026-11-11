@@ -398,7 +398,15 @@ fn lower_all<'b>(
     let mut index = 0;
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
-        let (function, ops) = FnLower::lower(analyzed, res, plan, &mut shapes, lin, &planned)?;
+        let (function, ops) = FnLower::lower(
+            analyzed,
+            res,
+            plan,
+            &mut shapes,
+            lin,
+            &planned,
+            u32::try_from(index).expect("function index fits u32"),
+        )?;
         functions.push(function);
         placed.push(ops);
         index += 1;

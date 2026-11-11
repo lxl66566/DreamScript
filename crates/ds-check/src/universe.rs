@@ -356,6 +356,21 @@ impl Universe {
         }
     }
 
+    /// Every declared atom in declaration order, minted type variables and
+    /// structural applications included: the candidate groundings a
+    /// coherence probe over generic heads draws from.
+    pub fn atom_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
+        (0..narrow(self.atoms.len())).map(TypeId::from_raw)
+    }
+
+    /// The solved type of an explicit member set: the intern inverse of
+    /// [`Universe::members`], for consumers that re-derive a
+    /// substitution's solved type at one site (the runtime-evidence
+    /// seam over generic impls).
+    pub fn set_ty(&mut self, members: &[TypeId]) -> Ty {
+        self.intern(members.to_vec())
+    }
+
     /// The singleton type of one atom.
     pub fn atom_ty(&mut self, id: TypeId) -> Result<Ty, Error> {
         self.atom_decl(id)?;
@@ -505,14 +520,6 @@ impl Universe {
             })
             .collect();
         if names.is_empty() { "empty".to_owned() } else { names.join(" | ") }
-    }
-
-    /// The solved type of an explicit member set: the intern inverse of
-    /// [`Universe::members`], for consumers that re-derive a
-    /// substitution's solved type at one site (the runtime-evidence
-    /// seam over generic impls).
-    pub fn set_ty(&mut self, members: &[TypeId]) -> Ty {
-        self.intern(members.to_vec())
     }
 
     fn intern(&mut self, mut set: Vec<TypeId>) -> Ty {

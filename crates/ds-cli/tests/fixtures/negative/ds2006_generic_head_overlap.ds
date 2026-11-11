@@ -1,0 +1,21 @@
+// A concrete head and a generic head of one trait read disjoint to the
+// set algebra (a generic head is one opaque atom), but the instantiation
+// probe grounds `list[t]` at `int` and both impls serve `list[int]`: the
+// overlap is rejected at the later declaration with the shared
+// instantiation as the witness [B6].
+
+tag int
+tag string
+struct list[t]
+trait shows {
+  fn show(self) -> string
+}
+impl shows for int {
+  fn show(self) -> string { "i" }
+}
+impl shows for list[int] {
+  fn show(self) -> string { "li" }
+}
+impl [t: shows] shows for list[t] {
+  fn show(self) -> string { "l" }
+}

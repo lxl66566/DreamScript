@@ -440,5 +440,12 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::ReentrancyRefused => "a native container call's lambda ended its fiber (HALT, fiber \
                                     switch, or yield under nesting) instead of returning"
             .to_owned(),
+        Trap::NurseryCancelled { .. } => "a fiber cancelled its nursery and never resumed; the \
+                                          payload unions out at the boundary, or the trap escaped \
+                                          one"
+        .to_owned(),
+        Trap::NurseryUncontained { .. } => {
+            "a nursery child failed with an error outside the boundary's return union".to_owned()
+        },
     }
 }

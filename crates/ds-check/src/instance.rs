@@ -5,7 +5,12 @@
 //! every pair `H1`, `H2` of same-trait heads, `H1 & H2 = Empty` must hold
 //! (B6). It is checked incrementally at declaration (per package (G3)) by
 //! [`InstanceEnv::declare`] and again over the final environment at link
-//! time by [`InstanceEnv::check_all`]. There is no orphan rule: any package
+//! time by [`InstanceEnv::check_all`]. Heads the set algebra reads
+//! disjoint because a generic head is opaque get the same rule through
+//! instantiation: the probe in `crate::instance_solve` grounds candidate
+//! instantiations and asks whether both heads serve one, so a concrete and
+//! a generic head (or two generic heads with intersecting bounds) are
+//! rejected at the later declaration. There is no orphan rule: any package
 //! may declare an instance for any type, foreign included; no priority
 //! machinery exists, so dispatch never depends on declaration order.
 //!
@@ -350,13 +355,29 @@ impl InstanceEnv {
         for (i, &head) in heads.iter().enumerate() {
             for inst in &self.instances {
                 if inst.trait_id == decl.trait_id {
-                    if let Some(err) = overlap_error(universe, inst.head, head, decl.trait_id)? {
+                    if let Some(err) = overlap_error(
+                        universe,
+                        self,
+                        inst.head,
+                        &inst.conditions,
+                        head,
+                        &conditions,
+                        decl.trait_id,
+                    )? {
                         return Err(err);
                     }
                 }
             }
             for &later in &heads[i + 1..] {
-                if let Some(err) = overlap_error(universe, head, later, decl.trait_id)? {
+                if let Some(err) = overlap_error(
+                    universe,
+                    self,
+                    head,
+                    &conditions,
+                    later,
+                    &conditions,
+                    decl.trait_id,
+                )? {
                     return Err(err);
                 }
             }
@@ -430,9 +451,15 @@ impl InstanceEnv {
             for j in (i + 1)..self.instances.len() {
                 let (a, b) = (&self.instances[i], &self.instances[j]);
                 if a.trait_id == b.trait_id {
-                    if let Some(err) =
-                        overlap_error(universe, edges.heads[i], edges.heads[j], a.trait_id)?
-                    {
+                    if let Some(err) = overlap_error(
+                        universe,
+                        self,
+                        edges.heads[i],
+                        edges.conditions[i],
+                        edges.heads[j],
+                        edges.conditions[j],
+                        a.trait_id,
+                    )? {
                         return Err(err);
                     }
                 }
@@ -523,17 +550,29 @@ fn collect_branches(expr: &TypeExpr, out: &mut Vec<TypeExpr>) {
 
 /// Builds the overlap error for two same-trait heads that intersect, with a
 /// witness value type of the intersection (B6); `None` when the heads are
-/// disjoint. `head_a` is the earlier-declared head.
+/// disjoint. `head_a` is the earlier-declared head. Heads the set algebra
+/// reads disjoint because a generic head is opaque get the instantiation
+/// probe: an intersection through generic heads is the same error, with
+/// the shared instantiation as the witness.
 fn overlap_error(
     universe: &mut Universe,
+    env: &InstanceEnv,
     head_a: Ty,
+    conds_a: &[Condition<Ty>],
     head_b: Ty,
+    conds_b: &[Condition<Ty>],
     trait_id: TraitId,
 ) -> Result<Option<Error>, Error> {
-    if universe.is_disjoint(head_a, head_b) {
-        return Ok(None);
-    }
-    let inter = universe.inter(head_a, head_b);
+    let inter = if universe.is_disjoint(head_a, head_b) {
+        let Some(shared) = crate::instance_solve::instantiation_overlap(
+            universe, env, head_a, conds_a, head_b, conds_b,
+        ) else {
+            return Ok(None);
+        };
+        shared
+    } else {
+        universe.inter(head_a, head_b)
+    };
     let witness = universe.witness(inter)?;
     Ok(Some(Error::InstanceOverlap {
         trait_id,

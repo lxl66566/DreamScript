@@ -75,6 +75,10 @@
 //! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) | reserved |
 //! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) | reserved |
 //! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) | reserved |
+//! | 41    | `nursery_open () -> int` (control seam; the `nursery` block) | reserved |
+//! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) | reserved |
+//! | 43    | `nursery_boundary (nursery: int, mask: int) -> tag + payload` (control seam; the block's join) | reserved |
+//! | 44    | `nursery_cancel (e: tag) -> unit` (control seam; `cancel`) | reserved |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -387,6 +391,34 @@ pub const BUILTIN_FILTER: u32 = 39;
 /// init seeding the accumulator and an empty list answering it; the ONE
 /// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_REDUCE: u32 = 40;
+/// `nursery_open() -> int` — the in-language `nursery` block's open seam
+/// [E2]: opens a fresh block-scoped nursery (not the root) and answers
+/// its pool id. Never user-callable: the lowerer synthesizes the call.
+pub const BUILTIN_NURSERY_OPEN: u32 = 41;
+/// `nursery_spawn(nursery: int, child: fn) -> unit` — the `spawn`
+/// expression's seam [E2]: the callable word names the synthesized child
+/// (a scalar `Fn` word or a closure object's `Ref` whose captures become
+/// the entry arguments); the fiber is born ready into the open nursery —
+/// the join at the block's exit drives it. Never user-callable.
+pub const BUILTIN_NURSERY_SPAWN: u32 = 42;
+/// `nursery_boundary(nursery: int, mask: int) -> tag+payload` — the
+/// in-language join seam [E2]: parks the caller, drives the named
+/// nursery's children to death in spawn order (first failure raises the
+/// cancel flag for the rest [E5]), and answers the boundary result: a
+/// two-word span whose word 0 is [`NURSERY_BOUNDARY_OK`] on a clean join
+/// or [`NURSERY_BOUNDARY_ERR`] on a first failure, word 1 the failing
+/// child's error payload. The staged mask is the caller's return-union
+/// member containment set: a failure payload whose tag sits outside it
+/// traps (the boundary refuses to union an uncontained error out); a
+/// trapped child that died by a real trap re-raises that trap on the
+/// joiner (let-it-crash surfaces at the boundary). Never user-callable.
+pub const BUILTIN_NURSERY_BOUNDARY: u32 = 43;
+/// `nursery_cancel(e: word) -> unit` — the `cancel(e)` call's seam [E1,
+/// E2]: the current fiber dies trapped carrying the payload, the trap
+/// path ledgers the outcome and raises its nursery's cancel flag. Never
+/// returns; the unit result shape only satisfies the call site's width
+/// check.
+pub const BUILTIN_NURSERY_CANCEL: u32 = 44;
 
 /// `println(msg: string) -> unit`.
 pub const STD_PRINTLN: u32 = 0;
@@ -439,6 +471,14 @@ pub const PLATFORM_NONE: u8 = u8::MAX - 4;
 /// `none` in the platform reservation's countdown.
 pub const PLATFORM_CANCELLED: u8 = u8::MAX - 5;
 
+/// The clean-join discriminant of the nursery boundary seam's result
+/// span: shares the cross-module tag-id reservation, counting down past
+/// the cancellation sentinel.
+pub const NURSERY_BOUNDARY_OK: u8 = u8::MAX - 6;
+/// The first-failure discriminant of the nursery boundary seam's result
+/// span; the payload word carries the failing child's error value.
+pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
+
 /// The control natives of the fiber substrate [E2]: the dispatcher
 /// intercepts them at `CALL` sites and performs the switch itself — the
 /// body only ever runs from a `CALLT` site (tail position), where no
@@ -460,6 +500,24 @@ pub enum ControlNative {
     /// bare `PLATFORM_NONE` tag; a child joining its own nursery traps
     /// (the driver would deadlock on itself).
     NurseryJoin,
+    /// `nursery_open()`: open a fresh block-scoped nursery and answer its
+    /// id. No switch happens; the answer overlays like an ordinary
+    /// native's.
+    NurseryOpen,
+    /// `nursery_spawn(nursery, child)`: spawn the callable's function as
+    /// a ready fiber into the open nursery (its captures become the entry
+    /// arguments). No switch happens; the answer is the inert unit word.
+    NurserySpawn,
+    /// `nursery_boundary(nursery, mask)`: the in-language join — park the
+    /// caller, drive the nursery to death, re-enter the joiner with the
+    /// boundary span (a clean join or the first failure's error payload,
+    /// contained in the staged mask); a real child trap or an
+    /// uncontained payload re-raises on the joiner.
+    NurseryBoundary,
+    /// `nursery_cancel(payload)`: the current fiber dies trapped carrying
+    /// the payload; the trap path raises its nursery's cancel flag. The
+    /// call never answers.
+    NurseryCancel,
 }
 
 /// A native's result: one word on the caller's overlay slot 0, or a
@@ -1560,10 +1618,38 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_38),
         reserved_entry(builtin_reserved_39),
         reserved_entry(builtin_reserved_40),
+        NativeFunction {
+            name: "nursery_open",
+            params: &[],
+            result_words: 1,
+            control: Some(ControlNative::NurseryOpen),
+            func: fiber_control_bounce_fn,
+        },
+        NativeFunction {
+            name: "nursery_spawn",
+            params: &[SlotType::I64, SlotType::Fn],
+            result_words: 1,
+            control: Some(ControlNative::NurserySpawn),
+            func: fiber_control_bounce_fn,
+        },
+        NativeFunction {
+            name: "nursery_boundary",
+            params: &[SlotType::I64, SlotType::I64],
+            result_words: 2,
+            control: Some(ControlNative::NurseryBoundary),
+            func: fiber_control_bounce_fn,
+        },
+        NativeFunction {
+            name: "nursery_cancel",
+            params: &[SlotType::Tag],
+            result_words: 1,
+            control: Some(ControlNative::NurseryCancel),
+            func: fiber_control_bounce_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
     // BUILTIN_REDUCE, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_REDUCE as usize + 1);
+    debug_assert_eq!(fns.len(), BUILTIN_NURSERY_CANCEL as usize + 1);
     fns
 }
 
@@ -1966,7 +2052,14 @@ mod tests {
         assert_eq!(fns[BUILTIN_LIST_PUSH as usize].name, "list_push");
         assert_eq!(fns[BUILTIN_MAP_NEW as usize].name, "map_new");
         assert_eq!(fns[BUILTIN_MAP_SET as usize].name, "map_set");
-        assert_eq!(fns.len(), 41);
+        assert_eq!(fns[BUILTIN_NURSERY_OPEN as usize].name, "nursery_open");
+        assert_eq!(fns[BUILTIN_NURSERY_SPAWN as usize].name, "nursery_spawn");
+        assert_eq!(
+            fns[BUILTIN_NURSERY_BOUNDARY as usize].name,
+            "nursery_boundary"
+        );
+        assert_eq!(fns[BUILTIN_NURSERY_CANCEL as usize].name, "nursery_cancel");
+        assert_eq!(fns.len(), 45);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
@@ -1991,6 +2084,10 @@ mod tests {
             (BUILTIN_FIBER_YIELD, 1),
             (BUILTIN_FIBER_RESUME, 1),
             (BUILTIN_NURSERY_JOIN, 1),
+            (BUILTIN_NURSERY_OPEN, 1),
+            (BUILTIN_NURSERY_SPAWN, 1),
+            (BUILTIN_NURSERY_BOUNDARY, 2),
+            (BUILTIN_NURSERY_CANCEL, 1),
             (BUILTIN_MAP_NEW, 1),
             (BUILTIN_MAP_SET, 1),
         ] {
@@ -2008,6 +2105,22 @@ mod tests {
         assert_eq!(
             fns[BUILTIN_NURSERY_JOIN as usize].control,
             Some(ControlNative::NurseryJoin)
+        );
+        assert_eq!(
+            fns[BUILTIN_NURSERY_OPEN as usize].control,
+            Some(ControlNative::NurseryOpen)
+        );
+        assert_eq!(
+            fns[BUILTIN_NURSERY_SPAWN as usize].control,
+            Some(ControlNative::NurserySpawn)
+        );
+        assert_eq!(
+            fns[BUILTIN_NURSERY_BOUNDARY as usize].control,
+            Some(ControlNative::NurseryBoundary)
+        );
+        assert_eq!(
+            fns[BUILTIN_NURSERY_CANCEL as usize].control,
+            Some(ControlNative::NurseryCancel)
         );
         assert!(
             fns.iter()

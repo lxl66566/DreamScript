@@ -12,16 +12,16 @@
 //! both sides then solve in the impl's own scope, where the impl's
 //! generic parameters mint the same atoms for both spellings, so solved
 //! equality is agreement modulo spelling (aliases and union reorderings
-//! solve equal). A member return left unannotated stays unchecked here:
-//! its inference is the body's, and the trait's declared return against
-//! an inferred impl return is a body-check seam.
+//! solve equal). A member return left unannotated is agreed after
+//! the body checks, through the body's own checked tail type
+//! (`agree_inferred_return`).
 
 use std::collections::HashMap;
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{FnDecl, ParamMode, Type};
 
-use crate::{decls::FnSig, type_of::Bodies};
+use crate::{decls::FnSig, type_of::Bodies, universe::Ty};
 
 /// Compares one impl member's written signature with its trait member's
 /// registered signature, reporting every disagreement at both sites.
@@ -233,4 +233,44 @@ fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         },
         Type::TypeKw(span) => Type::TypeKw(*span),
     }
+}
+
+/// An impl member whose return is unannotated agrees with the trait
+/// member's declared return through its body's checked tail type: the
+/// registered signature is the call-site contract, so an inferred body
+/// must produce exactly the declared return — a written divergence and an
+/// inferred one are the same disagreement.
+pub(super) fn agree_inferred_return(
+    this: &mut Bodies<'_>,
+    f: &FnDecl,
+    sig: &FnSig,
+    sig_span: Span,
+    subst: &HashMap<String, Type>,
+    inferred: Ty,
+) {
+    let Some(ret) = sig.ret.as_ref() else {
+        return;
+    };
+    let Some(declared) = this.solve_here(&substitute_type(ret, subst)) else {
+        return;
+    };
+    if declared == inferred {
+        return;
+    }
+    this.diags.push(
+        Diagnostic::error(
+            ErrorCode::ImplMemberSignatureMismatch,
+            format!(
+                "impl member `{}`'s body returns `{}`, the trait member declares `{}`",
+                f.name.name,
+                this.decls.universe.render(inferred),
+                this.decls.universe.render(declared),
+            ),
+        )
+        .with_primary(
+            f.body.as_ref().map_or(f.name.span, |body| body.span),
+            "impl member body",
+        )
+        .with_secondary(sig_span, "trait member signature"),
+    );
 }

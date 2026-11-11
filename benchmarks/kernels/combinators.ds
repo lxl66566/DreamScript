@@ -1,14 +1,14 @@
 // Kernel: the lambda combinators — map/filter/reduce chains over
 // list[int] and list[string] with non-capturing lambdas (the CALLG
 // reentry surface: the VM reenters the interpreter once per element per
-// combinator). The int pipeline runs 100 rounds of map (x*2), filter
+// combinator). The int pipeline runs 250 rounds of map (x*2), filter
 // (x % 3 == 0), reduce (sum) over a 10000-element list built with
-// list_push; the string pipeline runs 15 rounds of map (suffix concat),
+// list_push; the string pipeline runs 40 rounds of map (suffix concat),
 // filter (len < 5), reduce (concat join) over a 1000-element list,
-// checksummed by length so the golden stays short. Capturing lambdas
-// refuse at lowering (a closure cannot inhabit the fn-typed parameter
-// slot), so every lambda here is non-capturing by construction. Every
-// integer intermediate stays non-negative below 2^47.
+// checksummed by length so the golden stays short. Every lambda is
+// non-capturing by construction, so the reentry measures CALLG
+// dispatch alone, without capture build/copy traffic. Every integer
+// intermediate stays non-negative below 2^47.
 
 fn main() -> () {
   var xs: list[int] = list[int]()

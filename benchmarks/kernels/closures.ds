@@ -7,10 +7,8 @@
 // factory (a Ref capture — the store-acquires counting rides every
 // build and call). Captures stay immutable: captures copy by value, and
 // the peer languages capture by reference, so a mutated capture would
-// diverge; the mutable-counter shape is excluded for that reason, and
-// with it closure-into-fn-slot uses (map/filter/reduce over capturing
-// lambdas refuse at lowering). Every intermediate stays non-negative
-// below 2^47.
+// diverge; the mutable-counter shape is excluded for that reason.
+// Every intermediate stays non-negative below 2^47.
 
 fn make_adder(k: int) -> fn(int) -> int {
   (y: int) => y + k

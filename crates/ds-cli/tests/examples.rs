@@ -210,6 +210,19 @@ fn net_round_trips_against_a_local_listener() {
 }
 
 #[test]
+fn nursery_joins_cancels_and_unions_child_errors() {
+    // the tutorial's concurrency block: fetch_all fans out over `spawn`
+    // inside a `nursery`, the clean pass joins in spawn order over the
+    // shared list, and the failing pass cancels the in-flight sibling at
+    // its next backward branch with the child error unioning out at the
+    // boundary into the match
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("nursery.ds"))),
+        "kept 2 bodies\ncaught refused\n0\n"
+    );
+}
+
+#[test]
 fn script_entry_runs_top_level_statements() {
     // The entry file's top-level statements fold into the synthesized
     // `main` while the declarations beside them stay pure-declaration;

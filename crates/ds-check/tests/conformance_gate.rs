@@ -123,6 +123,26 @@ const TUPLES_AMBIENT: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
 );
 
+/// Ambient stdlib stubs for nursery_surface: the primitives, the shared
+/// list type with its mutation and read externs, the ambient-owned net
+/// failure taxonomy, and the generic cancel seam the nursery items name.
+const NURSERY_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "enum net_err {\n",
+    "  timeout\n",
+    "  refused\n",
+    "}\n",
+    "extern fn list_len[t] (xs: list[t]) -> int\n",
+    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "extern fn len[t] (xs: t) -> int\n",
+    "extern fn str[t] (v: t) -> string\n",
+    "extern fn println (msg: string) -> ()\n",
+    "extern fn cancel[t] (e: t) -> ()\n",
+);
+
 /// Ambient stdlib stubs for closures_surface: the primitives alone; the
 /// items carry their own fn-typed parameters and lambdas.
 const CLOSURES_AMBIENT: &str = concat!("tag int\n", "tag string\n", "trait Copyable { }\n");
@@ -824,6 +844,20 @@ fn closures_surface_items_check_clean() {
     assert!(
         rejects.is_empty(),
         "the closures surface declares no reject item"
+    );
+}
+
+/// nursery_surface.ds: the in-language nursery surface — spawn-in-scope,
+/// join at scope exit in spawn order, first-failure cancellation, child
+/// error unioning out through the boundary, and a completing child's
+/// deinit claim — every item checks clean [E2, E5]; the runs live in the
+/// ds-lower nursery e2e suite and examples/nursery.ds.
+#[test]
+fn nursery_surface_items_check_clean() {
+    let rejects = gate("../../conformance/nursery_surface.ds", NURSERY_AMBIENT);
+    assert!(
+        rejects.is_empty(),
+        "the nursery surface declares no reject item"
     );
 }
 

@@ -36,9 +36,10 @@ use ds_vm::{
         BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_LEN, BUILTIN_LIST_CONCAT,
         BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_MAP,
         BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_SET, BUILTIN_MAX,
-        BUILTIN_NURSERY_JOIN, BUILTIN_REDUCE, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT, BUILTIN_STR_INT,
-        BUILTIN_TAIL, STD_HTTP_GET, STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT,
-        STD_PRINTLN, std_platform_module,
+        BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
+        BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_REDUCE, BUILTIN_STR_BOOL,
+        BUILTIN_STR_FLOAT, BUILTIN_STR_INT, BUILTIN_TAIL, STD_HTTP_GET, STD_NET_CONNECT,
+        STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT, STD_PRINTLN, std_platform_module,
     },
 };
 
@@ -993,10 +994,27 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_MAP).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_FILTER).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_REDUCE).is_some());
+    // the in-language nursery seams (41-44)
     assert!(
-        reg.resolve_native("builtin", 41).is_none(),
-        "41 table entries: the core's, the list block, the fiber pair, the join, the push, the \
-         map block, the generic container closes, the reentrant combinators"
+        reg.resolve_native("builtin", BUILTIN_NURSERY_OPEN)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_NURSERY_SPAWN)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_NURSERY_BOUNDARY)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_NURSERY_CANCEL)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", 45).is_none(),
+        "45 table entries: the core's, the list block, the fiber pair, the join, the push, the \
+         map block, the generic container closes, the reentrant combinators, the nursery seams"
     );
     // the std platform module: console, file, net — its own gaps reserved
     assert!(

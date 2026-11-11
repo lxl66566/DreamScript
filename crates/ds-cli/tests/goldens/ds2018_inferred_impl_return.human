@@ -1,0 +1,8 @@
+error[DS2018]: impl member `show`'s body returns `int`, the trait member declares `string`
+ --> tests/fixtures/negative/ds2018_inferred_impl_return.ds:11:17
+   |
+11 |   fn show(self) { 1 }
+   |                 ^^^^^ impl member body
+   |
+ 8 |   fn show(self) -> string
+   |      ---- trait member signature

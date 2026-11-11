@@ -1,0 +1,101 @@
+// source: M5, the nursery/spawn surface round
+// purpose: the in-language nursery surface: spawn-in-scope, join at scope exit in spawn order, first-failure cancellation at safe points, child error unioning out at the boundary, and a completing child's deinit claim
+// items:
+// guarded: stage: run
+// guarded_cancel: stage: run
+// mixed: stage: run
+// claimed: stage: run
+// guarded_claim: stage: run
+// main: stage: run
+
+struct claimed: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn guarded(n: int) -> int | net_err {
+  var xs = list[int]()
+  nursery {
+    spawn {
+      var i = 0
+      while i < n {
+        xs.list_push(i)
+        i = i + 1
+      }
+    }
+  }
+  const kept = xs.list_len()
+  kept
+}
+
+fn guarded_cancel(n: int) -> int | net_err {
+  var xs = list[int]()
+  nursery {
+    spawn {
+      cancel(timeout)
+    }
+    spawn {
+      var i = 0
+      while i < n {
+        xs.list_push(i)
+        i = i + 1
+      }
+    }
+  }
+  const kept = xs.list_len()
+  kept
+}
+
+fn mixed(n: int) -> int | net_err {
+  var xs = list[int]()
+  nursery {
+    spawn {
+      xs.list_push(7)
+    }
+    spawn {
+      cancel(refused)
+    }
+    spawn {
+      var i = 0
+      while i < n {
+        xs.list_push(i)
+        i = i + 1
+      }
+    }
+  }
+  const kept = xs.list_len()
+  kept
+}
+
+fn guarded_claim() -> int | net_err {
+  nursery {
+    spawn {
+      const c = claimed { id: 1 }
+      println("ran ${c.id}")
+    }
+  }
+  0
+}
+
+fn main() -> () {
+  match guarded(3) {
+    timeout => println("t")
+    refused => println("r")
+    n => println("guarded kept ${n}")
+  }
+  match guarded_cancel(500000) {
+    timeout => println("t")
+    refused => println("r")
+    n => println("cancel kept ${n}")
+  }
+  match mixed(500000) {
+    timeout => println("t")
+    refused => println("r")
+    n => println("mixed kept ${n}")
+  }
+  match guarded_claim() {
+    timeout => println("t")
+    refused => println("r")
+    n => println("claim kept ${n}")
+  }
+}

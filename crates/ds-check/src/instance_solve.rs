@@ -34,15 +34,20 @@
 //!
 //! With coherent heads the answer is unique for every non-empty query, but
 //! a generic head is opaque to the set algebra: `list[$t#1]` and
-//! `list[$u#2]` are disjoint atoms, so two generic impls of one trait can
-//! both declare legally and both serve one receiver — that is true
-//! ambiguity and the caller's diagnostic. A head that matches while a
-//! bound fails is reported as the nearest miss so the diagnostic can name
-//! the unsatisfied bound instead of the receiver alone.
+//! `list[$u#2]` read as disjoint atoms, so coherence itself must look
+//! through them. Declaration-time and link-time checks call
+//! the instantiation probe: two heads whose provable instantiations
+//! intersect (a concrete head unifying with a generic one, or two generic
+//! heads grounded at one atom satisfying both bounds) are rejected as an
+//! overlap before any call exists; a pair no existing atom can prove
+//! declares, and a later conflict surfaces here as true ambiguity and the
+//! caller's diagnostic. A head that matches while a bound fails is
+//! reported as the nearest miss so the diagnostic can name the unsatisfied
+//! bound instead of the receiver alone.
 
 use crate::{
     atom::{AtomKind, TraitId, TypeId},
-    instance::{InstanceEnv, InstanceId},
+    instance::{Condition, InstanceEnv, InstanceId},
     universe::{Ty, Universe, is_subset},
 };
 
@@ -137,12 +142,27 @@ fn serves(
     target: &[TypeId],
     depth: u8,
 ) -> bool {
-    let Ok(head) = env.head(id) else {
+    let (Ok(head), Ok(conditions)) = (env.head(id), env.conditions(id)) else {
         return false;
     };
+    serves_head(universe, env, assumptions, head, conditions, target, depth)
+}
+
+/// Whether one declared head with its conditions serves the target: a
+/// stored instance is the [`InstanceEnv`] case; the coherence probe passes
+/// a head that is not yet stored.
+fn serves_head(
+    universe: &Universe,
+    env: &InstanceEnv,
+    assumptions: &[(TraitId, Ty)],
+    head: Ty,
+    conditions: &[Condition<Ty>],
+    target: &[TypeId],
+    depth: u8,
+) -> bool {
     let head_members = universe.members(head);
     if is_subset(target, head_members) {
-        return conditions_hold(universe, env, assumptions, id, &[], depth);
+        return conditions_hold(universe, env, assumptions, conditions, &[], depth);
     }
     // Structural match: a single-atom head pattern unifies with every
     // target member. Multi-atom heads carry no variables (written unions
@@ -154,7 +174,7 @@ fn serves(
     target.iter().all(|&member| {
         let mut subst = Vec::new();
         unify_atom(universe, &mut subst, *pattern, member)
-            && conditions_hold(universe, env, assumptions, id, &subst, depth)
+            && conditions_hold(universe, env, assumptions, conditions, &subst, depth)
     })
 }
 
@@ -354,19 +374,16 @@ fn is_var(universe: &Universe, atom: TypeId) -> bool {
         .is_ok_and(|decl| decl.name.starts_with('$'))
 }
 
-/// Every condition of an instance for one substitution: each condition's
+/// Every condition of one instance for one substitution: each condition's
 /// type is rewritten through it and the bound trait must hold there.
 fn conditions_hold(
     universe: &Universe,
     env: &InstanceEnv,
     assumptions: &[(TraitId, Ty)],
-    id: InstanceId,
+    conditions: &[Condition<Ty>],
     subst: &[(TypeId, Vec<TypeId>)],
     depth: u8,
 ) -> bool {
-    let Ok(conditions) = env.conditions(id) else {
-        return false;
-    };
     conditions.iter().all(|cond| {
         let solved = substitute(subst, universe.members(cond.ty));
         trait_holds(universe, env, assumptions, cond.trait_id, &solved, depth)
@@ -417,4 +434,131 @@ fn trait_holds(
         }
     }
     false
+}
+
+/// Declaration-time coherence through generic heads (B6): whether two
+/// same-trait heads the set algebra reads disjoint (a generic head is one
+/// opaque atom, so `list[int]` and `list[$t#1]` never intersect there)
+/// still cover one common instantiation, answered by instantiating the
+/// call-site machinery: every candidate grounding of either head must be
+/// served by both heads under provable conditions.
+///
+/// Candidates ground each head by replacing every one of its variables
+/// with one declared atom (real types only — minted inference variables
+/// name no values), so a two-generic overlap is proven exactly when some
+/// existing atom satisfies both impls' bounds, and a generic head against
+/// a concrete head is decided by unification and the substituted bound.
+/// The probe is conservative where grounding cannot reach (both heads
+/// generic with no bound-satisfying atom yet, a bare-variable head against
+/// an application whose overlap type is not yet minted): those pairs stay
+/// disjoint here and any true conflict still surfaces as call-site
+/// ambiguity (DS2010). Structural application atoms minted by grounding
+/// are ordinary universe atoms — hash-consed, never trait members.
+#[must_use]
+pub(crate) fn instantiation_overlap(
+    universe: &mut Universe,
+    env: &InstanceEnv,
+    head_a: Ty,
+    conds_a: &[Condition<Ty>],
+    head_b: Ty,
+    conds_b: &[Condition<Ty>],
+) -> Option<Ty> {
+    if !head_carries_vars(universe, head_a) && !head_carries_vars(universe, head_b) {
+        return None;
+    }
+    let candidates: Vec<TypeId> = universe
+        .atom_ids()
+        .filter(|&atom| !is_var(universe, atom))
+        .collect();
+    let mut probed = Vec::new();
+    for &x in &candidates {
+        for (head, conds_head, other_head, conds_other) in [
+            (head_a, conds_a, head_b, conds_b),
+            (head_b, conds_b, head_a, conds_a),
+        ] {
+            let Some(target) = ground(universe, head, x) else {
+                continue;
+            };
+            if probed.contains(&target) {
+                continue;
+            }
+            probed.push(target);
+            let members: Vec<TypeId> = universe.members(target).to_vec();
+            if serves_head(universe, env, &[], head, conds_head, &members, MAX_DEPTH)
+                && serves_head(
+                    universe,
+                    env,
+                    &[],
+                    other_head,
+                    conds_other,
+                    &members,
+                    MAX_DEPTH,
+                )
+            {
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a head can carry variables into the probe: only a single-atom
+/// head does (written unions decompose at declaration; a trait-as-type or
+/// negation head names no generic parameter, and a multi-atom head that
+/// merely snapshots minted variables is left to the set algebra —
+/// grounding it would rewrite coverage that never depended on them).
+fn head_carries_vars(universe: &Universe, head: Ty) -> bool {
+    match universe.members(head) {
+        [only] => carries_vars(universe, *only),
+        _ => false,
+    }
+}
+
+/// Whether an atom names a variable anywhere in its shape.
+fn carries_vars(universe: &Universe, atom: TypeId) -> bool {
+    if is_var(universe, atom) {
+        return true;
+    }
+    let Ok(decl) = universe.atom_decl(atom) else {
+        return false;
+    };
+    match &decl.kind {
+        AtomKind::Apply(_, args) => args.iter().any(|arg| {
+            universe
+                .members(*arg)
+                .iter()
+                .any(|&a| carries_vars(universe, a))
+        }),
+        _ => false,
+    }
+}
+
+/// One head grounded at a candidate atom: every variable member becomes
+/// the candidate, applications re-mint structurally, every other atom
+/// stays. A shape the grounding does not reach (a tuple with variable
+/// elements) grounds nothing.
+fn ground(universe: &mut Universe, head: Ty, x: TypeId) -> Option<Ty> {
+    let head_members = universe.members(head).to_vec();
+    let mut members = Vec::with_capacity(head_members.len());
+    for atom in head_members {
+        members.push(ground_atom(universe, atom, x)?);
+    }
+    Some(universe.set_ty(&members))
+}
+
+fn ground_atom(universe: &mut Universe, atom: TypeId, x: TypeId) -> Option<TypeId> {
+    if is_var(universe, atom) {
+        return Some(x);
+    }
+    let kind = universe.atom_decl(atom).ok()?.kind.clone();
+    match kind {
+        AtomKind::Apply(ctor, args) => {
+            let mut grounded = Vec::with_capacity(args.len());
+            for arg in args {
+                grounded.push(ground(universe, arg, x)?);
+            }
+            universe.apply_atom(ctor, &grounded).ok()
+        },
+        _ => Some(atom),
+    }
 }

@@ -64,6 +64,8 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   ambient-owned io_err (the tail `?` over the contained union included).
 /// * while_cond_refs: zero noise — the dying string/list/deinit-claim while conditions are
 ///   self-contained under the ambient (the corpus README's run stage documents their placement).
+/// * nursery_surface: zero noise — the nursery items are self-contained under the ambient (the net
+///   failure taxonomy and the cancel seam are ambient-owned).
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
@@ -105,6 +107,9 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // dying-string/list/deinit-claim items are self-contained under the
     // ambient (record C4, the while-cond placement round)
     assert_corpus_clean("while_cond_refs.ds", 0);
+    // zero noise — the spawn/join/cancel/unioning items are
+    // self-contained under the ambient (M5, the nursery surface round)
+    assert_corpus_clean("nursery_surface.ds", 0);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

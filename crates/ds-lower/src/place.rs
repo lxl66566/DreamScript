@@ -534,6 +534,29 @@ impl Placement {
         }
     }
 
+    /// The words dying at a loop-exit jump (break/continue): every
+    /// binder of the scopes the jump leaves drops its words there when
+    /// no alias in a kept scope survives. Computed against the current
+    /// map without consuming it — the fall-through path still owns
+    /// these words and drops them at its own scope pops, so each
+    /// runtime path drops each count exactly once.
+    pub(crate) fn loop_exit_drops(&self, doomed: &[Span]) -> Vec<(u8, Owned)> {
+        let mut owned = self.owned.clone();
+        let mut dying = Vec::new();
+        for binder in doomed {
+            for &word in self.binder_words.get(binder).into_iter().flatten() {
+                let survives = self
+                    .binders
+                    .get(&word)
+                    .is_some_and(|names| names.iter().any(|name| !doomed.contains(name)));
+                if !survives && let Some(entry) = owned.remove(&word) {
+                    dying.push((word, entry));
+                }
+            }
+        }
+        dying
+    }
+
     // ---- loops and branches ----------------------------------------------------------
 
     /// Enters a loop body: uses at the deeper depth never kill productions

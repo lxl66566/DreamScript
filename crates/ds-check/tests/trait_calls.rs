@@ -403,7 +403,8 @@ const GENERIC_BOUND_MISS_SOURCE: &str = concat!(
 /// A head that matches while its declared bound fails reports the
 /// unsatisfied bound, never a bare missing-instance message: the head
 /// unified (`t` solved to `int`) and the bound `unrelated` for `int` is
-/// the missing proof.
+/// the missing proof. Both call spellings carry the detail — the dot
+/// call resolves the same nearest miss the qualification does.
 #[test]
 fn generic_impl_with_unsatisfied_bound_names_the_bound() {
     let (_ast, analyzed) = analyze_source("bound_miss.ds", GENERIC_BOUND_MISS_SOURCE);
@@ -420,6 +421,152 @@ fn generic_impl_with_unsatisfied_bound_names_the_bound() {
     assert!(
         analyzed.checked.trait_calls.is_empty(),
         "an unsatisfied bound records no dispatch"
+    );
+}
+
+const DOT_BOUND_MISS_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "trait unrelated {\n",
+    "  fn peek(self) -> int\n",
+    "}\n",
+    "impl [t: unrelated] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+    "fn calls(xs: list[int]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// The dot-call spelling reports the same substituted-bound detail the
+/// qualification shows — the receiver-level message alone would hide the
+/// root cause.
+#[test]
+fn dot_call_with_unsatisfied_bound_names_the_bound() {
+    let (_ast, analyzed) = analyze_source("dot_bound_miss.ds", DOT_BOUND_MISS_SOURCE);
+    let detail = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2013")
+        .expect("the dot call reports DS2013");
+    assert!(
+        detail
+            .message
+            .contains("no instance of `unrelated` for `int`"),
+        "the dot call names the missing bound: {}",
+        detail.message
+    );
+    assert!(
+        detail
+            .message
+            .contains("the `shows` impl's bound is unsatisfied there"),
+        "the dot call names the serving impl's bound: {}",
+        detail.message
+    );
+    assert!(
+        analyzed.checked.trait_calls.is_empty(),
+        "an unsatisfied bound records no dispatch"
+    );
+}
+
+const SELF_MEMBER_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "  fn twice(self) -> string { self.show() + self.show() }\n",
+    "  fn qualified(self) -> string { shows::show(self) }\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "fn calls(x: int) -> () {\n",
+    "  x.twice()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A trait's own members see `Self` as satisfying their trait: default
+/// bodies call sibling members on `self` through both spellings with no
+/// instance — the assumption is scoped to the member bodies and sites an
+/// assumption covers still record no dispatch.
+#[test]
+fn trait_members_see_self_as_satisfying_their_trait() {
+    let (ast, analyzed) = analyze_source("self_member.ds", SELF_MEMBER_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "the trait's default bodies check clean: {rendered:?}"
+    );
+    // The member-body calls are covered by the scoped Self-assumption and
+    // record nothing (the runtime-resolved evidence form); the concrete
+    // receiver's call is the one recorded dispatch.
+    assert_eq!(
+        analyzed.checked.trait_calls.len(),
+        1,
+        "exactly the concrete site records a solved instance"
+    );
+    let spans = call_spans(&ast);
+    assert_eq!(spans.len(), 1, "the fixture makes one top-level call");
+    assert!(
+        analyzed.checked.trait_calls.contains_key(&spans[0]),
+        "the concrete receiver's call records its dispatch"
+    );
+}
+
+const CONCRETE_GENERIC_OVERLAP_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "impl shows for list[int] {\n",
+    "  fn show(self) -> string { \"li\" }\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+);
+
+/// A concrete head and a generic head the set algebra reads disjoint are
+/// still one overlap: the probe grounds the generic head at `int` and
+/// both impls serve `list[int]`, so the later declaration is rejected
+/// with the coherence error instead of deferring to the call site.
+#[test]
+fn concrete_and_generic_heads_overlap_at_declaration() {
+    let (_ast, analyzed) = analyze_source("concrete_overlap.ds", CONCRETE_GENERIC_OVERLAP_SOURCE);
+    let overlap = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2006")
+        .expect("the concrete-generic overlap reports as DS2006");
+    assert!(
+        overlap
+            .message
+            .contains("instance head `list[t]` intersects the `list[int]` instance"),
+        "the message names both heads: {}",
+        overlap.message
+    );
+    assert!(
+        overlap.message.contains("witness value type `list[int]`"),
+        "the witness is the shared instantiation: {}",
+        overlap.message
     );
 }
 
@@ -491,13 +638,82 @@ const GENERIC_AMBIGUITY_SOURCE: &str = concat!(
     "}\n",
 );
 
-/// Two generic impls of one trait with the same head shape declare
-/// legally (their heads are distinct opaque atoms, disjoint as declared),
-/// but both serve one receiver: true ambiguity at the call site, a
-/// compile error naming both impls, never a priority order.
+/// Two generic impls of one trait with the same head shape whose bounds
+/// provably intersect (the atom `int` satisfies both) are a
+/// declaration-time overlap: the instantiation probe grounds both heads
+/// at `int` and both serve `list[int]`, so the second declaration is
+/// rejected with the witness-carrying coherence error — never a
+/// deferred call-site ambiguity.
 #[test]
-fn two_generic_impls_of_one_shape_are_ambiguity_at_the_call() {
+fn two_generic_impls_of_one_shape_overlap_at_declaration() {
     let (ast, analyzed) = analyze_source("generic_amb.ds", GENERIC_AMBIGUITY_SOURCE);
+    let overlap = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2006")
+        .expect("the generic-generic overlap reports as DS2006");
+    assert!(
+        overlap
+            .message
+            .contains("instance head `list[u]` intersects the `list[$t#1]` instance"),
+        "the message names both heads: {}",
+        overlap.message
+    );
+    assert!(
+        overlap.message.contains("witness value type `list[int]`"),
+        "the witness is the shared instantiation: {}",
+        overlap.message
+    );
+    assert!(
+        !analyzed
+            .checked
+            .diags
+            .iter()
+            .any(|d| d.code.as_str() == "DS2010"),
+        "the conflict never defers to the call site"
+    );
+    let impls = impl_spans(&ast);
+    assert_eq!(impls.len(), 3, "the monomorphic impl plus both generics");
+    let spans = call_spans(&ast);
+    let recorded = &analyzed.checked.trait_calls[&spans[0]];
+    assert_eq!(
+        recorded.impl_site,
+        Some(impls[1]),
+        "the call site resolves against the surviving generic impl alone"
+    );
+}
+
+const ORDERED_AMBIGUITY_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"one\" }\n",
+    "}\n",
+    "impl [u: shows] shows for list[u] {\n",
+    "  fn show(self) -> string { \"two\" }\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "fn calls(xs: list[int]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// The declaration probe proves a generic-generic overlap only through an
+/// existing atom satisfying both bounds; when the bound-providing impl
+/// is declared after both generics, no probe can prove the pair and the
+/// true conflict still surfaces at the call site as DS2010 — the
+/// declaration-order residual, pinned honestly.
+#[test]
+fn unprovable_generic_pair_defers_to_call_site_ambiguity() {
+    let (ast, analyzed) = analyze_source("ordered_amb.ds", ORDERED_AMBIGUITY_SOURCE);
     let ambiguity = analyzed
         .checked
         .diags
@@ -511,12 +727,13 @@ fn two_generic_impls_of_one_shape_are_ambiguity_at_the_call() {
         "the message names the trait and receiver: {}",
         ambiguity.message
     );
-    let impls = impl_spans(&ast);
-    assert_eq!(impls.len(), 3, "the monomorphic impl plus both generics");
-    assert_eq!(
-        ambiguity.labels.len(),
-        3,
-        "the call plus both generic impl sites"
+    assert!(
+        !analyzed
+            .checked
+            .diags
+            .iter()
+            .any(|d| d.code.as_str() == "DS2006"),
+        "no declaration-time overlap was provable"
     );
     let spans = call_spans(&ast);
     assert!(

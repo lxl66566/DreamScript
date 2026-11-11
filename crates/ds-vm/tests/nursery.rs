@@ -671,3 +671,147 @@ fn absent_nurseries_name_themselves_in_the_trap() {
         })
     );
 }
+
+// ---- the in-language control seams [E2] --------------------------------
+//
+// The lowerer synthesizes every call site, so these fixtures pin the
+// dispatcher-intercepted seams directly: the open and spawn pair stages a
+// ready child, the boundary answers its span on the caller's overlay,
+// and the mask refuses an uncontained payload instead of corrupting the
+// union's tag space.
+
+use ds_abi::SlotType::Tag;
+use ds_vm::native::{
+    BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
+};
+
+/// The payload tag the cancel child hands the boundary.
+const SEAM_TAG: u8 = 5;
+
+/// `() -> int`: the inert plain child (a clean join's contribution).
+fn seam_plain_def() -> FunctionDef {
+    def("seam_plain", &[I64], 0, 0, vec![Const::I64(7)], &[
+        Uop::Funcf { frame_slots: 1 },
+        Uop::Kimm { dst: 0, kidx: k(0) },
+        Uop::Ret { src: 0 },
+    ])
+}
+
+/// `() -> ()`: construct one bare member word and hand it to the cancel
+/// seam — the `cancel(e)` spelling's hand-assembled form. The call never
+/// answers; the RET is unreachable.
+fn seam_cancel_def() -> FunctionDef {
+    def(
+        "seam_cancel",
+        &[Tag, Tag, Raw],
+        0,
+        1,
+        vec![builtin(BUILTIN_NURSERY_CANCEL)],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::TagNew {
+                dst: 0,
+                tag: SEAM_TAG,
+            },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// `() -> word`: open a fresh nursery, spawn `child` through the seam,
+/// join through the boundary with `mask` staged, and return the answer
+/// span's payload word.
+fn seam_parent_def(child: u32, mask: i64) -> FunctionDef {
+    def(
+        "seam_parent",
+        &[Raw, I64, Raw],
+        0,
+        2,
+        vec![
+            builtin(BUILTIN_NURSERY_OPEN),
+            builtin(BUILTIN_NURSERY_SPAWN),
+            builtin(BUILTIN_NURSERY_BOUNDARY),
+            Const::FuncRef {
+                module: "sb".into(),
+                func: child,
+            },
+            Const::I64(mask),
+        ],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            // open: the fresh nursery's id lands on overlay word 0
+            Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            },
+            Uop::Mov { dst: 0, src: 1 },
+            // spawn: (id, the child's scalar callable word)
+            Uop::Kconst { dst: 2, kidx: k(3) },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            // boundary: (id, the containment mask); the answer span
+            // lands on the same overlay words
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Kimm { dst: 2, kidx: k(4) },
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 0, src: 2 },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// One seam module over the given parent variant: [0] = the parent, [1]
+/// = the plain child, [2] = the cancel child.
+fn seam_vm(child: u32, mask: i64) -> Vm {
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("sb", vec![
+            seam_parent_def(child, mask),
+            seam_plain_def(),
+            seam_cancel_def(),
+        ])
+        .expect("valid seam module"),
+    );
+    Vm::new(reg)
+}
+
+/// A clean join answers the ok discriminant with the inert payload word:
+/// the parent runs to its entry RET with the boundary's payload.
+#[test]
+fn the_boundary_seam_answers_a_clean_join_span() {
+    let mut vm = seam_vm(1, 1);
+    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::I64(0)));
+}
+
+/// A cancel child's payload unions out at the boundary: the span answers
+/// the failure discriminant, and the payload word carries the failing
+/// member's own tag.
+#[test]
+fn the_boundary_seam_unions_a_cancelled_payload_out() {
+    let mut vm = seam_vm(2, 1 << SEAM_TAG);
+    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::Tag(SEAM_TAG)));
+}
+
+/// A payload outside the staged containment mask refuses: the boundary
+/// traps instead of writing a foreign tag into the caller's union.
+#[test]
+fn an_uncontained_boundary_payload_refuses() {
+    let mut vm = seam_vm(2, 0);
+    assert_eq!(
+        vm.run("sb", "seam_parent", &[]),
+        Err(Trap::NurseryUncontained {
+            payload: Value::Tag(SEAM_TAG)
+        })
+    );
+}

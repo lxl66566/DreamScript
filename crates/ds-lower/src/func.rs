@@ -28,7 +28,9 @@ use ds_parse::{
 use crate::{
     PlacedOp,
     error::LowerError,
-    native::{GENERIC_NATIVES, GenericNative, Native, NativeShape, PLATFORM_IO_OK},
+    native::{
+        GENERIC_NATIVES, GenericNative, NURSERY_BOUNDARY_ERR, Native, NativeShape, PLATFORM_IO_OK,
+    },
     place::{Hook, Owned, Placement},
     shape::{MemberField, Shape, Shapes},
 };
@@ -248,6 +250,19 @@ struct Place {
     shape: PlaceShape,
 }
 
+/// One enclosing loop's exit targets: `break` jumps to `exit` (the
+/// label past the backedge, where the loop's carried cleanups run),
+/// `continue` jumps to `cont` (the backedge start, before the
+/// induction step), and `body_depth` is the name-scope count below the
+/// loop's own body scope — a jump leaving the loop must account for
+/// every binder of the body scope inwards.
+#[derive(Clone, Copy)]
+struct LoopCtx {
+    exit: usize,
+    cont: usize,
+    body_depth: usize,
+}
+
 /// A walked expression's result: its place plus the use's static type.
 struct TypedPlace {
     place: Place,
@@ -310,6 +325,11 @@ pub(crate) struct PlannedFn {
     /// The runtime-evidence pairs a generic impl member's body demands,
     /// in body order: empty for every other entry.
     pub(crate) evidence: Rc<Vec<RuntimePair>>,
+    /// Whether this entry is a `spawn` expression's child [E2]: the
+    /// capture block is the entry's own argument area — the spawned
+    /// fiber's entry frame writes it exactly where a run entry writes
+    /// its parameters.
+    pub(crate) spawn_child: bool,
 }
 
 /// One declared impl-member function's lowering shape: its parameters
@@ -396,6 +416,7 @@ impl Plan {
             decl: None,
             ret: None,
             evidence: Rc::new(Vec::new()),
+            spawn_child: false,
         });
     }
 
@@ -423,6 +444,48 @@ impl Plan {
             decl: None,
             ret: None,
             evidence: Rc::new(Vec::new()),
+            spawn_child: false,
+        });
+        (index, captures)
+    }
+
+    /// Registers one `spawn` expression's block as a synthesized child
+    /// function [E2] and returns its table index plus the captures its
+    /// body will bind: the block becomes a zero-parameter lambda over the
+    /// same capture list the lambda construction uses. The child's
+    /// checked unit type rides the spawn expression's own span, so the
+    /// plan entry carries the return directly.
+    pub(crate) fn push_spawn(
+        &mut self,
+        enclosing: &str,
+        spawn: &Expr,
+        res: &Resolutions,
+        binders: &HashMap<Span, BinderFact>,
+        ret: Ty,
+    ) -> (u32, Rc<Vec<(Span, Ty)>>) {
+        let Expr::Spawn { span, body, .. } = spawn else {
+            unreachable!("push_spawn receives a spawn expression");
+        };
+        let index = u32::try_from(self.functions.len()).expect("function index fits u32");
+        let lambda = Expr::Lambda {
+            span: *span,
+            generics: Vec::new(),
+            params: Vec::new(),
+            ret: None,
+            arrow: false,
+            body: Box::new(Expr::Block(body.clone())),
+        };
+        let captures = Rc::new(collect_captures(&lambda, res, binders));
+        self.functions.push(PlannedFn {
+            name: format!("{enclosing}${index}"),
+            lambda,
+            def: None,
+            deinit: None,
+            captures: captures.clone(),
+            decl: None,
+            ret: Some(ret),
+            evidence: Rc::new(Vec::new()),
+            spawn_child: true,
         });
         (index, captures)
     }
@@ -454,6 +517,7 @@ impl Plan {
             ret: Some(ret),
             deinit: None,
             evidence,
+            spawn_child: false,
         });
         index
     }
@@ -497,6 +561,7 @@ impl Plan {
             decl: None,
             ret: None,
             evidence: Rc::new(Vec::new()),
+            spawn_child: false,
         });
     }
 
@@ -566,6 +631,193 @@ fn collect_captures(
         capture_use(span, start, res, binders, &mut seen, &mut out);
     });
     out
+}
+
+/// The earliest `return` or `?` sitting directly inside a block's
+/// statements [E2]: never one nested inside a lambda or a spawned block —
+/// their bodies are separate frames with their own exits. The nursery
+/// emission refuses strays (the block's scope exit must join), and the
+/// spawn emission refuses them (a spawned body completes with its own
+/// value, never the enclosing function's).
+fn stray_exit(block: &BlockExpr) -> Option<Span> {
+    block.stmts.iter().find_map(|stmt| match &stmt.kind {
+        StmtKind::Local(local) => stray_exit_expr(&local.init),
+        StmtKind::Expr(expr) => stray_exit_expr(expr),
+    })
+}
+
+/// Every `cancel` call's operand span inside one block's statements [E2]:
+/// the payload sites a spawned body hands the boundary, collected for the
+/// spawn site's containment proof. Lambdas and nested spawned blocks are
+/// separate frames and stay skipped (their own sites answer their own
+/// boundaries).
+fn cancel_operands(block: &BlockExpr, out: &mut Vec<Span>) {
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            StmtKind::Local(local) => cancel_operands_expr(&local.init, out),
+            StmtKind::Expr(expr) => cancel_operands_expr(expr, out),
+        }
+    }
+}
+
+fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
+    if let Expr::Call { callee, args, .. } = e
+        && let Expr::Path { path, .. } = &**callee
+        && path.segments.len() == 1
+        && path.segments[0].name.as_str() == "cancel"
+        && let Some(arg) = args.first()
+    {
+        // the ambient spelling is generic with exactly one parameter, and
+        // a same-named user function plans (so the def check in the
+        // emission refuses it); the collection is name-keyed on purpose —
+        // a false site only adds a redundant containment proof
+        out.push(arg.value.span());
+    }
+    match e {
+        Expr::Paren { inner, .. }
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Is { expr: inner, .. }
+        | Expr::Try { expr: inner, .. } => cancel_operands_expr(inner, out),
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        }
+        | Expr::Assign { left, right, .. } => {
+            cancel_operands_expr(left, out);
+            cancel_operands_expr(right, out);
+        },
+        Expr::Str { parts, .. } => {
+            for part in parts {
+                if let StrPart::Expr { expr, .. } = part {
+                    cancel_operands_expr(expr, out);
+                }
+            }
+        },
+        Expr::Call { callee, args, .. } => {
+            cancel_operands_expr(callee, out);
+            for arg in args {
+                cancel_operands_expr(&arg.value, out);
+            }
+        },
+        Expr::Field { recv, .. } | Expr::Index { recv, .. } => cancel_operands_expr(recv, out),
+        Expr::MapApply { key, value, .. } => {
+            cancel_operands_expr(key, out);
+            cancel_operands_expr(value, out);
+        },
+        Expr::Struct { fields, .. } => {
+            for (_, value) in fields {
+                if let Some(value) = value {
+                    cancel_operands_expr(value, out);
+                }
+            }
+        },
+        Expr::Tuple { items, .. } | Expr::List { items, .. } => {
+            for item in items {
+                cancel_operands_expr(item, out);
+            }
+        },
+        Expr::If {
+            cond, then, else_, ..
+        } => {
+            cancel_operands_expr(cond, out);
+            cancel_operands(then, out);
+            if let Some(else_) = else_ {
+                cancel_operands_expr(else_, out);
+            }
+        },
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            cancel_operands_expr(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    cancel_operands_expr(guard, out);
+                }
+                cancel_operands_expr(&arm.body, out);
+            }
+        },
+        Expr::While { cond, body, .. } => {
+            cancel_operands_expr(cond, out);
+            cancel_operands(body, out);
+        },
+        Expr::For { iter, body, .. } => {
+            cancel_operands_expr(iter, out);
+            cancel_operands_expr(body, out);
+        },
+        Expr::Nursery { body, .. } => cancel_operands(body, out),
+        Expr::Block(block) => cancel_operands(block, out),
+        Expr::Lambda { .. } | Expr::Spawn { .. } | Expr::Defer { .. } => {},
+        Expr::Call { .. }
+        | Expr::Literal { .. }
+        | Expr::RawStr { .. }
+        | Expr::Path { .. }
+        | Expr::FnType { .. }
+        | Expr::Return { .. }
+        | Expr::Break(_)
+        | Expr::Continue(_) => {},
+    }
+}
+
+/// One expression subtree's earliest direct exit, walking every container
+/// kind; lambdas and spawned blocks are separate frames and stay skipped.
+fn stray_exit_expr(e: &Expr) -> Option<Span> {
+    match e {
+        Expr::Return { span, .. } | Expr::Try { span, .. } => Some(*span),
+        Expr::Paren { inner, .. }
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Is { expr: inner, .. } => stray_exit_expr(inner),
+        Expr::Binary { left, right, .. } => {
+            stray_exit_expr(left).or_else(|| stray_exit_expr(right))
+        },
+        Expr::Range { start, end, .. } => stray_exit_expr(start).or_else(|| stray_exit_expr(end)),
+        Expr::Assign { left, right, .. } => {
+            stray_exit_expr(left).or_else(|| stray_exit_expr(right))
+        },
+        Expr::Str { parts, .. } => parts.iter().find_map(|part| match part {
+            StrPart::Expr { expr, .. } => stray_exit_expr(expr),
+            StrPart::Text { .. } | StrPart::Ident { .. } => None,
+        }),
+        Expr::Call { callee, args, .. } => stray_exit_expr(callee)
+            .or_else(|| args.iter().find_map(|arg| stray_exit_expr(&arg.value))),
+        Expr::Field { recv, .. } | Expr::Index { recv, .. } => stray_exit_expr(recv),
+        Expr::MapApply { key, value, .. } => {
+            stray_exit_expr(key).or_else(|| stray_exit_expr(value))
+        },
+        Expr::Struct { fields, .. } => fields
+            .iter()
+            .find_map(|(_, value)| value.as_ref().and_then(stray_exit_expr)),
+        Expr::Tuple { items, .. } | Expr::List { items, .. } => {
+            items.iter().find_map(stray_exit_expr)
+        },
+        Expr::If {
+            cond, then, else_, ..
+        } => stray_exit_expr(cond)
+            .or_else(|| stray_exit(then))
+            .or_else(|| else_.as_deref().and_then(stray_exit_expr)),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => stray_exit_expr(scrutinee).or_else(|| {
+            arms.iter().find_map(|arm| {
+                arm.guard
+                    .as_ref()
+                    .and_then(stray_exit_expr)
+                    .or_else(|| stray_exit_expr(&arm.body))
+            })
+        }),
+        Expr::While { cond, body, .. } => stray_exit_expr(cond).or_else(|| stray_exit(body)),
+        Expr::For { iter, body, .. } => stray_exit_expr(iter).or_else(|| stray_exit_expr(body)),
+        Expr::Nursery { body, .. } => stray_exit(body),
+        Expr::Block(block) => stray_exit(block),
+        Expr::Lambda { .. } | Expr::Spawn { .. } | Expr::Defer { .. } => None,
+        Expr::Literal { .. }
+        | Expr::RawStr { .. }
+        | Expr::Path { .. }
+        | Expr::FnType { .. }
+        | Expr::Break(_)
+        | Expr::Continue(_) => None,
+    }
 }
 
 /// One visited use span: an enclosing local's bind becomes one capture
@@ -905,9 +1157,13 @@ impl PairWalk<'_> {
                     self.expr(expr);
                 }
             },
-            Expr::Nursery { body, .. } | Expr::Defer { body, .. } | Expr::Spawn { body, .. } => {
+            Expr::Nursery { body, .. } | Expr::Defer { body, .. } => {
                 block(self, body);
             },
+            // a spawned block is its own planned frame with no evidence
+            // slots, exactly a nested lambda's: its trait-call sites
+            // refuse at their own lowering
+            Expr::Spawn { .. } => {},
         }
     }
 }
@@ -978,6 +1234,20 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// trait-method call on a bound type variable dispatches through the
     /// word at its slot (empty outside generic impl bodies).
     evidence: HashMap<(String, MethodId), u8>,
+    /// This function's table index: a dead Fn payload word zero-writes
+    /// the frame's own scalar FuncRef (a copyable word the dead member
+    /// never calls).
+    index: u32,
+    /// The enclosing loops, innermost last.
+    loops: Vec<LoopCtx>,
+    /// The innermost open nurseries' id words [E2], innermost last: the
+    /// `spawn` sites of one `nursery` block stage the top word.
+    nurseries: Vec<u8>,
+    /// Whether this frame is a `spawn` expression's child [E2]: the
+    /// parent's spawn site owns the `cancel`-payload containment checks
+    /// against the nursery-owning function's return union, so the child's
+    /// own lowering skips them.
+    spawn_child: bool,
 }
 
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
@@ -990,6 +1260,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         shapes: &'s mut Shapes<'a>,
         lin: &ds_check::Linearity,
         planned: &PlannedFn,
+        index: u32,
     ) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
         // A declared impl-member body lowers its declaration's params (the
         // `Self` receiver among them) and block body; every other entry
@@ -1108,9 +1379,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             overlay_len: 0,
             rc: Placement::from_linearity(lin),
             evidence: HashMap::new(),
+            index,
+            loops: Vec::new(),
+            nurseries: Vec::new(),
+            spawn_child: planned.spawn_child,
         };
         if planned.deinit.is_some() {
             this.bind_deinit_param(params)?;
+        } else if planned.spawn_child {
+            // a spawned child has no declared parameters: its capture
+            // block IS the entry's argument area, laid out from the frame
+            // start exactly where the spawned fiber's entry frame writes
+            // it
+            this.bind_captures(&planned.captures)?;
+            this.params_len = this.slots.len();
+            this.bind_evidence(&planned.evidence)?;
         } else {
             this.bind_params(params)?;
             this.bind_captures(&planned.captures)?;
@@ -1809,6 +2092,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.guard_deinit_union_member(init.ty, declared, local.span)?;
             self.widen_into(&target, declared, &init)?;
             self.place_of_ty(target.base, declared)?
+        } else if declared != init.ty && self.is_union_ty(declared)? {
+            // An annotated const over a narrower source claims the
+            // destination union's region under its source member: the
+            // binding must physically carry the union's tag, so a bare
+            // member literal re-spans through the same construction the
+            // if/match join uses instead of aliasing one word.
+            let target = self.temp_span(declared)?;
+            self.refuse_closure_init(&init, local.span)?;
+            self.widen_into(&target, declared, &init)?;
+            self.place_of_ty(target.base, declared)?
         } else {
             init.place.clone()
         };
@@ -1989,6 +2282,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let head = self.label();
         let exit = self.label();
+        // continue targets the head: the cond re-evaluates per iteration
+        // (body_depth is the scope count before the body scope pushes,
+        // so a jump sweeps every scope from the body scope inwards)
+        self.loops.push(LoopCtx {
+            exit,
+            cont: head,
+            body_depth: self.scopes.len(),
+        });
         // loop-fork the ownership map: words owned on entry AND at the
         // back edge survive the loop; body-only words died inside it, and
         // uses one depth deeper never kill outer productions
@@ -2015,6 +2316,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // an anonymous cond operand consumed in-loop has no scope of its
         // own: its carried count dies here, once per evaluation
         self.rc.drop_unnamed(&mut self.code, &carried);
+        self.loops.pop();
         Ok(self.unit_value(*span)?.place)
     }
 
@@ -2090,6 +2392,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let head = self.label();
         let exit = self.label();
+        let back = self.label();
+        // continue lands at the backedge start so the induction step
+        // still runs before the head re-test (body_depth is the scope
+        // count before the body scope pushes, so a jump sweeps every
+        // scope from the body scope inwards)
+        self.loops.push(LoopCtx {
+            exit,
+            cont: back,
+            body_depth: self.scopes.len(),
+        });
         self.bind_label(head);
         let bound_op = if inclusive { DataOp::LeI64 } else { DataOp::LtI64 };
         let cond = self.emit_data(bound_op, &ind_tp, &end_tp, span)?;
@@ -2136,6 +2448,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.loop_exit();
         let body_end = self.rc.take();
         self.rc.join(&[entry, body_end]);
+        self.bind_label(back);
         self.emit(Op::Data {
             op: DataOp::AddI64,
             dst: Slot::body(ind),
@@ -2144,6 +2457,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         self.emit(Op::Jmp { target: head });
         self.bind_label(exit);
+        self.loops.pop();
         Ok(self.unit_value(span)?.place)
     }
 
@@ -2192,6 +2506,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.loop_enter();
         let head = self.label();
         let exit = self.label();
+        let back = self.label();
+        // continue lands at the backedge start so the index step still
+        // runs before the head re-fetch (body_depth is the scope count
+        // before the body scope pushes, so a jump sweeps every scope
+        // from the body scope inwards)
+        self.loops.push(LoopCtx {
+            exit,
+            cont: back,
+            body_depth: self.scopes.len(),
+        });
         self.bind_label(head);
         self.fetch_element(list_w.slot, ind, slot)?;
         let cond = self.temp_word(SlotType::Bool)?;
@@ -2257,6 +2581,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.loop_exit();
         let body_end = self.rc.take();
         self.rc.join(&[entry, body_end]);
+        self.bind_label(back);
         self.emit(Op::Data {
             op: DataOp::AddI64,
             dst: Slot::body(ind),
@@ -2268,7 +2593,60 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // an anonymous iterable (a literal, a call result) has no scope
         // of its own: its consumed count dies here, once per evaluation
         self.rc.drop_unnamed(&mut self.code, &[list_w.slot]);
+        self.loops.pop();
         Ok(self.unit_value(span)?.place)
+    }
+
+    /// One `break`: the binders of the loop body's scopes inwards die at
+    /// the jump — their words drop here, once per path, while the
+    /// fall-through path drops the same words at the scope pops the jump
+    /// skips. Carried and outer words stay untouched: the exit label's
+    /// carried cleanup and the outer scope pops run past the loop on
+    /// every exit path.
+    fn break_value(&mut self, span: Span) -> Result<Place, LowerError> {
+        let Some(ctx) = self.loops.last().copied() else {
+            return Err(LowerError::unsupported(
+                span,
+                "a break outside a loop",
+                "loop exits never cross a function or lambda frame boundary",
+            ));
+        };
+        self.loop_exit_drops(ctx.body_depth);
+        self.emit(Op::Jmp { target: ctx.exit });
+        Ok(self.unit_value(span)?.place)
+    }
+
+    /// One `continue`: the same scope accounting as `break`, jumping to
+    /// the backedge start so the induction step and the head re-test
+    /// still run.
+    fn continue_value(&mut self, span: Span) -> Result<Place, LowerError> {
+        let Some(ctx) = self.loops.last().copied() else {
+            return Err(LowerError::unsupported(
+                span,
+                "a continue outside a loop",
+                "loop exits never cross a function or lambda frame boundary",
+            ));
+        };
+        self.loop_exit_drops(ctx.body_depth);
+        self.emit(Op::Jmp { target: ctx.cont });
+        Ok(self.unit_value(span)?.place)
+    }
+
+    /// The words dying at a loop-exit jump: every binder of the scopes
+    /// from the loop's body scope inwards, innermost scope first and
+    /// binders in source order inside one scope, matching the scope-pop
+    /// drop order the fall-through path takes.
+    fn loop_exit_drops(&mut self, body_depth: usize) {
+        let mut doomed: Vec<Span> = Vec::new();
+        for scope in self.scopes[body_depth..].iter().rev() {
+            let mut spans: Vec<Span> = scope.values().copied().collect();
+            spans.sort_by(|a, b| {
+                (a.file.as_u32(), a.start, a.end).cmp(&(b.file.as_u32(), b.start, b.end))
+            });
+            doomed.extend(spans);
+        }
+        let dying = self.rc.loop_exit_drops(&doomed);
+        Placement::emit_drops(&mut self.code, &dying);
     }
 
     /// Stages one `list_get` fetch through CALLG [H3]: the list word and
@@ -2373,16 +2751,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Expr::While { .. } => self.while_value(e)?,
             Expr::Return { .. } => return self.return_value(e),
             Expr::For { .. } => self.for_value(e)?,
-            Expr::Break(_)
-            | Expr::Continue(_)
-            | Expr::Nursery { .. }
-            | Expr::Spawn { .. }
-            | Expr::Defer { .. } => {
+            Expr::Break(span) => self.break_value(*span)?,
+            Expr::Continue(span) => self.continue_value(*span)?,
+            Expr::Nursery { .. } => self.nursery_value(e)?,
+            Expr::Spawn { .. } => self.spawn_value(e)?,
+            Expr::Defer { .. } => {
                 return Err(LowerError::unsupported(
                     e.span(),
                     "a control statement",
-                    "loop-exit/nursery statements have no lowering; write tail expressions and \
-                     while loops",
+                    "defer statements have no lowering yet",
                 ))
             },
             Expr::Lambda { .. } => self.lambda_value(e)?,
@@ -2543,6 +2920,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let (index, captures) =
             self.plan
                 .push_lambda(&self.name, e, self.res, &self.analyzed.checked.binders);
+        let (word, slot) = self.child_callable(*span, index, &captures)?;
+        Ok(Place {
+            base: word,
+            shape: PlaceShape::Word(slot),
+        })
+    }
+
+    /// The callable word for a synthesized block function (a lambda value
+    /// or a spawned child [E2]): a scalar `Fn` word when nothing
+    /// captures, a closure object's `Ref` staging the captures otherwise.
+    /// The capture refusals are the lambda construction's own — a spawned
+    /// child is the same shape.
+    fn child_callable(
+        &mut self,
+        span: Span,
+        index: u32,
+        captures: &[(Span, Ty)],
+    ) -> Result<(u8, SlotType), LowerError> {
         let kidx = self.pool(Constant::FuncRef {
             module: String::new(), // the enclosing module
             func: index,
@@ -2555,10 +2950,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if captures.is_empty() {
             self.fn_words.insert(func_word, index);
             self.scalar_fn_words.insert(func_word);
-            return Ok(Place {
-                base: func_word,
-                shape: PlaceShape::Word(SlotType::Fn),
-            });
+            return Ok((func_word, SlotType::Fn));
         }
         // stage the capture block on the overlay, in the order the
         // synthesized body binds it; a capture whose place is a closure
@@ -2566,15 +2958,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // capture slot would classify Fn and the Ref word cannot sit there)
         let mut staged: Vec<SlotType> = Vec::new();
         let mut moves: Vec<u8> = Vec::new();
-        for &(bind, ty) in &*captures {
+        for &(bind, ty) in captures {
             let place = self
                 .binders
                 .get(&bind)
                 .cloned()
-                .ok_or_else(|| self.missing_binder(*span))?;
+                .ok_or_else(|| self.missing_binder(span))?;
             if self.is_closure_word(&place, ty)? {
                 return Err(LowerError::unsupported(
-                    *span,
+                    span,
                     "a lambda capturing a closure",
                     "the capture block would carry a Ref word behind a Fn-classified capture \
                      slot; pass the callable as a parameter instead",
@@ -2584,9 +2976,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // closure object outlives the frame, but its death frees the
             // captured counts through the object cascade — the VM side
             // dispatches no user code there
-            if self.deinit_claim(ty, *span)?.is_some() {
+            if self.deinit_claim(ty, span)?.is_some() {
                 return Err(LowerError::unsupported(
-                    *span,
+                    span,
                     "a lambda capturing a `~Copyable` value with a deinit",
                     "the closure object's death cannot dispatch the hook yet; pass the value as a \
                      parameter instead",
@@ -2599,29 +2991,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if matches!(&*self.shapes.shape(ty)?, Shape::Word(SlotType::Fn)) {
                 let addrs = self
                     .word_addrs(&place, ty)
-                    .map_err(|err| err.respanned(*span))?;
+                    .map_err(|err| err.respanned(span))?;
                 let proven = addrs.len() == 1 && self.scalar_fn_words.contains(&addrs[0].slot);
                 if !proven {
                     return Err(LowerError::unsupported(
-                        *span,
+                        span,
                         "a lambda capturing a callable binding",
                         "the capture cannot prove a non-capturing scalar; a callable-defaulted \
-                         parameter may hold a closure at runtime — pass it as a parameter instead",
+                         parameter may hold a closure at runtime — pass the callable as a \
+                         parameter instead",
                     ));
                 }
             }
             for addr in self
                 .word_addrs(&place, ty)
-                .map_err(|err| err.respanned(*span))?
+                .map_err(|err| err.respanned(span))?
             {
                 moves.push(addr.slot);
                 staged.push(addr.slot_ty);
             }
         }
         self.guard_staged_count(staged.len())?;
-        for (index, slot) in moves.iter().enumerate() {
+        for (word, slot) in moves.iter().enumerate() {
             self.emit(Op::Mov {
-                dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
+                dst: Slot::overlay(u8::try_from(word).expect("overlay word fits u8")),
                 src: Slot::body(*slot),
             });
             // the construction acquires its own count per Ref capture
@@ -2637,10 +3030,229 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         self.rc.produced(dst);
         self.fn_words.insert(dst, index);
-        Ok(Place {
-            base: dst,
-            shape: PlaceShape::Word(SlotType::Ref),
-        })
+        Ok((dst, SlotType::Ref))
+    }
+
+    /// One internal seam call to a builtin control native [E2]: the
+    /// staged words are body slots with their word kinds, the result
+    /// words land on the overlay for the caller to read. No seam site is
+    /// ever in tail position — the emissions below keep them inside their
+    /// own blocks.
+    fn seam_call(
+        &mut self,
+        native: &Native,
+        staged: &[(u8, SlotType)],
+        result: &[SlotType],
+    ) -> Result<(), LowerError> {
+        self.guard_staged_count(staged.len())?;
+        let kinds: Vec<SlotType> = staged.iter().map(|(_, kind)| *kind).collect();
+        for (index, &(slot, _)) in staged.iter().enumerate() {
+            self.emit(Op::Mov {
+                dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
+                src: Slot::body(slot),
+            });
+            // a staged Ref is a transient borrow window, the native call
+            // convention's own discipline
+            if kinds[index] == SlotType::Ref {
+                self.rc.staged_native(slot, false);
+            }
+        }
+        self.overlay_site(&kinds, result);
+        let kidx = self.pool(Constant::FuncRef {
+            module: native.module.name().to_owned(),
+            func: native.index,
+        });
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+        });
+        self.rc.native_done(&mut self.code);
+        Ok(())
+    }
+
+    /// A `nursery` block [E2]: the seam opens a fresh nursery, the body
+    /// runs with its `spawn` sites bound to the id word, and scope exit
+    /// joins — the boundary answers a clean join or the first failure's
+    /// error payload, and the payload re-spans into the enclosing
+    /// function's return union exactly like a `?` exit: child errors
+    /// union out at the boundary. A child that died by a real trap
+    /// re-raises on the joiner (let-it-crash surfaces at the boundary);
+    /// a payload outside the boundary's containment mask refuses in the
+    /// seam instead of corrupting the union's tag space.
+    fn nursery_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
+        let Expr::Nursery { span, body } = e else {
+            return Err(mismatch("a nursery block"));
+        };
+        if let Some(exit) = stray_exit(body) {
+            return Err(LowerError::unsupported(
+                exit,
+                "an early exit inside a nursery block",
+                "the block's scope exit must join its children; route `return` and `?` around it",
+            ));
+        }
+        let open = crate::native::lookup("nursery_open")
+            .ok_or_else(|| mismatch("the nursery open seam"))?;
+        let join = crate::native::lookup("nursery_boundary")
+            .ok_or_else(|| mismatch("the nursery boundary seam"))?;
+        self.scope_push();
+        let id_word = self.temp_word(SlotType::I64)?;
+        self.seam_call(open, &[], &[SlotType::I64])?;
+        self.emit(Op::Mov {
+            dst: Slot::body(id_word),
+            src: Slot::overlay(0),
+        });
+        self.nurseries.push(id_word);
+        let body_val = self.block_inner(body);
+        self.nurseries.pop();
+        let _ = body_val?;
+        let mask = self.boundary_mask(*span)?;
+        // the mask word always stages (the native's parameter count is
+        // fixed); a zero mask answers nothing but clean joins — every
+        // contained cancel site was refused statically
+        let mask_word = self.temp_word(SlotType::I64)?;
+        let kidx = self.pool(Constant::I64(mask));
+        self.emit(Op::Kimm {
+            dst: Slot::body(mask_word),
+            kidx,
+        });
+        self.seam_call(
+            join,
+            &[(id_word, SlotType::I64), (mask_word, SlotType::I64)],
+            &[SlotType::Tag, SlotType::Tag],
+        )?;
+        let answer = if mask != 0 {
+            // the failing member's own tag word re-spans whole: bare
+            // members' tag ids are module-wide, so the union's tag slot
+            // takes it and the dead payload words zero-init (the
+            // construction convention)
+            let words = self.shapes.words(self.ret_ty)?.to_vec();
+            let fail = self.label();
+            let disc = self.temp_word(SlotType::Bool)?;
+            self.emit(Op::TagTest {
+                dst: Slot::body(disc),
+                src: Slot::overlay(0),
+                tag: NURSERY_BOUNDARY_ERR,
+            });
+            self.emit(Op::Jmpif {
+                cond: Slot::body(disc),
+                target: fail,
+            });
+            // the exit consumes the placement state; the continuation
+            // forks from before it
+            let ok_state = self.rc.save();
+            let unit = self.unit_value(*span)?.place;
+            let done = self.label();
+            self.emit(Op::Jmp { target: done });
+            self.bind_label(fail);
+            let target = self.temp_span(self.ret_ty)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(target.base),
+                src: Slot::overlay(1),
+            });
+            self.zero_init_member(target.base, &words, &[])?;
+            let n = u8::try_from(words.len()).expect("span width fits u8");
+            let transferred: Vec<u8> = (0..n).map(|index| target.base + index).collect();
+            self.rc.exit(&mut self.code, &transferred);
+            self.emit(Op::RetSpan {
+                src: Slot::body(target.base),
+                n,
+            });
+            self.rc.restore(ok_state);
+            self.bind_label(done);
+            unit
+        } else {
+            // no contained error member can answer, so the span is
+            // always the clean-join word; bug traps ride the call's own
+            // trap path
+            self.unit_value(*span)?.place
+        };
+        self.scope_pop();
+        Ok(answer)
+    }
+
+    /// The join's containment mask [E2]: one bit per bare member of the
+    /// function's return union — exactly the members a `cancel` payload
+    /// can be this round. A non-union return keeps the zero mask (every
+    /// cancel site refused statically at its own span).
+    fn boundary_mask(&mut self, span: Span) -> Result<i64, LowerError> {
+        let mut mask = 0i64;
+        let shape = self.shapes.shape(self.ret_ty)?;
+        let Shape::Union(u) = &*shape else {
+            return Ok(mask);
+        };
+        for member in self.members(self.ret_ty) {
+            let Some(entry) = u.member(member) else {
+                continue;
+            };
+            if !entry.fields.is_empty() {
+                continue;
+            }
+            let tag = self.shapes.tag_id(member)?;
+            if tag >= 64 {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a nursery boundary",
+                    "the return union's error-member tags pass the one-word containment mask; \
+                     keep the module's tag space under 64",
+                ));
+            }
+            mask |= 1i64 << tag;
+        }
+        Ok(mask)
+    }
+
+    /// A `spawn` expression [E2]: the block becomes a synthesized child
+    /// function (the lambda construction's own capture list) and the seam
+    /// spawns it into the innermost open nursery as a ready fiber — the
+    /// block's join drives it. The expression's value is the unit word.
+    fn spawn_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
+        let Expr::Spawn { span, body } = e else {
+            return Err(mismatch("a spawn block"));
+        };
+        let Some(&id_word) = self.nurseries.last() else {
+            return Err(LowerError::unsupported(
+                *span,
+                "a spawn outside a nursery block",
+                "spawn exists only inside a nursery block; bare detach requires an explicit root \
+                 nursery or supervisor",
+            ));
+        };
+        if let Some(exit) = stray_exit(body) {
+            return Err(LowerError::unsupported(
+                exit,
+                "an early exit inside a spawned block",
+                "a spawned body runs as its own fiber and completes with its own value; route \
+                 `return` and `?` through the enclosing function",
+            ));
+        }
+        let ret = self.val(*span)?.ty;
+        // the body's `cancel` payloads union out through THIS function's
+        // return at the enclosing nursery's join: prove the containment
+        // at the spawn site, where the return union is in scope
+        let mut operands = Vec::new();
+        cancel_operands(body, &mut operands);
+        for operand in operands {
+            let ty = self.val(operand)?.ty;
+            let members = self.members(ty);
+            if !set_diff(&members, &self.members(self.ret_ty)).is_empty() {
+                return Err(LowerError::unsupported(
+                    operand,
+                    "a `cancel` payload",
+                    "the error member is not contained in the enclosing function's return union; \
+                     the nursery boundary unions child errors out through the return",
+                ));
+            }
+        }
+        let (index, captures) =
+            self.plan
+                .push_spawn(&self.name, e, self.res, &self.analyzed.checked.binders, ret);
+        let native = crate::native::lookup("nursery_spawn")
+            .ok_or_else(|| mismatch("the nursery spawn seam"))?;
+        let (callable, kind) = self.child_callable(*span, index, &captures)?;
+        self.seam_call(native, &[(id_word, SlotType::I64), (callable, kind)], &[
+            SlotType::I64,
+        ])?;
+        Ok(self.unit_value(*span)?.place)
     }
 
     /// Whether a place holds a capturing lambda's closure word: a
@@ -2715,6 +3327,27 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "a capturing closure in a var binding",
                 "a var's fn-typed slot is re-storable and stays the scalar Fn word; construct a \
                  fresh closure for each binding instead",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether a solved type's value region is a union span.
+    fn is_union_ty(&mut self, ty: Ty) -> Result<bool, LowerError> {
+        Ok(matches!(&*self.shapes.shape(ty)?, Shape::Union(_)))
+    }
+
+    /// A capturing closure never enters a widened union region: the
+    /// member's Fn slot and the closure word's Ref classification
+    /// disagree (F2), and no payload read-back contract covers that
+    /// pairing yet.
+    fn refuse_closure_init(&mut self, val: &TypedPlace, span: Span) -> Result<(), LowerError> {
+        if self.is_closure_word(&val.place, val.ty)? {
+            return Err(LowerError::unsupported(
+                span,
+                "a capturing closure in a union binding",
+                "the member's Fn slot and the closure word's Ref classification disagree; store \
+                 the closure in a plain fn-typed binding instead",
             ));
         }
         Ok(())
@@ -3007,10 +3640,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// `x is T`: a TAG_TEST against the tested atom, or a constant when
     /// the checked types already decide it (legal specialization).
-    fn is_value(&mut self, expr: &Expr, ty: &Type, _span: Span) -> Result<Place, LowerError> {
+    fn is_value(&mut self, expr: &Expr, ty: &Type, span: Span) -> Result<Place, LowerError> {
         let operand = self.value(expr)?;
         let operand_ty = self.val(expr.span())?.ty;
-        let tested = self.type_atom(ty)?;
+        let tested = match self.type_atom(ty) {
+            Ok(atom) => atom,
+            Err(path_err) => match self.solved_is_atom(span) {
+                Some(atom) => atom,
+                None => return Err(path_err),
+            },
+        };
         let members = self.members(operand_ty);
         let dst = self.temp_word(SlotType::Bool)?;
         if members.as_slice() == [tested] {
@@ -3038,6 +3677,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             base: dst,
             shape: PlaceShape::Word(SlotType::Bool),
         })
+    }
+
+    /// The tested atom of a written type the nominal path cannot name
+    /// (a written fn type): the checker solved the `is` test and recorded
+    /// it keyed by the expression's span, so a single-atom solution is
+    /// the member TAG_TEST discriminates by. Anything else keeps the
+    /// path spelling's refusal.
+    fn solved_is_atom(&self, span: Span) -> Option<TypeId> {
+        let &solved = self.analyzed.checked.is_tests.get(&span)?;
+        let members = self.members(solved);
+        let [only] = members.as_slice() else {
+            return None;
+        };
+        Some(*only)
     }
 
     /// The atom a written type names; nominal single-segment paths only.
@@ -4830,6 +5483,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
             if let Some(place) = self.ambient_str_place(def, &arg_exprs, callee_span)? {
                 return Ok(place);
+            }
+            if self.ambient_cancel_def(def) {
+                return self.cancel_call(&arg_exprs, callee_span);
             }
         }
         // a trait-method dispatch names its impl body directly: the call
@@ -6952,6 +7608,76 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .is_some_and(|sig| sig.generics.len() == 1 && sig.params.len() == 1)
     }
 
+    /// Whether `def` is the ambient `cancel` extern [E1, E2]: the generic
+    /// one-parameter declaration the checker rows with the `cancel`
+    /// effect — the internal effect the nursery boundary dispatches.
+    fn ambient_cancel_def(&self, def: DefId) -> bool {
+        self.plan.index_of(def).is_none()
+            && self.analyzed.package.def(def).name == "cancel"
+            && self
+                .analyzed
+                .decls
+                .fns
+                .get(&def)
+                .is_some_and(|sig| sig.generics.len() == 1 && sig.params.len() == 1)
+    }
+
+    /// The `cancel(e)` call [E1, E2]: the operand is one bare enum member
+    /// value — the failing fiber's error payload — contained in the
+    /// enclosing function's return union, where the nursery boundary
+    /// unions it out at the join. The seam traps the running fiber, so
+    /// the call never answers; the unit place carries the value walk.
+    fn cancel_call(&mut self, args: &[&Expr], span: Span) -> Result<Place, LowerError> {
+        let native = crate::native::lookup("nursery_cancel")
+            .ok_or_else(|| mismatch("the nursery cancel seam"))?;
+        let [operand] = args else {
+            return Err(LowerError::unsupported(
+                span,
+                "a `cancel` call",
+                "stage exactly the error value; the payload is one member word",
+            ));
+        };
+        let tp = self.value(operand)?;
+        let payload_members = self.members(tp.ty);
+        let bare = match &*self.shapes.shape(tp.ty)? {
+            Shape::Union(u) => payload_members
+                .iter()
+                .all(|m| u.member(*m).is_some_and(|e| e.fields.is_empty())),
+            Shape::Word(SlotType::Tag) => true,
+            _ => false,
+        };
+        if !bare {
+            return Err(LowerError::unsupported(
+                operand.span(),
+                "a `cancel` payload",
+                "the error value must be a bare enum member this round; payloaded members wait on \
+                 the reboxing ruling",
+            ));
+        }
+        // the containment proof belongs to the function that owns the
+        // nursery the fiber cancels into: the parent's spawn site checks
+        // a spawned body's payloads against its own return union, so a
+        // child frame skips the check here
+        if !self.spawn_child && !set_diff(&payload_members, &self.members(self.ret_ty)).is_empty() {
+            return Err(LowerError::unsupported(
+                operand.span(),
+                "a `cancel` payload",
+                "the error member is not contained in the enclosing function's return union; the \
+                 nursery boundary unions child errors out through the return",
+            ));
+        }
+        let addr = single(&self.word_addrs(&tp.place, tp.ty)?, operand.span())?;
+        if addr.slot_ty != SlotType::Tag {
+            return Err(LowerError::unsupported(
+                operand.span(),
+                "a `cancel` payload",
+                "the error value must be a bare enum member this round",
+            ));
+        }
+        self.seam_call(native, &[(addr.slot, SlotType::Tag)], &[SlotType::I64])?;
+        Ok(self.unit_value(span)?.place)
+    }
+
     /// The ambient `str[t]` conversion as an explicit call [F6]: the
     /// operand's checked type routes the same conversion the
     /// interpolation holes use — printable primitives pass their Ref
@@ -7653,8 +8379,22 @@ impl FnLower<'_, '_, '_> {
                 self.rc.produced(dst);
                 return;
             },
-            // Fn words are scalar packed FuncRefs: no heap resource to zero
-            SlotType::Tag | SlotType::I32 | SlotType::Raw | SlotType::Fn => return,
+            // Fn words need kind-true content too: the call slide
+            // validates staged words against typed callee params, so
+            // the zero is the frame's own scalar FuncRef — a copyable
+            // word the dead member never calls
+            SlotType::Fn => {
+                let k = self.pool(Constant::FuncRef {
+                    module: String::new(), // the enclosing module
+                    func: self.index,
+                });
+                self.emit(Op::Kconst {
+                    dst: Slot::body(dst),
+                    kidx: k,
+                });
+                return;
+            },
+            SlotType::Tag | SlotType::I32 | SlotType::Raw => return,
         };
         self.emit(Op::Kconst {
             dst: Slot::body(dst),

@@ -1,0 +1,12 @@
+// A trait impl member whose return is inferred diverges from the trait
+// member's declared return: the body's checked tail type must agree with
+// the registered signature, exactly as a written return would [B6].
+
+tag int
+tag string
+trait shows {
+  fn show(self) -> string
+}
+impl shows for int {
+  fn show(self) { 1 }
+}

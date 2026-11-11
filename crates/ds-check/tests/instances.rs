@@ -446,6 +446,82 @@ fn link_time_check_catches_cross_batch_cycle() {
 }
 
 #[test]
+fn generic_head_overlaps_concrete_head_at_declaration() {
+    // `json for list[int]` plus `json for list[t] if json[t]`: the heads
+    // read disjoint to the set algebra (a generic head is one opaque
+    // atom), but the probe grounds the generic head at `int` and both
+    // serve `list[int]` once `json for int` exists — a declaration-time
+    // overlap with the shared instantiation as the witness.
+    let mut f = fixture();
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    let list = f.universe.declare_struct("list").unwrap();
+    let int_ty = f.universe.atom_ty(f.int).unwrap();
+    let list_int = f.universe.apply_atom(list, &[int_ty]).unwrap();
+    f.declare(f.json, TypeExpr::atom(list_int)).unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let err = f
+        .declare_conditional(f.json, TypeExpr::atom(list_t), vec![Condition::new(
+            f.json,
+            TypeExpr::atom(t),
+        )])
+        .unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "list[int]");
+}
+
+#[test]
+fn generic_heads_of_distinct_constructors_stay_disjoint() {
+    // `list[t]` and `pair[t]` never share an instantiation, bounds or
+    // not: the probe grounds both and no candidate type is served twice.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let pair = f.universe.declare_struct("pair").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let pair_t = f.universe.apply_atom(pair, &[t_ty]).unwrap();
+    f.declare(f.json, TypeExpr::atom(list_t)).unwrap();
+    f.declare(f.json, TypeExpr::atom(pair_t)).unwrap();
+    assert_eq!(f.env.len(), 2, "distinct constructors both declare");
+}
+
+#[test]
+fn generic_pair_unprovable_at_declaration_closes_at_link_time() {
+    // Both generic impls declare while no atom proves their bounds; the
+    // later `json for int` makes both serve `list[int]`, and the link
+    // pass over the closed environment catches the pair the declaration
+    // order could not.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let u = f.universe.declare_tag("$u#2").unwrap();
+    let u_ty = f.universe.atom_ty(u).unwrap();
+    let list_u = f.universe.apply_atom(list, &[u_ty]).unwrap();
+    f.declare_conditional(f.json, TypeExpr::atom(list_t), vec![Condition::new(
+        f.json,
+        TypeExpr::atom(t),
+    )])
+    .unwrap();
+    f.declare_conditional(f.json, TypeExpr::atom(list_u), vec![Condition::new(
+        f.json,
+        TypeExpr::atom(u),
+    )])
+    .unwrap();
+    f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
+    let err = f.env.check_all(&mut f.universe).unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "list[int]");
+}
+
+#[test]
 fn resolve_is_exact_containment_and_lookup_only() {
     let mut f = fixture();
     let int_ty = f.ty(f.int);

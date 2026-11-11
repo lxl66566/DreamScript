@@ -137,6 +137,11 @@ pub struct Checked {
     /// environment statically resolved, keyed by the call's span (B6).
     /// The lowering pass mints the CALLG evidence word from it.
     pub trait_calls: HashMap<Span, TraitCall>,
+    /// The solved tested type of every `is` expression that type-solves,
+    /// keyed by the expression's span. The lowering pass reads the tested
+    /// atom from it when the written type is not a nominal single-segment
+    /// path (a written fn type is the read-back call-through spelling).
+    pub is_tests: HashMap<Span, Ty>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -213,6 +218,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
+        is_tests: checked.is_tests,
     };
     Analyzed {
         package,
@@ -278,6 +284,7 @@ where
     let mut expr_types = HashMap::new();
     let mut generic_calls = HashMap::new();
     let mut trait_calls = HashMap::new();
+    let mut is_tests = HashMap::new();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
             files,
@@ -291,6 +298,7 @@ where
             expr_types: &mut expr_types,
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
+            is_tests: &mut is_tests,
             diags: Vec::new(),
             linear_vars: HashMap::new(),
             locals: ScopedMap::default(),
@@ -314,6 +322,7 @@ where
         expr_types,
         generic_calls,
         trait_calls,
+        is_tests,
     })
 }
 
@@ -347,6 +356,7 @@ struct Bodies<'a> {
     expr_types: &'a mut HashMap<Span, Val>,
     generic_calls: &'a mut HashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut HashMap<Span, TraitCall>,
+    is_tests: &'a mut HashMap<Span, Ty>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
     /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
@@ -411,10 +421,26 @@ impl Bodies<'_> {
             ItemKind::Trait(t) => {
                 self.push_generics(&t.generics.iter().map(generic_of).collect::<Vec<_>>());
                 let self_ty = self.fresh_var("Self");
+                // A trait's members see `Self` as satisfying their own
+                // trait: a default body calls sibling members on `self`
+                // without an instance — every eventual impl proves the
+                // whole member set together. The assumption is scoped to
+                // these bodies, never global, and bound recursion stays
+                // depth-capped through it.
+                let self_trait = self
+                    .package
+                    .lookup_type(&t.name.name)
+                    .and_then(|def| self.decls.traits.get(&def).copied());
+                if let Some(trait_id) = self_trait {
+                    self.assumptions.push((trait_id, self_ty));
+                }
                 for member in &t.members {
                     if let TraitMember::Fn(f) = member {
                         self.fn_decl(f, Some(self_ty));
                     }
+                }
+                if self_trait.is_some() {
+                    self.assumptions.pop();
                 }
                 self.pop_generics();
             },
@@ -525,7 +551,20 @@ impl Bodies<'_> {
                     }
                 }
             }
-            self.fn_decl(f, Some(target));
+            let inferred = self.fn_decl(f, Some(target));
+            // An inferred return is agreed through the body's checked tail
+            // type, exactly as a written one is: the trait member's
+            // registered signature stays the call-site contract.
+            if f.ret.is_none() {
+                if let (Some(def), Some(subst)) = (trait_def, &subst) {
+                    if let (Some((sig, sig_span)), Some(inferred)) = (
+                        decls::trait_member_sig(self.package, self.decls, def, &f.name.name),
+                        inferred,
+                    ) {
+                        impl_sig::agree_inferred_return(self, f, &sig, sig_span, subst, inferred);
+                    }
+                }
+            }
         }
         self.type_vars.pop();
         self.pop_generics();
@@ -631,8 +670,10 @@ impl Bodies<'_> {
     /// One named function declaration: boundary-anchored (B2). `self_ty`
     /// binds `Self` inside trait/impl scopes, where the first parameter
     /// named `self` is the receiver — exempt from annotation and typed
-    /// `Self` [record 6.1].
-    fn fn_decl(&mut self, f: &FnDecl, self_ty: Option<Ty>) {
+    /// `Self` [record 6.1]. Returns the member's solved return — the
+    /// written return, or the body's checked tail type when inferred —
+    /// for the impl-member agreement checks.
+    fn fn_decl(&mut self, f: &FnDecl, self_ty: Option<Ty>) -> Option<Ty> {
         let generics: Vec<GenericParam> = f.generics.iter().map(generic_of).collect();
         self.push_generics(&generics);
         if let Some(target) = self_ty {
@@ -718,8 +759,8 @@ impl Bodies<'_> {
         // tables for the lowering pass: a member function has no package
         // DefId, so its solved signature lives here — the written return
         // against `Self`, or the body's own checked type when inferred.
+        let solved = ret.or_else(|| body_val.as_ref().filter(|v| !v.poisoned).map(|v| v.ty));
         if self_ty.is_some() {
-            let solved = ret.or_else(|| body_val.as_ref().filter(|v| !v.poisoned).map(|v| v.ty));
             if let Some(ty) = solved {
                 self.decls.impl_fn_rets.insert(f.span, ty);
             }
@@ -730,6 +771,7 @@ impl Bodies<'_> {
             self.type_vars.pop();
         }
         self.pop_generics();
+        solved
     }
 
     // ---- statements ---------------------------------------------------------
@@ -964,7 +1006,7 @@ impl Bodies<'_> {
             },
             Expr::Try { expr, span } => self.try_expr(expr, expected, *span),
             Expr::Unary { op, expr, span } => self.unary(*op, expr, *span),
-            Expr::Is { expr, ty, .. } => {
+            Expr::Is { expr, ty, span, .. } => {
                 let operand = self.expr(expr, None);
                 let Some(solved) = self.solve_here(ty) else {
                     if !self.take_solve_reported() {
@@ -984,6 +1026,7 @@ impl Bodies<'_> {
                         poisoned: false,
                     };
                 };
+                self.is_tests.insert(*span, solved);
                 // A provably-disjoint test computes a constant false, so in
                 // value/assert position it is a compile error — the same
                 // ruling as the constant `==` [B9 carve-out 2]. In
@@ -3040,6 +3083,7 @@ impl Bodies<'_> {
     ) -> Val {
         let recv_val = self.expr(recv, None);
         let mut survivors: Vec<(MethodId, Arc<FnSig>)> = Vec::new();
+        let mut miss = None;
         for &candidate in candidates {
             let Some(sig) = self.member_sig(candidate) else {
                 continue
@@ -3049,8 +3093,23 @@ impl Bodies<'_> {
                     let Some(trait_id) = self.decls.traits.get(def).copied() else {
                         continue;
                     };
-                    if self.trait_satisfied_quiet(trait_id, recv_val.ty) {
+                    if self.assumption_covers(trait_id, recv_val.ty) {
                         survivors.push((candidate, sig));
+                        continue;
+                    }
+                    match self.instance_resolution(trait_id, recv_val.ty) {
+                        Resolution::Unique(_) | Resolution::Ambiguous(_) => {
+                            survivors.push((candidate, sig));
+                        },
+                        // A head that matched while its bound failed is
+                        // the nearest miss: the diagnostic below names the
+                        // unsatisfied bound instead of the receiver alone.
+                        Resolution::BoundUnsat { bound, target, .. } => {
+                            if miss.is_none() {
+                                miss = Some((trait_id, bound, target));
+                            }
+                        },
+                        Resolution::None => {},
                     }
                 },
                 MethodOwner::Inherent(target) => {
@@ -3072,6 +3131,17 @@ impl Bodies<'_> {
                     ty: self.empty(),
                     diverges: false,
                     poisoned: true,
+                };
+            }
+            if let Some((trait_id, bound, target)) = miss {
+                self.report_bound_miss(trait_id, bound, &target, span);
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
                 };
             }
             let trait_names: Vec<String> = candidates
@@ -4651,25 +4721,34 @@ impl Bodies<'_> {
                 false
             },
             Resolution::BoundUnsat { bound, target, .. } => {
-                let miss = self.render_members(&target);
-                self.error(
-                    ErrorCode::UnsatisfiedConstraint,
-                    format!(
-                        "no instance of `{}` for {}: the `{}` impl's bound is unsatisfied there",
-                        self.trait_name(bound),
-                        miss,
-                        self.trait_name(trait_id)
-                    ),
-                    span,
-                    "unsatisfied bound",
-                );
+                self.report_bound_miss(trait_id, bound, &target, span);
                 false
             },
         }
     }
 
-    fn trait_satisfied_quiet(&self, trait_id: TraitId, ty: Ty) -> bool {
-        self.assumption_covers(trait_id, ty) || self.instance_resolution(trait_id, ty).satisfied()
+    /// The bound-miss diagnostic both call spellings share: the head
+    /// matched and the substituted bound is the missing proof, so the
+    /// message names the bound's trait over the substituted type.
+    fn report_bound_miss(
+        &mut self,
+        trait_id: TraitId,
+        bound: TraitId,
+        target: &[TypeId],
+        span: Span,
+    ) {
+        let miss = self.render_members(target);
+        self.error(
+            ErrorCode::UnsatisfiedConstraint,
+            format!(
+                "no instance of `{}` for {}: the `{}` impl's bound is unsatisfied there",
+                self.trait_name(bound),
+                miss,
+                self.trait_name(trait_id)
+            ),
+            span,
+            "unsatisfied bound",
+        );
     }
 
     /// Whether an in-scope generic bound (`[t: json]`) assumes the trait
