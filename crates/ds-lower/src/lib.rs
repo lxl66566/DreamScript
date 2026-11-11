@@ -61,12 +61,12 @@ use std::{
 };
 
 use ds_abi::{RcOp, Uop};
-use ds_check::{Analyzed, TraitId, render_type};
+use ds_check::{Analyzed, Condition, TraitId, render_type};
 use ds_diag::Span;
 use ds_mod::{Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
-use func::{FnLower, Plan};
+use func::{EvidenceEnv, FnLower, Plan};
 use shape::Shapes;
 
 /// One op of a function body: a runnable micro-operation or a placed
@@ -302,10 +302,12 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
 /// Collects one trait impl's member bodies into the plan (the trait
 /// dispatch seam): each member fn enters the function table under its
 /// mangled identity `<trait>#<target>#<member>` with the checker-solved
-/// return its FnDecl names. A generic impl's bodies lower per resolved
-/// receiver type, which no static plan can name: the item is marked
-/// runtime-evidence territory and call sites dispatching into it refuse
-/// naming the seam. Inherent impls plan through their own mangle below.
+/// return its FnDecl names. A generic impl's bodies lower once per impl
+/// with one runtime-evidence slot per nested bound demand, staged by the
+/// entering call sites from the checker-recorded bounds; the runtime-impl
+/// marker serves the transitive-staging refusal (a nested dispatch whose
+/// serving body is itself generic). Inherent impls plan through their own
+/// mangle below.
 fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
     if imp.trait_ref.is_none() {
         plan_inherent_impl(item, imp, plan, analyzed);
@@ -318,7 +320,7 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
     let [only] = trait_ref.path.segments.as_slice() else {
         return;
     };
-    let bounds = impl_bounds(item.span, analyzed);
+    let bounds = Rc::new(impl_bounds(item.span, analyzed));
     if !imp.generics.is_empty() {
         // the runtime-evidence territory [H3]: a generic impl's member
         // bodies lower once per impl (never per instantiation), the call
@@ -336,11 +338,15 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             continue;
         };
         let body_expr = Rc::new(Expr::Block(body.clone()));
-        let evidence = if bounds.is_empty() {
+        let pairs = if bounds.is_empty() {
             Rc::new(Vec::new())
         } else {
             let res = &analyzed.resolutions[f.span.file.as_u32() as usize];
             Rc::new(func::runtime_pairs(analyzed, res, &bounds, &body_expr))
+        };
+        let evidence = EvidenceEnv {
+            pairs,
+            bounds: bounds.clone(),
         };
         let name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
         plan.push_declared(
@@ -362,13 +368,15 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
 /// neither a user-declared name nor a trait-impl body collides. A
 /// monomorphic impl's body is a plain local function its call sites
 /// reach through the checker-recorded method id. A generic impl's bodies
-/// need runtime-resolved evidence no inherent call site can stage, so
-/// the item is marked runtime-evidence territory and call sites refuse
-/// naming the seam.
+/// lower once per impl with the runtime-evidence machinery the trait form
+/// uses (one evidence slot per nested bound demand); the entering call
+/// sites stage the words through the checker's call-site bounds record —
+/// no instance word exists for an inherent impl — so the runtime-impl
+/// marker serves only the transitive-staging refusal.
 fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
+    let bounds = Rc::new(impl_bounds(item.span, analyzed));
     if !imp.generics.is_empty() {
         plan.note_runtime_impl(item.span);
-        return;
     }
     for f in &imp.fns {
         let Some(body) = &f.body else {
@@ -377,25 +385,37 @@ fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &A
         let Some(ret) = analyzed.decls.impl_fn_rets.get(&f.span).copied() else {
             continue;
         };
+        let body_expr = Rc::new(Expr::Block(body.clone()));
+        let pairs = if bounds.is_empty() {
+            Rc::new(Vec::new())
+        } else {
+            let res = &analyzed.resolutions[f.span.file.as_u32() as usize];
+            Rc::new(func::runtime_pairs(analyzed, res, &bounds, &body_expr))
+        };
         let name = format!("{}#{}", render_type(&imp.target), f.name.name);
         plan.push_declared(
             name,
             item.span,
             f.name.name.clone(),
             Rc::new(f.params.clone()),
-            Rc::new(Expr::Block(body.clone())),
+            body_expr,
             ret,
-            Rc::new(Vec::new()),
+            EvidenceEnv {
+                pairs,
+                bounds: bounds.clone(),
+            },
         );
     }
 }
 
 /// The declared bounds of one generic impl's type variables: parameter
-/// name to the traits its `[t: trait]` clauses name, from the instances
-/// the impl declared. The name (not the minted atom) is the key because
-/// the instance declaration and the body's checking mint their own
-/// variables; a bare `[t]` parameter bounds nothing, so calls on it
-/// never check clean and no demand collects for it.
+/// name to the traits its `[t: trait]` clauses name. The trait form reads
+/// its declared instances' conditions; the inherent form reads the
+/// checker's declared-bounds record (no instance exists). The name (not
+/// the minted atom) is the key because the declaration and the body's
+/// checking mint their own variables; a bare `[t]` parameter bounds
+/// nothing, so calls on it never check clean and no demand collects for
+/// it.
 fn impl_bounds(impl_site: Span, analyzed: &Analyzed) -> HashMap<String, HashSet<TraitId>> {
     let mut out: HashMap<String, HashSet<TraitId>> = HashMap::new();
     for (instance, site) in &analyzed.decls.instance_impls {
@@ -405,17 +425,31 @@ fn impl_bounds(impl_site: Span, analyzed: &Analyzed) -> HashMap<String, HashSet<
         let Ok(conditions) = analyzed.decls.instances.conditions(*instance) else {
             continue;
         };
-        for cond in conditions {
-            let [var] = analyzed.decls.universe.members(cond.ty) else {
-                continue;
-            };
-            let Some(param) = shape::var_param_name(&analyzed.decls.universe, *var) else {
-                continue;
-            };
-            out.entry(param).or_default().insert(cond.trait_id);
-        }
+        collect_bounds(&analyzed.decls.universe, conditions, &mut out);
+    }
+    if let Some(record) = analyzed.decls.inherent_impl_bounds.get(&impl_site) {
+        collect_bounds(&analyzed.decls.universe, &record.conditions, &mut out);
     }
     out
+}
+
+/// One conditions list into the parameter-name bounds map: each
+/// condition's single member is the declaration's minted variable atom,
+/// bridged to the written parameter name.
+fn collect_bounds(
+    universe: &ds_check::Universe,
+    conditions: &[Condition<ds_check::Ty>],
+    out: &mut HashMap<String, HashSet<TraitId>>,
+) {
+    for cond in conditions {
+        let [var] = universe.members(cond.ty) else {
+            continue;
+        };
+        let Some(param) = shape::var_param_name(universe, *var) else {
+            continue;
+        };
+        out.entry(param).or_default().insert(cond.trait_id);
+    }
 }
 
 /// What lowering every planned function yields: the module's functions,

@@ -2,11 +2,11 @@
 //! pass: a defaulted parameter call stages the literal default (it
 //! previously miscompiled into the VM's arity trap — the checker
 //! accepted the omission and the call staged one word short), an inline
-//! union member argument against a multi-word parameter region refuses
-//! at lowering with the callee's span (it previously trapped inside the
-//! VM's slide validation), and a type-keyed shape refusal reports at the
-//! observing node instead of the sentinel span that rendered against an
-//! unrelated file's first line.
+//! union member argument re-spans into the multi-word parameter region
+//! at the call (an inline unit tag or payload case previously trapped
+//! inside the VM's slide validation, then refused at lowering), and a
+//! type-keyed shape refusal reports at the observing node instead of the
+//! sentinel span that rendered against an unrelated file's first line.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -93,6 +93,42 @@ fn refused(source: &str, seam: &str, needle: &str) -> LowerError {
     error
 }
 
+/// One run probe: the source must check clean, lower, round-trip,
+/// install, and run main, returning the captured output.
+fn runs(source: &str) -> String {
+    let mut files = Files::new();
+    let id = files.add_source("run_probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "run_probe",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the probe lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(vm.run("run_probe", "main", &[]), Ok(Value::I64(0)));
+    String::from_utf8_lossy(vm.captured_output()).into_owned()
+}
+
 /// The defaulted call stages its literal: the checker proved the
 /// default against its parameter, so the call slides every parameter
 /// word and prints the default (one word short, the VM's slide
@@ -113,71 +149,80 @@ fn a_defaulted_call_stages_its_literal_default() {
     );
 }
 
-/// An inline unit tag against a union-typed parameter refuses at
-/// lowering: the member's one word cannot fill the parameter's whole
-/// region, and the VM trap becomes the callee-spanned seam.
+/// An inline unit tag against a union-typed parameter re-spans into the
+/// parameter's whole region at the call, and the callee reads the
+/// member it received.
 #[test]
-fn an_inline_unit_tag_argument_refuses_at_lowering() {
-    refused(
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "tag ready\n",
-            "tag failed\n",
-            "enum grade { scored(int) }\n",
-            "type outcome = ready | failed | grade\n",
-            "fn speak(o: outcome) -> string { \"x\" }\n",
-            "fn main() -> () {\n",
-            "  println(speak(ready))\n",
-            "}\n",
-            "extern fn println (msg: string) -> ()\n",
-        ),
-        "staged words disagree with the callee's parameter span",
-        "speak(ready)",
-    );
+fn an_inline_unit_tag_argument_re_spans_into_the_parameter_region() {
+    let out = runs(concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag ready\n",
+        "tag failed\n",
+        "enum grade { scored(int) }\n",
+        "type outcome = ready | failed | grade\n",
+        "fn speak(o: outcome) -> string {\n",
+        "  match o {\n",
+        "    ready => \"ready\",\n",
+        "    failed => \"failed\",\n",
+        "    g => \"graded\",\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(speak(ready))\n",
+        "  println(speak(failed))\n",
+        "  println(speak(scored(3)))\n",
+        "}\n",
+        "extern fn println (msg: string) -> ()\n",
+    ));
+    assert_eq!(out, "ready\nfailed\ngraded\n");
 }
 
-/// An inline payload case refuses the same way: its two words meet the
-/// union's region, not the exact span the slide contract pins.
+/// An inline payload case re-spans the same way: its words land in the
+/// union's region under the case's member, payload included.
 #[test]
-fn an_inline_payload_case_argument_refuses_at_lowering() {
-    refused(
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "tag ready\n",
-            "enum grade { scored(int) }\n",
-            "type outcome = ready | grade\n",
-            "fn speak(o: outcome) -> string { \"x\" }\n",
-            "fn main() -> () {\n",
-            "  println(speak(scored(3)))\n",
-            "}\n",
-            "extern fn println (msg: string) -> ()\n",
-        ),
-        "staged words disagree with the callee's parameter span",
-        "speak(scored(3))",
-    );
+fn an_inline_payload_case_argument_re_spans_into_the_parameter_region() {
+    let out = runs(concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag ready\n",
+        "enum grade { scored { n: int } }\n",
+        "type outcome = ready | grade\n",
+        "fn speak(o: outcome) -> string {\n",
+        "  if o is ready {\n",
+        "    \"ready\"\n",
+        "  } else {\n",
+        "    if o is scored { \"scored ${o.n}\" } else { \"?\" }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(speak(ready))\n",
+        "  println(speak(scored(n: 3)))\n",
+        "}\n",
+        "extern fn println (msg: string) -> ()\n",
+    ));
+    assert_eq!(out, "ready\nscored 3\n");
 }
 
-/// A type-keyed shape refusal (a struct field outside the word
-/// contract) reports at the struct literal whose lowering shaped it,
-/// never at the sentinel span that renders against another file.
+/// A type-keyed shape refusal (a struct field outside the inline-span
+/// vocabulary — a union-typed field) reports at the struct literal whose
+/// lowering shaped it, never at the sentinel span that renders against
+/// another file.
 #[test]
 fn a_shape_refusal_reports_at_the_observing_literal() {
     refused(
         concat!(
             "tag int\n",
             "tag string\n",
-            "struct inner { n: int }\n",
-            "struct outer { x: inner }\n",
+            "struct outer { x: int | string }\n",
             "fn main() -> () {\n",
-            "  const box = outer { x: inner { n: 1 } }\n",
+            "  const box = outer { x: 1 }\n",
             "  println(\"unreachable\")\n",
             "}\n",
             "extern fn println (msg: string) -> ()\n",
         ),
         "struct payload field",
-        "outer { x: inner { n: 1 } }",
+        "outer { x: 1 }",
     );
 }
 
@@ -189,8 +234,7 @@ fn a_shape_refusal_through_a_parameter_reports_at_the_parameter() {
         concat!(
             "tag int\n",
             "tag string\n",
-            "struct inner { n: int }\n",
-            "struct outer { x: inner }\n",
+            "struct outer { x: int | string }\n",
             "fn take(o: outer) -> int { 0 }\n",
             "fn main() -> () { println(\"unreachable\") }\n",
             "extern fn println (msg: string) -> ()\n",
@@ -198,4 +242,50 @@ fn a_shape_refusal_through_a_parameter_reports_at_the_parameter() {
         "struct payload field",
         "o: outer",
     );
+}
+
+/// A strict sub-union argument re-spans per member into the wider
+/// parameter region at the call: the multi-member source tag-dispatches,
+/// the same widening write an annotated binding runs.
+#[test]
+fn a_sub_union_argument_re_spans_per_member_at_the_call() {
+    let out = runs(concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag bool\n",
+        "tag red\n",
+        "tag blue\n",
+        "tag green\n",
+        "fn sub(b: bool) -> red | blue {\n",
+        "  if b { red } else { blue }\n",
+        "}\n",
+        "fn wide(x: red | blue | green) -> string {\n",
+        "  match x { red => \"r\", blue => \"b\", green => \"g\" }\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(wide(sub(true)))\n",
+        "  println(wide(sub(false)))\n",
+        "  println(wide(green))\n",
+        "}\n",
+        "extern fn println (msg: string) -> ()\n",
+    ));
+    assert_eq!(out, "r\nb\ng\n");
+}
+
+/// A fn-typed value's call site re-spans too: the value's signature
+/// carries the parameter types, so a bare member argument stages the
+/// parameter's whole region against the CALLS slide.
+#[test]
+fn a_fn_value_call_site_re_spans_a_bare_member_argument() {
+    let out = runs(concat!(
+        "tag int\n",
+        "tag string\n",
+        "fn kind(v: int | string) -> int { if v is int { 1 } else { 2 } }\n",
+        "fn main() -> () {\n",
+        "  const g = kind\n",
+        "  println(\"${g(5)} ${g(\"s\")}\")\n",
+        "}\n",
+        "extern fn println (msg: string) -> ()\n",
+    ));
+    assert_eq!(out, "1 2\n");
 }

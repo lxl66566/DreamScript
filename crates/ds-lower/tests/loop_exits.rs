@@ -3,12 +3,13 @@
 //! binders of the loop body's scopes drop at the jump, each once per
 //! runtime path, carried and outer words keep their own death sites,
 //! and the induction step still runs on the continue path. A loop exit
-//! inside a lambda lexically inside a loop refuses at lowering: the
-//! exit never crosses a frame boundary.
+//! inside a lambda lexically inside a loop refuses at the checker's
+//! frame boundary; the lowering's own frame-boundary refusal stays as
+//! the backstop behind the checker.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, lower};
+use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
@@ -239,7 +240,7 @@ fn a_body_ref_binding_dies_at_the_break_and_the_read_survives() {
 }
 
 #[test]
-fn a_loop_exit_inside_a_lambda_refuses_at_lowering() {
+fn a_loop_exit_inside_a_lambda_refuses_at_check_time() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -254,30 +255,22 @@ fn a_loop_exit_inside_a_lambda_refuses_at_lowering() {
     let id = files.add_source("lambda_exit.ds", source);
     let asts = [parse(&files, id).expect("the probe parses")];
     let analyzed = analyze(&files, &asts);
-    assert!(
-        analyzed.checked.diags.is_empty(),
-        "the lexical loop still checks the exit clean: {}",
-        analyzed
-            .checked
-            .diags
-            .iter()
-            .map(|diag| human(diag, &files))
-            .collect::<String>()
-    );
-    let Err(err) = lower(
-        "lambda_exit",
-        Hash128::compute(source.as_bytes()),
-        &asts,
-        &analyzed,
-    ) else {
-        panic!("the lambda-bound exit must refuse at lowering")
-    };
-    assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
+    let rendered = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|diag| human(diag, &files))
+        .collect::<String>();
+    assert_eq!(
+        analyzed.checked.diags.len(),
+        1,
+        "one frame-boundary refusal, not a cascade: {rendered}"
     );
     assert!(
-        err.to_string().contains("a break outside a loop"),
-        "the refusal names the frame boundary: {err}"
+        rendered.contains("loop exits never cross a lambda or spawned-body frame boundary"),
+        "the refusal names the frame boundary: {rendered}"
     );
+    // The lowering layer refuses diag-carrying packages outright, and
+    // its own frame-boundary refusal in break/continue stays as the
+    // backstop behind the checker.
 }

@@ -2,11 +2,10 @@
 //!
 //! Two halves over one per-fiber [`Heap`] owner:
 //!
-//! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry,
-//!   bump alloc, restore on every pop path; chunk-append growth keeps captured
-//!   frame addresses stable; marks are per-fiber so fiber switching needs no
-//!   arena action. The arena module's docs carry the full contract mapping
-//!   from the design record ([C4], [H4] in `docs/en/design-decisions.md`).
+//! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry, bump alloc, restore
+//!   on every pop path; chunk-append growth keeps captured frame addresses stable; marks are
+//!   per-fiber so fiber switching needs no arena action. The arena module's docs carry the full
+//!   contract mapping from the design record ([C4], [H4] in `docs/en/design-decisions.md`).
 //! - Precise non-atomic reference counting for boxed/shared values ([`RcHeader`], [`RcRef`]):
 //!   `rc_inc` at each explicit clone, `rc_dec` at each unique death; the dying block becomes a
 //!   reuse candidate threaded to the next compatible allocation (the `alloc_at` pattern), with the
@@ -20,8 +19,8 @@
 //! use during an exclusive window.
 //!
 //! VM seam: ds-vm's object store consumes the block half as its object
-//! substrate - the store keeps the stable id table (`Value::Ref(u32)` words
-//! index it), and every live id names a counted block here. The store drives
+//! substrate - the store keeps the stable id table (the `Value::Ref`
+//! word's id part indexes it), and every live id names a counted block here. The store drives
 //! count lifecycles through the raw surface ([`Heap::alloc_store`],
 //! [`Heap::rc_inc_raw`], [`Heap::rc_dec_count`] plus [`Heap::rc_dispose`],
 //! [`Heap::payload`]/[`Heap::payload_mut`]) so its own death order runs

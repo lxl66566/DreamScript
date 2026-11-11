@@ -1,5 +1,5 @@
-// source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed) plus its dispatch landing
-// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); the member bodies plan under the `<target>#<member>` mangle and the call sites dispatch as plain local calls
+// source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed) plus its dispatch landing; the member-tail and default-staging round
+// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); the member bodies plan under the `<target>#<member>` mangle, the call sites dispatch as plain local calls, a member tail transfers through CALLT at constant stack, and an omitted defaulted member parameter stages the literal default at the call site
 // items:
 // counter: stage: typecheck
 // timer: stage: typecheck
@@ -7,11 +7,19 @@
 // impl-timer: stage: run
 // use-both: stage: run
 // use-fields: stage: run
+// spin_deep: stage: run
+// bump_defaulted: stage: run
 // wrong-receiver: stage: reject DS2013 no method `peek` accepts receiver `int`
 
 struct counter { ticks: int }
 struct timer { laps: int }
-impl counter { fn peek(self) -> int { 1 } }
+impl counter {
+  fn peek(self) -> int { 1 }
+  fn count(self, n: int) -> int {
+    if n == 0 { self.ticks } else { self.count(n - 1) }
+  }
+  fn bump(self, by: int = 3) -> int { self.ticks + by }
+}
 impl timer { fn peek(self) -> int { 2 } }
 
 // the two owners share the method name; each dot-call selects its own
@@ -23,6 +31,21 @@ fn use_both(c: counter, t: timer) -> int {
 // the receiver binds Self: field access through it checks
 fn use_fields(c: counter) -> int {
   c.peek() + c.ticks
+}
+
+// a member tail-recursion loops at constant stack: the solved inherent
+// body is a plain local callee, so the tail position transfers through
+// the frame-reuse CALLT instead of growing the stack
+fn spin_deep() -> int {
+  const c = counter { ticks: 7 }
+  c.count(100000)
+}
+
+// an omitted defaulted member parameter stages the literal default at
+// the call site like the free-fn spelling
+fn bump_defaulted() -> int {
+  const c = counter { ticks: 7 }
+  c.bump()
 }
 
 fn wrong_receiver(x: int) -> int {

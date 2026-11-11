@@ -1,0 +1,1 @@
+{"code":"DS2002","severity":"error","message":"loop exits never cross a lambda or spawned-body frame boundary","spans":[{"file":"tests/fixtures/negative/ds2002_loop_exit_in_lambda.ds","start_line":9,"start_col":22,"end_line":9,"end_col":27,"label":"frame-crossing loop exit","primary":true}],"notes":[],"suggestions":[]}

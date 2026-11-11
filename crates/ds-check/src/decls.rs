@@ -43,7 +43,7 @@ use ds_parse::{
 use crate::{
     TypeExpr,
     atom::{Case, Field, TraitId, TypeId},
-    instance::{Condition, InstanceDecl, InstanceEnv, InstanceId},
+    instance::{Condition, InherentBounds, InstanceDecl, InstanceEnv, InstanceId},
     resolve::{DefId, MethodId, MethodOwner, Package},
     universe::{Ty, Universe},
 };
@@ -222,6 +222,13 @@ pub struct Decls {
     /// inherent dispatch — a solved inherent call site reaches its impl's
     /// bodies through this tie, never through a package def.
     pub inherent_impls: HashMap<MethodId, Span>,
+    /// The declared generic bounds of every generic inherent impl, keyed by
+    /// the impl item's span: the inherent mirror of [`Decls::instance_impls`]
+    /// plus its instances' conditions — an inherent impl declares no
+    /// instance, so this record is the only place its bounds live. Call
+    /// sites verify the bounds and stage their runtime evidence from it;
+    /// the lowering pass reads it for the evidence-demand walk.
+    pub inherent_impl_bounds: HashMap<Span, InherentBounds>,
     /// Top-level `const`/`var` initializers keyed by every name the
     /// binding pattern declares (lazy memoized typing (G3)).
     pub consts: HashMap<DefId, LocalDecl>,
@@ -914,6 +921,54 @@ fn solve_written(
     })
 }
 
+/// Records one generic inherent impl's declared bounds (F3): minted
+/// variables, the solved head pattern, and one condition per declared
+/// bound — the same shapes the trait arm builds, so the two impl forms
+/// read through the same machinery downstream. An impl declaring no trait
+/// bounds records nothing (a bare `[t]` bounds nothing, and calls on its
+/// variable never check clean); a head the type core cannot solve records
+/// nothing (the impl's own body checking reports the target).
+fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls: &mut Decls) {
+    if imp.generics.is_empty() {
+        return;
+    }
+    let mut vars = HashMap::new();
+    for param in &imp.generics {
+        // the same minting rule as the trait arm: a bare `$name` would
+        // collide across impls (the universe is package-wide), so minted
+        // variables carry the shared counter
+        decls.var_counter += 1;
+        let unique = format!("${}#{}", param.name.name, decls.var_counter);
+        if let Ok(var) = decls.universe.declare_tag(&unique) {
+            vars.insert(param.name.name.clone(), var);
+        }
+    }
+    let Some(head_expr) = conv_node(package, &imp.target, &vars, decls) else {
+        return;
+    };
+    let Ok(head) = decls.universe.solve(&head_expr) else {
+        return;
+    };
+    let mut conditions = Vec::new();
+    for param in &imp.generics {
+        let Some(bound) = &param.bound else { continue };
+        let Some(bound_trait) = trait_of_type(package, bound, decls) else {
+            continue;
+        };
+        let Some(&var) = vars.get(&param.name.name) else {
+            continue
+        };
+        if let Ok(ty) = decls.universe.atom_ty(var) {
+            conditions.push(Condition::new(bound_trait, ty));
+        }
+    }
+    if !conditions.is_empty() {
+        decls
+            .inherent_impl_bounds
+            .insert(item.span, InherentBounds { head, conditions });
+    }
+}
+
 /// Declares one impl's instances into the environment (B6): mints variable
 /// atoms for the generic parameters, converts the head (written unions
 /// decompose inside `declare`), attaches trait bounds as conditions, and
@@ -928,7 +983,8 @@ fn declare_instance(
     diags: &mut Vec<Diagnostic>,
 ) {
     let Some(trait_ref) = &imp.trait_ref else {
-        return
+        declare_inherent_bounds(package, item, imp, decls);
+        return;
     };
     let [trait_only] = trait_ref.path.segments.as_slice() else {
         return

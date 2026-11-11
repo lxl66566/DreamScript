@@ -161,14 +161,17 @@ pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_
 pub use error::Error;
 pub use expr::TypeExpr;
 pub use extraction::Extraction;
-pub use instance::{Condition, InstanceBody, InstanceDecl, InstanceEnv, InstanceId};
+pub use instance::{
+    Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId,
+};
 pub use linearity::{BinderFact, DropSite, LastUse, Linearity, Move, check, linearity_check};
 pub use resolve::{
     Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
     resolve_package,
 };
 pub use type_of::{
-    Analyzed, Checked, TraitCall, TypedPackage, Val, analyze, check_resolved, type_check,
+    Analyzed, Checked, InherentCallBounds, TraitCall, TypedPackage, Val, analyze, check_resolved,
+    type_check,
 };
 pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};

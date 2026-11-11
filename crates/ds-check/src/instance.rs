@@ -144,6 +144,22 @@ impl<T> Condition<T> {
     }
 }
 
+/// An inherent impl's declared generic bounds (F3): the impl's solved head
+/// plus one condition per declared bound over the declaration's minted
+/// variable atoms — the trait form's per-instance record mirrored for an
+/// impl that declares no instance. Call sites verify and stage their
+/// runtime evidence from this record; the lowering pass reads the bounds
+/// for its evidence-demand walk.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InherentBounds {
+    /// The impl's target solved at declaration: the single-atom head
+    /// pattern a receiver unifies against, binding the minted variables.
+    pub head: Ty,
+    /// One condition per declared trait bound; a bare `[t]` parameter
+    /// contributes none.
+    pub conditions: Vec<Condition<Ty>>,
+}
+
 /// The body of an instance declaration. Opaque placeholder: method tables
 /// are M2 checker work; the environment carries it without interpreting it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

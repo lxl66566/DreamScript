@@ -189,7 +189,16 @@ fn head_substitution(
     id: InstanceId,
     recv: Ty,
 ) -> Option<Vec<(TypeId, Vec<TypeId>)>> {
-    let head = env.head(id).ok()?;
+    pattern_substitution(universe, env.head(id).ok()?, recv)
+}
+
+/// The shared head-pattern form of [`head_substitution`]: one single-atom
+/// pattern unified against every receiver member under one substitution.
+fn pattern_substitution(
+    universe: &Universe,
+    head: Ty,
+    recv: Ty,
+) -> Option<Vec<(TypeId, Vec<TypeId>)>> {
     let [pattern] = universe.members(head) else {
         return None;
     };
@@ -205,6 +214,37 @@ fn head_substitution(
         return None;
     }
     Some(subst)
+}
+
+/// The declared bounds of an inherent impl's head pattern against one
+/// receiver (F3): the pattern's variables bound by unifying it with the
+/// receiver's members under the shared substitution, then every condition's
+/// variable rewritten through it — the inherent mirror of
+/// [`evidence_bounds`]'s per-condition loop. Each entry names the
+/// condition's variable atom, its trait, and the solved type the bound
+/// must hold for at this call site; an empty answer means the head did not
+/// unify (the lowerer's staging refusal owns that shape).
+#[must_use]
+pub fn inherent_bound_targets(
+    universe: &mut Universe,
+    head: Ty,
+    conditions: &[Condition<Ty>],
+    recv: Ty,
+) -> Vec<(TypeId, TraitId, Ty)> {
+    let Some(subst) = pattern_substitution(universe, head, recv) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for cond in conditions {
+        let var = match universe.members(cond.ty) {
+            [only] => *only,
+            _ => continue,
+        };
+        let solved = substitute(&subst, universe.members(cond.ty));
+        let target = universe.set_ty(&solved);
+        out.push((var, cond.trait_id, target));
+    }
+    out
 }
 
 /// The runtime evidence one call site into a generic impl's body needs

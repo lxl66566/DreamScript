@@ -1,26 +1,57 @@
 //! The shared generator for the VM execution fuzz leg: fuzz bytes become a
 //! structurally valid-ish dsmod module — a small deterministic uop-program
 //! builder — assembled through ds-mod's public encode path, written, read
-//! back through the real reader, installed into a budgeted VM, and run.
-//! The property under test is the VM's own discipline: decode, validate,
-//! install, and execute never panic, and every stop is structured (a halt
-//! value, a trap, or a budget stop). Included by the cargo-fuzz target
-//! `fuzz_vm` and the nextest mirror in `crates/ds-vm/tests/fuzz_vm.rs`.
+//! back through the real reader, installed into a budgeted VM, run, and
+//! then driven over the fiber/nursery host face. The property under test
+//! is the VM's own discipline: decode, validate, install, execute, and
+//! switch never panic, and every stop is structured (a halt value, a trap,
+//! or a budget stop). Included by the cargo-fuzz target `fuzz_vm` and the
+//! nextest mirrors in `crates/ds-vm/tests/fuzz_vm.rs` and
+//! `crates/ds-vm/tests/fuzz_vm_fibers.rs`.
+//!
+//! Vocabulary: the builtin core's scalar, string, list, map, and callable
+//! words plus the fiber/nursery control seams — `fiber_yield`,
+//! `fiber_resume`, `nursery_open`, `nursery_join`, `nursery_boundary`,
+//! `nursery_cancel` at random call sites, and `nursery_spawn` only inside
+//! the entry's template (see Termination) — plus the std console pair
+//! (captured output; the file and net natives stay unreferenced so
+//! execution is hermetic) and the host fiber face
+//! (`open_root_nursery`/`spawn_fiber_in`/`join_nursery`/`teardown_nursery`/
+//! `resume_fiber`) driven with staged Ref/string words.
 //!
 //! Termination (why every generated run stops by itself):
 //! - jumps are forward-only except each loop body's one template back-edge, a Jmpif whose counter
-//!   slot the template decrements exactly once per pass; the four template slots are excluded from
-//!   every random write (destinations remap around them; call overlays land in the argument area),
-//!   so the trip count is the pool constant, at most 5
+//!   slot the template decrements exactly once per pass; the reserved template blocks (the loop's
+//!   four words, the entry nursery block's three) are excluded from every random write
+//!   (destinations remap around them; call overlays land in the argument area), so the trip count
+//!   is the pool constant, at most 5
 //! - CALL/CALLS recursion consumes stack words per frame and the VM runs under `Vm::with_limit`
 //!   (128 words), so depth is bounded and StackOverflow is a routinely reachable structured stop
 //! - CALLT targets only strictly-lower functions or natives, so a tail chain strictly descends and
 //!   cannot cycle
+//! - the spawn tree is depth one: `nursery_spawn` call sites exist only in the entry body's
+//!   template (the spawned child word names a non-entry function, whose body can never emit a spawn
+//!   site), the template is straight-line and each of its landing points executes at most once, and
+//!   the host driver spawns at most a handful per input, so no fiber tree recurses through
+//!   boundaries (each join drive would nest one `run_nursery_to_death` per level)
+//! - every switch makes progress: a parked fiber re-enters at the instruction after the call that
+//!   parked it, and bodies are finite with bounded loop trips, so each fiber parks finitely often
+//!   per drive; join/teardown drivers enter each ledgered child until it dies (a parked yield is
+//!   bounced back in with the bare PLATFORM_NONE tag), so every drive returns. The substrate can
+//!   hang by construction — a child yielding inside an infinite loop never lets a join driver
+//!   return — and the VM has no step budget (the run limit is stack words; a steps limit is a ds-vm
+//!   change outside this leg's boundary), so the generator's bounded-back-edge discipline is the
+//!   fuzzer's only hang guard: any relaxation of the loop template must keep every backward edge
+//!   passing the decrement exactly once
 //! - work stays bounded: same-module call edges point strictly down the function table (self-calls
 //!   only in the loop-free lowest function, one site), at most two CALL/CALLS sites and one CALLT
 //!   per body, loop trip counts at most 5, and the generated natives are deterministic and
-//!   non-blocking (the std references are the captured-output console pair only — file and net
-//!   natives stay out of the vocabulary)
+//!   non-blocking
+//!
+//! Re-audit point: the emit path's target discipline — forward targets computed against the
+//! fixed-part length (a lower bound, since call staging appends words) and the retargeting of
+//! stray landings onto the loop's decrement — is the invariant to re-check whenever the uop ABI
+//! changes.
 
 use ds_abi::{
     FrameLayout, SlotType,
@@ -28,7 +59,8 @@ use ds_abi::{
 };
 use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{
-    ModuleRegistry, Trap, Vm,
+    ChildOutcome, FiberId, FiberState, FuncRef, JoinOutcome, ModuleRegistry, NurseryId,
+    NurseryState, Trap, Value, Vm,
     native::{self, BUILTIN_MODULE, STD_PLATFORM_MODULE},
 };
 
@@ -45,7 +77,12 @@ const STR_KIDX: u16 = 10;
 /// Direct natives the generator may CALL/CALLT, as (index, params) in the
 /// builtin core — builtins resolve in every VM; reserved slots answer
 /// their reserved trap — plus the std console pair (captured output; the
-/// file and net surfaces stay unreferenced so execution is hermetic).
+/// file and net surfaces stay unreferenced so execution is hermetic). The
+/// control seams park and drive: a random `nursery_join`/`nursery_boundary`
+/// bounces or drives a bounded nursery, a random `nursery_cancel` kills the
+/// caller carrying its payload. `nursery_spawn` (42) stays out: a random
+/// spawn site would break the depth-one spawn tree (see Termination), so
+/// it appears only in the entry's template.
 const NATIVES: &[(u32, &[SlotType])] = &[
     (2, &[SlotType::I64]),
     (3, &[SlotType::F64]),
@@ -65,6 +102,9 @@ const NATIVES: &[(u32, &[SlotType])] = &[
     (27, &[SlotType::Ref, SlotType::Raw]),
     (28, &[]),
     (31, &[SlotType::Ref, SlotType::Raw, SlotType::Raw]),
+    (41, &[]),
+    (43, &[SlotType::I64, SlotType::I64]),
+    (44, &[SlotType::Tag]),
     (0, &[]),
     (1, &[]),
     (19, &[]),
@@ -118,14 +158,17 @@ impl<'a> Stream<'a> {
 }
 
 /// One function's decided shape, fixed before any body is emitted. The
-/// frame is `[params | usable | template(4 when looping) | arg area]`.
+/// frame is `[params | usable | loop template (4 when looping) | nursery
+/// template (3, entry only) | arg area]`.
 struct Plan {
     index: usize,
     has_loop: bool,
+    /// Whether this (entry) body carries the in-language nursery template.
+    nursery: bool,
     slots: Vec<SlotType>,
     params: usize,
     arg_area: usize,
-    /// `params + usable`: where the template block starts when looping.
+    /// `params + usable`: where the reserved template blocks start.
     body_span: usize,
     /// The primary native's index: its parameter list types the overlay
     /// prefix and its pool FuncRef is the body's first builtin entry.
@@ -133,15 +176,21 @@ struct Plan {
 }
 
 impl Plan {
-    /// The destination domain: every writable slot except the template
-    /// block (mapped around it into the argument area).
+    /// The reserved template blocks' total width (loop four, nursery
+    /// three): excluded from every random destination.
+    fn reserved(&self) -> usize {
+        (if self.has_loop { 4 } else { 0 }) + (if self.nursery { 3 } else { 0 })
+    }
+
+    /// The destination domain: every writable slot except the reserved
+    /// template blocks.
     fn dst_span(&self) -> usize {
-        self.slots.len() - if self.has_loop { 4 } else { 0 }
+        self.slots.len() - self.reserved()
     }
 
     /// Maps a roll over the destination domain onto a real slot index.
     fn dst(&self, roll: usize) -> u8 {
-        let raw = if !self.has_loop || roll < self.body_span { roll } else { roll + 4 };
+        let raw = if roll < self.body_span { roll } else { roll + self.reserved() };
         u8::try_from(raw.min(self.slots.len() - 1)).expect("slot indices are tiny")
     }
 
@@ -167,8 +216,23 @@ impl Plan {
         }
     }
 
+    /// The entry's reserved nursery block: (nursery id, fn word, closure).
+    fn nursery_slots(&self) -> (u8, u8, u8) {
+        let id = self.body_span + if self.has_loop { 4 } else { 0 };
+        (
+            u8::try_from(id).expect("slot indices are tiny"),
+            u8::try_from(id + 1).expect("slot indices are tiny"),
+            u8::try_from(id + 2).expect("slot indices are tiny"),
+        )
+    }
+
+    /// The first overlay (argument-area) slot index.
+    fn ov_slot(&self, index: usize) -> u8 {
+        u8::try_from(self.slots.len() - self.arg_area + index).expect("slot indices are tiny")
+    }
+
     /// Any slot is readable (counter reads are harmless; only writes to
-    /// the template block would break the loop invariant).
+    /// the template blocks would break the loop invariant).
     fn src(&self, roll: usize) -> u8 {
         u8::try_from(roll.min(self.slots.len() - 1)).expect("slot indices are tiny")
     }
@@ -186,18 +250,25 @@ struct Budgets {
 /// Slot weights lean on `Raw` (every write accepts; reads check the
 /// concrete value) so type-consistent prefixes are common enough for
 /// execution to run deep instead of trapping on the first typed write.
-fn plan_function(rng: &mut Stream, index: usize, is_entry: bool) -> Plan {
+/// The entry may carry the in-language nursery template when a non-entry
+/// child function exists to name (`can_spawn`).
+fn plan_function(rng: &mut Stream, index: usize, is_entry: bool, can_spawn: bool) -> Plan {
     let params = if is_entry { 0 } else { rng.below(3) }; // 0..=2
     let usable = 1 + rng.below(3); // 1..=3
     let has_loop = rng.below(2) == 0;
-    let reserved = if has_loop { 4 } else { 0 };
-    let arg_area = if rng.below(10) < 8 {
+    let nursery = is_entry && can_spawn && rng.below(2) == 0;
+    let reserved = if has_loop { 4 } else { 0 } + if nursery { 3 } else { 0 };
+    let arg_area = if nursery {
+        3 // staged id+child words and the boundary's two-word span
+    } else if rng.below(10) < 8 {
         1 + rng.below(3) // 1..=3, wide enough to stage native args
     } else {
         rng.below(2)
     };
     // the primary native's parameter list types the overlay prefix, so its
-    // staged arguments type-check by construction
+    // staged arguments type-check by construction; the nursery template's
+    // overlay stays Raw (the control seams round-trip ids, callable words,
+    // and tag+payload spans through it)
     let native1_index = rng.below(NATIVES.len());
     let native1 = NATIVES[native1_index].1;
     let mut slots = Vec::with_capacity(params + usable + reserved + arg_area);
@@ -224,11 +295,16 @@ fn plan_function(rng: &mut Stream, index: usize, is_entry: bool) -> Plan {
         slots.push(SlotType::Raw);
     }
     for i in 0..arg_area {
-        slots.push(native1.get(i).copied().unwrap_or(SlotType::Raw));
+        slots.push(if nursery {
+            SlotType::Raw
+        } else {
+            native1.get(i).copied().unwrap_or(SlotType::Raw)
+        });
     }
     Plan {
         index,
         has_loop,
+        nursery,
         slots,
         params,
         arg_area,
@@ -252,6 +328,18 @@ struct Pool {
     generic: (u16, u32, u8, u8),
     /// The std console entry: (kidx, index, params).
     std: (u16, u32, usize),
+    /// The nursery control seams (open/spawn/boundary/join/cancel), when
+    /// this body's plan carries the template.
+    nursery: Option<NurserySeams>,
+}
+
+/// Pool FuncRef indices for the entry's nursery template.
+struct NurserySeams {
+    open: u16,
+    spawn: u16,
+    boundary: u16,
+    join: u16,
+    cancel: u16,
 }
 
 fn name_of(index: usize, total: usize) -> String {
@@ -310,6 +398,13 @@ fn build_pool(rng: &mut Stream, plan: &Plan, garbage: bool) -> Pool {
         s.0,
         s.1.len(),
     );
+    let nursery = plan.nursery.then(|| NurserySeams {
+        open: push(&mut constants, BUILTIN_MODULE, 41),
+        spawn: push(&mut constants, BUILTIN_MODULE, 42),
+        boundary: push(&mut constants, BUILTIN_MODULE, 43),
+        join: push(&mut constants, BUILTIN_MODULE, 26),
+        cancel: push(&mut constants, BUILTIN_MODULE, 44),
+    });
     if garbage && plan.index == 0 {
         // one unresolved foreign reference: the loader's structured refusal
         push(&mut constants, "nowhere", 7);
@@ -322,16 +417,318 @@ fn build_pool(rng: &mut Stream, plan: &Plan, garbage: bool) -> Pool {
         natives,
         generic,
         std,
+        nursery,
+    }
+}
+
+/// The entry's in-language nursery template, decided before any body word
+/// so its fixed instruction count enters `total`: one `nursery_open`, a
+/// straight-line spawn run (each child names a non-entry function, so the
+/// spawn tree stays depth one), and one ending — the boundary join, the
+/// count join, or a cancel that kills the entry carrying the payload.
+struct NurseryTemplate {
+    spawns: Vec<SpawnSite>,
+    end: NurseryEnd,
+}
+
+/// One template spawn site.
+struct SpawnSite {
+    /// A pool FuncRef naming the child function (a `down` entry).
+    fn_kidx: u16,
+    /// The child's function-table index (its params drive capture staging).
+    child: usize,
+    /// The closure path: captures (one typed word per child param,
+    /// including Ref/string words whose counts cross at the copy-in)
+    /// become the child's entry arguments; the scalar path stages a bare
+    /// Fn word, so it only names a parameter-less child.
+    closure: bool,
+}
+
+enum NurseryEnd {
+    /// `nursery_boundary(id, mask)`: the boundary span (clean join or the
+    /// first trapped cancel payload, contained in the staged mask).
+    Boundary { mask_kidx: u16 },
+    /// `nursery_join(id)`: the failed-children count.
+    Join,
+    /// `nursery_cancel(payload)`: the entry dies carrying the payload.
+    Cancel { kstr: bool },
+}
+
+fn decide_nursery(rng: &mut Stream, plans: &[Plan], pool: &Pool) -> NurseryTemplate {
+    // spawnable children only: no parameter may be typed I32 (no value
+    // word inhabits the kind, so the entry check would refuse the spawn);
+    // the scalar path additionally needs a parameter-less child
+    let spawnable: Vec<(u16, usize)> = pool
+        .down
+        .iter()
+        .copied()
+        .filter(|entry| !plans[entry.1].slots[..plans[entry.1].params].contains(&SlotType::I32))
+        .collect();
+    let scalar_ok: Vec<(u16, usize)> = spawnable
+        .iter()
+        .copied()
+        .filter(|entry| plans[entry.1].params == 0)
+        .collect();
+    let count = if spawnable.is_empty() {
+        0
+    } else {
+        1 + rng.below(3) // 1..=3 children
+    };
+    let spawns = (0..count)
+        .map(|_| {
+            let closure = scalar_ok.is_empty() || rng.below(2) == 0;
+            let (fn_kidx, child) = if closure {
+                spawnable[rng.below(spawnable.len())]
+            } else {
+                scalar_ok[rng.below(scalar_ok.len())]
+            };
+            SpawnSite {
+                fn_kidx,
+                child,
+                closure,
+            }
+        })
+        .collect();
+    let end = match rng.below(5) {
+        0 => NurseryEnd::Boundary { mask_kidx: 0 }, // mask zero: every contained check fails
+        1 | 2 => NurseryEnd::Boundary { mask_kidx: 1 }, // mask one: tag zero is contained
+        3 => NurseryEnd::Join,
+        _ => NurseryEnd::Cancel {
+            kstr: rng.below(2) == 0,
+        },
+    };
+    NurseryTemplate { spawns, end }
+}
+
+fn template_len(template: &NurseryTemplate, plans: &[Plan]) -> usize {
+    let open = 2; // CALL nursery_open + Mov (the id into its reserved slot)
+    let spawns: usize = template
+        .spawns
+        .iter()
+        .map(|s| if s.closure { 5 + plans[s.child].params } else { 3 })
+        .sum();
+    let end = match template.end {
+        NurseryEnd::Boundary { .. } => 3,
+        NurseryEnd::Join | NurseryEnd::Cancel { .. } => 2,
+    };
+    open + spawns + end
+}
+
+/// Stages one capture word of the child's parameter type at overlay
+/// position `i` — the words that cross at the spawn copy-in.
+fn capture_word(rng: &mut Stream, pool: &Pool, dst: u8, ty: SlotType) -> Uop {
+    match ty {
+        SlotType::I64 => Uop::Kimm {
+            dst,
+            kidx: ConstIdx(u16::try_from(rng.below(2)).expect("rng bounds are tiny")),
+        },
+        SlotType::F64 => Uop::Kconst {
+            dst,
+            kidx: ConstIdx(6),
+        },
+        SlotType::Bool => Uop::Kconst {
+            dst,
+            kidx: ConstIdx(8),
+        },
+        SlotType::Tag => Uop::TagNew {
+            dst,
+            tag: u8::try_from(rng.below(5)).expect("rng bounds are tiny"),
+        },
+        // the string capture: a Ref word whose count crosses at the copy-in
+        SlotType::Ref => Uop::Kstr {
+            dst,
+            kidx: ConstIdx(STR_KIDX),
+        },
+        // any callable word serves a fn-typed capture
+        SlotType::Fn => Uop::Kconst {
+            dst,
+            kidx: ConstIdx(
+                pool.down
+                    .first()
+                    .expect("the template names lower functions")
+                    .0,
+            ),
+        },
+        // no value word inhabits the kind; staging an i64 lets the
+        // spawn's entry check refuse it
+        SlotType::I32 | SlotType::Raw => Uop::Kimm {
+            dst,
+            kidx: ConstIdx(0),
+        },
+    }
+}
+
+fn emit_nursery(
+    rng: &mut Stream,
+    code: &mut Vec<Inst>,
+    plans: &[Plan],
+    plan: &Plan,
+    pool: &Pool,
+    template: &NurseryTemplate,
+) {
+    let seams = pool
+        .nursery
+        .as_ref()
+        .expect("the template's plan built its seams");
+    let (id_slot, fnw_slot, clo_slot) = plan.nursery_slots();
+    // open the block's own nursery; the returned id lives in the reserved
+    // slot and is re-staged before every call
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.open),
+            nargs: 0,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Mov {
+            dst: id_slot,
+            src: plan.ov_slot(0),
+        }
+        .into(),
+    );
+    for site in &template.spawns {
+        let params = &plans[site.child].slots[..plans[site.child].params];
+        if site.closure {
+            // the closure word: header fn plus one typed capture per child
+            // param, staged at the overlay positions the closure adopts
+            code.push(
+                Uop::Kconst {
+                    dst: fnw_slot,
+                    kidx: ConstIdx(site.fn_kidx),
+                }
+                .into(),
+            );
+            for (i, &ty) in params.iter().enumerate() {
+                code.push(capture_word(rng, pool, plan.ov_slot(i), ty).into());
+            }
+            code.push(
+                Uop::ClosureNew {
+                    dst: clo_slot,
+                    func: fnw_slot,
+                    n: u8::try_from(params.len()).expect("child params fit a capture count"),
+                }
+                .into(),
+            );
+            // re-stage the id (capture zero clobbered the overlay) and the
+            // closure Ref word against the fn-typed parameter
+            code.push(
+                Uop::Mov {
+                    dst: plan.ov_slot(0),
+                    src: id_slot,
+                }
+                .into(),
+            );
+            code.push(
+                Uop::Mov {
+                    dst: plan.ov_slot(1),
+                    src: clo_slot,
+                }
+                .into(),
+            );
+        } else {
+            code.push(
+                Uop::Mov {
+                    dst: plan.ov_slot(0),
+                    src: id_slot,
+                }
+                .into(),
+            );
+            code.push(
+                Uop::Kconst {
+                    dst: plan.ov_slot(1),
+                    kidx: ConstIdx(site.fn_kidx),
+                }
+                .into(),
+            );
+        }
+        code.push(
+            Uop::Call {
+                callee: ConstIdx(seams.spawn),
+                nargs: 2,
+            }
+            .into(),
+        );
+    }
+    match template.end {
+        NurseryEnd::Boundary { mask_kidx } => {
+            code.push(
+                Uop::Mov {
+                    dst: plan.ov_slot(0),
+                    src: id_slot,
+                }
+                .into(),
+            );
+            code.push(
+                Uop::Kimm {
+                    dst: plan.ov_slot(1),
+                    kidx: ConstIdx(mask_kidx),
+                }
+                .into(),
+            );
+            code.push(
+                Uop::Call {
+                    callee: ConstIdx(seams.boundary),
+                    nargs: 2,
+                }
+                .into(),
+            );
+        },
+        NurseryEnd::Join => {
+            code.push(
+                Uop::Mov {
+                    dst: plan.ov_slot(0),
+                    src: id_slot,
+                }
+                .into(),
+            );
+            code.push(
+                Uop::Call {
+                    callee: ConstIdx(seams.join),
+                    nargs: 1,
+                }
+                .into(),
+            );
+        },
+        NurseryEnd::Cancel { kstr } => {
+            // the payload word: a string Ref rides the trap word; a small
+            // tag exercises the containment check at a boundary
+            if kstr {
+                code.push(
+                    Uop::Kstr {
+                        dst: plan.ov_slot(0),
+                        kidx: ConstIdx(STR_KIDX),
+                    }
+                    .into(),
+                );
+            } else {
+                code.push(
+                    Uop::TagNew {
+                        dst: plan.ov_slot(0),
+                        tag: u8::try_from(rng.below(5)).expect("rng bounds are tiny"),
+                    }
+                    .into(),
+                );
+            }
+            code.push(
+                Uop::Call {
+                    callee: ConstIdx(seams.cancel),
+                    nargs: 1,
+                }
+                .into(),
+            );
+        },
     }
 }
 
 /// Emits one function body over its plan: FUNCF, pre ops, the optional
-/// countdown loop, post ops, and a final stop. Forward jump targets are
-/// computed against `total` (a lower bound on the final length, since the
-/// call-staging patterns may append extra words), so every target lands
-/// in-body by construction.
+/// countdown loop, the optional entry nursery template, post ops, and a
+/// final stop. Forward jump targets are computed against `total` (a lower
+/// bound on the final length, since the call-staging patterns may append
+/// extra words), so every target lands in-body by construction.
 fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -> Function {
     let pool = build_pool(rng, plan, garbage);
+    let template = plan.nursery.then(|| decide_nursery(rng, plans, &pool));
     let mut code: Vec<Inst> = Vec::new();
     let mut budgets = Budgets::default();
 
@@ -341,7 +738,8 @@ fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -
     let pre = rng.below(4);
     let loop_body = if plan.has_loop { 1 + rng.below(4) } else { 0 };
     let post = rng.below(5);
-    let total = 1 + pre + if plan.has_loop { 6 + loop_body } else { 0 } + post + 1;
+    let nursery_len = template.as_ref().map_or(0, |t| template_len(t, plans));
+    let total = 1 + pre + if plan.has_loop { 6 + loop_body } else { 0 } + nursery_len + post + 1;
     let emit = |code: &mut Vec<Inst>, rng: &mut Stream, budgets: &mut Budgets| {
         emit_op(
             rng,
@@ -435,6 +833,9 @@ fn emit_function(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool) -
                 *target = tail;
             }
         }
+    }
+    if let Some(template) = template {
+        emit_nursery(rng, &mut code, plans, plan, &pool, &template);
     }
     for _ in 0..post {
         emit(&mut code, rng, &mut budgets);
@@ -761,28 +1162,36 @@ fn emit_call(
         return;
     }
     let roll = rng.below(10);
-    let (kidx, params, is_native) = if roll < 3 && !pool.down.is_empty() {
+    let (kidx, params, is_native, native_index) = if roll < 3 && !pool.down.is_empty() {
         let (kidx, j) = pool.down[rng.below(pool.down.len())];
-        (kidx, plans[j].params, false)
+        (kidx, plans[j].params, false, None)
     } else if roll == 3 && pool.self_kidx.is_some() && !budgets.self_used {
         budgets.self_used = true;
         (
             pool.self_kidx.expect("checked above"),
             plans[0].params,
             false,
+            None,
         )
     } else if roll < 8 {
-        let (kidx, _, params) = pool.natives[rng.below(2)];
-        (kidx, params, true)
+        let (kidx, index, params) = pool.natives[rng.below(2)];
+        (kidx, params, true, Some(index))
     } else if roll == 8 {
-        (pool.std.0, pool.std.2, true)
+        (pool.std.0, pool.std.2, true, None)
     } else {
         fallback_load(rng, code, plan);
         return;
     };
     budgets.call_sites += 1;
-    if is_native && rng.below(2) == 0 {
-        stage_native_args(rng, code, plan, params);
+    if is_native {
+        if matches!(native_index, Some(24 | 25)) {
+            // the switch pair always stages plausible ids and payloads, so
+            // a drive genuinely hops fibers (the O(1) switch path) instead
+            // of trapping on stale overlay words
+            stage_fiber_args(rng, code, plan, params);
+        } else if rng.below(2) == 0 {
+            stage_native_args(rng, code, plan, params);
+        }
     }
     let nargs = if rng.below(4) > 0 {
         u8::try_from(params).expect("native arities are tiny")
@@ -928,6 +1337,30 @@ fn emit_calls(
     );
 }
 
+/// Stages plausible fiber ids and payloads for the switch pair: small
+/// constants (pool ids of the joiner and the first few siblings as the
+/// target, arbitrary words as payloads) into overlay slots that accept
+/// an i64. Slots of other kinds stay as-is and the call traps on them
+/// structurally.
+fn stage_fiber_args(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, params: usize) {
+    let start = plan.slots.len() - plan.arg_area;
+    for i in 0..params.min(plan.arg_area) {
+        let slot = plan.slots[start + i];
+        if slot != SlotType::I64 && slot != SlotType::Raw {
+            continue;
+        }
+        let dst = u8::try_from(start + i).expect("slot indices are tiny");
+        let kidx = u16::try_from([0, 1, 4][rng.below(3)]).expect("rng bounds are tiny");
+        code.push(
+            Uop::Kimm {
+                dst,
+                kidx: ConstIdx(kidx),
+            }
+            .into(),
+        );
+    }
+}
+
 /// Stages one typed argument word per native param into the outgoing
 /// argument area, so the call that follows lands in a real native body.
 fn stage_native_args(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, params: usize) {
@@ -955,32 +1388,220 @@ fn stage_native_args(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, params
     }
 }
 
-/// Builds a full module from the fuzz input.
-pub fn build_module(rng: &mut Stream) -> Module {
+/// One generated function's host-facing entry description: what the
+/// host driver needs to spawn it (its name and parameter words).
+pub struct ChildFn {
+    pub name: String,
+    pub params: Vec<SlotType>,
+}
+
+/// Builds a full module plus the host driver's view of its functions.
+pub fn build_planned(rng: &mut Stream) -> (Module, Vec<ChildFn>) {
     let funcs = 1 + rng.below(3); // 1..=3
     let garbage = rng.below(32) == 0;
     let plans: Vec<Plan> = (0..funcs)
-        .map(|i| plan_function(rng, i, i + 1 == funcs))
+        .map(|i| plan_function(rng, i, i + 1 == funcs, funcs > 1))
         .collect();
     let mut module = Module::new(
         MODULE_NAME,
         TargetClass::Bytecode,
         Hash128::compute(b"vm execution fuzz"),
     );
+    let mut entries = Vec::with_capacity(funcs);
     for plan in &plans {
         module = module.with_function(emit_function(rng, &plans, plan, garbage));
+        entries.push(ChildFn {
+            name: name_of(plan.index, plans.len()),
+            params: plan.slots[..plan.params].to_vec(),
+        });
     }
-    module
+    (module, entries)
+}
+
+/// Coverage counters over one input's fiber/nursery phases, for the
+/// mirror's sweep assertions.
+#[derive(Default)]
+pub struct Fibers {
+    /// Host-spawned children (root nursery plus one detached spawn).
+    pub spawned: u32,
+    /// Host `resume_fiber` calls that returned a value.
+    pub resumed: u32,
+    /// Resumes whose returned value was a Ref word.
+    pub resumed_ref: u32,
+    /// Children whose drive ended `Completed` at a boundary.
+    pub completed: u32,
+    /// Completions delivering a Ref word (the completion crossing).
+    pub completed_ref: u32,
+    /// Children cut down under the cancel flag.
+    pub cancelled: u32,
+    /// Children that died trapped.
+    pub trapped: u32,
+    /// A join boundary ran; a teardown boundary ran; the run entry itself
+    /// died cancelled; a boundary re-raised an uncontained payload.
+    pub joined: u32,
+    pub torn_down: u32,
+    pub run_cancelled: u32,
+    pub run_uncontained: u32,
+}
+
+/// Stages one host argument word of the child's parameter type: Ref and
+/// Raw parameters receive interned string words (the captured Ref/string
+/// crossing at the spawn copy-in), a Fn parameter receives a bogus
+/// callable word (typed-correct at the entry check, trapped only if the
+/// child calls it).
+fn stage_host_word(vm: &mut Vm, rng: &mut Stream, ty: SlotType) -> Value {
+    match ty {
+        SlotType::I64 => Value::I64(i64::try_from(rng.below(5)).expect("rng bounds are tiny")),
+        SlotType::F64 => Value::F64(0.5),
+        SlotType::Bool => Value::Bool(rng.below(2) == 0),
+        SlotType::Tag => Value::Tag(u8::try_from(rng.below(5)).expect("rng bounds are tiny")),
+        SlotType::Ref => vm.intern_str("fiber spawn word"),
+        SlotType::Fn => Value::Fn(FuncRef::new(u32::MAX, 0)),
+        // no value word inhabits the kind; the spawn's entry check refuses
+        SlotType::I32 => Value::I64(0),
+        SlotType::Raw => vm.intern_str("fiber raw word"),
+    }
+}
+
+fn spawn_host_child(
+    vm: &mut Vm,
+    rng: &mut Stream,
+    entries: &[ChildFn],
+    nursery: Option<NurseryId>,
+) -> Option<FiberId> {
+    let child = &entries[rng.below(entries.len())];
+    let args: Vec<Value> = child
+        .params
+        .iter()
+        .map(|&ty| stage_host_word(vm, rng, ty))
+        .collect();
+    let spawned = match nursery {
+        Some(id) => vm.spawn_fiber_in(id, MODULE_NAME, &child.name, &args),
+        // a bare spawn after the root nursery died detaches (the host is
+        // the supervisor: no child-of link)
+        None => vm.spawn_fiber(MODULE_NAME, &child.name, &args),
+    };
+    match spawned {
+        Ok(id) => Some(id),
+        // a refused entry (arity, word kinds, frame versus the limit) is a
+        // structured refusal
+        Err(trap) => {
+            std::hint::black_box(&trap);
+            None
+        },
+    }
+}
+
+fn record_child_outcomes(outcomes: &[ChildOutcome], shape: &mut Fibers) {
+    for outcome in outcomes {
+        match outcome {
+            ChildOutcome::Completed(value) => {
+                shape.completed += 1;
+                if matches!(value, Value::Ref(_)) {
+                    shape.completed_ref += 1;
+                }
+            },
+            ChildOutcome::Cancelled => shape.cancelled += 1,
+            ChildOutcome::Trapped(_) => shape.trapped += 1,
+        }
+    }
+}
+
+/// Drives the host fiber face over the installed module: spawns children
+/// with staged Ref/string words into the root nursery, host-resumes one
+/// child a bounded number of times (the O(1) switch face, payloads
+/// crossing in and completions out), then joins or tears the nursery down
+/// (teardown raises the cancel flag: looping children stop at their next
+/// taken backward branch), and finishes with a detached bare spawn.
+fn drive_fibers(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape: &mut Fibers) {
+    let root = vm.open_root_nursery();
+    let count = 1 + rng.below(3); // 1..=3 children
+    let mut first: Option<FiberId> = None;
+    for _ in 0..count {
+        if let Some(id) = spawn_host_child(vm, rng, entries, Some(root)) {
+            shape.spawned += 1;
+            if first.is_none() {
+                first = Some(id);
+            }
+        }
+    }
+    if let Some(id) = first {
+        for _ in 0..=rng.below(3) {
+            let payload = stage_host_word(vm, rng, SlotType::Raw);
+            match vm.resume_fiber(id, payload) {
+                Ok(value) => {
+                    shape.resumed += 1;
+                    if matches!(value, Value::Ref(_)) {
+                        shape.resumed_ref += 1;
+                    }
+                },
+                Err(trap) => {
+                    std::hint::black_box(&trap);
+                    break;
+                },
+            }
+            if vm.fiber_state(id) == Some(FiberState::Dead) {
+                break;
+            }
+        }
+    }
+    if rng.below(2) == 0 {
+        if let Ok(outcome) = vm.join_nursery(root) {
+            shape.joined += 1;
+            match outcome {
+                JoinOutcome::Joined(values) => {
+                    for value in &values {
+                        shape.completed += 1;
+                        if matches!(value, Value::Ref(_)) {
+                            shape.completed_ref += 1;
+                        }
+                    }
+                },
+                JoinOutcome::Failed(outcomes) => record_child_outcomes(&outcomes, shape),
+            }
+            assert_eq!(
+                vm.nursery_state(root),
+                Some(NurseryState::Dead),
+                "a join consumes its nursery"
+            );
+        }
+    } else if let Ok(outcomes) = vm.teardown_nursery(root) {
+        shape.torn_down += 1;
+        record_child_outcomes(&outcomes, shape);
+        assert_eq!(
+            vm.nursery_state(root),
+            Some(NurseryState::Dead),
+            "a teardown consumes its nursery"
+        );
+        assert_eq!(
+            vm.nursery_cancelled(root),
+            Some(true),
+            "teardown raises the cancel flag"
+        );
+    }
+    if let Some(id) = spawn_host_child(vm, rng, entries, None) {
+        shape.spawned += 1;
+        let payload = stage_host_word(vm, rng, SlotType::Raw);
+        if vm.resume_fiber(id, payload).is_ok() {
+            shape.resumed += 1;
+        }
+        if vm.fiber_state(id) != Some(FiberState::Dead) {
+            let payload = stage_host_word(vm, rng, SlotType::Raw);
+            let _ = vm.resume_fiber(id, payload);
+        }
+    }
 }
 
 /// Runs the full pipeline over one fuzz input and asserts the discipline:
 /// canonical write-read round trip, natives installed before the loader,
 /// a structured install outcome (pool FuncRefs validate at install; entry
 /// descriptors fill), a structured run stop (a value, or a trap whose
-/// backtrace materializes), and the stack never passing the limit.
-/// Returns 1 for a halted value, 0 for a structured trap.
-pub fn exercise(data: &[u8]) -> u32 {
-    let module = build_module(&mut Stream::new(data));
+/// backtrace materializes), the fiber/nursery host phase, and the stack
+/// never passing the limit. Returns 1 for a halted value, 0 for a
+/// structured trap, plus the fiber-phase coverage record.
+pub fn exercise_fibers(data: &[u8]) -> (u32, Fibers) {
+    let mut rng = Stream::new(data);
+    let (module, entries) = build_planned(&mut rng);
     let bytes = write(&module);
     let back = read(&bytes).expect("the writer's output is canonical");
     assert_eq!(
@@ -1002,6 +1623,7 @@ pub fn exercise(data: &[u8]) -> u32 {
             assert_eq!(f.entry.resolve(), position, "install fills entry word 0");
         }
     }
+    let mut shape = Fibers::default();
     let result = vm.run(MODULE_NAME, ENTRY_NAME, &[]);
     if !installed {
         assert!(
@@ -1015,15 +1637,31 @@ pub fn exercise(data: &[u8]) -> u32 {
             1
         },
         Err(trap) => {
+            match &trap {
+                Trap::NurseryCancelled { .. } => shape.run_cancelled += 1,
+                Trap::NurseryUncontained { .. } => shape.run_uncontained += 1,
+                _ => {},
+            }
             std::hint::black_box(&trap);
             std::hint::black_box(vm.backtrace());
             0
         },
     };
+    if installed {
+        drive_fibers(&mut vm, &mut rng, &entries, &mut shape);
+    }
     assert!(
         vm.max_stack_len() <= STACK_LIMIT,
         "the per-entry stack-limit discipline holds"
     );
     std::hint::black_box(vm.captured_output().len());
-    outcome
+    (outcome, shape)
+}
+
+/// The pipeline over one fuzz input, outcome only: the cargo-fuzz
+/// target's and the base mirror's entry; the fiber mirror drives
+/// `exercise_fibers` directly, so this wrapper is dead code there.
+#[allow(dead_code)]
+pub fn exercise(data: &[u8]) -> u32 {
+    exercise_fibers(data).0
 }

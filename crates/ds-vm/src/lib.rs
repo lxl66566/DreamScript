@@ -105,6 +105,7 @@
 /// user package can collide.
 pub const EVIDENCE_MODULE: &str = "$evidence";
 
+mod claims;
 pub mod fiber;
 pub mod loader;
 pub mod module;
@@ -124,5 +125,5 @@ pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, Module
 pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
 pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
 pub use program::{Const, ConstKind, FunctionDef, assemble};
-pub use value::{FuncRef, Value, Word};
+pub use value::{FuncRef, RefId, Value, Word};
 pub use vm::{BacktraceFrame, Trap, Vm};

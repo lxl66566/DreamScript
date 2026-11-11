@@ -1,0 +1,57 @@
+// purpose: sibling evidence-carrying lambdas — a filter predicate and
+// a map body in one generic impl member each demand the bound member,
+// the two lambdas' capture blocks stage the same frame evidence slot
+// (one recorded pair, deduplicated), and the predicate's answer
+// diverges per instantiation: the int elements pass the length test,
+// the string elements fail it.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// keeps: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// keeps-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag bool
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
+extern fn len[t] (xs: t) -> int
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+trait keeps {
+  fn long(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] keeps for list[t] {
+  fn long(self) -> string {
+    const parts = self.filter((x) => len(x.show()) > 2)
+    const shown = parts.map((x) => x.show())
+    join(shown, ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].long())
+  println(["a", "b"].long())
+  0
+}

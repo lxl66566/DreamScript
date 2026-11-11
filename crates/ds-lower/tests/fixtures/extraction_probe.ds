@@ -2,7 +2,10 @@
 // fallback and unwrap_or_else's inlined lazy one over `t | none`
 // receivers of int, string, and one-field-struct payloads, ok_or's
 // constructed `t | e` union propagated through `?` with unit-tag and
-// two-field-struct error values, and map_err mirroring the `.ok`
+// two-field-struct error values, ok_or's degenerate union (the err
+// value's own type is the extracted side, so the result collapses to a
+// plain value, bound and read directly), the bound ok_or union narrowed
+// through `is` and matched per member, and map_err mirroring the `.ok`
 // handler over a named spelling; every Ref payload and error value
 // exercises the reference-count bookkeeping on both arms.
 
@@ -79,6 +82,56 @@ fn messy(x: string?) -> string {
   x.ok_or(config { host: "e", port: 0 }).err((_: config) => "e")
 }
 
+// ok_or's degenerate union: the err value's own type is the extracted
+// side, so `t | e` collapses to `t` — both arms answer one value of it,
+// and the bound result reads like any plain binding (unwrap_or's shape
+// with the err value as the fallback)
+fn degenerate_word(x: string?) -> string {
+  const r = x.ok_or("?")
+  r
+}
+
+// the same collapse composed with `?`: nothing propagates, so the kept
+// side extracts in place
+fn degenerate_guard(x: string?) -> string {
+  x.ok_or("boom")?
+}
+
+// the ok_or result union bound, then narrowed through `is`: the stored
+// union flows like any union value
+fn narrowed_guard(x: string?) -> string {
+  const r = x.ok_or(missing)
+  if r is string {
+    r
+  } else {
+    "none"
+  }
+}
+
+// the same bound union read through match: each arm picks its member
+fn matched_guard(x: string?) -> string {
+  const r = x.ok_or(missing)
+  match r {
+    string => r
+    missing => "none"
+  }
+}
+
+// the bound-result report: the four degenerate and two flow legs in one
+// frame (main's own frame sits at the width limit)
+fn deg_report() -> bool {
+  const deg_hit = degenerate_word(list_get(split("x:y", ':'), 0))
+  const deg_miss = degenerate_word(list_get(split("x:y", ':'), 9))
+  const deg_guard = degenerate_guard(list_get(split("x:y", ':'), 0))
+  const narrow_hit = narrowed_guard(list_get(split("x:y", ':'), 0))
+  const narrow_miss = narrowed_guard(list_get(split("x:y", ':'), 9))
+  const match_hit = matched_guard(list_get(split("x:y", ':'), 0))
+  const match_miss = matched_guard(list_get(split("x:y", ':'), 9))
+  println("deg ${deg_hit} ${deg_miss} ${deg_guard} narrow ${narrow_hit} ${narrow_miss}")
+  println("matched ${match_hit} ${match_miss}")
+  deg_hit == "x" && deg_miss == "?" && deg_guard == "x" && narrow_hit == "x" && narrow_miss == "none" && match_hit == "x" && match_miss == "none"
+}
+
 // map_err: the handled member maps through the inlined lambda, the
 // remainder flows; the annotated parameter names the handled set
 fn reword(present: bool) -> string | bad_port {
@@ -120,5 +173,5 @@ fn main() -> bool {
   println("word ${word_hit} ${word_miss} lazy ${lazy_hit} ${lazy_back}")
   println("kept ${kept} ${dropped} messy ${messy_hit} ${messy_miss}")
   println("mapped ${mapped} ${flowed}")
-  hit == 9 && fell_back == 8080 && point_hit == 9 && point_back == 70 && word_hit == "b" && word_miss == "?" && lazy_hit == 3 && lazy_back == 7 && kept == "x" && dropped == "?" && messy_hit == "a" && messy_miss == "e" && mapped == "bad" && flowed == "kept"
+  hit == 9 && fell_back == 8080 && point_hit == 9 && point_back == 70 && word_hit == "b" && word_miss == "?" && lazy_hit == 3 && lazy_back == 7 && kept == "x" && dropped == "?" && messy_hit == "a" && messy_miss == "e" && mapped == "bad" && flowed == "kept" && deg_report()
 }

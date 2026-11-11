@@ -174,6 +174,7 @@ const LISTS_AMBIENT: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
+    "extern fn join (parts: list[string], sep: string) -> string\n",
     "extern fn println (msg: string) -> ()\n",
 );
 

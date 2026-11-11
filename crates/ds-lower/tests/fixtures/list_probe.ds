@@ -1,9 +1,11 @@
 // purpose: the list surface and the `.ok` handler — split produces the
 // list object, len/get/concat read and join it, the checked read answers
-// a `t | none` union the `.ok`/`.err` handlers extract, fs_list lists a
-// directory through the fallible platform span, and the `port_of`
-// pipeline runs `.ok` over an error union: the success member transforms
-// through the handler, the error member flows to the `.err` fallback.
+// a `t | none` union the `.ok`/`.err` handlers extract, join renders the
+// parts back to one string (the empty list to the empty one), fs_list
+// lists a directory through the fallible platform span, and the
+// `port_of` pipeline runs `.ok` over an error union: the success member
+// transforms through the handler, the error member flows to the `.err`
+// fallback.
 
 tag int
 tag string
@@ -22,6 +24,7 @@ extern fn list_new () -> list[string]
 extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+extern fn join (parts: list[string], sep: string) -> string
 extern fn fs_list (dir: string) -> list[string]
 
 fn word_at(s: string, at: int) -> string {
@@ -35,8 +38,10 @@ fn main() -> bool {
   const n = list_len(joined) + list_len(list_new())
   const a = word_at("alpha:beta:gamma", 1)
   const b = word_at("alpha:beta:gamma", 9)
-  println("n ${n} ${a} ${b}")
-  n == 6 && a == "beta" && b == "?"
+  const csv = parts.join(",")
+  const blank = list_new().join(", ")
+  println("n ${n} ${a} ${b} csv ${csv}")
+  n == 6 && a == "beta" && b == "?" && csv == "alpha,beta,gamma" && blank == ""
 }
 
 fn port_of(ok: bool) -> int {

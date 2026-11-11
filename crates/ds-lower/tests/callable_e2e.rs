@@ -337,3 +337,151 @@ fn main() -> int {{
         "only planned module functions mint callable words",
     );
 }
+
+/// Parse -> check -> lower, for the op-shape pins (no install or run).
+fn lower_only(name: &str, source: &str) -> ds_lower::Lowered {
+    let mut files = Files::new();
+    let file_name = format!("{name}.ds");
+    let id = files.add_source(&file_name, source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the source checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed).expect("the source lowers")
+}
+
+/// One function's placed uop kinds, RC ops in place.
+fn uop_kinds(lowered: &ds_lower::Lowered, name: &str) -> Vec<String> {
+    use ds_lower::PlacedOp;
+    lowered
+        .placed(name)
+        .unwrap_or_else(|| panic!("{name} is planned"))
+        .iter()
+        .map(|op| match op {
+            PlacedOp::Uop(uop) => {
+                let repr = format!("{uop:?}");
+                repr.chars().take_while(char::is_ascii_alphabetic).collect()
+            },
+            PlacedOp::Rc(_) => "Rc".to_owned(),
+        })
+        .collect()
+}
+
+/// A tail call through a fn-typed binding whose word the tracking proves
+/// a count-free scalar (a const alias of a named fn) transfers through
+/// CALLT with the named function's own pool FuncRef [H2's closure ruling].
+#[test]
+fn a_proven_scalar_callee_word_transfers_through_callt() {
+    const SOURCE: &str = "
+tag int
+
+fn double(x: int) -> int { x * 2 }
+
+fn relay(n: int) -> int {
+  const f = double
+  f(n)
+}
+
+fn main() -> int { relay(21) }
+";
+    let lowered = lower_only("proven_scalar_tail", SOURCE);
+    let relay = uop_kinds(&lowered, "relay");
+    assert!(
+        relay.iter().any(|k| k == "Callt") && !relay.iter().any(|k| k == "Calls"),
+        "the proven count-free callee word tail-transfers: {relay:?}"
+    );
+    let (vm, got) = run_source("proven_scalar_tail", SOURCE);
+    assert_eq!(got, Ok(Value::I64(42)));
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// A non-capturing lambda bound in the frame mints the same proven scalar
+/// word, so its tail call transfers through CALLT too — the
+/// closure-staging surface's count-free half.
+#[test]
+fn a_non_capturing_lambda_callee_word_transfers_through_callt() {
+    const SOURCE: &str = "
+tag int
+
+fn relay(n: int) -> int {
+  const f = (x: int) => x + 1
+  f(n)
+}
+
+fn main() -> int { relay(41) }
+";
+    let lowered = lower_only("noncap_lambda_tail", SOURCE);
+    let relay = uop_kinds(&lowered, "relay");
+    assert!(
+        relay.iter().any(|k| k == "Callt") && !relay.iter().any(|k| k == "Calls"),
+        "the non-capturing lambda word is the proven scalar: {relay:?}"
+    );
+    let (vm, got) = run_source("noncap_lambda_tail", SOURCE);
+    assert_eq!(got, Ok(Value::I64(42)));
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// A callable-defaulted parameter's word is maybe-Ref at runtime (a
+/// closure may inhabit it), so tracking cannot prove it count-free: the
+/// tail lowers in place, CALLS plus return, exactly as before the ruling.
+#[test]
+fn a_callable_parameter_tail_stays_in_place() {
+    const SOURCE: &str = "
+tag int
+
+fn double(x: int) -> int { x * 2 }
+
+fn relay(f: fn(int) -> int, n: int) -> int {
+  f(n)
+}
+
+fn main() -> int { relay(double, 21) }
+";
+    let lowered = lower_only("callable_param_tail", SOURCE);
+    let relay = uop_kinds(&lowered, "relay");
+    assert!(
+        relay.iter().any(|k| k == "Calls") && !relay.iter().any(|k| k == "Callt"),
+        "the maybe-Ref parameter word keeps the in-place CALLS tail: {relay:?}"
+    );
+    assert!(
+        relay.iter().any(|k| k == "Ret"),
+        "the in-place tail returns its result: {relay:?}"
+    );
+    let (vm, got) = run_source("callable_param_tail", SOURCE);
+    assert_eq!(got, Ok(Value::I64(42)));
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// A capturing lambda's bound word is the closure object's Ref — a count
+/// the transfer cannot settle — so its tail stays in place behind the
+/// runtime CALLS read.
+#[test]
+fn a_capturing_lambda_callee_tail_stays_in_place() {
+    const SOURCE: &str = "
+tag int
+
+fn relay(n: int) -> int {
+  const f = (x: int) => x + n
+  f(n)
+}
+
+fn main() -> int { relay(20) }
+";
+    let lowered = lower_only("capturing_lambda_tail", SOURCE);
+    let relay = uop_kinds(&lowered, "relay");
+    assert!(
+        relay.iter().any(|k| k == "Calls") && !relay.iter().any(|k| k == "Callt"),
+        "the closure's Ref word keeps the in-place CALLS tail: {relay:?}"
+    );
+    let (vm, got) = run_source("capturing_lambda_tail", SOURCE);
+    assert_eq!(got, Ok(Value::I64(40)));
+    assert!(vm.objects().is_empty(), "the heap drains");
+}

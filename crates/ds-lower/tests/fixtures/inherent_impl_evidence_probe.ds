@@ -1,0 +1,61 @@
+// purpose: the generic inherent impl runtime-evidence seam — a generic
+// inherent impl's member bodies lower once per impl under the mangled
+// `<target>#<member>` identity; the entering dot-call stages the serving
+// member bodies' table indexes per the checker-recorded bounds, one word
+// per the body's runtime demands, and the words ride the call as trailing
+// parameters (an inherent impl has no instance id, so no dispatch uop
+// exists). The body's nested calls on the bound variable dispatch at
+// runtime through the staged slot, and a lambda lexically inside the
+// body carries its demand's evidence word in its capture block. Two
+// instantiations of one body run: int elements and string elements.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// describe: stage: run
+// render: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] list[t] {
+  fn describe(self) -> string {
+    var acc = "list:"
+    for x in self {
+      acc = "${acc}${x.show()};"
+    }
+    acc
+  }
+  fn render(self) -> string {
+    join(self.map((x) => x.show()), ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].describe())
+  println(["a", "b"].describe())
+  println([1, 2].render())
+  println(["a", "b"].render())
+  0
+}

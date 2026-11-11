@@ -1,0 +1,5 @@
+error[DS2002]: loop exits never cross a lambda or spawned-body frame boundary
+ --> tests/fixtures/negative/ds2002_loop_exit_in_lambda.ds:9:22
+  |
+9 |         pick(() => { break })
+  |                      ^^^^^ frame-crossing loop exit

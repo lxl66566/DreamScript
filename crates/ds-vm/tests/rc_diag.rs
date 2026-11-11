@@ -255,7 +255,7 @@ fn a_raised_count_is_observable_and_returns_to_one() {
     // two incs and one dec over the host's single claim: 3 - 1 = 2, and
     // the object is alive to tell about it
     assert_eq!(
-        vm.objects().rc_at(id),
+        vm.objects().rc_at(id.id()),
         Ok(2),
         "the count rose above one and settled at two"
     );
@@ -812,7 +812,7 @@ fn a_spawn_copy_in_round_trips_one_captured_count() {
     // the host's lone claim remains: the copy-in acquired exactly one and
     // the child's exit drop returned exactly one (the host-staged closure
     // keeps no capture count of its own)
-    assert_eq!(vm.objects().rc_at(id), Ok(1));
-    assert_eq!(vm.objects().str_at(id), Ok("shared"));
+    assert_eq!(vm.objects().rc_at(id.id()), Ok(1));
+    assert_eq!(vm.objects().str_at(id.id()), Ok("shared"));
     assert_eq!(vm.objects().len(), 2, "the captured word and the closure");
 }

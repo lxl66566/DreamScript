@@ -6,18 +6,19 @@
 //!
 //! # Union payload strategy (the M3 choice, per the golden fixtures)
 //!
-//! One payload region per union TYPE: each member's fields take the
-//! lowest free region slot whose `SlotType` matches the field's word
-//! type, and a slot stays claimable by every other member. Two members
-//! share a word when their word types agree (the golden fixture's
-//! `bad_port.got` and `config.port` share an I64 word), so the region
-//! width is the number of distinct word shapes members need, not the
-//! member count. Payloads are one word each in this round; a multi-word
-//! field (a nested struct or union payload) is
-//! [`LowerError::Unsupported`] — covering it needs the "minority payloads
-//! reboxed to Ref" alternative, and a boxing allocator is outside the M3
-//! uop set. That alternative stays open for the design record to
-//! adjudicate when a payloaded-nesting corpus item lands.
+//! One payload region per union TYPE: each member's fields claim the
+//! lowest free region span whose word types match the field's span, with
+//! contiguity mandatory within one field, and a word stays claimable by
+//! every other member. Two members share a word when their word types
+//! agree (the golden fixture's `bad_port.got` and `config.port` share an
+//! I64 word), so the region width is the number of distinct word shapes
+//! members need, not the member count. Every region word keeps its
+//! `SlotType` for the union's life, and dead words are zero-initialized
+//! per word. The claim algorithm is span-generic — the inline-spans
+//! design, with the reboxing alternative rejected — and a struct-typed
+//! field claims its whole flattened word span (a multi-word field);
+//! union, tuple, and application field types still refuse, so those
+//! spans wait on the span channel.
 //!
 //! # Primitive atoms
 //!
@@ -66,16 +67,52 @@ fn primitive_slot(name: &str) -> Option<SlotType> {
 /// objects.
 const HEAP_REFS: &[&str] = &["list", "map"];
 
-/// One word of a value's span: the field's name (or `None` for a
-/// primitive member's own payload word) plus the span offset it lives at.
+/// One field of a value's span: the field's name (or `None` for a
+/// primitive member's own payload word), its consecutive word types, and
+/// the span offset its first word lives at. A field spans one word
+/// unless its type is itself a struct, whose whole inline span the field
+/// claims contiguously.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemberField {
     /// The declared field name; `None` marks a primitive member's payload.
     pub name: Option<String>,
-    /// The word type.
-    pub slot: SlotType,
-    /// Offset from the span base.
+    /// The field's word types, in span order.
+    pub slots: Vec<SlotType>,
+    /// Offset of the field's first word from the span base.
     pub word: u8,
+}
+
+impl MemberField {
+    /// The field's base word type.
+    pub(crate) fn slot(&self) -> SlotType {
+        self.slots[0]
+    }
+
+    /// How many words the field spans.
+    pub(crate) fn width(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+/// One payload field's word-type span: the field's consecutive word
+/// types, the claim input for a union region and the placement input for
+/// a bare struct. A struct-typed field carries its flattened multi-word
+/// span; every other field type is one word or refuses.
+struct PayloadField {
+    /// The declared field name; `None` marks a positional payload word.
+    name: Option<String>,
+    /// The field's word types, in span order.
+    slots: Vec<SlotType>,
+}
+
+impl PayloadField {
+    /// A one-word payload field.
+    fn word(name: Option<String>, slot: SlotType) -> Self {
+        Self {
+            name,
+            slots: vec![slot],
+        }
+    }
 }
 
 /// One member of a union span [BL-2].
@@ -248,37 +285,35 @@ impl<'a> Shapes<'a> {
         let shape = self.shape(ty)?;
         Ok(match &*shape {
             Shape::Word(slot) => vec![*slot],
-            Shape::Struct(s) | Shape::Tuple(s) => s.fields.iter().map(|f| f.slot).collect(),
+            Shape::Struct(s) | Shape::Tuple(s) => s
+                .fields
+                .iter()
+                .flat_map(|f| f.slots.iter().copied())
+                .collect(),
             Shape::Union(u) => u.words.clone(),
         })
     }
 
     /// A union span: the tag word plus the shared payload region, member
-    /// fields assigned per the module-doc strategy.
+    /// fields claiming the lowest free region span per the module-doc
+    /// strategy. A member's `claimed` set scopes to that member alone:
+    /// members share region words by kind, one member's fields never
+    /// share a word among themselves.
     fn union_shape(&mut self, members: &[TypeId]) -> Result<Shape, LowerError> {
         let mut region: Vec<SlotType> = Vec::new();
         let mut shapes = Vec::with_capacity(members.len());
         for atom in members {
             let tag = self.tag_id(*atom)?;
             self.guard_deinit_member(*atom)?;
-            let payload = self.payload_fields(*atom)?;
+            let payload = self.payload_fields(*atom, 0)?;
             let mut claimed = vec![false; region.len()];
             let mut fields = Vec::with_capacity(payload.len());
-            for (name, slot) in payload {
-                let index = if let Some(i) =
-                    (0..region.len()).find(|i| region[*i] == slot && !claimed[*i])
-                {
-                    i
-                } else {
-                    region.push(slot);
-                    claimed.push(false);
-                    region.len() - 1
-                };
-                claimed[index] = true;
+            for field in &payload {
+                let word = claim_span(&mut region, &mut claimed, &field.slots)?;
                 fields.push(MemberField {
-                    name,
-                    slot,
-                    word: word_of(index + 1)?,
+                    name: field.name.clone(),
+                    slots: field.slots.clone(),
+                    word,
                 });
             }
             shapes.push(MemberShape {
@@ -310,13 +345,18 @@ impl<'a> Shapes<'a> {
                 primitive_slot(&decl.name).unwrap_or(SlotType::Tag),
             )),
             ds_check::AtomKind::Struct(_) => {
-                let payload = self.payload_fields(atom)?;
+                let payload = self.payload_fields(atom, 0)?;
                 let mut fields = Vec::with_capacity(payload.len());
-                for (index, (name, slot)) in payload.into_iter().enumerate() {
+                // a bare struct places its field spans at consecutive
+                // words; no sharing, so a cursor suffices
+                let mut cursor = 0usize;
+                for field in payload {
+                    let word = word_of(cursor)?;
+                    cursor += field.slots.len();
                     fields.push(MemberField {
-                        name,
-                        slot,
-                        word: word_of(index)?,
+                        name: field.name,
+                        slots: field.slots,
+                        word,
                     });
                 }
                 Ok(Shape::Struct(StructShape { fields }))
@@ -328,19 +368,20 @@ impl<'a> Shapes<'a> {
                 let mut fields = Vec::with_capacity(elements.len());
                 for (index, element) in elements.iter().enumerate() {
                     // One plain frame word per element: struct, union, and
-                    // nested-tuple elements carry their own spans and need
-                    // reboxing (the open alternative in this module's doc).
+                    // nested-tuple elements carry their own spans, and the
+                    // tuple vocabulary keeps one word per element until
+                    // those spans stage per element.
                     let shape = self.atom_shape(*element)?;
                     let Shape::Word(slot) = shape else {
                         return Err(unsupported(
                             "a multi-word tuple element",
-                            "tuple elements lower as one plain frame word this round; struct, \
-                             union, and nested-tuple elements need reboxing",
+                            "tuple elements lower as one plain frame word; a wider element needs \
+                             its whole span staged per element, which tuple spans do not carry yet",
                         ));
                     };
                     fields.push(MemberField {
                         name: None,
-                        slot,
+                        slots: vec![slot],
                         word: word_of(index)?,
                     });
                 }
@@ -364,10 +405,12 @@ impl<'a> Shapes<'a> {
         }
     }
 
-    /// One atom's payload: `(name, word type)` pairs. Unit tags carry no
-    /// payload; primitives carry their own word; struct members carry
-    /// their declared fields. A multi-word field type is unsupported.
-    fn payload_fields(&self, atom: TypeId) -> Result<Vec<(Option<String>, SlotType)>, LowerError> {
+    /// One atom's payload: the member's fields as word-type spans. Unit
+    /// tags carry no payload; primitives carry their own word; struct
+    /// members carry their declared fields, a struct-typed field carrying
+    /// its whole flattened span. Union, tuple, and application field
+    /// types refuse.
+    fn payload_fields(&self, atom: TypeId, depth: usize) -> Result<Vec<PayloadField>, LowerError> {
         let universe = &self.analyzed.decls.universe;
         let Ok(decl) = universe.atom_decl(atom) else {
             return Err(unsupported("a value", "its atom has no declaration"));
@@ -382,32 +425,37 @@ impl<'a> Shapes<'a> {
                  is the seam",
             )),
             ds_check::AtomKind::Unit => match primitive_slot(&decl.name) {
-                Some(slot) => Ok(vec![(None, slot)]),
+                Some(slot) => Ok(vec![PayloadField::word(None, slot)]),
                 None => Ok(Vec::new()),
             },
             // Positional slots (tuple-payload enum cases [B3]) keep
             // their `None` name; the span places them by word offset.
             ds_check::AtomKind::Struct(fields) => fields
                 .iter()
-                .map(|f| match self.field_slot(&f.ty) {
-                    Some(slot) => Ok((f.name.clone(), slot)),
+                .map(|f| match self.field_span(&f.ty, depth)? {
+                    Some(slots) => Ok(PayloadField {
+                        name: f.name.clone(),
+                        slots,
+                    }),
                     None => Err(unsupported(
                         "a struct payload field",
-                        "only single-word primitive and unit field types are lowerable this round",
+                        "struct fields lower as inline word spans of primitive, unit, or struct \
+                         type; union, tuple, and application field types stay outside the \
+                         inline-span vocabulary",
                     )),
                 })
                 .collect(),
             ds_check::AtomKind::Tuple(_) => Err(unsupported(
                 "a tuple member of a union",
-                "a tuple payload spans several words and the union region gives members one word \
-                 each this round; reboxing is the open alternative",
+                "a tuple payload spans several words the region would have to carry as one \
+                 contiguous claim; the region takes struct member fields only",
             )),
             // A callable member's payload is the one Fn word (F2): the
             // checked read hands the element word out under the element's
             // own classification — a closure element refuses at the
             // construction guard, so the word reaching a payload slot is
             // the scalar FuncRef.
-            ds_check::AtomKind::FnSig(..) => Ok(vec![(None, SlotType::Fn)]),
+            ds_check::AtomKind::FnSig(..) => Ok(vec![PayloadField::word(None, SlotType::Fn)]),
             _ => Err(unsupported(
                 "an enum, application, or function member",
                 "the M3 runtime contract covers unit, primitive, and struct atoms only",
@@ -415,22 +463,58 @@ impl<'a> Shapes<'a> {
         }
     }
 
-    /// The word type of a written field type: primitives and unit only.
-    fn field_slot(&self, expr: &TypeExpr) -> Option<SlotType> {
+    /// The word span of a written field type: a primitive or unit one
+    /// word, a type variable's Raw word, and a struct's whole flattened
+    /// inline span (its fields' spans concatenated). `None` is the shared
+    /// refusal: union, tuple, and application types stay outside the
+    /// inline-span vocabulary. `depth` bounds the recursion — a cyclic
+    /// field type has no finite span, and the budget refuses it typed
+    /// instead of recursing.
+    fn field_span(
+        &self,
+        expr: &TypeExpr,
+        depth: usize,
+    ) -> Result<Option<Vec<SlotType>>, LowerError> {
+        const SPAN_DEPTH_LIMIT: usize = 32;
         let TypeExpr::Atom(id) = expr else {
-            return None;
+            return Ok(None);
         };
         let universe = &self.analyzed.decls.universe;
-        let decl = universe.atom_decl(*id).ok()?;
+        let Ok(decl) = universe.atom_decl(*id) else {
+            return Ok(None);
+        };
         if self.is_var_atom(*id) {
-            return Some(SlotType::Raw);
+            return Ok(Some(vec![SlotType::Raw]));
         }
         if let Some(slot) = primitive_slot(&decl.name) {
-            return Some(slot);
+            return Ok(Some(vec![slot]));
         }
         match decl.kind {
-            ds_check::AtomKind::Unit => Some(SlotType::I64), // a unit word
-            _ => None,
+            ds_check::AtomKind::Unit => Ok(Some(vec![SlotType::I64])), // a unit word
+            ds_check::AtomKind::Struct(_) => {
+                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(id)
+                    && self.declared_deinits.contains(def)
+                {
+                    return Err(unsupported(
+                        "a struct payload field",
+                        "a deinit-carrying field type has no claim of its own inside the inline \
+                         span, so its hook would run at the wrong death; per-span deinit claims \
+                         own the seam",
+                    ));
+                }
+                if depth >= SPAN_DEPTH_LIMIT {
+                    return Err(unsupported(
+                        "a struct payload field",
+                        "the field's inline span nests past the depth budget; a cyclic field type \
+                         has no finite span",
+                    ));
+                }
+                let payload = self.payload_fields(*id, depth + 1)?;
+                Ok(Some(
+                    payload.into_iter().flat_map(|field| field.slots).collect(),
+                ))
+            },
+            _ => Ok(None),
         }
     }
 
@@ -509,10 +593,358 @@ pub(crate) fn var_param_name(universe: &ds_check::Universe, atom: TypeId) -> Opt
     base.rsplit_once('#').map(|(name, _)| name.to_owned())
 }
 
+/// Claims the lowest free contiguous region span matching `span`'s word
+/// types, growing the region past its end when no gap fits: a field's
+/// words sit at consecutive region words (contiguity is mandatory), a
+/// claimed word is invisible to the member's later fields, and every
+/// region word keeps its `SlotType` for the union's life — a word only
+/// ever hosts values of its own kind. Returns the field's base offset
+/// into the union span (the tag word at 0 precedes the region).
+fn claim_span(
+    region: &mut Vec<SlotType>,
+    claimed: &mut Vec<bool>,
+    span: &[SlotType],
+) -> Result<u8, LowerError> {
+    debug_assert!(!span.is_empty(), "a payload field spans at least one word");
+    let start = (0..=region.len())
+        .find(|&start| span_fits(region, claimed, span, start))
+        .expect("a span fits by growing past the region end");
+    while region.len() < start + span.len() {
+        region.push(span[region.len() - start]);
+        claimed.push(false);
+    }
+    claimed[start..start + span.len()].fill(true);
+    word_of(start + 1)
+}
+
+/// Whether `span` fits contiguously at `start`: each of its words either
+/// matches a free region word of its own type or sits past the region
+/// end, where the claim grows the region.
+fn span_fits(region: &[SlotType], claimed: &[bool], span: &[SlotType], start: usize) -> bool {
+    (0..span.len()).all(|k| {
+        let pos = start + k;
+        pos >= region.len() || (region[pos] == span[k] && !claimed[pos])
+    })
+}
+
 fn word_of(index: usize) -> Result<u8, LowerError> {
     u8::try_from(index).map_err(|_| unsupported("a value span", "more than 255 payload words"))
 }
 
 fn unsupported(what: &'static str, reason: &'static str) -> LowerError {
     LowerError::unsupported(NO_SPAN, what, reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use SlotType::{Bool, F64, I64, Ref};
+    use ds_diag::{Files, human};
+    use ds_parse::parse;
+
+    use super::*;
+
+    /// Claims one member's field spans against the shared region, in
+    /// order: the per-member `claimed` starts clear, exactly as
+    /// `union_shape` processes one member.
+    fn claim_member(region: &mut Vec<SlotType>, spans: &[&[SlotType]]) -> Vec<u8> {
+        let mut claimed = vec![false; region.len()];
+        spans
+            .iter()
+            .map(|span| claim_span(region, &mut claimed, span).expect("the span claims"))
+            .collect()
+    }
+
+    #[test]
+    fn one_word_claims_stay_lowest_free_word() {
+        // The width-1 rule is the span rule's degenerate case: config's
+        // host/port claim the first two region words, bad_port's two int
+        // words reuse the port word and grow one — the golden fixture's
+        // word sharing, byte-identical through the span rework.
+        let mut region = Vec::new();
+        assert_eq!(claim_member(&mut region, &[&[Ref], &[I64]]), [1, 2]);
+        assert_eq!(claim_member(&mut region, &[&[I64], &[I64]]), [2, 3]);
+        assert_eq!(region, [Ref, I64, I64]);
+    }
+
+    #[test]
+    fn a_multi_word_span_needs_one_contiguous_gap() {
+        // Contiguity is mandatory: no two adjacent free I64 words exist
+        // before the region's trailing pair, so the [I64, I64] span
+        // starts after the Bool word instead of at the lowest free I64
+        // word.
+        let mut region = Vec::new();
+        claim_member(&mut region, &[&[I64], &[Bool], &[I64], &[I64]]);
+        assert_eq!(region, [I64, Bool, I64, I64]);
+        assert_eq!(claim_member(&mut region, &[&[I64, I64]]), [3]);
+        assert_eq!(region, [I64, Bool, I64, I64]);
+    }
+
+    #[test]
+    fn a_span_grows_the_region_only_for_its_tail() {
+        // The lowest fitting span reuses free region words first and
+        // grows the region only past its end, keeping every grown word's
+        // kind stable.
+        let mut region = vec![I64];
+        assert_eq!(claim_member(&mut region, &[&[I64, I64, I64]]), [1]);
+        assert_eq!(region, [I64, I64, I64]);
+    }
+
+    #[test]
+    fn one_members_spans_share_no_word() {
+        // Member-local disjointness: the member's second field skips
+        // the words its first span claimed (cross-member word reuse
+        // stays the design's sharing, pinned above).
+        let mut region = Vec::new();
+        assert_eq!(claim_member(&mut region, &[&[I64, I64], &[I64]]), [1, 3]);
+        assert_eq!(region, [I64, I64, I64]);
+    }
+
+    #[test]
+    fn every_region_word_keeps_its_kind() {
+        // A word claimed by one kind never serves another: the F64
+        // field grows the region instead of reusing Bool or I64 words,
+        // and the later [I64, I64] span skips the F64 word mid-gap.
+        let mut region = Vec::new();
+        claim_member(&mut region, &[&[Bool], &[I64]]);
+        assert_eq!(claim_member(&mut region, &[&[F64], &[I64, I64]]), [3, 4]);
+        assert_eq!(region, [Bool, I64, F64, I64, I64]);
+    }
+
+    /// A corpus union: two payloaded struct members sharing the port
+    /// word plus a bare tag, a narrower two-member union, struct
+    /// literals, var widening, and both match shapes.
+    const UNION_SRC: &str = concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag io_error\n",
+        "struct config { host: string, port: int }\n",
+        "struct bad_port { expected: int, got: int }\n",
+        "extern fn println (msg: string) -> ()\n",
+        "fn port_of(r: config | io_error) -> int {\n",
+        "  match r {\n",
+        "    io_error => 0,\n",
+        "    c => c.port,\n",
+        "  }\n",
+        "}\n",
+        "fn show(r: config | bad_port | io_error) -> () {\n",
+        "  match r {\n",
+        "    io_error => println(\"io\"),\n",
+        "    c => println(\"payload\"),\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  var store: config | bad_port | io_error = config { host: \"h\", port: 1 }\n",
+        "  store = bad_port { expected: 2, got: 3 }\n",
+        "  show(store)\n",
+        "  show(io_error)\n",
+        "  var p = port_of(io_error)\n",
+        "  store = config { host: \"x\", port: p }\n",
+        "  show(store)\n",
+        "}\n",
+    );
+
+    /// The shape of one source-rendered type, claimed through the same
+    /// `Shapes` the lowerer drives; no lowering runs here.
+    fn shape_of(source: &str, rendered: &str) -> Rc<Shape> {
+        let mut files = Files::new();
+        let id = files.add_source("probe.ds", source);
+        let asts = [parse(&files, id).expect("the probe parses")];
+        let analyzed = ds_check::analyze(&files, &asts);
+        assert!(
+            analyzed.checked.diags.is_empty(),
+            "{}",
+            analyzed
+                .checked
+                .diags
+                .iter()
+                .map(|diag| human(diag, &files))
+                .collect::<String>()
+        );
+        let ty = analyzed
+            .checked
+            .expr_types
+            .values()
+            .map(|val| val.ty)
+            .find(|ty| analyzed.decls.universe.render(*ty) == rendered)
+            .unwrap_or_else(|| panic!("no expression of {rendered}"));
+        let mut shapes = Shapes::new(&analyzed, std::collections::HashSet::new());
+        shapes.shape(ty).expect("the shape lowers")
+    }
+
+    #[test]
+    fn the_corpus_union_keeps_its_pinned_region() {
+        // Recorded from the pre-rework allocator, byte-identical after
+        // it: io_error carries no payload, config claims words 1-2,
+        // bad_port reuses the port word and grows one.
+        let shape = shape_of(UNION_SRC, "io_error | config | bad_port");
+        let Shape::Union(u) = &*shape else {
+            panic!("the corpus type is a union");
+        };
+        assert_eq!(u.words, [SlotType::Tag, Ref, I64, I64]);
+        let [bare, config, bad] = u.members.as_slice() else {
+            panic!("the corpus union has three members");
+        };
+        assert_eq!(bare.fields, []);
+        assert_eq!(config.fields, [
+            MemberField {
+                name: Some("host".into()),
+                slots: vec![Ref],
+                word: 1,
+            },
+            MemberField {
+                name: Some("port".into()),
+                slots: vec![I64],
+                word: 2,
+            },
+        ]);
+        assert_eq!(bad.fields, [
+            MemberField {
+                name: Some("expected".into()),
+                slots: vec![I64],
+                word: 2,
+            },
+            MemberField {
+                name: Some("got".into()),
+                slots: vec![I64],
+                word: 3,
+            },
+        ]);
+        // the narrower union claims the narrower region
+        let narrow = shape_of(UNION_SRC, "io_error | config");
+        let Shape::Union(u) = &*narrow else {
+            panic!("the narrower corpus type is a union");
+        };
+        assert_eq!(u.words, [SlotType::Tag, Ref, I64]);
+    }
+
+    /// A struct-typed field claims its real span width: the width flip
+    /// the span rework lands. `boxed.at` (a two-word struct) claims two
+    /// contiguous region words, the following scalar grows past the span,
+    /// and the two-Ref member's fields claim their own grown words.
+    #[test]
+    fn a_struct_typed_field_claims_its_whole_span_width() {
+        let src = concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct point { x: int, y: int }\n",
+            "struct boxed { at: point, n: int }\n",
+            "struct wide { a: string, b: string }\n",
+            "tag miss\n",
+            "extern fn println (msg: string) -> ()\n",
+            "fn area(b: boxed | miss) -> int {\n",
+            "  match b {\n",
+            "    miss => 0,\n",
+            "    b => b.at.x + b.at.y + b.n,\n",
+            "  }\n",
+            "}\n",
+            "fn show(w: wide | miss) -> () {\n",
+            "  match w {\n",
+            "    miss => println(\"miss\"),\n",
+            "    w => println(w.a),\n",
+            "  }\n",
+            "}\n",
+            "fn whole(t: boxed | wide | miss) -> int {\n",
+            "  match t {\n",
+            "    miss => 0,\n",
+            "    other => 1,\n",
+            "  }\n",
+            "}\n",
+        );
+        let shape = shape_of(src, "boxed | wide | miss");
+        let Shape::Union(u) = &*shape else {
+            panic!("the probe type is a union");
+        };
+        // boxed claims [I64, I64] at words 1-2 then n at word 3; wide
+        // grows the region with its two Ref words
+        assert_eq!(u.words, [SlotType::Tag, I64, I64, I64, Ref, Ref]);
+        let [boxed, wide, miss] = u.members.as_slice() else {
+            panic!("the probe union has three members");
+        };
+        assert_eq!(miss.fields, []);
+        assert_eq!(boxed.fields, [
+            MemberField {
+                name: Some("at".into()),
+                slots: vec![I64, I64],
+                word: 1,
+            },
+            MemberField {
+                name: Some("n".into()),
+                slots: vec![I64],
+                word: 3,
+            },
+        ]);
+        assert_eq!(wide.fields, [
+            MemberField {
+                name: Some("a".into()),
+                slots: vec![Ref],
+                word: 4,
+            },
+            MemberField {
+                name: Some("b".into()),
+                slots: vec![Ref],
+                word: 5,
+            },
+        ]);
+        // a bare struct's own layout flattens the same field span, its
+        // words starting at 0 (no tag word before them)
+        let bare = shape_of(src, "boxed");
+        let Shape::Struct(s) = &*bare else {
+            panic!("boxed is a bare struct");
+        };
+        assert_eq!(
+            s.fields
+                .iter()
+                .map(|f| (f.name.clone(), f.slots.clone(), f.word))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("at".into()), vec![I64, I64], 0),
+                (Some("n".into()), vec![I64], 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn member_spans_stay_disjoint_and_zero_init_covers_every_dead_word() {
+        // The silent-breakage tripwires of the span rework: within one
+        // member no two fields share a word, every field word matches
+        // the region word's kind, and the live words leave every other
+        // word dead — the words zero-init writes once each, with each
+        // word's own kind.
+        let shape = shape_of(UNION_SRC, "io_error | config | bad_port");
+        let Shape::Union(u) = &*shape else {
+            panic!("the corpus type is a union");
+        };
+        for member in &u.members {
+            let mut live = std::collections::HashSet::new();
+            for field in &member.fields {
+                let word = usize::from(field.word);
+                assert!(
+                    (1..u.words.len()).contains(&word),
+                    "the field stays inside the payload region"
+                );
+                for (offset, slot) in field.slots.iter().enumerate() {
+                    assert_eq!(
+                        u.words[word + offset],
+                        *slot,
+                        "every word of the field's span keeps its claimed kind"
+                    );
+                }
+                for offset in 0..field.width() {
+                    assert!(
+                        live.insert(field.word + u8::try_from(offset).expect("offset fits u8")),
+                        "one member never shares a word"
+                    );
+                }
+            }
+            let dead: std::collections::HashSet<u8> = (1..u.words.len())
+                .filter_map(|index| u8::try_from(index).ok())
+                .filter(|word| !live.contains(word))
+                .collect();
+            assert_eq!(
+                live.len() + dead.len(),
+                u.words.len() - 1,
+                "live and dead words partition the region exactly"
+            );
+        }
+    }
 }

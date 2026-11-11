@@ -79,6 +79,7 @@
 //! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) | reserved |
 //! | 43    | `nursery_boundary (nursery: int, mask: int) -> tag + payload` (control seam; the block's join) | reserved |
 //! | 44    | `nursery_cancel (e: tag) -> unit` (control seam; `cancel`) | reserved |
+//! | 45    | `join (parts: list[string], sep: string) -> string` | reserved |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -241,13 +242,14 @@
 //! host API's ([`crate::Vm::join_nursery`]); an in-language surface over
 //! them lands with the checker/lowerer rounds.
 
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Duration};
 
 use ds_abi::SlotType;
 
 use crate::{
-    object::Objects,
-    value::Value,
+    net::Connections,
+    object::Heaps,
+    value::{RefId, Value},
     vm::{Trap, Vm},
 };
 
@@ -421,6 +423,13 @@ pub const BUILTIN_NURSERY_BOUNDARY: u32 = 43;
 /// check.
 pub const BUILTIN_NURSERY_CANCEL: u32 = 44;
 
+/// `join (parts: list[string], sep: string) -> string` — the list of
+/// strings rendered back to one string, the separator between
+/// neighbors. An empty list answers the empty string; the elements and
+/// the separator stay borrowed (the `list_len` discipline), the answer
+/// one fresh string object.
+pub const BUILTIN_JOIN: u32 = 45;
+
 /// `println(msg: string) -> unit`.
 pub const STD_PRINTLN: u32 = 0;
 /// `print(msg: string) -> unit`.
@@ -552,7 +561,7 @@ impl NativeResult {
 /// (already type-checked against `params` by the call site), the result
 /// overlays the caller's argument slots like a RET (one word, or the
 /// two-word span of a fallible native).
-pub type NativeFn = fn(&mut Objects, &mut OutputSink, &[Value]) -> Result<NativeResult, Trap>;
+pub type NativeFn = fn(&mut Heaps, &mut OutputSink, &[Value]) -> Result<NativeResult, Trap>;
 
 /// One native function: a name, its parameter slot types, the overlay
 /// width its result needs, the body.
@@ -578,74 +587,63 @@ pub struct NativeFunction {
 }
 
 fn substring_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let id = ref_arg(args, 0)?;
-    let n = i64::try_from(objects.char_count(id)?).expect("string length fits i64");
+    let n = i64::try_from(heaps.char_count(id)?).expect("string length fits i64");
     // clamped to [0, n], so the narrowed index is a valid char position
     let start = usize::try_from(i64_arg(args, 1)?.clamp(0, n)).expect("index fits usize");
     let end = usize::try_from(i64_arg(args, 2)?.clamp(0, n)).expect("index fits usize");
     if start >= end {
-        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+        return Ok(NativeResult::Word(heaps.new_str_part("")));
     }
     // both offsets sit on char boundaries, so the slice cannot cut a code point
-    let (begin, stop) = objects.char_byte_range(id, start, end)?;
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_substr(id, begin, stop)?,
-    )))
+    let (begin, stop) = heaps.char_byte_range(id, start, end)?;
+    let part = heaps.alloc_substr(id, begin, stop)?;
+    Ok(NativeResult::Word(heaps.word(part)))
 }
 
 fn concat_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let joined = objects.concat(ref_arg(args, 0)?, ref_arg(args, 1)?)?;
-    Ok(NativeResult::Word(Value::Ref(joined)))
+    let joined = heaps.concat(ref_arg(args, 0)?, ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(heaps.word(joined)))
 }
 
 fn to_upper_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_str(text.to_uppercase()),
-    )))
+    let text = heaps.str_at(ref_arg(args, 0)?)?.to_uppercase();
+    Ok(NativeResult::Word(heaps.new_str(text)))
 }
 
 fn to_lower_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_str(text.to_lowercase()),
-    )))
+    let text = heaps.str_at(ref_arg(args, 0)?)?.to_lowercase();
+    Ok(NativeResult::Word(heaps.new_str(text)))
 }
 
-fn trim_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_str(text.trim().to_owned()),
-    )))
+fn trim_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
+    let text = heaps.str_at(ref_arg(args, 0)?)?.trim().to_owned();
+    Ok(NativeResult::Word(heaps.new_str(text)))
 }
 
 fn parse_int_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let id = ref_arg(args, 0)?;
-    let text = objects.str_at(id)?;
+    let text = heaps.str_at(id)?;
     Ok(match text.parse::<i64>() {
         // strict: no implicit whitespace handling (the `trim` native composes)
         Ok(v) => NativeResult::Tag {
@@ -660,28 +658,35 @@ fn parse_int_fn(
 }
 
 fn split_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
-    let sep = objects.str_at(ref_arg(args, 1)?)?;
+    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let sep = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
     // the surface separator is a `char` (one scalar value); an empty
     // separator falls back to the per-character split rather than trap
     let parts: Vec<String> = if sep.is_empty() {
         text.chars().map(String::from).collect()
     } else {
-        text.split(sep).map(str::to_owned).collect()
+        text.split(sep.as_str()).map(str::to_owned).collect()
     };
     let elems = parts
         .into_iter()
-        .map(|part| Value::Ref(objects.alloc_str(part)))
+        .map(|part| heaps.new_str(part))
         .collect::<Vec<_>>();
-    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(elems))))
+    // each fresh part's birth count becomes the list's edge, so the
+    // frame claim its alloc entered leaves with the adoption
+    for elem in &elems {
+        if let Value::Ref(word) = *elem {
+            heaps.release_claim(word);
+        }
+    }
+    Ok(NativeResult::Word(heaps.new_list(elems)))
 }
 
 fn char_at_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
@@ -689,47 +694,70 @@ fn char_at_fn(
     let index = i64_arg(args, 1)?;
     // out of range by either side: the empty string, never a trap
     if index < 0 {
-        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+        return Ok(NativeResult::Word(heaps.new_str_part("")));
     }
     let i = usize::try_from(index).expect("checked index fits usize");
-    if i >= objects.char_count(id)? {
-        return Ok(NativeResult::Word(Value::Ref(objects.alloc_str_part(""))));
+    if i >= heaps.char_count(id)? {
+        return Ok(NativeResult::Word(heaps.new_str_part("")));
     }
-    let (begin, stop) = objects.char_byte_range(id, i, i + 1)?;
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_substr(id, begin, stop)?,
-    )))
+    let (begin, stop) = heaps.char_byte_range(id, i, i + 1)?;
+    let part = heaps.alloc_substr(id, begin, stop)?;
+    Ok(NativeResult::Word(heaps.word(part)))
+}
+
+fn join_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
+    let sep = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
+    let elems: Vec<Value> = heaps.list_at(ref_arg(args, 0)?)?.to_vec();
+    let mut joined = String::new();
+    for (at, part) in elems.iter().enumerate() {
+        // a non-string element refuses at its own position: the checked
+        // surface guarantees list[string], so only a hand-assembled
+        // caller reaches here
+        let word = match part {
+            Value::Ref(word) => word,
+            other => {
+                return Err(Trap::SlotTypeMismatch {
+                    slot: u8::try_from(at).expect("element index fits u8"),
+                    expected: SlotType::Ref,
+                    actual: other.slot_type(),
+                })
+            },
+        };
+        if at > 0 {
+            joined.push_str(&sep);
+        }
+        joined.push_str(heaps.str_at(*word)?);
+    }
+    Ok(NativeResult::Word(heaps.new_str(joined)))
 }
 
 // total: the Result is the calling convention every native shares, not
 // this body's
 #[allow(clippy::unnecessary_wraps)]
 fn list_new_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     _args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    Ok(NativeResult::Word(Value::Ref(
-        objects.alloc_list(Vec::new()),
-    )))
+    Ok(NativeResult::Word(heaps.new_list(Vec::new())))
 }
 
 fn list_len_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = objects.list_at(ref_arg(args, 0)?)?;
+    let elems = heaps.list_at(ref_arg(args, 0)?)?;
     let n = i64::try_from(elems.len()).expect("list length fits i64");
     Ok(NativeResult::Word(Value::I64(n)))
 }
 
 fn list_get_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = objects.list_at(ref_arg(args, 0)?)?;
+    let elems = heaps.list_at(ref_arg(args, 0)?)?;
     let index = i64_arg(args, 1)?;
     // Bounds follow the crate's checked-API convention (the span shape
     // `parse_int` answers), not the string ops' clamping: a generic
@@ -741,8 +769,8 @@ fn list_get_fn(
         Some(&value) => {
             // the read hands the element word out: a Ref element gains a
             // count for the reader, the list keeps its own (C4)
-            if let Value::Ref(id) = value {
-                objects.inc(id)?;
+            if let Value::Ref(word) = value {
+                heaps.inc(word)?;
             }
             NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
@@ -757,24 +785,24 @@ fn list_get_fn(
 }
 
 fn list_concat_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let joined = objects.concat_lists(ref_arg(args, 0)?, ref_arg(args, 1)?)?;
-    Ok(NativeResult::Word(Value::Ref(joined)))
+    let joined = heaps.concat_lists(ref_arg(args, 0)?, ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(heaps.word(joined)))
 }
 
 // total: the Result is the calling convention every native shares, not
 // this body's
 #[allow(clippy::unnecessary_wraps)]
 fn list_push_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let list = ref_arg(args, 0)?;
-    objects.push_list(list, args[1])?;
+    heaps.push_list(list, args[1])?;
     // the inert unit word: no caller reads the overlay result
     Ok(NativeResult::Word(Value::I64(0)))
 }
@@ -783,36 +811,35 @@ fn list_push_fn(
 // this body's
 #[allow(clippy::unnecessary_wraps)]
 fn map_new_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     _args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    Ok(NativeResult::Word(Value::Ref(objects.alloc_map())))
+    Ok(NativeResult::Word(heaps.new_map()))
 }
 
 fn map_len_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let n =
-        i64::try_from(objects.map_pairs(ref_arg(args, 0)?)?.len()).expect("map length fits i64");
+    let n = i64::try_from(heaps.map_pairs(ref_arg(args, 0)?)?.len()).expect("map length fits i64");
     Ok(NativeResult::Word(Value::I64(n)))
 }
 
 fn map_get_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let map = ref_arg(args, 0)?;
-    let hit = objects.map_at(map, args[1])?;
+    let hit = heaps.map_at(map, args[1])?;
     Ok(match hit {
         Some(value) => {
             // the read hands the value word out: a Ref value gains a
             // count for the reader, the map keeps its own (C4)
-            if let Value::Ref(id) = value {
-                objects.inc(id)?;
+            if let Value::Ref(word) = value {
+                heaps.inc(word)?;
             }
             NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
@@ -829,65 +856,51 @@ fn map_get_fn(
 }
 
 fn map_set_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    objects.set_map(ref_arg(args, 0)?, args[1], args[2])?;
+    heaps.set_map(ref_arg(args, 0)?, args[1], args[2])?;
     // the inert unit word: no caller reads the overlay result
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
-/// Acquires one count per `Ref` word of `words` (the producer retain
-/// contract): a fresh list adopting the words owns its element words,
-/// the sources keep their own (C4).
-fn retain_copied(objects: &mut Objects, words: &[Value]) -> Result<(), Trap> {
-    for &value in words {
-        if let Value::Ref(id) = value {
-            objects.inc(id)?;
+/// The copy natives' shared finisher: the fresh list's edge owns one
+/// count per `Ref` word of `elems` (taken on the one walk the copy
+/// already pays), the sources keep their own (C4), and the vec moves
+/// into the adopting list with no second pass.
+fn copy_into_fresh_list(heaps: &mut Heaps, elems: Vec<Value>) -> Result<NativeResult, Trap> {
+    for value in &elems {
+        if let Value::Ref(word) = *value {
+            heaps.inc_edge(word)?;
         }
     }
-    Ok(())
+    Ok(NativeResult::Word(heaps.new_list(elems)))
 }
 
-fn cons_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
+fn cons_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
     let head = args[0];
-    let rest: Vec<Value> = objects.list_at(ref_arg(args, 1)?)?.to_vec();
+    let rest = heaps.list_at(ref_arg(args, 1)?)?;
     let mut elems = Vec::with_capacity(rest.len() + 1);
     elems.push(head);
-    elems.extend(rest);
-    retain_copied(objects, &elems)?;
-    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(elems))))
+    elems.extend_from_slice(rest);
+    copy_into_fresh_list(heaps, elems)
 }
 
-fn tail_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
+fn tail_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
     // an empty list skips nothing and answers the empty list
-    let rest: Vec<Value> = objects
-        .list_at(ref_arg(args, 0)?)?
-        .iter()
-        .skip(1)
-        .copied()
-        .collect();
-    retain_copied(objects, &rest)?;
-    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(rest))))
+    let rest = heaps.list_at(ref_arg(args, 0)?)?;
+    let elems = rest.get(1..).unwrap_or(&[]).to_vec();
+    copy_into_fresh_list(heaps, elems)
 }
 
 fn collect_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let words: Vec<Value> = objects.list_at(ref_arg(args, 0)?)?.to_vec();
-    retain_copied(objects, &words)?;
-    Ok(NativeResult::Word(Value::Ref(objects.alloc_list(words))))
+    let elems = heaps.list_at(ref_arg(args, 0)?)?.to_vec();
+    copy_into_fresh_list(heaps, elems)
 }
 
 /// `head`'s and `first`'s one body: the checked first element in
@@ -897,15 +910,15 @@ fn collect_fn(
 /// trap. The miss payload is the inert unit word: there is no rejected
 /// index to carry, and callers read the payload only on the hit.
 fn first_element_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = objects.list_at(ref_arg(args, 0)?)?;
+    let elems = heaps.list_at(ref_arg(args, 0)?)?;
     Ok(match elems.first() {
         Some(&value) => {
-            if let Value::Ref(id) = value {
-                objects.inc(id)?;
+            if let Value::Ref(word) = value {
+                heaps.inc(word)?;
             }
             NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
@@ -923,11 +936,7 @@ fn first_element_fn(
 /// float follows IEEE and never traps, a NaN operand answering the other
 /// side. Any other word kind refuses like a comparison against a
 /// mismatched slot — the call site's own trap shape.
-fn max_fn(
-    _objects: &mut Objects,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
+fn max_fn(_heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
     match args {
         [Value::I64(a), Value::I64(b)] => Ok(NativeResult::Word(Value::I64((*a).max(*b)))),
         [Value::F64(a), Value::F64(b)] => Ok(NativeResult::Word(Value::F64((*a).max(*b)))),
@@ -959,7 +968,7 @@ fn max_fn(
 /// a `CALLT`, where no switch is possible — the bounce answer.
 #[allow(clippy::unnecessary_wraps)]
 fn fiber_control_bounce_fn(
-    _objects: &mut Objects,
+    _heaps: &mut Heaps,
     _out: &mut OutputSink,
     _args: &[Value],
 ) -> Result<NativeResult, Trap> {
@@ -1139,17 +1148,17 @@ pub fn resolve_generic(module: &str, index: u32) -> Option<&'static GenericFunct
 /// ([`ds_abi::BuiltinInstance`]). The string instance counts unicode
 /// scalar values; the list instance counts elements.
 fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
-    let (objects, _out) = vm.split();
+    let (mut heaps, _out) = vm.split();
     let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
     match instance {
         Value::I64(id) if id == ds_abi::BuiltinInstance::Str as i64 => {
             // char count, never bytes: multi-byte text measures its scalar values
-            let n = i64::try_from(objects.char_count(ref_arg(args, 0)?)?)
+            let n = i64::try_from(heaps.char_count(ref_arg(args, 0)?)?)
                 .expect("string length fits i64");
             Ok(NativeResult::Word(Value::I64(n)))
         },
         Value::I64(id) if id == ds_abi::BuiltinInstance::List as i64 => {
-            let elems = objects.list_at(ref_arg(args, 0)?)?;
+            let elems = heaps.list_at(ref_arg(args, 0)?)?;
             let n = i64::try_from(elems.len()).expect("list length fits i64");
             Ok(NativeResult::Word(Value::I64(n)))
         },
@@ -1172,8 +1181,8 @@ fn list_len_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    list_len_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    list_len_fn(&mut heaps, out, args)
 }
 
 fn list_get_generic_fn(
@@ -1181,8 +1190,8 @@ fn list_get_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    list_get_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    list_get_fn(&mut heaps, out, args)
 }
 
 fn list_concat_generic_fn(
@@ -1190,8 +1199,8 @@ fn list_concat_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    list_concat_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    list_concat_fn(&mut heaps, out, args)
 }
 
 fn map_len_generic_fn(
@@ -1199,8 +1208,8 @@ fn map_len_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    map_len_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    map_len_fn(&mut heaps, out, args)
 }
 
 fn map_get_generic_fn(
@@ -1208,23 +1217,23 @@ fn map_get_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    map_get_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    map_get_fn(&mut heaps, out, args)
 }
 
 fn cons_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    cons_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    cons_fn(&mut heaps, out, args)
 }
 
 fn head_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    first_element_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    first_element_fn(&mut heaps, out, args)
 }
 
 fn tail_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    tail_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    tail_fn(&mut heaps, out, args)
 }
 
 fn collect_generic_fn(
@@ -1232,8 +1241,8 @@ fn collect_generic_fn(
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let (objects, out) = vm.split();
-    collect_fn(objects, out, args)
+    let (mut heaps, out) = vm.split();
+    collect_fn(&mut heaps, out, args)
 }
 
 /// `max`'s one body: dispatch on the call's evidence word like `len`'s —
@@ -1247,8 +1256,8 @@ fn max_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
             if id == ds_abi::BuiltinInstance::Int as i64
                 || id == ds_abi::BuiltinInstance::Float as i64 =>
         {
-            let (objects, out) = vm.split();
-            max_fn(objects, out, args)
+            let (mut heaps, out) = vm.split();
+            max_fn(&mut heaps, out, args)
         },
         staged => Err(Trap::UnknownInstance {
             evidence: match staged {
@@ -1290,19 +1299,19 @@ fn fn_arg(args: &[Value], index: usize) -> Result<Value, Trap> {
 fn map_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
     let f = fn_arg(args, 1)?;
     let elems = {
-        let (objects, _) = vm.split();
-        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (mut heaps, _) = vm.split();
+        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
     };
     let res = {
-        let (objects, _) = vm.split();
-        objects.alloc_list(Vec::new())
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
     };
     for x in elems {
         let mapped = vm.call_hosted(f, &[x])?;
-        let (objects, _) = vm.split();
-        objects.push_list(res, mapped)?;
-        if let Value::Ref(id) = mapped {
-            objects.dec(id)?;
+        let (mut heaps, _) = vm.split();
+        heaps.push_list(res, mapped)?;
+        if let Value::Ref(word) = mapped {
+            heaps.dec(word)?;
         }
     }
     Ok(NativeResult::Word(Value::Ref(res)))
@@ -1320,19 +1329,19 @@ fn filter_generic_fn(
 ) -> Result<NativeResult, Trap> {
     let f = fn_arg(args, 1)?;
     let elems = {
-        let (objects, _) = vm.split();
-        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (mut heaps, _) = vm.split();
+        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
     };
     let res = {
-        let (objects, _) = vm.split();
-        objects.alloc_list(Vec::new())
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
     };
     for x in elems {
         let keep = vm.call_hosted(f, &[x])?;
         match keep {
             Value::Bool(true) => {
-                let (objects, _) = vm.split();
-                objects.push_list(res, x)?;
+                let (mut heaps, _) = vm.split();
+                heaps.push_list(res, x)?;
             },
             Value::Bool(false) => {},
             other => {
@@ -1363,26 +1372,26 @@ fn reduce_generic_fn(
 ) -> Result<NativeResult, Trap> {
     let f = fn_arg(args, 2)?;
     let elems = {
-        let (objects, _) = vm.split();
-        objects.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (mut heaps, _) = vm.split();
+        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
     };
     let mut acc = args[1];
     let mut owned = false;
     for x in elems {
         let next = vm.call_hosted(f, &[acc, x])?;
         if owned {
-            if let Value::Ref(id) = acc {
-                let (objects, _) = vm.split();
-                objects.dec(id)?;
+            if let Value::Ref(word) = acc {
+                let (mut heaps, _) = vm.split();
+                heaps.dec(word)?;
             }
         }
         acc = next;
         owned = true;
     }
     if !owned {
-        if let Value::Ref(id) = acc {
-            let (objects, _) = vm.split();
-            objects.inc(id)?;
+        if let Value::Ref(word) = acc {
+            let (mut heaps, _) = vm.split();
+            heaps.inc(word)?;
         }
     }
     Ok(NativeResult::Word(acc))
@@ -1391,7 +1400,7 @@ fn reduce_generic_fn(
 macro_rules! reserved {
     ($name:ident in $module:ident at $index:literal) => {
         fn $name(
-            _objects: &mut Objects,
+            _heaps: &mut Heaps,
             _out: &mut OutputSink,
             _args: &[Value],
         ) -> Result<NativeResult, Trap> {
@@ -1465,8 +1474,10 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// list block, and the nursery boundary's debug join
 /// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair, the generic
 /// container closes (`cons`, `head`, `tail`, `collect`, `first`,
-/// `max`) append past the map block, and the reentrant combinators
-/// (`map`, `filter`, `reduce`) append past the closes.
+/// `max`) append past the map block, the reentrant combinators
+/// (`map`, `filter`, `reduce`) append past the closes, and the
+/// string-list renderer `join` ([`BUILTIN_JOIN`]) appends past the
+/// nursery controls.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
     let fns = vec![
@@ -1647,10 +1658,17 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             control: Some(ControlNative::NurseryCancel),
             func: fiber_control_bounce_fn,
         },
+        NativeFunction {
+            name: "join",
+            params: &[SlotType::Ref, SlotType::Ref],
+            result_words: 1,
+            control: None,
+            func: join_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_REDUCE, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_NURSERY_CANCEL as usize + 1);
+    // BUILTIN_JOIN, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_JOIN as usize + 1);
     fns
 }
 
@@ -1765,10 +1783,25 @@ pub fn std_platform_module() -> Vec<NativeFunction> {
     fns
 }
 
-/// Where print/println write: process stdout by default, a captured buffer
-/// for tests and embedders ([`crate::Vm::capture_output`]).
+/// The native convention's second host reference (beside the object
+/// store): where print/println write — process stdout by default, a
+/// captured buffer for tests and embedders ([`crate::Vm::capture_output`])
+/// — plus the VM-lifetime host state that is not heap state, which rides
+/// this reference because a native body sees exactly the two (the store,
+/// the sink). The net natives' connection table is that state (crate::net):
+/// sockets are VM-lifetime like heap objects, but the store is the
+/// per-fiber half a split hands a body, while this sink stays VM-level.
+#[derive(Debug, Default)]
+pub struct OutputSink {
+    /// Where print/println write.
+    target: SinkTarget,
+    /// The connection table of the net natives.
+    net: Connections,
+}
+
+/// The write target of an [`OutputSink`].
 #[derive(Debug, Default, PartialEq)]
-pub enum OutputSink {
+enum SinkTarget {
     /// No capture requested yet; stdout. `Default` so `Vm::new` stays
     /// cheap and the switch to `Captured` is explicit.
     #[default]
@@ -1778,19 +1811,54 @@ pub enum OutputSink {
 }
 
 impl OutputSink {
+    /// A fresh in-memory sink (tests and embedders construct the capture
+    /// mode directly; the VM reaches it through [`crate::Vm::capture_output`]).
+    #[must_use]
+    pub fn captured() -> Self {
+        Self {
+            target: SinkTarget::Captured(Vec::new()),
+            net: Connections::default(),
+        }
+    }
+
+    /// Switches the write target to a fresh in-memory buffer, keeping
+    /// every other field.
+    pub(crate) fn capture(&mut self) {
+        self.target = SinkTarget::Captured(Vec::new());
+    }
+
+    /// The bytes captured so far, empty in stdout mode.
+    #[must_use]
+    pub fn captured_bytes(&self) -> &[u8] {
+        match &self.target {
+            SinkTarget::Captured(buf) => buf,
+            SinkTarget::Stdout => &[],
+        }
+    }
+
+    /// The connection table of the net natives.
+    pub(crate) fn net(&mut self) -> &mut Connections {
+        &mut self.net
+    }
+
+    /// Bounds every blocking net wait ([`crate::net`]).
+    pub(crate) fn set_net_timeout(&mut self, timeout: Duration) {
+        self.net.set_timeout(timeout);
+    }
+
     /// Writes `text` with no newline.
     ///
     /// # Errors
     ///
     /// [`Trap::OutputWrite`] when the underlying write fails.
     pub fn write_str(&mut self, text: &str) -> Result<(), Trap> {
-        match self {
+        match &mut self.target {
             // Stdout is line-buffered, so println's trailing newline is
             // the flush point; print keeps its no-newline contract
-            Self::Stdout => std::io::stdout()
+            SinkTarget::Stdout => std::io::stdout()
                 .write_all(text.as_bytes())
                 .map_err(|e| Trap::OutputWrite { kind: e.kind() }),
-            Self::Captured(buf) => {
+            SinkTarget::Captured(buf) => {
                 buf.extend_from_slice(text.as_bytes());
                 Ok(())
             },
@@ -1808,11 +1876,12 @@ impl OutputSink {
     }
 }
 
-/// Reads the `Ref` word at `index`, refusing like a mismatched slot with
-/// the offending argument's own kind (never another argument's).
-pub(crate) fn ref_arg(args: &[Value], index: usize) -> Result<u32, Trap> {
+/// Reads the `Ref` word at `index` — the full owner-routing pair —
+/// refusing like a mismatched slot with the offending argument's own
+/// kind (never another argument's).
+pub(crate) fn ref_arg(args: &[Value], index: usize) -> Result<RefId, Trap> {
     match args.get(index) {
-        Some(Value::Ref(id)) => Ok(*id),
+        Some(Value::Ref(word)) => Ok(*word),
         _ => Err(Trap::SlotTypeMismatch {
             slot: u8::try_from(index).expect("slot index fits u8"),
             expected: SlotType::Ref,
@@ -1835,34 +1904,28 @@ pub(crate) fn i64_arg(args: &[Value], index: usize) -> Result<i64, Trap> {
 }
 
 fn println_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
+    let text = heaps.str_at(ref_arg(args, 0)?)?;
     out.write_line(text)?;
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
-fn print_fn(
-    objects: &mut Objects,
-    out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
-    let text = objects.str_at(ref_arg(args, 0)?)?;
+fn print_fn(heaps: &mut Heaps, out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
+    let text = heaps.str_at(ref_arg(args, 0)?)?;
     out.write_str(text)?;
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
 fn str_int_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     match args {
-        [Value::I64(v)] => Ok(NativeResult::Word(Value::Ref(
-            objects.alloc_str(v.to_string()),
-        ))),
+        [Value::I64(v)] => Ok(NativeResult::Word(heaps.new_str(v.to_string()))),
         _ => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::I64,
@@ -1872,14 +1935,12 @@ fn str_int_fn(
 }
 
 fn str_float_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     match args {
-        [Value::F64(v)] => Ok(NativeResult::Word(Value::Ref(
-            objects.alloc_str(v.to_string()),
-        ))),
+        [Value::F64(v)] => Ok(NativeResult::Word(heaps.new_str(v.to_string()))),
         _ => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::F64,
@@ -1889,16 +1950,16 @@ fn str_float_fn(
 }
 
 fn str_bool_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     match args {
-        [Value::Bool(v)] => Ok(NativeResult::Word(Value::Ref(objects.intern(if *v {
+        [Value::Bool(v)] => Ok(NativeResult::Word(heaps.new_intern(if *v {
             "true"
         } else {
             "false"
-        })))),
+        }))),
         _ => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::Bool,
@@ -1908,61 +1969,61 @@ fn str_bool_fn(
 }
 
 /// The `io_err` span: the OS error rendered as `"<op> <path>: <error>"`.
-fn io_err(objects: &mut Objects, op: &str, path: &str, err: &std::io::Error) -> NativeResult {
+fn io_err(heaps: &mut Heaps, op: &str, path: &str, err: &std::io::Error) -> NativeResult {
     NativeResult::Tag {
         tag: PLATFORM_IO_ERR,
-        payload: Value::Ref(objects.alloc_str(format!("{op} {path}: {err}"))),
+        payload: heaps.new_str(format!("{op} {path}: {err}")),
     }
 }
 
 fn read_file_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let path = objects.str_at(ref_arg(args, 0)?)?.to_owned();
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
     Ok(match std::fs::read_to_string(&path) {
         Ok(text) => NativeResult::Tag {
             tag: PLATFORM_IO_OK,
-            payload: Value::Ref(objects.alloc_str(text)),
+            payload: heaps.new_str(text),
         },
-        Err(err) => io_err(objects, "read_file", &path, &err),
+        Err(err) => io_err(heaps, "read_file", &path, &err),
     })
 }
 
 fn write_file_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let path = objects.str_at(ref_arg(args, 0)?)?.to_owned();
-    let contents = objects.str_at(ref_arg(args, 1)?)?.to_owned();
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let contents = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
     Ok(match std::fs::write(&path, contents.as_bytes()) {
         // create-or-truncate; the payload word is the inert unit word
         Ok(()) => NativeResult::Tag {
             tag: PLATFORM_IO_OK,
             payload: Value::I64(0),
         },
-        Err(err) => io_err(objects, "write_file", &path, &err),
+        Err(err) => io_err(heaps, "write_file", &path, &err),
     })
 }
 
 fn file_exists_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     // total by contract: an entry the process cannot stat answers false
-    let path = objects.str_at(ref_arg(args, 0)?)?;
+    let path = heaps.str_at(ref_arg(args, 0)?)?;
     Ok(NativeResult::Word(Value::Bool(Path::new(path).exists())))
 }
 
 fn fs_list_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let dir = objects.str_at(ref_arg(args, 0)?)?.to_owned();
+    let dir = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
     // sorted, so listing order never depends on the platform's readdir
     let names = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
@@ -1972,38 +2033,50 @@ fn fs_list_fn(
     };
     let mut names = match names {
         Ok(names) => names,
-        Err(err) => return Ok(io_err(objects, "fs_list", &dir, &err)),
+        Err(err) => return Ok(io_err(heaps, "fs_list", &dir, &err)),
     };
     names.sort_unstable();
     let mut elems = Vec::with_capacity(names.len());
     for name in names {
-        elems.push(Value::Ref(objects.alloc_str(name)));
+        elems.push(heaps.new_str(name));
+    }
+    // each fresh name's birth count becomes the list's edge, so the
+    // frame claim its alloc entered leaves with the adoption
+    for elem in &elems {
+        if let Value::Ref(word) = *elem {
+            heaps.release_claim(word);
+        }
     }
     Ok(NativeResult::Tag {
         tag: PLATFORM_IO_OK,
-        payload: Value::Ref(objects.alloc_list(elems)),
+        payload: heaps.new_list(elems),
     })
 }
 
 fn file_size_fn(
-    objects: &mut Objects,
+    heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let path = objects.str_at(ref_arg(args, 0)?)?.to_owned();
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
     Ok(match std::fs::metadata(&path) {
         // no filesystem carries a length past i64::MAX
         Ok(meta) => NativeResult::Tag {
             tag: PLATFORM_IO_OK,
             payload: Value::I64(i64::try_from(meta.len()).expect("file size fits i64")),
         },
-        Err(err) => io_err(objects, "file_size", &path, &err),
+        Err(err) => io_err(heaps, "file_size", &path, &err),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        claims::ClaimTable,
+        fiber::{FIBER_ROOT, Fiber},
+        object::Objects,
+    };
 
     #[test]
     fn builtin_core_table_indices_are_contract() {
@@ -2060,7 +2133,8 @@ mod tests {
             "nursery_boundary"
         );
         assert_eq!(fns[BUILTIN_NURSERY_CANCEL as usize].name, "nursery_cancel");
-        assert_eq!(fns.len(), 45);
+        assert_eq!(fns[BUILTIN_JOIN as usize].name, "join");
+        assert_eq!(fns.len(), 46);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
@@ -2089,6 +2163,7 @@ mod tests {
             (BUILTIN_NURSERY_SPAWN, 1),
             (BUILTIN_NURSERY_BOUNDARY, 2),
             (BUILTIN_NURSERY_CANCEL, 1),
+            (BUILTIN_JOIN, 1),
             (BUILTIN_MAP_NEW, 1),
             (BUILTIN_MAP_SET, 1),
         ] {
@@ -2176,12 +2251,12 @@ mod tests {
         // each module's gaps report the module's own name and their index,
         // the same UnknownCallee an out-of-range index yields at resolution
         let traps_like = |module: &str, index: u32, fns: &[NativeFunction]| {
+            let mut objects = Objects::new(FIBER_ROOT);
+            let mut fibers: Vec<Fiber> = Vec::new();
+            let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+            let mut bare = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
             assert_eq!(
-                (fns[index as usize].func)(
-                    &mut Objects::new(),
-                    &mut OutputSink::Captured(Vec::new()),
-                    &[]
-                ),
+                (fns[index as usize].func)(&mut bare, &mut OutputSink::captured(), &[]),
                 Err(Trap::UnknownCallee {
                     module: module.into(),
                     func: index,
@@ -2199,54 +2274,64 @@ mod tests {
 
     #[test]
     fn println_writes_the_line_print_does_not() {
-        let mut objects = Objects::new();
-        let id = objects.intern("hello");
-        let mut out = OutputSink::Captured(Vec::new());
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let id = heaps.current().intern("hello");
+        let mut out = OutputSink::captured();
         assert_eq!(
-            println_fn(&mut objects, &mut out, &[Value::Ref(id)]),
+            println_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, id
+            ))]),
             Ok(NativeResult::Word(Value::I64(0)))
         );
-        assert_eq!(out, OutputSink::Captured(b"hello\n".to_vec()));
+        assert_eq!(out.captured_bytes(), b"hello\n");
         assert_eq!(
-            print_fn(&mut objects, &mut out, &[Value::Ref(id)]),
+            print_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, id
+            ))]),
             Ok(NativeResult::Word(Value::I64(0)))
         );
-        assert_eq!(out, OutputSink::Captured(b"hello\nhello".to_vec()));
+        assert_eq!(out.captured_bytes(), b"hello\nhello");
     }
 
     #[test]
     fn str_conversions_cover_the_scalar_types() {
-        let mut objects = Objects::new();
-        let mut out = OutputSink::Captured(Vec::new());
-        let v = str_int_fn(&mut objects, &mut out, &[Value::I64(-1)])
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let v = str_int_fn(&mut heaps, &mut out, &[Value::I64(-1)])
             .expect("int converts")
             .word()
             .expect("a single word");
         assert_eq!(
-            objects.str_at(match v {
-                Value::Ref(id) => id,
+            heaps.str_at(match v {
+                Value::Ref(word) => word,
                 _ => panic!("a string ref"),
             }),
             Ok("-1")
         );
-        let v = str_float_fn(&mut objects, &mut out, &[Value::F64(2.5)])
+        let v = str_float_fn(&mut heaps, &mut out, &[Value::F64(2.5)])
             .expect("float converts")
             .word()
             .expect("a single word");
         assert_eq!(
-            objects.str_at(match v {
-                Value::Ref(id) => id,
+            heaps.str_at(match v {
+                Value::Ref(word) => word,
                 _ => panic!("a string ref"),
             }),
             Ok("2.5")
         );
-        let v = str_bool_fn(&mut objects, &mut out, &[Value::Bool(false)])
+        let v = str_bool_fn(&mut heaps, &mut out, &[Value::Bool(false)])
             .expect("bool converts")
             .word()
             .expect("a single word");
         assert_eq!(
-            objects.str_at(match v {
-                Value::Ref(id) => id,
+            heaps.str_at(match v {
+                Value::Ref(word) => word,
                 _ => panic!("a string ref"),
             }),
             Ok("false")
@@ -2255,13 +2340,19 @@ mod tests {
 
     #[test]
     fn wrong_typed_arguments_name_their_own_slot() {
-        let mut objects = Objects::new();
-        let mut out = OutputSink::Captured(Vec::new());
-        let s = objects.intern("x");
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let s = heaps.current().intern("x");
         // ref_arg at index 1: concat's second word is the offender, so
         // the trap names its kind, not the first argument's
         assert_eq!(
-            concat_fn(&mut objects, &mut out, &[Value::Ref(s), Value::I64(5)]),
+            concat_fn(&mut heaps, &mut out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, s)),
+                Value::I64(5)
+            ]),
             Err(Trap::SlotTypeMismatch {
                 slot: 1,
                 expected: SlotType::Ref,
@@ -2271,7 +2362,7 @@ mod tests {
         // max's pair must agree on one numeric kind: the bool word at
         // index 1 breaks the int pair, cited with the other side's kind
         assert_eq!(
-            max_fn(&mut objects, &mut out, &[Value::I64(1), Value::Bool(true)]),
+            max_fn(&mut heaps, &mut out, &[Value::I64(1), Value::Bool(true)]),
             Err(Trap::SlotTypeMismatch {
                 slot: 1,
                 expected: SlotType::I64,
@@ -2282,22 +2373,29 @@ mod tests {
 
     #[test]
     fn parse_int_answers_both_span_members() {
-        let mut objects = Objects::new();
-        let mut out = OutputSink::Captured(Vec::new());
-        let ok = objects.intern("-42");
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let ok = heaps.current().intern("-42");
         assert_eq!(
-            parse_int_fn(&mut objects, &mut out, &[Value::Ref(ok)]),
+            parse_int_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, ok
+            ))]),
             Ok(NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
                 payload: Value::I64(-42),
             })
         );
-        let bad = objects.intern("12x");
+        let bad = heaps.current().intern("12x");
         assert_eq!(
-            parse_int_fn(&mut objects, &mut out, &[Value::Ref(bad)]),
+            parse_int_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, bad
+            ))]),
             Ok(NativeResult::Tag {
                 tag: PLATFORM_PARSE_ERR,
-                payload: Value::Ref(bad),
+                payload: Value::Ref(RefId::new(FIBER_ROOT, bad)),
             }),
             "the failure payload names the input text"
         );
@@ -2305,25 +2403,35 @@ mod tests {
 
     #[test]
     fn list_natives_construct_read_and_join() {
-        let mut objects = Objects::new();
-        let mut out = OutputSink::Captured(Vec::new());
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
         // the empty construction
-        let v = list_new_fn(&mut objects, &mut out, &[])
+        let v = list_new_fn(&mut heaps, &mut out, &[])
             .expect("new runs")
             .word()
             .expect("a single word");
         let Value::Ref(empty) = v else {
             panic!("a list ref, got {v:?}");
         };
-        assert_eq!(objects.list_at(empty), Ok(&[][..]));
+        assert_eq!(heaps.list_at(empty), Ok(&[][..]));
         // reads over any element kinds, both span members
-        let list = objects.alloc_list(vec![Value::I64(7), Value::Bool(true)]);
+        let list = heaps
+            .current()
+            .alloc_list(vec![Value::I64(7), Value::Bool(true)]);
         assert_eq!(
-            list_len_fn(&mut objects, &mut out, &[Value::Ref(list)]),
+            list_len_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, list
+            ))]),
             Ok(NativeResult::Word(Value::I64(2)))
         );
         assert_eq!(
-            list_get_fn(&mut objects, &mut out, &[Value::Ref(list), Value::I64(1)]),
+            list_get_fn(&mut heaps, &mut out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, list)),
+                Value::I64(1)
+            ]),
             Ok(NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
                 payload: Value::Bool(true),
@@ -2331,8 +2439,8 @@ mod tests {
         );
         for index in [2_i64, -1] {
             assert_eq!(
-                list_get_fn(&mut objects, &mut out, &[
-                    Value::Ref(list),
+                list_get_fn(&mut heaps, &mut out, &[
+                    Value::Ref(RefId::new(FIBER_ROOT, list)),
                     Value::I64(index)
                 ]),
                 Ok(NativeResult::Tag {
@@ -2343,9 +2451,9 @@ mod tests {
             );
         }
         // the join: a fresh object over both element runs
-        let v = list_concat_fn(&mut objects, &mut out, &[
+        let v = list_concat_fn(&mut heaps, &mut out, &[
             Value::Ref(empty),
-            Value::Ref(list),
+            Value::Ref(RefId::new(FIBER_ROOT, list)),
         ])
         .expect("concat runs")
         .word()
@@ -2353,37 +2461,116 @@ mod tests {
         let Value::Ref(joined) = v else {
             panic!("a list ref, got {v:?}");
         };
-        assert_ne!(joined, list, "the join is a fresh object");
+        assert_ne!(joined.id(), list, "the join is a fresh object");
         assert_eq!(
-            objects.list_at(joined),
+            heaps.list_at(joined),
             Ok(&[Value::I64(7), Value::Bool(true)][..])
         );
         // a non-list argument names no object
-        let str_obj = objects.intern("x");
+        let str_obj = heaps.current().intern("x");
         assert_eq!(
-            list_len_fn(&mut objects, &mut out, &[Value::Ref(str_obj)]),
+            list_len_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, str_obj
+            ))]),
             Err(Trap::UnknownObject { obj: str_obj })
         );
         // the construction append: every element word kind pushes in
         // place, the answer is the inert unit word
-        for value in [Value::I64(9), Value::Bool(false), Value::Ref(str_obj)] {
+        for value in [
+            Value::I64(9),
+            Value::Bool(false),
+            Value::Ref(RefId::new(FIBER_ROOT, str_obj)),
+        ] {
             assert_eq!(
-                list_push_fn(&mut objects, &mut out, &[Value::Ref(empty), value]),
+                list_push_fn(&mut heaps, &mut out, &[Value::Ref(empty), value]),
                 Ok(NativeResult::Word(Value::I64(0)))
             );
         }
         assert_eq!(
-            objects.list_at(empty),
-            Ok(&[Value::I64(9), Value::Bool(false), Value::Ref(str_obj)][..]),
+            heaps.list_at(empty),
+            Ok(&[
+                Value::I64(9),
+                Value::Bool(false),
+                Value::Ref(RefId::new(FIBER_ROOT, str_obj))
+            ][..]),
             "the pushes appended in order"
         );
         assert_eq!(
-            list_push_fn(&mut objects, &mut out, &[
-                Value::Ref(str_obj),
+            list_push_fn(&mut heaps, &mut out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, str_obj)),
                 Value::I64(0)
             ]),
             Err(Trap::UnknownObject { obj: str_obj }),
             "pushing onto a string object traps"
         );
+    }
+
+    /// The copy natives hand each copied `Ref` element's count to the
+    /// fresh list's edge inside their copy loops, so the ledger holds
+    /// the frame's own words only (the caller's head, the lists
+    /// themselves) and the deaths drain through the edges.
+    #[test]
+    fn list_copies_hand_element_counts_to_the_edge() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut out = OutputSink::captured();
+        let (a, b, head, src, consed, tailed, collected) = {
+            let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+            let str_word = |heaps: &mut Heaps, text: &str| {
+                let Value::Ref(word) = heaps.new_str(text.to_owned()) else {
+                    panic!("a fresh string is its reference word");
+                };
+                word
+            };
+            // the producer-native construction shape: fresh elements whose
+            // birth counts the adopting list's edge owns
+            let a = str_word(&mut heaps, "a");
+            let b = str_word(&mut heaps, "b");
+            heaps.release_claim(a);
+            heaps.release_claim(b);
+            let Value::Ref(src) = heaps.new_list(vec![Value::Ref(a), Value::Ref(b)]) else {
+                panic!("a fresh list is its reference word");
+            };
+            // the caller's own head word keeps its frame claim
+            let head = str_word(&mut heaps, "h");
+            let word_of = |v: Result<NativeResult, Trap>| match v.expect("the copy runs").word() {
+                Some(Value::Ref(word)) => word,
+                other => panic!("a list ref, got {other:?}"),
+            };
+            let consed = word_of(cons_fn(&mut heaps, &mut out, &[
+                Value::Ref(head),
+                Value::Ref(src),
+            ]));
+            let tailed = word_of(tail_fn(&mut heaps, &mut out, &[Value::Ref(consed)]));
+            let collected = word_of(collect_fn(&mut heaps, &mut out, &[Value::Ref(src)]));
+            (a, b, head, src, consed, tailed, collected)
+        };
+        // one edge count per copied element word (src, consed, tailed,
+        // collected own the four counts of a and b) and the caller's own
+        // head count rides beside consed's edge count
+        assert_eq!(objects.rc_at(a.id()), Ok(4));
+        assert_eq!(objects.rc_at(b.id()), Ok(4));
+        assert_eq!(objects.rc_at(head.id()), Ok(2));
+        // the ledger answers the frame's words only: no element claim
+        let key = |(word, n): &(RefId, u32)| (word.fiber().index(), word.id(), *n);
+        let mut drained = claims[0].take_all_except(None);
+        drained.sort_unstable_by_key(key);
+        let mut want = vec![
+            (src, 1),
+            (head, 1),
+            (consed, 1),
+            (tailed, 1),
+            (collected, 1),
+        ];
+        want.sort_unstable_by_key(key);
+        assert_eq!(drained, want, "the frames own the lists and the head only");
+        // the deaths drain the whole graph through the edges
+        for word in [head, src, consed, tailed, collected] {
+            objects
+                .dec(word.id())
+                .expect("each frame word drops its count");
+        }
+        assert!(objects.is_empty(), "the edge-owned elements died inside");
     }
 }

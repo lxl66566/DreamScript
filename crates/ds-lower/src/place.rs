@@ -23,7 +23,10 @@
 //! * staging into the overlay: a local callee's borrow parameter owns its word (the callee balances
 //!   with its own exit drops), so a dying source forwards its count and a live source dups; a
 //!   native is a transient borrow window (C2) — never a dup, and a dying source drops right after
-//!   the call;
+//!   the call. The window opens before the call's operand evaluation and pins every word its CALL
+//!   reads: a death firing inside that window (a later operand's own last-use dec) defers to the
+//!   window's flush, so the object survives the CALL; nested windows flush LIFO, and a word several
+//!   nested calls read dies at the outermost reading window's flush;
 //! * exits (RET/RETSPAN/CALLT) transfer the returned words and drop every other still-owned word,
 //!   in ascending slot order; HALT ends the program, where the heap dies whole — no drops.
 //!
@@ -65,24 +68,29 @@ use ds_diag::Span;
 use super::func::Op;
 
 /// One declared deinit hook (C5): the pool index of the struct's
-/// synthesized deinit function plus the word width of the value it
-/// stages at the death.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// synthesized deinit function, the word width of the value it stages
+/// at the death, and the span's `Ref` word offsets — the claim decs
+/// each at the value's death, so a multi-`Ref` span dies as one unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hook {
     /// The pool index of the `Constant::FuncRef` naming the deinit.
     pub(crate) pool: u16,
     /// How many words the dying value spans; the hook stages them all.
     pub(crate) width: u8,
+    /// Offsets of the span's `Ref` words from the claim's base word.
+    pub(crate) refs: std::rc::Rc<[u8]>,
 }
 
 /// One outstanding reference count this frame must account for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Owned {
     /// The deinit hook of the dying value this word anchors (C5). A
     /// hook rides the value's base word only: a scalar base word owns
-    /// the hook without any `Ref` count.
+    /// the hook without any `Ref` count, and the span's other `Ref`
+    /// words fold into the claim (their decs fire with the hook's).
     hook: Option<Hook>,
-    /// Whether the word carries a `Ref` count alongside any hook.
+    /// Whether the word carries a `Ref` count alongside any hook. A
+    /// claimed base word keeps this clear — its decs are the hook's.
     count: bool,
     /// A deinit value's word: its uses are borrows and never kill it
     /// (the C5 discipline keeps the value live to its drop site); only
@@ -95,6 +103,23 @@ pub(crate) struct Owned {
 
 /// The per-function ownership map snapshot fork/join passes around.
 pub(crate) type State = BTreeMap<u8, Owned>;
+
+/// One open native-call borrow window: the words its CALL reads (each
+/// staged Ref argument and the body words its already-evaluated operands
+/// resolved to) plus the deaths deferred to the window's flush. The
+/// emitter pushes one window before a native call's operand evaluation
+/// and pops it at the call's flush, so windows nest LIFO — an inner
+/// call's flush runs before the outer CALL reads.
+#[derive(Default)]
+struct Window {
+    /// Words the window's CALL reads or will read.
+    readers: HashSet<u8>,
+    /// Words whose death decs fire at this window's flush, in
+    /// first-deferral order; `seen` dedupes a word both staged and dying
+    /// at one call so the count dies exactly once.
+    deferred: Vec<u8>,
+    seen: HashSet<u8>,
+}
 
 /// The placement state machine over one function's walk.
 pub(crate) struct Placement {
@@ -129,8 +154,8 @@ pub(crate) struct Placement {
     /// suppressed), its content rolls over at in-body overwrites, and the
     /// final content dies past the join.
     loop_claims: Vec<HashSet<u8>>,
-    /// Staged Ref words a native borrow must drop after its call.
-    native_pending: Vec<u8>,
+    /// The open native-call borrow windows, outermost first.
+    windows: Vec<Window>,
     /// Whether the walk's current path exited the frame since the last
     /// fork (an arm that exits never reaches the join, so its state
     /// must not constrain what the join keeps).
@@ -162,7 +187,7 @@ impl Placement {
             forwarded: HashSet::new(),
             loop_depth: 0,
             loop_claims: Vec::new(),
-            native_pending: Vec::new(),
+            windows: Vec::new(),
             diverged: false,
         }
     }
@@ -182,30 +207,47 @@ impl Placement {
 
     /// Registers one deinit-carrying value's claim (C5): the hook
     /// anchors the value's base word and fires at the value's unique
-    /// death; every already-owned word of the value pins — its uses are
-    /// borrows, never deaths. `count` says whether the base word also
-    /// holds a `Ref` count (a first `Ref` field); a scalar base word
-    /// owns the hook alone and never decs.
-    pub(crate) fn claimed(&mut self, base: u8, hook: Hook, count: bool, words: &[u8]) {
+    /// death, dec-ing every `Ref` word of the span (the hook's refs).
+    /// The span's other plain-count words fold into the claim — their
+    /// decs fire with the hook's, never on their own — while a word
+    /// anchoring its own nested claim keeps it (the nested value's
+    /// death stays its own). Every already-owned word of the value
+    /// pins — its uses are borrows, never deaths.
+    pub(crate) fn claimed(&mut self, base: u8, hook: Hook, words: &[u8]) {
         match self.owned.get_mut(&base) {
             Some(owned) => {
                 owned.hook = Some(hook);
+                owned.count = false;
                 owned.pinned = true;
             },
             None => {
                 self.owned.insert(base, Owned {
                     hook: Some(hook),
-                    count,
+                    count: false,
                     pinned: true,
                     depth: self.loop_depth,
                 });
             },
         }
         for &word in words {
-            if let Some(owned) = self.owned.get_mut(&word) {
-                owned.pinned = true;
+            match self.owned.get_mut(&word) {
+                // a plain count word of the span folds into the claim
+                Some(owned) if owned.hook.is_none() => {
+                    self.owned.remove(&word);
+                },
+                // a nested claim keeps its own death
+                Some(owned) => {
+                    owned.pinned = true;
+                },
+                None => {},
             }
         }
+    }
+
+    /// Whether the placement currently owns `word`'s count (a guard's
+    /// consumption check reads ownership before and after its walk).
+    pub(crate) fn owns(&self, word: u8) -> bool {
+        self.owned.contains_key(&word)
     }
 
     /// Whether one word anchors a deinit value's claim.
@@ -215,13 +257,24 @@ impl Placement {
             .is_some_and(|owned| owned.hook.is_some())
     }
 
+    /// The base word of the span claim covering `word`, if one does: a
+    /// folded word of a deinit value answers its claim's base, so a
+    /// hand-off can fire the claim while the value's words are live.
+    pub(crate) fn claim_base_of(&self, word: u8) -> Option<u8> {
+        self.owned.iter().find_map(|(base, owned)| {
+            let hook = owned.hook.as_ref()?;
+            (word >= *base && usize::from(word - base) < usize::from(hook.width)).then_some(*base)
+        })
+    }
+
     /// Fires one word's deinit claim at a hand-off (C5): the word
-    /// escapes as a smaller value (a scalar field read of the dying
-    /// struct), so the claim the word anchors runs here while the
-    /// value's other words are still live. A count the word carries
-    /// rides the hand-off untouched — the claim is spent, the count is
-    /// the returned value's.
-    pub(crate) fn fire_claim(&mut self, code: &mut Vec<Op>, word: u8) {
+    /// escapes as a smaller value (a field read of the dying struct),
+    /// so the claim the word anchors runs here while the value's other
+    /// words are still live. The `Ref` words of the span whose absolute
+    /// word the hand-off does not carry dec right after the hook; a
+    /// count whose word escapes rides the hand-off untouched — the
+    /// claim is spent, the count is the returned value's.
+    pub(crate) fn fire_claim(&mut self, code: &mut Vec<Op>, word: u8, escaping: &[u8]) {
         let Some(hook) = self
             .owned
             .get_mut(&word)
@@ -239,6 +292,14 @@ impl Placement {
             callee: hook.pool,
             nargs: hook.width,
         });
+        for &offset in hook.refs.iter() {
+            let count_word = word + offset;
+            if !escaping.contains(&count_word) {
+                code.push(Op::RcDec {
+                    src: super::func::Slot::body(count_word),
+                });
+            }
+        }
     }
 
     /// A binder starts naming `words`. Aliases add to the set; the word's
@@ -348,21 +409,55 @@ impl Placement {
     // ---- copies, reads, and drops ---------------------------------------------------
 
     /// A `Mov` copied `src` into the body word `dst` (already emitted).
-    /// Transfer on the source's death, duplication otherwise.
+    /// Transfer on the source's death, duplication otherwise. A word
+    /// folded into a span claim borrows instead: the claim keeps its
+    /// count (the hook reads it at the claim's death), so the copy incs
+    /// and owns a fresh one — unless the destination sits inside the
+    /// moved claim's own span, where the bits ride the claim.
     pub(crate) fn copied(&mut self, code: &mut Vec<Op>, dst: u8, src: u8) {
-        let Some(owned) = self.owned.get(&src).copied() else {
+        if let Some(owned) = self.owned.get(&src).cloned() {
+            // A pinned word belongs to a deinit value: the copy site is
+            // the checker's consuming move (a linear value never
+            // alias-copies), so the claim and its count transfer with no
+            // dup.
+            if owned.pinned || self.dies_at(src) {
+                // the count moves with the word
+                self.owned.remove(&src);
+                self.owned.insert(dst, owned);
+            } else {
+                Self::emit_inc(code, src);
+                self.owned.insert(dst, owned);
+            }
             return;
-        };
-        // A pinned word belongs to a deinit value: the copy site is the
-        // checker's consuming move (a linear value never alias-copies),
-        // so the claim and its count transfer with no dup.
-        if owned.pinned || self.dies_at(src) {
-            // the count moves with the word
-            self.owned.remove(&src);
-            self.owned.insert(dst, owned);
-        } else {
+        }
+        if self.claim_base_of(src).is_some() && self.claim_base_of(dst).is_none() {
             Self::emit_inc(code, src);
+            self.owned.insert(dst, Owned {
+                hook: None,
+                count: true,
+                pinned: false,
+                depth: self.loop_depth,
+            });
+            self.recompute_death(dst);
+        }
+    }
+
+    /// One Ref word duplicated unconditionally: a construct that keeps
+    /// the source live past its checker-recorded death position (a
+    /// guarded match arm's scrutinee copy) owns its dup outright — the
+    /// source's count is not this use's to consume, so the death test
+    /// does not apply.
+    pub(crate) fn duped(&mut self, code: &mut Vec<Op>, dst: u8, src: u8) {
+        if self.owned.contains_key(&src) {
+            Self::emit_inc(code, src);
+            let owned = Owned {
+                hook: None,
+                count: true,
+                pinned: false,
+                depth: self.loop_depth,
+            };
             self.owned.insert(dst, owned);
+            self.recompute_death(dst);
         }
     }
 
@@ -390,7 +485,7 @@ impl Placement {
     /// and the final content dies past the loop.
     pub(crate) fn store_over(&mut self, code: &mut Vec<Op>, words: &[u8]) {
         for &word in words {
-            if let Some(owned) = self.owned.get(&word).copied() {
+            if let Some(owned) = self.owned.get(&word).cloned() {
                 Self::emit_drop(code, word, owned);
                 if !self.loop_carried(word) {
                     self.owned.remove(&word);
@@ -402,30 +497,48 @@ impl Placement {
     /// One Ref word staged into the overlay for a local callee (the Mov is
     /// emitted): the callee's borrow parameter owns the handed word and
     /// drops it at its own exit, so a dying source forwards its count and
-    /// a live source dups.
+    /// a live source dups. A word an enclosing native window still reads
+    /// cannot forward — the callee decs its parameter inside the CALL,
+    /// before the enclosing window's CALL reads the word — so the
+    /// handing dups instead and the frame keeps its count for that
+    /// window's flush.
     pub(crate) fn staged_local(&mut self, code: &mut Vec<Op>, src: u8) {
         if self.owned.contains_key(&src) {
-            if self.dies_at(src) {
+            if self.dies_at(src) && self.enclosing_window_reads(src) {
+                Self::emit_inc(code, src);
+            } else if self.dies_at(src) {
                 self.owned.remove(&src);
                 self.forwarded.insert(src);
             } else {
                 Self::emit_inc(code, src);
             }
-        } else if self.forwarded.contains(&src) {
-            // the count already left at this use; the extra handed word
-            // needs its own (the callee drops each parameter once)
+        } else if self.forwarded.contains(&src) || self.claim_base_of(src).is_some() {
+            // the count already left at this use, or the word belongs to
+            // a span claim (a deinit value's borrow): the extra handed
+            // word needs its own (the callee drops each parameter once,
+            // the claim keeps its count for the hook)
             Self::emit_inc(code, src);
         }
+    }
+
+    /// Whether an open window below the innermost one reads `word`: its
+    /// CALL runs after the current emission's, so the word must outlive
+    /// this call.
+    fn enclosing_window_reads(&self, word: u8) -> bool {
+        self.windows
+            .get(..self.windows.len().saturating_sub(1))
+            .is_some_and(|below| below.iter().any(|w| w.readers.contains(&word)))
     }
 
     /// One Ref word staged for a local callee the frame tail-transfers
     /// to: the transfer ends the frame, so no post-transfer position
     /// exists for a dup or a drop — the count rides the callee (its own
     /// exit drops the handed word) and a claim the word anchors fires
-    /// here, at the value's frame-exit death, with its fields alive.
+    /// here, at the value's frame-exit death, with its fields alive,
+    /// the span's non-escaping `Ref` words dec-ing behind the hook.
     pub(crate) fn staged_tail_local(&mut self, code: &mut Vec<Op>, src: u8) {
         if self.owned.contains_key(&src) {
-            self.fire_claim(code, src);
+            self.fire_claim(code, src, &[src]);
             self.owned.remove(&src);
             self.forwarded.insert(src);
         } else if self.forwarded.contains(&src) {
@@ -451,17 +564,88 @@ impl Placement {
         }
         if tail {
             self.owned.remove(&src);
-        } else if self.dies_at(src) {
-            self.native_pending.push(src);
+            return;
+        }
+        // the window's CALL reads the staged word, so its own death pins
+        // inside it
+        if let Some(window) = self.windows.last_mut() {
+            window.readers.insert(src);
+        }
+        if self.dies_at(src) {
+            self.defer_death(src);
         }
     }
 
-    /// The native call returned: flush the drops its borrow windows owe.
+    /// Opens one native call's borrow window: the walk pushes it before
+    /// evaluating the call's operands (a later operand's own use can fire
+    /// an earlier word's last-use dec there, and the window pins every
+    /// word the CALL still reads) and pops it at the call's flush.
+    pub(crate) fn native_open(&mut self) {
+        self.windows.push(Window::default());
+    }
+
+    /// Registers words the innermost open window's CALL will read: each
+    /// staged Ref argument and, eagerly, the body words the call's
+    /// already-evaluated operands resolved to.
+    pub(crate) fn native_reads(&mut self, words: &[u8]) {
+        if let Some(window) = self.windows.last_mut() {
+            window.readers.extend(words.iter().copied());
+        }
+    }
+
+    /// The outermost open window whose CALL reads `word`: an inner
+    /// window flushes before an outer CALL reads, so a word several
+    /// nested calls read must die at the outermost reader's flush.
+    fn pinning_window(&self, word: u8) -> Option<usize> {
+        self.windows.iter().position(|w| w.readers.contains(&word))
+    }
+
+    /// Defers one death into its pinning window's flush list; false when
+    /// no open window reads the word, so the caller drops it now.
+    fn defer_death(&mut self, word: u8) -> bool {
+        let Some(index) = self.pinning_window(word) else {
+            return false;
+        };
+        let window = &mut self.windows[index];
+        if window.seen.insert(word) {
+            window.deferred.push(word);
+        }
+        true
+    }
+
+    /// The native call returned: pop its borrow window and flush the
+    /// deaths the window deferred — the CALL has consumed the staged
+    /// words, so their counts die now, in first-deferral order.
     pub(crate) fn native_done(&mut self, code: &mut Vec<Op>) {
-        for word in std::mem::take(&mut self.native_pending) {
+        debug_assert!(
+            !self.windows.is_empty(),
+            "every native flush pairs with its window's open"
+        );
+        let Some(window) = self.windows.pop() else {
+            return;
+        };
+        for word in window.deferred {
             if self.owned.contains_key(&word) {
                 self.drop_word(code, word);
             }
+        }
+    }
+
+    /// The frame's tail transfer flushed its borrow window: the staged
+    /// words ride the CALLT with their counts (a local callee owns its
+    /// borrow parameters; the root frame's native tail ends the program,
+    /// where the heap dies whole), so deferred deaths abandon instead of
+    /// dec'ing — no legal position exists after the transfer.
+    pub(crate) fn native_tail_transfer(&mut self) {
+        debug_assert!(
+            !self.windows.is_empty(),
+            "every native flush pairs with its window's open"
+        );
+        let Some(window) = self.windows.pop() else {
+            return;
+        };
+        for word in window.deferred {
+            self.owned.remove(&word);
         }
     }
 
@@ -470,8 +654,14 @@ impl Placement {
     /// the value's fields are still alive — then the RCDEC consumes the
     /// count when the word carries one (a unique death pools the block
     /// for reuse inside the `ds-vm/src/object.rs` store — the
-    /// dec-to-alloc pairing needs no uop).
+    /// dec-to-alloc pairing needs no uop). A death firing while an open
+    /// native window's CALL still reads the word defers instead: the dec
+    /// moves to that window's flush, after the CALL, and the word stays
+    /// owned so the count dies exactly once, at the flush.
     fn drop_word(&mut self, code: &mut Vec<Op>, word: u8) {
+        if self.defer_death(word) {
+            return;
+        }
         let owned = self.owned.remove(&word).unwrap_or(Owned {
             hook: None,
             count: true,
@@ -482,7 +672,9 @@ impl Placement {
     }
 
     /// Emits one drop without touching the ownership map — the exit path
-    /// emits from a snapshot so sibling paths keep their counts.
+    /// emits from a snapshot so sibling paths keep their counts. A claim
+    /// stages its whole span, calls the hook, then decs every `Ref` word
+    /// of the span (the hook's refs); an unclaimed count decs alone.
     fn emit_drop(code: &mut Vec<Op>, word: u8, owned: Owned) {
         if let Some(hook) = owned.hook {
             for index in 0..hook.width {
@@ -495,6 +687,12 @@ impl Placement {
                 callee: hook.pool,
                 nargs: hook.width,
             });
+            for &offset in hook.refs.iter() {
+                code.push(Op::RcDec {
+                    src: super::func::Slot::body(word + offset),
+                });
+            }
+            return;
         }
         if owned.count {
             code.push(Op::RcDec {
@@ -513,7 +711,7 @@ impl Placement {
     /// inside its arm, deinit hook first like every drop.
     pub(crate) fn emit_drops(code: &mut Vec<Op>, dying: &[(u8, Owned)]) {
         for (word, owned) in dying {
-            Self::emit_drop(code, *word, *owned);
+            Self::emit_drop(code, *word, owned.clone());
         }
     }
 
@@ -614,7 +812,7 @@ impl Placement {
             Some(first) => first
                 .iter()
                 .filter(|(word, _)| live.iter().all(|arm| arm.contains_key(word)))
-                .map(|(word, owned)| (*word, *owned))
+                .map(|(word, owned)| (*word, owned.clone()))
                 .collect(),
             // every arm exited: no path reaches the join, nothing flows on
             None => State::new(),
@@ -628,7 +826,7 @@ impl Placement {
                     state
                         .iter()
                         .filter(|(word, _)| !keep.contains_key(word))
-                        .map(|(word, owned)| (*word, *owned))
+                        .map(|(word, owned)| (*word, owned.clone()))
                         .collect()
                 }
             })
@@ -649,7 +847,7 @@ impl Placement {
         self.owned = first
             .iter()
             .filter(|(word, _)| arms.iter().all(|arm| arm.contains_key(word)))
-            .map(|(word, owned)| (*word, *owned))
+            .map(|(word, owned)| (*word, owned.clone()))
             .collect();
         for word in self.owned.keys().copied().collect::<Vec<_>>() {
             self.recompute_death(word);
@@ -668,7 +866,7 @@ impl Placement {
             .owned
             .iter()
             .filter(|(word, _)| !transferred.contains(word))
-            .map(|(word, owned)| (*word, *owned))
+            .map(|(word, owned)| (*word, owned.clone()))
             .collect();
         for (word, owned) in dying {
             Self::emit_drop(code, word, owned);
@@ -697,16 +895,26 @@ mod tests {
         Placement::new(HashMap::new(), HashSet::new())
     }
 
+    fn hook(pool: u16, width: u8, refs: &[u8]) -> Hook {
+        Hook {
+            pool,
+            width,
+            refs: std::rc::Rc::from(refs),
+        }
+    }
+
     /// The deinit hook (C5): a dying value's claim stages its whole word
-    /// span, calls the synthesized deinit, then decs when its base word
-    /// carries a count — the structure every drop site routes through.
+    /// span, calls the synthesized deinit, then decs every `Ref` word of
+    /// the span — the structure every drop site routes through.
     #[test]
-    fn a_deinit_death_calls_the_hook_before_the_dec() {
+    fn a_deinit_death_calls_the_hook_before_the_decs() {
         let mut rc = placement();
         let mut code = Vec::new();
-        // a Ref-backed base word: the claim rides the count word
+        // a span with Refs at both words: the second word's independent
+        // count folds into the claim, both dec behind the hook
         rc.produced(3);
-        rc.claimed(3, Hook { pool: 42, width: 2 }, true, &[3, 4]);
+        rc.produced(4);
+        rc.claimed(3, hook(42, 2, &[0, 1]), &[3, 4]);
         rc.drop_word(&mut code, 3);
         assert_eq!(
             code,
@@ -724,13 +932,18 @@ mod tests {
                     nargs: 2,
                 },
                 Op::RcDec { src: Slot::body(3) },
+                Op::RcDec { src: Slot::body(4) },
             ],
-            "the hook stages the span, calls, then decs the count"
+            "the hook stages the span, calls, then decs every Ref word"
+        );
+        assert!(
+            !rc.owned.contains_key(&4),
+            "the folded word rides the claim"
         );
         // a scalar base word: the hook fires alone, nothing decs
         let mut rc = placement();
         let mut code = Vec::new();
-        rc.claimed(7, Hook { pool: 42, width: 1 }, false, &[]);
+        rc.claimed(7, hook(42, 1, &[]), &[]);
         rc.drop_word(&mut code, 7);
         assert_eq!(
             code,
@@ -748,6 +961,83 @@ mod tests {
         );
     }
 
+    /// A hand-off fires the covering claim: the hook stages the whole
+    /// span while the escaping words stay live, and the span's `Ref`
+    /// words the hand-off does not carry dec behind the hook.
+    #[test]
+    fn a_hand_off_fires_the_covering_claim_and_decs_the_rest() {
+        let mut rc = placement();
+        let mut code = Vec::new();
+        rc.claimed(3, hook(42, 3, &[0, 2]), &[3, 5]);
+        // a folded word answers its claim's base (the anchor included)
+        assert_eq!(rc.claim_base_of(5), Some(3));
+        assert_eq!(rc.claim_base_of(3), Some(3));
+        assert_eq!(rc.claim_base_of(9), None);
+        // the word at offset 1 escapes (a scalar field read of the span)
+        rc.fire_claim(&mut code, 3, &[4]);
+        assert_eq!(
+            code,
+            vec![
+                Op::Mov {
+                    dst: Slot::overlay(0),
+                    src: Slot::body(3),
+                },
+                Op::Mov {
+                    dst: Slot::overlay(1),
+                    src: Slot::body(4),
+                },
+                Op::Mov {
+                    dst: Slot::overlay(2),
+                    src: Slot::body(5),
+                },
+                Op::Call {
+                    callee: 42,
+                    nargs: 3,
+                },
+                Op::RcDec { src: Slot::body(3) },
+                Op::RcDec { src: Slot::body(5) },
+            ],
+            "the claim decs the Ref words the hand-off leaves behind"
+        );
+    }
+
+    /// A copy of a word folded into a claim borrows: the destination owns
+    /// a fresh inc'd count (the claim keeps its own for the hook), and a
+    /// copy into the claim's own moved span rides silently.
+    #[test]
+    fn a_folded_word_copies_as_a_borrow() {
+        let mut rc = placement();
+        rc.produced(4);
+        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        let mut code = Vec::new();
+        rc.copied(&mut code, 8, 4);
+        assert_eq!(
+            code,
+            vec![Op::RcInc { src: Slot::body(4) }],
+            "the field-read copy incs and owns its count"
+        );
+        assert!(rc.owned.contains_key(&8));
+        // a whole-value move lands inside the moved claim's span: silent
+        let mut rc = placement();
+        rc.produced(4);
+        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        rc.copied(&mut code, 10, 3);
+        let mut code = Vec::new();
+        rc.copied(&mut code, 11, 4);
+        assert_eq!(code, Vec::new(), "the claim's own span carries the bits");
+        // a staged folded word borrows with an inc (the callee decs it)
+        let mut rc = placement();
+        rc.produced(4);
+        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        let mut code = Vec::new();
+        rc.staged_local(&mut code, 4);
+        assert_eq!(
+            code,
+            vec![Op::RcInc { src: Slot::body(4) }],
+            "the staged borrow incs; the claim keeps its count"
+        );
+    }
+
     /// A pinned deinit word never dies at a use: borrows keep it alive
     /// to the scope end, where the last alias leaving kills it once.
     #[test]
@@ -756,7 +1046,7 @@ mod tests {
         let b = binder_span(10);
         let use_at = binder_span(60);
         rc.last_use.insert(b, (use_at, true));
-        rc.claimed(7, Hook { pool: 9, width: 1 }, false, &[7]);
+        rc.claimed(7, hook(9, 1, &[]), &[7]);
         rc.bound(b, &[7]);
         rc.use_of(b, use_at);
         let mut code = Vec::new();
@@ -910,6 +1200,143 @@ mod tests {
             vec![Op::RcDec { src: Slot::body(4) }],
             "the final content dies at the frame exit"
         );
+    }
+
+    /// The borrow-window stack: a death firing inside an open native
+    /// window whose CALL still reads the word defers to that window's
+    /// flush — the read emits nothing, the staging does not re-kill the
+    /// word (the deferred dec and the staged borrow's own dec are the
+    /// same count, deduped), and the flush decs exactly once.
+    #[test]
+    fn an_open_window_defers_a_staged_word_death_to_its_flush() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let death = binder_span(60);
+        rc.last_use.insert(b, (death, true));
+        rc.produced(4);
+        rc.bound(b, &[4]);
+        rc.native_open();
+        rc.native_reads(&[4]);
+        // a later operand's own use fires the binder's last-use dec
+        rc.use_of(b, death);
+        let mut code = Vec::new();
+        rc.read(&mut code, &[4]);
+        assert!(code.is_empty(), "the window pins the word past the read");
+        assert!(rc.owned.contains_key(&4), "the deferred word stays owned");
+        // the staging of the same word is the same death, not a second one
+        rc.staged_native(4, false);
+        rc.native_done(&mut code);
+        assert_eq!(
+            code,
+            vec![Op::RcDec { src: Slot::body(4) }],
+            "the flush decs the deferred count exactly once, after the CALL"
+        );
+        assert!(!rc.owned.contains_key(&4));
+    }
+
+    /// Nested windows flush LIFO, and a word several nested calls read
+    /// dies at the outermost reading window's flush: the inner window's
+    /// flush leaves it alone so the outer CALL still reads a live
+    /// object.
+    #[test]
+    fn nested_windows_flush_the_outermost_reader_last() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let death = binder_span(60);
+        rc.last_use.insert(b, (death, true));
+        rc.produced(4);
+        rc.bound(b, &[4]);
+        rc.native_open();
+        rc.native_reads(&[4]);
+        rc.native_open();
+        rc.use_of(b, death);
+        rc.staged_native(4, false);
+        let mut code = Vec::new();
+        rc.read(&mut code, &[4]);
+        assert!(code.is_empty(), "the death defers past the inner window");
+        rc.native_done(&mut code);
+        assert!(
+            code.is_empty(),
+            "the inner flush leaves the outer window's word alive"
+        );
+        assert!(rc.owned.contains_key(&4));
+        rc.native_done(&mut code);
+        assert_eq!(
+            code,
+            vec![Op::RcDec { src: Slot::body(4) }],
+            "the outermost reading window's flush decs it once"
+        );
+    }
+
+    /// A local callee staged inside a native window dups instead of
+    /// forwarding when an enclosing window still reads the word: the
+    /// callee consumes the fresh count inside its CALL, the frame's
+    /// count dies at the window's flush, and a word no window reads
+    /// still forwards untouched.
+    #[test]
+    fn a_local_staging_dups_under_an_enclosing_window() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let death = binder_span(60);
+        rc.last_use.insert(b, (death, true));
+        rc.produced(4);
+        rc.bound(b, &[4]);
+        rc.native_open();
+        rc.native_reads(&[4]);
+        rc.native_open();
+        rc.use_of(b, death);
+        let mut code = Vec::new();
+        rc.staged_local(&mut code, 4);
+        assert_eq!(
+            code,
+            vec![Op::RcInc { src: Slot::body(4) }],
+            "the handing dups; the frame keeps its count for the flush"
+        );
+        assert!(rc.owned.contains_key(&4), "the window's word stays owned");
+        // the inner window closes empty; the enclosing window then stages
+        // the same word and its flush decs the frame's count
+        rc.native_done(&mut code);
+        rc.staged_native(4, false);
+        rc.native_done(&mut code);
+        assert_eq!(
+            code,
+            vec![Op::RcInc { src: Slot::body(4) }, Op::RcDec {
+                src: Slot::body(4)
+            },],
+            "the flush decs the frame's count after both CALLs"
+        );
+        // outside every window the same staging forwards as always
+        let mut rc = placement();
+        rc.last_use.insert(b, (death, true));
+        rc.produced(4);
+        rc.bound(b, &[4]);
+        rc.use_of(b, death);
+        let mut code = Vec::new();
+        rc.staged_local(&mut code, 4);
+        assert!(code.is_empty(), "a forward emits nothing");
+        assert!(!rc.owned.contains_key(&4));
+    }
+
+    /// The tail transfer abandons its window's deferred deaths: the
+    /// staged words ride the CALLT with their counts, so no dec exists.
+    #[test]
+    fn a_tail_transfer_rides_the_callt_with_deferred_counts() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let death = binder_span(60);
+        rc.last_use.insert(b, (death, true));
+        rc.produced(4);
+        rc.bound(b, &[4]);
+        rc.native_open();
+        rc.native_reads(&[4]);
+        rc.use_of(b, death);
+        let mut code = Vec::new();
+        rc.read(&mut code, &[4]);
+        assert!(code.is_empty(), "the death deferred into the window");
+        rc.native_tail_transfer();
+        assert!(!rc.owned.contains_key(&4), "the count rode the transfer");
+        rc.exit(&mut code, &[]);
+        assert!(code.is_empty(), "nothing decs after the transfer");
     }
 
     /// Fork/join: words owned on every arm survive the join; one-arm words

@@ -1,0 +1,52 @@
+// purpose: runtime evidence across a lambda capture — a generic impl
+// member body passes a lambda to a container combinator; the lambda's
+// bound-demanding call resolves through an evidence word riding the
+// capture block: the entering call site stages the member frame's
+// evidence slot (the serving member body under the site's
+// substitution), the closure construction copies it into the capture
+// block, and every hosted per-element call writes it into the lambda
+// frame's trailing capture slot, where the sentinel CALLG dispatches
+// from. Two instantiations of one body run, int and string, the
+// latter exercising the Raw runtime word's kind-checked counts.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    const parts = self.map((x) => x.show())
+    join(parts, ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].show())
+  println(["a", "b"].show())
+  0
+}

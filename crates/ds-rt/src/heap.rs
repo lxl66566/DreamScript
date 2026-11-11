@@ -31,6 +31,7 @@
 use core::{
     alloc::Layout,
     cell::UnsafeCell,
+    mem::{align_of, size_of},
     ptr::{self, NonNull},
 };
 use std::alloc::{alloc, dealloc};
@@ -84,14 +85,29 @@ fn reusable_class(layout: Layout) -> Option<usize> {
     (class <= MAX_REUSE_CLASS).then_some(class)
 }
 
-/// Block layout for a payload type: `repr(C)` header, payload at a
-/// `Layout::extend`-aligned offset. The offset is a pure function of `T`, so
-/// every site holding the type computes the same payload address.
+/// The payload offset within a block carrying a `T`: the `repr(C)` header
+/// rounded up to its own alignment, then to `T`'s - the same arithmetic
+/// `Layout::extend` performs over the padded header, as a const fn so the hot
+/// payload accessors fold it to a constant per `T`; adding a header field
+/// moves the offset with the type instead of leaving a magic constant.
+const fn payload_offset<T>() -> usize {
+    let align_h = align_of::<RcHeader>();
+    let size = (size_of::<RcHeader>() + align_h - 1) & !(align_h - 1);
+    let align_t = align_of::<T>();
+    (size + align_t - 1) & !(align_t - 1)
+}
+
+/// Block layout for a payload type: `repr(C)` header, payload at
+/// [`payload_offset`]. The offset is a pure function of `T`, so every site
+/// holding the type computes the same payload address.
 fn block_layout<T>() -> (Layout, usize) {
-    let header = Layout::new::<RcHeader>().pad_to_align();
-    let (layout, offset) =
-        Layout::extend(&header, Layout::new::<T>()).expect("ds-rt: block layout overflow");
-    (layout, offset)
+    let offset = payload_offset::<T>();
+    let size = offset + size_of::<T>();
+    let align = align_of::<RcHeader>().max(align_of::<T>());
+    (
+        Layout::from_size_align(size, align).expect("ds-rt: block layout overflow"),
+        offset,
+    )
 }
 
 /// Snapshot of heap memory state, for the M4 residency accounting and tests.
@@ -163,7 +179,7 @@ impl Heap {
     /// If the global allocator returns null or the block exceeds u32 bytes.
     pub fn alloc_box<T>(&self, value: T, deinit: Option<DeinitFn>) -> RcRef<'_, T> {
         let header = self.alloc_store(value, deinit);
-        let (_, offset) = block_layout::<T>();
+        let offset = payload_offset::<T>();
         // SAFETY: the block carries at least the layout `block_layout`
         // computed; `offset` is that same layout math, in-bounds and aligned.
         let payload = unsafe { header.byte_add(offset) }.cast::<T>();
@@ -202,7 +218,7 @@ impl Heap {
     /// owning store or a dropping [`RcRef`] can drive.
     #[must_use]
     pub fn payload<T>(&self, header: NonNull<RcHeader>) -> &T {
-        let (_, offset) = block_layout::<T>();
+        let offset = payload_offset::<T>();
         // SAFETY: the block is live with an initialized `T` payload at
         // `offset`; the reference borrows from `&self`, so only the owner's
         // exclusive window (its `&mut`) can end the block's life.
@@ -217,7 +233,7 @@ impl Heap {
     /// Same liveness discipline as [`Heap::payload`].
     #[must_use]
     pub fn payload_mut<T>(&mut self, header: NonNull<RcHeader>) -> &mut T {
-        let (_, offset) = block_layout::<T>();
+        let offset = payload_offset::<T>();
         // SAFETY: live block, initialized `T` payload at `offset`; `&mut self`
         // makes the window exclusive over every accessor of this heap.
         unsafe { &mut *header.byte_add(offset).cast::<T>().as_ptr() }
@@ -295,7 +311,7 @@ impl Heap {
     /// One `rc_dispose` per observed unique death; a second one is a double
     /// free.
     pub fn rc_dispose<T>(&self, header: NonNull<RcHeader>) {
-        let (_, offset) = block_layout::<T>();
+        let offset = payload_offset::<T>();
         // SAFETY: same layout math as the allocation; in-bounds and aligned.
         let payload = unsafe { header.byte_add(offset) }.cast::<u8>();
         self.dispose(header, payload);
@@ -482,4 +498,47 @@ fn write_header(block: NonNull<RcHeader>, size: usize, align: usize, deinit: Opt
     // alignment); the write initializes dead or stale memory (pooled
     // candidates carry a clobbered header by contract).
     unsafe { block.as_ptr().write(header) };
+}
+
+#[cfg(test)]
+mod tests {
+    use core::alloc::Layout;
+
+    use super::{RcHeader, block_layout, payload_offset};
+
+    /// The const payload offset is the same arithmetic `Layout::extend` runs
+    /// over the padded `repr(C)` header, for every alignment shape a payload
+    /// can take: the header itself, sub-header, zero-sized, over-aligned,
+    /// and large.
+    #[test]
+    fn const_payload_offset_matches_layout_extend() {
+        fn extend_offset<T>() -> usize {
+            let header = Layout::new::<RcHeader>().pad_to_align();
+            Layout::extend(&header, Layout::new::<T>())
+                .expect("ds-rt: block layout overflow")
+                .1
+        }
+        for (offset, extend) in [
+            (payload_offset::<RcHeader>(), extend_offset::<RcHeader>()),
+            (payload_offset::<u8>(), extend_offset::<u8>()),
+            (payload_offset::<[u64; 3]>(), extend_offset::<[u64; 3]>()),
+            (payload_offset::<()>(), extend_offset::<()>()),
+            (payload_offset::<[u128; 2]>(), extend_offset::<[u128; 2]>()),
+            (payload_offset::<[u128; 0]>(), extend_offset::<[u128; 0]>()),
+            (payload_offset::<[u64; 32]>(), extend_offset::<[u64; 32]>()),
+        ] {
+            assert_eq!(offset, extend);
+        }
+        // the whole layout derives from the same arithmetic
+        let (layout, offset) = block_layout::<[u64; 3]>();
+        let (extend, extend_off) = {
+            let header = Layout::new::<RcHeader>().pad_to_align();
+            Layout::extend(&header, Layout::new::<[u64; 3]>())
+                .expect("ds-rt: block layout overflow")
+        };
+        assert_eq!(
+            (layout.size(), layout.align(), offset),
+            (extend.size(), extend.align(), extend_off)
+        );
+    }
 }

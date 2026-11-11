@@ -12,9 +12,10 @@
 //!
 //! A connection is VM state, not a heap object: the native calling
 //! convention hands a body exactly two host references (the object store,
-//! the output sink), so the connection table rides the store the VM owns
-//! ([`crate::object::Objects`]) — the same lifetime rule as the heap, and
-//! the store's drop closes every socket still open when the VM goes away.
+//! the output sink), so the connection table rides the sink the VM owns
+//! ([`crate::native::OutputSink`], the store is per-fiber state) — the
+//! same lifetime rule as the heap, and the sink's drop closes every
+//! socket still open when the VM goes away.
 //! `net_connect` answers an `i64` handle; handles are monotonic and never
 //! reused, so a closed (or never-opened) id names no connection and every
 //! later native on it answers `net_err` "unknown connection". `net_close`
@@ -54,7 +55,7 @@ use std::{
 
 use crate::{
     native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ERR, i64_arg, ref_arg},
-    object::Objects,
+    object::Heaps,
     value::Value,
     vm::Trap,
 };
@@ -73,7 +74,7 @@ const HTTP_CHUNK: usize = 8192;
 
 /// The VM-side connection table: the sockets `net_connect` opens, keyed by
 /// the monotonic handle ids it hands out. VM state, not heap state: the
-/// table rides the object store (see the module docs), and dropping it
+/// table rides the output sink (see the module docs), and dropping it
 /// closes every socket still open.
 #[derive(Debug)]
 pub(crate) struct Connections {
@@ -198,10 +199,10 @@ fn normalize(err: io::Error, timeout: Duration) -> io::Error {
 }
 
 /// The `net_err` span: the message `Ref` as the payload word.
-fn net_err(objects: &mut Objects, op: &str, target: &str, detail: &str) -> NativeResult {
+fn net_err(heaps: &mut Heaps, op: &str, target: &str, detail: &str) -> NativeResult {
     NativeResult::Tag {
         tag: PLATFORM_NET_ERR,
-        payload: Value::Ref(objects.alloc_str(format!("{op} {target}: {detail}"))),
+        payload: heaps.new_str(format!("{op} {target}: {detail}")),
     }
 }
 
@@ -216,27 +217,27 @@ fn ok(payload: Value) -> NativeResult {
 /// `net_connect(host: string, port: int) -> int | net_err`: opens a
 /// timeout-bounded TCP connection and answers its handle.
 pub(crate) fn net_connect_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let host = objects.str_at(ref_arg(args, 0)?)?.to_owned();
+    let host = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
     let port = i64_arg(args, 1)?;
     let Some(port) = u16::try_from(port).ok() else {
         return Ok(net_err(
-            objects,
+            heaps,
             "net_connect",
             &format!("{host}:{port}"),
             "port out of range",
         ));
     };
-    match objects.net().open(&host, port) {
+    match out.net().open(&host, port) {
         Ok(stream) => {
-            let id = objects.net().register(stream);
+            let id = out.net().register(stream);
             Ok(ok(Value::I64(id)))
         },
         Err(err) => Ok(net_err(
-            objects,
+            heaps,
             "net_connect",
             &format!("{host}:{port}"),
             &err.to_string(),
@@ -246,17 +247,17 @@ pub(crate) fn net_connect_fn(
 
 /// `net_send(conn: int, data: string) -> unit | net_err`.
 pub(crate) fn net_send_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let conn = i64_arg(args, 0)?;
-    let data = objects.str_at(ref_arg(args, 1)?)?.to_owned();
-    match objects.net().send(conn, data.as_bytes()) {
+    let data = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
+    match out.net().send(conn, data.as_bytes()) {
         // the payload word is the inert unit word, like write_file's
         Ok(()) => Ok(ok(Value::I64(0))),
         Err(err) => Ok(net_err(
-            objects,
+            heaps,
             "net_send",
             &conn.to_string(),
             &err.to_string(),
@@ -268,28 +269,28 @@ pub(crate) fn net_send_fn(
 /// at most `max_bytes` bytes (clamped to [`NET_CAP`]); the empty string
 /// is an orderly close.
 pub(crate) fn net_recv_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let conn = i64_arg(args, 0)?;
     let max = i64_arg(args, 1)?;
     if max < 1 {
         return Ok(net_err(
-            objects,
+            heaps,
             "net_recv",
             &conn.to_string(),
             "max_bytes must be positive",
         ));
     }
-    let bytes = match objects
+    let bytes = match out
         .net()
         .recv(conn, usize::try_from(max).unwrap_or(NET_CAP).min(NET_CAP))
     {
         Ok(bytes) => bytes,
         Err(err) => {
             return Ok(net_err(
-                objects,
+                heaps,
                 "net_recv",
                 &conn.to_string(),
                 &err.to_string(),
@@ -299,9 +300,9 @@ pub(crate) fn net_recv_fn(
     // a string native answers a string: mid-code-point truncation and
     // binary protocols surface as errors, not as silently mangled text
     match String::from_utf8(bytes) {
-        Ok(text) => Ok(ok(Value::Ref(objects.alloc_str(text)))),
+        Ok(text) => Ok(ok(heaps.new_str(text))),
         Err(_) => Ok(net_err(
-            objects,
+            heaps,
             "net_recv",
             &conn.to_string(),
             "invalid UTF-8 in the received bytes",
@@ -312,15 +313,15 @@ pub(crate) fn net_recv_fn(
 /// `net_close(conn: int) -> unit | net_err`: closes the socket and
 /// invalidates the handle.
 pub(crate) fn net_close_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let conn = i64_arg(args, 0)?;
-    match objects.net().close(conn) {
+    match out.net().close(conn) {
         Ok(()) => Ok(ok(Value::I64(0))),
         Err(err) => Ok(net_err(
-            objects,
+            heaps,
             "net_close",
             &conn.to_string(),
             &err.to_string(),
@@ -332,21 +333,21 @@ pub(crate) fn net_close_fn(
 /// the module docs for the tier decision (no TLS, body-only payload,
 /// close-delimited responses).
 pub(crate) fn http_get_fn(
-    objects: &mut Objects,
-    _out: &mut OutputSink,
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let url = objects.str_at(ref_arg(args, 0)?)?.to_owned();
-    let detail = http_get(objects, &url);
+    let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let detail = http_get(out, &url);
     match detail {
-        Ok(body) => Ok(ok(Value::Ref(objects.alloc_str(body)))),
-        Err(detail) => Ok(net_err(objects, "http_get", &url, &detail)),
+        Ok(body) => Ok(ok(heaps.new_str(body))),
+        Err(detail) => Ok(net_err(heaps, "http_get", &url, &detail)),
     }
 }
 
 /// The `http_get` body: parse the URL, run the one request/response
 /// exchange, answer the response body, or the `net_err` detail.
-fn http_get(objects: &mut Objects, url: &str) -> Result<String, String> {
+fn http_get(out: &mut OutputSink, url: &str) -> Result<String, String> {
     let Some(rest) = url.strip_prefix("http://").map(str::to_owned) else {
         if url.starts_with("https://") {
             return Err("https unsupported at this platform tier (no TLS)".into());
@@ -365,7 +366,7 @@ fn http_get(objects: &mut Objects, url: &str) -> Result<String, String> {
             .map_err(|_| "invalid port in the URL".to_owned())?,
         None => HTTP_PORT,
     };
-    let net = objects.net();
+    let net = out.net();
     let timeout = net.timeout();
     let mut stream = net.open(&host, port).map_err(|err| err.to_string())?;
     let request = format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
@@ -400,6 +401,7 @@ mod tests {
     use ds_abi::SlotType;
 
     use super::*;
+    use crate::{fiber::FIBER_ROOT, object::Objects, value::RefId};
 
     /// The timeout discipline: a never-answering socket yields the
     /// timeout detail, not the OS's EAGAIN rendering.
@@ -426,13 +428,16 @@ mod tests {
     /// bounds. No case reaches a socket.
     #[test]
     fn type_mismatches_name_the_offending_slot() {
-        let mut objects = Objects::new();
-        let mut out = OutputSink::Captured(Vec::new());
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<crate::fiber::Fiber> = Vec::new();
+        let mut claims: Vec<crate::claims::ClaimTable> = vec![crate::claims::ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
         // net_connect(host, port): the port word is wrong, not the host's
-        let host = objects.intern("example.invalid");
+        let host = heaps.current().intern("example.invalid");
         assert_eq!(
-            net_connect_fn(&mut objects, &mut out, &[
-                Value::Ref(host),
+            net_connect_fn(&mut heaps, &mut out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, host)),
                 Value::Bool(true)
             ]),
             Err(Trap::SlotTypeMismatch {
@@ -445,7 +450,7 @@ mod tests {
         // answers the same trap instead of panicking on args[1]
         for args in [vec![Value::I64(0), Value::I64(7)], vec![Value::I64(0)]] {
             assert_eq!(
-                net_send_fn(&mut objects, &mut out, &args),
+                net_send_fn(&mut heaps, &mut out, &args),
                 Err(Trap::SlotTypeMismatch {
                     slot: 1,
                     expected: SlotType::Ref,
@@ -455,7 +460,7 @@ mod tests {
         }
         // http_get(url): the single argument names itself
         assert_eq!(
-            http_get_fn(&mut objects, &mut out, &[Value::I64(1)]),
+            http_get_fn(&mut heaps, &mut out, &[Value::I64(1)]),
             Err(Trap::SlotTypeMismatch {
                 slot: 0,
                 expected: SlotType::Ref,

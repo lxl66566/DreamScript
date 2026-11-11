@@ -134,6 +134,14 @@ fn call_samples() -> Vec<Uop> {
             callee: KMAX,
             nargs: 255,
         },
+        Calltg {
+            callee: K0,
+            nargs: 0,
+        },
+        Calltg {
+            callee: KMAX,
+            nargs: 255,
+        },
         Calls {
             callee_slot: 0,
             nargs: 0,
@@ -431,7 +439,7 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
     .collect()
 }
 
-/// The call-family opcode entries (CALL, CALLT, CALLG, CALLS): the
+/// The call-family opcode entries (CALL, CALLT, CALLG, CALLTG, CALLS): the
 /// multi-line struct literals are the bulk of the table, so they live in
 /// their own helper to keep each function readable.
 fn documented_call_opcodes() -> Vec<(Uop, u8)> {
@@ -456,6 +464,13 @@ fn documented_call_opcodes() -> Vec<(Uop, u8)> {
                 nargs: 0,
             },
             0xa4,
+        ),
+        (
+            Calltg {
+                callee: K0,
+                nargs: 0,
+            },
+            0xa5,
         ),
         (
             Calls {
@@ -797,13 +812,22 @@ fn malformed_encodings_are_rejected() {
             minor: 0x4
         })
     );
-    // CALLTG (0xA.5) is reserved with no variant yet; decode rejects it
+    // CALLTG (0xA.5) decodes with CALL's operand layout and re-encodes to
+    // itself (the reserved slot became the dispatch tail call)
     assert_eq!(
-        Uop::decode(0, 0xa5_00_00_00),
-        Err(DecodeError::UnknownOpcode {
-            major: 0xa,
-            minor: 0x5
+        Uop::decode(0, 0xa5_02_ab_cd),
+        Ok(Calltg {
+            callee: ConstIdx(0xab_cd),
+            nargs: 2,
         })
+    );
+    assert_eq!(
+        Calltg {
+            callee: ConstIdx(0xab_cd),
+            nargs: 2,
+        }
+        .encode(0),
+        Ok(0xa5_02_ab_cd)
     );
     // CALLG decodes with CALL's operand layout and re-encodes to itself
     assert_eq!(
@@ -905,7 +929,12 @@ fn effects_are_consistent_with_slot_operands() {
             Ret { src } | RetSpan { src, .. } => vec![src],
             Halt { slot } => vec![slot],
             Calls { callee_slot, .. } => vec![callee_slot],
-            Jmp { .. } | Funcf { .. } | Call { .. } | Callg { .. } | Callt { .. } => vec![],
+            Jmp { .. }
+            | Funcf { .. }
+            | Call { .. }
+            | Callg { .. }
+            | Callt { .. }
+            | Calltg { .. } => vec![],
             AddI64 { dst, lhs, rhs }
             | SubI64 { dst, lhs, rhs }
             | MulI64 { dst, lhs, rhs }
@@ -960,6 +989,7 @@ fn effects_are_consistent_with_slot_operands() {
                 | Callg { .. }
                 | Calls { .. }
                 | Callt { .. }
+                | Calltg { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Funcf { .. }
@@ -1016,6 +1046,7 @@ fn purity_table_is_exact() {
                 | Callg { .. }
                 | Calls { .. }
                 | Callt { .. }
+                | Calltg { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }

@@ -261,6 +261,111 @@ fn newline_separates_expression_bodied_arms() {
     assert!(matches!(arms[1].body, Expr::Literal { .. }));
 }
 
+// ===== guard-tail collision (the section-6 quirk, ruled 2026-11-12) =====
+
+parses! {
+    guard_parenthesized_expression_parses => "fn f(x: int, m: int) -> int {\nmatch x { _ if (x > m) => 1, _ => 2 }\n}\n",
+    guard_call_tail_parses => "fn f(x: int) -> int {\nmatch x { _ if x > f(m) => 1, _ => 2 }\n}\n",
+    guard_operator_tail_parses => "fn f(x: int, m: int) -> int {\nmatch x { _ if x > m + 1 => 1, _ => 2 }\n}\n",
+    guard_is_tail_parses => "fn f() {\nmatch x { b if b is bad_port => 1, _ => 2 }\n}\n",
+    bare_lambda_in_non_guard_position_parses => "fn f(h: fn(int) -> int) -> int { h(m => m + 1) }\n",
+}
+
+#[test]
+fn guard_tail_bare_ident_names_the_collision() {
+    // The grammar keeps its lambda greediness: `m` before the arm arrow is
+    // read as a bare-parameter lambda, so the arm loses its arrow. The
+    // diagnostic names the identifier (primary) and the stolen arrow.
+    let mut files = Files::new();
+    let src = "fn f(x: int, m: int) -> int {\nmatch x { _ if x > m => 1, _ => 2 }\n}\n";
+    let f = files.add_source("t.ds", src);
+    let diags = parse(&files, f).expect_err("collision");
+    assert_eq!(diags.len(), 1);
+    let d = &diags[0];
+    assert_eq!(d.code, ErrorCode::GuardTailLambda);
+    assert_eq!(d.labels.len(), 2);
+    assert_eq!(d.suggestions.len(), 2);
+    assert_eq!(
+        files.location(d.labels[0].span.file, d.labels[0].span.start),
+        Location { line: 2, col: 20 }
+    );
+    assert_eq!(
+        files.location(d.labels[1].span.file, d.labels[1].span.start),
+        Location { line: 2, col: 22 }
+    );
+}
+
+#[test]
+fn guard_tail_fires_across_comparison_shapes() {
+    // Every guard whose rightmost operand is a bare identifier directly
+    // before the arm arrow: `>`, `==`, an `in`-range end, and both arm body
+    // shapes. The primary label sits on that identifier.
+    for (src, line, col) in [
+        ("fn f() {\nmatch x { _ if x == m => 1, _ => 2 }\n}\n", 2, 21),
+        (
+            "fn f() {\nmatch x { _ if x in m..n => 1, _ => 2 }\n}\n",
+            2,
+            24,
+        ),
+        (
+            "fn f() {\nmatch x { _ if x > m => { 1 }, _ => 2 }\n}\n",
+            2,
+            20,
+        ),
+        ("fn f() {\nmatch x { _ if x > m => 1 }\n}\n", 2, 20),
+    ] {
+        let (code, starts, labels) = err(src);
+        assert_eq!(code, ErrorCode::GuardTailLambda, "source: {src}");
+        assert_eq!(labels, 2, "source: {src}");
+        assert_eq!(starts[0], Location { line, col }, "source: {src}");
+    }
+}
+
+#[test]
+fn guard_tail_suggestion_repairs_the_parse() {
+    // The two insert suggestions are exactly the verified repair: applying
+    // them must turn the collision into a clean parse.
+    let mut files = Files::new();
+    let src = "fn f(x: int, m: int) -> int {\nmatch x { _ if x > m => 1, _ => 2 }\n}\n";
+    let f = files.add_source("t.ds", src);
+    let d = &parse(&files, f).expect_err("collision")[0];
+    let mut repaired = src.to_owned();
+    for s in d.suggestions.iter().rev() {
+        let ds_diag::Suggestion::Insert { span, text } = s else {
+            panic!("insert suggestion");
+        };
+        let at = span.start as usize;
+        repaired.replace_range(at..at, text);
+    }
+    let f2 = files.add_source("repaired.ds", &repaired);
+    parse(&files, f2).expect("parenthesized guard parses");
+}
+
+#[test]
+fn paren_lambda_guard_tail_stays_generic() {
+    // The paren-parameter shape is the same arrow-greediness family without
+    // a bare lambda: parked behind the F1 escalation, not this diagnostic.
+    let (code, ..) =
+        err("fn f(x: int, m: int) -> int {\nmatch x { _ if x > (m) => 1, _ => 2 }\n}\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+}
+
+#[test]
+fn one_name_guard_tail_stays_generic() {
+    // `if m => ...` has no parenthesizable guard: `(m) => ...` is itself a
+    // paren-parameter lambda, so no parenthesization fixes the arm.
+    let (code, ..) = err("fn f() {\nmatch x { _ if m => 1, _ => 2 }\n}\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+}
+
+#[test]
+fn broken_file_with_bare_lambda_elsewhere_keeps_generic() {
+    // A legal bare lambda next to an unrelated syntax error never confirms:
+    // parenthesizing around it does not fix the file.
+    let (code, ..) = err("fn f(x: int) -> int {\nif x > 1 { x }\nconst g = m => m + 1\nx +\n}\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+}
+
 #[test]
 fn pattern_negation_cooks_into_numeric_literals() {
     // The `-` sign is consumed by the int/float literal itself.

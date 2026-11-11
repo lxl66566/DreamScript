@@ -113,14 +113,28 @@ impl Nursery {
         self.outcomes.push(None);
     }
 
+    /// The outcome recorded for one child, `None` until its death
+    /// ledgered (or the fiber is not this nursery's child).
+    pub(crate) fn outcome(&self, child: FiberId) -> Option<ChildOutcome> {
+        let at = self.children.iter().position(|&c| c == child)?;
+        self.outcomes[at].clone()
+    }
+
     /// Ledgers a child's death at its spawn position. Called from every
     /// death path (completion, cancellation, trap), whichever driver ran it.
+    /// A death can arrive after the boundary consumed the nursery (the
+    /// gone-joiner shape: a child resumed the parked joiner mid-drive, the
+    /// joiner moved on, and the boundary's re-raised trap attributes to
+    /// the dead child the drive ended on) — the drained ledger has no
+    /// slot, and the death was already recorded once at its origin, so
+    /// the duplicate drops. A recycled nursery slot (a stale id naming
+    /// another nursery's children) drops the same way.
     pub(crate) fn record(&mut self, child: FiberId, outcome: ChildOutcome) {
-        let at = self
-            .children
-            .iter()
-            .position(|&c| c == child)
-            .expect("a ledgered fiber is this nursery's child");
-        self.outcomes[at] = Some(outcome);
+        let Some(at) = self.children.iter().position(|&c| c == child) else {
+            return;
+        };
+        if at < self.outcomes.len() {
+            self.outcomes[at] = Some(outcome);
+        }
     }
 }

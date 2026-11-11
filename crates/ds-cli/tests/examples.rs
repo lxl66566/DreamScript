@@ -114,7 +114,8 @@ fn callables_pass_named_fns_closures_and_collections() {
 fn tuples_destructure_in_bindings_and_match_arms() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("tuples.ds"))),
-        "host:8080\nport 5432\nmatched host 8080\nlabel unit\nseven 7\nequal\n0\n"
+        "host:8080\nport 5432\nmatched host 8080\nlabel unit\nseven 7\nequal\nvar db:8081\npick \
+         zero-five big zero flat\n0\n"
     );
 }
 

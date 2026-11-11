@@ -497,7 +497,7 @@ fn a_fiber_completing_switches_back_with_its_final_value() {
     let Value::Ref(id) = joined else {
         panic!("a string ref, got {joined:?}");
     };
-    assert_eq!(vm.objects().str_at(id), Ok("done"));
+    assert_eq!(vm.objects_of(id).str_at(id.id()), Ok("done"));
     assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
 }
 
@@ -654,7 +654,7 @@ fn a_delivered_ref_keeps_one_transferred_count_over_a_dead_child() {
         panic!("a string ref, got {delivered:?}");
     };
     assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
-    assert_eq!(vm.objects().rc_at(id), Ok(1));
-    assert_eq!(vm.objects().str_at(id), Ok("done"));
+    assert_eq!(vm.objects().rc_at(id.id()), Ok(1));
+    assert_eq!(vm.objects().str_at(id.id()), Ok("done"));
     assert_eq!(vm.objects().len(), 1, "only the delivered word stays live");
 }

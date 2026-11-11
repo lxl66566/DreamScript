@@ -122,7 +122,7 @@ fn random_function(rng: &mut Rng) -> Function {
         constants.push(random_constant(rng));
     }
     let code_len = usize::from(rng.byte() % 15) + 1;
-    let code = (0..code_len).map(|_| random_uop(rng, code_len)).collect();
+    let code: Vec<Uop> = (0..code_len).map(|_| random_uop(rng, code_len)).collect();
     Function::new(random_string(rng, 10), layout, constants, code)
         .expect("generator produces valid functions")
 }

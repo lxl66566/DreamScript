@@ -6,7 +6,8 @@
 //! left-associative chains over literals and a repeated binder, an
 //! interpolation hole as the left operand, var accumulation through
 //! store_over inside a while loop, and the checked-read report chain;
-//! the heap drains at the end, so every staged count balanced.
+//! every staged-borrow seam shape runs with its heap drained, so every
+//! staged count balanced.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -60,8 +61,9 @@ fn string_plus_runs_as_the_concat_call_and_the_heap_drains() {
         "every leg of the probe matched"
     );
     // each chain's staged borrows flushed after their calls, both
-    // accumulation spellings' replaced contents died at each store, and
-    // the report chain's extraction handlers composed with the staging
+    // accumulation spellings' replaced contents died at each store, the
+    // report chain's extraction handlers composed with the staging, and
+    // every seam leg balanced
     assert_eq!(
         vm.captured_output(),
         b"ab\nabcb\nbxb\nxxx\nsxxx\nlocalhost:?\n"
@@ -73,20 +75,42 @@ fn string_plus_runs_as_the_concat_call_and_the_heap_drains() {
     );
 }
 
-/// The staged-borrow seam, pinned as it traps today so the eventual fix
-/// flips this test: a concat native call stages a word as a borrow
-/// window (no dup, the native contract), then a later operand's own
-/// use fires the binder's last-use dec before the CALL executes, and the
-/// call reads the freed object. Both spellings trap identically
-/// (`b + "${b}x"` and `b.concat("${b}x")`), as do the symmetric shapes
-/// (`s + "(${s})"`, `b + (c + b)`). The fix shape is a borrow-window
-/// stack in the placement pass: a word inside an open native window
-/// defers its dec to the window's flush.
+/// The staged-borrow seam, closed: a native call's borrow window opens
+/// before operand evaluation and pins every word its CALL reads, so a
+/// later operand's own last-use dec — which used to free the object
+/// before the CALL read the staged word — defers to the window's flush
+/// and the object survives the call. Every shape runs clean and drains:
+/// the interpolation hole over the receiver (`b + "${b}x"`), the
+/// explicit spelling, the parenthesized interpolation, the later
+/// operand that is itself a native call staging the same word
+/// (`b + (c + b)`, inner window flushes first), native-in-native
+/// (`a.concat(b.concat("x"))`), a local callee handed the window's word
+/// (the staging dups, the frame's count dies at the flush), and a
+/// generic native's staged list receiver whose alias's use fires the
+/// owner's last-use dec inside the later operand.
 #[test]
-fn the_staged_borrow_seam_traps_and_this_pin_flips_when_it_closes() {
+fn the_staged_borrow_seam_is_closed_and_every_shape_drains() {
     let (mut vm, _) = build_vm();
-    assert_eq!(
-        vm.run("string_add_probe", "seam_self_reference", &[]),
-        Err(ds_vm::Trap::UnknownObject { obj: 0 })
-    );
+    for leg in [
+        "seam_self_reference",
+        "seam_call_spelling",
+        "seam_parenthesized",
+        "seam_operand_swap",
+        "seam_nested_windows",
+        "seam_later_use",
+        "seam_compounded",
+        "seam_local_operand",
+        "seam_list_receiver",
+    ] {
+        assert_eq!(
+            vm.run("string_add_probe", leg, &[]),
+            Ok(Value::Bool(true)),
+            "{leg} runs clean (the window pinned its staged words)"
+        );
+        assert!(
+            vm.objects().is_empty(),
+            "{leg} drains its heap ({} live)",
+            vm.objects().len()
+        );
+    }
 }

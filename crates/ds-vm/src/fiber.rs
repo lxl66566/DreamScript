@@ -1,9 +1,9 @@
 //! Fibers as interpreter data [E2]: the VM pool, per-fiber segments, and
 //! the switching vocabulary. A fiber is not an OS thread — the pool is
 //! single-threaded, spawn allocates a pool entry with a fresh segment, and
-//! a switch swaps segment and call-chain ownership between the running
-//! fiber's pool slot and the VM's execution context: two buffer swaps, no
-//! word ever copied [E2: switch is O(1)].
+//! a switch swaps segment, call-chain, and heap-store ownership between
+//! the running fiber's pool slot and the VM's execution context: three
+//! buffer swaps, no word or object ever copied [E2: switch is O(1)].
 //!
 //! # Segments: chunk-append growth [H2]
 //!
@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use ds_abi::CodePc;
 
-use crate::{module::ModuleVersion, nursery::NurseryId, value::Word, vm::CallInfo};
+use crate::{
+    module::ModuleVersion, nursery::NurseryId, object::Objects, value::Word, vm::CallInfo,
+};
 
 /// Log2 of [`CHUNK_WORDS`]: chunk lookup is a shift and a mask.
 const CHUNK_SHIFT: usize = 8;
@@ -48,7 +50,7 @@ const CHUNK_MASK: usize = CHUNK_WORDS - 1;
 /// A fiber's identity in the VM pool. Index 0 is reserved for the root
 /// fiber a [`crate::Vm::run`] entry drives ([`FIBER_ROOT`]); spawns take
 /// the slots above it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FiberId(pub u32);
 
 /// The root fiber: the entry function a `run` call drives. Its resumer is
@@ -86,14 +88,21 @@ pub(crate) struct ResumePoint {
     pub(crate) pc: CodePc,
 }
 
-/// One pooled fiber: its value-stack segment, its call chain, and its
-/// switch state. While the fiber runs, segment and call chain live in the
-/// VM's execution context and the slot holds scratch; every other time
-/// they live here.
+/// One pooled fiber: its value-stack segment, its call chain, its heap
+/// object store, and its switch state. While the fiber runs, segment,
+/// call chain, and store live in the VM's execution context and the slot
+/// holds scratch; every other time they live here.
 #[derive(Debug)]
 pub(crate) struct Fiber {
     /// The fiber's value-stack segment [H2: chunk-append growth].
     pub(crate) segment: Segment,
+    /// The fiber's heap object store: the id table, the free list, the
+    /// intern map, and ds-rt's block pools — one store per fiber, so a
+    /// block and its count are only ever touched by the thread driving
+    /// that fiber [C4]. The slot's store persists across pool reuse: a
+    /// foreign-held object outlives its dead owner, and the next spawn
+    /// continues the id space.
+    pub(crate) objects: Objects,
     /// The fiber's frame chain (the running fiber's is swapped into the VM).
     pub(crate) callinfo: Vec<CallInfo>,
     /// High-water mark of this fiber's segment, the per-fiber TCO criterion.
@@ -112,11 +121,13 @@ pub(crate) struct Fiber {
 
 impl Fiber {
     /// An empty fiber: no segment, no frames, nothing resumable. The pool's
-    /// root slot starts here and every spawn overwrites its slot wholesale.
-    pub(crate) fn empty() -> Self {
+    /// root slot starts here and every spawn overwrites its slot wholesale
+    /// (a reused slot keeps its chunks and its store — the objects stay).
+    pub(crate) fn empty(id: FiberId) -> Self {
         Self {
             segment: Segment::new(),
             callinfo: Vec::new(),
+            objects: Objects::new(id),
             max_len: 0,
             resume: None,
             state: FiberState::Ready,

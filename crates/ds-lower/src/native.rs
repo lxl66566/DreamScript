@@ -219,6 +219,12 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
+        name: "join",
+        module: NativeModule::Builtin,
+        index: 45,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
         name: "read_file",
         module: NativeModule::StdPlatform,
         index: 5,

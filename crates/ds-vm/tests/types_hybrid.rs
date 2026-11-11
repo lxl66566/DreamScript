@@ -24,7 +24,8 @@
 //!   builtin staging) declare `SlotType::Raw`.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, FIBER_ROOT, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion, Trap, Value,
+    Vm,
     abi::{
         ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, F64, I64, Raw, Ref, Tag},
@@ -33,14 +34,16 @@ use ds_vm::{
     assemble,
     native::{
         BUILTIN_CHAR_AT, BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD,
-        BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_LEN, BUILTIN_LIST_CONCAT,
-        BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_MAP,
-        BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_SET, BUILTIN_MAX,
-        BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
-        BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_REDUCE, BUILTIN_STR_BOOL,
-        BUILTIN_STR_FLOAT, BUILTIN_STR_INT, BUILTIN_TAIL, STD_HTTP_GET, STD_NET_CONNECT,
-        STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT, STD_PRINTLN, std_platform_module,
+        BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_JOIN, BUILTIN_LEN,
+        BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
+        BUILTIN_LIST_PUSH, BUILTIN_MAP, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
+        BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL,
+        BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_REDUCE,
+        BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT, BUILTIN_STR_INT, BUILTIN_TAIL, STD_HTTP_GET,
+        STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT, STD_PRINTLN,
+        std_platform_module,
     },
+    value::RefId,
 };
 
 /// Module-wide tag ids, as ds-lower will assign them.
@@ -864,7 +867,7 @@ fn retspan_edges_trap_and_load_checks_reject() {
     ]);
     let mut vm = Vm::new(registry("e", vec![printer]));
     assert_eq!(
-        vm.run("e", "printer", &[Value::Ref(9999)]),
+        vm.run("e", "printer", &[Value::Ref(RefId::new(FIBER_ROOT, 9999))]),
         Err(Trap::UnknownObject { obj: 9999 })
     );
 
@@ -1011,10 +1014,11 @@ fn both_native_modules_are_installed_and_resolvable() {
         reg.resolve_native("builtin", BUILTIN_NURSERY_CANCEL)
             .is_some()
     );
+    assert!(reg.resolve_native("builtin", BUILTIN_JOIN).is_some());
     assert!(
-        reg.resolve_native("builtin", 45).is_none(),
-        "45 table entries: the core's, the list block, the fiber pair, the join, the push, the \
-         map block, the generic container closes, the reentrant combinators, the nursery seams"
+        reg.resolve_native("builtin", 46).is_none(),
+        "46 table entries: the core's, the list block, the fiber pair, the push, the map block, \
+         the generic container closes, the reentrant combinators, the nursery seams, the join"
     );
     // the std platform module: console, file, net — its own gaps reserved
     assert!(

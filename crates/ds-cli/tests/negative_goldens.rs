@@ -24,7 +24,8 @@
 //! (the instantiation probe's witness). The check_all wiring round adds
 //! DS2006's package-level route: the ordering-hidden generic pair whose
 //! bounds only a later impl intersects, reported by the closure pass
-//! over the closed instance set.
+//! over the closed instance set. The loop-exit round adds DS2002's lambda-frame route: a break
+//! lexically inside a lambda within a loop reports the crossed frame boundary at check time.
 
 use std::{
     env, fs,
@@ -59,6 +60,11 @@ const CASES: &[Case] = &[
         stem: "ds1014_top_level_statement",
         human: include_str!("goldens/ds1014_top_level_statement.human"),
         json: include_str!("goldens/ds1014_top_level_statement.json"),
+    },
+    Case {
+        stem: "ds2002_loop_exit_in_lambda",
+        human: include_str!("goldens/ds2002_loop_exit_in_lambda.human"),
+        json: include_str!("goldens/ds2002_loop_exit_in_lambda.json"),
     },
     Case {
         stem: "ds2003_non_exhaustive_match",

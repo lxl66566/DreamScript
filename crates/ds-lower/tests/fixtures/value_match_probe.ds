@@ -1,0 +1,101 @@
+// Probe: value-level match tests over non-union scrutinees — tuple
+// elements tested in place with short-circuit jumps, scalar and string
+// literal arms, guards with fall-through (a guarded arm over a
+// Ref-carrying scrutinee binds its binder a copy so the guard's
+// consumption cannot eat the scrutinee's own count), a tail-position
+// match, and a literal arm past a catchall (dead code the chain lowers).
+
+tag int
+tag string
+tag bool
+
+struct list[int]
+
+extern fn println (s: string) -> ()
+extern fn len[t] (xs: t) -> int
+
+fn classify(t: (int, int)) -> string {
+  match t {
+    (a, b) if (a == b) => "diag",
+    (0, 0) => "origin",
+    (0, _) => "axis",
+    (_, 5) => "five",
+    _ => "flat",
+  }
+}
+
+fn scalars(n: int) -> string {
+  match n {
+    1 => "one",
+    2 => "two",
+    m if m > 10 => "big",
+    _ => "n",
+  }
+}
+
+fn strings(s: string) -> int {
+  match s {
+    "go" => 1,
+    "stop" => 2,
+    t if t == "later" => 3,
+    _ => 0,
+  }
+}
+
+fn flags(t: (bool, int)) -> string {
+  match t {
+    (true, 0) => "on",
+    (true, _) => "on2",
+    _ => "off",
+  }
+}
+
+fn elem_binding(t: (int, int)) -> int {
+  match t {
+    (a, b) if (a > b) => a,
+    (int, 0) => 100,
+    _ => 7,
+  }
+}
+
+fn tail_pick(t: (int, int)) -> int {
+  match t {
+    (1, _) => 10,
+    (_, 1) => 20,
+    _ => 0,
+  }
+}
+
+fn dead_after_catchall(n: int) -> string {
+  match n {
+    _ => "any",
+    1 => "one",
+  }
+}
+
+fn guard_list(xs: list[int]) -> string {
+  match xs {
+    ys if len(ys) > 2 => "big",
+    _ => "small",
+  }
+}
+
+fn main() -> bool {
+  println(classify((0, 0)))
+  println(classify((0, 9)))
+  println(classify((3, 5)))
+  println(classify((4, 4)))
+  println(classify((7, 1)))
+  println(scalars(1))
+  println(scalars(2))
+  println(scalars(42))
+  println(scalars(3))
+  println("${strings("go")}${strings("stop")}${strings("later")}${strings("zz")}")
+  println("${flags((true, 0))} ${flags((true, 9))} ${flags((false, 1))}")
+  println("${elem_binding((9, 1))} ${elem_binding((5, 0))} ${elem_binding((1, 1))}")
+  println("${tail_pick((1, 9))} ${tail_pick((9, 1))} ${tail_pick((2, 2))}")
+  println(dead_after_catchall(1))
+  println(guard_list([1, 2, 3]))
+  println(guard_list([1]))
+  classify((0, 0)) == "diag" && tail_pick((2, 2)) == 0
+}

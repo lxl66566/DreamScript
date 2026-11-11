@@ -348,7 +348,7 @@ fn print_value(value: &Value) {
         Value::F64(v) => println!("{v:?}"),
         Value::Bool(v) => println!("{v}"),
         Value::Tag(v) => println!("{v}"),
-        Value::Ref(v) => println!("<object {v}>"),
+        Value::Ref(v) => println!("<object {}>", v.id()),
         Value::Fn(f) => println!("<fn {}:{}>", f.module(), f.func()),
     }
 }

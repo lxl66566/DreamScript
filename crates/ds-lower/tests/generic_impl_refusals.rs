@@ -1,7 +1,7 @@
 //! The generic-impl runtime-evidence seam's honest boundaries: the shapes
 //! whose runtime dispatch or runtime word has no contract this round
 //! refuse at lowering naming exactly the seam they wait on — transitive
-//! evidence, evidence across a nested lambda boundary, an overwrite
+//! evidence, evidence across a spawned child's frame, an overwrite
 //! contract for a type-variable's word, and a checked read whose union
 //! payload spans the variable's runtime word.
 
@@ -102,10 +102,12 @@ fn transitive_dispatch_into_another_generic_impl_refuses() {
     );
 }
 
-/// A runtime-dispatched member call inside a nested lambda: the lambda
-/// value is its own frame, and no evidence slot reaches inside it.
+/// A runtime-dispatched member call inside a spawned child: the child
+/// is its own frame whose capture block is its entry argument area, and
+/// no evidence channel rides a spawn — the lambda path is the covered
+/// crossing, this one refuses.
 #[test]
-fn a_runtime_call_inside_a_nested_lambda_refuses() {
+fn a_runtime_call_inside_a_spawned_child_refuses() {
     let source = format!(
         "{}\n{}",
         concat!(
@@ -113,7 +115,7 @@ fn a_runtime_call_inside_a_nested_lambda_refuses() {
             "tag string\n",
             "struct list[t]\n",
             "extern fn println (s: string) -> ()\n",
-            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "extern fn concat (a: string, b: string) -> string\n",
             "trait shows {\n",
             "  fn show(self) -> string\n",
             "}\n",
@@ -122,8 +124,13 @@ fn a_runtime_call_inside_a_nested_lambda_refuses() {
             "}\n",
             "impl [t: shows] shows for list[t] {\n",
             "  fn show(self) -> string {\n",
-            "    const parts = self.map((e) => e.show())\n",
-            "    \"l\"\n",
+            "    var acc = \"l\"\n",
+            "    nursery {\n",
+            "      for x in self {\n",
+            "        spawn { acc = concat(acc, x.show()) }\n",
+            "      }\n",
+            "    }\n",
+            "    acc\n",
             "  }\n",
             "}\n",
         ),
@@ -136,7 +143,7 @@ fn a_runtime_call_inside_a_nested_lambda_refuses() {
     );
     refuses_with(
         &source,
-        "a nested lambda or a generic function body has none",
+        "a spawned child or a generic function body has none",
     );
 }
 
@@ -178,4 +185,37 @@ fn a_checked_read_spanning_the_variable_word_refuses() {
         )
     );
     refuses_with(&source, "a union member over a type variable");
+}
+
+/// A call into a generic inherent member from inside another generic
+/// body: the checker accepts the site (the enclosing body's bound
+/// assumes the trait for the receiver's variable) but records no
+/// serving instance for it — no instance names a word the site could
+/// stage — so the lowering refuses naming the per-bound staging seam.
+#[test]
+fn an_inherent_call_into_a_generic_body_from_inside_one_refuses() {
+    let source = format!(
+        "{}{}\n",
+        loop_body(""),
+        concat!(
+            "impl [t: shows] list[t] {\n",
+            "  fn describe(self) -> string {\n",
+            "    var acc = \"d\"\n",
+            "    for x in self {\n",
+            "      acc = \"${acc}${x.show()}\"\n",
+            "    }\n",
+            "    acc\n",
+            "  }\n",
+            "  fn wrap(self) -> string { self.describe() }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "  println([1].wrap())\n",
+            "  0\n",
+            "}\n",
+        )
+    );
+    refuses_with(
+        &source,
+        "the element type's bound has no unique serving instance at this site",
+    );
 }

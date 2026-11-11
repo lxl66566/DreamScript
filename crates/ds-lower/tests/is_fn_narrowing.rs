@@ -2,12 +2,12 @@
 //! the checker's recorded solved test — TAG_TEST by member tag, with the
 //! narrowed read handing the payload word back under its own
 //! classification — so the call-through idiom runs on fn-typed bindings
-//! and union members alike. A written union test type keeps the nominal
-//! single-segment refusal.
+//! and union members alike. The multi-atom union spelling has its own
+//! suite (is_union_narrowing).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, lower};
+use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
@@ -75,16 +75,20 @@ fn a_written_fn_type_narrows_and_calls_through() {
     );
 }
 
-/// A written union test type has no single-atom TAG_TEST spelling and
-/// keeps the written-type refusal.
+/// A union test covering the operand's whole member set folds to the
+/// true constant (legal specialization) and runs — the bare union
+/// spelling rides the same solved record as the parenthesized one.
 #[test]
-fn a_written_union_test_type_stays_refused() {
+fn a_covering_union_test_folds_true_and_runs() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
         "extern fn println (msg: string) -> ()\n",
         "fn kind(v: int | string) -> int { if v is int | string { 1 } else { 0 } }\n",
-        "fn main() -> () { println(\"${kind(7)}\") }\n",
+        "fn main() -> () {\n",
+        "  const n: int | string = 7\n",
+        "  println(\"${kind(n)}\")\n",
+        "}\n",
     );
     let mut files = Files::new();
     let id = files.add_source("is_union.ds", source);
@@ -100,20 +104,29 @@ fn a_written_union_test_type_stays_refused() {
             .map(|diag| human(diag, &files))
             .collect::<String>()
     );
-    let Err(err) = lower(
+    let lowered = lower(
         "is_union",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) else {
-        panic!("the union-test shape must refuse at lowering")
-    };
-    assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
+    )
+    .expect("the covering union test lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(
+        vm.run("is_union", "main", &[]),
+        Ok(Value::I64(0)),
+        "the unit entry result"
     );
-    assert!(
-        err.to_string().contains("a written type"),
-        "the refusal keeps the written-type wording: {err}"
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        "1\n",
+        "the covering test folds true"
     );
 }

@@ -13,10 +13,10 @@ use ds_vm::{
     Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
-        SlotType::{Fn as FnSlot, I64, Ref},
+        SlotType::{Bool, Fn as FnSlot, I64, Ref},
         uop::Uop,
     },
-    assemble,
+    assemble, native,
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -117,14 +117,7 @@ fn recursion_module() -> ModuleRegistry {
     reg.install(
         ModuleVersion::new("rec", vec![def(
             "f",
-            &[
-                FnSlot,
-                I64,
-                SlotType::Bool,
-                I64,
-                SlotType::Raw,
-                SlotType::Raw,
-            ],
+            &[FnSlot, I64, Bool, I64, SlotType::Raw, SlotType::Raw],
             2,
             2,
             vec![Const::I64(0), Const::I64(1)],
@@ -384,7 +377,7 @@ fn garbage_callable_words_trap_honestly() {
     };
     assert_eq!(
         vm.run("bogus", "call_ref", &[Value::Ref(id)]),
-        Err(Trap::UnknownObject { obj: id })
+        Err(Trap::UnknownObject { obj: id.id() })
     );
     // a closure whose capture block is wider than the callee's body
     let closure = vm.alloc_closure(
@@ -535,4 +528,335 @@ fn call_site_cache_keys_the_site_on_the_function_not_the_module() {
         "the same-pc site in the sibling function resolves its own callee"
     );
     assert_eq!(vm.run("app", "f", &[Value::I64(10)]), Ok(Value::I64(11)));
+}
+
+// CALLTG fixtures (the dispatch tail call, H2's guarantee closure): the
+// dispatch resolution is CALLG's own and the transfer is CALLT's — the
+// staged words slide into the reused frame, the evidence/instance words
+// riding past the callee's parameters as count-free dead words.
+
+/// One impl-body-shaped side of the mutual dispatch tail: [n, the
+/// trailing evidence parameter, t, zero, one, staged-n,
+/// staged-evidence, staged-instance] with params (n, evidence) and a
+/// three-word overlay. The CALLTG names the sibling (kidx 4), stages
+/// n-1, the evidence word, and the instance word; nargs is 1, so the
+/// slide carries the argument and the evidence parameter while the
+/// instance word rides dead.
+fn dispatch_body(even: bool) -> [Uop; 11] {
+    [
+        Uop::Funcf { frame_slots: 8 },
+        Uop::Kimm { dst: 3, kidx: k(0) }, // zero
+        Uop::EqI64 {
+            dst: 2,
+            lhs: 0,
+            rhs: 3,
+        }, // t = n == 0
+        Uop::Jmpif { cond: 2, target: 9 }, // answer at the tail
+        Uop::Kimm { dst: 4, kidx: k(1) }, // one
+        Uop::SubI64 {
+            dst: 5,
+            lhs: 0,
+            rhs: 4,
+        }, // stage n - 1 (the real argument)
+        Uop::Kimm { dst: 6, kidx: k(2) }, // stage the evidence word
+        Uop::Kimm { dst: 7, kidx: k(3) }, // stage the instance word past it
+        Uop::Calltg {
+            callee: k(4),
+            nargs: 1,
+        },
+        Uop::Kconst {
+            dst: 2,
+            kidx: k(if even { 5 } else { 6 }),
+        }, // t = true / false
+        Uop::Ret { src: 2 },
+    ]
+}
+
+/// The dispatch-tail probe module: `deven`/`dodd` are impl bodies claiming
+/// one trailing evidence parameter (params_len 2), each tail-dispatching
+/// the sibling through CALLTG; pool k0=0, k1=1, k2=42 (evidence), k3=7
+/// (instance), k4 the sibling FuncRef, k5/k6 the bool results.
+fn dispatch_tail_module() -> ModuleVersion {
+    fn side(even: bool) -> FunctionDef {
+        def(
+            if even { "deven" } else { "dodd" },
+            &[I64, I64, Bool, I64, I64, I64, I64, I64],
+            2,
+            3,
+            vec![
+                Const::I64(0),
+                Const::I64(1),
+                Const::I64(42),
+                Const::I64(7),
+                Const::FuncRef {
+                    module: "dmut".into(),
+                    func: u32::from(!even), // the sibling
+                },
+                Const::Bool(true),
+                Const::Bool(false),
+            ],
+            &dispatch_body(even),
+        )
+    }
+    ModuleVersion::new("dmut", vec![side(true), side(false)]).expect("valid dmut module")
+}
+
+/// The dispatch tail transfers through the frame-reuse slide: the mutual
+/// recursion runs ten million deep at a constant stack, the evidence
+/// parameter arriving with the real argument every slide and the instance
+/// word riding past the callee's parameters as a dead constant.
+#[test]
+fn dispatch_tails_slide_through_the_frame_reuse_transfer() {
+    let mut reg = ModuleRegistry::new();
+    reg.install(dispatch_tail_module());
+    let mut vm = Vm::new(reg);
+    let depth = 10_000_000_i64;
+    assert_eq!(
+        vm.run("dmut", "deven", &[Value::I64(depth), Value::I64(42)]),
+        Ok(Value::Bool(true)),
+        "the even side answers through the dispatch tail transfer"
+    );
+    // metadata word + call word + 8 slots, held constant across the 10^7
+    // dispatch tail transfers
+    assert_eq!(vm.max_stack_len(), 10);
+    assert_eq!(
+        vm.run("dmut", "dodd", &[Value::I64(depth), Value::I64(42)]),
+        Ok(Value::Bool(false)),
+        "the odd side answers through its own dispatch tail"
+    );
+    assert_eq!(vm.max_stack_len(), 10);
+}
+
+/// The dispatch-site cache keys CALLTG like CALL/CALLT: the same site hits
+/// across repeated runs, two same-pc sites in sibling functions never
+/// serve each other's rows, a target swap bumps the generation stamp and
+/// the site falls back to the full lookup, and an unresolvable callee
+/// traps every time (traps are never cached).
+#[test]
+fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
+    // two same-shaped functions at identical pcs dispatching different
+    // callees through CALLTG: the cache must key on the function. The
+    // site stages the call's lowered shape: the real argument, the
+    // evidence word the callee's trailing parameter claims, and the
+    // instance word riding past them
+    fn site(name: &str, callee: u32) -> FunctionDef {
+        def(
+            name,
+            &[I64, I64, I64, I64, I64],
+            1,
+            4,
+            vec![
+                Const::I64(42), // the evidence word
+                Const::I64(7),  // the instance word
+                Const::FuncRef {
+                    module: "dmut".into(),
+                    func: callee,
+                },
+            ],
+            &[
+                Uop::Funcf { frame_slots: 5 },
+                Uop::Mov { dst: 2, src: 0 }, // stage the real argument
+                Uop::Kimm { dst: 3, kidx: k(0) }, // stage the evidence word
+                Uop::Kimm { dst: 4, kidx: k(1) }, // stage the instance word
+                Uop::Calltg {
+                    callee: k(2),
+                    nargs: 1,
+                },
+                Uop::Ret { src: 2 },
+            ],
+        )
+    }
+    let mut reg = ModuleRegistry::new();
+    reg.install(dispatch_tail_module());
+    reg.install(
+        ModuleVersion::new("app", vec![site("f", 0), site("g", 1)]).expect("valid app module"),
+    );
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("app", "f", &[Value::I64(10)]),
+        Ok(Value::Bool(true)),
+        "the first function's site dispatches into dmut's even body"
+    );
+    assert_eq!(
+        vm.run("app", "g", &[Value::I64(9)]),
+        Ok(Value::Bool(false)),
+        "the same-pc sibling function resolves its own callee"
+    );
+    assert_eq!(
+        vm.run("app", "f", &[Value::I64(10)]),
+        Ok(Value::Bool(true)),
+        "the first site answers again after the sibling's run"
+    );
+    // a target swap bumps the generation: the cached row dies and the
+    // full lookup redirects through the target's current slot (the swap
+    // keeps the parameter span, answering false for every input)
+    vm.install_module(
+        ModuleVersion::new("dmut", vec![def(
+            "deven",
+            &[I64, I64, Bool],
+            2,
+            0,
+            vec![Const::Bool(false)],
+            &[
+                Uop::Funcf { frame_slots: 3 },
+                Uop::Kconst { dst: 2, kidx: k(0) },
+                Uop::Ret { src: 2 },
+            ],
+        )])
+        .expect("valid swap module"),
+    );
+    assert_eq!(
+        vm.run("app", "f", &[Value::I64(10)]),
+        Ok(Value::Bool(false)),
+        "the cached dispatch row falls back to the full lookup after the swap"
+    );
+    // an unresolvable callee traps, and keeps trapping: the failure was
+    // never cached
+    let bogus = ModuleVersion::new("bad", vec![def(
+        "main",
+        &[I64, I64, I64],
+        1,
+        2,
+        vec![Const::FuncRef {
+            module: "nowhere".into(),
+            func: 0,
+        }],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Calltg {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )])
+    .expect("valid bad module");
+    vm.install_module(bogus);
+    for _ in 0..3 {
+        assert_eq!(
+            vm.run("bad", "main", &[Value::I64(1)]),
+            Err(Trap::UnknownCallee {
+                module: "nowhere".to_owned(),
+                func: 0,
+            }),
+            "the unresolvable dispatch tail traps every time"
+        );
+    }
+}
+
+/// The sentinel evidence FuncRef dispatches a dispatch tail from the
+/// frame's own evidence slot: the word staged there names the serving
+/// body, the transfer slides the staged words into it, and the recursion
+/// through the sentinel runs a million deep at a constant stack. `drive`
+/// and `step` share the shape [n, evidence, t, one, staged-n,
+/// staged-evidence] with the evidence word naming `step`'s table index.
+#[test]
+fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
+    fn body() -> [Uop; 10] {
+        [
+            Uop::Funcf { frame_slots: 7 },
+            Uop::Kimm { dst: 3, kidx: k(0) }, // zero
+            Uop::EqI64 {
+                dst: 2,
+                lhs: 0,
+                rhs: 3,
+            },
+            Uop::Jmpif { cond: 2, target: 8 },
+            Uop::Kimm { dst: 4, kidx: k(1) }, // one
+            Uop::SubI64 {
+                dst: 5,
+                lhs: 0,
+                rhs: 4,
+            }, // stage n - 1
+            Uop::Mov { dst: 6, src: 1 },      // stage the evidence word
+            Uop::Calltg {
+                callee: k(2),
+                nargs: 2,
+            }, // the sentinel reads evidence slot 1's word
+            Uop::Kconst { dst: 2, kidx: k(3) },
+            Uop::Ret { src: 2 },
+        ]
+    }
+    fn sentinel_def(name: &str) -> FunctionDef {
+        def(
+            name,
+            &[I64, I64, Bool, I64, I64, I64, I64],
+            2,
+            2,
+            vec![
+                Const::I64(0),
+                Const::I64(1),
+                Const::FuncRef {
+                    module: "$evidence".into(),
+                    func: 1,
+                }, // the sentinel names evidence slot 1
+                Const::Bool(true),
+            ],
+            &body(),
+        )
+    }
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("sent", vec![sentinel_def("drive"), sentinel_def("step")])
+            .expect("valid sent module"),
+    );
+    let mut vm = Vm::new(reg);
+    // the evidence word 1 names `step`'s function-table index
+    assert_eq!(
+        vm.run("sent", "drive", &[Value::I64(1_000_000), Value::I64(1)]),
+        Ok(Value::Bool(true)),
+        "the sentinel dispatch tail runs the named body"
+    );
+    // metadata + call word + 7 slots, constant across the million-deep
+    // runtime-evidence transfers
+    assert_eq!(vm.max_stack_len(), 9);
+}
+
+/// A CALLTG addressing a generic builtin runs the one body inside the
+/// instruction and returns its result from the frame — the root-frame
+/// CALLT-to-native discipline over the generic dispatch shape: `len` of a
+/// KSTR-materialized string with the Str instance as the evidence word.
+#[test]
+fn a_generic_builtin_dispatch_tail_runs_and_returns() {
+    let mut reg = ModuleRegistry::new();
+    reg.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    reg.install(
+        ModuleVersion::new("gapp", vec![def(
+            "main",
+            &[Ref, Ref, I64],
+            0,
+            2,
+            vec![
+                Const::Str("four".into()),
+                Const::I64(ds_vm::abi::BuiltinInstance::Str as i64),
+                Const::FuncRef {
+                    module: "builtin".into(),
+                    func: 10, // len, the reserved generic slot
+                },
+            ],
+            &[
+                Uop::Funcf { frame_slots: 3 },
+                Uop::Kstr { dst: 0, kidx: k(0) }, // materialize "four"
+                Uop::Mov { dst: 1, src: 0 },      // stage the receiver
+                Uop::Kimm { dst: 2, kidx: k(1) }, // stage the evidence word
+                Uop::Calltg {
+                    callee: k(2),
+                    nargs: 1,
+                }, // the body runs, the frame rets its result
+                Uop::Ret { src: 0 },
+            ],
+        )])
+        .expect("valid gapp module"),
+    );
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("gapp", "main", &[]),
+        Ok(Value::I64(4)),
+        "the generic dispatch tail answers the string's length"
+    );
+    assert!(
+        !vm.objects().is_empty(),
+        "the interned constant's abandoned count rides the root-tail corner"
+    );
 }

@@ -15,8 +15,8 @@ use std::{
 
 use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Uop};
 use ds_check::{
-    Analyzed, BinderFact, DefId, DotRes, Extraction, MethodId, MethodOwner, Res, Resolutions,
-    TraitCall, TraitId, Ty, TypeId, Val,
+    Analyzed, BinderFact, DefId, DotRes, Extraction, InherentCallBounds, MethodId, MethodOwner,
+    Res, Resolutions, TraitCall, TraitId, Ty, TypeId, Val,
 };
 use ds_diag::Span;
 use ds_mod::Constant;
@@ -204,6 +204,13 @@ pub(crate) enum Op {
         callee: u16,
         nargs: u8,
     },
+    /// The dispatch tail call (CALLTG, the CALLG tail form): the same
+    /// dispatch resolution and staged shape as `Callg`, transferring
+    /// through the CALLT frame-reuse slide [H2's guarantee closure].
+    Calltg {
+        callee: u16,
+        nargs: u8,
+    },
     /// CALLS (the callable-word call form, F2): the callee operand is a
     /// frame slot holding the fn word; `nargs` arguments are staged on
     /// the overlay like every call form.
@@ -270,6 +277,17 @@ struct TypedPlace {
 }
 
 /// One word of a value inside a place.
+/// How one arm's pattern tests a non-union scrutinee.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueArmKind {
+    /// No runtime test: a plain binding, `_`, an atom naming the
+    /// scrutinee's sole member, or a destructuring tuple without
+    /// literal elements.
+    Catchall,
+    /// Literal words tested in place.
+    Tested,
+}
+
 #[derive(Clone, Debug)]
 struct WordAddr {
     /// The field name where one exists; `None` for scalars.
@@ -280,14 +298,29 @@ struct WordAddr {
     slot_ty: SlotType,
 }
 
+/// The word addresses of one field's whole span at `base`: one address
+/// per word, the field's name on its base word alone so grouped lists
+/// stay name-addressable.
+fn field_addrs(base: u8, field: &MemberField) -> Vec<WordAddr> {
+    field
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(offset, slot_ty)| WordAddr {
+            name: (offset == 0).then(|| field.name.clone()).flatten(),
+            slot: base + field.word + u8::try_from(offset).expect("field span offset fits u8"),
+            slot_ty: *slot_ty,
+        })
+        .collect()
+}
+
 /// One value's declared deinit claim: what the drop site stages.
 struct DeinitClaim {
-    /// The synthesized deinit's pool constant and the staged width.
+    /// The synthesized deinit's pool constant, staged width, and `Ref`
+    /// word offsets (the decs fire per span word).
     hook: Hook,
     /// The value's word types, in span order — the hook's staging.
     staged: Vec<SlotType>,
-    /// Whether the value's base word holds a `Ref` count.
-    count: bool,
 }
 
 /// One planned function: its table name plus the lambda that is its
@@ -322,9 +355,17 @@ pub(crate) struct PlannedFn {
     /// The checker-solved return type, set for declared bodies: a member
     /// function has no def-typed entry the signature path reads.
     pub(crate) ret: Option<Ty>,
-    /// The runtime-evidence pairs a generic impl member's body demands,
-    /// in body order: empty for every other entry.
+    /// The runtime-evidence pairs this frame's body demands, in body
+    /// order — a generic impl member body's own sites plus every demand
+    /// lexically inside its lambdas, or a lambda's own demands (through
+    /// its nested lambdas) when the entry is one. Empty outside generic
+    /// impl bodies.
     pub(crate) evidence: Rc<Vec<RuntimePair>>,
+    /// The declared bounds of the generic impl whose member body this
+    /// entry lowers (empty elsewhere): a lambda lexically inside the
+    /// body inherits them, so its own demands collect at its
+    /// construction.
+    pub(crate) bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     /// Whether this entry is a `spawn` expression's child [E2]: the
     /// capture block is the entry's own argument area — the spawned
     /// fiber's entry frame writes it exactly where a run entry writes
@@ -356,6 +397,16 @@ pub(crate) struct RuntimePair {
     pub(crate) method: MethodId,
 }
 
+/// A generic impl body's runtime-evidence environment: the demand
+/// pairs the body's frame stages slots for, plus the declared bounds
+/// they collected against — the bounds ride along so a lambda lexically
+/// inside the body inherits them and collects its own demands at its
+/// construction.
+pub(crate) struct EvidenceEnv {
+    pub(crate) pairs: Rc<Vec<RuntimePair>>,
+    pub(crate) bounds: Rc<HashMap<String, HashSet<TraitId>>>,
+}
+
 /// A solved trait-method call site's dispatch [B6, H3].
 pub(crate) enum TraitDispatch {
     /// The impl body the checker's solved instance names: the body's
@@ -368,10 +419,16 @@ pub(crate) enum TraitDispatch {
     /// entering the body staged.
     Runtime { slot: u8 },
     /// A solved inherent-method call site: the impl body's
-    /// function-table index. The receiver's own type picked the body at
-    /// check time, so the call dispatches like a plain local callee — no
-    /// instance word and no dispatch uop.
-    Inherent { index: u32 },
+    /// function-table index plus the checker-recorded bounds when the
+    /// body is a generic impl's (empty for a monomorphic impl's). The
+    /// receiver's own type picked the body at check time, so the call
+    /// dispatches like a plain local callee — no instance word and no
+    /// dispatch uop; a generic body's evidence words stage trailing the
+    /// arguments and the body claims them as its trailing parameters.
+    Inherent {
+        index: u32,
+        bounds: InherentCallBounds,
+    },
 }
 
 /// The module plan: lowered functions in function-table order.
@@ -421,6 +478,7 @@ impl Plan {
             decl: None,
             ret: None,
             evidence: Rc::new(Vec::new()),
+            bounds: Rc::new(HashMap::new()),
             spawn_child: false,
         });
     }
@@ -437,6 +495,8 @@ impl Plan {
         lambda: &Expr,
         res: &Resolutions,
         binders: &HashMap<Span, BinderFact>,
+        evidence: Rc<Vec<RuntimePair>>,
+        bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     ) -> (u32, Rc<Vec<(Span, Ty)>>) {
         let index = u32::try_from(self.functions.len()).expect("function index fits u32");
         let captures = Rc::new(collect_captures(lambda, res, binders));
@@ -448,7 +508,8 @@ impl Plan {
             captures: captures.clone(),
             decl: None,
             ret: None,
-            evidence: Rc::new(Vec::new()),
+            evidence,
+            bounds,
             spawn_child: false,
         });
         (index, captures)
@@ -490,6 +551,7 @@ impl Plan {
             decl: None,
             ret: Some(ret),
             evidence: Rc::new(Vec::new()),
+            bounds: Rc::new(HashMap::new()),
             spawn_child: true,
         });
         (index, captures)
@@ -509,7 +571,7 @@ impl Plan {
         params: Rc<Vec<Param>>,
         body: Rc<Expr>,
         ret: Ty,
-        evidence: Rc<Vec<RuntimePair>>,
+        evidence: EvidenceEnv,
     ) -> u32 {
         let index = u32::try_from(self.functions.len()).expect("function index fits u32");
         self.impl_index.insert((impl_site, member), index);
@@ -521,15 +583,17 @@ impl Plan {
             decl: Some(Rc::new(DeclFn { params, body })),
             ret: Some(ret),
             deinit: None,
-            evidence,
+            evidence: evidence.pairs,
+            bounds: evidence.bounds,
             spawn_child: false,
         });
         index
     }
 
-    /// Marks one impl item's bodies as runtime-evidence territory (the
-    /// generic impls this round): nothing plans, and call sites
-    /// dispatching into them refuse naming the seam.
+    /// Marks one impl item as runtime-evidence territory (the generic
+    /// impls): a nested dispatch whose serving body is one of its members
+    /// refuses naming the transitive-staging seam — the bodies themselves
+    /// plan, and the entering call sites stage their evidence words.
     pub(crate) fn note_runtime_impl(&mut self, impl_site: Span) {
         self.runtime_impls.insert(impl_site);
     }
@@ -566,6 +630,7 @@ impl Plan {
             decl: None,
             ret: None,
             evidence: Rc::new(Vec::new()),
+            bounds: Rc::new(HashMap::new()),
             spawn_child: false,
         });
     }
@@ -980,13 +1045,14 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
     }
 }
 
-/// Collects one generic impl member body's runtime-evidence demands, in
-/// body order: every trait-method call whose receiver's checked type is
-/// the impl's own bound type variable (the checker satisfied it through
-/// the impl's in-scope bound, so no solved instance records there).
-/// Nested lambda subtrees stay out — their bodies are separate frames
-/// with no evidence slots, and their runtime sites refuse at their own
-/// lowering.
+/// Collects one frame's runtime-evidence demands, in body order: every
+/// trait-method call whose receiver's checked type is the impl's own
+/// bound type variable (the checker satisfied it through the impl's
+/// in-scope bound, so no solved instance records there). Value-site
+/// lambda subtrees stay in — their demands ride the capture block as
+/// evidence words, staged from this frame's slots — while spawned
+/// subtrees stay out: a spawned child's frame has no evidence channel,
+/// so its runtime sites refuse at their own lowering.
 pub(crate) fn runtime_pairs(
     analyzed: &Analyzed,
     res: &Resolutions,
@@ -1063,17 +1129,20 @@ impl PairWalk<'_> {
             }
         };
         match e {
-            // a value-site lambda and a spawned block are their own
-            // frames: no evidence reaches inside, so their runtime sites
-            // refuse at their own lowering
+            // a spawned block is its own frame with no evidence
+            // channel: its runtime sites refuse at their own lowering
             Expr::Literal { .. }
             | Expr::RawStr { .. }
             | Expr::Break(_)
             | Expr::Continue(_)
             | Expr::FnType { .. }
             | Expr::Path { .. }
-            | Expr::Lambda { .. }
             | Expr::Spawn { .. } => {},
+            // a value-site lambda's body sites demand evidence too: the
+            // construction stages the words from this frame's slots into
+            // the capture block, so this frame must carry a slot for
+            // every demand lexically inside the lambda, transitively
+            Expr::Lambda { body, .. } => self.expr(body),
             Expr::Str { parts, .. } => {
                 for part in parts {
                     if let StrPart::Expr { expr, .. } = part {
@@ -1238,8 +1307,14 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     rc: Placement,
     /// This body's runtime-evidence pairs to their frame slots: a nested
     /// trait-method call on a bound type variable dispatches through the
-    /// word at its slot (empty outside generic impl bodies).
+    /// word at its slot (empty outside generic impl bodies and their
+    /// lambdas).
     evidence: HashMap<(String, MethodId), u8>,
+    /// The declared bounds of the generic impl whose member body this
+    /// frame lowers, or the ones the enclosing member body carried when
+    /// this frame is one of its lambdas: a lambda's own evidence demands
+    /// collect against them at its construction.
+    bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     /// This function's table index: a dead Fn payload word zero-writes
     /// the frame's own scalar FuncRef (a copyable word the dead member
     /// never calls).
@@ -1288,7 +1363,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // word kind statically (the runtime word is the caller's fact),
         // and the pool-call slide checks words against the callee's
         // typed parameters — so those members refuse here, honestly,
-        // until the reboxing/ruling that names their representation.
+        // until the representation ruling that names their word shape.
         if let Some(decl) = &planned.decl {
             for param in decl.params.iter() {
                 let Some(fact) = analyzed.checked.binders.get(&param.name.span) else {
@@ -1385,6 +1460,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             overlay_len: 0,
             rc: Placement::from_linearity(lin),
             evidence: HashMap::new(),
+            bounds: planned.bounds.clone(),
             index,
             loops: Vec::new(),
             nurseries: Vec::new(),
@@ -1403,7 +1479,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         } else {
             this.bind_params(params)?;
             this.bind_captures(&planned.captures)?;
-            this.bind_evidence(&planned.evidence)?;
+            if planned.decl.is_some() {
+                this.bind_evidence(&planned.evidence)?;
+            } else {
+                // a lambda's evidence words ride its capture block: their
+                // slots bind right after the real captures, exactly where
+                // the CALLS copy-in writes them
+                this.bind_capture_evidence(&planned.evidence)?;
+            }
         }
         this.tail(body)?;
         this.finalize()
@@ -1580,7 +1663,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let mut words = self.tracked_words(place, ty)?;
         if let Some(claim) = self.deinit_claim(ty, span)? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
-            self.rc.claimed(place.base, claim.hook, claim.count, &words);
+            self.rc.claimed(place.base, claim.hook, &words);
             if !words.contains(&place.base) {
                 words.insert(0, place.base);
             }
@@ -1588,17 +1671,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(words)
     }
 
-    /// Registers an owning binder with the RC pass: its Ref words plus
-    /// the deinit claim its concrete type carries (C5) — the value's
-    /// base word anchors the hook, and the frame's overlay grows to
-    /// hold the hook's staging.
-    fn rc_bind(&mut self, binder: Span, base: u8, ty: Ty) -> Result<(), LowerError> {
-        let mut words = self.count_words(base, ty)?;
+    /// Registers an owning binder with the RC pass: its tracked words
+    /// (the place's own classification leads, so a closure word behind a
+    /// fn-typed binding is owned by its binder — its dec fires at the
+    /// checker-recorded last use, and a never-consumed word drops at its
+    /// scope's end) plus the deinit claim its concrete type carries (C5)
+    /// — the value's base word anchors the hook, and the frame's overlay
+    /// grows to hold the hook's staging.
+    fn rc_bind(&mut self, binder: Span, place: &Place, ty: Ty) -> Result<(), LowerError> {
+        let mut words = self.tracked_words(place, ty)?;
         if let Some(claim) = self.deinit_claim(ty, binder)? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
-            self.rc.claimed(base, claim.hook, claim.count, &words);
-            if !words.contains(&base) {
-                words.insert(0, base);
+            self.rc.claimed(place.base, claim.hook, &words);
+            if !words.contains(&place.base) {
+                words.insert(0, place.base);
             }
         }
         self.rc.bound(binder, &words);
@@ -1617,19 +1703,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The deinit claim one value of `ty` carries: the synthesized
     /// deinit's pool constant, the word span it stages at the death, and
-    /// whether the value's base word holds a `Ref` count. `None` for
+    /// the span's `Ref` word offsets (the claim's decs). `None` for
     /// types without a declared deinit.
     fn deinit_claim(&mut self, ty: Ty, span: Span) -> Result<Option<DeinitClaim>, LowerError> {
         let Some(hook) = self.deinit_hook(ty, span)? else {
             return Ok(None);
         };
         let staged = self.shapes.words(ty)?;
-        let count = staged.first() == Some(&SlotType::Ref);
-        Ok(Some(DeinitClaim {
-            hook,
-            staged,
-            count,
-        }))
+        Ok(Some(DeinitClaim { hook, staged }))
     }
 
     /// The deinit hook of a value's concrete type (C5): a single struct
@@ -1662,7 +1743,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         let staged = self.shapes.words(ty)?;
         let width = u8::try_from(staged.len()).expect("span width fits u8");
-        Ok(Some(Hook { pool, width }))
+        // the claim decs every Ref word of the span at the value's death
+        let refs: Vec<u8> = staged
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| **slot == SlotType::Ref)
+            .map(|(offset, _)| u8::try_from(offset).expect("span offset fits u8"))
+            .collect();
+        Ok(Some(Hook {
+            pool,
+            width,
+            refs: refs.into(),
+        }))
     }
 
     // ---- params and scopes ---------------------------------------------------
@@ -1719,6 +1811,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         for pair in pairs {
             let slot = self.temp_word(SlotType::I64)?;
             self.params_len += 1;
+            self.evidence.insert((pair.var.clone(), pair.method), slot);
+        }
+        Ok(())
+    }
+
+    /// Binds one lambda's runtime-evidence words as the trailing
+    /// capture words: the construction site staged them from the
+    /// enclosing frame's evidence slots, and the CALLS copy-in writes
+    /// them right after the real captures. They are plain I64 words —
+    /// never counted, never a binder.
+    fn bind_capture_evidence(&mut self, pairs: &[RuntimePair]) -> Result<(), LowerError> {
+        for pair in pairs {
+            let slot = self.alloc(&[SlotType::I64])?;
             self.evidence.insert((pair.var.clone(), pair.method), slot);
         }
         Ok(())
@@ -1873,33 +1978,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             (Shape::Struct(s), PlaceShape::Span(underlying)) => {
                 let place_shape = self.shapes.shape(*underlying)?;
                 if matches!(&*place_shape, Shape::Struct(_)) {
-                    // the same bare struct: words in declaration order
+                    // the same bare struct: words in declaration order,
+                    // one address per word of each field's span
                     return Ok(s
                         .fields
                         .iter()
-                        .map(|f| WordAddr {
-                            name: f.name.clone(),
-                            slot: place.base + f.word,
-                            slot_ty: f.slot,
-                        })
+                        .flat_map(|f| field_addrs(place.base, f))
                         .collect());
                 }
                 let atom = self.only_atom(ty, no_span())?;
                 let fields = self.member_fields(*underlying, atom)?;
-                s.fields
-                    .iter()
-                    .map(|field| {
-                        let member = fields
-                            .iter()
-                            .find(|f| f.name == field.name)
-                            .ok_or_else(|| mismatch("a union member field"))?;
-                        Ok(WordAddr {
-                            name: field.name.clone(),
-                            slot: place.base + member.word,
-                            slot_ty: field.slot,
-                        })
-                    })
-                    .collect()
+                let mut out = Vec::new();
+                for field in &s.fields {
+                    let member = fields
+                        .iter()
+                        .find(|f| f.name == field.name)
+                        .ok_or_else(|| mismatch("a union member field"))?;
+                    out.extend(field_addrs(place.base, member));
+                }
+                Ok(out)
             },
             (Shape::Tuple(s), PlaceShape::Span(underlying)) => {
                 let place_shape = self.shapes.shape(*underlying)?;
@@ -1908,11 +2005,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 Ok(s.fields
                     .iter()
-                    .map(|f| WordAddr {
-                        name: None,
-                        slot: place.base + f.word,
-                        slot_ty: f.slot,
-                    })
+                    .flat_map(|f| field_addrs(place.base, f))
                     .collect())
             },
             (Shape::Union(u), PlaceShape::Span(underlying)) if *underlying == ty => Ok(u
@@ -1956,6 +2049,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .member(atom)
             .ok_or_else(|| mismatch("a union member read"))?;
         Ok(member.fields.clone())
+    }
+
+    /// Moves one field's whole word span from `srcs` (the source value's
+    /// word addresses, in span order) into the words at `base +
+    /// field.word`: a Mov per word, an RC copy per Ref word.
+    fn store_field_span(&mut self, base: u8, field: &MemberField, srcs: &[WordAddr]) {
+        for (offset, addr) in srcs.iter().enumerate() {
+            let word = base + field.word + u8::try_from(offset).expect("field span offset fits u8");
+            self.emit(Op::Mov {
+                dst: Slot::body(word),
+                src: Slot::body(addr.slot),
+            });
+            if addr.slot_ty == SlotType::Ref {
+                self.rc.copied(&mut self.code, word, addr.slot);
+            }
+        }
     }
 
     /// The tag word of a union place.
@@ -2093,11 +2202,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                      placement has no overwrite contract for it yet",
                 ));
             }
-            let target = self.temp_span(declared)?;
             self.refuse_closure_widen(&init, declared, local.span)?;
             self.guard_deinit_union_member(init.ty, declared, local.span)?;
-            self.widen_into(&target, declared, &init)?;
-            self.place_of_ty(target.base, declared)?
+            // A destructuring var owns one re-storable slot per
+            // element: each element word copies into its own var
+            // slot at the binding, so an assignment through an
+            // element re-stores its slot alone — the const
+            // convention aliases the tuple's words instead.
+            if let Pattern::Tuple { pats, .. } = pat {
+                self.var_tuple_slots(pats, &init, declared)?;
+                init.place.clone()
+            } else {
+                let target = self.temp_span(declared)?;
+                self.widen_into(&target, declared, &init)?;
+                self.place_of_ty(target.base, declared)?
+            }
         } else if declared != init.ty && self.is_union_ty(declared)? {
             // An annotated const over a narrower source claims the
             // destination union's region under its source member: the
@@ -2118,22 +2237,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // the place's own word classification leads: a const
                 // aliasing a closure word binds the Ref word the declared
                 // fn type does not name, and the binder's death drops it
-                self.rc_bind(*span, place.base, declared)?;
+                self.rc_bind(*span, &place, declared)?;
                 self.scope_insert(&name.name, *span);
             },
             Pattern::Tuple { pats, .. } => {
-                if local.mutable {
-                    return Err(LowerError::unsupported(
-                        local.span,
-                        "a destructuring var binding",
-                        "a var owns one re-storable span; destructured elements need their own \
-                         var slots",
-                    ));
+                // a mutable tuple already bound its per-element var
+                // slots; the const convention aliases in place
+                if !local.mutable {
+                    self.bind_tuple_pattern(
+                        pats.as_slice(),
+                        &TypedPlace {
+                            place: place.clone(),
+                            ty: declared,
+                        },
+                        false,
+                    )?;
                 }
-                self.bind_tuple_pattern(pats.as_slice(), &TypedPlace {
-                    place: place.clone(),
-                    ty: declared,
-                })?;
             },
             Pattern::Wildcard(_) => {
                 // `const _ = e` discards: no binder names the value, so
@@ -2153,6 +2272,81 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             place,
             ty: declared,
         })
+    }
+
+    /// Binds one destructuring `var`'s elements to fresh per-element
+    /// slots: each width-1 element word copies into its own var slot (a
+    /// Ref word inc's at the copy), so an assignment through an element
+    /// re-stores its slot alone and the source tuple keeps its words.
+    /// Wider elements refuse: a multi-word element would need a
+    /// span-shaped slot, which the span rework's width slices open.
+    fn var_tuple_slots(
+        &mut self,
+        pats: &[Pattern],
+        init: &TypedPlace,
+        declared: Ty,
+    ) -> Result<(), LowerError> {
+        let shape = self.shapes.shape(declared)?;
+        let Shape::Tuple(s) = &*shape else {
+            return Err(mismatch("a destructuring var binding"));
+        };
+        if pats.len() != s.fields.len() {
+            return Err(mismatch("a tuple pattern's arity"));
+        }
+        let addrs = self.word_addrs(&init.place, declared)?;
+        for ((sub, field), addr) in pats.iter().zip(s.fields.iter()).zip(addrs.iter()) {
+            let Pattern::Binding { span, name } = sub else {
+                match sub {
+                    Pattern::Wildcard(_) => continue,
+                    _ => {
+                        return Err(LowerError::unsupported(
+                            pattern_span(sub),
+                            "a var destructuring element pattern",
+                            "elements bind as plain names or skip as `_`; literals test at match \
+                             time and never bind",
+                        ))
+                    },
+                }
+            };
+            let Some(fact) = self.analyzed.checked.binders.get(span).copied() else {
+                return Err(mismatch("a var destructuring binder"));
+            };
+            if self.is_var_ty(fact.ty) {
+                return Err(LowerError::unsupported(
+                    *span,
+                    "a var element over a generic impl's type variable",
+                    "a reassignment would drop the previous word's count by runtime kind, and the \
+                     placement has no overwrite contract for it yet",
+                ));
+            }
+            let Shape::Word(slot) = &*self.shapes.shape(fact.ty)? else {
+                return Err(LowerError::unsupported(
+                    *span,
+                    "a var destructuring element wider than one word",
+                    "a struct, tuple, or union element would need a span-shaped var slot; the \
+                     span rework's width slices open it",
+                ));
+            };
+            if *slot != field.slot() {
+                return Err(mismatch("a var destructuring element word"));
+            }
+            let target = self.temp_word(*slot)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(target),
+                src: Slot::body(addr.slot),
+            });
+            if addr.slot_ty == SlotType::Ref {
+                self.rc.copied(&mut self.code, target, addr.slot);
+            }
+            let place = Place {
+                base: target,
+                shape: PlaceShape::Word(*slot),
+            };
+            self.binders.insert(*span, place.clone());
+            self.rc_bind(*span, &place, fact.ty)?;
+            self.scope_insert(&name.name, *span);
+        }
+        Ok(())
     }
 
     /// One assignment `x = e` / `x op= e` [C3]: the place is a single-segment
@@ -2234,10 +2428,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     ds_parse::AssignOp::Div => (DataOp::DivI64, DataOp::DivF64),
                     _ => (DataOp::ModI64, DataOp::ModI64),
                 };
+                // string `+=` opens the concat window before the rhs
+                // evaluation and pins the replaced word: a last use
+                // inside the rhs defers the replaced content's dec to
+                // the flush (after the CALL), and the store below then
+                // finds the word unowned and skips its own dec
+                let str_add = matches!(op, ds_parse::AssignOp::Add)
+                    && self.is_string_add_ty(declared, self.val(right.span())?.ty);
+                if str_add {
+                    self.rc.native_open();
+                    let words = self
+                        .word_addrs(&place, declared)
+                        .map_err(|err| err.respanned(right.span()))?;
+                    self.rc
+                        .native_reads(&words.iter().map(|addr| addr.slot).collect::<Vec<_>>());
+                }
                 let rhs = self.value(right)?;
-                let result = if matches!(op, ds_parse::AssignOp::Add)
-                    && self.is_string_add(&current, &rhs)
-                {
+                let result = if str_add {
                     // string `+=` desugars like the binary arm: the
                     // compound store re-stores the concat result, a
                     // fresh Ref word
@@ -2261,19 +2468,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // the replaced reference dies before the store overwrites its word
         // (compound stores re-store arithmetic results or the string
         // concat's fresh Ref word, never a borrowed operand). A deinit
-        // value's
-        // claim fires first (C5): the hook runs while the old content's
-        // counts are still live
-        let claimed = self.deinit_claim(declared, e.span())?.is_some();
-        if claimed {
-            // the claim's drop covers the base word's own count
+        // value's claim fires first (C5): the hook runs while the old
+        // content's counts are still live, and the span claim's drop decs
+        // every `Ref` word of the value — the folded words carry no entry
+        // of their own
+        if self.deinit_claim(declared, e.span())?.is_some() {
             self.rc.store_over(&mut self.code, &[place.base]);
-        }
-        for word in self.ref_words(place.base, declared)? {
-            if claimed && word == place.base {
-                continue;
+        } else {
+            for word in self.ref_words(place.base, declared)? {
+                self.rc.store_over(&mut self.code, &[word]);
             }
-            self.rc.store_over(&mut self.code, &[word]);
         }
         self.refuse_closure_widen(&assigned, declared, e.span())?;
         self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
@@ -2436,7 +2640,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 name,
             } => {
                 self.binders.insert(*bind_span, ind_place.clone());
-                self.rc_bind(*bind_span, ind, start_tp.ty)?;
+                self.rc_bind(*bind_span, &ind_place, start_tp.ty)?;
                 self.scope_insert(&name.name, *bind_span);
             },
             Pattern::Wildcard(_) => {},
@@ -2565,8 +2769,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 span: bind_span,
                 name,
             } => {
-                self.binders.insert(*bind_span, elem_place);
-                self.rc_bind(*bind_span, elem, element)?;
+                self.binders.insert(*bind_span, elem_place.clone());
+                self.rc_bind(*bind_span, &elem_place, element)?;
                 self.scope_insert(&name.name, *bind_span);
             },
             Pattern::Wildcard(_) => {
@@ -2676,6 +2880,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .find(|native| native.name == "list_get")
             .expect("the list_get body is tabled");
         self.guard_staged_count(3)?;
+        self.rc.native_open();
+        self.rc.native_reads(&[list]);
         self.overlay_site(&[SlotType::Ref, SlotType::I64, SlotType::I64], &[
             SlotType::Tag,
             slot,
@@ -2702,7 +2908,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The word kind of one list element type: the native hands exactly
     /// one payload word out, so the element must lower as one scalar
-    /// word; struct, tuple, and union elements refuse until reboxing.
+    /// word; struct, tuple, and union elements refuse until the native channel.
     fn element_word(&mut self, element: Ty, span: Span) -> Result<SlotType, LowerError> {
         match &*self.shapes.shape(element)? {
             Shape::Word(
@@ -2718,7 +2924,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 span,
                 "a list element wider than one word",
                 "list elements lower as one scalar word; struct, tuple, and union elements wait \
-                 on reboxing",
+                 on the native channel's span read-out",
             )),
         }
     }
@@ -2923,7 +3129,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// through value-site places (its construction word, const aliases of
     /// it, a provenance-known call result).
     fn lambda_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
-        let Expr::Lambda { generics, span, .. } = e else {
+        let Expr::Lambda {
+            generics,
+            span,
+            body,
+            ..
+        } = e
+        else {
             return Err(mismatch("a lambda value"));
         };
         if !generics.is_empty() {
@@ -2933,10 +3145,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "generic bodies are the M6 CALL_GENERIC seam",
             ));
         }
-        let (index, captures) =
-            self.plan
-                .push_lambda(&self.name, e, self.res, &self.analyzed.checked.binders);
-        let (word, slot) = self.child_callable(*span, index, &captures)?;
+        // a lambda lexically inside a generic impl body carries its own
+        // evidence demands: the pairs its body calls (through its own
+        // nested lambdas), staged from this frame's evidence slots into
+        // the capture block
+        let evidence = if self.bounds.is_empty() {
+            Rc::new(Vec::new())
+        } else {
+            Rc::new(runtime_pairs(self.analyzed, self.res, &self.bounds, body))
+        };
+        let (index, captures) = self.plan.push_lambda(
+            &self.name,
+            e,
+            self.res,
+            &self.analyzed.checked.binders,
+            evidence.clone(),
+            self.bounds.clone(),
+        );
+        let (word, slot) = self.child_callable(*span, index, &captures, &evidence)?;
         Ok(Place {
             base: word,
             shape: PlaceShape::Word(slot),
@@ -2953,6 +3179,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         span: Span,
         index: u32,
         captures: &[(Span, Ty)],
+        evidence: &[RuntimePair],
     ) -> Result<(u8, SlotType), LowerError> {
         let kidx = self.pool(Constant::FuncRef {
             module: String::new(), // the enclosing module
@@ -2963,7 +3190,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::body(func_word),
             kidx,
         });
-        if captures.is_empty() {
+        if captures.is_empty() && evidence.is_empty() {
             self.fn_words.insert(func_word, index);
             self.scalar_fn_words.insert(func_word);
             return Ok((func_word, SlotType::Fn));
@@ -3027,6 +3254,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 staged.push(addr.slot_ty);
             }
         }
+        // the lambda's evidence words ride the capture block as its
+        // trailing words: this frame staged them at its own entry, so
+        // the moves read the evidence slots and the closure carries the
+        // words into every frame the callable enters
+        for pair in evidence {
+            let slot = self
+                .evidence
+                .get(&(pair.var.clone(), pair.method))
+                .copied()
+                .ok_or_else(|| mismatch("a lambda's runtime-evidence demand"))?;
+            moves.push(slot);
+            staged.push(SlotType::I64);
+        }
         self.guard_staged_count(staged.len())?;
         for (word, slot) in moves.iter().enumerate() {
             self.emit(Op::Mov {
@@ -3061,6 +3301,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         result: &[SlotType],
     ) -> Result<(), LowerError> {
         self.guard_staged_count(staged.len())?;
+        self.rc.native_open();
         let kinds: Vec<SlotType> = staged.iter().map(|(_, kind)| *kind).collect();
         for (index, &(slot, _)) in staged.iter().enumerate() {
             self.emit(Op::Mov {
@@ -3264,7 +3505,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .push_spawn(&self.name, e, self.res, &self.analyzed.checked.binders, ret);
         let native = crate::native::lookup("nursery_spawn")
             .ok_or_else(|| mismatch("the nursery spawn seam"))?;
-        let (callable, kind) = self.child_callable(*span, index, &captures)?;
+        // a spawned child carries no evidence channel: its body's
+        // bound-demanding sites refuse at their own lowering
+        let (callable, kind) = self.child_callable(*span, index, &captures, &[])?;
         self.seam_call(native, &[(id_word, SlotType::I64), (callable, kind)], &[
             SlotType::I64,
         ])?;
@@ -3526,6 +3769,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let native = crate::native::lookup(native_name)
             .unwrap_or_else(|| panic!("the str native `{native_name}` is covered"));
         self.overlay_site(&[arg_slot], &[SlotType::Ref]);
+        self.rc.native_open();
         self.emit(Op::Mov {
             dst: Slot::overlay(0),
             src: Slot::body(only.slot),
@@ -3654,40 +3898,98 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// `x is T`: a TAG_TEST against the tested atom, or a constant when
-    /// the checked types already decide it (legal specialization).
+    /// `x is T`: TAG_TESTs against the tested atoms, or a constant when
+    /// the checked types already decide it (legal specialization). A
+    /// multi-atom test (a written union spelling) joins one TAG_TEST
+    /// per atom by jumps — the first hit answers true, the fall-through
+    /// answers false.
     fn is_value(&mut self, expr: &Expr, ty: &Type, span: Span) -> Result<Place, LowerError> {
         let operand = self.value(expr)?;
         let operand_ty = self.val(expr.span())?.ty;
         let tested = match self.type_atom(ty) {
-            Ok(atom) => atom,
-            Err(path_err) => match self.solved_is_atom(span) {
-                Some(atom) => atom,
+            Ok(atom) => vec![atom],
+            Err(path_err) => match self.solved_is_members(span) {
+                Some(members) => members,
                 None => return Err(path_err),
             },
         };
         let members = self.members(operand_ty);
+        // the operand's member set decides the test: its whole coverage
+        // folds to true, a disjoint test to false, and the rest tests the
+        // members the two sets share
+        let live: Vec<TypeId> = members
+            .iter()
+            .copied()
+            .filter(|m| tested.contains(m))
+            .collect();
         let dst = self.temp_word(SlotType::Bool)?;
-        if members.as_slice() == [tested] {
+        // the covered fold is instantiation-stable even over type
+        // variables (the variable's atom covers whatever it becomes);
+        // every other shape reads a tag the variable's raw word cannot
+        // answer — or folds against a member set an instantiation may
+        // re-solve — so a type variable on either side of the test
+        // refuses here
+        if !members.is_empty() && live.len() == members.len() {
             let kidx = self.pool(Constant::Bool(true));
             self.emit(Op::Kconst {
                 dst: Slot::body(dst),
                 kidx,
             });
-        } else if !members.contains(&tested) {
+        } else if tested
+            .iter()
+            .chain(members.iter())
+            .any(|a| self.shapes.is_var_atom(*a))
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "an `is` test over a type variable",
+                "a type-variable value rides one raw word, so no tag discriminates it and no \
+                 member set survives instantiation; testing it needs runtime reflection",
+            ));
+        } else if live.is_empty() {
             let kidx = self.pool(Constant::Bool(false));
             self.emit(Op::Kconst {
                 dst: Slot::body(dst),
                 kidx,
             });
-        } else {
+        } else if let [atom] = live.as_slice() {
             let src = self.tag_addr(&operand.place)?;
-            let tag = self.shapes.tag_id(tested)?;
+            let tag = self.shapes.tag_id(*atom)?;
             self.emit(Op::TagTest {
                 dst: Slot::body(dst),
                 src: Slot::body(src),
                 tag,
             });
+        } else {
+            let src = self.tag_addr(&operand.place)?;
+            let hit = self.label();
+            let join = self.label();
+            for atom in &live {
+                let probe = self.temp_word(SlotType::Bool)?;
+                let tag = self.shapes.tag_id(*atom)?;
+                self.emit(Op::TagTest {
+                    dst: Slot::body(probe),
+                    src: Slot::body(src),
+                    tag,
+                });
+                self.emit(Op::Jmpif {
+                    cond: Slot::body(probe),
+                    target: hit,
+                });
+            }
+            let k_false = self.pool(Constant::Bool(false));
+            self.emit(Op::Kconst {
+                dst: Slot::body(dst),
+                kidx: k_false,
+            });
+            self.emit(Op::Jmp { target: join });
+            self.bind_label(hit);
+            let k_true = self.pool(Constant::Bool(true));
+            self.emit(Op::Kconst {
+                dst: Slot::body(dst),
+                kidx: k_true,
+            });
+            self.bind_label(join);
         }
         Ok(Place {
             base: dst,
@@ -3695,18 +3997,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// The tested atom of a written type the nominal path cannot name
-    /// (a written fn type): the checker solved the `is` test and recorded
-    /// it keyed by the expression's span, so a single-atom solution is
-    /// the member TAG_TEST discriminates by. Anything else keeps the
-    /// path spelling's refusal.
-    fn solved_is_atom(&self, span: Span) -> Option<TypeId> {
+    /// The tested members of a written type the nominal path cannot name
+    /// (a written fn type, a union spelling): the checker solved the
+    /// `is` test and recorded it keyed by the expression's span, so the
+    /// solution's members are what the TAG_TESTs discriminate by.
+    /// Anything else keeps the path spelling's refusal.
+    fn solved_is_members(&self, span: Span) -> Option<Vec<TypeId>> {
         let &solved = self.analyzed.checked.is_tests.get(&span)?;
-        let members = self.members(solved);
-        let [only] = members.as_slice() else {
-            return None;
-        };
-        Some(*only)
+        Some(self.members(solved))
     }
 
     /// The atom a written type names; nominal single-segment paths only.
@@ -3770,9 +4068,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .ok_or_else(|| mismatch("a struct field"))?,
             Shape::Word(_) | Shape::Tuple(_) => return Err(mismatch("a field access")),
         };
+        // A one-word field reads as its word; a multi-word field (a
+        // struct-typed field) reads as the span the expression's own
+        // checked type names, nested access resolving through it.
+        let shape = if field.width() == 1 {
+            PlaceShape::Word(field.slot())
+        } else {
+            PlaceShape::Span(self.val(e.span())?.ty)
+        };
         Ok(Place {
             base: recv_val.place.base + field.word,
-            shape: PlaceShape::Word(field.slot),
+            shape,
         })
     }
 
@@ -3810,9 +4116,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .iter()
                 .find(|f| f.name.as_deref() == Some(name.name.as_str()))
                 .ok_or_else(|| mismatch("a struct literal field"))?;
-            let addr = if let Some(expr) = value {
+            let addrs = if let Some(expr) = value {
                 let v = self.value(expr)?;
-                single(&self.word_addrs(&v.place, v.ty)?, expr.span())?
+                self.word_addrs(&v.place, v.ty)
+                    .map_err(|err| err.respanned(expr.span()))?
             } else {
                 // punning: the field name is the value's name
                 let bind = self.scope_lookup(&name.name).ok_or_else(|| {
@@ -3834,13 +4141,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .binders
                     .get(&bind)
                     .map_or(static_ty, |f| f.ty);
-                single(&self.word_addrs(&place, ty)?, name.span)?
+                self.word_addrs(&place, ty)
+                    .map_err(|err| err.respanned(name.span))?
             };
+            if addrs.len() != field.width() {
+                return Err(mismatch("a struct literal field's span"));
+            }
             // a fn-typed field must prove scalar provenance: a closure word
             // (or a callable-defaulted binding that may hold one at
             // runtime) would write a Ref word into the Fn-classified field
             // slot and trap at the store
-            if field.slot == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
+            if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addrs[0].slot) {
                 return Err(LowerError::unsupported(
                     name.span,
                     "a fn-typed struct field",
@@ -3848,22 +4159,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                      callable binding cannot inhabit a struct field",
                 ));
             }
-            self.emit(Op::Mov {
-                dst: Slot::body(target.base + field.word),
-                src: Slot::body(addr.slot),
-            });
-            if addr.slot_ty == SlotType::Ref {
-                self.rc
-                    .copied(&mut self.code, target.base + field.word, addr.slot);
-            }
+            self.store_field_span(target.base, field, &addrs);
         }
         // the constructed value's deinit claim anchors its base word
         // (C5); the value dies unnamed unless a binder aliases it
         if let Some(claim) = self.deinit_claim(static_ty, e.span())? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
             let words = self.ref_words(target.base, static_ty)?;
-            self.rc
-                .claimed(target.base, claim.hook, claim.count, &words);
+            self.rc.claimed(target.base, claim.hook, &words);
         }
         Ok(target)
     }
@@ -3898,7 +4201,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 dst: Slot::body(target.base + field.word),
                 src: Slot::body(addr.slot),
             });
-            if field.slot == SlotType::Ref {
+            if field.slot() == SlotType::Ref {
                 self.rc
                     .copied(&mut self.code, target.base + field.word, addr.slot);
             }
@@ -3944,13 +4247,26 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  not ruled yet",
             ));
         }
+        // string `+` is the concat native's call shape: its borrow
+        // window opens before operand evaluation, so a later operand's
+        // own last-use dec cannot free a word the CALL still reads
+        let str_add = *op == BinaryOp::Add
+            && self.is_string_add_ty(self.val(left.span())?.ty, self.val(right.span())?.ty);
+        if str_add {
+            self.rc.native_open();
+        }
         let lhs = self.value(left)?;
+        if str_add {
+            let words = self
+                .word_addrs(&lhs.place, lhs.ty)
+                .map_err(|err| err.respanned(*span))?;
+            self.rc
+                .native_reads(&words.iter().map(|addr| addr.slot).collect::<Vec<_>>());
+        }
         let rhs = self.value(right)?;
         let place = match op {
             BinaryOp::Eq | BinaryOp::Ne => self.eq_chain(&lhs, &rhs, e.span())?,
-            BinaryOp::Add if self.is_string_add(&lhs, &rhs) => {
-                self.concat_value(&lhs, &rhs, static_ty, *span)?
-            },
+            BinaryOp::Add if str_add => self.concat_value(&lhs, &rhs, static_ty, *span)?,
             BinaryOp::Add => self.arith(DataOp::AddI64, DataOp::AddF64, &lhs, &rhs, *span)?,
             BinaryOp::Sub => self.arith(DataOp::SubI64, DataOp::SubF64, &lhs, &rhs, *span)?,
             BinaryOp::Mul => self.arith(DataOp::MulI64, DataOp::MulF64, &lhs, &rhs, *span)?,
@@ -4015,10 +4331,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Both operands solve to the string atom: `+` is the concat
-    /// call's spelling [B8].
-    fn is_string_add(&self, lhs: &TypedPlace, rhs: &TypedPlace) -> bool {
-        self.shapes.builtin_instance(lhs.ty) == Some(BuiltinInstance::Str)
-            && self.shapes.builtin_instance(rhs.ty) == Some(BuiltinInstance::Str)
+    /// call's spelling [B8]. The checked-type-only probe answers before
+    /// operand evaluation, so the call's borrow window opens in time to
+    /// pin the words the CALL reads.
+    fn is_string_add_ty(&self, lhs: Ty, rhs: Ty) -> bool {
+        self.shapes.builtin_instance(lhs) == Some(BuiltinInstance::Str)
+            && self.shapes.builtin_instance(rhs) == Some(BuiltinInstance::Str)
     }
 
     /// String `+` lowers to the concat native's own call shape: the two
@@ -4415,32 +4733,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 dst
             },
-            Shape::Struct(s) => {
+            Shape::Struct(_) => {
+                // the flattened word lists compare pairwise, a field's
+                // span word-by-word in declaration order
                 let fail = self.label();
                 let join = self.label();
                 let l = self.word_addrs(&lhs.place, lhs.ty)?;
                 let r = self.word_addrs(&rhs.place, rhs.ty)?;
-                for (field, rf) in s.fields.iter().zip(r.iter()) {
-                    let lf = l
-                        .iter()
-                        .find(|a| a.name == field.name)
-                        .ok_or_else(|| mismatch("a struct field equality"))?;
-                    let cond = self.temp_word(SlotType::Bool)?;
-                    let op = eq_op(field.slot)?;
-                    self.emit(Op::Data {
-                        op,
-                        dst: Slot::body(cond),
-                        lhs: Slot::body(lf.slot),
-                        rhs: Slot::body(rf.slot),
-                    });
-                    if op == DataOp::EqStr {
-                        self.rc.read(&mut self.code, &[lf.slot, rf.slot]);
-                    }
-                    self.emit(Op::JmpifNot {
-                        cond: Slot::body(cond),
-                        target: fail,
-                    });
-                }
+                self.emit_word_compares(&l, &r, fail)?;
                 let truth = self.pool(Constant::Bool(true));
                 let dst = self.temp_word(SlotType::Bool)?;
                 self.emit(Op::Kconst {
@@ -4462,23 +4762,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let join = self.label();
                 let l = self.word_addrs(&lhs.place, lhs.ty)?;
                 let r = self.word_addrs(&rhs.place, rhs.ty)?;
-                for (field, (lf, rf)) in s.fields.iter().zip(l.iter().zip(r.iter())) {
-                    let cond = self.temp_word(SlotType::Bool)?;
-                    let op = eq_op(field.slot)?;
-                    self.emit(Op::Data {
-                        op,
-                        dst: Slot::body(cond),
-                        lhs: Slot::body(lf.slot),
-                        rhs: Slot::body(rf.slot),
-                    });
-                    if op == DataOp::EqStr {
-                        self.rc.read(&mut self.code, &[lf.slot, rf.slot]);
-                    }
-                    self.emit(Op::JmpifNot {
-                        cond: Slot::body(cond),
-                        target: fail,
-                    });
+                if l.len() != s.fields.len() || r.len() != s.fields.len() {
+                    return Err(mismatch("a tuple equality's arity"));
                 }
+                self.emit_word_compares(&l, &r, fail)?;
                 let truth = self.pool(Constant::Bool(true));
                 let dst = self.temp_word(SlotType::Bool)?;
                 self.emit(Op::Kconst {
@@ -4501,6 +4788,39 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             base: dst,
             shape: PlaceShape::Word(SlotType::Bool),
         })
+    }
+
+    /// Emits the pairwise word compares of two flattened address lists,
+    /// every mismatched word jumping to `fail`; the last word's result
+    /// flows on. A struct's whole span compares word-by-word this way —
+    /// inline spans are flat words, so per-word equality is the value's.
+    fn emit_word_compares(
+        &mut self,
+        l: &[WordAddr],
+        r: &[WordAddr],
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        if l.len() != r.len() {
+            return Err(mismatch("a span equality's width"));
+        }
+        for pair in l.iter().zip(r.iter()) {
+            let cond = self.temp_word(SlotType::Bool)?;
+            let op = eq_op(pair.0.slot_ty)?;
+            self.emit(Op::Data {
+                op,
+                dst: Slot::body(cond),
+                lhs: Slot::body(pair.0.slot),
+                rhs: Slot::body(pair.1.slot),
+            });
+            if op == DataOp::EqStr {
+                self.rc.read(&mut self.code, &[pair.0.slot, pair.1.slot]);
+            }
+            self.emit(Op::JmpifNot {
+                cond: Slot::body(cond),
+                target: fail,
+            });
+        }
+        Ok(())
     }
 
     /// Union equality: per-member tag tests, then the member's payload
@@ -4544,17 +4864,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 });
             } else {
                 let field = member.fields[0].clone();
-                let op = eq_op(field.slot)?;
-                self.emit(Op::Data {
-                    op,
-                    dst: Slot::body(dst),
-                    lhs: Slot::body(lhs.place.base + field.word),
-                    rhs: Slot::body(rhs.place.base + field.word),
-                });
-                if op == DataOp::EqStr {
-                    let words = [lhs.place.base + field.word, rhs.place.base + field.word];
-                    self.rc.read(&mut self.code, &words);
-                }
+                let l = field_addrs(lhs.place.base, &field);
+                let r = field_addrs(rhs.place.base, &field);
+                self.emit_word_compares(&l, &r, false_lbl)?;
             }
             self.emit(Op::Jmp { target: done });
             self.bind_label(next);
@@ -4768,9 +5080,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if arm.guard.is_some() || arm.ann.is_some() {
                 return Err(LowerError::unsupported(
                     arm.span,
-                    "a guarded or annotated match arm",
-                    "guards arrive with the record's guard lowering; payload patterns cover this \
-                     round",
+                    "a guarded or annotated match arm over a union",
+                    "union dispatch tests tags before any arm runs, so a guard's fall-through \
+                     needs the dispatch reordering; a non-union match lowers guards as a test \
+                     chain",
                 ));
             }
             self.rc.restore(base.clone());
@@ -4808,52 +5121,492 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// A match over a single-atom scrutinee (a tuple or a scalar): one
-    /// member has no tags to dispatch on, so exactly one catchall-shaped
-    /// arm lowers — the destructuring match `match t { (a, b) => ... }`.
-    /// Disjoint tests need a union scrutinee; literal sub-patterns are
-    /// value-level tests with no seam yet.
+    /// A match over a non-union scrutinee (a tuple, a scalar, a struct —
+    /// one member, no tags to dispatch on): one unguarded catchall arm
+    /// lowers as direct destructuring, anything else as a linear test
+    /// chain — each arm tests in order, a failed test or guard falls
+    /// through to the next arm. A chain that can fail needs one
+    /// unguarded catchall arm to close it: literal tests and guards
+    /// prove no coverage, so the checker's tuple-arity coverage leaves
+    /// the fall-through open.
     fn match_single(
         &mut self,
         scrut: &TypedPlace,
         arms: &[MatchArm],
         value: Option<(&Place, Ty, usize)>,
     ) -> Result<(), LowerError> {
-        let [arm] = arms else {
+        let kinds = arms
+            .iter()
+            .map(|arm| self.value_arm_kind(&arm.pat, scrut))
+            .collect::<Result<Vec<ValueArmKind>, _>>()?;
+        let catchall = arms
+            .iter()
+            .enumerate()
+            .find(|(index, arm)| kinds[*index] == ValueArmKind::Catchall && arm.guard.is_none())
+            .map(|(index, _)| index);
+        let can_fail =
+            kinds.contains(&ValueArmKind::Tested) || arms.iter().any(|arm| arm.guard.is_some());
+        if can_fail && catchall.is_none() {
             let span = arms.first().map_or_else(no_span, |arm| arm.span);
             return Err(LowerError::unsupported(
                 span,
-                "a multi-arm match on a non-union value",
-                "one destructuring arm covers a single-member scrutinee; disjoint tests need a \
-                 union",
-            ));
-        };
-        if arm.guard.is_some() || arm.ann.is_some() {
-            return Err(LowerError::unsupported(
-                arm.span,
-                "a guarded or annotated match arm",
-                "guards arrive with the record's guard lowering; this round's arms destructure",
+                "a value-level match without a catchall arm",
+                "literal tests and guards prove no coverage, so the checker's exhaustiveness \
+                 proof leaves the fall-through open; one unguarded catchall arm closes the chain",
             ));
         }
-        match &arm.pat {
-            Pattern::Tuple { .. } | Pattern::Binding { .. } | Pattern::Wildcard(_) => {},
-            _ => {
+        if let [arm] = arms {
+            if arm.ann.is_some() {
                 return Err(LowerError::unsupported(
-                    pattern_span(&arm.pat),
-                    "a member-test pattern on a non-union value",
-                    "a single-member scrutinee has no tags to test",
-                ))
-            },
+                    arm.span,
+                    "an annotated match arm",
+                    "annotations narrow through the member machinery; value arms stay unannotated \
+                     this round",
+                ));
+            }
+            match &arm.pat {
+                Pattern::Tuple { .. } | Pattern::Binding { .. } | Pattern::Wildcard(_) => {},
+                _ => {
+                    return Err(LowerError::unsupported(
+                        pattern_span(&arm.pat),
+                        "a member-test pattern on a non-union value",
+                        "a single-member scrutinee has no tags to test",
+                    ))
+                },
+            }
+            self.bind_arm_pattern(&arm.pat, scrut)?;
+            match value {
+                Some((result, ty, _join)) => {
+                    let body = self.value(&arm.body)?;
+                    self.widen_into(result, ty, &body)?;
+                },
+                None => self.tail(&arm.body)?,
+            }
+            return Ok(());
         }
-        self.bind_arm_pattern(&arm.pat, scrut)?;
-        match value {
-            Some((result, ty, _join)) => {
-                let body = self.value(&arm.body)?;
-                self.widen_into(result, ty, &body)?;
-            },
-            None => self.tail(&arm.body)?,
+        self.value_match_chain(
+            scrut,
+            arms,
+            value,
+            catchall.expect("the safety check passed"),
+        )
+    }
+
+    /// The linear arm chain over a non-union value: every arm's section
+    /// runs on the fall-through path in arm order (its tests
+    /// short-circuit to the next entry on the first mismatch, its guard
+    /// jumps there on failure), and each section snapshots its
+    /// post-guard state so its body forks from exactly that — the join
+    /// reconciles the per-arm states, so a count one guard ate stays
+    /// eaten on every later path while a count no reached guard ate
+    /// decs at its own arm's join jump. A guarded arm over a
+    /// Ref-carrying scrutinee binds copies of the scrutinee's words: a
+    /// guard that consumes its binder at the binder's last use must not
+    /// eat the scrutinee's count, which later entries still test. The
+    /// copy incs at the section's top, before its tests, so every path
+    /// reaching the section incs what its decs will eat.
+    fn value_match_chain(
+        &mut self,
+        scrut: &TypedPlace,
+        arms: &[MatchArm],
+        value: Option<(&Place, Ty, usize)>,
+        catchall: usize,
+    ) -> Result<(), LowerError> {
+        for arm in arms {
+            if arm.ann.is_some() {
+                return Err(LowerError::unsupported(
+                    arm.span,
+                    "an annotated match arm",
+                    "annotations narrow through the member machinery; value arms stay unannotated \
+                     this round",
+                ));
+            }
+        }
+        let entries: Vec<usize> = arms.iter().map(|_| self.label()).collect();
+        let mut states = Vec::with_capacity(arms.len());
+        let mut jumps = Vec::with_capacity(arms.len());
+        let mut divs = Vec::with_capacity(arms.len());
+        for (index, arm) in arms.iter().enumerate() {
+            self.bind_label(entries[index]);
+            let fail = entries.get(index + 1).copied().unwrap_or(entries[catchall]);
+            let copy = self.guard_scrut_copy(arm, scrut)?;
+            self.emit_value_tests(&arm.pat, scrut, fail)?;
+            if let Some(guard) = &arm.guard {
+                match &copy {
+                    Some(copy) => self.bind_guarded(&arm.pat, copy, scrut)?,
+                    None => self.bind_arm_pattern(&arm.pat, scrut)?,
+                }
+                // a guard that consumes the scrutinee's own Ref word (a
+                // direct outer-name reference; the binder copy shields
+                // the bound spelling) frees it before later entries test
+                // it, so the walk refuses the moment it sees the count go
+                let before = self.scrut_owned(scrut)?;
+                let cond = self.value(guard)?;
+                let eaten = before
+                    .iter()
+                    .any(|&(word, owned)| owned && !self.rc.owns(word));
+                if eaten {
+                    return Err(LowerError::unsupported(
+                        arm.span,
+                        "a guard consuming the scrutinee",
+                        "the fall-through path keeps testing the scrutinee after the guard, so \
+                         its count must survive the guard; bind a name for the tested arm instead",
+                    ));
+                }
+                let word = single(&self.word_addrs(&cond.place, cond.ty)?, arm.span)?;
+                self.emit(Op::JmpifNot {
+                    cond: Slot::body(word.slot),
+                    target: fail,
+                });
+            } else {
+                self.bind_arm_pattern(&arm.pat, scrut)?;
+            }
+            let after_entry = self.rc.save();
+            // a value arm decs at its own jump what only it kept; a tail
+            // arm exits the frame, its exit path dropping from its own
+            // state
+            if let Some((result, ty, join)) = value {
+                let body_tp = self.value(&arm.body)?;
+                self.widen_into(result, ty, &body_tp)?;
+                states.push(self.rc.take());
+                divs.push(self.rc.diverged());
+                let at = self.code.len();
+                self.emit(Op::Jmp { target: join });
+                jumps.push(Some(at));
+            } else {
+                self.tail(&arm.body)?;
+                states.push(self.rc.take());
+                divs.push(self.rc.diverged());
+                jumps.push(None);
+            }
+            // the next entry's path executed this section's tests and
+            // guard but never its body, so the chain walk resumes from
+            // the post-guard state (a body that exited the frame also
+            // cleared the map; the snapshot is what keeps walking)
+            self.rc.restore(after_entry);
+        }
+        let forked: Vec<_> = states.into_iter().zip(divs).collect();
+        let dying = self.rc.reconcile(&forked);
+        let mut shift = 0;
+        for (at, dying) in jumps.into_iter().zip(&dying) {
+            if let Some(at) = at {
+                let mut epilogue = Vec::new();
+                Placement::emit_drops(&mut epilogue, dying);
+                let len = epilogue.len();
+                self.splice(epilogue, at + shift);
+                shift += len;
+            }
         }
         Ok(())
+    }
+
+    /// The scrutinee copy a guarded arm binds when the scrutinee carries
+    /// Ref words and the pattern binds them: `None` for unguarded arms,
+    /// scalar scrutinees (no count rides the words, so the guard cannot
+    /// eat one), and binder-free patterns (`_`, an atom naming the sole
+    /// member — a guard cannot reach the scrutinee through them). A
+    /// deinit-carrying scrutinee refuses: the copy would anchor a second
+    /// claim, so the value would deinit twice.
+    fn guard_scrut_copy(
+        &mut self,
+        arm: &MatchArm,
+        scrut: &TypedPlace,
+    ) -> Result<Option<TypedPlace>, LowerError> {
+        let binds = match &arm.pat {
+            Pattern::Binding { name, .. } => self.binding_atom(&name.name).is_none(),
+            Pattern::Tuple { pats, .. } => pats.iter().any(|sub| {
+                matches!(sub, Pattern::Binding { name, .. }
+                    if self.binding_atom(&name.name).is_none())
+            }),
+            _ => false,
+        };
+        if arm.guard.is_none() || !binds {
+            return Ok(None);
+        }
+        let words = self.shapes.words(scrut.ty)?;
+        if !words.contains(&SlotType::Ref) {
+            return Ok(None);
+        }
+        if self
+            .deinit_claim(scrut.ty, pattern_span(&arm.pat))?
+            .is_some()
+        {
+            return Err(LowerError::unsupported(
+                arm.span,
+                "a guarded arm over a deinit-carrying value",
+                "the guard's binder copy would anchor a second claim, so the value would deinit \
+                 twice; the payload-pattern seam covers it",
+            ));
+        }
+        self.scrut_copy(scrut).map(Some)
+    }
+
+    /// The scrutinee's Ref words and whether the placement currently
+    /// owns each: a guard's consumption check reads the pair before and
+    /// after the guard's walk.
+    fn scrut_owned(&mut self, scrut: &TypedPlace) -> Result<Vec<(u8, bool)>, LowerError> {
+        let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
+        Ok(addrs
+            .iter()
+            .filter(|addr| addr.slot_ty == SlotType::Ref)
+            .map(|addr| (addr.slot, self.rc.owns(addr.slot)))
+            .collect())
+    }
+
+    /// Binds one guarded arm's pattern over its scrutinee copy: the
+    /// plain binding aliases the copy's whole span, a tuple pattern its
+    /// elements (a literal element tested nothing to bind), and a
+    /// wildcard or atom-named binding binds nothing at all.
+    fn bind_guarded(
+        &mut self,
+        pat: &Pattern,
+        copy: &TypedPlace,
+        scrut: &TypedPlace,
+    ) -> Result<(), LowerError> {
+        match pat {
+            Pattern::Binding { span, name } if self.binding_atom(&name.name).is_none() => {
+                self.binders.insert(*span, copy.place.clone());
+                self.rc_bind(*span, &copy.place, scrut.ty)?;
+                self.scope_insert(&name.name, *span);
+                Ok(())
+            },
+            Pattern::Tuple { pats, .. } => self.bind_tuple_pattern(pats, copy, true),
+            _ => self.bind_arm_pattern(pat, scrut),
+        }
+    }
+
+    /// A fresh word-for-word copy of the scrutinee: Ref words dup
+    /// unconditionally — the source's death position is the checker's,
+    /// not this use's, because the fall-through keeps the scrutinee —
+    /// and scalar words mov.
+    fn scrut_copy(&mut self, scrut: &TypedPlace) -> Result<TypedPlace, LowerError> {
+        let words = self.shapes.words(scrut.ty)?;
+        let base = self.alloc(&words)?;
+        let place = self.place_of_ty(base, scrut.ty)?;
+        let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
+        for (index, addr) in addrs.iter().enumerate() {
+            let word = u8::try_from(index).map_err(|_| mismatch("a scrutinee copy"))?;
+            self.emit(Op::Mov {
+                dst: Slot::body(base + word),
+                src: Slot::body(addr.slot),
+            });
+            if addr.slot_ty == SlotType::Ref {
+                self.rc.duped(&mut self.code, base + word, addr.slot);
+            }
+        }
+        Ok(TypedPlace {
+            place,
+            ty: scrut.ty,
+        })
+    }
+
+    /// How one arm's pattern tests a non-union scrutinee: `_`, a plain
+    /// binding, an atom naming the scrutinee's sole member (always true,
+    /// binding nothing), and a destructuring tuple without literal
+    /// elements run no test; literal elements and scalar literals test
+    /// the value in place.
+    fn value_arm_kind(
+        &mut self,
+        pat: &Pattern,
+        scrut: &TypedPlace,
+    ) -> Result<ValueArmKind, LowerError> {
+        if let Pattern::Tuple {
+            pats,
+            trailing_comma: false,
+            ..
+        } = pat
+        {
+            if pats.len() == 1 {
+                return self.value_arm_kind(&pats[0], scrut);
+            }
+        }
+        match pat {
+            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(ValueArmKind::Catchall),
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
+                Ok(ValueArmKind::Tested)
+            },
+            Pattern::Tuple { pats, .. } => {
+                let shape = self.shapes.shape(scrut.ty)?;
+                let Shape::Tuple(s) = &*shape else {
+                    return Err(mismatch("a tuple destructuring"));
+                };
+                if pats.len() != s.fields.len() {
+                    return Err(mismatch("a tuple pattern's arity"));
+                }
+                let mut tested = false;
+                for sub in pats {
+                    tested |= Self::tuple_elem_tested(sub)?;
+                }
+                Ok(if tested { ValueArmKind::Tested } else { ValueArmKind::Catchall })
+            },
+            Pattern::Or { .. } => Err(LowerError::unsupported(
+                pattern_span(pat),
+                "an or-pattern over a non-union value",
+                "each alternative would need its own value-test chain; or-arms test union tags \
+                 this round",
+            )),
+            Pattern::Path { .. } | Pattern::Call { .. } => Err(LowerError::unsupported(
+                pattern_span(pat),
+                "a member-test pattern on a non-union value",
+                "a single-member scrutinee has no tags to test",
+            )),
+            Pattern::Struct { .. } => Err(LowerError::unsupported(
+                pattern_span(pat),
+                "a struct pattern over a non-union value",
+                "struct fields test in place with the span rework's width slices; union payload \
+                 patterns are the same seam",
+            )),
+        }
+    }
+
+    /// Whether one tuple element pattern contributes a value test: `_`
+    /// and bindings test nothing (bindings bind at arm entry; an
+    /// atom-named element binds nothing per the member-test predicate),
+    /// literals test the element word, other shapes refuse.
+    fn tuple_elem_tested(sub: &Pattern) -> Result<bool, LowerError> {
+        match sub {
+            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(false),
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => Ok(true),
+            _ => Err(LowerError::unsupported(
+                pattern_span(sub),
+                "a tuple element test",
+                "elements test as literals, bind as plain names, or skip as `_`; nested patterns \
+                 need multi-word elements",
+            )),
+        }
+    }
+
+    /// Emits one arm's value tests in place, in element order: each
+    /// literal word compares against its constant and jumps to `fail`
+    /// on the first mismatch (short-circuit); a catchall arm emits
+    /// nothing.
+    fn emit_value_tests(
+        &mut self,
+        pat: &Pattern,
+        scrut: &TypedPlace,
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        if let Pattern::Tuple {
+            pats,
+            trailing_comma: false,
+            ..
+        } = pat
+        {
+            if pats.len() == 1 {
+                return self.emit_value_tests(&pats[0], scrut, fail);
+            }
+        }
+        match pat {
+            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(()),
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
+                let (place, slot) = self.pattern_const(pat)?;
+                let word = single(&self.word_addrs(&scrut.place, scrut.ty)?, pattern_span(pat))?;
+                self.emit_value_eq(&word, &place, slot, fail)
+            },
+            Pattern::Tuple { pats, .. } => {
+                let shape = self.shapes.shape(scrut.ty)?;
+                let Shape::Tuple(s) = &*shape else {
+                    return Err(mismatch("a tuple destructuring"));
+                };
+                if pats.len() != s.fields.len() {
+                    return Err(mismatch("a tuple pattern's arity"));
+                }
+                let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
+                for (sub, addr) in pats.iter().zip(addrs.iter()) {
+                    if Self::tuple_elem_tested(sub)? {
+                        let (place, slot) = self.pattern_const(sub)?;
+                        self.emit_value_eq(addr, &place, slot, fail)?;
+                    }
+                }
+                Ok(())
+            },
+            _ => Err(mismatch("a value test the classification passed")),
+        }
+    }
+
+    /// One equality test against a constant word: the tested word's slot
+    /// picks the comparison, a string constant reads its Ref at the use
+    /// (the comparison drops a dying constant there), and a mismatch
+    /// jumps to `fail`.
+    fn emit_value_eq(
+        &mut self,
+        tested: &WordAddr,
+        constant: &Place,
+        slot: SlotType,
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        if slot != tested.slot_ty {
+            return Err(mismatch("a literal pattern's word class"));
+        }
+        let op = eq_op(tested.slot_ty)?;
+        let cond = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::Data {
+            op,
+            dst: Slot::body(cond),
+            lhs: Slot::body(tested.slot),
+            rhs: Slot::body(constant.base),
+        });
+        if op == DataOp::EqStr {
+            // the tested word is a borrow across every arm's test (the
+            // union dispatch reads its tag word the same way); the
+            // constant dies at its use, its count balanced per pass
+            self.rc.read(&mut self.code, &[constant.base]);
+        }
+        self.emit(Op::JmpifNot {
+            cond: Slot::body(cond),
+            target: fail,
+        });
+        Ok(())
+    }
+
+    /// The constant word a literal pattern tests against: the scalar
+    /// literal family lowers like the expression literal, a string
+    /// pattern its interned constant (interpolation holes refuse).
+    fn pattern_const(&mut self, pat: &Pattern) -> Result<(Place, SlotType), LowerError> {
+        let intern = |me: &mut Self, text: String| -> Result<(Place, SlotType), LowerError> {
+            let dst = me.temp_word(SlotType::Ref)?;
+            let kidx = me.pool(Constant::Str(text));
+            me.emit(Op::Kstr {
+                dst: Slot::body(dst),
+                kidx,
+            });
+            me.rc.produced(dst);
+            Ok((
+                Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::Ref),
+                },
+                SlotType::Ref,
+            ))
+        };
+        match pat {
+            Pattern::Literal { lit, span } => {
+                let place = self.literal(lit, *span)?;
+                let PlaceShape::Word(slot) = place.shape else {
+                    return Err(mismatch("a literal pattern's word"));
+                };
+                Ok((place, slot))
+            },
+            Pattern::RawStr { text, .. } => intern(self, text.clone()),
+            Pattern::Str { parts, span, .. } => {
+                let mut text = String::new();
+                for part in parts {
+                    match part {
+                        StrPart::Text { text: run, .. } => text.push_str(run),
+                        _ => {
+                            return Err(LowerError::unsupported(
+                                *span,
+                                "a string pattern with interpolation holes",
+                                "a pattern tests one constant string; holes have no pattern \
+                                 lowering",
+                            ))
+                        },
+                    }
+                }
+                intern(self, text)
+            },
+            _ => Err(mismatch("a literal pattern")),
+        }
     }
 
     /// The member atoms a pattern tests; empty for a catchall arm. A
@@ -4944,7 +5697,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Ok(());
                 }
                 self.binders.insert(*span, scrut.place.clone());
-                self.rc_bind(*span, scrut.place.base, scrut.ty)?;
+                self.rc_bind(*span, &scrut.place, scrut.ty)?;
                 self.scope_insert(&name.name, *span);
                 Ok(())
             },
@@ -4975,19 +5728,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                             ))
                         },
                     };
-                    self.binders.insert(bind.0, Place {
-                        base: scrut.place.base + field.word,
-                        shape: PlaceShape::Word(field.slot),
-                    });
+                    let base = scrut.place.base + field.word;
+                    // a one-word field binds its word; a multi-word field
+                    // (a struct-typed field) binds the span its checked
+                    // type names
+                    let shape = match self.analyzed.checked.binders.get(&bind.0) {
+                        Some(fact) if field.width() > 1 => PlaceShape::Span(fact.ty),
+                        _ => PlaceShape::Word(field.slot()),
+                    };
+                    self.binders.insert(bind.0, Place { base, shape });
                     if let Some(fact) = self.analyzed.checked.binders.get(&bind.0).copied() {
-                        self.rc_bind_borrowed(bind.0, scrut.place.base + field.word, fact.ty)?;
+                        self.rc_bind_borrowed(bind.0, base, fact.ty)?;
                     }
                     self.scope_insert(&bind.1, bind.0);
                 }
                 Ok(())
             },
             Pattern::Tuple { pats, .. } => {
-                self.bind_tuple_pattern(pats, scrut)?;
+                self.bind_tuple_pattern(pats, scrut, true)?;
                 Ok(())
             },
             _ => Ok(()),
@@ -4996,12 +5754,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Binds one tuple pattern's elements to the tuple span's words:
     /// one word per element, bound in place (aliases, the const
-    /// convention). Sub-patterns are plain names and `_` this round —
-    /// a nested pattern would need a multi-word element.
+    /// convention). A test position skips what the dispatch already
+    /// tested: literal elements bind nothing, and an atom-named element
+    /// is a member test binding nothing [F9] — the same resolution the
+    /// checker's pattern walk applies, so the two layers never disagree.
+    /// Declaration positions bind every name and refuse literals: a
+    /// declaration cannot fail a test.
     fn bind_tuple_pattern(
         &mut self,
         pats: &[Pattern],
         scrut: &TypedPlace,
+        arm: bool,
     ) -> Result<(), LowerError> {
         let shape = self.shapes.shape(scrut.ty)?;
         let Shape::Tuple(s) = &*shape else {
@@ -5014,22 +5777,28 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             match sub {
                 Pattern::Wildcard(_) => {},
                 Pattern::Binding { span, name } => {
+                    if arm && self.binding_atom(&name.name).is_some() {
+                        // an atom-named element is a member test [F9];
+                        // nothing binds
+                        continue;
+                    }
                     let base = scrut.place.base + field.word;
                     self.binders.insert(*span, Place {
                         base,
-                        shape: PlaceShape::Word(field.slot),
+                        shape: PlaceShape::Word(field.slot()),
                     });
                     if let Some(fact) = self.analyzed.checked.binders.get(span).copied() {
                         self.rc_bind_borrowed(*span, base, fact.ty)?;
                     }
                     self.scope_insert(&name.name, *span);
                 },
+                Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } if arm => {},
                 _ => {
                     return Err(LowerError::unsupported(
                         pattern_span(sub),
-                        "a nested tuple element pattern",
-                        "tuple elements destructure by plain names and `_` this round; nested \
-                         patterns need multi-word elements",
+                        "a destructuring element pattern",
+                        "elements bind as plain names, skip as `_`, or test as literals at match \
+                         time; a declaration cannot fail a test, so it never tests",
                     ))
                 },
             }
@@ -5045,7 +5814,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// non-capturing lambda value). A bare struct or tuple element stages
     /// its raw field words, so a one-field struct would store its field's
     /// word as the element and reading it back hands that word to a place
-    /// typed as the struct; wider or struct elements arrive with reboxing.
+    /// typed as the struct; inline element spans arrive with the native
+    /// channel's staged-count and read-out span seam.
     /// A callable element must prove scalar provenance: a closure word (or
     /// a callable-defaulted parameter that may hold one at runtime) would
     /// leave its count invisible to the element staging and read back as a
@@ -5068,12 +5838,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Shape::Struct(_) | Shape::Tuple(_)
         );
         if !one_word || bare_fields {
-            return Err(LowerError::unsupported(
-                span,
-                what,
-                "list elements lower as one scalar word; struct and tuple elements would store \
-                 their raw field words as the element; reboxing covers wider elements",
-            ));
+            return Err(
+                LowerError::unsupported(
+                    span,
+                    what,
+                    "list elements lower as one scalar word; struct and tuple elements would \
+                     store their raw field words as the element; inline element spans arrive with \
+                     the \n                 native channel",
+                ),
+            );
         }
         if matches!(&*self.shapes.shape(val.ty)?, Shape::Word(SlotType::Fn)) {
             let addrs = self.word_addrs(&val.place, val.ty)?;
@@ -5090,7 +5863,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// A reentrant combinator's lambda argument must answer one word:
+    /// A reentrant combinator's callable argument must answer one word:
     /// the VM's hosted-call seam returns a single value, and a
     /// multi-word (struct or tuple) return would silently keep only its
     /// first word. A non-fn-typed argument is not this guard's business
@@ -5102,9 +5875,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if self.shapes.words(ret)?.len() != 1 {
             return Err(LowerError::unsupported(
                 span,
-                "a container-combinator lambda",
-                "the hosted per-element call answers one word; a struct or tuple return needs \
-                 reboxing",
+                "a container-combinator callable",
+                "the hosted per-element call answers one word; a multi-word return arrives when \
+                 the native channel carries whole spans",
             ));
         }
         Ok(())
@@ -5114,10 +5887,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// `map_set`'s key and value lower as one machine word each: a wider
     /// argument (a union span) would shift the staged words under the
     /// native's positional contract. A local callee's slide contract is
-    /// its parameter span: an argument narrower than the parameter
-    /// region (an inline unit tag or payload case meeting a multi-word
-    /// union parameter) would trap in the VM's slide validation, so the
-    /// call refuses here with the seam it needs.
+    /// its parameter span: the widening family re-spans a member or
+    /// sub-union argument into the parameter's whole region before the
+    /// staging moves, so a remaining width disagreement is a lowerer
+    /// seam the VM's slide validation would trap on.
     fn guard_staged_width(
         &mut self,
         target: Callee,
@@ -5129,8 +5902,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 return Err(LowerError::unsupported(
                     span,
                     "a map_set argument",
-                    "map keys and values lower as one machine word; wider values arrive with \
-                     reboxing",
+                    "map keys and values lower as one machine word; wider values arrive when the \
+                     native channel carries whole spans",
                 ));
             }
         }
@@ -5141,8 +5914,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         span,
                         "a call argument",
                         "the staged words disagree with the callee's parameter span; a \
-                         union-typed parameter takes its member's whole region — pass a \
-                         same-typed binding until argument widening lands",
+                         union-typed parameter re-spans its member argument into the whole region \
+                         at the call, so a disagreement here is a lowerer seam",
                     ));
                 }
             }
@@ -5173,7 +5946,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// owns, so the in-place appends carry no window discipline [B3].
     /// The staged element borrows or transfers by its own death: `list_push`
     /// acquires its own count when storing, so a dying element's post-call
-    /// drop hands the count to the list (`native_pending`); a live element
+    /// drop hands the count to the list (the push window's flush); a live
+    /// element
     /// keeps its frame count and the list holds the acquired one.
     fn list_literal(&mut self, e: &Expr) -> Result<Place, LowerError> {
         let Expr::List { items, .. } = e else {
@@ -5181,6 +5955,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let list = self.list_new_word()?;
         for item in items {
+            // the push's borrow window opens before the element
+            // evaluation (an element expression may itself call) and
+            // pins the list word plus every word the push stages
+            self.rc.native_open();
+            self.rc.native_reads(&[list]);
             let item_val = self.value(item)?;
             self.guard_list_element(&item_val, item.span(), "a list literal element")?;
             let push = crate::native::lookup("list_push")
@@ -5228,6 +6007,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let native = crate::native::lookup("list_new")
             .expect("the list surface is covered by the native table");
         self.overlay_site(&[], &[SlotType::Ref]);
+        self.rc.native_open();
         let kidx = self.pool(funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
@@ -5300,6 +6080,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let native = crate::native::lookup("map_new")
             .expect("the map surface is covered by the native table");
         self.overlay_site(&[], &[SlotType::Ref]);
+        self.rc.native_open();
         let kidx = self.pool(funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
@@ -5344,15 +6125,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .ok_or_else(|| mismatch("a case construction slot"))?,
             };
             let v = self.value(&arg.value)?;
-            let addr = single(&self.word_addrs(&v.place, v.ty)?, arg.value.span())?;
-            self.emit(Op::Mov {
-                dst: Slot::body(target.base + field.word),
-                src: Slot::body(addr.slot),
-            });
-            if addr.slot_ty == SlotType::Ref {
-                self.rc
-                    .copied(&mut self.code, target.base + field.word, addr.slot);
+            let addrs = self
+                .word_addrs(&v.place, v.ty)
+                .map_err(|err| err.respanned(arg.value.span()))?;
+            if addrs.len() != field.width() {
+                return Err(mismatch("a case construction slot's span"));
             }
+            self.store_field_span(target.base, field, &addrs);
         }
         Ok(target)
     }
@@ -5521,7 +6300,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             } else if let Some(Res::Local { bind }) = self.res.get(*span) {
                 // a clean check makes this a fn-typed binding: the
                 // call dispatches through its Fn word [F2]
-                return self.calls_value(ty, *bind, *span, args);
+                return self.calls_value(ty, *bind, *span, args, tail);
             } else {
                 return Err(LowerError::unsupported(
                     *span,
@@ -5552,10 +6331,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // stages and transfers like a local callee, with the solved
         // instance riding as the evidence word after the arguments. An
         // inherent dispatch is a plain local callee — the receiver's own
-        // type picked the body, so no evidence word exists
+        // type picked the body, so no instance word exists; a generic
+        // body's evidence words stage below like ordinary parameters
         let target = match &trait_dispatch {
-            Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index }) => {
-                self.guard_member_arity(*index, &arg_exprs, callee_span)?;
+            Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index, .. }) => {
                 Callee::Local(*index)
             },
             Some(TraitDispatch::Runtime { slot }) => Callee::Evidence(*slot),
@@ -5563,9 +6342,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.resolve_callee(def.expect("a named callee resolves to a def"), callee_span)?
             },
         };
-        let arg_exprs = match def {
-            Some(def) => self.defaulted_args(def, target, arg_exprs),
-            None => arg_exprs,
+        // a member call stages its omitted literal defaults at the call
+        // site like the free-fn spelling [F7]
+        let member_defaults: Vec<Expr>;
+        let arg_exprs = match (def, target) {
+            (Some(def), _) => self.defaulted_args(def, target, arg_exprs),
+            (None, Callee::Local(index)) => {
+                member_defaults = self.member_default_exprs(index, arg_exprs.len(), callee_span)?;
+                let mut staged = arg_exprs;
+                staged.extend(member_defaults.iter());
+                staged
+            },
+            _ => arg_exprs,
         };
         // A direct `list_push` stages its (list, value) pair with the
         // value as one word — the same element guard the literal path
@@ -5603,15 +6391,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // borrow window, never a dup or a forward
         let mut defaulted: Vec<usize> = Vec::new();
         let expected_words = self.expected_param_words(target);
+        // a local callee's per-parameter checked types, when its
+        // signature is static: a union-typed parameter re-spans a bare
+        // member or a strict sub-union argument into its whole region
+        // here (the widening family)
+        let param_types = match target {
+            Callee::Local(index) => self.callee_param_types(index),
+            _ => None,
+        };
         // the receiver's checked type mints a generic call's evidence
         // words (the builtin instance it addresses) [H3]
         let mut receiver_ty: Option<Ty> = None;
+        // the call's borrow window opens before operand evaluation: a
+        // later operand's own use can fire an earlier word's last-use
+        // dec there, and the window pins every word this CALL reads
+        // (native borrows never dup), deferring the dec to the flush
+        // after the CALL
+        self.rc.native_open();
         for (index, arg) in arg_exprs.iter().enumerate() {
             let arg_val = self.value(arg)?;
             if index == 0 {
                 receiver_ty = Some(arg_val.ty);
             }
-            if self.deinit_claim(arg_val.ty, arg.span())?.is_some() {
+            let deinit = self.deinit_claim(arg_val.ty, arg.span())?;
+            if deinit.is_some() {
                 if matches!(target, Callee::Builtin(_) | Callee::Generic(_)) {
                     return Err(LowerError::unsupported(
                         arg.span(),
@@ -5644,11 +6447,41 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 Self::guard_callable_staged(expected_words.as_deref(), staged.len(), arg.span())?;
                 defaulted.push(staged.len());
             }
+            // a union-typed parameter takes its member's whole region: a
+            // bare member (a literal or an un-annotated binding) or a
+            // strict sub-union argument re-spans into a staging temp of
+            // the parameter's own region here, mirroring the annotated
+            // binding's widening write, so the staged words match the
+            // callee's parameter span
+            let arg_val = match param_types.as_ref().and_then(|types| types.get(index)) {
+                Some(&param_ty) if param_ty != arg_val.ty && self.is_union_ty(param_ty)? => {
+                    // a union member cannot carry a deinit yet (the
+                    // callee's own parameter shapes refuse first), so
+                    // this guard is the staging temp's backstop for the
+                    // deinit arc's landing
+                    if deinit.is_some() {
+                        return Err(LowerError::unsupported(
+                            arg.span(),
+                            "a deinit-carrying argument into a union parameter",
+                            "the re-span's staging temp is anonymous, so it carries no claim \
+                             contract of its own; the deinit arc owns the seam",
+                        ));
+                    }
+                    let temp = self.temp_span(param_ty)?;
+                    self.widen_into(&temp, param_ty, &arg_val)?;
+                    TypedPlace {
+                        place: temp,
+                        ty: param_ty,
+                    }
+                },
+                _ => arg_val,
+            };
             let var_word = self.is_var_ty(arg_val.ty);
             for addr in self
                 .word_addrs(&arg_val.place, arg_val.ty)
                 .map_err(|err| err.respanned(arg.span()))?
             {
+                self.rc.native_reads(&[addr.slot]);
                 moves.push((staged.len(), addr.slot));
                 staged.push(addr.slot_ty);
                 counted.push(addr.slot_ty == SlotType::Ref || var_word);
@@ -5662,22 +6495,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // stack-identical and count-exact; the frame-reuse guarantee
         // [H2] keeps every scalar-staging tail site
         let closure_tail = !defaulted.is_empty() && tail && matches!(target, Callee::Local(_));
-        // a trait-method dispatch names its impl body directly (or
-        // resolves it at runtime): a trait tail stages like a local
-        // callee; its evidence words and the CALLG run inside this
-        // frame, so the tail lowers in place. An inherent dispatch is
-        // excluded — it is a plain local callee, so even a future
-        // tail-recognized site takes the local transfer below
-        let trait_tail = matches!(
-            trait_dispatch,
-            Some(TraitDispatch::Static { .. } | TraitDispatch::Runtime { .. })
-        ) && tail;
-        let native_tail_return = tail && !self.root && matches!(target, Callee::Builtin(_));
+        // a trait-method tail transfers through CALLTG now (the dispatch
+        // tail form, H2's guarantee closure): a Static site's evidence and
+        // instance words and a Runtime site's sentinel FuncRef ride the
+        // same frame-reuse slide a local tail's arguments take, staged
+        // after the exit claims. An inherent dispatch stays excluded — it
+        // is a plain local callee taking the CALLT transfer below
+        let native_tail_return =
+            tail && !self.root && matches!(target, Callee::Builtin(_) | Callee::Generic(_));
         // a closure-staging local tail lowers in place for the root frame
         // too: the callee reads the word during the call, so the count
         // cannot ride the abandoned corner nor die at the pre-transfer
         // exit drops
-        let in_place_tail = native_tail_return || closure_tail || trait_tail;
+        let in_place_tail = native_tail_return || closure_tail;
         // the frame-ending transfer: the exit drops and every claim hook
         // stage through the overlay as their own argument windows, so the
         // call's argument span stages after them, ahead of the CALLT
@@ -5731,19 +6561,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         // a generic call site [H3]: stage the instantiated types as
         // evidence words after the real arguments and dispatch the
-        // callee's ONE body through CALLG
+        // callee's ONE body through CALLG — or, from the root frame's
+        // tail position, through the CALLTG transfer (a non-root frame
+        // lowers the native tail in place below, the R13 shape, because
+        // the body runs inside the instruction and no frame is pushed)
         let generic_target = match target {
             Callee::Generic(generic) => Some(generic),
             _ => None,
         };
         let mut generic_instance: Option<BuiltinInstance> = None;
+        let generic_tail_at = staged.len();
         if let Some(generic) = generic_target {
-            if tail {
+            if tail && matches!(generic.shape, NativeShape::Checked) {
                 return Err(LowerError::unsupported(
                     callee_span,
-                    "a tail call to a generic builtin",
-                    "CALLTG, the generic tail variant, stays reserved; keep the call out of tail \
-                     position",
+                    "a tail call to a checked-read generic",
+                    "the ok/none span re-spans into the call's union at the call site, and the \
+                     tail transfer leaves no position for it; keep the call out of tail position",
                 ));
             }
             generic_instance = Some(self.stage_generic_evidence(
@@ -5753,6 +6587,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 *span,
                 &mut staged,
                 receiver_ty,
+                tail_transfer,
             )?);
         }
         // a trait-method dispatch site [H3]: a call into a generic impl
@@ -5762,25 +6597,64 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // monomorphic body stages the instance word alone — and a nested
         // bound-variable site stages none of these (the sentinel FuncRef
         // dispatches from the frame's evidence slot, staged by the site
-        // that entered this body)
+        // that entered this body). The staged types register here (the
+        // overlay span sizes from them); on the tail path the Kimm
+        // stores defer past the exit claims, staged after them like
+        // every tail-staged word (a claim's overlay window would clobber
+        // words staged before it)
+        let mut trait_evidence: Vec<u32> = Vec::new();
+        let trait_evidence_at = staged.len();
         if let Some(TraitDispatch::Static { index, call }) = &trait_dispatch {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
             self.guard_staged_count(staged.len() + pairs.len() + 1)?;
             for pair in pairs.iter() {
-                let word = self.evidence_word(pair, call, callee_span)?;
-                let kidx = self.pool(Constant::I64(i64::from(word)));
-                self.emit(Op::Kimm {
-                    dst: Slot::overlay(u8::try_from(staged.len()).expect("overlay word fits u8")),
-                    kidx,
-                });
+                let word = self.evidence_word(
+                    pair,
+                    &call.bounds,
+                    "a trait-method call into a generic impl body",
+                    callee_span,
+                )?;
+                trait_evidence.push(word);
+            }
+            trait_evidence.push(call.instance.index());
+            for _ in &trait_evidence {
                 staged.push(SlotType::I64);
             }
-            let kidx = self.pool(Constant::I64(i64::from(call.instance.index())));
-            self.emit(Op::Kimm {
-                dst: Slot::overlay(u8::try_from(staged.len()).expect("overlay word fits u8")),
-                kidx,
-            });
-            staged.push(SlotType::I64);
+            if !tail_transfer {
+                self.stage_member_evidence(&trait_evidence, trait_evidence_at);
+            }
+        }
+        // a generic inherent member call stages the same per-pair
+        // runtime-evidence words the trait path stages, minus the
+        // instance word an inherent impl never has: the words trail the
+        // staged arguments in the overlay, and the body claims them as
+        // its trailing evidence parameters, so the ordinary CALL below —
+        // and a tail site's CALLT — names the whole staged count; no
+        // dispatch uop exists. The staged types register here (the
+        // overlay span sizes from them), while the Kimm stores defer
+        // past the exit claims on the tail path (a claim's overlay
+        // window would clobber words staged before it)
+        let mut member_evidence: Vec<u32> = Vec::new();
+        let member_evidence_at = staged.len();
+        if let Some(TraitDispatch::Inherent { index, bounds }) = &trait_dispatch {
+            let pairs = self.plan.functions()[*index as usize].evidence.clone();
+            if !pairs.is_empty() {
+                self.guard_staged_count(staged.len() + pairs.len())?;
+                for pair in pairs.iter() {
+                    member_evidence.push(self.evidence_word(
+                        pair,
+                        bounds,
+                        "an inherent method call into a generic impl body",
+                        callee_span,
+                    )?);
+                }
+                for _ in &member_evidence {
+                    staged.push(SlotType::I64);
+                }
+                if !tail_transfer {
+                    self.stage_member_evidence(&member_evidence, member_evidence_at);
+                }
+            }
         }
         // a checked generic read (`list_get`, `map_get`): the staged span
         // ends in its evidence words and the ok/none span re-spans
@@ -5798,17 +6672,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.overlay_site(&staged, &result_words);
         let kidx = self.pool(funcref_const(target));
         // A native tail call transfers control only from the root frame:
-        // CALLT-to-native pops the frame inside the instruction, so the
-        // staged borrows' decs have no code position there — sound solely
-        // because the root frame's transfer ends the program (the heap
-        // dies whole). From any other frame the same tail position lowers
-        // in place: CALL + RET is stack-identical (the native runs inside
-        // the CALL instruction, no frame is pushed), and the post-call
-        // flush plus the return's exit drops balance every count.
-        // a trait-method tail lowers in place: CALLTG stays reserved, and
-        // the impl body is a frame the CALLG pushes and pops inside the
-        // instruction before this frame returns its result —
-        // stack-identical to the transfer
+        // CALLT-to-native (and CALLTG-to-generic) pops the frame inside
+        // the instruction, so the staged borrows' decs have no code
+        // position there — sound solely because the root frame's transfer
+        // ends the program (the heap dies whole). From any other frame the
+        // same tail position lowers in place: CALL + RET is
+        // stack-identical (the native runs inside the CALL instruction,
+        // no frame is pushed), and the post-call flush plus the return's
+        // exit drops balance every count.
+        // a dispatch tail (a trait site, or the root frame's generic
+        // call) transfers through CALLTG: the dispatch resolution is the
+        // CALLG emission's own and the transfer is the CALLT slide's, so
+        // the guarantee admits no callee-class exception [H2]
+        let dispatch_tail = generic_target.is_some()
+            || matches!(
+                trait_dispatch,
+                Some(TraitDispatch::Static { .. } | TraitDispatch::Runtime { .. })
+            );
         if tail_transfer {
             // control transfers to the callee; the stack never grows [H2].
             // A local callee owns its handed words (their counts ride the
@@ -5817,15 +6697,40 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // native's staged borrows are the abandoned corner above. The
             // exit drops and every claim hook staged through the overlay
             // as their own argument windows, so the call's argument span
-            // stages after them — the transfer hands the callee its words
-            // intact.
-            self.rc.native_done(&mut self.code);
+            // and the dispatch tail's evidence words stage after them —
+            // the transfer hands the callee its words intact.
+            self.rc.native_tail_transfer();
             self.rc.exit(&mut self.code, &[]);
+            self.stage_member_evidence(&member_evidence, member_evidence_at);
+            if let (Some(generic), Some(instance)) = (generic_target, generic_instance) {
+                // the deferred evidence stores: one instance word per
+                // constraint-list entry, staged after the exit claims
+                let word = u32::try_from(instance as i64).expect("instance ids fit u32");
+                let words = vec![word; usize::from(generic.evidence)];
+                self.stage_member_evidence(&words, generic_tail_at);
+            }
+            self.stage_member_evidence(&trait_evidence, trait_evidence_at);
             self.stage_moves(&moves);
-            self.emit(Op::Callt {
-                callee: kidx,
-                nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
-            });
+            if dispatch_tail {
+                // the dispatch tail's uop names the real arguments; the
+                // evidence/instance words trailing them ride the transfer
+                let real_args = if let Some(generic) = generic_target {
+                    staged.len() - usize::from(generic.evidence)
+                } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
+                    staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len()
+                } else {
+                    staged.len()
+                };
+                self.emit(Op::Calltg {
+                    callee: kidx,
+                    nargs: u8::try_from(real_args).expect("argument count fits u8"),
+                });
+            } else {
+                self.emit(Op::Callt {
+                    callee: kidx,
+                    nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+                });
+            }
             // an unreachable marker place; no code follows a tail call
             return Ok(Place {
                 base: 0,
@@ -5871,11 +6776,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.native_done(&mut self.code);
         let place = self.result_place(ty, &result_words, callee_span)?;
         if in_place_tail {
-            // the in-place tail call (a non-root native tail, or a local
-            // tail staging a closure into a callable-defaulted parameter):
-            // the tail position returns the call's result, the post-call
-            // flush settles the borrow windows, and the return's exit
-            // drops flush every other count the frame owes
+            // the in-place tail call (a non-root native or generic tail,
+            // or a local tail staging a closure into a callable-defaulted
+            // parameter): the tail position returns the call's result,
+            // the post-call flush settles the borrow windows, and the
+            // return's exit drops flush every other count the frame owes
             self.emit_return(&place, ty, e.span())?;
             // an unreachable marker place; no code follows the return
             return Ok(Place {
@@ -5924,10 +6829,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if let Some(claim) = self.deinit_claim(ty, span)? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
             let words = self.ref_words(base, ty)?;
-            self.rc.claimed(base, claim.hook, claim.count, &words);
+            self.rc.claimed(base, claim.hook, &words);
         }
         let shape = match &*self.shapes.shape(ty)? {
-            Shape::Word(slot) => PlaceShape::Word(*slot),
+            // the copy-out word's own kind leads: a factory's fn-typed
+            // result classifies Ref (the closure its tail constructs),
+            // so the place names the physical word the call slide
+            // validated — a Fn classification would hide the count from
+            // every use and the binder
+            Shape::Word(slot) => PlaceShape::Word(result_words.first().copied().unwrap_or(*slot)),
             _ => PlaceShape::Span(ty),
         };
         Ok(Place { base, shape })
@@ -5938,15 +6848,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// or a Ref word naming a closure object (the read dispatches on the
     /// word's kind; the emitted op is the same). Arguments stage on the
     /// overlay exactly like a pool call, the callee frame overlays it,
-    /// and the result copies out of the overlay. There is no tail
-    /// variant, so a tail-position call lowers through the value walk
-    /// and the enclosing return RETs its result.
+    /// and the result copies out of the overlay. A tail position runs
+    /// the maybe-Ref callee tracking [H2's closure ruling]: the callee
+    /// word is maybe-Ref by classification, and the provenance tables
+    /// (`scalar_fn_words` naming the function through `fn_words`) prove
+    /// some words count-free scalars naming exactly one planned function
+    /// — those tails transfer through CALLT with that function's own
+    /// pool FuncRef, and every unprovable word (a closure's Ref, a
+    /// callable-defaulted parameter, an unproven alias) keeps the
+    /// in-place CALLS plus return.
     fn calls_value(
         &mut self,
         ty: Ty,
         bind: Span,
         callee_span: Span,
         args: &[CallArg],
+        tail: bool,
     ) -> Result<Place, LowerError> {
         let callee_ty = self.val(callee_span)?.ty;
         let Some((params, ret)) = fn_sig_of(&self.analyzed.decls.universe, callee_ty) else {
@@ -5971,6 +6888,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // handler's parameter aliases
         let word = single(&self.word_addrs(&place, callee_ty)?, callee_span)?;
         let closure = word.slot_ty == SlotType::Ref;
+        // the maybe-Ref callee tracking: a proven scalar word is
+        // count-free by construction and names exactly one planned
+        // function, so a tail call through it can take the CALLT
+        // transfer; every other word stays behind the runtime CALLS read
+        let proven_fn = self
+            .scalar_fn_words
+            .contains(&word.slot)
+            .then(|| self.fn_words.get(&word.slot).copied())
+            .flatten();
         let expected_words: Vec<SlotType> = params
             .iter()
             .map(|ty| self.shapes.words(*ty))
@@ -5980,24 +6906,62 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .collect();
         let expected = expected_words.len();
         // stage: evaluate every argument to a place, then move its words
-        // into the overlay area (argument evaluation may itself call)
+        // into the overlay area (argument evaluation may itself call).
+        // The borrow window opens before that evaluation and pins the
+        // callee word (CALLS reads it during the call) plus every word
+        // the staged arguments resolve to
         let mut staged: Vec<SlotType> = Vec::new();
         let mut moves: Vec<(usize, u8)> = Vec::new();
         // staged indices whose Ref word lands in a callable-defaulted `Fn`
         // parameter: the callee reads the word and never owns its count
         let mut defaulted: Vec<usize> = Vec::new();
-        for arg in args {
+        // a deinit-carrying argument pins its hook to this frame's death
+        // sites, so a tail through the callable word lowers in place
+        // (the callee's borrow would outlive a transferred frame)
+        let mut deinit_arg = false;
+        self.rc.native_open();
+        self.rc.native_reads(&[word.slot]);
+        for (index, arg) in args.iter().enumerate() {
             let arg_val = self.value(&arg.value)?;
+            if tail && self.deinit_claim(arg_val.ty, arg.value.span())?.is_some() {
+                deinit_arg = true;
+            }
             // a closure argument lands only in a callable-defaulted `Fn`
             // parameter, staged as a borrow window
             if self.is_closure_word(&arg_val.place, arg_val.ty)? {
                 Self::guard_callable_staged(Some(&expected_words), staged.len(), arg.value.span())?;
                 defaulted.push(staged.len());
             }
+            // a union-typed parameter takes its member's whole region: a
+            // bare member or a strict sub-union argument re-spans into a
+            // staging temp of the parameter's region, the named-callee
+            // widening family's value-site spelling
+            let arg_val = match params.get(index) {
+                Some(&param_ty) if param_ty != arg_val.ty && self.is_union_ty(param_ty)? => {
+                    // the same staging-temp backstop as the named
+                    // callee path
+                    if self.deinit_claim(arg_val.ty, arg.value.span())?.is_some() {
+                        return Err(LowerError::unsupported(
+                            arg.value.span(),
+                            "a deinit-carrying argument into a union parameter",
+                            "the re-span's staging temp is anonymous, so it carries no claim \
+                             contract of its own; the deinit arc owns the seam",
+                        ));
+                    }
+                    let temp = self.temp_span(param_ty)?;
+                    self.widen_into(&temp, param_ty, &arg_val)?;
+                    TypedPlace {
+                        place: temp,
+                        ty: param_ty,
+                    }
+                },
+                _ => arg_val,
+            };
             for addr in self
                 .word_addrs(&arg_val.place, arg_val.ty)
                 .map_err(|err| err.respanned(arg.value.span()))?
             {
+                self.rc.native_reads(&[addr.slot]);
                 moves.push((staged.len(), addr.slot));
                 staged.push(addr.slot_ty);
             }
@@ -6017,18 +6981,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 reason,
             ));
         }
-        for (index, slot) in moves {
-            self.emit(Op::Mov {
-                dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
-                src: Slot::body(slot),
-            });
+        // the tail transfer: only a proven count-free scalar callee word
+        // with no closure-defaulted argument and no deinit-carrying
+        // argument takes it — the count-free word needs no settling and
+        // the named function's own pool FuncRef drives the CALLT
+        let tail_transfer = tail && proven_fn.is_some() && defaulted.is_empty() && !deinit_arg;
+        for &(index, slot) in &moves {
+            if !tail_transfer {
+                self.emit(Op::Mov {
+                    dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
+                    src: Slot::body(slot),
+                });
+            }
             // a borrow parameter owns the handed word: forward on the
             // source's death, dup otherwise (C2/C4); a callable-defaulted
             // closure word is a plain borrow — the callee reads it (CALLS
-            // never consumes) and never owns its count
+            // never consumes) and never owns its count. A transferring
+            // tail's count rides the callee like every staged local word
+            // (its own exit drops the handed parameter)
             if staged[index] == SlotType::Ref {
                 if defaulted.contains(&index) {
                     self.rc.staged_native(slot, false);
+                } else if tail_transfer {
+                    self.rc.staged_tail_local(&mut self.code, slot);
                 } else {
                     self.rc.staged_local(&mut self.code, slot);
                 }
@@ -6048,6 +7023,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
         }
         self.overlay_site(&staged, &result_words);
+        if tail_transfer {
+            // the tracking proved the callee word a count-free scalar
+            // naming one planned function: the tail transfers through
+            // CALLT with that function's own pool FuncRef [H2], the exit
+            // claims staging first and the argument moves after them
+            let index = proven_fn.expect("the transfer requires a proven function");
+            let kidx = self.pool(Constant::FuncRef {
+                module: String::new(), // the enclosing module
+                func: index,
+            });
+            self.rc.native_tail_transfer();
+            self.rc.exit(&mut self.code, &[]);
+            self.stage_moves(&moves);
+            self.emit(Op::Callt {
+                callee: kidx,
+                nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+            });
+            // an unreachable marker place; no code follows a tail call
+            return Ok(Place {
+                base: 0,
+                shape: PlaceShape::Word(SlotType::Raw),
+            });
+        }
         self.emit(Op::Calls {
             callee_slot: word.slot,
             nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
@@ -6058,7 +7056,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // drops here, the object's death releasing the captures
             self.rc.read(&mut self.code, &[word.slot]);
         }
-        self.result_place(ty, &result_words, callee_span)
+        let place = self.result_place(ty, &result_words, callee_span)?;
+        if tail {
+            // the in-place tail (the unproven maybe-Ref word): the CALLS
+            // runs inside this frame, the post-call flush settles the
+            // borrow windows, and the return's exit drops flush every
+            // other count the frame owes
+            self.emit_return(&place, ty, callee_span)?;
+            // an unreachable marker place; no code follows the return
+            return Ok(Place {
+                base: 0,
+                shape: PlaceShape::Word(SlotType::Raw),
+            });
+        }
+        Ok(place)
     }
 
     /// A fallible or checked native's result span: neither platform span
@@ -6107,7 +7118,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// constraint count; a receiver no covered instance names, or one
     /// outside the callee's implemented set, is a lowering error,
     /// never a runtime misdispatch. The minted instance comes back for
-    /// the result shape's instance-keyed word kind.
+    /// the result shape's instance-keyed word kind. `defer` registers
+    /// the staged types without emitting the Kimm stores — the tail
+    /// transfer path re-stages every word past the exit claims, and a
+    /// claim's overlay window would clobber words staged before it.
     fn stage_generic_evidence(
         &mut self,
         generic: &'static GenericNative,
@@ -6116,6 +7130,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         call: Span,
         staged: &mut Vec<SlotType>,
         receiver_ty: Option<Ty>,
+        defer: bool,
     ) -> Result<BuiltinInstance, LowerError> {
         let sig = self
             .analyzed
@@ -6162,11 +7177,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         self.guard_staged_count(staged.len() + usize::from(generic.evidence))?;
         for _ in 0..generic.evidence {
-            let kidx = self.pool(Constant::I64(instance as i64));
-            self.emit(Op::Kimm {
-                dst: Slot::overlay(u8::try_from(staged.len()).expect("overlay word fits u8")),
-                kidx,
-            });
+            if !defer {
+                let kidx = self.pool(Constant::I64(instance as i64));
+                self.emit(Op::Kimm {
+                    dst: Slot::overlay(u8::try_from(staged.len()).expect("overlay word fits u8")),
+                    kidx,
+                });
+            }
             staged.push(SlotType::I64);
         }
         Ok(instance)
@@ -6192,7 +7209,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             )
         }) && !candidates.is_empty();
         if let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) {
-            return self.resolve_inherent_method(method, what);
+            return self.resolve_inherent_method(method, call, what);
         }
         let Some(tc) = self.analyzed.checked.trait_calls.get(&call).cloned() else {
             // A bound-variable receiver inside a generic impl body: the
@@ -6220,9 +7237,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     [] => Err(LowerError::unsupported(
                         what,
                         "a trait-method call on a bound type variable",
-                        "this body carries no runtime evidence slot for the member (a nested \
-                         lambda or a generic function body has none); the evidence seam covers \
-                         the impl member body's own sites",
+                        "this body carries no runtime evidence slot for the member (a spawned \
+                         child or a generic function body has none); the evidence seam covers the \
+                         impl member body and its lambdas",
                     )),
                     _ => Err(LowerError::unsupported(
                         what,
@@ -6266,11 +7283,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// A solved inherent-method call site: the impl body the
     /// checker-recorded method id names, reached through the declaration
     /// tables' method-to-impl-item map. The receiver's own type picked
-    /// the body at check time — no instance and no evidence word exist
-    /// for an inherent impl, so the call dispatches like a local callee.
+    /// the body at check time — no instance word exists for an inherent
+    /// impl, so the call dispatches like a local callee; a generic body's
+    /// entering site carries the checker-recorded bounds (the serving
+    /// instance per declared bound under the receiver's substitution),
+    /// which stage the body's evidence demands.
     fn resolve_inherent_method(
         &self,
         method: MethodId,
+        call: Span,
         what: Span,
     ) -> Result<TraitDispatch, LowerError> {
         let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
@@ -6281,34 +7302,36 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  the construct",
             ));
         };
-        if self.plan.is_runtime_impl(impl_site) {
-            return Err(LowerError::unsupported(
-                what,
-                "an inherent method call",
-                "a generic inherent impl's body needs runtime-resolved evidence; that seam covers \
-                 trait impls this round — call the free function or use UFCS [F3]",
-            ));
-        }
         let member = self.analyzed.package.method(method).name.clone();
-        match self.plan.impl_body(impl_site, &member) {
-            Some(index) => Ok(TraitDispatch::Inherent { index }),
-            None => Err(LowerError::unsupported(
+        let Some(index) = self.plan.impl_body(impl_site, &member) else {
+            return Err(LowerError::unsupported(
                 what,
                 "an inherent method call",
                 "the impl's body did not plan (no body, no solved return, or a shape over its own \
                  type variables); report the construct",
-            )),
-        }
+            ));
+        };
+        let bounds = self
+            .analyzed
+            .checked
+            .inherent_call_bounds
+            .get(&call)
+            .cloned()
+            .unwrap_or_default();
+        Ok(TraitDispatch::Inherent { index, bounds })
     }
 
     /// The one runtime-evidence word a call site entering a generic impl
     /// body stages for one of the body's demands: the serving member
     /// body's function-table index, resolved through the checker-recorded
-    /// bounds of this call site's solved instance.
+    /// bounds of this call site's solved dispatch — the trait form's
+    /// per-bound instance record, or the inherent form's call-site
+    /// record minus the instance word.
     fn evidence_word(
         &self,
         pair: &RuntimePair,
-        call: &TraitCall,
+        bounds: &InherentCallBounds,
+        what: &'static str,
         span: Span,
     ) -> Result<u32, LowerError> {
         let method = self.analyzed.package.method(pair.method);
@@ -6326,11 +7349,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "the member's trait is missing from the declaration tables",
             ));
         };
-        // the recorded bounds key by the instance's own minted variable;
+        // the recorded bounds key by the declaration's own minted variable;
         // the written parameter name bridges the two mintings
         let universe = &self.analyzed.decls.universe;
-        let Some(Some(instance)) = call
-            .bounds
+        let Some(Some(instance)) = bounds
             .iter()
             .find(|(var, bound, _)| {
                 crate::shape::var_param_name(universe, *var).as_deref() == Some(pair.var.as_str())
@@ -6340,7 +7362,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         else {
             return Err(LowerError::unsupported(
                 span,
-                "a trait-method call into a generic impl body",
+                what,
                 "the element type's bound has no unique serving instance at this site (or the \
                  receiver is a union across branches); runtime evidence resolves one body per \
                  bound",
@@ -6355,14 +7377,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .ok_or_else(|| {
                 LowerError::unsupported(
                     span,
-                    "a trait-method call into a generic impl body",
+                    what,
                     "the serving instance's impl item is missing from the declaration tables",
                 )
             })?;
         if self.plan.is_runtime_impl(impl_site) {
             return Err(LowerError::unsupported(
                 span,
-                "a trait-method call into a generic impl body",
+                what,
                 "the element type's serving body is itself generic; transitive runtime evidence \
                  staging is the next seam",
             ));
@@ -6370,34 +7392,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.plan.impl_body(impl_site, &method.name).ok_or_else(|| {
             LowerError::unsupported(
                 span,
-                "a trait-method call into a generic impl body",
+                what,
                 "the element type's serving impl body did not plan; report the construct",
             )
         })
     }
 
-    /// A member call's argument count against the impl body's declared
-    /// parameters (trait and inherent alike): a defaulted member
-    /// parameter has no staging this round, so an omitted default
-    /// refuses here instead of trapping in the VM's arity check.
-    fn guard_member_arity(
-        &self,
-        index: u32,
-        arg_exprs: &[&Expr],
-        span: Span,
-    ) -> Result<(), LowerError> {
-        let Some(decl) = &self.plan.functions()[index as usize].decl else {
-            return Ok(());
-        };
-        if arg_exprs.len() != decl.params.len() {
-            return Err(LowerError::unsupported(
-                span,
-                "a defaulted member parameter",
-                "stage every argument explicitly; default staging for member calls is not in the \
-                 contract yet",
-            ));
+    /// Emits one generic inherent member call's evidence words as Kimm
+    /// stores into the overlay span trailing the arguments, at the
+    /// recorded staged indexes: one function-table index per the body's
+    /// runtime demands, a constant word each (never counted, never a
+    /// binder).
+    fn stage_member_evidence(&mut self, words: &[u32], at: usize) {
+        for (offset, word) in words.iter().enumerate() {
+            let kidx = self.pool(Constant::I64(i64::from(*word)));
+            self.emit(Op::Kimm {
+                dst: Slot::overlay(u8::try_from(at + offset).expect("overlay word fits u8")),
+                kidx,
+            });
         }
-        Ok(())
     }
 
     fn resolve_callee(&self, def: DefId, span: Span) -> Result<Callee, LowerError> {
@@ -6463,6 +7476,63 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         staged
     }
 
+    /// The literal-only parameter defaults [F7] an impl-member call
+    /// stages at the call site for its omitted trailing parameters:
+    /// the checker proves each default's literal against the
+    /// parameter type at the call, so the call lowers them exactly
+    /// like written arguments — the same staging the free-fn spelling
+    /// applies, over the impl body's own declaration (the plan entry
+    /// the dispatch resolved). The staged exprs are span-preserving
+    /// clones, so the checker's span-keyed tables resolve them
+    /// unchanged. A default the checker never typed — a trait impl
+    /// body's own re-declared default, whose call sites check the
+    /// trait's declared signature — refuses naming the seam. A
+    /// non-defaulted omission is the checker's to reject; the
+    /// staged-width guard at the call names anything that slips
+    /// through.
+    fn member_default_exprs(
+        &self,
+        index: u32,
+        written: usize,
+        span: Span,
+    ) -> Result<Vec<Expr>, LowerError> {
+        let Some(decl) = &self.plan.functions()[index as usize].decl else {
+            return Ok(Vec::new());
+        };
+        let Some(missing) = decl.params.get(written..) else {
+            return Ok(Vec::new());
+        };
+        if !missing.iter().all(|param| param.default.is_some()) {
+            return Ok(Vec::new());
+        }
+        for param in missing {
+            let default = param.default.as_ref().expect("checked directly above");
+            if !self
+                .analyzed
+                .checked
+                .expr_types
+                .contains_key(&default.span())
+            {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a defaulted trait-member parameter",
+                    "the call site checks the trait's declared default while the staging lowers \
+                     the impl body's own re-declared one; the two spellings disagree this round",
+                ));
+            }
+        }
+        Ok(missing
+            .iter()
+            .map(|param| {
+                param
+                    .default
+                    .as_ref()
+                    .expect("checked directly above")
+                    .clone()
+            })
+            .collect())
+    }
+
     /// A local callee's parameter word count, as its own frame layout
     /// records it (params first, one region per parameter). `None` when
     /// a parameter type has no shape; those callees keep the runtime
@@ -6484,6 +7554,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             words.extend(self.shapes.words(fact.ty).ok()?);
         }
         Some(words)
+    }
+
+    /// A local callee's per-parameter checked types, when its signature
+    /// is static: a declared body's parameters come from the checked
+    /// binder facts keyed by each parameter's name span, a def's from
+    /// its recorded signature. `None` keeps the runtime arity check.
+    fn callee_param_types(&mut self, index: u32) -> Option<Vec<Ty>> {
+        let planned = self.plan.functions().get(index as usize)?;
+        if let Some(decl) = &planned.decl {
+            return decl
+                .params
+                .iter()
+                .map(|param| {
+                    self.analyzed
+                        .checked
+                        .binders
+                        .get(&param.name.span)
+                        .map(|fact| fact.ty)
+                })
+                .collect();
+        }
+        let def = planned.def?;
+        let fn_ty = self.analyzed.checked.def_types.get(&def).copied()?;
+        let (params, _) = fn_sig_of(&self.analyzed.decls.universe, fn_ty)?;
+        Some(params.to_vec())
     }
 
     fn callee_param_words(&mut self, index: u32) -> Option<usize> {
@@ -6687,6 +7782,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::overlay(0),
             src: Slot::body(text),
         });
+        self.rc.native_open();
         self.rc.staged_native(text, false);
         let println = crate::native::lookup("println").expect("the console native is covered");
         let kidx = self.pool(funcref_const(Callee::Builtin(println)));
@@ -6724,8 +7820,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// ([`fn checked_native_result`](Self::checked_native_result)). The
     /// union must carry exactly one member that holds the native's one
     /// payload word and exactly one payload-less error member beside it
-    /// (the native answers one failure discriminant; which error member
-    /// that is rides the ambient signature). The error member has no
+    /// (the platform span answers one failure bit with no member
+    /// mapping, so the pairing is by the checked call-site union's
+    /// member shapes: the ambient's declaration owns the CLI-world
+    /// spelling, and any other host's own extern row owns its members).
+    /// The error member has no
     /// field for the failure message, so a `Ref` payload's native-born
     /// message count dies inside the failure arm; a scalar payload's
     /// failure word is inert (parse_int hands back the staged input's
@@ -6744,7 +7843,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let success: Vec<_> = u
             .members
             .iter()
-            .filter(|m| m.fields.len() == 1 && m.fields[0].slot == payload)
+            .filter(|m| m.fields.len() == 1 && m.fields[0].slot() == payload)
             .collect();
         let failure: Vec<_> = u.members.iter().filter(|m| m.fields.is_empty()).collect();
         if success.len() + failure.len() != u.members.len() {
@@ -6837,7 +7936,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::body(result.base + field.word),
             src: Slot::overlay(1),
         });
-        if field.slot == SlotType::Ref {
+        if field.slot() == SlotType::Ref {
             self.rc.produced(result.base + field.word);
         }
         let arm_ok = self.rc.take();
@@ -6910,10 +8009,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 no_span(),
                 "a checked-read native call",
-                "the element type must be one word; rebox wider elements first",
+                "the element type must be one word; wider elements arrive when the native \n                 channel carries whole spans",
             ));
         };
-        self.overlay_site(staged, &[SlotType::Tag, field.slot]);
+        self.overlay_site(staged, &[SlotType::Tag, field.slot()]);
         let kidx = self.pool(funcref_const(target));
         match target {
             // the staged span of a generic call ends in its evidence
@@ -6972,7 +8071,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::body(result.base + field.word),
             src: Slot::overlay(1),
         });
-        if field.slot == SlotType::Ref {
+        if field.slot() == SlotType::Ref {
             self.rc.produced(result.base + field.word);
         }
         let arm_ok = self.rc.take();
@@ -7281,7 +8380,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The family's receiver decomposition: the checked `t | none`
     /// union's none member and its single one-word t side — the same
-    /// restriction the checked reads carry; wider sides wait on reboxing.
+    /// restriction the checked reads carry; wider sides wait on the native channel.
     fn optional_side(
         &mut self,
         recv_ty: Ty,
@@ -7314,7 +8413,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 span,
                 "an extraction-family receiver",
-                "the extracted side must be one word; rebox wider members first",
+                "the extracted side must be one word; wider members arrive when the native \
+                 channel carries whole spans",
             ));
         };
         Ok((*elem, field.clone()))
@@ -7460,6 +8560,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         ty: Ty,
         span: Span,
     ) -> Result<Place, LowerError> {
+        // The degenerate spell: the err value's own type sits inside the
+        // receiver's extracted side, so the checked `t | e` collapses to
+        // the extracted type and both arms answer one value of it —
+        // `unwrap_or`'s exact shape, the err value as the fallback.
+        if self
+            .shapes
+            .shape(ty)
+            .is_ok_and(|shape| !matches!(*shape, Shape::Union(_)))
+        {
+            return self.unwrap_or_value(recv, err, ty, span);
+        }
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
         let (elem, field) = self.optional_side(src_ty, span)?;
@@ -7486,7 +8597,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 span,
                 "an ok_or result",
-                "the extracted side must be one word; rebox wider members first",
+                "the extracted side must be one word; wider members arrive when the native \
+                 channel carries whole spans",
             ));
         };
         let cond = self.temp_word(SlotType::Bool)?;
@@ -7510,15 +8622,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         self.zero_init_member(result.base, &u.words, &err_member.fields)?;
         for dst_field in &err_member.fields {
-            let addr = src_word_for(&err_words, dst_field.name.as_deref())?;
-            self.emit(Op::Mov {
-                dst: Slot::body(result.base + dst_field.word),
-                src: Slot::body(addr.slot),
-            });
-            if dst_field.slot == SlotType::Ref {
-                self.rc
-                    .copied(&mut self.code, result.base + dst_field.word, addr.slot);
-            }
+            let srcs = field_srcs(&err_words, dst_field)?;
+            self.store_field_span(result.base, dst_field, srcs);
         }
         let arm_err = self.rc.take();
         let err_div = self.rc.diverged();
@@ -7535,7 +8640,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::body(result.base + dst_field.word),
             src: Slot::body(src.place.base + field.word),
         });
-        if dst_field.slot == SlotType::Ref {
+        if dst_field.slot() == SlotType::Ref {
             self.rc.copied(
                 &mut self.code,
                 result.base + dst_field.word,
@@ -7658,23 +8763,36 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     // ---- tail position and returns ---------------------------------------------
 
-    /// Whether a call's callee can transfer control in tail position: a
-    /// name call, or a UFCS dot-call onto a resolved free function [F3].
-    /// Handlers inline, so `.err` stays a value-position call.
-    fn is_tail_callee(&self, callee: &Expr) -> bool {
-        match callee {
+    /// Whether a call can transfer control in tail position [H2]: a
+    /// name call, a UFCS dot-call onto a resolved free function [F3],
+    /// or a member dot-call the checker solved to a monomorphic
+    /// inherent body — its mangled `<target>#<member>` identity plans
+    /// as a plain local callee, so the CALLT transfer applies. A
+    /// trait-method site dispatches through CALLG (CALLTG stays
+    /// reserved) and a runtime-evidence site resolves at run, so
+    /// neither tails; their tail position lowers in place. Handlers
+    /// inline, so `.err` stays a value-position call.
+    fn is_tail_callee(&self, call: &Expr) -> bool {
+        let Expr::Call {
+            callee,
+            span: call_span,
+            ..
+        } = call
+        else {
+            return false;
+        };
+        match &**callee {
             // A minted case constructor produces a value in place; it
             // never transfers control, so tail position lowers it as a
             // plain value [B3]. The extraction family inlines too, so a
             // tail-position family call lowers through the value walk's
             // return, not a control transfer [E4].
             Expr::Path { span, .. } => {
-                // CALLS has no tail variant: a call through a local
-                // binding lowers as a value and the enclosing return RETs
-                // its result.
-                if matches!(self.res.get(*span), Some(Res::Local { .. })) {
-                    return false;
-                }
+                // A call through a local binding reaches the maybe-Ref
+                // callee tracking: the tail transfers through CALLT when
+                // the callee word is provably count-free (a scalar naming
+                // one function), and lowers in place (CALLS plus return)
+                // where tracking cannot prove it [H2's closure ruling]
                 !matches!(
                     self.res.get(*span),
                     Some(Res::Def(def))
@@ -7688,10 +8806,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                                 .is_some_and(|c| !matches!(c.payload, EnumPayload::None))
                 )
             },
-            Expr::Field { name, .. } => matches!(
-                self.res.get(name.span),
-                Some(Res::Dot(DotRes::Free { func, .. })) if self.extraction_def(*func).is_none()
-            ),
+            Expr::Field { recv, name, .. } => match self.res.get(name.span) {
+                Some(Res::Dot(DotRes::Free { func, .. })) => self.extraction_def(*func).is_none(),
+                Some(Res::Dot(DotRes::Methods { candidates })) => matches!(
+                    self.resolve_method_dispatch(*call_span, name.span, Some(recv), candidates),
+                    Ok(TraitDispatch::Inherent { .. }
+                        | TraitDispatch::Static { .. }
+                        | TraitDispatch::Runtime { .. })
+                ),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -7759,7 +8883,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 operand.span(),
                 "a `cancel` payload",
                 "the error value must be a bare enum member this round; payloaded members wait on \
-                 the reboxing ruling",
+                 the span rework's native channel",
             ));
         }
         // the containment proof belongs to the function that owns the
@@ -7864,7 +8988,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             Expr::Match { .. } => self.match_tail(e),
             Expr::Try { expr, .. } => self.try_tail(expr),
-            Expr::Call { callee, .. } if self.is_tail_callee(callee) => {
+            Expr::Call { .. } if self.is_tail_callee(e) => {
                 let ty = self.val(e.span())?.ty;
                 self.call_impl(e, ty, true)?;
                 Ok(())
@@ -7941,15 +9065,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     fn emit_return_inner(&mut self, place: &Place, src_ty: Ty) -> Result<(), LowerError> {
         // A returned value that is a part of a deinit-carrying value (a
-        // scalar field read) leaves with the dying value's own word: the
-        // claim the word anchors fires here, the struct's death staged
-        // while its other words are still live. The value itself — the
+        // field read) leaves with the dying value's own words: the span
+        // claim covering the read fires here, the struct's death staged
+        // while its other words are still live, the span's non-escaping
+        // `Ref` words dec-ing behind the hook. The value itself — the
         // returned type carries the deinit — keeps its claim with the
         // transfer.
         if self.deinit_claim(src_ty, no_span())?.is_none() {
-            for addr in self.word_addrs(place, src_ty)? {
-                if self.rc.has_claim(addr.slot) {
-                    self.rc.fire_claim(&mut self.code, addr.slot);
+            let escaping = self.word_addrs(place, src_ty)?;
+            let words: Vec<u8> = escaping.iter().map(|addr| addr.slot).collect();
+            let mut fired = Vec::new();
+            for &word in &words {
+                if let Some(base) = self.rc.claim_base_of(word)
+                    && !fired.contains(&base)
+                {
+                    fired.push(base);
+                    self.rc.fire_claim(&mut self.code, base, &words);
                 }
             }
         }
@@ -7994,21 +9125,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let target = self.temp_span(self.ret_ty)?;
                 let addrs = self.word_addrs(place, src_ty)?;
                 self.transfer_claim(target.base, place, src_ty)?;
-                for (field, src_addr) in s.fields.iter().zip(addrs.iter()) {
-                    self.emit(Op::Mov {
-                        dst: Slot::body(target.base + field.word),
-                        src: Slot::body(src_addr.slot),
-                    });
-                    if field.slot == SlotType::Ref {
-                        self.rc
-                            .copied(&mut self.code, target.base + field.word, src_addr.slot);
-                    }
+                for field in &s.fields {
+                    let srcs = field_srcs(&addrs, field)?;
+                    self.store_field_span(target.base, field, srcs);
                 }
-                let transferred: Vec<u8> = s.fields.iter().map(|f| target.base + f.word).collect();
+                let transferred: Vec<u8> = addrs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        target.base + u8::try_from(index).expect("span width fits u8")
+                    })
+                    .collect();
+                let width = self.shapes.words(self.ret_ty)?.len();
                 self.rc.exit(&mut self.code, &transferred);
                 self.emit(Op::RetSpan {
                     src: Slot::body(target.base),
-                    n: u8::try_from(s.fields.len()).expect("span width fits u8"),
+                    n: u8::try_from(width).expect("span width fits u8"),
                 });
                 Ok(())
             },
@@ -8024,7 +9156,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         dst: Slot::body(target.base + field.word),
                         src: Slot::body(src_addr.slot),
                     });
-                    if field.slot == SlotType::Ref {
+                    if field.slot() == SlotType::Ref {
                         self.rc
                             .copied(&mut self.code, target.base + field.word, src_addr.slot);
                     }
@@ -8083,15 +9215,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.zero_init_member(target.base, &u.words, &member.fields)?;
                 let addrs = self.word_addrs(place, src_ty)?;
                 for field in &member.fields {
-                    let src_addr = src_word_for(&addrs, field.name.as_deref())?;
-                    self.emit(Op::Mov {
-                        dst: Slot::body(target.base + field.word),
-                        src: Slot::body(src_addr.slot),
-                    });
-                    if field.slot == SlotType::Ref {
-                        self.rc
-                            .copied(&mut self.code, target.base + field.word, src_addr.slot);
-                    }
+                    let srcs = field_srcs(&addrs, field)?;
+                    self.store_field_span(target.base, field, srcs);
                 }
                 let transferred: Vec<u8> = (0..u8::try_from(u.words.len())
                     .expect("span width fits u8"))
@@ -8162,17 +9287,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .iter()
                 .find(|f| f.name == field.name)
                 .ok_or_else(|| mismatch("a re-span field"))?;
-            self.emit(Op::Mov {
-                dst: Slot::body(dst.base + field.word),
-                src: Slot::body(src.base + src_field.word),
-            });
-            if field.slot == SlotType::Ref {
-                self.rc.copied(
-                    &mut self.code,
-                    dst.base + field.word,
-                    src.base + src_field.word,
-                );
-            }
+            let srcs = field_addrs(src.base, src_field);
+            self.store_field_span(dst.base, field, &srcs);
         }
         Ok(())
     }
@@ -8250,15 +9366,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Shape::Struct(s) => {
                 let addrs = self.word_addrs(&src.place, src.ty)?;
                 for field in &s.fields {
-                    let addr = src_word_for(&addrs, field.name.as_deref())?;
-                    self.emit(Op::Mov {
-                        dst: Slot::body(dst.base + field.word),
-                        src: Slot::body(addr.slot),
-                    });
-                    if addr.slot_ty == SlotType::Ref {
-                        self.rc
-                            .copied(&mut self.code, dst.base + field.word, addr.slot);
-                    }
+                    let srcs = field_srcs(&addrs, field)?;
+                    self.store_field_span(dst.base, field, srcs);
                 }
                 Ok(())
             },
@@ -8330,15 +9439,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.zero_init_member(dst.base, &u.words, &member.fields)?;
                 let addrs = self.word_addrs(&src.place, src.ty)?;
                 for field in &member.fields {
-                    let addr = src_word_for(&addrs, field.name.as_deref())?;
-                    self.emit(Op::Mov {
-                        dst: Slot::body(dst.base + field.word),
-                        src: Slot::body(addr.slot),
-                    });
-                    if addr.slot_ty == SlotType::Ref {
-                        self.rc
-                            .copied(&mut self.code, dst.base + field.word, addr.slot);
-                    }
+                    let srcs = field_srcs(&addrs, field)?;
+                    self.store_field_span(dst.base, field, srcs);
                 }
                 Ok(())
             },
@@ -8447,6 +9549,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     callee: ConstIdx(callee),
                     nargs,
                 }),
+                Op::Calltg { callee, nargs } => PlacedOp::Uop(Uop::Calltg {
+                    callee: ConstIdx(callee),
+                    nargs,
+                }),
                 Op::Calls { callee_slot, nargs } => {
                     PlacedOp::Uop(Uop::Calls { callee_slot, nargs })
                 },
@@ -8519,14 +9625,21 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// Writes kind-correct zeros into every payload word the constructed
-    /// member does not fill.
+    /// member does not fill: a field's whole claimed span stays live.
     fn zero_init_member(
         &mut self,
         base: u8,
         words: &[SlotType],
         member_fields: &[MemberField],
     ) -> Result<(), LowerError> {
-        let live: HashSet<u8> = member_fields.iter().map(|f| f.word).collect();
+        let mut live: HashSet<u8> = HashSet::new();
+        for field in member_fields {
+            for offset in 0..field.width() {
+                live.insert(
+                    field.word + u8::try_from(offset).map_err(|_| mismatch("a union span"))?,
+                );
+            }
+        }
         for (index, slot) in words.iter().enumerate().skip(1) {
             let word = u8::try_from(index).map_err(|_| mismatch("a union span"))?;
             if !live.contains(&word) {
@@ -8603,15 +9716,23 @@ fn single(addrs: &[WordAddr], span: Span) -> Result<WordAddr, LowerError> {
     Ok(only.clone())
 }
 
-fn src_word_for(addrs: &[WordAddr], name: Option<&str>) -> Result<WordAddr, LowerError> {
-    addrs
+/// The source words of one field inside a flattened address list: the
+/// addresses group by field in span order, each group's base word
+/// carrying the field's name.
+fn field_srcs<'a>(
+    addrs: &'a [WordAddr],
+    field: &MemberField,
+) -> Result<&'a [WordAddr], LowerError> {
+    let start = addrs
         .iter()
-        .find(|a| match name {
-            Some(n) => a.name.as_deref() == Some(n),
+        .position(|a| match field.name.as_deref() {
+            Some(name) => a.name.as_deref() == Some(name),
             None => a.name.is_none(),
         })
-        .cloned()
-        .ok_or_else(|| mismatch("a value field"))
+        .ok_or_else(|| mismatch("a value field"))?;
+    addrs
+        .get(start..start + field.width())
+        .ok_or_else(|| mismatch("a value field span"))
 }
 
 /// Set difference over member lists.

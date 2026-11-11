@@ -1,0 +1,51 @@
+// purpose: evidence across nested lambda frames — a lambda inside a
+// generic impl body constructs its own lambda whose body also demands
+// the bound member: the outer lambda's capture block carries the
+// evidence word staged from the member frame's slot, and the inner
+// lambda's capture block stages it from the outer lambda's frame, so
+// the demand crosses two capture boundaries through the one word.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    const parts = self.map((x: t) -> string {
+      const one = [x].map((y: t) => y.show())
+      join(one, "")
+    })
+    join(parts, ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].show())
+  println(["a", "b"].show())
+  0
+}

@@ -155,3 +155,272 @@ fn a_union_head_impl_accepts_no_receiver() {
         "an unaccepted receiver records nothing"
     );
 }
+
+/// The spans of every call expression inside impl member bodies, in
+/// source order.
+fn impl_call_spans(ast: &Ast) -> Vec<Span> {
+    fn expr(e: &Expr, out: &mut Vec<Span>) {
+        if let Expr::Call {
+            span, callee, args, ..
+        } = e
+        {
+            out.push(*span);
+            expr(callee, out);
+            for arg in args {
+                expr(&arg.value, out);
+            }
+            return;
+        }
+        if let Expr::Field { recv, .. } = e {
+            expr(recv, out);
+        }
+    }
+    let mut out = Vec::new();
+    for item in ast.blocks.iter().flat_map(|b| b.items.iter()) {
+        if let ItemKind::Impl(imp) = &item.kind {
+            for f in &imp.fns {
+                if let Some(body) = &f.body {
+                    for stmt in &body.stmts {
+                        match &stmt.kind {
+                            ds_parse::StmtKind::Expr(e) => expr(e, &mut out),
+                            ds_parse::StmtKind::Local(local) => expr(&local.init, &mut out),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The shared generic-inherent story: the shows trait with its int and
+/// string instances, plus one generic inherent impl over `list[t]` whose
+/// body demands evidence (the element call inside the loop).
+const GENERIC_STORY: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "extern fn println (s: string) -> ()\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"n\" }\n",
+    "}\n",
+    "impl shows for string {\n",
+    "  fn show(self) -> string { \"s\" }\n",
+    "}\n",
+    "impl[t: shows] list[t] {\n",
+    "  fn describe(self) -> string {\n",
+    "    var acc = \"l\"\n",
+    "    for x in self {\n",
+    "      acc = \"${acc}${x.show()}\"\n",
+    "    }\n",
+    "    acc\n",
+    "  }\n",
+    "}\n",
+);
+
+/// A generic inherent impl records its declared bounds in the declaration
+/// tables: one condition over the declaration's minted variable, keyed by
+/// the impl item's span — the record the call sites and the lowering pass
+/// read, mirroring the trait form's instance conditions.
+#[test]
+fn a_generic_inherent_impl_records_its_declared_bounds() {
+    let (_ast, analyzed) = analyze_source("bounds_record.ds", GENERIC_STORY);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the story checks clean: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>()
+    );
+    let impl_site = *analyzed
+        .decls
+        .inherent_impl_bounds
+        .keys()
+        .next()
+        .expect("the generic inherent impl records its bounds");
+    let record = &analyzed.decls.inherent_impl_bounds[&impl_site];
+    let [cond] = record.conditions.as_slice() else {
+        panic!("one condition per declared bound: {:?}", record.conditions);
+    };
+    let shows = analyzed
+        .package
+        .lookup_type("shows")
+        .and_then(|def| analyzed.decls.traits.get(&def).copied())
+        .expect("the shows trait is declared");
+    assert_eq!(cond.trait_id, shows, "the condition names the bound trait");
+    // the minted variable bridges to the written parameter name `t`
+    let [var] = analyzed.decls.universe.members(cond.ty) else {
+        panic!("the condition constrains one variable");
+    };
+    let rendered = analyzed
+        .decls
+        .universe
+        .atom_decl(*var)
+        .expect("the variable atom is declared")
+        .name
+        .clone();
+    assert!(
+        rendered.starts_with("$t#"),
+        "the minted variable carries the written name: {rendered}"
+    );
+}
+
+/// A call site entering a generic inherent impl's body records the
+/// serving instance per declared bound under the receiver's substitution
+/// — the trait form's per-bound record minus the instance word. Two
+/// instantiations of one body each name their own serving impl.
+#[test]
+fn a_call_site_records_the_serving_instances_per_declared_bound() {
+    let source = format!(
+        "{}\n{}\n",
+        GENERIC_STORY,
+        concat!(
+            "fn main() -> int {\n",
+            "  println([1].describe())\n",
+            "  println([\"a\"].describe())\n",
+            "  0\n",
+            "}\n",
+        )
+    );
+    let (_ast, analyzed) = analyze_source("bounds_calls.ds", &source);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "both call sites check clean: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>()
+    );
+    let shows = analyzed
+        .package
+        .lookup_type("shows")
+        .and_then(|def| analyzed.decls.traits.get(&def).copied())
+        .expect("the shows trait is declared");
+    assert_eq!(
+        analyzed.checked.inherent_call_bounds.len(),
+        2,
+        "one record per entering call site"
+    );
+    let mut served_heads = Vec::new();
+    for bounds in analyzed.checked.inherent_call_bounds.values() {
+        let [(_var, trait_id, served)] = bounds.as_slice() else {
+            panic!("one bound entry per call site: {bounds:?}");
+        };
+        assert_eq!(*trait_id, shows, "the bound names the shows trait");
+        let &instance = served
+            .as_ref()
+            .expect("a unique instance serves the element");
+        served_heads.push(
+            analyzed
+                .decls
+                .instances
+                .head(instance)
+                .map(|ty| analyzed.decls.universe.render(ty))
+                .expect("the serving instance has a head"),
+        );
+    }
+    served_heads.sort();
+    assert_eq!(
+        served_heads,
+        vec!["int".to_owned(), "string".to_owned()],
+        "the two instantiations name their own serving instance heads"
+    );
+}
+
+/// A declared bound unsatisfied at the call site reports there — the
+/// trait form's call-site bound miss mirrored: the receiver accepts the
+/// owner, the bound's substituted type has no serving instance, and the
+/// diagnostic names the trait over the element type.
+#[test]
+fn an_unsatified_inherent_bound_reports_at_the_call_site() {
+    let source = concat!(
+        "tag int\n",
+        "struct list[t]\n",
+        "extern fn println (s: string) -> ()\n",
+        "trait shows {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "impl[t: shows] list[t] {\n",
+        "  fn describe(self) -> string { \"d\" }\n",
+        "}\n",
+        "fn main() -> string {\n",
+        "  const xs = [1]\n",
+        "  xs.describe()\n",
+        "}\n",
+    );
+    let (ast, analyzed) = analyze_source("bound_miss.ds", source);
+    assert!(
+        !analyzed.checked.diags.is_empty(),
+        "the unsatisfied bound reports at the call"
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one dot-call site: {} spans", spans.len());
+    };
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| {
+            d.labels.iter().any(|l| {
+                l.span.file == call.file && l.span.start <= call.start && l.span.end >= call.end
+            })
+        })
+        .expect("the diagnostic lands at the call site");
+    assert!(
+        diag.message.contains("no instance of `shows` for `int`"),
+        "the message names the bound over the element type: {}",
+        diag.message
+    );
+}
+
+/// A call into a generic inherent member from inside another generic
+/// body checks clean — the enclosing body's bound assumes the trait —
+/// but records `None` for the serving instance: no instance names a
+/// word the site could stage, so the lowerer keeps the honest
+/// transitive-staging refusal.
+#[test]
+fn an_inherent_call_inside_a_generic_body_records_none() {
+    let source = format!(
+        "{}{}\n{}\n{}\n",
+        GENERIC_STORY,
+        "impl[t: shows] list[t] {",
+        "  fn wrap(self) -> string { self.describe() }",
+        "}",
+    );
+    let (ast, analyzed) = analyze_source("inner_none.ds", &source);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the in-scope assumption satisfies the bound: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>()
+    );
+    let inner_spans = impl_call_spans(&ast);
+    let [inner] = inner_spans.as_slice() else {
+        panic!("one call site inside the impl bodies");
+    };
+    let bounds = analyzed
+        .checked
+        .inherent_call_bounds
+        .get(inner)
+        .expect("the inner site records its bounds");
+    let [(_var, _trait, served)] = bounds.as_slice() else {
+        panic!("one bound entry: {bounds:?}");
+    };
+    assert!(
+        served.is_none(),
+        "no instance serves the caller's own variable: {bounds:?}"
+    );
+}

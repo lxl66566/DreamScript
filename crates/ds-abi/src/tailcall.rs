@@ -393,6 +393,45 @@ mod tests {
     }
 
     #[test]
+    fn width_three_params_slide_as_flat_ranges_pairwise() {
+        // The span-rework ABI contract: a parameter wider than one word
+        // is consecutive flat slots, so the slide validates the flat
+        // lists word-by-word and moves the staged range as one contiguous
+        // copy — two width-3 params crossing an overlapping down-slide
+        // arrive adjacent, each span intact and in order. FrameLayout
+        // carries spans verbatim; no format change.
+        let caller = layout(vec![Bool, Ref, I64, I64, I64, F64, F64, F64], 2, 6);
+        let callee = layout(vec![I64, I64, I64, F64, F64, F64, Bool], 6, 1);
+        let plan = slide_plan(&caller, &callee).expect("layouts agree");
+        assert_eq!(plan.src(), 2..8);
+        assert_eq!(plan.dst(), 0..6);
+        assert_eq!(plan.direction(), SlideDirection::Ascending);
+        assert!(plan.overlaps());
+        assert_eq!(plan.delta(), 2);
+        let mut words = [0, 0, 11, 12, 13, 21, 22, 23];
+        plan.apply(&mut words);
+        assert_eq!(words, [11, 12, 13, 21, 22, 23, 22, 23]);
+    }
+
+    #[test]
+    fn an_interior_word_of_a_staged_span_validates_pairwise() {
+        // No whole-span shortcut: a staged span whose interior word
+        // disagrees with the callee's parameter span rejects at that
+        // word's index, so a mis-typed middle word cannot ride a
+        // matching head through the slide.
+        let caller = layout(vec![I64, I64, F64, F64, F64, I64], 0, 6);
+        let callee = layout(vec![I64, I64, I64, F64, F64, F64, Bool], 6, 1);
+        assert_eq!(
+            slide_plan(&caller, &callee),
+            Err(SlideError::TypeMismatch {
+                index: 2,
+                staged: F64,
+                expected: I64
+            })
+        );
+    }
+
+    #[test]
     fn unequal_ranges_are_rejected() {
         assert_eq!(
             SlidePlan::try_new(0..2, 0..3),

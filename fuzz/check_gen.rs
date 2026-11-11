@@ -1686,35 +1686,42 @@ impl Gen<'_> {
                 let pick = ms[self.s.below(ms.len())].clone();
                 self.typed(&pick, depth)
             },
-            Ty::Fn(ps, ret) => match self.s.below(4) {
-                0 => {
-                    let names: Vec<String> = ps.iter().map(|_| self.fresh("z")).collect();
-                    let saved = self.locals.len();
-                    for (n, p) in names.iter().zip(&ps) {
-                        self.locals.push(Local {
-                            name: n.clone(),
-                            ty: p.clone(),
-                            mutable: false,
-                        });
-                    }
-                    let body = self.typed(&ret, depth - 1);
-                    self.locals.truncate(saved);
-                    let header = names
-                        .iter()
-                        .zip(&ps)
-                        .map(|(n, p)| format!("{n}: {}", self.render_ty(p)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("({header}) => {body}")
-                },
-                1 => {
-                    let p = self.fresh("z");
-                    format!("({p}) => {p}")
-                },
-                _ => {
-                    let body = self.typed(&ret, depth - 1);
-                    format!("() => {body}")
-                },
+            Ty::Fn(ps, ret) => {
+                // the wrong splice: a loop exit inside a lambda body
+                // inside a loop is the checker's frame-boundary refusal
+                if self.loop_depth > 0 && self.s.roll(32) {
+                    return "() => { break }".to_owned();
+                }
+                match self.s.below(4) {
+                    0 => {
+                        let names: Vec<String> = ps.iter().map(|_| self.fresh("z")).collect();
+                        let saved = self.locals.len();
+                        for (n, p) in names.iter().zip(&ps) {
+                            self.locals.push(Local {
+                                name: n.clone(),
+                                ty: p.clone(),
+                                mutable: false,
+                            });
+                        }
+                        let body = self.typed(&ret, depth - 1);
+                        self.locals.truncate(saved);
+                        let header = names
+                            .iter()
+                            .zip(&ps)
+                            .map(|(n, p)| format!("{n}: {}", self.render_ty(p)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("({header}) => {body}")
+                    },
+                    1 => {
+                        let p = self.fresh("z");
+                        format!("({p}) => {p}")
+                    },
+                    _ => {
+                        let body = self.typed(&ret, depth - 1);
+                        format!("() => {body}")
+                    },
+                }
             },
         }
     }

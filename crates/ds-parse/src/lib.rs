@@ -53,6 +53,7 @@
 
 mod ast;
 mod convert;
+mod guardtail;
 mod lexscan;
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Files, Span};
@@ -76,8 +77,7 @@ pub use ast::{
     StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, Trivia, TriviaKind, Type,
     TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
 };
-use pest_gen::DsParser;
-pub(crate) use pest_gen::Rule;
+pub(crate) use pest_gen::{DsParser, Rule};
 
 /// Parses one registered source file into its blocks, or the syntax
 /// diagnostics. Two-span diagnostics cover the pairs the record names
@@ -145,7 +145,10 @@ const PARSE_STACK: usize = 8 << 20;
 fn run_grammar(file: FileId, src: &str, script: bool) -> Result<Ast, Vec<Diagnostic>> {
     match DsParser::parse(Rule::file, src) {
         Ok(pairs) => convert::convert(file, src, pairs, script),
-        Err(err) => Err(vec![pest_error(file, src, err)]),
+        Err(err) => Err(match guardtail::detect(file, src) {
+            Some(d) => vec![d],
+            None => vec![pest_error(file, src, err)],
+        }),
     }
 }
 

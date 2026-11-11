@@ -54,7 +54,9 @@ fn build_vm() -> (Vm, Lowered) {
 fn split_get_concat_round_trip_through_the_list_object() {
     // split feeds len/get/concat: the joined list has 6 elements, the
     // empty list 0, in-range get answers the element and out-of-range
-    // get answers none, extracted by the `.ok`/`.err` chain
+    // get answers none, extracted by the `.ok`/`.err` chain; join
+    // renders the parts back to one string, and the empty list joins
+    // to the empty string
     let (mut vm, _) = build_vm();
     vm.capture_output();
     assert_eq!(
@@ -62,7 +64,7 @@ fn split_get_concat_round_trip_through_the_list_object() {
         Ok(Value::Bool(true)),
         "the round trip's every leg matched"
     );
-    assert_eq!(vm.captured_output(), b"n 6 beta ?\n");
+    assert_eq!(vm.captured_output(), b"n 6 beta ? csv alpha,beta,gamma\n");
 }
 
 #[test]
@@ -171,5 +173,21 @@ fn direct_list_push_runs_every_one_word_element_kind() {
     assert_eq!(
         vm.run("lists_lit_probe", "push_lists", &[]),
         Ok(Value::I64(2))
+    );
+}
+
+/// The join legs leave no count behind: every staged borrow frees at
+/// the post-call flush, and main's own answer is the boolean word, so
+/// the heap drains by the run's end (the diag tripwires arm under
+/// --all-features).
+#[test]
+fn join_leaves_the_heap_drained() {
+    let (mut vm, _) = build_vm();
+    vm.capture_output();
+    assert_eq!(vm.run("list_probe", "main", &[]), Ok(Value::Bool(true)));
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
     );
 }

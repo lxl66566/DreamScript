@@ -1,7 +1,7 @@
 //! The VM-side heap object store [BL-2]: the objects raw `Ref` words name.
 //!
-//! Identity is the id table: a `Value::Ref(u32)` word is an index into
-//! `table`, and every live entry names one counted block of the ds-rt heap —
+//! Identity is the id table: a `Value::Ref` word's id part is an index
+//! into `table`, and every live entry names one counted block of the ds-rt heap —
 //! header plus payload in one allocation, the `repr(C)` layout a later JIT
 //! can inline. The count lives in the block header, RCINC/RCDEC route
 //! through ds-rt's rc surface, and a count reaching zero frees the object:
@@ -37,18 +37,30 @@
 //! the recursive depth-first one: each owner's children fully before
 //! the next sibling).
 //!
-//! Counts are non-atomic: one `Objects` store belongs to one VM on one
-//! thread [C4]. The `diag` feature arms ds-rt's balance tripwires (rc
-//! underflow/overflow asserts, the borrow-at-death check); the store
-//! holds no borrows, so a firing tripwire is a balance bug.
+//! Counts are non-atomic: one `Objects` store belongs to one fiber on
+//! one thread [C4]. Words self-describe their owner, so a store can
+//! hold a foreign word — a list on one heap owning a count on another —
+//! and the count mutations that reach past the store's own heap are
+//! the bracketed delivery classes plus the death cascade, which route
+//! through the pending-foreign queue: the store queues the cross-heap
+//! inc/dec and the routing face (the `Heaps` router over the pool)
+//! drains it, so no `Objects` method reaches another store. The `diag`
+//! feature arms ds-rt's balance tripwires (rc underflow/overflow
+//! asserts, the borrow-at-death check); the store holds no borrows, so
+//! a firing tripwire is a balance bug.
 
-use std::{collections::HashMap, fmt, ptr::NonNull, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    ptr::NonNull,
+};
 
 use ds_rt::{Heap, RcHeader, drop_deinit};
 
 use crate::{
-    net::Connections,
-    value::{FuncRef, Value},
+    claims::ClaimTable,
+    fiber::{Fiber, FiberId},
+    value::{FuncRef, RefId, Value},
     vm::Trap,
 };
 
@@ -161,8 +173,114 @@ enum Object {
     /// no ordering promise and no iteration surface. Key matching:
     /// string keys compare by content (two equal-content string objects
     /// are one key), every other word by identity — so scalar and
-    /// reference keys never collide across kinds.
-    Map(Vec<(Value, Value)>),
+    /// reference keys never collide across kinds. Each row carries a
+    /// filter hash ([`MapData`]) so a probe's reject scan walks dense
+    /// u32 words and never loads a candidate key's payload.
+    Map(MapData),
+}
+
+/// A map's payload: the association rows plus one filter hash per row.
+/// The hash is a reject filter, never the answer — every hash hit runs
+/// the exact key check, so a collision costs one compare and nothing
+/// else, while a miss answers from the dense u32 scan alone.
+#[derive(Debug, Default)]
+struct MapData {
+    hashes: Vec<u32>,
+    pairs: Vec<(Value, Value)>,
+}
+
+/// FNV-1a over `bytes`, continuing `state` (one round per byte; the
+/// strings hashed here are short, and the map scan amortizes the hash
+/// over thousands of compares).
+#[inline]
+const fn fnv_step(mut state: u32, bytes: &[u8]) -> u32 {
+    let mut at = 0;
+    while at < bytes.len() {
+        state ^= bytes[at] as u32;
+        state = state.wrapping_mul(0x0100_0193);
+        at += 1;
+    }
+    state
+}
+
+/// Key equality classes, folded into each hash's first round so a text
+/// hash and an identity hash over the same bytes stay distinguishable.
+const KEY_CLASS_TEXT: u32 = b't' as u32;
+const KEY_CLASS_REF: u32 = b'r' as u32;
+const KEY_CLASS_SCALAR: u32 = b's' as u32;
+
+/// The hash of a string key: its content, the text equality class.
+fn text_hash(text: &str) -> u32 {
+    fnv_step(KEY_CLASS_TEXT, text.as_bytes())
+}
+
+/// The hash of an identity key: the reference word's own bits.
+fn ref_hash(word: RefId) -> u32 {
+    let state = fnv_step(KEY_CLASS_REF, &word.fiber().0.to_le_bytes());
+    fnv_step(state, &word.id().to_le_bytes())
+}
+
+/// The hash of a scalar key: bits that respect word equality — `+0.0`
+/// and `-0.0` compare equal as words, so both fold to one bits form and
+/// the filter never rejects an equal pair (every other scalar kind is
+/// bits-equal exactly when word-equal; a NaN probe never matches, so its
+/// hash is free).
+fn scalar_hash(word: Value) -> u32 {
+    let (payload, is_f64) = match word {
+        Value::I64(n) => (n.to_le_bytes(), false),
+        Value::F64(x) => (
+            (if x == 0.0 { 0.0 } else { x }).to_bits().to_le_bytes(),
+            true,
+        ),
+        Value::Bool(b) => ([u8::from(b), 0, 0, 0, 0, 0, 0, 0], false),
+        Value::Tag(t) => ([t, 0, 0, 0, 0, 0, 0, 0], false),
+        Value::Fn(f) => {
+            let (module, func) = (f.module().to_le_bytes(), f.func().to_le_bytes());
+            let mut bytes = [0; 8];
+            bytes[..4].copy_from_slice(&module);
+            bytes[4..].copy_from_slice(&func);
+            (bytes, false)
+        },
+        // the probe resolution routes a Ref to the text or identity class
+        // first; hashing its bits keeps this total for the dead case
+        Value::Ref(r) => {
+            let (fiber, id) = (r.fiber().0.to_le_bytes(), r.id().to_le_bytes());
+            let mut bytes = [0; 8];
+            bytes[..4].copy_from_slice(&fiber);
+            bytes[4..].copy_from_slice(&id);
+            (bytes, false)
+        },
+    };
+    let state = fnv_step(KEY_CLASS_SCALAR, &payload);
+    fnv_step(state, &[u8::from(is_f64)])
+}
+
+/// A map probe resolved once per lookup or store — the payload-local
+/// form the row scan compares against. The probe word's payload is read
+/// exactly here (a local word through this store, a foreign word through
+/// the router's pre-resolution), so the per-candidate loop never walks
+/// the probe's descriptor chain again; the classes mirror the key
+/// equality rules exactly.
+enum ProbeKey<'a> {
+    /// A string probe: content equality, the text borrowed from its
+    /// object (local) or the router's copy (foreign).
+    Text { hash: u32, text: &'a str },
+    /// A non-string reference probe: identity equality.
+    Identity { hash: u32, word: RefId },
+    /// A probe carrying no reference: word equality.
+    Scalar { hash: u32, word: Value },
+}
+
+impl ProbeKey<'_> {
+    /// The row filter hash: equal keys hash equal in every class, so a
+    /// mismatch is a certain reject.
+    fn hash(&self) -> u32 {
+        match *self {
+            Self::Text { hash, .. } | Self::Identity { hash, .. } | Self::Scalar { hash, .. } => {
+                hash
+            },
+        }
+    }
 }
 
 /// One id-table entry: a live id names the header of its ds-rt block
@@ -174,21 +292,31 @@ enum Slot {
     Free(u32),
 }
 
+/// One cross-heap count operation the store cannot apply itself: the
+/// word names another fiber's heap, so the store queues it and the
+/// routing face drains it (the order within one cascade is preserved,
+/// FIFO).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ForeignOp {
+    /// Acquire one count on the owning heap.
+    Inc(RefId),
+    /// Release one count on the owning heap.
+    Dec(RefId),
+}
+
 /// The heap: the id table over ds-rt's counted blocks, the table's free
 /// list threading freed ids, and the string intern map.
-#[derive(Default)]
 pub struct Objects {
+    /// The owning fiber: the local/foreign test every count mutation on
+    /// a stored word runs against (the pool index is the word's owner
+    /// axis, stable across slot reuse).
+    owner: FiberId,
     interned: HashMap<Box<str>, u32>,
     table: Vec<Slot>,
     heap: Heap,
     free_head: Option<u32>,
     live: usize,
-    /// The connection table of the net natives ([`crate::net`]): sockets
-    /// are VM-lifetime host state like heap objects, and the native
-    /// calling convention hands a body exactly two host references (this
-    /// store, the output sink), so the table rides the store the VM owns
-    /// and drops — closing every open socket when the VM goes away.
-    net: Connections,
+    pending: VecDeque<ForeignOp>,
 }
 
 impl fmt::Debug for Objects {
@@ -215,10 +343,53 @@ impl Drop for Objects {
 }
 
 impl Objects {
-    /// An empty heap.
+    /// An empty heap owned by `owner`.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(owner: FiberId) -> Self {
+        Self {
+            owner,
+            interned: HashMap::new(),
+            table: Vec::new(),
+            heap: Heap::default(),
+            free_head: None,
+            live: 0,
+            pending: VecDeque::new(),
+        }
+    }
+
+    /// The owning fiber (the pool index the store's words carry).
+    #[must_use]
+    pub fn owner(&self) -> FiberId {
+        self.owner
+    }
+
+    /// Pops the oldest queued cross-heap operation, if any — the routing
+    /// face's drain loop.
+    pub(crate) fn pending_pop(&mut self) -> Option<ForeignOp> {
+        self.pending.pop_front()
+    }
+
+    /// Acquires one count for a stored `Ref` word, routing by the word's
+    /// owner: a local word incs here, a foreign word queues onto the
+    /// pending list (the router drains it onto the owning heap).
+    fn acquire_stored(&mut self, word: RefId) {
+        if word.fiber() == self.owner {
+            self.inc(word.id())
+                .expect("a stored local reference is live");
+        } else {
+            self.pending.push_back(ForeignOp::Inc(word));
+        }
+    }
+
+    /// Releases one count a stored `Ref` word carried, routing by the
+    /// word's owner the same way [`Objects::acquire_stored`] acquires.
+    fn release_stored(&mut self, word: RefId) {
+        if word.fiber() == self.owner {
+            self.dec(word.id())
+                .expect("a stored local reference is live");
+        } else {
+            self.pending.push_back(ForeignOp::Dec(word));
+        }
     }
 
     /// How many objects are live (a freed id counts only when reused).
@@ -390,7 +561,8 @@ impl Objects {
             // block's death hook drops only empty containers
             let words: Vec<Value> = match self.heap.payload_mut::<Object>(header) {
                 Object::List(elems) => std::mem::take(elems),
-                Object::Map(pairs) => pairs
+                Object::Map(data) => data
+                    .pairs
                     .drain(..)
                     .flat_map(|(key, value)| [key, value])
                     .collect(),
@@ -410,12 +582,18 @@ impl Objects {
                 let Value::Ref(child) = word else {
                     continue;
                 };
-                let child_header = match self.table.get(child as usize) {
+                if child.fiber() != self.owner {
+                    // a foreign-held word: the count sits on the owning
+                    // heap, so the dec queues for the router to drain
+                    self.pending.push_back(ForeignOp::Dec(child));
+                    continue;
+                }
+                let child_header = match self.table.get(child.id() as usize) {
                     Some(Slot::Live(header)) => *header,
                     _ => panic!("a stored element reference is live"),
                 };
                 if self.heap.rc_dec_count(child_header) {
-                    zeros.push((child, child_header));
+                    zeros.push((child.id(), child_header));
                 }
             }
             // reverse push pops in owned order: the first child's whole
@@ -441,9 +619,14 @@ impl Objects {
             return Err(Trap::UnknownObject { obj });
         }
         // the acquire happens before the store: a bogus element reference
-        // leaves the list untouched
-        if let Value::Ref(id) = value {
-            self.inc(id)?;
+        // leaves the list untouched (a foreign element word queues, so
+        // the owning heap takes the list's count)
+        if let Value::Ref(word) = value {
+            if word.fiber() == self.owner {
+                self.inc(word.id())?;
+            } else {
+                self.pending.push_back(ForeignOp::Inc(word));
+            }
         }
         match self.heap.payload_mut::<Object>(header) {
             Object::List(elems) => elems.push(value),
@@ -466,8 +649,8 @@ impl Objects {
         let mut elems = Vec::with_capacity(front.len() + back.len());
         let words: Vec<Value> = front.iter().chain(back.iter()).copied().collect();
         for value in words {
-            if let Value::Ref(id) = value {
-                self.inc(id)?;
+            if let Value::Ref(word) = value {
+                self.acquire_stored(word);
             }
             elems.push(value);
         }
@@ -579,7 +762,7 @@ impl Objects {
 
     /// Allocates a fresh empty map object, owned by the caller.
     pub fn alloc_map(&mut self) -> u32 {
-        self.alloc(Object::Map(Vec::new()))
+        self.alloc(Object::Map(MapData::default()))
     }
 
     /// Allocates a fresh closure object (the header FuncRef plus the
@@ -611,17 +794,98 @@ impl Objects {
         matches!(self.payload_of(obj), Some(Object::Str(s)) if &*s.text == text)
     }
 
-    /// Whether two key words name the same key: string references compare
-    /// by content (one key per content, whatever object carries it),
-    /// every other word by identity — mixed kinds never match.
-    fn key_matches(&self, stored: Value, probe: Value) -> bool {
-        match (stored, probe) {
-            (Value::Ref(a), Value::Ref(b)) => match (self.payload_of(a), self.payload_of(b)) {
-                (Some(Object::Str(x)), Some(Object::Str(y))) => x.text == y.text,
-                _ => a == b,
-            },
-            _ => stored == probe,
+    /// The string content of object `obj`, when it names a live string —
+    /// the map probe's foreign-resolution read.
+    pub(crate) fn str_if(&self, obj: u32) -> Option<&str> {
+        match self.payload_of(obj) {
+            Some(Object::Str(s)) => Some(&s.text),
+            _ => None,
         }
+    }
+
+    /// Resolves a probe word once per lookup or store, payload-locally:
+    /// a local word resolves through this store, a foreign word through
+    /// the router's pre-resolution, a scalar word needs no payload at
+    /// all. The scan then never re-reads the probe's payload per
+    /// candidate.
+    fn resolve_probe<'a>(&'a self, key: Value, res: &'a ResolvedKey) -> ProbeKey<'a> {
+        match res {
+            ResolvedKey::Text(text) => ProbeKey::Text {
+                hash: text_hash(text),
+                text,
+            },
+            ResolvedKey::Opaque => match key {
+                // the router builds Opaque only from a reference word
+                Value::Ref(word) => ProbeKey::Identity {
+                    hash: ref_hash(word),
+                    word,
+                },
+                scalar => ProbeKey::Scalar {
+                    hash: scalar_hash(scalar),
+                    word: scalar,
+                },
+            },
+            ResolvedKey::Word => match key {
+                Value::Ref(word) => match self.payload_of(word.id()) {
+                    Some(Object::Str(s)) => ProbeKey::Text {
+                        hash: text_hash(&s.text),
+                        text: &s.text,
+                    },
+                    _ => ProbeKey::Identity {
+                        hash: ref_hash(word),
+                        word,
+                    },
+                },
+                scalar => ProbeKey::Scalar {
+                    hash: scalar_hash(scalar),
+                    word: scalar,
+                },
+            },
+        }
+    }
+
+    /// Whether one stored key word equals the probe — the exact check a
+    /// hash hit runs; the classes mirror the key equality rules with no
+    /// probe payload read (the resolution already did it).
+    fn stored_key_matches(&self, stored: Value, probe: &ProbeKey<'_>) -> bool {
+        match probe {
+            ProbeKey::Text { text, .. } => match stored {
+                // the probe names a string: only a stored string key can
+                // equal it (mixed kinds never match), by content
+                Value::Ref(a) => matches!(
+                    self.payload_of(a.id()),
+                    Some(Object::Str(s)) if &*s.text == *text
+                ),
+                _ => false,
+            },
+            ProbeKey::Identity { word, .. } => match stored {
+                // the probe names no string: a local stored string key
+                // is a different object by construction (same id would
+                // have resolved the probe to text), so identity answers
+                Value::Ref(a) => match self.payload_of(a.id()) {
+                    Some(Object::Str(_)) => false,
+                    _ => a == *word,
+                },
+                _ => false,
+            },
+            ProbeKey::Scalar { word, .. } => stored == *word,
+        }
+    }
+
+    /// The first row whose key equals the probe, if present: the dense
+    /// hash scan rejects most candidates without any payload load, and
+    /// every hash hit runs the exact check.
+    fn map_row_at(&self, data: &MapData, probe: &ProbeKey<'_>) -> Option<usize> {
+        let hash = probe.hash();
+        for (at, &row_hash) in data.hashes.iter().enumerate() {
+            if row_hash == hash {
+                let (stored, _) = data.pairs[at];
+                if self.stored_key_matches(stored, probe) {
+                    return Some(at);
+                }
+            }
+        }
+        None
     }
 
     /// Stores one key-value pair into a map object in place, the exclusive
@@ -636,7 +900,13 @@ impl Objects {
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
-    pub fn set_map(&mut self, obj: u32, key: Value, value: Value) -> Result<(), Trap> {
+    pub fn set_map(
+        &mut self,
+        obj: u32,
+        key: Value,
+        res: &ResolvedKey,
+        value: Value,
+    ) -> Result<(), Trap> {
         let header = match self.table.get(obj as usize) {
             Some(Slot::Live(header))
                 if matches!(self.heap.payload::<Object>(*header), Object::Map(_)) =>
@@ -645,45 +915,47 @@ impl Objects {
             },
             _ => return Err(Trap::UnknownObject { obj }),
         };
-        if let Some(at) = self.map_pair_at(obj, key)? {
+        // one probe resolution serves the scan and the fresh row's hash;
+        // the borrow ends before the mutation window opens
+        let (found, hash) = match self.payload_of(obj) {
+            Some(Object::Map(data)) => {
+                let probe = self.resolve_probe(key, res);
+                (self.map_row_at(data, &probe), probe.hash())
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        if let Some(at) = found {
             // the store acquires for the map first, whatever it replaces:
             // a value word arriving with its caller's count must not ride
             // that count into the entry (a dying caller would free it)
-            if let Value::Ref(id) = value {
-                self.inc(id)?;
+            if let Value::Ref(word) = value {
+                self.acquire_stored(word);
             }
             let old = match self.heap.payload_mut::<Object>(header) {
-                Object::Map(pairs) => std::mem::replace(&mut pairs[at].1, value),
+                Object::Map(data) => std::mem::replace(&mut data.pairs[at].1, value),
                 _ => return Err(Trap::UnknownObject { obj }),
             };
-            if let Value::Ref(id) = old {
-                self.dec(id).expect("a stored pair reference is live");
+            if let Value::Ref(word) = old {
+                self.release_stored(word);
             }
             return Ok(());
         }
         // the acquires happen before the store: a bogus reference word
         // leaves the map untouched
-        if let Value::Ref(id) = key {
-            self.inc(id)?;
+        if let Value::Ref(word) = key {
+            self.acquire_stored(word);
         }
-        if let Value::Ref(id) = value {
-            self.inc(id)?;
+        if let Value::Ref(word) = value {
+            self.acquire_stored(word);
         }
         match self.heap.payload_mut::<Object>(header) {
-            Object::Map(pairs) => pairs.push((key, value)),
+            Object::Map(data) => {
+                data.hashes.push(hash);
+                data.pairs.push((key, value));
+            },
             _ => return Err(Trap::UnknownObject { obj }),
         }
         Ok(())
-    }
-
-    /// The entry position of `key` in map object `obj`, if present.
-    fn map_pair_at(&self, obj: u32, key: Value) -> Result<Option<usize>, Trap> {
-        match self.payload_of(obj) {
-            Some(Object::Map(pairs)) => Ok(pairs
-                .iter()
-                .position(|(stored, _)| self.key_matches(*stored, key))),
-            _ => Err(Trap::UnknownObject { obj }),
-        }
     }
 
     /// The value word stored under `key` in map object `obj`, if present.
@@ -693,12 +965,10 @@ impl Objects {
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
-    pub fn map_at(&self, obj: u32, key: Value) -> Result<Option<Value>, Trap> {
+    pub fn map_at(&self, obj: u32, key: Value, res: &ResolvedKey) -> Result<Option<Value>, Trap> {
+        let probe = self.resolve_probe(key, res);
         match self.payload_of(obj) {
-            Some(Object::Map(pairs)) => Ok(pairs
-                .iter()
-                .find(|(stored, _)| self.key_matches(*stored, key))
-                .map(|(_, value)| *value)),
+            Some(Object::Map(data)) => Ok(self.map_row_at(data, &probe).map(|at| data.pairs[at].1)),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -710,29 +980,413 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no map object.
     pub fn map_pairs(&self, obj: u32) -> Result<&[(Value, Value)], Trap> {
         match self.payload_of(obj) {
-            Some(Object::Map(pairs)) => Ok(pairs),
+            Some(Object::Map(data)) => Ok(&data.pairs),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
+}
 
-    /// The connection table of the net natives.
-    pub(crate) fn net(&mut self) -> &mut Connections {
-        &mut self.net
+/// The routing face over the pool's heaps: the store side of the native
+/// calling convention. The running fiber's store is the default (fresh
+/// objects are born there); every id-taking service routes a word to the
+/// store its owner axis names, so a foreign word — a delivered, staged,
+/// or host-held one — serves wherever it lands. Cross-heap count traffic
+/// rides the stores' pending queues, drained after each routed call, so
+/// the routing itself never skips a beat of the count discipline.
+pub struct Heaps<'a> {
+    /// The running fiber: its store sits in `current`, and its pool slot
+    /// holds the scratch — never routed to.
+    pub(crate) owner: FiberId,
+    /// Whether `current` really is the running fiber's store: true under
+    /// a live execution context, false when the drive is parked and the
+    /// context store is the scratch — then every store is reached through
+    /// the pool (the death walk's form).
+    pub(crate) live: bool,
+    pub(crate) current: &'a mut Objects,
+    pub(crate) pool: &'a mut [Fiber],
+    /// The per-fiber claim ledgers, parallel to the pool: the frame-claim
+    /// bookkeeping the router's count mutations maintain.
+    pub(crate) claims: &'a mut [ClaimTable],
+}
+
+impl<'a> Heaps<'a> {
+    /// The router over the running fiber's store, the pool, and the claim
+    /// ledgers.
+    pub(crate) fn new(
+        owner: FiberId,
+        current: &'a mut Objects,
+        pool: &'a mut [Fiber],
+        claims: &'a mut [ClaimTable],
+        live: bool,
+    ) -> Self {
+        Self {
+            owner,
+            live,
+            current,
+            pool,
+            claims,
+        }
     }
 
-    /// Bounds every blocking net wait ([`crate::net`]).
-    pub(crate) fn set_net_timeout(&mut self, timeout: Duration) {
-        self.net.set_timeout(timeout);
+    /// The claim ledger of one fiber.
+    fn ledger(&mut self, fiber: FiberId) -> &mut ClaimTable {
+        &mut self.claims[fiber.index()]
     }
+
+    /// The running fiber's store: the bare allocation target, for the
+    /// fixtures' id-level assertions. Only ever this store — a
+    /// word-bearing call goes through the routed mirrors below.
+    #[cfg(test)]
+    pub(crate) fn current(&mut self) -> &mut Objects {
+        self.current
+    }
+
+    /// The `Ref` word of a fresh object `id` on the running fiber's store.
+    pub(crate) fn word(&self, id: u32) -> Value {
+        Value::Ref(RefId::new(self.owner, id))
+    }
+
+    /// The store owning `word`: the running fiber's when the owner axes
+    /// agree under a live context, the named pool slot's otherwise.
+    fn store(&mut self, word: RefId) -> Result<&mut Objects, Trap> {
+        if self.live && word.fiber() == self.owner {
+            Ok(self.current)
+        } else {
+            self.pool
+                .get_mut(word.fiber().index())
+                .map(|fiber| &mut fiber.objects)
+                .ok_or(Trap::UnknownObject { obj: word.id() })
+        }
+    }
+
+    /// Drains every store's queued cross-heap operations until none
+    /// remain: a routed dec can free an object whose cascade queues
+    /// more, on any store, so the loop runs to quiescence. Order within
+    /// one queue is FIFO — a cascade's cross-heap decs fire in the
+    /// traversal order the queueing store saw.
+    fn settle(&mut self) -> Result<(), Trap> {
+        loop {
+            let op = if let Some(op) = self.current.pending_pop() {
+                op
+            } else {
+                let mut found = None;
+                for fiber in self.pool.iter_mut() {
+                    if let Some(op) = fiber.objects.pending_pop() {
+                        found = Some(op);
+                        break;
+                    }
+                }
+                let Some(op) = found else {
+                    return Ok(());
+                };
+                op
+            };
+            match op {
+                ForeignOp::Inc(word) => self.store(word)?.inc(word.id())?,
+                ForeignOp::Dec(word) => {
+                    let store = self.store(word)?;
+                    store.dec(word.id())?;
+                },
+            }
+        }
+    }
+
+    /// Allocates a fresh string object on the running fiber's store and
+    /// answers its word — the caller's frame claim.
+    pub(crate) fn new_str(&mut self, text: String) -> Value {
+        let id = self.current.alloc_str(text);
+        self.claimed_alloc(id)
+    }
+
+    /// A fresh string object holding `part`, as its word — the caller's
+    /// frame claim.
+    pub(crate) fn new_str_part(&mut self, part: &str) -> Value {
+        let id = self.current.alloc_str_part(part);
+        self.claimed_alloc(id)
+    }
+
+    /// A fresh list object over `elems`, as its word — the caller's frame
+    /// claim. The element words are adopted as-is, and each `Ref`
+    /// element's count must already be the list's edge (an `inc_edge`
+    /// where the caller's copy loop saw the word, or a fresh producer
+    /// word's birth count with its frame claim released), so the free
+    /// cascade owns those counts and no element claim stays on a ledger.
+    pub(crate) fn new_list(&mut self, elems: Vec<Value>) -> Value {
+        let id = self.current.alloc_list(elems);
+        self.claimed_alloc(id)
+    }
+
+    /// A fresh list object over `elems`, as the raw word (the combinators'
+    /// per-element accumulation list, carried across hosted calls).
+    pub(crate) fn new_list_id(&mut self, elems: Vec<Value>) -> RefId {
+        let id = self.current.alloc_list(elems);
+        match self.claimed_alloc(id) {
+            Value::Ref(word) => word,
+            _ => unreachable!("a fresh list is its reference word"),
+        }
+    }
+
+    /// A fresh empty map object, as its word — the caller's frame claim.
+    pub(crate) fn new_map(&mut self) -> Value {
+        let id = self.current.alloc_map();
+        self.claimed_alloc(id)
+    }
+
+    /// The interned word of `text` on the running fiber's store,
+    /// acquiring one count — the caller's frame claim.
+    pub(crate) fn new_intern(&mut self, text: &str) -> Value {
+        let id = self.current.intern(text);
+        self.claimed_alloc(id)
+    }
+
+    /// A fresh object's word with the caller's claim entered on the
+    /// running fiber's ledger (the birth count is the caller's).
+    fn claimed_alloc(&mut self, id: u32) -> Value {
+        let word = RefId::new(self.owner, id);
+        self.ledger(self.owner).acquire(word);
+        Value::Ref(word)
+    }
+
+    /// Releases the running fiber's frame claim on `word` without
+    /// touching the count: a fresh word's birth count (or a retained
+    /// copy's count) becomes the adopting container's edge, so the frame
+    /// no longer owns it and the container's free cascade will drop it.
+    pub(crate) fn release_claim(&mut self, word: RefId) {
+        self.ledger(self.owner).release(word);
+    }
+
+    /// `rc_inc` routed by the word's owner, the claim the running
+    /// fiber's (a read-out's retain, the RCINC arm), queues drained.
+    pub(crate) fn inc(&mut self, word: RefId) -> Result<(), Trap> {
+        self.inc_for(self.owner, word)
+    }
+
+    /// `rc_inc` routed by the word's owner, the count claimed for
+    /// `claimant`'s frames — the copy-in convention (the callee's
+    /// parameters, the spawned child's entry frame).
+    pub(crate) fn inc_for(&mut self, claimant: FiberId, word: RefId) -> Result<(), Trap> {
+        self.store(word)?.inc(word.id())?;
+        self.ledger(claimant).acquire(word);
+        self.settle()
+    }
+
+    /// `rc_inc` routed by the word's owner for an object-graph edge (a
+    /// closure's capture adoption, a list push): the count belongs to the
+    /// holding object, released by its free cascade — no frame claim.
+    pub(crate) fn inc_edge(&mut self, word: RefId) -> Result<(), Trap> {
+        self.store(word)?.inc(word.id())?;
+        self.settle()
+    }
+
+    /// `rc_dec` routed by the word's owner, the claim the running
+    /// fiber's, queues drained.
+    pub(crate) fn dec(&mut self, word: RefId) -> Result<(), Trap> {
+        self.store(word)?.dec(word.id())?;
+        self.ledger(self.owner).release(word);
+        self.settle()
+    }
+
+    /// `rc_dec` routed for a death walk: no ledger (the claims were
+    /// taken before the walk began) and no live-context assumption (a
+    /// parked drive's context store is the scratch) — the word's own
+    /// heap takes the dec through the pool, queues drained.
+    pub(crate) fn dec_walk(&mut self, word: RefId) -> Result<(), Trap> {
+        self.store(word)?.dec(word.id())?;
+        self.settle()
+    }
+
+    /// The string content of `word`, routed.
+    pub(crate) fn str_at(&mut self, word: RefId) -> Result<&str, Trap> {
+        let store = self.store(word)?;
+        let text = store.str_at(word.id())?;
+        Ok(text)
+    }
+
+    /// Whether two reference words name content-equal strings: a
+    /// same-store pair compares in place, a cross-store pair copies one
+    /// side (string equality is content equality whatever heap each
+    /// side lives on).
+    pub(crate) fn str_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
+        if x.fiber() == y.fiber() {
+            let store = self.store(x)?;
+            let a = store.str_at(x.id())?;
+            let b = store.str_at(y.id())?;
+            return Ok(a == b);
+        }
+        let a = self.store(x)?.str_at(x.id())?.to_owned();
+        let b = self.store(y)?.str_at(y.id())?;
+        Ok(a == b)
+    }
+
+    /// Concatenates two strings into a fresh object on the running
+    /// fiber's store, reading each operand from its own heap.
+    pub(crate) fn concat(&mut self, x: RefId, y: RefId) -> Result<u32, Trap> {
+        if x.fiber() == y.fiber() && x.fiber() == self.owner {
+            let id = self.current.concat(x.id(), y.id())?;
+            return Ok(id);
+        }
+        let a = self.store(x)?.str_at(x.id())?.to_owned();
+        let b = self.store(y)?.str_at(y.id())?.to_owned();
+        let mut text = String::with_capacity(a.len() + b.len());
+        text.push_str(&a);
+        text.push_str(&b);
+        let id = self.current.alloc_str(text);
+        Ok(self.claim_result(id))
+    }
+
+    /// Enters the fresh result's claim on the running fiber's ledger
+    /// (every producer native's birth count is the calling frame's).
+    fn claim_result(&mut self, id: u32) -> u32 {
+        let word = RefId::new(self.owner, id);
+        self.ledger(self.owner).acquire(word);
+        id
+    }
+
+    /// The char count of string object `word`, routed.
+    pub(crate) fn char_count(&mut self, word: RefId) -> Result<usize, Trap> {
+        self.store(word)?.char_count(word.id())
+    }
+
+    /// The byte offsets of a char range of string object `word`, routed.
+    pub(crate) fn char_byte_range(
+        &mut self,
+        word: RefId,
+        start: usize,
+        end: usize,
+    ) -> Result<(usize, usize), Trap> {
+        self.store(word)?.char_byte_range(word.id(), start, end)
+    }
+
+    /// A fresh string object holding the byte range `[begin, stop)` of
+    /// string object `src`, born on the running fiber's store; the range
+    /// reads from the source's own heap.
+    pub(crate) fn alloc_substr(
+        &mut self,
+        src: RefId,
+        begin: usize,
+        stop: usize,
+    ) -> Result<u32, Trap> {
+        let id = if self.live && src.fiber() == self.owner {
+            self.current.alloc_substr(src.id(), begin, stop)?
+        } else {
+            let part: Box<str> = self.store(src)?.str_at(src.id())?[begin..stop].into();
+            self.current.alloc_str_part(&part)
+        };
+        Ok(self.claim_result(id))
+    }
+
+    /// The element words of list object `word`, routed: a borrowed slice
+    /// of the owning store — copy a word out before another routed call.
+    pub(crate) fn list_at(&mut self, word: RefId) -> Result<&[Value], Trap> {
+        let store = self.store(word)?;
+        let elems = store.list_at(word.id())?;
+        Ok(elems)
+    }
+
+    /// Concatenates two lists into a fresh object on the running fiber's
+    /// store: a same-store pair runs in place, a cross-store pair copies
+    /// the element words out and acquires one count per `Ref` element on
+    /// the element's own heap.
+    pub(crate) fn concat_lists(&mut self, x: RefId, y: RefId) -> Result<u32, Trap> {
+        if x.fiber() == y.fiber() && x.fiber() == self.owner {
+            let id = self.current.concat_lists(x.id(), y.id())?;
+            self.settle()?;
+            return Ok(self.claim_result(id));
+        }
+        let front: Vec<Value> = self.list_at(x)?.to_vec();
+        let back: Vec<Value> = self.list_at(y)?.to_vec();
+        let mut elems = Vec::with_capacity(front.len() + back.len());
+        for value in front.into_iter().chain(back) {
+            if let Value::Ref(word) = value {
+                self.inc_edge(word)?;
+            }
+            elems.push(value);
+        }
+        let id = self.current.alloc_list(elems);
+        Ok(self.claim_result(id))
+    }
+
+    /// Appends one element word onto list object `list`, routed: the
+    /// payload mutation lands on the list's store and a `Ref` element's
+    /// acquired count on the element's own heap.
+    pub(crate) fn push_list(&mut self, list: RefId, value: Value) -> Result<(), Trap> {
+        self.store(list)?.push_list(list.id(), value)?;
+        self.settle()
+    }
+
+    /// Resolves a map probe word for the map's store: a local (or
+    /// scalar) word compares through the store itself; a foreign word's
+    /// string content resolves here, on the probe's own heap, so the
+    /// content compare never reads the wrong store's payload.
+    fn resolve_key(&mut self, map: FiberId, key: Value) -> Result<ResolvedKey, Trap> {
+        let Value::Ref(word) = key else {
+            return Ok(ResolvedKey::Word);
+        };
+        if word.fiber() == map {
+            return Ok(ResolvedKey::Word);
+        }
+        let text = self.store(word)?.str_if(word.id()).map(str::to_owned);
+        Ok(match text {
+            Some(text) => ResolvedKey::Text(text.into()),
+            None => ResolvedKey::Opaque,
+        })
+    }
+
+    /// The value word stored under `key` in map object `map`, routed.
+    pub(crate) fn map_at(&mut self, map: RefId, key: Value) -> Result<Option<Value>, Trap> {
+        let res = self.resolve_key(map.fiber(), key)?;
+        self.store(map)?.map_at(map.id(), key, &res)
+    }
+
+    /// Stores one key-value pair into map object `map`, routed, with the
+    /// queues drained.
+    pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: Value) -> Result<(), Trap> {
+        let res = self.resolve_key(map.fiber(), key)?;
+        self.store(map)?.set_map(map.id(), key, &res, value)?;
+        self.settle()
+    }
+
+    /// A closure word's header and capture block, routed and copied out:
+    /// the block leaves the owning store as owned words (captures are
+    /// plain value words), so the caller may route count mutations while
+    /// holding it.
+    pub(crate) fn closure_parts(&mut self, word: RefId) -> Result<(FuncRef, Vec<Value>), Trap> {
+        let store = self.store(word)?;
+        let (header, block) = store.closure_at(word.id())?;
+        Ok((header, block.to_vec()))
+    }
+
+    /// The pairs of map object `map`, in entry order, routed.
+    pub(crate) fn map_pairs(&mut self, map: RefId) -> Result<&[(Value, Value)], Trap> {
+        let store = self.store(map)?;
+        let pairs = store.map_pairs(map.id())?;
+        Ok(pairs)
+    }
+}
+
+/// A map key probe's resolution for [`Objects::map_at`] and
+/// [`Objects::set_map`]: a local or scalar word resolves through the
+/// map's own store; a foreign word arrives pre-resolved — its string
+/// content, or the knowledge that it names no string (identity compare
+/// then, like every non-string reference key).
+pub enum ResolvedKey {
+    /// The word is local to the map's store or carries no reference:
+    /// the store resolves it itself.
+    Word,
+    /// A foreign string probe's content, resolved on the probe's heap.
+    Text(Box<str>),
+    /// A foreign reference probe naming no string.
+    Opaque,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fiber::FIBER_ROOT;
 
     #[test]
     fn intern_shares_by_content_and_alloc_does_not() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let a = objects.intern("localhost");
         let b = objects.intern("local");
         let c = objects.alloc_str("host".to_owned());
@@ -753,7 +1407,7 @@ mod tests {
 
     #[test]
     fn bogus_references_name_no_string() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let id = objects.intern("x");
         assert_eq!(
             objects.str_at(id + 1),
@@ -771,16 +1425,20 @@ mod tests {
 
     #[test]
     fn lists_hold_any_value_words_and_concat_shares_elements() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let a = objects.intern("a");
         let scalars = objects.alloc_list(vec![Value::I64(1), Value::Bool(false)]);
-        let strings = objects.alloc_list(vec![Value::Ref(a)]);
+        let strings = objects.alloc_list(vec![Value::Ref(RefId::new(FIBER_ROOT, a))]);
         let joined = objects
             .concat_lists(scalars, strings)
             .expect("both lists live");
         assert_eq!(
             objects.list_at(joined),
-            Ok(&[Value::I64(1), Value::Bool(false), Value::Ref(a)][..]),
+            Ok(&[
+                Value::I64(1),
+                Value::Bool(false),
+                Value::Ref(RefId::new(FIBER_ROOT, a))
+            ][..]),
             "element words copied in order, any kind"
         );
         // the joined list owns one acquired count of its shared element
@@ -805,7 +1463,7 @@ mod tests {
     /// reborns fresh).
     #[test]
     fn a_unique_death_frees_and_the_slot_reuses() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let a = objects.intern("gone");
         assert_eq!(objects.rc_at(a), Ok(1));
         objects.dec(a).expect("the one owner drops");
@@ -825,13 +1483,13 @@ mod tests {
     #[test]
     fn a_deeply_nested_death_does_not_recurse_on_the_native_stack() {
         const DEPTH: usize = 500_000;
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         // each level's birth count becomes its parent's stored count (the
         // list adopts the Ref word as-is), so the outermost's single count
         // owns the whole chain
         let mut node = objects.alloc_list(Vec::new());
         for _ in 1..DEPTH {
-            node = objects.alloc_list(vec![Value::Ref(node)]);
+            node = objects.alloc_list(vec![Value::Ref(RefId::new(FIBER_ROOT, node))]);
         }
         objects.dec(node).expect("the outermost drops");
         assert!(objects.is_empty(), "the whole cascade died");
@@ -842,37 +1500,58 @@ mod tests {
     /// and an overwrite replaces the value while keeping the entry count.
     #[test]
     fn maps_store_and_lookup_by_content_keys() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let interned = objects.intern("host");
         let fresh = objects.alloc_str("host".to_owned());
         assert_ne!(interned, fresh, "the fresh word is a distinct object");
         let map = objects.alloc_map();
         objects
-            .set_map(map, Value::Ref(interned), Value::I64(80))
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, interned)),
+                &ResolvedKey::Word,
+                Value::I64(80),
+            )
             .expect("the map object accepts the pair");
         // the fresh object's content names the interned key's entry
         assert_eq!(
-            objects.map_at(map, Value::Ref(fresh)),
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, fresh)),
+                &ResolvedKey::Word
+            ),
             Ok(Some(Value::I64(80))),
             "string keys match by content, not object identity"
         );
-        assert_eq!(objects.map_at(map, Value::I64(80)), Ok(None));
+        assert_eq!(
+            objects.map_at(map, Value::I64(80), &ResolvedKey::Word),
+            Ok(None)
+        );
         // a scalar key of its own
         objects
-            .set_map(map, Value::I64(1), Value::Bool(true))
+            .set_map(map, Value::I64(1), &ResolvedKey::Word, Value::Bool(true))
             .expect("the map accepts scalars");
         assert_eq!(
-            objects.map_at(map, Value::I64(1)),
+            objects.map_at(map, Value::I64(1), &ResolvedKey::Word),
             Ok(Some(Value::Bool(true)))
         );
         assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
         // the overwrite keeps one entry and drops the old value's count
         objects
-            .set_map(map, Value::Ref(fresh), Value::I64(8080))
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, fresh)),
+                &ResolvedKey::Word,
+                Value::I64(8080),
+            )
             .expect("the content-equal key overwrites");
         assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
         assert_eq!(
-            objects.map_at(map, Value::Ref(interned)),
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, interned)),
+                &ResolvedKey::Word
+            ),
             Ok(Some(Value::I64(8080)))
         );
         // wrong-kind reads name no object
@@ -880,8 +1559,77 @@ mod tests {
         assert_eq!(objects.str_at(map), Err(Trap::UnknownObject { obj: map }));
         // a set over a non-map reports the bogus side
         assert_eq!(
-            objects.set_map(interned, Value::I64(1), Value::I64(2)),
+            objects.set_map(interned, Value::I64(1), &ResolvedKey::Word, Value::I64(2)),
             Err(Trap::UnknownObject { obj: interned })
+        );
+    }
+
+    /// Foreign probe resolution holds through the pre-resolved forms: a
+    /// foreign string probe (the router resolved its content on the
+    /// probe's own heap) finds a local string key by content and misses
+    /// on different content, while a foreign non-string probe never
+    /// matches a string or scalar key.
+    #[test]
+    fn foreign_probes_resolve_through_their_pre_resolution() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let key = objects.alloc_str("host".to_owned());
+        let map = objects.alloc_map();
+        objects
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Word,
+                Value::I64(80),
+            )
+            .expect("the local key stores");
+        let foreign_text: Box<str> = "host".into();
+        assert_eq!(
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Text(foreign_text.clone())
+            ),
+            Ok(Some(Value::I64(80))),
+            "a foreign string probe matches a local key by content"
+        );
+        let other_text: Box<str> = "port".into();
+        assert_eq!(
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Text(other_text)
+            ),
+            Ok(None),
+            "different content never matches"
+        );
+        let foreign_word = RefId::new(FiberId(7), key);
+        assert_eq!(
+            objects.map_at(map, Value::Ref(foreign_word), &ResolvedKey::Opaque),
+            Ok(None),
+            "an opaque foreign probe matches no string or scalar key"
+        );
+    }
+
+    /// Word equality is the scalar key rule, so the hash filter folds
+    /// `+0.0` and `-0.0` to one form: either spelling finds the other's
+    /// entry, while an int and a float over equal-looking bytes stay
+    /// distinct keys.
+    #[test]
+    fn signed_zero_scalar_keys_match_through_the_filter() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let map = objects.alloc_map();
+        objects
+            .set_map(map, Value::F64(0.0), &ResolvedKey::Word, Value::Bool(true))
+            .expect("the positive zero stores");
+        assert_eq!(
+            objects.map_at(map, Value::F64(-0.0), &ResolvedKey::Word),
+            Ok(Some(Value::Bool(true))),
+            "the two zero spellings are one scalar key"
+        );
+        assert_eq!(
+            objects.map_at(map, Value::I64(0), &ResolvedKey::Word),
+            Ok(None),
+            "an int key never matches a float key"
         );
     }
 
@@ -890,11 +1638,11 @@ mod tests {
     /// dies recursively).
     #[test]
     fn a_list_death_drops_its_element_counts() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         // a fresh element whose birth count is the adopting list's (the
         // producer-native construction rule)
         let s = objects.alloc_str("elem".to_owned());
-        let inner = objects.alloc_list(vec![Value::Ref(s)]);
+        let inner = objects.alloc_list(vec![Value::Ref(RefId::new(FIBER_ROOT, s))]);
         assert_eq!(objects.rc_at(s), Ok(1), "the adoption keeps the one count");
         let outer = objects.concat_lists(inner, inner).expect("both lists live");
         // the outer list acquired one count per copied element word
@@ -911,7 +1659,7 @@ mod tests {
     /// object.
     #[test]
     fn closures_carry_the_header_and_retain_their_captures() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let id = objects.alloc_closure(FuncRef::new(3, 4), vec![Value::I64(9)]);
         assert_eq!(
             objects.closure_at(id),
@@ -936,10 +1684,12 @@ mod tests {
     /// retain contract a list carries.
     #[test]
     fn a_closure_death_drops_its_capture_counts() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let s = objects.alloc_str("cap".to_owned());
         // the moved-in word keeps its count: the closure owns it now
-        let id = objects.alloc_closure(FuncRef::new(0, 0), vec![Value::Ref(s)]);
+        let id = objects.alloc_closure(FuncRef::new(0, 0), vec![Value::Ref(RefId::new(
+            FIBER_ROOT, s,
+        ))]);
         assert_eq!(objects.rc_at(s), Ok(1));
         objects.dec(id).expect("the unique owner drops");
         assert_eq!(objects.rc_at(s), Err(Trap::UnknownObject { obj: s }));
@@ -952,12 +1702,17 @@ mod tests {
     /// caller's counts drop too.
     #[test]
     fn a_map_death_drops_its_pair_counts() {
-        let mut objects = Objects::new();
+        let mut objects = Objects::new(FIBER_ROOT);
         let map = objects.alloc_map();
         let key = objects.alloc_str("host".to_owned());
         let value = objects.alloc_str("localhost".to_owned());
         objects
-            .set_map(map, Value::Ref(key), Value::Ref(value))
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Word,
+                Value::Ref(RefId::new(FIBER_ROOT, value)),
+            )
             .expect("the map accepts the pair");
         // the store acquired one count per stored Ref word, on top of the
         // caller's own
@@ -966,13 +1721,23 @@ mod tests {
         // the overwrite drops the replaced value's acquired count and
         // keeps the key's
         objects
-            .set_map(map, Value::Ref(key), Value::I64(8080))
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Word,
+                Value::I64(8080),
+            )
             .expect("the content-equal key overwrites");
         assert_eq!(objects.rc_at(value), Ok(1));
         assert_eq!(objects.rc_at(key), Ok(2));
         let other = objects.alloc_str("port".to_owned());
         objects
-            .set_map(map, Value::I64(1), Value::Ref(other))
+            .set_map(
+                map,
+                Value::I64(1),
+                &ResolvedKey::Word,
+                Value::Ref(RefId::new(FIBER_ROOT, other)),
+            )
             .expect("the second entry adopts the scalar key");
         assert_eq!(objects.rc_at(other), Ok(2));
         // the death drops exactly the map's acquired counts, both pairs'

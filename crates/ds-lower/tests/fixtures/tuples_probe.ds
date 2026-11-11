@@ -49,6 +49,14 @@ fn list_element() -> int {
   c.ok((x: int) => x).err((_: none) => 0 - 1) + n
 }
 
+fn var_slots(t: (string, int)) -> bool {
+  var (host, port) = t
+  host = "db"
+  port = port + 1
+  const (h2, p2) = t
+  h2 == "db.local" && p2 == 5432 && host == "db" && port == 5433
+}
+
 fn main() -> bool {
   const t = mk("host", 8080)
   const (name, port) = t
@@ -61,5 +69,6 @@ fn main() -> bool {
   println("unit ${unit_element()}")
   println("list ${list_element()}")
   println(if t == mk("host", 8080) { "eq" } else { "ne" })
-  pair_sum((20, 22)) == 42
+  println("var ${var_slots(mk("db.local", 5432))}")
+  pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432))
 }

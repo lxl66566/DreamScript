@@ -291,7 +291,7 @@ fn map_new_answers_the_empty_map() {
     };
     assert_eq!(count_of(&mut vm, map), 0);
     assert_eq!(
-        vm.objects().map_pairs(id),
+        vm.objects().map_pairs(id.id()),
         Ok(&[] as &[(Value, Value)]),
         "the constructor answers an empty map"
     );
@@ -313,7 +313,7 @@ fn map_set_fills_overwrites_and_counts() {
         panic!("a map ref, got {filled:?}");
     };
     assert_eq!(
-        vm.objects().map_pairs(id).map(<[_]>::len),
+        vm.objects().map_pairs(id.id()).map(<[_]>::len),
         Ok(2),
         "host was overwritten, not appended"
     );
@@ -336,7 +336,11 @@ fn map_get_answers_hit_and_miss_with_the_checked_span() {
     // hit: the overwritten value, handed out as a read copy
     match run_value(&mut vm, "at", &[map, Value::Ref(key)]) {
         Value::Ref(hit) => {
-            assert_eq!(vm.objects().str_at(hit), Ok("example"), "the overwrite won");
+            assert_eq!(
+                vm.objects().str_at(hit.id()),
+                Ok("example"),
+                "the overwrite won"
+            );
         },
         other => panic!("the hit's value ref, got {other:?}"),
     }
@@ -358,7 +362,11 @@ fn map_get_answers_hit_and_miss_with_the_checked_span() {
     let built = run_value(&mut vm, "fresh_key", &[]);
     match built {
         Value::Ref(hit) => {
-            assert_eq!(vm.objects().str_at(hit), Ok("one"), "content keys match");
+            assert_eq!(
+                vm.objects().str_at(hit.id()),
+                Ok("one"),
+                "content keys match"
+            );
         },
         other => panic!("the content-key hit's value ref, got {other:?}"),
     }

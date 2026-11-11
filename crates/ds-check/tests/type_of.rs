@@ -1544,3 +1544,90 @@ fn script_entry_value_tail_names_the_script_main_body() {
         "DS2001 `script main body` has type `string`, not contained in `()` [B2]"
     ]);
 }
+
+/// The loop depth is frame-scoped: a lambda or spawned body inherits no
+/// enclosing loop, so a loop exit lexically inside one reports the
+/// crossed boundary instead of waiting for the lowering refusal.
+#[test]
+fn loop_exits_never_cross_a_lambda_or_spawned_body_frame() {
+    let boundary = "DS2002 loop exits never cross a lambda or spawned-body frame boundary";
+    assert_eq!(
+        check(concat!(
+            "fn call(f: fn() -> ()) -> () { f() }\n",
+            "fn main() -> () {\n",
+            "  var i = 0\n",
+            "  while i < 3 {\n",
+            "    call(() => { break })\n",
+            "    i += 1\n",
+            "  }\n",
+            "}\n",
+        )),
+        [boundary]
+    );
+    assert_eq!(
+        check(concat!(
+            "fn call(f: fn() -> ()) -> () { f() }\n",
+            "fn main() -> () {\n",
+            "  var i = 0\n",
+            "  while i < 3 {\n",
+            "    call(() => { continue })\n",
+            "    i += 1\n",
+            "  }\n",
+            "}\n",
+        )),
+        [boundary]
+    );
+    assert_eq!(
+        check(concat!(
+            "fn main() -> () {\n",
+            "  var i = 0\n",
+            "  while i < 3 {\n",
+            "    nursery {\n",
+            "      spawn { break }\n",
+            "    }\n",
+            "    i += 1\n",
+            "  }\n",
+            "}\n",
+        )),
+        [boundary]
+    );
+}
+
+/// A loop lexically inside a lambda body still owns that body's exits,
+/// and a nursery body lowers inline in the enclosing frame, so its
+/// exits keep addressing the enclosing loop.
+#[test]
+fn frame_scoped_loops_own_their_exits() {
+    clean(concat!(
+        "fn call(f: fn() -> ()) -> () { f() }\n",
+        "fn main() -> () {\n",
+        "  call(() => {\n",
+        "    var j = 0\n",
+        "    while j < 3 {\n",
+        "      break\n",
+        "      j += 1\n",
+        "    }\n",
+        "  })\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "fn main() -> () {\n",
+        "  var i = 0\n",
+        "  while i < 3 {\n",
+        "    nursery {\n",
+        "      i += 1\n",
+        "      break\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+    ));
+}
+
+/// A top-level initializer is its own frame even when its lazy fill is
+/// triggered from inside a loop walk in another body.
+#[test]
+fn a_top_level_initializer_is_its_own_frame() {
+    assert_eq!(check("const k = break\n"), [
+        "DS2002 loop exit outside a loop"
+    ]);
+}

@@ -262,7 +262,11 @@ fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
 
 fn head_string(vm: &mut Vm, list: Value) -> String {
     match run_value(vm, "head", &[list]) {
-        Value::Ref(id) => vm.objects().str_at(id).expect("string elements").to_owned(),
+        Value::Ref(id) => vm
+            .objects()
+            .str_at(id.id())
+            .expect("string elements")
+            .to_owned(),
         other => panic!("a string ref, got {other:?}"),
     }
 }
@@ -355,8 +359,8 @@ fn tail_and_collect_answer_fresh_copies() {
         unreachable!("list results are refs");
     };
     assert_eq!(
-        vm.objects().list_at(copy_id).expect("the copy"),
-        vm.objects().list_at(ab_id).expect("the source"),
+        vm.objects().list_at(copy_id.id()).expect("the copy"),
+        vm.objects().list_at(ab_id.id()).expect("the source"),
         "elements shared by identity"
     );
 }

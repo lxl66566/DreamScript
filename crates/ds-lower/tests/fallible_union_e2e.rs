@@ -260,3 +260,112 @@ fn main() -> bool {{
         );
     }
 }
+
+/// The failure-member pairing rides the checked call-site signature, not
+/// a native-owned name: a platform host whose extern row re-spells
+/// read_file's failure member (`string | my_err`) gets exactly that
+/// member constructed on the failure bit — the same shape routing the
+/// ambient spelling uses, with the signature, not the table, owning the
+/// member mapping.
+#[test]
+fn the_failure_member_pairs_by_the_checked_signature() {
+    let source = "
+tag int
+tag string
+tag bool
+tag my_err
+extern fn println (s: string) -> ()
+extern fn read_file (path: string) -> string | my_err
+extern fn write_file (path: string, contents: string) -> ()
+
+fn spell(path: string) -> string {
+  const cell = read_file(path)
+  match cell { my_err => \"failed\", s => s }
+}
+
+fn main(path: string, missing: string) -> bool {
+  write_file(path, \"kept\")
+  spell(path) == \"kept\" && spell(missing) == \"failed\"
+}";
+    let mut files = Files::new();
+    let id = files.add_source("fallible_respelled.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the re-spelled signature checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "fallible_respelled",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the re-spelled union lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    let dir = std::env::temp_dir();
+    let path = dir.join("ds_lower_fallible_respelled.txt");
+    let missing = dir.join("ds_lower_fallible_respelled_absent.txt");
+    let _ = std::fs::remove_file(&missing);
+    let good = vm.intern_str(path.to_str().expect("a UTF-8 temp path"));
+    let absent = vm.intern_str(missing.to_str().expect("a UTF-8 temp path"));
+    assert_eq!(
+        vm.run("fallible_respelled", "main", &[good, absent]),
+        Ok(Value::Bool(true)),
+        "the failure bit constructs the signature's own error member"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A `?` propagation whose return union re-spells the failure member
+/// stays the checker's refusal (DS2008): the propagated error value is
+/// the checked signature's member, and containment is the proof that no
+/// re-spelled union can sneak a wrong member through the extraction
+/// family.
+#[test]
+fn a_respelled_error_union_stays_refused_at_the_extraction() {
+    let source = "
+tag int
+tag string
+tag bool
+tag io_err
+tag my_err
+extern fn read_file (path: string) -> string | io_err
+
+fn f(path: string) -> string | my_err {
+  read_file(path)?
+}
+
+fn main() -> () { }";
+    let mut files = Files::new();
+    let id = files.add_source("fallible_propagate.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    let rendered = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|diag| human(diag, &files))
+        .collect::<String>();
+    assert!(
+        rendered.contains("does not contain"),
+        "the propagation names the containment proof: {rendered}"
+    );
+}

@@ -66,7 +66,16 @@ fn the_extraction_family_runs_both_arms() {
     );
     assert_eq!(
         vm.captured_output(),
-        b"lazy fired\nhit 9 back 8080 point 9 70\nword b ? lazy 3 7\nkept x ? messy a e\nmapped bad kept\n"
+        concat!(
+            "lazy fired\n",
+            "hit 9 back 8080 point 9 70\n",
+            "word b ? lazy 3 7\n",
+            "kept x ? messy a e\n",
+            "mapped bad kept\n",
+            "deg x ? x narrow x none\n",
+            "matched x none\n",
+        )
+        .as_bytes()
     );
 }
 
@@ -82,5 +91,24 @@ fn tail_position_family_calls_return_their_value() {
     assert_eq!(
         vm.run("extraction_probe", "tail_port", &[Value::Bool(false)]),
         Ok(Value::I64(5))
+    );
+}
+
+/// The degenerate and bound ok_or legs leave no count behind: the
+/// collapsed spell's err value and payload free like unwrap_or's, and
+/// the constructed union's member words die with their region (the diag
+/// tripwires arm under --all-features).
+#[test]
+fn the_degenerate_legs_drain_the_heap() {
+    let mut vm = build_vm();
+    vm.capture_output();
+    assert_eq!(
+        vm.run("extraction_probe", "deg_report", &[]),
+        Ok(Value::Bool(true))
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
     );
 }

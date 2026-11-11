@@ -2,6 +2,8 @@
 
 use ds_abi::SlotType;
 
+use crate::fiber::FiberId;
+
 /// The scalar callable word (the `Fn` slot classification, F2): a module
 /// id plus a function-table index packed into one copyable word. Never a
 /// code pointer — resolution goes through the two-slot module table at
@@ -51,15 +53,54 @@ pub enum Value {
     /// The tag word of an unboxed tag+payload union [BL-2]: a bare
     /// discriminant in one slot; payload words are the following slots.
     Tag(u8),
-    /// A raw reference to a heap object: the index into the VM's object
-    /// table. `Ref` slots hold only these words, so no null niche is spent
-    /// and `T | none` packing stays a legal later pass [B4].
-    Ref(u32),
+    /// A raw reference to a heap object: the owner-routing word, the
+    /// owning fiber plus the object id inside that fiber's store
+    /// (the word self-describes its owner, so a delivered or host-held
+    /// word routes to its heap anywhere). `Ref` slots hold only these
+    /// words, so no null niche is spent and `T | none` packing stays a
+    /// legal later pass [B4].
+    Ref(RefId),
     /// A callable word (the `Fn` classification, F2): the scalar
     /// [`FuncRef`] naming a non-capturing function. Copied by MOV like any
     /// scalar, zero RC traffic. A capturing lambda is not this word: it is
     /// a `Ref` word to a closure object whose header word is the FuncRef.
     Fn(FuncRef),
+}
+
+/// The `Ref` word's payload: the owning fiber plus the object id inside
+/// that fiber's store. Each fiber owns its heap, so the word
+/// self-describes its owner and routes to its heap from any hand: a
+/// delivered or host-held word serves wherever it lands. Runtime words
+/// never serialize, so the pair rides the payload with no dsmod impact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RefId {
+    /// The owning fiber.
+    fiber: FiberId,
+    /// The object id inside the owning fiber's store.
+    id: u32,
+}
+
+impl RefId {
+    /// The word of object `id` inside `owner`'s store. The owner names
+    /// the pool slot, so the component stays stable across slot reuse —
+    /// a foreign-held object outlives its dead owner's recycling and the
+    /// next spawn continues the same id space.
+    #[must_use]
+    pub const fn new(owner: FiberId, id: u32) -> Self {
+        Self { fiber: owner, id }
+    }
+
+    /// The object id inside the owning fiber's store.
+    #[must_use]
+    pub const fn id(self) -> u32 {
+        self.id
+    }
+
+    /// The owning fiber.
+    #[must_use]
+    pub const fn fiber(self) -> FiberId {
+        self.fiber
+    }
 }
 
 impl Value {

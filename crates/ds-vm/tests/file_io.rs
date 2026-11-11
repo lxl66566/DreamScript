@@ -399,13 +399,17 @@ fn fs_lists_sorted_entry_names() {
     let Value::Ref(list) = result else {
         panic!("the success payload is a list ref, got {result:?}");
     };
-    let elems = vm.objects().list_at(list).expect("a list object").to_vec();
+    let elems = vm
+        .objects()
+        .list_at(list.id())
+        .expect("a list object")
+        .to_vec();
     let names = elems
         .iter()
         .map(|e| match e {
             Value::Ref(id) => vm
                 .objects()
-                .str_at(*id)
+                .str_at(id.id())
                 .expect("string elements")
                 .to_owned(),
             other => panic!("string elements, got {other:?}"),

@@ -193,7 +193,11 @@ fn at_value(vm: &mut Vm, list: Value, index: i64) -> Value {
 
 fn at_string(vm: &mut Vm, list: Value, index: i64) -> String {
     match at_value(vm, list, index) {
-        Value::Ref(id) => vm.objects().str_at(id).expect("string elements").to_owned(),
+        Value::Ref(id) => vm
+            .objects()
+            .str_at(id.id())
+            .expect("string elements")
+            .to_owned(),
         other => panic!("a string ref, got {other:?}"),
     }
 }
@@ -205,7 +209,7 @@ fn list_new_answers_the_empty_list() {
     let Value::Ref(id) = list else {
         panic!("a list ref, got {list:?}");
     };
-    assert_eq!(vm.objects().list_at(id), Ok(&[][..]));
+    assert_eq!(vm.objects().list_at(id.id()), Ok(&[][..]));
     assert_eq!(count_of(&mut vm, list), 0);
     // the empty list is a fresh object per call, never interned
     let again = run_value(&mut vm, "fresh", &[]);
@@ -251,7 +255,7 @@ fn concat_joins_into_a_fresh_object_sharing_elements() {
     assert_ne!(glued_id, b_id, "the join is a fresh object");
     // element words are copied, not the objects they name: the glued
     // list shares the operand elements by identity
-    let shared = vm.objects().list_at(glued_id).expect("glued").to_vec();
-    let front = vm.objects().list_at(a_id).expect("a").to_vec();
+    let shared = vm.objects().list_at(glued_id.id()).expect("glued").to_vec();
+    let front = vm.objects().list_at(a_id.id()).expect("a").to_vec();
     assert_eq!(shared[..front.len()], front[..], "elements shared");
 }

@@ -1,5 +1,5 @@
 // source: the E4 extraction ruling (design-decisions.md) and tutorial blocks b14/b15 (docs/en/tutorial.md)
-// purpose: the @std extraction family — unwrap_or's eager fallback, unwrap_or_else's inlined lazy one, ok_or's ?-composed early exit, map_err's handled-member mapping — plus the negative: the non-optional receiver (the two struct-field and row.get spellings stage to typecheck: union-typed struct fields and the map read are not in the M3 lowering contract yet)
+// purpose: the @std extraction family — unwrap_or's eager fallback, unwrap_or_else's inlined lazy one, ok_or's ?-composed early exit, ok_or's degenerate union (the err value's own type is the extracted side, so the result collapses to a plain binding) and the bound union read through match, map_err's handled-member mapping — plus the negative: the non-optional receiver (the two struct-field and row.get spellings stage to typecheck: union-typed struct fields and the map read are not in the M3 lowering contract yet)
 // items:
 // parse_error: stage: typecheck
 // env_port: stage: typecheck
@@ -9,6 +9,8 @@
 // eager_word: stage: run
 // name_of: stage: run
 // parse_user: stage: run
+// degenerate_word: stage: run
+// matched_missing: stage: run
 // reworded: stage: run
 // main: stage: run
 // plain_receiver: stage: reject unwrap_or over a receiver without the none member names the receiver type [E4]
@@ -50,6 +52,25 @@ fn name_of(xs: list[string]) -> string | parse_error {
 fn parse_user(xs: list[string]) -> string | parse_error {
   const nm = list_get(xs, 0).ok_or(missing_field("name"))
   return nm?
+}
+
+// the degenerate union: the err value's own type is the extracted
+// side, so `t | e` collapses to the extracted type — the none side
+// answers the err value, the ok side the payload, and the bound result
+// reads like any plain binding
+fn degenerate_word(xs: list[string]) -> string {
+  const word = list_get(xs, 0).ok_or("?")
+  word
+}
+
+// the ok_or result bound, then read through match: each arm picks its
+// member out of the stored union
+fn matched_missing(xs: list[string]) -> string {
+  const word = list_get(xs, 0).ok_or(missing_field("name"))
+  match word {
+    string => word
+    parse_error => "?"
+  }
 }
 
 // map_err: the handled member maps through the inlined lambda, the

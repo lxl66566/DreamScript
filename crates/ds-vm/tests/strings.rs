@@ -23,9 +23,10 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_CHAR_AT, BUILTIN_CONCAT, BUILTIN_LEN, BUILTIN_PARSE_INT, BUILTIN_SPLIT,
-        BUILTIN_STR_INT, BUILTIN_SUBSTRING, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM,
-        PLATFORM_PARSE_ERR, STD_PLATFORM_MODULE, STD_PRINTLN, std_platform_module,
+        BUILTIN_CHAR_AT, BUILTIN_CONCAT, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_NEW,
+        BUILTIN_LIST_PUSH, BUILTIN_PARSE_INT, BUILTIN_SPLIT, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
+        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_PARSE_ERR, STD_PLATFORM_MODULE,
+        STD_PRINTLN, std_platform_module,
     },
 };
 
@@ -336,7 +337,7 @@ fn run_str(vm: &mut Vm, func: &str, args: &[Value]) -> String {
         panic!("a string ref, got {result:?}");
     };
     vm.objects()
-        .str_at(id)
+        .str_at(id.id())
         .expect("the result names a string object")
         .to_owned()
 }
@@ -348,13 +349,13 @@ fn run_parts(vm: &mut Vm, func: &str, args: &[Value]) -> Vec<String> {
         panic!("a list ref, got {result:?}");
     };
     vm.objects()
-        .list_at(list)
+        .list_at(list.id())
         .expect("the result names a list object")
         .iter()
         .map(|elem| match elem {
             Value::Ref(id) => vm
                 .objects()
-                .str_at(*id)
+                .str_at(id.id())
                 .expect("list elements are strings")
                 .to_owned(),
             other => panic!("string elements, got {other:?}"),
@@ -506,7 +507,11 @@ fn concat_joins_two_strings_into_a_fresh_object() {
     let Value::Ref(id) = result else {
         panic!("a string ref, got {result:?}");
     };
-    assert_eq!(vm.objects().str_at(id), Ok("foobar"), "the joined content");
+    assert_eq!(
+        vm.objects().str_at(id.id()),
+        Ok("foobar"),
+        "the joined content"
+    );
     // the native's results are transient by construction, so they never
     // intern: the same content under a distinct object id
     let interned = vm.intern_str("foobar");
@@ -515,8 +520,8 @@ fn concat_joins_two_strings_into_a_fresh_object() {
     };
     assert_ne!(id, shared, "identity differs");
     assert_eq!(
-        vm.objects().str_at(id),
-        vm.objects().str_at(shared),
+        vm.objects().str_at(id.id()),
+        vm.objects().str_at(shared.id()),
         "content matches"
     );
 }
@@ -724,4 +729,153 @@ fn kstr_pool_consts_share_one_object_and_the_cache_claim_releases() {
     // the refill of the second run releases again
     assert_eq!(vm.run("st", "shared_k", &[]), Ok(Value::Bool(true)));
     assert!(vm.objects().is_empty());
+}
+
+/// `join`'s fixture pool: the string family's producer and renderer plus
+/// the empty-list constructor, the plain comma separator, and one
+/// non-string element word.
+fn jn_pool() -> Vec<Const> {
+    vec![
+        builtin(BUILTIN_SPLIT),     // k0
+        builtin(BUILTIN_JOIN),      // k1
+        builtin(BUILTIN_LIST_NEW),  // k2
+        Const::Str(",".into()),     // k3
+        Const::I64(7),              // k4: the non-string element
+        builtin(BUILTIN_LIST_PUSH), // k5
+    ]
+}
+
+fn jn_def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
+    FunctionDef {
+        name: name.into(),
+        layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
+        pool: jn_pool(),
+        code: assemble(body).expect("fixture body encodes"),
+    }
+}
+
+fn jn_registry() -> ModuleRegistry {
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("st", vec![render(), blanks(), tainted()])
+            .expect("valid fixture module"),
+    );
+    reg
+}
+
+/// `(s, split_sep, join_sep: string) -> string`: split builds the parts
+/// list, join renders it back with the second separator. The two CALLs
+/// chain on one overlay area: split's result overlays word 0 while the
+/// join separator survives on word 1.
+fn render() -> FunctionDef {
+    jn_def("render", &[Ref, Ref, Ref, Raw, Raw, Raw], 3, 3, &[
+        Uop::Funcf { frame_slots: 6 },
+        Uop::Mov { dst: 3, src: 0 },
+        Uop::Mov { dst: 4, src: 1 },
+        Uop::Mov { dst: 5, src: 2 },
+        Uop::Call {
+            callee: k(0),
+            nargs: 2,
+        },
+        Uop::Mov { dst: 4, src: 5 },
+        Uop::Call {
+            callee: k(1),
+            nargs: 2,
+        },
+        Uop::Ret { src: 3 },
+    ])
+}
+
+/// `() -> string`: the empty list joins to the empty string.
+fn blanks() -> FunctionDef {
+    jn_def("blanks", &[Raw, Raw], 0, 2, &[
+        Uop::Funcf { frame_slots: 2 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 0,
+        },
+        Uop::Kstr { dst: 1, kidx: k(3) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 2,
+        },
+        Uop::Ret { src: 0 },
+    ])
+}
+
+/// `() -> string`: a list holding one i64 element refuses at its own
+/// position — the checked surface guarantees `list[string]`, so only a
+/// hand-assembled caller reaches the trap.
+fn tainted() -> FunctionDef {
+    // slot 0 is the body word holding the list across both calls; the
+    // two overlay words are slots 1 and 2
+    jn_def("tainted", &[Raw, Raw, Raw], 0, 2, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 0,
+        },
+        Uop::Mov { dst: 0, src: 1 },
+        Uop::Kimm { dst: 2, kidx: k(4) },
+        Uop::Call {
+            callee: k(5),
+            nargs: 2,
+        },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kstr { dst: 2, kidx: k(3) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 2,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+/// `join` renders the parts list back to one string: multiple parts
+/// carry the separator between neighbors, a single part answers alone,
+/// a unicode separator round-trips, an empty separator concatenates,
+/// and the empty list answers the empty string.
+#[test]
+fn join_renders_the_parts_back_to_one_string() {
+    let mut vm = Vm::new(jn_registry());
+    let args = [
+        string(&mut vm, "a:b:c"),
+        string(&mut vm, ":"),
+        string(&mut vm, ","),
+    ];
+    assert_eq!(run_str(&mut vm, "render", &args), "a,b,c");
+    let args = [
+        string(&mut vm, "solo"),
+        string(&mut vm, ":"),
+        string(&mut vm, ","),
+    ];
+    assert_eq!(run_str(&mut vm, "render", &args), "solo");
+    let args = [
+        string(&mut vm, "\u{3b1}\u{2192}\u{3b2}"),
+        string(&mut vm, "\u{2192}"),
+        string(&mut vm, "\u{2192}"),
+    ];
+    assert_eq!(run_str(&mut vm, "render", &args), "\u{3b1}\u{2192}\u{3b2}");
+    let args = [
+        string(&mut vm, "a:b"),
+        string(&mut vm, ":"),
+        string(&mut vm, ""),
+    ];
+    assert_eq!(run_str(&mut vm, "render", &args), "ab");
+    assert_eq!(run_str(&mut vm, "blanks", &[]), "");
+}
+
+/// A non-string element refuses at its own position: the checked surface
+/// guarantees `list[string]`, so the trap names the offending element.
+#[test]
+fn join_refuses_a_non_string_element_at_its_position() {
+    let mut vm = Vm::new(jn_registry());
+    assert_eq!(
+        vm.run("st", "tainted", &[]),
+        Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: Ref,
+            actual: I64,
+        })
+    );
 }

@@ -260,8 +260,9 @@ fn list_push_rejects_non_scalar_elements_at_the_lowering_boundary() {
     // a struct element (multi-word or one field wide) would store its
     // raw field words as the element — a two-field page traps in the VM
     // and a one-field struct silently mis-stages — so both call
-    // spellings and both shapes reject here with the reboxing seam named
-    // (cons shares the guard with its element in the receiver position)
+    // spellings and both shapes reject here with the native-channel
+    // seam named (cons shares the guard with its element in the receiver
+    // position)
     const LIST_AMBIENT: &str = concat!(
         "tag int\n",
         "tag string\n",
@@ -318,7 +319,7 @@ fn list_push_rejects_non_scalar_elements_at_the_lowering_boundary() {
             "the error names the rejection: {error}"
         );
         assert!(
-            error.to_string().contains("reboxing"),
+            error.to_string().contains("native channel"),
             "the error names the future: {error}"
         );
     }

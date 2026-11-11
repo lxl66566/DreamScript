@@ -2,12 +2,14 @@
 //! in bindings and match arms, tuple params, returns, and tail calls — every
 //! tuple is consecutive frame words (one plain word per element: strings and
 //! lists ride their Ref, `()` rides the I64 unit word), and destructuring is
-//! per-slot reads binding each element word in place. The multi-word corners
-//! reject at the lowering boundary with their own notes: a union-typed
+//! per-slot reads binding each element word in place. A destructuring `var`
+//! binds each element its own re-storable slot (a fresh word the initializer
+//! copies into, so an assignment through an element re-stores its slot alone
+//! while the const convention aliases the tuple's words). The multi-word
+//! corners reject at the lowering boundary with their own notes: a union-typed
 //! element distributed the product into several tuple atoms, a struct or
-//! nested-tuple element spans several words, a tuple member of a union is a
-//! multi-word payload, and a non-union scrutinee carries no tags to
-//! dispatch on, so its match takes exactly one destructuring arm.
+//! nested-tuple element spans several words, and a tuple member of a union is
+//! a multi-word payload.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -55,13 +57,15 @@ fn build_vm() -> Vm {
 fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     // every leg of the fixture: the annotated and inferred constructions,
     // let and match-arm destructuring, the 1-tuple, the unit element, the
-    // list element, structural ==, and the tail call returning a pair
+    // list element, structural ==, the tail call returning a pair, and
+    // the per-element var slots (assignment through an element re-stores
+    // its slot while the const aliases still read the source)
     let mut vm = build_vm();
     vm.capture_output();
     assert_eq!(vm.run("tuples_probe", "main", &[]), Ok(Value::Bool(true)));
     assert_eq!(
         vm.captured_output(),
-        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\n" as &[u8]
+        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nvar true\n" as &[u8]
     );
 }
 
@@ -120,14 +124,15 @@ fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
             "a tuple member of a union",
         ),
         (
-            // a non-union scrutinee has no tags: one destructuring arm
-            "fn main() -> int { const t = (1, 2)\nmatch t { (a, b) => a, (c, d) => c } }",
-            "one destructuring arm covers a single-member scrutinee",
+            // a var destructuring element binds: literals test at match
+            // time and a declaration cannot fail a test
+            "fn main() -> int { var (a, 0) = (1, 0)\n a }",
+            "a var destructuring element pattern",
         ),
         (
-            // a var destructuring would need per-element var slots
-            "fn main() -> int { var (a, b) = (1, 2)\n a }",
-            "destructured elements need their own var slots",
+            // the const convention is the same: a declaration never tests
+            "fn main() -> int { const (a, 0) = (1, 0)\n a }",
+            "a destructuring element pattern",
         ),
     ];
     for (source, needle) in cases {

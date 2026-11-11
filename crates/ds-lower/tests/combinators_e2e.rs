@@ -14,7 +14,7 @@
 use ds_abi::{BuiltinInstance, Inst};
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{Lowered, lower};
+use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
@@ -282,25 +282,129 @@ fn main() -> int {
     );
 }
 
-/// A combinator call in tail position inherits the generic-table
-/// reservation: CALLTG stays reserved, so the site refuses at lowering.
+/// One inline source lowered and installed into a fresh VM (the same
+/// discipline the fixture builder follows), for the tail-transfer probes.
+fn run_inline(name: &str, source: &str) -> (Vm, Lowered) {
+    let mut files = Files::new();
+    let id = files.add_source(name, source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the source checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
+        .expect("the source lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    (vm, lowered)
+}
+
+/// One function's placed uop kinds, RC ops in place (the trait probe's
+/// spelling).
+fn shape(lowered: &Lowered, name: &str) -> Vec<String> {
+    lowered
+        .placed(name)
+        .unwrap_or_else(|| panic!("{name} is planned"))
+        .iter()
+        .map(|op| match op {
+            PlacedOp::Uop(uop) => {
+                let repr = format!("{uop:?}");
+                repr.chars().take_while(char::is_ascii_alphabetic).collect()
+            },
+            PlacedOp::Rc(_) => "Rc".to_owned(),
+        })
+        .collect()
+}
+
+/// A non-root frame's combinator tail lowers in place (CALLG plus return,
+/// the native-tail shape): the one body runs inside the instruction and no
+/// frame is pushed, so the stack never grows and the post-call flush
+/// settles the staged borrows — the wrapper runs, and the caller's own
+/// generic tail (the root frame's len transfer) abandons its staged count
+/// as the accepted root-tail corner.
 #[test]
-fn a_tail_position_combinator_call_stays_reserved() {
-    refused(
-        "
+fn a_non_root_combinator_tail_lowers_in_place() {
+    let source = "
 tag int
 struct list[t]
 extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn len[t] (xs: t) -> int
 
 fn shout(xs: list[int]) -> list[int] {
   map(xs, (x: int) => x * 2)
 }
 
 fn main() -> int {
-  const out = shout([1, 2])
-  0
+  len(shout([1, 2]))
+}";
+    let (mut vm, lowered) = run_inline("non_root_combinator_tail", source);
+    assert_eq!(
+        vm.run("non_root_combinator_tail", "main", &[]),
+        Ok(Value::I64(2)),
+        "the wrapper's in-place combinator tail answers the element count"
+    );
+    let shout = shape(&lowered, "shout");
+    assert!(
+        shout.iter().any(|k| k == "Callg") && !shout.iter().any(|k| k == "Calltg"),
+        "the non-root native tail stays in place: {shout:?}"
+    );
+}
+
+/// The root frame's generic tail transfers through CALLTG [H2's guarantee
+/// closure]: the evidence words stage after the exit claims, the uop names
+/// the real arguments, the one body runs inside the instruction, and the
+/// frame returns the body's result — the program's answer.
+#[test]
+fn a_root_generic_tail_transfers_through_calltg() {
+    let source = "
+tag int
+tag string
+extern fn len[t] (xs: t) -> int
+
+fn main() -> int {
+  len(\"four\")
+}";
+    let (mut vm, lowered) = run_inline("root_generic_tail", source);
+    assert_eq!(
+        vm.run("root_generic_tail", "main", &[]),
+        Ok(Value::I64(4)),
+        "the transfer runs the one body and returns its result"
+    );
+    let main = shape(&lowered, "main");
+    assert!(
+        main.iter().any(|k| k == "Calltg") && !main.iter().any(|k| k == "Callg"),
+        "the root frame's generic tail is the dispatch tail transfer: {main:?}"
+    );
+}
+
+/// A checked-read generic keeps its tail refusal: the ok/none span re-spans
+/// into the call's union at the call site, and the transfer leaves no
+/// position for it.
+#[test]
+fn a_checked_generic_tail_still_refuses() {
+    refused(
+        "
+tag int
+struct list[t]
+extern fn list_get[t] (xs: list[t], at: int) -> t
+
+fn main() -> int {
+  list_get([1, 2], 0)
 }",
-        "tail call to a generic builtin",
+        "a tail call to a checked-read generic",
     );
 }
 
@@ -386,11 +490,12 @@ fn main() -> int {
     );
 }
 
-/// A struct-returning lambda refuses: the hosted per-element call
+/// A struct-returning callable refuses: the hosted per-element call
 /// answers one word, and a wider return would silently keep its first
-/// word only.
+/// word only. Both the lambda and the named-fn spellings name the
+/// argument by its actual shape.
 #[test]
-fn a_multi_word_lambda_result_refuses_at_lowering() {
+fn a_multi_word_callable_result_refuses_at_lowering() {
     refused(
         "
 tag int
@@ -402,6 +507,23 @@ fn main() -> int {
   const out = map([1, 2], (x: int) => point { x: x, y: x })
   0
 }",
-        "container-combinator lambda",
+        "container-combinator callable",
+    );
+    refused(
+        "
+tag int
+struct list[t]
+struct point { x: int, y: int }
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+
+fn widen(x: int) -> point {
+  point { x: x, y: x }
+}
+
+fn main() -> int {
+  const out = map([1, 2], widen)
+  0
+}",
+        "container-combinator callable",
     );
 }

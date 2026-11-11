@@ -14,11 +14,11 @@ use super::{
     },
     Uop::{
         self, AddF64, AddI64, Call as UCall, Callg as UCallg, Calls as UCalls, Callt,
-        ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr,
-        Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst,
-        Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64,
-        MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew,
-        TagTest, TagTestNot,
+        Calltg as UCalltg, ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool,
+        EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif,
+        JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64,
+        ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat,
+        SubF64, SubI64, TagNew, TagTest, TagTestNot,
     },
 };
 
@@ -224,6 +224,10 @@ impl Uop {
                     callee: ConstIdx(d),
                     nargs: a,
                 }),
+                5 => Ok(UCalltg {
+                    callee: ConstIdx(d),
+                    nargs: a,
+                }),
                 6 => {
                     cx(c == 0)?;
                     Ok(UCalls {
@@ -307,7 +311,8 @@ impl Uop {
             | UClosureNew { .. } => 3,
             // minor 4 spans majors: MODI64/LEI64/LEF64 and CALLG
             ModI64 { .. } | LeI64 { .. } | LeF64 { .. } | UCallg { .. } => 4,
-            GtI64 { .. } | GtF64 { .. } => 5,
+            // minor 5 spans majors: GTI64/GTF64 and CALLTG
+            GtI64 { .. } | GtF64 { .. } | UCalltg { .. } => 5,
             UCalls { .. } => 6,
         }
     }
@@ -354,6 +359,7 @@ impl Uop {
             UCall { nargs, .. }
             | Callt { nargs, .. }
             | UCallg { nargs, .. }
+            | UCalltg { nargs, .. }
             | UCalls { nargs, .. } => nargs,
             Ret { src } | RetSpan { src, .. } => src,
             UHalt { slot } => slot,
@@ -364,9 +370,10 @@ impl Uop {
     fn bc_field(self, pc: u32) -> Result<Bc, EncodeError> {
         Ok(match self {
             UKimm { kidx, .. } | UKconst { kidx, .. } | UKstr { kidx, .. } => Bc::Wide(kidx.0),
-            UCall { callee, .. } | Callt { callee, .. } | UCallg { callee, .. } => {
-                Bc::Wide(callee.0)
-            },
+            UCall { callee, .. }
+            | Callt { callee, .. }
+            | UCallg { callee, .. }
+            | UCalltg { callee, .. } => Bc::Wide(callee.0),
             UCalls { callee_slot, .. } => Bc::Reg {
                 b: callee_slot,
                 c: 0,

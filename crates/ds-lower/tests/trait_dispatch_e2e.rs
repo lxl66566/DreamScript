@@ -157,8 +157,10 @@ fn impl_bodies_enter_the_table_under_mangled_identity() {
 }
 
 /// The dispatch sites emit CALLG with the instance evidence word staged
-/// right before it — never a plain CALL, and never a CALLT even in the
-/// wrapper's tail position (the in-place shape CALLG plus RET).
+/// right before it — never a plain CALL. The wrapper's tail-position site
+/// transfers through CALLTG (the dispatch tail form): the instance word
+/// stages after the exit claims, right before the transfer, and no RET
+/// follows it.
 #[test]
 fn trait_call_sites_emit_callg_with_the_instance_evidence_word() {
     let (_, lowered) = lower_inline();
@@ -166,37 +168,38 @@ fn trait_call_sites_emit_callg_with_the_instance_evidence_word() {
     let callg = main.iter().filter(|k| *k == "Callg").count();
     assert_eq!(callg, 7, "every trait-method site dispatches: {main:?}");
     assert!(
-        !main.iter().any(|k| k == "Callt"),
-        "the root frame's trait tail never transfers: {main:?}"
+        !main.iter().any(|k| k == "Callt" || *k == "Calltg"),
+        "the root frame's value-position trait sites never transfer: {main:?}"
     );
     let wrap = shape(&lowered, "wrap");
     assert!(
-        wrap.iter().any(|k| k == "Callg"),
-        "the tail-position trait call lowers through CALLG: {wrap:?}"
+        wrap.iter().any(|k| k == "Calltg"),
+        "the wrapper's tail transfers through the dispatch tail call: {wrap:?}"
     );
     assert!(
-        !wrap.iter().any(|k| k == "Callt"),
-        "the wrapper's tail lowers in place (CALLTG stays reserved): {wrap:?}"
+        !wrap
+            .iter()
+            .any(|k| *k == "Callg" || *k == "Callt" || *k == "Ret"),
+        "the tail transfer replaces the in-place dispatch and the return: {wrap:?}"
     );
     let wrap_placed = lowered.placed("wrap").expect("wrap is planned");
     let kinds: Vec<String> = wrap_placed
         .iter()
         .map(|op| match op {
             PlacedOp::Uop(Uop::Kimm { .. }) => "Kimm".to_owned(),
-            PlacedOp::Uop(Uop::Callg { .. }) => "Callg".to_owned(),
-            PlacedOp::Uop(Uop::Ret { .. }) => "Ret".to_owned(),
+            PlacedOp::Uop(Uop::Calltg { .. }) => "Calltg".to_owned(),
             PlacedOp::Uop(_) => "_".to_owned(),
             PlacedOp::Rc(_) => "Rc".to_owned(),
         })
         .collect();
     let kimm = kinds.iter().position(|k| k == "Kimm");
-    let callg = kinds
+    let transfer_at = kinds
         .iter()
-        .position(|k| k == "Callg")
-        .expect("the dispatch");
+        .position(|k| k == "Calltg")
+        .expect("the dispatch tail transfer");
     assert!(
-        kimm.is_some_and(|at| at < callg),
-        "the instance evidence word stages right before the CALLG: {kinds:?}"
+        kimm.is_some_and(|at| at < transfer_at),
+        "the instance evidence word stages before the CALLTG, past the exit claims: {kinds:?}"
     );
 }
 

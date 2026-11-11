@@ -2,10 +2,13 @@
 //! impl's member bodies enter the plan under the `<target>#<member>`
 //! mangle, and every solved inherent dot-call dispatches as a plain
 //! local call — the receiver's own type picked the body at check time,
-//! so no instance word and no dispatch uop exist. Refusals stay honest:
-//! a generic inherent impl's call sites refuse naming the runtime
-//! evidence seam, and a `mut self` receiver refuses through the
-//! non-borrow parameter mode.
+//! so no instance word and no dispatch uop exist. A member tail lowers
+//! through that same local-callee identity as a CALLT transfer, and an
+//! omitted defaulted member parameter stages the literal at the call
+//! site like the free-fn spelling. Refusals stay honest: a `mut self`
+//! receiver refuses through the non-borrow parameter mode (the generic
+//! inherent evidence surface runs in inherent_impl_evidence_e2e, and its
+//! transitive shapes refuse in generic_impl_refusals).
 
 use ds_abi::Uop;
 use ds_check::analyze;
@@ -146,10 +149,11 @@ fn inherent_bodies_enter_the_table_under_mangled_identity() {
 
 /// The call sites emit plain CALL — never CALLG, since no instance word
 /// exists for an inherent impl — and a tail-position inherent call
-/// lowers in place (CALL plus RET) like every member-call tail this
-/// round; the tail-callee recognizer takes free functions only.
+/// transfers through CALLT: the solved inherent body is a plain local
+/// callee under its mangled identity, so the tail recognition covers it
+/// like a free function.
 #[test]
-fn inherent_call_sites_emit_plain_call_and_in_place_tails() {
+fn inherent_call_sites_emit_plain_call_and_tail_transfers() {
     let (_, lowered) = lower_probe();
     let main = shape(&lowered, "main");
     assert!(main.iter().any(|k| k == "Call"), "plain calls: {main:?}");
@@ -159,48 +163,12 @@ fn inherent_call_sites_emit_plain_call_and_in_place_tails() {
     );
     let wrap = shape(&lowered, "wrap");
     assert!(
-        wrap.iter().any(|k| k == "Call"),
-        "the inherent tail lowers in place: {wrap:?}"
+        wrap.iter().any(|k| k == "Callt"),
+        "the inherent tail transfers: {wrap:?}"
     );
     assert!(
         !wrap.iter().any(|k| k == "Callg"),
-        "the in-place shape is a plain local call: {wrap:?}"
-    );
-}
-
-/// A generic inherent impl's member call refuses at lowering naming the
-/// runtime-evidence seam: no instance exists for an inherent impl, so no
-/// call site can stage what a generic body would demand.
-#[test]
-fn a_generic_inherent_impl_refuses_naming_the_runtime_evidence_seam() {
-    let source = concat!(
-        "tag int\n",
-        "tag string\n",
-        "struct list[t]\n",
-        "trait shows {\n",
-        "  fn show(self) -> string\n",
-        "}\n",
-        "impl shows for int {\n",
-        "  fn show(self) -> string { \"n=$self\" }\n",
-        "}\n",
-        "impl[t: shows] list[t] {\n",
-        "  fn inner(self) -> int { 1 }\n",
-        "}\n",
-        "fn main() -> int {\n",
-        "  const b = [1, 2]\n",
-        "  b.inner()\n",
-        "}\n",
-    );
-    let Err(err) = lower_inline("generic_inherent.ds", source) else {
-        panic!("a generic inherent impl must refuse this round")
-    };
-    assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
-    );
-    assert!(
-        err.to_string().contains("a generic inherent impl"),
-        "the refusal names the runtime-evidence seam: {err}"
+        "the transfer is a plain local callee: {wrap:?}"
     );
 }
 
@@ -233,10 +201,13 @@ fn a_mut_self_receiver_refuses_through_the_non_borrow_mode() {
     );
 }
 
-/// An omitted defaulted member parameter refuses at the call site: an
-/// impl member has no package def, so no default staging exists.
+/// An omitted defaulted member parameter stages the literal default at
+/// the call site: the member spelling matches the free-fn spelling
+/// [F7] — the checker proved the default's literal against the
+/// parameter type, so the call lowers it exactly like a written
+/// argument and the body reads the staged word.
 #[test]
-fn an_omitted_defaulted_member_parameter_refuses() {
+fn an_omitted_defaulted_member_parameter_stages_the_literal_default() {
     let source = concat!(
         "tag int\n",
         "struct counter { ticks: int }\n",
@@ -248,16 +219,93 @@ fn an_omitted_defaulted_member_parameter_refuses() {
         "  c.bump()\n",
         "}\n",
     );
-    let Err(err) = lower_inline("defaulted_member.ds", source) else {
-        panic!("an omitted defaulted member parameter must refuse this round")
-    };
-    assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
+    let lowered =
+        lower_inline("defaulted_member", source).expect("the defaulted member call lowers");
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("defaulted_member", "main", &[]),
+        Ok(Value::I64(4)),
+        "the omitted default stages: ticks 1 + default 3"
     );
+}
+
+/// A member tail recursion runs deep at constant stack: a member
+/// dot-call solved to a monomorphic inherent body is a plain local
+/// callee, so its tail position lowers through CALLT and the frame
+/// transfers instead of growing the stack [H2]. A plain CALL at this
+/// depth would need ~21M stack words against the VM's 1MiB-word limit,
+/// so completing at all proves the transfer — and the max-stack pin
+/// keeps it constant across every one of the 3 million slides.
+#[test]
+fn a_member_tail_recursion_runs_three_million_deep_at_constant_stack() {
+    let source = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn count(self, n: int) -> int {\n",
+        "    if n == 0 { self.ticks } else { self.count(n - 1) }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const c = counter { ticks: 7 }\n",
+        "  c.count(3_000_000)\n",
+        "}\n",
+    );
+    let lowered = lower_inline("member_tail", source).expect("the member tail lowers");
     assert!(
-        err.to_string().contains("a defaulted member parameter"),
-        "the refusal names the default-staging boundary: {err}"
+        shape(&lowered, "counter#count").contains(&"Callt".to_owned()),
+        "the member body ends in the tail transfer: {:?}",
+        shape(&lowered, "counter#count")
+    );
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("member_tail", "main", &[]),
+        Ok(Value::I64(7)),
+        "the loop answers the base case's field read"
+    );
+    assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");
+    assert_eq!(
+        vm.max_stack_len(),
+        10,
+        "the metadata and call words plus main's frame and the one reused member frame"
+    );
+}
+
+/// Mutual member tails between two bodies of one inherent impl: each
+/// member's tail dot-call transfers into the other's frame, so the
+/// even/odd ping-pong runs at constant stack the same way the free-fn
+/// mutual fixture does.
+#[test]
+fn mutual_member_tails_run_one_million_deep_at_constant_stack() {
+    let source = concat!(
+        "tag int\n",
+        "tag bool\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn even(self, n: int) -> bool {\n",
+        "    if n == 0 { true } else { self.odd(n - 1) }\n",
+        "  }\n",
+        "  fn odd(self, n: int) -> bool {\n",
+        "    if n == 0 { false } else { self.even(n - 1) }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> bool {\n",
+        "  const c = counter { ticks: 0 }\n",
+        "  c.even(1_000_000)\n",
+        "}\n",
+    );
+    let lowered = lower_inline("member_mutual", source).expect("the mutual member tails lower");
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("member_mutual", "main", &[]),
+        Ok(Value::Bool(true)),
+        "even at a million depth"
+    );
+    assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");
+    assert_eq!(
+        vm.max_stack_len(),
+        11,
+        "the metadata and call words plus main's frame and the one reused member frame"
     );
 }
 

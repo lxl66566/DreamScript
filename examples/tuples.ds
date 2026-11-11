@@ -11,6 +11,15 @@ fn port_of(pair: (string, int)) -> int {
   port
 }
 
+fn pick(t: (int, int)) -> string {
+  match t {
+    (n, m) if (n > 100) => "big"
+    (0, 5) => "zero-five"
+    (0, _) => "zero"
+    _ => "flat"
+  }
+}
+
 fn main() -> () {
   const t = ("host", 8080)
   const (name, port) = t
@@ -26,4 +35,9 @@ fn main() -> () {
   const (seven,) = one
   println("seven ${seven}")
   println(if t == ("host", 8080) { "equal" } else { "unequal" })
+  var (host2, port2) = t
+  host2 = "db"
+  port2 = port2 + 1
+  println("var ${host2}:${port2}")
+  println("pick ${pick((0, 5))} ${pick((200, 5))} ${pick((0, 9))} ${pick((3, 1))}")
 }

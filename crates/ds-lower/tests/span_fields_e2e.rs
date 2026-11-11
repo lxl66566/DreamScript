@@ -1,0 +1,276 @@
+//! The span rework's width flips, end to end: a struct-typed field
+//! carries its whole inline word span through construction, binding,
+//! calls, returns, union writes, match arms, and equality — the emitted
+//! layouts show the real widths and the values survive every hop.
+
+use ds_check::analyze;
+use ds_diag::{Files, human};
+use ds_lower::{LowerError, lower};
+use ds_mod::{Hash128, read, write};
+use ds_parse::parse;
+use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+
+/// Parse -> check -> lower -> round-trip -> run, returning the captured
+/// stdout of `main`. Panics with the checker's renderings when the
+/// source does not check clean, and with the lowering error when it
+/// does not lower.
+fn runs(name: &str, source: &str) -> String {
+    let mut files = Files::new();
+    let id = files.add_source("probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "{}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
+        .unwrap_or_else(|err| panic!("the probe lowers: {err}"));
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(
+        vm.run(name, "main", &[]),
+        Ok(Value::I64(0)),
+        "the unit entry result"
+    );
+    String::from_utf8_lossy(vm.captured_output()).into_owned()
+}
+
+/// Same pipeline, expecting lowering to refuse with the exact message
+/// fragment.
+fn refuses(name: &str, source: &str, seam: &str, needle: &str) {
+    let mut files = Files::new();
+    let id = files.add_source("probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "{}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let Err(error) = lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed) else {
+        panic!("the probe refuses: {source}")
+    };
+    assert!(
+        matches!(error, LowerError::Unsupported { .. }),
+        "the refusal is Unsupported, got {error:?}"
+    );
+    let text = error.to_string();
+    assert!(text.contains(seam), "the error names the seam: {error}");
+    assert!(text.contains(needle), "the error names the future: {error}");
+}
+
+/// The whole multi-word field story: a two-word `point` field inside a
+/// struct, through a call, a return, a union write, a match arm, nested
+/// reads, and memberwise equality.
+#[test]
+fn a_struct_typed_field_flows_its_whole_span() {
+    let out = runs(
+        "span_fields",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag io_error\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct point { x: int, y: int }\n",
+            "struct box { at: point, label: string }\n",
+            "fn shift(p: point) -> point {\n",
+            "  point { x: p.x + 1, y: p.y }\n",
+            "}\n",
+            "fn total(p: point) -> int { p.x + p.y }\n",
+            "fn show(v: box | io_error) -> () {\n",
+            "  match v {\n",
+            "    io_error => println(\"io\"),\n",
+            "    c => println(c.label),\n",
+            "  }\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  const p = point { x: 1, y: 2 }\n",
+            "  const b = box { at: shift(p), label: \"b\" }\n",
+            "  println(\"${total(b.at)}\")\n",
+            "  show(b)\n",
+            "  var v: box | io_error = b\n",
+            "  show(v)\n",
+            "  v = io_error\n",
+            "  show(v)\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(out, "4\nb\nb\nio\n");
+}
+
+/// A member whose fields span Ref words behind a multi-word struct
+/// field: the claims, the union re-spans, and the deaths balance with
+/// counts on both the struct field's words and the trailing Ref.
+#[test]
+fn ref_words_inside_a_multi_word_field_balance() {
+    let out = runs(
+        "span_refs",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag none\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct pair { a: string, b: string }\n",
+            "struct card { sides: pair, rank: int }\n",
+            "fn render(c: card) -> string { c.sides.a + \"/\" + c.sides.b }\n",
+            "fn main() -> () {\n",
+            "  var i = 0\n",
+            "  var total = 0\n",
+            "  while i < 3 {\n",
+            "    const c = card { sides: pair { a: \"left\", b: \"right\" }, rank: i }\n",
+            "    const text = render(c)\n",
+            "    if text == \"left/right\" { total += c.rank + 1 }\n",
+            "    i += 1\n",
+            "  }\n",
+            "  println(\"${total}\")\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(out, "6\n");
+}
+
+/// The widened surfaces refuse honestly: the field vocabulary beyond
+/// struct-typed fields, tuple spans over wider elements, and the
+/// one-word native seams.
+#[test]
+fn the_refusal_openings_keep_their_honest_names() {
+    // a union-typed struct field: the inline-span vocabulary refuses it
+    // (the literal forces the field's shape)
+    refuses(
+        "refuse_union_field",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct outer { x: int | string }\n",
+            "fn main() -> () {\n",
+            "  const box = outer { x: 1 }\n",
+            "  println(\"unreachable\")\n",
+            "}\n",
+            "extern fn println (msg: string) -> ()\n",
+        ),
+        "a struct payload field",
+        "union, tuple, and application field types stay outside",
+    );
+    // a tuple whose element type spans words: the tuple vocabulary keeps
+    // one word per element
+    refuses(
+        "refuse_tuple_element",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct point { x: int, y: int }\n",
+            "fn take(t: (point, int)) -> int { 0 }\n",
+            "fn main() -> () { println(\"unreachable\") }\n",
+            "extern fn println (msg: string) -> ()\n",
+        ),
+        "a multi-word tuple element",
+        "tuple elements lower as one plain frame word",
+    );
+    // a tuple member of a union
+    refuses(
+        "refuse_tuple_member",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag miss\n",
+            "extern fn println (msg: string) -> ()\n",
+            "fn f(v: (int, int) | miss) -> int {\n",
+            "  match v { miss => 0, other => 1 }\n",
+            "}\n",
+            "fn main() -> () { println(\"unreachable\") }\n",
+        ),
+        "a tuple member of a union",
+        "the region takes struct member fields only",
+    );
+    // a one-word list element over a struct value
+    refuses(
+        "refuse_list_element",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct list[t]\n",
+            "extern fn list_len[t] (xs: list[t]) -> int\n",
+            "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+            "struct point { x: int, y: int }\n",
+            "fn main() -> int {\n",
+            "  var xs = list[point]()\n",
+            "  list_push(xs, point { x: 1, y: 2 })\n",
+            "  list_len(xs)\n",
+            "}\n",
+        ),
+        "a list_push element",
+        "native channel",
+    );
+    // a hosted combinator whose callable answers several words
+    refuses(
+        "refuse_hosted_return",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct list[t]\n",
+            "struct point { x: int, y: int }\n",
+            "extern fn println (msg: string) -> ()\n",
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn main() -> () {\n",
+            "  const xs = list[point]()\n",
+            "  const ys = map(xs, (p: point) => point { x: p.x, y: p.y })\n",
+            "  println(\"unreachable\")\n",
+            "}\n",
+        ),
+        "a container-combinator callable",
+        "the hosted per-element call answers one word",
+    );
+    // a wider map value under map_set's positional contract
+    refuses(
+        "refuse_map_value",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct map[k, v]\n",
+            "struct point { x: int, y: int }\n",
+            "extern fn map_set (m: mut map[string, point], key: string, value: point) -> ()\n",
+            "fn main() -> () {\n",
+            "  var m = map[string, point]()\n",
+            "  map_set(m, \"origin\", point { x: 0, y: 0 })\n",
+            "}\n",
+        ),
+        "a map_set argument",
+        "map keys and values lower as one machine word",
+    );
+    // a deinit-carrying field type: the inline span has no claim of its
+    // own, so the hook would run at the wrong death
+    refuses(
+        "refuse_deinit_field",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct session { user: string\n",
+            "  deinit { println(\"freed ${self.user}\") }\n",
+            "}\n",
+            "struct holder { inner: session, mark: int }\n",
+            "fn main() -> () {\n",
+            "  const h = holder { inner: session { user: \"u\" }, mark: 1 }\n",
+            "}\n",
+        ),
+        "a struct payload field",
+        "per-span deinit claims own the seam",
+    );
+}

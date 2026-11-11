@@ -53,8 +53,9 @@
 //! | Mov (0x8)            | MOV                     | dst slot | src slot   | —          | —
 //! | Ctl (0x9)            | JMPIF, JMPIF_NOT, JMP   | cond / — | —          | —          | jump bias
 //! | Call (0xA)           | CALL, CALLT, RET,       | nargs /  | callee slot  | span       | const idx    |
-//! |                      | RETSPAN, CALLG, CALLS   | src slot | (CALLS only) | (RETSPAN)  | (CALL/       |
-//! |                      | (CALLTG reserved: 0xA.5)|          |             |            | CALLT/CALLG) |
+//! |                      | RETSPAN, CALLG, CALLTG, | src slot | (CALLS only) | (RETSPAN)  | (CALL/       |
+//! |                      | CALLS                   |          |             |            | CALLT/CALLG/ |
+//! |                      |                         |          |             |            | CALLTG)      |
 //! | Frame (0xB)          | FUNCF                   | —        | —          | —          | frame slots
 //! | Halt (0xC)           | HALT                    | slot     | —          | —          | —
 //!
@@ -315,14 +316,26 @@ pub enum Uop {
     /// dispatch reads the evidence words to select the body's behavior on
     /// the resolved types — monomorphic instances never exist at runtime.
     /// Evidence words are ordinary register arguments, so a generic call
-    /// in tail position tail-calls normally; that tail variant is CALLTG,
-    /// minor 5, reserved (no variant yet; decode rejects it). Phase-1
-    /// convention: each evidence word is an i64 pool constant, a
+    /// in tail position tail-calls normally through CALLTG, minor 5.
+    /// Phase-1 convention: each evidence word is an i64 pool constant, a
     /// statically-resolved instance reference ([`BuiltinInstance`]); the
     /// future runtime-resolved shape (a slot keyed by the runtime tag,
     /// later patched into a 1-2 entry inline cache (H3)) stages through
     /// the same overlay positions, so the layout admits both.
     Callg { callee: ConstIdx, nargs: u8 },
+    /// `0xA.5` — CALLTG: the tail form of CALLG (H2's guarantee-closure
+    /// ruling — the guarantee admits no callee-class exception). The
+    /// dispatch resolution is CALLG's own (the FuncRef names the impl
+    /// body a statically solved instance picked, or the sentinel naming
+    /// the frame's evidence slot, or a generic builtin's ONE body); the
+    /// transfer is CALLT's: the staged words — real arguments plus the
+    /// evidence/instance words trailing them — slide into the reused
+    /// frame's parameter slots per [`crate::slide_plan`], the metadata
+    /// word rewrites in place, and the stack never grows at any depth.
+    /// The evidence/instance words past the callee's parameters ride the
+    /// transfer as dead words (count-free i64 constants the callee never
+    /// claims), so the slide moves exactly the callee's parameter count.
+    Calltg { callee: ConstIdx, nargs: u8 },
     /// `0xA.6` — CALLS (the callable-word call form, F2): call the function
     /// named by frame slot `callee_slot` with `nargs` arguments staged in
     /// the caller's outgoing-argument area; the result overlays slot 0 like

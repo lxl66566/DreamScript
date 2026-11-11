@@ -408,7 +408,7 @@ fn payload_string(vm: &mut Vm, result: Value) -> String {
         panic!("the payload is a string ref, got {result:?}");
     };
     vm.objects()
-        .str_at(id)
+        .str_at(id.id())
         .expect("the payload names a string")
         .to_owned()
 }

@@ -1,0 +1,12 @@
+// A loop exit lexically inside a lambda within a loop: the checker's
+// frame-boundary refusal names the crossed boundary at check time.
+
+tag int
+fn pick(items: fn() -> ()) -> () { items() }
+fn main() -> () {
+    var i: int = 0
+    while i < 4 {
+        pick(() => { break })
+        i += 1
+    }
+}

@@ -2,9 +2,10 @@
 //! claims the destination union's region under its source member — the
 //! same construction the if/match join re-spans through — instead of
 //! aliasing one word a union-typed use cannot address. A direct literal
-//! or a bare binding passed to a union-typed parameter stays the
-//! argument-widening refusal, and a capturing closure into a union
-//! member refuses on the slot-classification pairing.
+//! or a bare binding passed to a union-typed parameter re-spans into the
+//! parameter's whole region at the call (the widening family), and a
+//! capturing closure into a union member refuses on the slot-classification
+//! pairing.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -79,11 +80,12 @@ fn an_annotated_const_binds_each_member_through_the_union_region() {
     );
 }
 
-/// A bare argument widened at the call stays refused: staging a member's
-/// single word against a union-typed parameter span is the argument
-/// widening seam, not the binding construction.
+/// A bare binding and a direct literal passed to a union-typed
+/// parameter re-span into the parameter's whole region at the call, and
+/// the callee reads the member it received: the argument staging of the
+/// annotated binding's widening family.
 #[test]
-fn a_bare_argument_widened_at_the_call_stays_refused() {
+fn a_bare_argument_re_spans_into_the_parameter_region_at_the_call() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -91,7 +93,7 @@ fn a_bare_argument_widened_at_the_call_stays_refused() {
         "fn kind(v: int | string) -> int { if v is int { 1 } else { 2 } }\n",
         "fn main() -> () {\n",
         "  const bare = 7\n",
-        "  println(\"${kind(bare)}\")\n",
+        "  println(\"${kind(bare)} ${kind(3)} ${kind(\"s\")}\")\n",
         "}\n",
     );
     let mut files = Files::new();
@@ -108,22 +110,26 @@ fn a_bare_argument_widened_at_the_call_stays_refused() {
             .map(|diag| human(diag, &files))
             .collect::<String>()
     );
-    let Err(err) = lower(
+    let lowered = lower(
         "union_bare",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) else {
-        panic!("the bare-argument shape must refuse at lowering")
-    };
-    assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
-    );
-    assert!(
-        err.to_string()
-            .contains("a union-typed parameter takes its member's whole region"),
-        "the refusal names the argument-widening seam: {err}"
+    )
+    .expect("the bare argument re-spans at the call");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    loader::install(&mut registry, &module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(vm.run("union_bare", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        "1 1 2\n",
+        "every bare argument lands under its own member"
     );
 }
 

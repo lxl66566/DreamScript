@@ -9,6 +9,7 @@
 // seeds_total: stage: run
 // for_sum: stage: run
 // member_scan: stage: run
+// csv_line: stage: run
 // reject-mixed: stage: reject the mixed-element literal names the offending item's type (DS2001) [B3]
 
 struct page { url: string }
@@ -59,6 +60,15 @@ fn for_sum() -> int {
 fn member_scan() -> bool {
   const words = ["alpha", "beta"]
   2 in [1, 2, 3] && "beta" in words && !("delta" in words)
+}
+
+// join renders the parts list back to one string, the separator between
+// neighbors; the empty list answers the empty string
+fn csv_line() -> string {
+  const words = ["alpha", "beta", "gamma"]
+  const csv = words.join(",")
+  const blank = list[string]().join(",")
+  csv + "|" + blank
 }
 
 fn reject_mixed() -> int {

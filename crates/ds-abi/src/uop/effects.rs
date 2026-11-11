@@ -5,10 +5,11 @@
 use super::{
     Uop,
     Uop::{
-        AddF64, AddI64, Call, Callg, Calls, Callt, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64,
-        EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot,
-        Kconst, Kimm, Kstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool,
-        NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew, TagTest, TagTestNot,
+        AddF64, AddI64, Call, Callg, Calls, Callt, Calltg, ClosureNew, CvtF2I, CvtI2F, DivF64,
+        DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif,
+        JmpifNot, Kconst, Kimm, Kstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64,
+        NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew, TagTest,
+        TagTestNot,
     },
 };
 
@@ -45,9 +46,8 @@ pub enum Major {
     /// 0x9 — control: JMPIF, JMPIF_NOT, JMP (biased offsets; the two
     /// conditional jumps are the XOR-adjacent minor pair 0/1).
     Ctl = 0x9,
-    /// 0xA — calls: CALL, CALLT, RET, RETSPAN, CALLG (CALLTG, minor 5,
-    /// reserved for the generic tail call), CALLS (minor 6, the frame-slot
-    /// callee form).
+    /// 0xA — calls: CALL, CALLT, RET, RETSPAN, CALLG, CALLTG (minor 5, the
+    /// dispatch tail call), CALLS (minor 6, the frame-slot callee form).
     Call = 0xa,
     /// 0xB — frame protocol: FUNCF.
     Frame = 0xb,
@@ -165,6 +165,7 @@ impl Uop {
             | Callg { .. }
             | Calls { .. }
             | Callt { .. }
+            | Calltg { .. }
             | Ret { .. }
             | RetSpan { .. } => Major::Call,
             Funcf { .. } => Major::Frame,
@@ -186,6 +187,7 @@ impl Uop {
             | Call { .. }
             | Callg { .. }
             | Callt { .. }
+            | Calltg { .. }
             | Halt { .. } => SlotList::none(),
             Jmpif { cond, .. } | JmpifNot { cond, .. } => SlotList::new(*cond, &[]),
             Calls { callee_slot, .. } => SlotList::new(*callee_slot, &[]),
@@ -276,6 +278,7 @@ impl Uop {
             | Callg { .. }
             | Calls { .. }
             | Callt { .. }
+            | Calltg { .. }
             | Ret { .. }
             | RetSpan { .. }
             | Funcf { .. }
@@ -303,6 +306,7 @@ impl Uop {
                 | Callg { .. }
                 | Calls { .. }
                 | Callt { .. }
+                | Calltg { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }

@@ -114,6 +114,8 @@ error_codes! {
     TopLevelStatement => "DS1014", Parse,
     /// Script statements synthesize `main`; the entry file already declares `main`.
     ScriptMainConflict => "DS1015", Parse,
+    /// A match guard's bare identifier directly before `=>` is read as a bare-parameter lambda; parenthesize the guard expression.
+    GuardTailLambda => "DS1016", Parse,
 
     /// Value's type is not contained in the expected type.
     TypeMismatch => "DS2001", Type,
@@ -211,6 +213,7 @@ mod tests {
             ("NamedConstLambda", "DS1013", ErrorClass::Parse),
             ("TopLevelStatement", "DS1014", ErrorClass::Parse),
             ("ScriptMainConflict", "DS1015", ErrorClass::Parse),
+            ("GuardTailLambda", "DS1016", ErrorClass::Parse),
             ("TypeMismatch", "DS2001", ErrorClass::Type),
             ("InferenceFailed", "DS2002", ErrorClass::Type),
             ("NonExhaustiveMatch", "DS2003", ErrorClass::Type),

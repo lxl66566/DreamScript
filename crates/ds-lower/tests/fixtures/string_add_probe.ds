@@ -11,11 +11,15 @@ tag string
 tag bool
 
 struct map[k, v]
+struct list[t]
 
 extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
 extern fn map_new() -> map[string, string]
 extern fn map_set(mut m: map[string, string], key: string, value: string) -> ()
 extern fn map_get[k, v](m: map[k, v], key: k) -> v | none
+extern fn list_concat[t](a: list[t], b: list[t]) -> list[t]
+extern fn len[t](xs: t) -> int
 
 fn main() -> bool {
   println(plain())
@@ -24,7 +28,7 @@ fn main() -> bool {
   println(accumulated(3))
   println(compounded(3))
   println(report())
-  plain() == "ab" && chain() == "abcb" && holed("b") == "bxb" && accumulated(3) == "xxx" && compounded(3) == "sxxx" && report() == "localhost:?"
+  plain() == "ab" && chain() == "abcb" && holed("b") == "bxb" && accumulated(3) == "xxx" && compounded(3) == "sxxx" && report() == "localhost:?" && seam_self_reference() && seam_call_spelling() && seam_parenthesized() && seam_operand_swap() && seam_nested_windows() && seam_later_use() && seam_compounded() && seam_local_operand() && seam_list_receiver()
 }
 
 fn plain() -> string {
@@ -68,7 +72,85 @@ fn report() -> string {
   host.ok((s: string) => s).err((_: none) => "?") + ":" + user.ok((s: string) => s).err((_: none) => "?")
 }
 
-fn seam_self_reference() -> string {
+// the staged-borrow seam shapes: a later operand of the same native
+// call fires the binder's last-use dec before the CALL reads the staged
+// word; the borrow window pins the word and its dec fires at the
+// window's flush, after the CALL. Each leg reads its result back so
+// the heap drains when the leg returns.
+
+fn seam_self_reference() -> bool {
   var b = "B"
-  b + "${b}x"
+  const r = b + "${b}x"
+  r == "BBx"
 }
+
+fn seam_call_spelling() -> bool {
+  var b = "B"
+  const r = b.concat("${b}x")
+  r == "BBx"
+}
+
+fn seam_parenthesized() -> bool {
+  var s = "s"
+  const r = s + "(${s})"
+  r == "s(s)"
+}
+
+// the later operand is itself a native call staging the same word: the
+// inner window flushes first, the outer CALL reads, the outer flush decs
+fn seam_operand_swap() -> bool {
+  var b = "b"
+  var c = "c"
+  const r = b + (c + b)
+  r == "bcb"
+}
+
+// native-in-native: each window's staged word decs at its own flush
+fn seam_nested_windows() -> bool {
+  var a = "a"
+  var b = "b"
+  const r = a.concat(b.concat("x"))
+  r == "abx"
+}
+
+// a staged borrow whose binder has uses outside the call: the dec fires
+// at the ordinary last use, never at the window's flush
+fn seam_later_use() -> bool {
+  var b = "B"
+  const r = b.concat("x")
+  const t = b + r
+  t == "BBx"
+}
+
+// the compound-assign spelling over an open window: the replaced
+// content's dec stays the store's own rollover, and the flush decs
+// nothing the store still owns
+fn seam_compounded() -> bool {
+  var b = "B"
+  b += "${b}x"
+  b == "BBx"
+}
+
+// a local callee staged inside the window's operand: the handing dups
+// (the callee decs its borrow inside its own CALL), and the frame's
+// count dies at the window's flush
+fn wrap(s: string) -> string {
+  "(" + s + ")"
+}
+
+fn seam_local_operand() -> bool {
+  var b = "B"
+  const r = b + wrap(b)
+  r == "B(B)"
+}
+
+// a generic native's staged list receiver: the alias's use inside the
+// later operand fires the owner's last-use dec under the outer window
+fn seam_list_receiver() -> bool {
+  var xs = [1, 2]
+  const t = xs
+  const r = list_concat(xs, [len(t)])
+  const n = len(r)
+  n == 3
+}
+

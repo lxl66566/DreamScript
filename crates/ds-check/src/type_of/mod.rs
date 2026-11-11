@@ -58,7 +58,7 @@ use crate::{
     decls::{self, Decls, FnSig, GenericParam, ParamSig},
     error::Error,
     extraction::Extraction,
-    instance::InstanceId,
+    instance::{Condition, InstanceId},
     instance_solve::Resolution,
     resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
     universe::Ty,
@@ -108,6 +108,12 @@ struct Narrow {
     ty: Ty,
 }
 
+/// The per-call-site runtime-evidence record of an inherent call
+/// entering a generic impl's body: one entry per declared bound — the
+/// bound's variable atom, its trait, and the unique instance serving the
+/// substituted type at the site (`None` when none serves it uniquely).
+pub type InherentCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>)>;
+
 /// The result of one package check: diagnostics in walk order plus the
 /// memoized type of every top-level binding (G3).
 #[derive(Default)]
@@ -143,6 +149,15 @@ pub struct Checked {
     /// tables' method-to-impl-item map; no instance exists for an
     /// inherent impl, so nothing else records at the site.
     pub inherent_calls: HashMap<Span, MethodId>,
+    /// The runtime evidence a call into a generic inherent impl's body
+    /// needs (H3): one entry per declared bound — the bound's variable
+    /// atom, its trait, and the unique instance serving the substituted
+    /// type at this call site (`None` when none serves it uniquely, the
+    /// shape the lowerer's staging refusal owns). Keyed by the call's own
+    /// span, mirroring [`TraitCall::bounds`] minus the instance word an
+    /// inherent impl never has. Recorded only at sites entering a generic
+    /// body; monomorphic inherent calls need no evidence.
+    pub inherent_call_bounds: HashMap<Span, InherentCallBounds>,
     /// The solved tested type of every `is` expression that type-solves,
     /// keyed by the expression's span. The lowering pass reads the tested
     /// atom from it when the written type is not a nominal single-segment
@@ -225,6 +240,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
         inherent_calls: checked.inherent_calls,
+        inherent_call_bounds: checked.inherent_call_bounds,
         is_tests: checked.is_tests,
     };
     Analyzed {
@@ -292,6 +308,7 @@ where
     let mut generic_calls = HashMap::new();
     let mut trait_calls = HashMap::new();
     let mut inherent_calls = HashMap::new();
+    let mut inherent_call_bounds: HashMap<Span, InherentCallBounds> = HashMap::new();
     let mut is_tests = HashMap::new();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
@@ -307,6 +324,7 @@ where
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
             inherent_calls: &mut inherent_calls,
+            inherent_call_bounds: &mut inherent_call_bounds,
             is_tests: &mut is_tests,
             diags: Vec::new(),
             linear_vars: HashMap::new(),
@@ -317,6 +335,7 @@ where
             assumption_marks: Vec::new(),
             ret: None,
             loop_depth: 0,
+            frame_depth: 0,
             cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
@@ -332,6 +351,7 @@ where
         generic_calls,
         trait_calls,
         inherent_calls,
+        inherent_call_bounds,
         is_tests,
     })
 }
@@ -367,6 +387,7 @@ struct Bodies<'a> {
     generic_calls: &'a mut HashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut HashMap<Span, TraitCall>,
     inherent_calls: &'a mut HashMap<Span, MethodId>,
+    inherent_call_bounds: &'a mut HashMap<Span, InherentCallBounds>,
     is_tests: &'a mut HashMap<Span, Ty>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
@@ -387,6 +408,10 @@ struct Bodies<'a> {
     /// The enclosing return union; `None` outside function bodies.
     ret: Option<Ty>,
     loop_depth: usize,
+    /// Depth of enclosing lambda and spawned-body frames. Loop exits
+    /// never cross such a frame, so a stray exit inside one reports the
+    /// crossed boundary instead of a missing loop.
+    frame_depth: usize,
     /// Depth of condition positions being walked (if/match-guard/while
     /// conditions). An `is` test there refines legitimately — a disjoint
     /// test narrows a branch to empty, which is sound dead code — so the
@@ -640,6 +665,11 @@ impl Bodies<'_> {
         self.locals.clear();
         self.refined.clear();
         self.ret = None;
+        // The initializer is its own frame: a lazily triggered fill
+        // must not inherit the triggering walk's loop and frame depths.
+        let (outer_loops, outer_frames) = (self.loop_depth, self.frame_depth);
+        self.loop_depth = 0;
+        self.frame_depth = 0;
         // A use in another file's body can trigger this lazy fill; the
         // initializer's spans resolve under the binding's OWN file table,
         // never the triggering file's [G3].
@@ -674,6 +704,8 @@ impl Bodies<'_> {
             }
         }
         self.restore(saved);
+        self.loop_depth = outer_loops;
+        self.frame_depth = outer_frames;
         self.res = home_res;
         self.visiting.truncate(visiting);
     }
@@ -1115,12 +1147,17 @@ impl Bodies<'_> {
             },
             Expr::Break(span) | Expr::Continue(span) => {
                 if self.loop_depth == 0 {
-                    self.error(
-                        ErrorCode::InferenceFailed,
-                        "loop exit outside a loop".to_owned(),
-                        *span,
-                        "stray loop exit",
-                    );
+                    // The loop depth is frame-scoped: inside a lambda or
+                    // spawned body it counts only that frame's own loops.
+                    let (message, label) = if self.frame_depth > 0 {
+                        (
+                            "loop exits never cross a lambda or spawned-body frame boundary",
+                            "frame-crossing loop exit",
+                        )
+                    } else {
+                        ("loop exit outside a loop", "stray loop exit")
+                    };
+                    self.error(ErrorCode::InferenceFailed, message.to_owned(), *span, label);
                 }
                 Val {
                     ty: self.empty(),
@@ -1128,17 +1165,10 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
-            Expr::Nursery { body, .. } | Expr::Spawn { body, .. } => {
-                let saved = self.snapshot();
-                self.refined.clear();
-                self.block(body);
-                self.restore(saved);
-                Val {
-                    ty: self.unit(),
-                    diverges: false,
-                    poisoned: false,
-                }
-            },
+            Expr::Nursery { body, .. } => self.fiber_block(body, false),
+            // A spawned body runs as its own fiber: its loop exits stay
+            // inside its frame.
+            Expr::Spawn { body, .. } => self.fiber_block(body, true),
             Expr::Defer { body, .. } => {
                 self.block(body);
                 Val {
@@ -1648,7 +1678,15 @@ impl Bodies<'_> {
         let expected_is_var = fn_ret_expected.is_some_and(|r| self.is_var_ty(r));
         let old_ret = self.ret;
         self.ret = if expected_is_var { None } else { fn_ret_expected };
+        // A lambda body starts its own frame: the lexical loop depth
+        // stays with the enclosing frame. The synthesized script entry
+        // keeps the file walk's depth; its stray exits have no loop, and
+        // the boundary message would name a lambda the user never wrote.
+        let frame = (span.start != span.end).then(|| self.enter_frame());
         let body_val = self.expr(body, self.ret);
+        if let Some(frame) = frame {
+            self.exit_frame(frame);
+        }
         let fn_ret = match fn_ret_expected {
             Some(r) if !expected_is_var => {
                 if !body_val.diverges {
@@ -3274,6 +3312,19 @@ impl Bodies<'_> {
     fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
         if matches!(&self.package.method(method).owner, MethodOwner::Inherent(_)) {
             self.inherent_calls.insert(span, method);
+            // A generic inherent impl's body dispatches on runtime
+            // evidence (H3): the site records the serving instance per
+            // declared bound under the receiver's substitution — the
+            // trait arm's per-bound record minus the instance word an
+            // inherent impl never has.
+            if let Some(&impl_site) = self.decls.inherent_impls.get(&method)
+                && let Some(record) = self.decls.inherent_impl_bounds.get(&impl_site).cloned()
+            {
+                let bounds = self.inherent_evidence(record.head, &record.conditions, recv, span);
+                if !bounds.is_empty() {
+                    self.inherent_call_bounds.insert(span, bounds);
+                }
+            }
             return;
         }
         let MethodOwner::Trait(def) = &self.package.method(method).owner else {
@@ -4718,6 +4769,42 @@ impl Bodies<'_> {
         }
     }
 
+    /// The runtime evidence one inherent call site must stage for the
+    /// impl's declared bounds (H3): the head pattern substitutes against
+    /// the receiver, and every bound must hold for the substituted type
+    /// exactly as the trait form's instance bounds do [B6] — an in-scope
+    /// assumption satisfies the checker while the record keeps `None`
+    /// (the lowerer refuses that site naming the staging seam). A head
+    /// that does not unify (a union receiver solving the variables
+    /// differently) records nothing.
+    fn inherent_evidence(
+        &mut self,
+        head: Ty,
+        conditions: &[Condition<Ty>],
+        recv: Ty,
+        span: Span,
+    ) -> InherentCallBounds {
+        let targets = crate::instance_solve::inherent_bound_targets(
+            &mut self.decls.universe,
+            head,
+            conditions,
+            recv,
+        );
+        let mut out = Vec::new();
+        for (var, trait_id, target) in targets {
+            if self.decls.universe.is_empty(target) {
+                continue; // a cascading argument error's empty type
+            }
+            let served = if self.trait_satisfied(trait_id, target, span) {
+                self.instance_resolution(trait_id, target).solved()
+            } else {
+                None
+            };
+            out.push((var, trait_id, served));
+        }
+        out
+    }
+
     /// Whether a trait holds for a type: an in-scope assumption covers
     /// it, or the environment resolves an instance — a containing head
     /// for concrete receivers, or a generic head that unifies with the
@@ -4889,6 +4976,40 @@ impl Bodies<'_> {
             .universe
             .atom_ty(var)
             .unwrap_or_else(|_| self.empty())
+    }
+
+    /// A nursery or spawn block: the body checks in a fresh scope. A
+    /// spawned body starts its own frame, since it runs as its own
+    /// fiber.
+    fn fiber_block(&mut self, body: &BlockExpr, own_frame: bool) -> Val {
+        let saved = self.snapshot();
+        self.refined.clear();
+        let frame = own_frame.then(|| self.enter_frame());
+        self.block(body);
+        if let Some(frame) = frame {
+            self.exit_frame(frame);
+        }
+        self.restore(saved);
+        Val {
+            ty: self.unit(),
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
+    /// Enters one lambda or spawned-body frame: the lexical loop depth
+    /// stays with the enclosing frame because loop exits never cross a
+    /// function or lambda frame boundary. Returns the saved depth for the
+    /// paired [`Self::exit_frame`].
+    fn enter_frame(&mut self) -> usize {
+        self.frame_depth += 1;
+        std::mem::replace(&mut self.loop_depth, 0)
+    }
+
+    /// The paired exit of [`Self::enter_frame`].
+    fn exit_frame(&mut self, saved: usize) {
+        self.frame_depth -= 1;
+        self.loop_depth = saved;
     }
 
     fn snapshot(&self) -> ScopeMark {
