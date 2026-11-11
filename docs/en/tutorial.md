@@ -52,7 +52,7 @@ timeout                                    // unit tag: bare
 bad_number("nan")                          // enum case: call form only
 page { url: "https://ds.dev", body: "" }   // struct: brace form only
 const url = "https://ds.dev"
-page { url, body: "" }                     // punning: the field fills from the local
+const home = page { url, body: "" }       // punning: the field fills from the local
 ```
 
 `T?` is exactly `T | none` and is legal in every annotation position; `none` is an ordinary unit tag, so optionals, error unions, and enums share one mechanism — narrowing, matching, and one extraction family — with no `?.` operator.
@@ -227,7 +227,7 @@ struct file: ~Copyable {
 
 fn size(s: string) -> int { ... }           // borrow: immutable for the call
 fn read_all(f: mut file) -> string { ... }  // exclusive mutable window
-fn close(move h: file) { ... }              // consume: moved in, dies and deinits here
+fn close_file(move h: file) { ... }          // consume: moved in, dies and deinits here
 ```
 
 ## Collections and iteration
@@ -257,6 +257,8 @@ for u in users {
   println("user ${u.name} age ${u.age}")
 }
 ```
+
+Stage note: `for x in xs` iteration and `x in xs` membership run today over lists of one-word elements (`int`, `float`, `bool`, `string`); lists of struct or tuple elements wait on the multi-word element ruling, so the `user` chains above are checked surface, not running examples yet. Maps have no iteration — build a list, or use the checked `get` read.
 
 ## Traits and generics
 

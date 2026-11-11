@@ -18,10 +18,10 @@
 //! * instance heads of generic impls — minted into the [`crate::instance::InstanceEnv`] as solved
 //!   singletons over freshly minted variable atoms, so coherence checking (B6) runs unchanged.
 //!
-//! Instance-head resolution under substitution (`json for list[int]`
-//! because `json for int` exists) is deliberately not here: lookup stays
-//! containment-only, exact for concrete heads and conservative for
-//! variable heads; seeing through a conditional head is H3 checker work.
+//! Instance-head resolution under substitution (`shows for list[int]`
+//! because `shows for int` exists) is not here: lookup stays
+//! containment-only, and [`crate::instance_solve`] owns the unification
+//! and bound-recursion half at call sites.
 //! The `~Copyable` marker bound on generic parameters (C1) is carried on
 //! the parameter and otherwise unchecked here; the affine pass owns it at
 //! M4.
@@ -205,11 +205,22 @@ pub struct Decls {
     pub members: HashMap<MethodId, Arc<FnSig>>,
     /// Member names of each trait, for impl signature matching (B6).
     pub trait_members: HashMap<DefId, Vec<String>>,
+    /// Generic parameter names of each trait, in declaration order: an
+    /// impl's trait reference substitutes them positionally when it
+    /// spells its arguments (B6).
+    pub trait_generics: HashMap<DefId, Vec<String>>,
     /// Inherent impl-function signatures keyed by method id (F3).
     pub inherent: HashMap<MethodId, Arc<FnSig>>,
     /// Top-level `const`/`var` initializers keyed by every name the
     /// binding pattern declares (lazy memoized typing (G3)).
     pub consts: HashMap<DefId, LocalDecl>,
+    /// The solved return type of every impl-member function body (trait
+    /// and inherent alike), keyed by the declaring `FnDecl`'s span: the
+    /// written return solved against `Self`, or the body's own checked
+    /// type when the declaration infers it. The lowering pass reads this
+    /// when it plans impl bodies — a member function has no package
+    /// `DefId`, so no other solved-signature table names it.
+    pub impl_fn_rets: HashMap<Span, Ty>,
     /// Shared counter for minted type-variable tags (`$t#3`): instance
     /// declaration and body checking draw from it so the package universe
     /// never sees one name twice.
@@ -393,6 +404,10 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     }
                 }
                 decls.trait_members.insert(def, names);
+                decls.trait_generics.insert(
+                    def,
+                    t.generics.iter().map(|p| p.name.name.clone()).collect(),
+                );
             }
         },
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
@@ -951,6 +966,20 @@ fn member_id(package: &Package, trait_def: DefId, name: &str) -> Option<MethodId
         .iter()
         .copied()
         .find(|&id| package.method(id).owner == MethodOwner::Trait(trait_def))
+}
+
+/// One trait member's registered signature and declaring span (B6): the
+/// signature an impl member must agree with, and the site an agreement
+/// diagnostic points back to.
+pub(crate) fn trait_member_sig(
+    package: &Package,
+    decls: &Decls,
+    trait_def: DefId,
+    name: &str,
+) -> Option<(Arc<FnSig>, Span)> {
+    let method = member_id(package, trait_def, name)?;
+    let sig = decls.members.get(&method)?.clone();
+    Some((sig, package.method(method).span))
 }
 
 /// Every name a binding pattern binds, through the shared binder walker.

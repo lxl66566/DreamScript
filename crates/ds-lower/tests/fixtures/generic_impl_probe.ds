@@ -1,0 +1,52 @@
+// purpose: the generic-impl runtime-evidence seam — a generic impl's
+// member bodies lower once per impl under mangled identity; the call
+// sites entering them stage the per-bound evidence words (the serving
+// member bodies under the site's substitution) plus the declared
+// instance id; the body's nested calls on the bound variable dispatch
+// at runtime through the staged slot (the sentinel FuncRef over
+// CALLG). Two instantiations of one body run: int elements and string
+// elements, the latter exercising the kind-checked RC balance over the
+// Raw runtime word.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = "list:"
+    for x in self {
+      acc = "${acc}${x.show()};"
+    }
+    acc
+  }
+}
+
+fn main() -> int {
+  println([1, 2].show())
+  println(["a", "b"].show())
+  0
+}

@@ -816,6 +816,7 @@ parses! {
     negation => "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
     fn_types => "type h = fn(a: int) -> int\n",
     fn_type_ctor_args => "fn f() { const fns = list[fn(int) -> int]()\n const m = map[string, fn(int) -> int]()\n const n = list[list[fn() -> int]]()\n}\n",
+    fn_type_annotation_positions => "struct handler { f: fn(int) -> int, pending: list[fn(int) -> int] }\nenum ev { made(fn(int) -> int), none }\nfn gen[t: fn(int) -> int](x: t) -> t { x }\nfn f(g: fn(int) -> int) -> fn(int) -> int {\nconst a: fn(int) -> int = g\nvar b: fn(int) -> int = g\nmatch g {\n  h: fn(int) -> int => ()\n}\nif g is fn(int) -> int { g }\n}\n",
     unit_type => "fn main() -> () | io_error { 0 }\n",
     case_type_refs => "type e = badnumber(string) | missingfield(string)\n",
     enum_decl => "enum color { red, green(int), blue { shade: int } }\n",

@@ -62,6 +62,14 @@ fn resolve_funcref(
     module: &str,
     index: u32,
 ) -> Result<(String, u32), ()> {
+    // The runtime-evidence sentinel names no module: its `func` field is
+    // the calling frame's slot, resolved by the CALLG arm at dispatch,
+    // so validation only bounds the slot index.
+    if module == crate::EVIDENCE_MODULE {
+        return (index < 256)
+            .then_some((module.to_owned(), index))
+            .ok_or(());
+    }
     if module.is_empty() || module == own_module {
         if (index as usize) < local_len {
             return Ok((own_module.to_owned(), index));

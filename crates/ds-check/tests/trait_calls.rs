@@ -318,3 +318,251 @@ fn same_named_generic_params_across_impls_both_declare() {
         "each impl contributes its instance"
     );
 }
+
+const GENERIC_IMPL_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+    "fn calls(xs: list[int]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A generic impl's head `list[t]` declares an opaque application atom no
+/// containment ever matches for a concrete receiver; the call site over
+/// `list[int]` checks clean because the head unifies with the receiver and
+/// the `shows` bound holds for the substituted `int`. The recorded
+/// instance is the declared generic instance — no per-substitution
+/// instance is minted; the recorded receiver type carries the
+/// substitution.
+#[test]
+fn generic_impl_call_site_records_the_declared_instance() {
+    let (ast, analyzed) = analyze_source("generic_impl.ds", GENERIC_IMPL_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "the generic-impl call site checks clean: {rendered:?}"
+    );
+    let spans = call_spans(&ast);
+    assert_eq!(spans.len(), 1, "the fixture makes one call");
+    let universe = &analyzed.decls.universe;
+    let solved = &analyzed.checked.trait_calls[&spans[0]];
+    assert_eq!(universe.render(solved.recv), "list[int]");
+    let impls = impl_spans(&ast);
+    assert_eq!(impls.len(), 2);
+    assert_eq!(
+        solved.impl_site,
+        Some(impls[1]),
+        "the list impl's own instance serves the call"
+    );
+    let (head, _) = (
+        analyzed.decls.instances.head(solved.instance),
+        analyzed.decls.instances.trait_of(solved.instance),
+    );
+    assert_eq!(
+        universe.render(head.unwrap()),
+        "list[$t#1]",
+        "the solved instance is the declared generic head"
+    );
+}
+
+const GENERIC_BOUND_MISS_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "trait unrelated {\n",
+    "  fn peek(self) -> int\n",
+    "}\n",
+    "impl [t: unrelated] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+    "fn calls(xs: list[int]) -> () {\n",
+    "  shows::show(xs)\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A head that matches while its declared bound fails reports the
+/// unsatisfied bound, never a bare missing-instance message: the head
+/// unified (`t` solved to `int`) and the bound `unrelated` for `int` is
+/// the missing proof.
+#[test]
+fn generic_impl_with_unsatisfied_bound_names_the_bound() {
+    let (_ast, analyzed) = analyze_source("bound_miss.ds", GENERIC_BOUND_MISS_SOURCE);
+    assert!(
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .any(|d| d.code.as_str() == "DS2013"
+                && d.message.contains("no instance of `unrelated` for `int`")),
+        "the missing bound is named: {:?}",
+        analyzed.checked.diags
+    );
+    assert!(
+        analyzed.checked.trait_calls.is_empty(),
+        "an unsatisfied bound records no dispatch"
+    );
+}
+
+const GENERIC_ASSUMED_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+    "fn calls[u: shows](ys: list[u]) -> () {\n",
+    "  ys.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A generic impl also serves receivers that are themselves bound
+/// variables: the head unifies (`t` binds the caller's variable) and the
+/// bound holds through the in-scope assumption. The dispatch target is
+/// statically the generic impl, so the site records it — the receiver's
+/// element type is the runtime-resolved half, and the lowerer refuses it
+/// honestly.
+#[test]
+fn generic_impl_serves_bound_variable_receivers() {
+    let (ast, analyzed) = analyze_source("generic_assumed.ds", GENERIC_ASSUMED_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "the bound-variable receiver checks clean: {rendered:?}"
+    );
+    let spans = call_spans(&ast);
+    assert_eq!(spans.len(), 1);
+    assert!(
+        analyzed.checked.trait_calls.contains_key(&spans[0]),
+        "the statically-known generic impl records its dispatch"
+    );
+}
+
+const GENERIC_AMBIGUITY_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"one\" }\n",
+    "}\n",
+    "impl [u: shows] shows for list[u] {\n",
+    "  fn show(self) -> string { \"two\" }\n",
+    "}\n",
+    "fn calls(xs: list[int]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// Two generic impls of one trait with the same head shape declare
+/// legally (their heads are distinct opaque atoms, disjoint as declared),
+/// but both serve one receiver: true ambiguity at the call site, a
+/// compile error naming both impls, never a priority order.
+#[test]
+fn two_generic_impls_of_one_shape_are_ambiguity_at_the_call() {
+    let (ast, analyzed) = analyze_source("generic_amb.ds", GENERIC_AMBIGUITY_SOURCE);
+    let ambiguity = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2010")
+        .expect("the ambiguity reports as DS2010");
+    assert!(
+        ambiguity
+            .message
+            .contains("2 impls of `shows` accept receiver `list[int]`"),
+        "the message names the trait and receiver: {}",
+        ambiguity.message
+    );
+    let impls = impl_spans(&ast);
+    assert_eq!(impls.len(), 3, "the monomorphic impl plus both generics");
+    assert_eq!(
+        ambiguity.labels.len(),
+        3,
+        "the call plus both generic impl sites"
+    );
+    let spans = call_spans(&ast);
+    assert!(
+        !analyzed.checked.trait_calls.contains_key(&spans[0]),
+        "the ambiguous call records no dispatch"
+    );
+}
+
+const GENERIC_UNION_RECEIVER_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait shows {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl shows for int {\n",
+    "  fn show(self) -> string { \"i\" }\n",
+    "}\n",
+    "impl shows for string {\n",
+    "  fn show(self) -> string { \"s\" }\n",
+    "}\n",
+    "impl [t: shows] shows for list[t] {\n",
+    "  fn show(self) -> string { \"l\" }\n",
+    "}\n",
+    "fn calls(xs: list[int] | list[string]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A union receiver is served when every member unifies with the head
+/// under its own substitution: `list[int]` and `list[string]` both cover
+/// under `t`, each proving the bound against its own element.
+#[test]
+fn generic_impl_serves_union_receivers_member_wise() {
+    let (ast, analyzed) = analyze_source("generic_union.ds", GENERIC_UNION_RECEIVER_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "the union receiver checks clean: {rendered:?}"
+    );
+    let spans = call_spans(&ast);
+    assert!(analyzed.checked.trait_calls.contains_key(&spans[0]));
+}

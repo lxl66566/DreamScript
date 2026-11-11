@@ -1,0 +1,78 @@
+// source: record C4, the while-cond placement round 2026-11-12
+// purpose: a Ref operand of a while condition is loop-carried — its count dies past the loop, never at the per-iteration head use
+// items:
+// guard: stage: typecheck
+// dying_string: stage: run
+// dying_list: stage: run
+// compound: stage: run
+// guard_cond: stage: run
+// nested: stage: run
+// uses_after: stage: run
+
+struct guard: ~Copyable {
+  word: string
+  deinit { println("guard gone") }
+}
+
+fn dying_string() -> int {
+  const base = "abc"
+  var n: int = 0
+  while base == "abc" && n < 3 {
+    n += 1
+  }
+  n
+}
+
+fn dying_list() -> int {
+  const words = ["alpha", "beta", "gamma"]
+  var n: int = 0
+  while len(words) == 3 && n < 2 {
+    n += 1
+  }
+  n
+}
+
+fn compound() -> int {
+  const a = "ab"
+  const b = "cd"
+  var n: int = 0
+  while a == "ab" && b == "cd" && n < 2 {
+    n += 1
+  }
+  n
+}
+
+fn guard_cond() -> int {
+  const g = guard { word: "abc" }
+  var n: int = 0
+  while g.word == "abc" && n < 2 {
+    n += 1
+  }
+  n
+}
+
+fn nested() -> int {
+  const a = "aa"
+  var total: int = 0
+  var i: int = 0
+  while a == "aa" && i < 2 {
+    const c = "cc"
+    var k: int = 0
+    while c == "cc" && k < 2 {
+      k += 1
+    }
+    total += k
+    i += 1
+  }
+  total
+}
+
+fn uses_after() -> int {
+  const base = "abc"
+  var n: int = 0
+  while base == "abc" && n < 2 {
+    n += 1
+  }
+  println("still ${base}")
+  n
+}

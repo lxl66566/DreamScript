@@ -364,14 +364,36 @@ impl Bodies<'_> {
             },
             In => {
                 // Only non-range right sides reach here (`binary` routes
-                // `x in a..b` first); collection membership is not ruled,
-                // so refuse instead of typing bool ahead of a ruling.
+                // `x in a..b` first). Membership over one list
+                // application is ruled [F7]: the operand carries the
+                // element type and the result is bool; every other
+                // right side keeps the honest refusal until its ruling.
+                if let Some(element) = self.list_element(right) {
+                    if !self.decls.universe.contains(element, left) {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "list membership needs the list's element type `{}`, `{}` given",
+                                self.decls.universe.render(element),
+                                self.decls.universe.render(left)
+                            ),
+                            span,
+                            "operand mismatch",
+                        );
+                    }
+                    return Val {
+                        ty: bool_ty,
+                        diverges: false,
+                        poisoned: false,
+                    };
+                }
                 self.error(
                     ErrorCode::NonRangeIn,
-                    "`in` ranges over ranges (`x in a..b`); collection membership is not ruled yet"
+                    "`in` runs over ranges (`x in a..b`) and lists (`x in xs`); membership over \
+                     other collections is not ruled yet"
                         .to_owned(),
                     span,
-                    "not a range",
+                    "not a range or list",
                 );
                 Val {
                     ty: bool_ty,
@@ -481,6 +503,18 @@ impl Bodies<'_> {
             },
         }
         None
+    }
+
+    /// The element type of one whole-list application [F7]: membership
+    /// reads it. `None` for any other type — a union of lists, a
+    /// non-list application, a non-application.
+    fn list_element(&mut self, ty: Ty) -> Option<Ty> {
+        let (ctor, args) = self.single_apply(ty)?;
+        let [element] = args.as_slice() else {
+            return None
+        };
+        let def = self.package.lookup_type("list")?;
+        (self.decls.defs_of_atoms.get(&ctor) == Some(&def)).then_some(*element)
     }
 
     /// Range membership (F7): the operand must carry the range's integer

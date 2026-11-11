@@ -12,6 +12,14 @@ use ds_abi::{BuiltinInstance, SlotType};
 /// top of the platform tag-id reservation both native modules share.
 pub(crate) const PLATFORM_IO_OK: u8 = u8::MAX;
 
+/// The reserved FuncRef module name a runtime-resolved trait dispatch
+/// site inside a generic impl body carries [H3]: the FuncRef's `func`
+/// field names the calling frame's evidence slot, whose staged word
+/// holds the serving member body's function-table index in the
+/// enclosing module. `$` sits outside the identifier charset, so no
+/// user package can collide.
+pub(crate) const EVIDENCE_MODULE: &str = "$evidence";
+
 /// Which reserved native module a covered native's pool FuncRef
 /// addresses: the VM's `builtin` core or the `std` platform module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -604,6 +612,11 @@ mod drift {
     /// and the tag-mint ceiling are the VM's reservations.
     #[test]
     fn module_names_and_success_tag_match_the_vm_reservation() {
+        assert_eq!(
+            EVIDENCE_MODULE,
+            ds_vm::EVIDENCE_MODULE,
+            "the runtime-evidence sentinel matches the VM's reservation"
+        );
         assert_eq!(NativeModule::Builtin.name(), ds_vm::native::BUILTIN_MODULE);
         assert_eq!(
             NativeModule::StdPlatform.name(),

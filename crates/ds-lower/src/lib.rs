@@ -55,12 +55,16 @@ mod native;
 mod place;
 mod shape;
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use ds_abi::{RcOp, Uop};
-use ds_check::Analyzed;
+use ds_check::{Analyzed, TraitId, render_type};
+use ds_diag::Span;
 use ds_mod::{Hash128, Module, TargetClass};
-use ds_parse::{Ast, Expr, Item, ItemKind, Pattern};
+use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
 use func::{FnLower, Plan};
 use shape::Shapes;
@@ -146,6 +150,7 @@ pub fn lower(
         });
     }
     let mut plan = Plan::new();
+    plan_deinits(asts, &mut plan, analyzed);
     for ast in asts {
         for block in &ast.blocks {
             for item in &block.items {
@@ -179,6 +184,72 @@ pub fn lower(
     })
 }
 
+/// Plans every struct's declared `deinit` member as a synthesized module
+/// function before any body lowers (C5): binding a value of a
+/// deinit-carrying struct claims the hook by naming this plan's function,
+/// so the table index must exist before the first binder mints its pool
+/// constant. The synthesized function is one borrowed `self` parameter —
+/// the dying instance — whose body is the declared block, named after
+/// the struct. A generic struct's deinit registers without a plan:
+/// binding its values refuses with the CALL_GENERIC seam instead of
+/// silently skipping the hook.
+fn plan_deinits(asts: &[Ast], plan: &mut Plan, analyzed: &Analyzed) {
+    for ast in asts {
+        for block in &ast.blocks {
+            for item in &block.items {
+                let ItemKind::Struct(s) = &item.kind else {
+                    continue;
+                };
+                let Some((span, body)) = s.members.iter().find_map(|member| match member {
+                    StructMember::Deinit { span, body } => Some((*span, body.clone())),
+                    StructMember::Field(_) => None,
+                }) else {
+                    continue;
+                };
+                let Some(def) = analyzed.package.lookup_type(&s.name.name) else {
+                    continue;
+                };
+                if !s.generics.is_empty() {
+                    plan.declare_deinit(def);
+                    continue;
+                }
+                let lambda = Expr::Lambda {
+                    span,
+                    generics: Vec::new(),
+                    params: vec![Param {
+                        span,
+                        mode: ds_parse::ParamMode::Borrow,
+                        name: Ident {
+                            span,
+                            name: "self".to_owned(),
+                        },
+                        ty: None,
+                        default: None,
+                    }],
+                    ret: None,
+                    arrow: true,
+                    body: Box::new(Expr::Block(body)),
+                };
+                let body_span_value = body_span(&lambda);
+                plan.push_deinit(def, &s.name.name, lambda, body_span_value);
+            }
+        }
+    }
+}
+
+/// The deinit function's recorded body-block span: the checker types the
+/// declared block in place, so its span keys the unit return the
+/// synthesized function reads.
+fn body_span(lambda: &Expr) -> Span {
+    let Expr::Lambda { body, .. } = lambda else {
+        unreachable!("the synthesized deinit is a lambda");
+    };
+    let Expr::Block(block) = &**body else {
+        unreachable!("the synthesized deinit body is a block");
+    };
+    block.span
+}
+
 /// A `#[derive(...)]` attribute refuses at lowering: the derive engine
 /// is M6's (G1) work, so the attribute generates no behavior yet, and
 /// the refusal reports that at the attribute's own span. Parse, check,
@@ -200,6 +271,10 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 /// monomorphic const-arrow function. Everything else is skipped; generic
 /// functions and comptime items are the documented M6 exemption.
 fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
+    if let ItemKind::Impl(imp) = &item.kind {
+        plan_impl(item, imp, plan, analyzed);
+        return;
+    }
     let ItemKind::Local(local) = &item.kind else {
         return;
     };
@@ -224,6 +299,86 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     plan.push(name.name.clone(), def, local);
 }
 
+/// Collects one trait impl's member bodies into the plan (the trait
+/// dispatch seam): each member fn enters the function table under its
+/// mangled identity `<trait>#<target>#<member>` with the checker-solved
+/// return its FnDecl names. Inherent impls stay unplanned — no instance
+/// names their bodies, and their call sites keep refusing. A generic
+/// impl's bodies lower per resolved receiver type, which no static plan
+/// can name: the item is marked runtime-evidence territory and call
+/// sites dispatching into it refuse naming the seam.
+fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
+    let Some(trait_ref) = &imp.trait_ref else {
+        return;
+    };
+    let [only] = trait_ref.path.segments.as_slice() else {
+        return;
+    };
+    let bounds = impl_bounds(item.span, analyzed);
+    if !imp.generics.is_empty() {
+        // the runtime-evidence territory [H3]: a generic impl's member
+        // bodies lower once per impl (never per instantiation), the call
+        // sites entering them stage the per-bound evidence words the
+        // body's nested dispatches read, and the marker serves the
+        // transitive refusal — a nested dispatch whose serving body is
+        // itself generic has no staging yet
+        plan.note_runtime_impl(item.span);
+    }
+    for f in &imp.fns {
+        let Some(body) = &f.body else {
+            continue;
+        };
+        let Some(ret) = analyzed.decls.impl_fn_rets.get(&f.span).copied() else {
+            continue;
+        };
+        let body_expr = Rc::new(Expr::Block(body.clone()));
+        let evidence = if bounds.is_empty() {
+            Rc::new(Vec::new())
+        } else {
+            let res = &analyzed.resolutions[f.span.file.as_u32() as usize];
+            Rc::new(func::runtime_pairs(analyzed, res, &bounds, &body_expr))
+        };
+        let name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
+        plan.push_declared(
+            name,
+            item.span,
+            f.name.name.clone(),
+            Rc::new(f.params.clone()),
+            body_expr,
+            ret,
+            evidence,
+        );
+    }
+}
+
+/// The declared bounds of one generic impl's type variables: parameter
+/// name to the traits its `[t: trait]` clauses name, from the instances
+/// the impl declared. The name (not the minted atom) is the key because
+/// the instance declaration and the body's checking mint their own
+/// variables; a bare `[t]` parameter bounds nothing, so calls on it
+/// never check clean and no demand collects for it.
+fn impl_bounds(impl_site: Span, analyzed: &Analyzed) -> HashMap<String, HashSet<TraitId>> {
+    let mut out: HashMap<String, HashSet<TraitId>> = HashMap::new();
+    for (instance, site) in &analyzed.decls.instance_impls {
+        if *site != impl_site {
+            continue;
+        }
+        let Ok(conditions) = analyzed.decls.instances.conditions(*instance) else {
+            continue;
+        };
+        for cond in conditions {
+            let [var] = analyzed.decls.universe.members(cond.ty) else {
+                continue;
+            };
+            let Some(param) = shape::var_param_name(&analyzed.decls.universe, *var) else {
+                continue;
+            };
+            out.entry(param).or_default().insert(cond.trait_id);
+        }
+    }
+    out
+}
+
 /// What lowering every planned function yields: the module's functions,
 /// each function's placed op sequence, and the shared shape tables.
 type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
@@ -237,7 +392,7 @@ fn lower_all<'b>(
     analyzed: &'b Analyzed,
     lin: &ds_check::Linearity,
 ) -> Result<LowerAll<'b>, LowerError> {
-    let mut shapes = Shapes::new(analyzed);
+    let mut shapes = Shapes::new(analyzed, plan.declared_deinits());
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
     let mut index = 0;

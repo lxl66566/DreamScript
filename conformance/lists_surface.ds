@@ -7,6 +7,8 @@
 // empty_pages: stage: run
 // fresh_ints: stage: run
 // seeds_total: stage: run
+// for_sum: stage: run
+// member_scan: stage: run
 // reject-mixed: stage: reject the mixed-element literal names the offending item's type (DS2001) [B3]
 
 struct page { url: string }
@@ -43,6 +45,20 @@ fn fresh_ints() -> list[int] {
 fn seeds_total() -> int {
   const seeds: list[int] = [10, 20]
   list_len(seeds) + list_len(fresh_ints())
+}
+
+fn for_sum() -> int {
+  const xs = [1, 2, 3]
+  var total: int = 0
+  for x in xs {
+    total += x
+  }
+  total
+}
+
+fn member_scan() -> bool {
+  const words = ["alpha", "beta"]
+  2 in [1, 2, 3] && "beta" in words && !("delta" in words)
 }
 
 fn reject_mixed() -> int {

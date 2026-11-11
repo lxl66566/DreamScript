@@ -97,6 +97,14 @@
 // docs/en/design-decisions.md; they are references, not doc links.
 #![allow(rustdoc::broken_intra_doc_links)]
 
+/// The reserved FuncRef module name a runtime-resolved trait dispatch
+/// site inside a generic impl body carries (H3): the FuncRef's `func`
+/// field names the calling frame's evidence slot, whose staged word
+/// holds the serving member body's function-table index in the
+/// enclosing module. `$` sits outside the identifier charset, so no
+/// user package can collide.
+pub const EVIDENCE_MODULE: &str = "$evidence";
+
 pub mod fiber;
 pub mod loader;
 pub mod module;

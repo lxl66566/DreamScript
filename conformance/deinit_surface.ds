@@ -1,0 +1,52 @@
+// source: record C5, the deinit wiring round 2026-11-11
+// purpose: declared `deinit` blocks run observably at the value's unique death, across every exit
+// items:
+// res: stage: run
+// named: stage: run
+// early: stage: run
+// take: stage: run
+// borrow_keeps: stage: run
+// maker: stage: run
+// main: stage: run
+
+struct res: ~Copyable {
+  id: int
+  deinit { println("dying ${self.id}") }
+}
+
+struct named: ~Copyable {
+  label: string
+  deinit { println("bye ${self.label}") }
+}
+
+fn early(n: int) -> int {
+  const a = res { id: n }
+  if n > 3 {
+    return 99
+  }
+  a.id
+}
+
+fn take(f: res) -> int { f.id }
+
+fn borrow_keeps(n: int) -> int {
+  const r = res { id: n }
+  const got = take(r)
+  got + r.id
+}
+
+fn maker(n: int) -> res { res { id: n } }
+
+fn main() -> int {
+  println("early: ${early(7)}")
+  println("kept: ${early(1)}")
+  println("borrow: ${borrow_keeps(4)}")
+  const s = named { label: "alpha" }
+  println("have ${s.label}")
+  const r = maker(5)
+  println("made ${r.id}")
+  var b: res = res { id: 100 }
+  b = res { id: 200 }
+  println("rolled ${b.id}")
+  0
+}

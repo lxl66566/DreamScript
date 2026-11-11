@@ -149,6 +149,8 @@ error_codes! {
     AnnotatedReceiver => "DS2016", Type,
     /// `in` right-hand side is not a range; collection membership is not ruled yet.
     NonRangeIn => "DS2017", Type,
+    /// An impl member's signature disagrees with its trait member's arity, parameter modes, parameter types, or return.
+    ImplMemberSignatureMismatch => "DS2018", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -226,6 +228,7 @@ mod tests {
             ("LowercaseSelfType", "DS2015", ErrorClass::Type),
             ("AnnotatedReceiver", "DS2016", ErrorClass::Type),
             ("NonRangeIn", "DS2017", ErrorClass::Type),
+            ("ImplMemberSignatureMismatch", "DS2018", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

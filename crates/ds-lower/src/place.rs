@@ -32,10 +32,11 @@
 //! kept it, and an arm keeping a word the join does not keep decs it at
 //! its own flow end (the balanced join: a count produced or kept on one
 //! arm's path dies inside that arm), so each runtime path drops each
-//! count once. The deinit hook
-//! (C5) rides the drop: when the dying word's concrete type carries a
-//! `deinit`, the drop first stages the word and calls the static deinit
-//! target, then emits the `RCDEC`.
+//! count once. The deinit hook (C5) rides the value's base word: when
+//! the dying value's concrete type declares a `deinit`, the drop first
+//! stages the value's whole word span, calls the synthesized deinit
+//! function while the fields are still live, then emits the `RCDEC` on
+//! the count words.
 //!
 //! # Conservative corners (dup or defer rather than risk a premature free)
 //!
@@ -63,14 +64,31 @@ use ds_diag::Span;
 
 use super::func::Op;
 
+/// One declared deinit hook (C5): the pool index of the struct's
+/// synthesized deinit function plus the word width of the value it
+/// stages at the death.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Hook {
+    /// The pool index of the `Constant::FuncRef` naming the deinit.
+    pub(crate) pool: u16,
+    /// How many words the dying value spans; the hook stages them all.
+    pub(crate) width: u8,
+}
+
 /// One outstanding reference count this frame must account for.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Owned {
-    /// The static `deinit` hook of the dying word's concrete type (C5):
-    /// the pool index of the placeholder call target, staged before the
-    /// dec. `None` for deinit-less types (everything in the lowered
-    /// subset today).
-    deinit: Option<u16>,
+    /// The deinit hook of the dying value this word anchors (C5). A
+    /// hook rides the value's base word only: a scalar base word owns
+    /// the hook without any `Ref` count.
+    hook: Option<Hook>,
+    /// Whether the word carries a `Ref` count alongside any hook.
+    count: bool,
+    /// A deinit value's word: its uses are borrows and never kill it
+    /// (the C5 discipline keeps the value live to its drop site); only
+    /// a consuming move, the scope end, an assignment, or the frame
+    /// exit may fire the drop.
+    pinned: bool,
     /// The loop nesting depth at the production site.
     depth: usize,
 }
@@ -153,22 +171,82 @@ impl Placement {
 
     /// A fresh reference landed in `slot` (KSTR, STRCAT, a call result
     /// copied off the overlay, a zero-init dead Ref payload word).
-    pub(crate) fn produced(&mut self, slot: u8, deinit: Option<u16>) {
+    pub(crate) fn produced(&mut self, slot: u8) {
         self.owned.insert(slot, Owned {
-            deinit,
+            hook: None,
+            count: true,
+            pinned: false,
             depth: self.loop_depth,
+        });
+    }
+
+    /// Registers one deinit-carrying value's claim (C5): the hook
+    /// anchors the value's base word and fires at the value's unique
+    /// death; every already-owned word of the value pins — its uses are
+    /// borrows, never deaths. `count` says whether the base word also
+    /// holds a `Ref` count (a first `Ref` field); a scalar base word
+    /// owns the hook alone and never decs.
+    pub(crate) fn claimed(&mut self, base: u8, hook: Hook, count: bool, words: &[u8]) {
+        match self.owned.get_mut(&base) {
+            Some(owned) => {
+                owned.hook = Some(hook);
+                owned.pinned = true;
+            },
+            None => {
+                self.owned.insert(base, Owned {
+                    hook: Some(hook),
+                    count,
+                    pinned: true,
+                    depth: self.loop_depth,
+                });
+            },
+        }
+        for &word in words {
+            if let Some(owned) = self.owned.get_mut(&word) {
+                owned.pinned = true;
+            }
+        }
+    }
+
+    /// Whether one word anchors a deinit value's claim.
+    pub(crate) fn has_claim(&self, word: u8) -> bool {
+        self.owned
+            .get(&word)
+            .is_some_and(|owned| owned.hook.is_some())
+    }
+
+    /// Fires one word's deinit claim at a hand-off (C5): the word
+    /// escapes as a smaller value (a scalar field read of the dying
+    /// struct), so the claim the word anchors runs here while the
+    /// value's other words are still live. A count the word carries
+    /// rides the hand-off untouched — the claim is spent, the count is
+    /// the returned value's.
+    pub(crate) fn fire_claim(&mut self, code: &mut Vec<Op>, word: u8) {
+        let Some(hook) = self
+            .owned
+            .get_mut(&word)
+            .and_then(|owned| owned.hook.take())
+        else {
+            return;
+        };
+        for index in 0..hook.width {
+            code.push(Op::Mov {
+                dst: super::func::Slot::overlay(index),
+                src: super::func::Slot::body(word + index),
+            });
+        }
+        code.push(Op::Call {
+            callee: hook.pool,
+            nargs: hook.width,
         });
     }
 
     /// A binder starts naming `words`. Aliases add to the set; the word's
     /// death use widens to the latest last-use among all its binders.
-    pub(crate) fn bound(&mut self, binder: Span, words: &[u8], deinit: Option<u16>) {
+    pub(crate) fn bound(&mut self, binder: Span, words: &[u8]) {
         self.binder_words.insert(binder, words.to_vec());
         for &word in words {
             self.binders.entry(word).or_default().insert(binder);
-            if let Some(owned) = self.owned.get_mut(&word) {
-                owned.deinit = deinit;
-            }
             self.recompute_death(word);
         }
     }
@@ -195,6 +273,13 @@ impl Placement {
     }
 
     fn recompute_death(&mut self, word: u8) {
+        // A pinned word's death never derives from last uses (C5): the
+        // value stays live to its drop site, so only the checker's
+        // forced moves (the consuming use that transfers ownership) may
+        // claim it at a use.
+        if self.owned.get(&word).is_some_and(|owned| owned.pinned) {
+            return;
+        }
         let death = self
             .binders
             .get(&word)
@@ -268,7 +353,10 @@ impl Placement {
         let Some(owned) = self.owned.get(&src).copied() else {
             return;
         };
-        if self.dies_at(src) {
+        // A pinned word belongs to a deinit value: the copy site is the
+        // checker's consuming move (a linear value never alias-copies),
+        // so the claim and its count transfer with no dup.
+        if owned.pinned || self.dies_at(src) {
             // the count moves with the word
             self.owned.remove(&src);
             self.owned.insert(dst, owned);
@@ -303,7 +391,7 @@ impl Placement {
     pub(crate) fn store_over(&mut self, code: &mut Vec<Op>, words: &[u8]) {
         for &word in words {
             if let Some(owned) = self.owned.get(&word).copied() {
-                Self::emit_drop(code, word, owned.deinit);
+                Self::emit_drop(code, word, owned);
                 if !self.loop_carried(word) {
                     self.owned.remove(&word);
                 }
@@ -326,6 +414,21 @@ impl Placement {
         } else if self.forwarded.contains(&src) {
             // the count already left at this use; the extra handed word
             // needs its own (the callee drops each parameter once)
+            Self::emit_inc(code, src);
+        }
+    }
+
+    /// One Ref word staged for a local callee the frame tail-transfers
+    /// to: the transfer ends the frame, so no post-transfer position
+    /// exists for a dup or a drop — the count rides the callee (its own
+    /// exit drops the handed word) and a claim the word anchors fires
+    /// here, at the value's frame-exit death, with its fields alive.
+    pub(crate) fn staged_tail_local(&mut self, code: &mut Vec<Op>, src: u8) {
+        if self.owned.contains_key(&src) {
+            self.fire_claim(code, src);
+            self.owned.remove(&src);
+            self.forwarded.insert(src);
+        } else if self.forwarded.contains(&src) {
             Self::emit_inc(code, src);
         }
     }
@@ -362,34 +465,42 @@ impl Placement {
         }
     }
 
-    /// The central drop: the deinit hook (C5) stages the word and calls
-    /// the static target first when the concrete type carries one, then
-    /// the RCDEC consumes the count (a unique death pools the block for
-    /// reuse inside the `ds-vm/src/object.rs` store — the dec-to-alloc pairing needs no uop).
+    /// The central drop (C5): a deinit claim stages the value's whole
+    /// word span and calls the synthesized deinit function first — while
+    /// the value's fields are still alive — then the RCDEC consumes the
+    /// count when the word carries one (a unique death pools the block
+    /// for reuse inside the `ds-vm/src/object.rs` store — the
+    /// dec-to-alloc pairing needs no uop).
     fn drop_word(&mut self, code: &mut Vec<Op>, word: u8) {
         let owned = self.owned.remove(&word).unwrap_or(Owned {
-            deinit: None,
+            hook: None,
+            count: true,
+            pinned: false,
             depth: 0,
         });
-        Self::emit_drop(code, word, owned.deinit);
+        Self::emit_drop(code, word, owned);
     }
 
     /// Emits one drop without touching the ownership map — the exit path
     /// emits from a snapshot so sibling paths keep their counts.
-    fn emit_drop(code: &mut Vec<Op>, word: u8, deinit: Option<u16>) {
-        if let Some(deinit) = deinit {
-            code.push(Op::Mov {
-                dst: super::func::Slot::overlay(0),
-                src: super::func::Slot::body(word),
-            });
+    fn emit_drop(code: &mut Vec<Op>, word: u8, owned: Owned) {
+        if let Some(hook) = owned.hook {
+            for index in 0..hook.width {
+                code.push(Op::Mov {
+                    dst: super::func::Slot::overlay(index),
+                    src: super::func::Slot::body(word + index),
+                });
+            }
             code.push(Op::Call {
-                callee: deinit,
-                nargs: 1,
+                callee: hook.pool,
+                nargs: hook.width,
             });
         }
-        code.push(Op::RcDec {
-            src: super::func::Slot::body(word),
-        });
+        if owned.count {
+            code.push(Op::RcDec {
+                src: super::func::Slot::body(word),
+            });
+        }
     }
 
     fn emit_inc(code: &mut Vec<Op>, word: u8) {
@@ -402,7 +513,24 @@ impl Placement {
     /// inside its arm, deinit hook first like every drop.
     pub(crate) fn emit_drops(code: &mut Vec<Op>, dying: &[(u8, Owned)]) {
         for (word, owned) in dying {
-            Self::emit_drop(code, *word, owned.deinit);
+            Self::emit_drop(code, *word, *owned);
+        }
+    }
+
+    /// Drops one expression's consumed operand words when no binder
+    /// names them: an anonymous production whose consumption sat inside
+    /// a nested loop (the depth and carried guards suppressed its
+    /// in-loop dec) dies here instead — once per evaluation of the
+    /// enclosing expression, so a per-iteration production inside an
+    /// outer loop balances. A named word keeps its carried claim and
+    /// dies at its own scope end.
+    pub(crate) fn drop_unnamed(&mut self, code: &mut Vec<Op>, words: &[u8]) {
+        for &word in words {
+            if self.owned.contains_key(&word)
+                && self.binders.get(&word).is_none_or(HashSet::is_empty)
+            {
+                self.drop_word(code, word);
+            }
         }
     }
 
@@ -520,7 +648,7 @@ impl Placement {
             .map(|(word, owned)| (*word, *owned))
             .collect();
         for (word, owned) in dying {
-            Self::emit_drop(code, word, owned.deinit);
+            Self::emit_drop(code, word, owned);
         }
         self.owned.clear();
         self.diverged = true;
@@ -546,14 +674,16 @@ mod tests {
         Placement::new(HashMap::new(), HashSet::new())
     }
 
-    /// The deinit hook (C5): a dying word whose type carries a deinit
-    /// stages itself, calls the static placeholder target, then decs — the
-    /// structure every drop site routes through.
+    /// The deinit hook (C5): a dying value's claim stages its whole word
+    /// span, calls the synthesized deinit, then decs when its base word
+    /// carries a count — the structure every drop site routes through.
     #[test]
-    fn a_deinit_death_calls_the_static_target_before_the_dec() {
+    fn a_deinit_death_calls_the_hook_before_the_dec() {
         let mut rc = placement();
         let mut code = Vec::new();
-        rc.produced(3, Some(42));
+        // a Ref-backed base word: the claim rides the count word
+        rc.produced(3);
+        rc.claimed(3, Hook { pool: 42, width: 2 }, true, &[3, 4]);
         rc.drop_word(&mut code, 3);
         assert_eq!(
             code,
@@ -562,13 +692,73 @@ mod tests {
                     dst: Slot::overlay(0),
                     src: Slot::body(3),
                 },
+                Op::Mov {
+                    dst: Slot::overlay(1),
+                    src: Slot::body(4),
+                },
+                Op::Call {
+                    callee: 42,
+                    nargs: 2,
+                },
+                Op::RcDec { src: Slot::body(3) },
+            ],
+            "the hook stages the span, calls, then decs the count"
+        );
+        // a scalar base word: the hook fires alone, nothing decs
+        let mut rc = placement();
+        let mut code = Vec::new();
+        rc.claimed(7, Hook { pool: 42, width: 1 }, false, &[]);
+        rc.drop_word(&mut code, 7);
+        assert_eq!(
+            code,
+            vec![
+                Op::Mov {
+                    dst: Slot::overlay(0),
+                    src: Slot::body(7),
+                },
                 Op::Call {
                     callee: 42,
                     nargs: 1,
                 },
-                Op::RcDec { src: Slot::body(3) },
             ],
-            "the hook stages the word, calls, then decs"
+            "a scalar claim never decs"
+        );
+    }
+
+    /// A pinned deinit word never dies at a use: borrows keep it alive
+    /// to the scope end, where the last alias leaving kills it once.
+    #[test]
+    fn a_pinned_claim_survives_its_uses() {
+        let mut rc = placement();
+        let b = binder_span(10);
+        let use_at = binder_span(60);
+        rc.last_use.insert(b, (use_at, true));
+        rc.claimed(7, Hook { pool: 9, width: 1 }, false, &[7]);
+        rc.bound(b, &[7]);
+        rc.use_of(b, use_at);
+        let mut code = Vec::new();
+        rc.read(&mut code, &[7]);
+        assert!(code.is_empty(), "the borrowed use is not the death");
+        // a copy is the consuming move: the claim transfers, no dup
+        let mut code = Vec::new();
+        rc.copied(&mut code, 8, 7);
+        assert_eq!(code, Vec::new(), "a pinned copy transfers silently");
+        assert!(!rc.owned.contains_key(&7) && rc.owned.contains_key(&8));
+        let mut code = Vec::new();
+        rc.exit(&mut code, &[]);
+        assert_eq!(
+            code,
+            vec![
+                Op::Mov {
+                    dst: Slot::overlay(0),
+                    src: Slot::body(8),
+                },
+                Op::Call {
+                    callee: 9,
+                    nargs: 1,
+                },
+            ],
+            "the exit fires the transferred claim exactly once"
         );
     }
 
@@ -577,7 +767,7 @@ mod tests {
     fn copies_transfer_at_the_death_and_dup_before_it() {
         let mut rc = placement();
         let mut code = Vec::new();
-        rc.produced(1, None);
+        rc.produced(1);
         // no binders: the temp dies at first consumption
         rc.copied(&mut code, 2, 1);
         assert!(matches!(code.as_slice(), []), "a transfer emits nothing");
@@ -588,7 +778,7 @@ mod tests {
         let b = binder_span(50);
         let use_at = binder_span(90);
         rc.last_use.insert(b, (use_at, true));
-        rc.bound(b, &[2], None);
+        rc.bound(b, &[2]);
         rc.use_of(b, binder_span(60));
         let mut code = Vec::new();
         rc.copied(&mut code, 5, 2);
@@ -620,9 +810,9 @@ mod tests {
         let t_use = binder_span(40);
         rc.last_use.insert(s, (s_use, true));
         rc.last_use.insert(t, (t_use, true));
-        rc.produced(7, None);
-        rc.bound(s, &[7], None);
-        rc.bound(t, &[7], None);
+        rc.produced(7);
+        rc.bound(s, &[7]);
+        rc.bound(t, &[7]);
         rc.use_of(s, s_use);
         let mut code = Vec::new();
         rc.read(&mut code, &[7]);
@@ -639,8 +829,8 @@ mod tests {
         let b = binder_span(10);
         let in_loop = binder_span(60);
         rc.last_use.insert(b, (in_loop, true));
-        rc.produced(4, None);
-        rc.bound(b, &[4], None);
+        rc.produced(4);
+        rc.bound(b, &[4]);
         rc.loop_enter();
         rc.use_of(b, in_loop);
         let mut code = Vec::new();
@@ -666,8 +856,8 @@ mod tests {
         let b = binder_span(10);
         let use_at = binder_span(50);
         rc.last_use.insert(b, (use_at, true));
-        rc.produced(4, None);
-        rc.bound(b, &[4], None);
+        rc.produced(4);
+        rc.bound(b, &[4]);
         rc.loop_enter();
         // the head overwrite: one dec for the previous content, claim kept
         let mut code = Vec::new();
@@ -682,7 +872,7 @@ mod tests {
             "the carried claim survives the overwrite for the join"
         );
         // the in-body re-production re-stamps the slot at the body depth
-        rc.produced(4, None);
+        rc.produced(4);
         // the binder's textual last use inside the body is NOT a death
         rc.use_of(b, use_at);
         let mut code = Vec::new();
@@ -704,10 +894,10 @@ mod tests {
     #[test]
     fn branches_keep_what_every_arm_keeps() {
         let mut rc = placement();
-        rc.produced(1, None);
+        rc.produced(1);
         let base = rc.save();
         // arm A also produces 2
-        rc.produced(2, None);
+        rc.produced(2);
         let arm_a = rc.take();
         rc.restore(base.clone());
         // arm B produces nothing
@@ -734,10 +924,10 @@ mod tests {
     #[test]
     fn a_branch_arm_reports_what_it_owns_beyond_the_join() {
         let mut rc = placement();
-        rc.produced(1, None);
+        rc.produced(1);
         let base = rc.save();
         // arm A also produces 2 and keeps both words
-        rc.produced(2, None);
+        rc.produced(2);
         let arm_a = rc.take();
         rc.restore(base);
         // arm B keeps only the base word
@@ -755,7 +945,7 @@ mod tests {
             panic!("arm A owns exactly the one-arm word: {a:?}");
         };
         assert_eq!(*word, 2, "arm A's epilogue decs the one-arm word");
-        assert!(owned.deinit.is_none());
+        assert!(owned.hook.is_none() && owned.count);
         assert!(b.is_empty(), "arm B owns nothing beyond the join");
         // the epilogue carries the dec for the arm's own count
         let mut code = Vec::new();
@@ -769,14 +959,14 @@ mod tests {
         // a diverging arm (an exit cleared its state) never constrains
         // the join: what the surviving arm owns flows past unchanged
         let mut rc = placement();
-        rc.produced(1, None);
+        rc.produced(1);
         let base = rc.save();
         let mut code = Vec::new();
         rc.exit(&mut code, &[]);
         let exit_div = rc.diverged();
         let arm_exit = rc.take();
         rc.restore(base);
-        rc.produced(2, None);
+        rc.produced(2);
         let arm_live = rc.take();
         let dying = rc.reconcile(&[(arm_exit, exit_div), (arm_live, false)]);
         assert!(rc.owned.contains_key(&1) && rc.owned.contains_key(&2));

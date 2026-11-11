@@ -2,8 +2,9 @@
 //! [F7, F8]: `b'x'` literals type through the `byte` atom — the stdlib
 //! ambient declares it, and a self-contained package may declare its own
 //! — byte sits outside the int conversion family (arithmetic, ordering,
-//! and range membership refuse), and a non-range `in` right side is
-//! refused at the checker instead of typing bool ahead of a ruling.
+//! and range membership refuse), and a non-range `in` right side either
+//! types against one list's element type [F7] or is refused at the
+//! checker instead of typing bool ahead of a ruling.
 
 use ds_check::type_check;
 use ds_diag::Files;
@@ -140,16 +141,31 @@ fn byte_sits_outside_the_int_conversion_family() {
 }
 
 #[test]
-fn non_range_in_right_sides_refuse_at_the_checker() {
-    const MSG: &str =
-        "DS2017 `in` ranges over ranges (`x in a..b`); collection membership is not ruled yet";
-    assert_eq!(check("fn f(xs: list[int]) -> bool { 1 in xs }\n"), [MSG]);
+fn non_list_in_right_sides_refuse_at_the_checker() {
+    const MSG: &str = "DS2017 `in` runs over ranges (`x in a..b`) and lists (`x in xs`); \
+                       membership over other collections is not ruled yet";
     assert_eq!(
         check("fn f(m: map[string, int]) -> bool { \"k\" in m }\n"),
         [MSG]
     );
     assert_eq!(check("fn f(s: string) -> bool { \"x\" in s }\n"), [MSG]);
     assert_eq!(check("fn f(n: int) -> bool { 1 in n }\n"), [MSG]);
+}
+
+/// List membership [F7]: the operand carries the list's element type and
+/// the result is bool; a width or atom outside the element set names the
+/// element type, never a silent bool.
+#[test]
+fn list_membership_types_against_the_element() {
+    clean("fn f(xs: list[int]) -> bool { 1 in xs }\n");
+    clean("fn f(ws: list[string]) -> bool { \"k\" in ws }\n");
+    clean("fn f(xs: list[int], n: int) -> bool { n in xs && n > 0 }\n");
+    assert_eq!(
+        check("fn f(ws: list[string]) -> bool { 1 in ws }\n")
+            .first()
+            .map(String::as_str),
+        Some("DS2001 list membership needs the list's element type `string`, `int` given")
+    );
 }
 
 #[test]

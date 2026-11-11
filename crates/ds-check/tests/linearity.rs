@@ -2,6 +2,8 @@
 //! consuming position, join and loop-back-edge semantics, deinit
 //! well-formedness, and the exact two-span golden render.
 
+use std::fmt::Write as _;
+
 use ds_check::linearity;
 use ds_diag::{Diagnostic, Files};
 use ds_parse::parse;
@@ -390,7 +392,13 @@ fn last_use_positions_report_borrowed_and_consuming_final_uses() {
     ));
     assert_eq!(lin.moves.len(), 1);
     let moved = &lin.moves[0];
-    assert_eq!(lin.last_uses.len(), 2, "h and p each record a last use");
+    // h, p, and the prelude deinit's `self` (its body walks like a
+    // borrowed receiver's) each record a last use
+    assert_eq!(
+        lin.last_uses.len(),
+        3,
+        "h, p, and the deinit's self record last uses"
+    );
     let h_use = lin
         .last_uses
         .iter()
@@ -766,4 +774,51 @@ fn cross_file_top_level_consumption_is_order_independent() {
     let diag = expect_one(&lin);
     assert_eq!(diag.code.as_str(), "DS3001");
     assert_eq!(diag.message, "value `shared` is no longer usable");
+}
+
+/// The grammar-based generator round found the loop audit compounding: a
+/// loop's audit round re-walks its body, and a nested loop ran its own
+/// round inside the outer audit, doubling the walk per nesting level —
+/// checking a 26-deep nested loop took ~8s, a 30-deep generated source
+/// ~80s, and depth 40 would take days. The audit walk mutates nothing
+/// (binds, reads, and drops all no-op or dedup), so a nested round inside
+/// an outer audit is a pure duplicate re-check; it is skipped, and the
+/// walk stays linear in program size. This pins boundedness by
+/// completion: before the fix this depth did not finish.
+#[test]
+fn deeply_nested_loops_finish() {
+    for kind in [Kind::For, Kind::While] {
+        let mut src = String::from("tag int\nfn deep() -> int {\n");
+        let mut closers = String::new();
+        for d in 0..30 {
+            let indent = (d + 1) * 2;
+            let head = match kind {
+                Kind::For => format!("for i{d} in 0..2 {{"),
+                Kind::While => format!(
+                    "var i{d}: int = 0\n{spaces}while i{d} < 2 {{",
+                    spaces = " ".repeat(indent)
+                ),
+            };
+            writeln!(src, "{spaces}{head}", spaces = " ".repeat(indent))
+                .expect("String writes are infallible");
+            let step = match kind {
+                Kind::For => format!("const x{d}: int = i{d}"),
+                Kind::While => format!("i{d} += 1"),
+            };
+            writeln!(src, "{spaces}{step}", spaces = " ".repeat(indent + 2))
+                .expect("String writes are infallible");
+            closers.insert_str(0, &format!("{} }}\n", " ".repeat(indent - 2)));
+        }
+        src.push_str(&closers);
+        src.push_str("  0\n");
+        src.push_str("}\n");
+        let (checked, linearity) = check(&src);
+        assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+        assert_eq!(linearity.moves.len(), 0);
+    }
+}
+
+enum Kind {
+    For,
+    While,
 }

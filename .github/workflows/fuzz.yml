@@ -6,8 +6,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Raised iteration count for the scheduled run; both fuzz-mirror tests
-  # read the knob, their local defaults keep ordinary runs cheap.
+  # Raised iteration count for the scheduled run; all three fuzz-mirror
+  # tests read the knob, their local defaults keep ordinary runs cheap.
   FUZZ_RUNS: "50000"
 
 jobs:
@@ -34,3 +34,14 @@ jobs:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
       - run: cargo nextest run -p ds-check --test fuzz_check
+
+  ds-check-generator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo nextest run -p ds-check --test fuzz_check_gen

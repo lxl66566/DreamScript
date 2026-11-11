@@ -247,18 +247,11 @@ fn float_remainder_rejects_at_the_lowering_boundary() {
 }
 
 #[test]
-fn byte_literal_stays_a_named_lowering_boundary() {
-    // the record pins `b'x'` as a single byte [F6] but no byte type, so
-    // a declared `byte` atom types the literal while the locked uop set
-    // has no byte slot; lowering rejects by name instead of compiling a
-    // wrong-width word
-    let Err(error) = lower_inline("tag byte\nfn main() -> byte { b'x' }") else {
-        panic!("byte literals do not lower: the uop contract has no byte slot");
-    };
-    assert!(
-        error.to_string().contains("a byte literal"),
-        "the error names the seam: {error}"
-    );
+fn byte_literals_lower_through_the_integer_slot() {
+    // `b'x'` stages as its 0-255 integer value [F6]: the byte atom rides
+    // the integer slot encoding while staying outside the int conversion
+    // family at the checker; the run-level shapes live in bytes_e2e.rs
+    lower_inline("tag byte\nfn main() -> byte { b'x' }").expect("the byte literal lowers");
 }
 
 #[test]

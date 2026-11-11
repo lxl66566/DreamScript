@@ -146,6 +146,7 @@ pub mod error;
 pub mod expr;
 pub mod extraction;
 pub mod instance;
+pub mod instance_solve;
 pub mod linearity;
 mod pattern;
 pub mod resolve;
@@ -155,7 +156,7 @@ pub mod witness;
 
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
-pub use decls::{Decls, FnSig, GenericParam};
+pub use decls::{Decls, FnSig, GenericParam, render_type};
 pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_of};
 pub use error::Error;
 pub use expr::TypeExpr;

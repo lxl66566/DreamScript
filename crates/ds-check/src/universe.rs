@@ -507,6 +507,14 @@ impl Universe {
         if names.is_empty() { "empty".to_owned() } else { names.join(" | ") }
     }
 
+    /// The solved type of an explicit member set: the intern inverse of
+    /// [`Universe::members`], for consumers that re-derive a
+    /// substitution's solved type at one site (the runtime-evidence
+    /// seam over generic impls).
+    pub fn set_ty(&mut self, members: &[TypeId]) -> Ty {
+        self.intern(members.to_vec())
+    }
+
     fn intern(&mut self, mut set: Vec<TypeId>) -> Ty {
         set.sort_unstable();
         set.dedup();
@@ -612,7 +620,7 @@ fn is_disjoint_slices(a: &[TypeId], b: &[TypeId]) -> bool {
 }
 
 /// Whether every element of `sub` occurs in `sup` (both sorted).
-fn is_subset(sub: &[TypeId], sup: &[TypeId]) -> bool {
+pub(crate) fn is_subset(sub: &[TypeId], sup: &[TypeId]) -> bool {
     let (mut i, mut j) = (0, 0);
     while i < sub.len() && j < sup.len() {
         match sub[i].cmp(&sup[j]) {

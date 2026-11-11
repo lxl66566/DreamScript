@@ -62,6 +62,8 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   the ambient.
 /// * pattern_dispatch: zero noise — the tutorial-pass regressions check clean against the
 ///   ambient-owned io_err (the tail `?` over the contained union included).
+/// * while_cond_refs: zero noise — the dying string/list/deinit-claim while conditions are
+///   self-contained under the ambient (the corpus README's run stage documents their placement).
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
@@ -96,6 +98,13 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // seed's moved/used pair); the reversed-order and cross-file
     // consumption shapes ride the gate's two-file harness
     assert_corpus_clean("toplevel_consumption.ds", 1);
+    // zero noise — the deinit surface runs self-contained under the
+    // ambient (record C5, the deinit wiring round)
+    assert_corpus_clean("deinit_surface.ds", 0);
+    // zero noise — the while-cond Ref operands are loop-carried, so the
+    // dying-string/list/deinit-claim items are self-contained under the
+    // ambient (record C4, the while-cond placement round)
+    assert_corpus_clean("while_cond_refs.ds", 0);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

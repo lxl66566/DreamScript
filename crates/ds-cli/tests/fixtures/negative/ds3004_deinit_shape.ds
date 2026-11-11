@@ -5,10 +5,10 @@ tag int
 trait Copyable { }
 struct plain {
   data: int
-  deinit { 1 }
+  deinit { }
 }
 struct twice: ~Copyable {
   data: int
-  deinit { 1 }
-  deinit { 2 }
+  deinit { }
+  deinit { }
 }

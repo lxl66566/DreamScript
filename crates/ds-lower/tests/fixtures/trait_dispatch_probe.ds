@@ -1,0 +1,74 @@
+// purpose: trait-method dispatch end to end — impl member bodies enter the
+// plan under mangled identity and call sites dispatch through CALLG with
+// the solved instance as the trailing evidence word: two impls behind the
+// same call-site shapes (dot form and Trait::f qualification), a
+// multi-argument member, a tail-position call through a named wrapper, an
+// application target, and a struct receiver reading fields through self.
+// items:
+// int: stage: run
+// string: stage: run
+// bool: stage: run
+// point: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// spots: stage: run
+// spots-point: stage: run
+// wrap: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag bool
+
+struct point { x: int, y: int }
+struct list[t]
+
+extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string
+  fn tagged(self, label: string) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+  fn tagged(self, label: string) -> string { concat("$label", "n=$self") }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+  fn tagged(self, label: string) -> string { concat("$label", "$self") }
+}
+
+impl shows for list[int] {
+  fn show(self) -> string { "list" }
+  fn tagged(self, label: string) -> string { concat("$label", "list") }
+}
+
+trait spots {
+  fn spot(self) -> string
+}
+
+impl spots for point {
+  fn spot(self) -> string { "(${self.x}, ${self.y})" }
+}
+
+fn wrap(x: int) -> string {
+  x.show()
+}
+
+fn main() -> int {
+  println(7.show())
+  println("hey".show())
+  println(shows::show(9))
+  println(3.tagged("n="))
+  println("abc".tagged("s="))
+  println([1, 2].show())
+  println(wrap(11))
+  const p = point { x: 2, y: 3 }
+  println(p.spot())
+  0
+}

@@ -17,7 +17,9 @@
 //! statement outside the entry file); DS1015, the script-mode collision
 //! with a written `main`, fires only through `parse_script` and is pinned
 //! in ds-parse's unit suite instead. The mut-window round adds DS3006
-//! (a `const` binding fed to a `mut` window parameter [D2]).
+//! (a `const` binding fed to a `mut` window parameter [D2]). The
+//! signature-agreement round adds DS2018 (an impl member diverging from
+//! its trait member's registered signature).
 
 use std::{
     env, fs,
@@ -102,6 +104,11 @@ const CASES: &[Case] = &[
         stem: "ds2016_annotated_receiver",
         human: include_str!("goldens/ds2016_annotated_receiver.human"),
         json: include_str!("goldens/ds2016_annotated_receiver.json"),
+    },
+    Case {
+        stem: "ds2018_impl_member_signature",
+        human: include_str!("goldens/ds2018_impl_member_signature.human"),
+        json: include_str!("goldens/ds2018_impl_member_signature.json"),
     },
     Case {
         stem: "ds3001_moved_then_used",

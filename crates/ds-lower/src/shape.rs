@@ -24,8 +24,12 @@
 //! The corpus declares `int`/`float`/`string`/`bool`/`char` as ambient
 //! tags (conformance/README.md); the lowerer maps those names onto the
 //! slot types of the same names, with `char` riding the string Ref —
-//! one scalar per word, the pinned list-separator convention. `none` is
-//! the universe's predeclared unit atom and needs no declaration.
+//! one scalar per word, the pinned list-separator convention. `byte`
+//! (the F6 ruling) rides the I64 slot as its 0-255 value: its own atom
+//! in the u8 width class, outside the int conversion family — the
+//! checker keeps byte and int disjoint, lowering shares the integer
+//! word. `none` is the universe's predeclared unit atom and needs no
+//! declaration.
 
 use std::{collections::HashMap, rc::Rc};
 
@@ -42,8 +46,11 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 /// declared as ambient `tag` names by the corpus and check like any tag.
 /// `char` shares the string Ref: one scalar value per one-char string
 /// word, the runtime convention the list natives' separator pins.
+/// `byte` shares the integer slot [F6]: the word carries the 0-255
+/// value, while the checker holds it outside the int conversion family.
 const PRIMITIVES: &[(&str, SlotType)] = &[
     ("int", SlotType::I64),
+    ("byte", SlotType::I64),
     ("float", SlotType::F64),
     ("bool", SlotType::Bool),
     ("string", SlotType::Ref),
@@ -132,15 +139,23 @@ pub(crate) const FIRST_RESERVED_TAG: u8 = u8::MAX - 5;
 /// Shapes of the types of one package, plus the module-wide tag ids.
 pub(crate) struct Shapes<'a> {
     analyzed: &'a Analyzed,
+    /// Every struct whose declaration carries a `deinit` member: the
+    /// positions a deinit value cannot inhabit (a union payload)
+    /// refuse against it.
+    declared_deinits: std::collections::HashSet<ds_check::DefId>,
     cache: HashMap<Ty, Rc<Shape>>,
     tags: HashMap<TypeId, u8>,
     next_tag: u8,
 }
 
 impl<'a> Shapes<'a> {
-    pub(crate) fn new(analyzed: &'a Analyzed) -> Self {
+    pub(crate) fn new(
+        analyzed: &'a Analyzed,
+        declared_deinits: std::collections::HashSet<ds_check::DefId>,
+    ) -> Self {
         Self {
             analyzed,
+            declared_deinits,
             cache: HashMap::new(),
             tags: HashMap::new(),
             next_tag: 0,
@@ -180,6 +195,38 @@ impl<'a> Shapes<'a> {
         out
     }
 
+    /// A union member that declares a deinit refuses (C5): the union's
+    /// death decs the live member's payload words through the placement
+    /// and frees nested objects through the VM cascade, but neither
+    /// carries the member value's own hook — storing a deinit value in
+    /// a union payload would silently skip its deinit.
+    fn guard_deinit_member(&self, atom: TypeId) -> Result<(), LowerError> {
+        let Some(def) = self.analyzed.decls.defs_of_atoms.get(&atom) else {
+            return Ok(());
+        };
+        if self.declared_deinits.contains(def) {
+            return Err(unsupported(
+                "a deinit-carrying union member",
+                "the union's death decs the member's payload words and frees nested objects, but \
+                 dispatches no user deinit; a deinit value's death is its own binding's",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether an atom is one of the checker's minted type variables: a
+    /// generic parameter of an impl, function, or alias, named `$...`
+    /// (`$` sits outside the identifier charset). Its values ride one
+    /// Raw word — the runtime kind is the caller's fact, checked by the
+    /// VM at every hand-off, never a static one.
+    pub(crate) fn is_var_atom(&self, atom: TypeId) -> bool {
+        self.analyzed
+            .decls
+            .universe
+            .atom_decl(atom)
+            .is_ok_and(|decl| decl.name.starts_with('$'))
+    }
+
     /// The shape of one solved type, memoized.
     pub(crate) fn shape(&mut self, ty: Ty) -> Result<Rc<Shape>, LowerError> {
         if let Some(shape) = self.cache.get(&ty) {
@@ -213,6 +260,7 @@ impl<'a> Shapes<'a> {
         let mut shapes = Vec::with_capacity(members.len());
         for atom in members {
             let tag = self.tag_id(*atom)?;
+            self.guard_deinit_member(*atom)?;
             let payload = self.payload_fields(*atom)?;
             let mut claimed = vec![false; region.len()];
             let mut fields = Vec::with_capacity(payload.len());
@@ -255,6 +303,9 @@ impl<'a> Shapes<'a> {
             return Err(unsupported("a value", "its atom has no declaration"));
         };
         match &decl.kind {
+            // a type variable's value is one Raw word: the runtime kind
+            // is the caller's fact (the VM checks it at every hand-off)
+            ds_check::AtomKind::Unit if self.is_var_atom(atom) => Ok(Shape::Word(SlotType::Raw)),
             ds_check::AtomKind::Unit => Ok(Shape::Word(
                 primitive_slot(&decl.name).unwrap_or(SlotType::Tag),
             )),
@@ -322,6 +373,14 @@ impl<'a> Shapes<'a> {
             return Err(unsupported("a value", "its atom has no declaration"));
         };
         match &decl.kind {
+            // a union member over a type variable has no static payload
+            // shape: the member's runtime word kind is the caller's fact,
+            // and a checked read would need runtime reflection to re-span
+            ds_check::AtomKind::Unit if self.is_var_atom(atom) => Err(unsupported(
+                "a union member over a type variable",
+                "the variable's runtime word kind is a runtime fact; a runtime reflection table \
+                 is the seam",
+            )),
             ds_check::AtomKind::Unit => match primitive_slot(&decl.name) {
                 Some(slot) => Ok(vec![(None, slot)]),
                 None => Ok(Vec::new()),
@@ -363,6 +422,9 @@ impl<'a> Shapes<'a> {
         };
         let universe = &self.analyzed.decls.universe;
         let decl = universe.atom_decl(*id).ok()?;
+        if self.is_var_atom(*id) {
+            return Some(SlotType::Raw);
+        }
         if let Some(slot) = primitive_slot(&decl.name) {
             return Some(slot);
         }
@@ -370,6 +432,25 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Unit => Some(SlotType::I64), // a unit word
             _ => None,
         }
+    }
+
+    /// The element type of one whole-list application [F7]: iteration
+    /// and membership read it. `None` for any other type — a union of
+    /// lists, a non-list application, a non-application.
+    pub(crate) fn list_element(&self, ty: Ty) -> Option<Ty> {
+        let universe = &self.analyzed.decls.universe;
+        let [only] = universe.members(ty) else {
+            return None
+        };
+        let decl = universe.atom_decl(*only).ok()?;
+        let ds_check::AtomKind::Apply(ctor, args) = &decl.kind else {
+            return None
+        };
+        if !self.heap_ref(*ctor) {
+            return None;
+        }
+        let [element] = &**args else { return None };
+        (universe.atom_decl(*ctor).ok()?.name == "list").then_some(*element)
     }
 
     /// The builtin instance of a generic call's receiver type [H3]: the
@@ -411,6 +492,21 @@ impl<'a> Shapes<'a> {
             .atom_decl(ctor)
             .is_ok_and(|decl| HEAP_REFS.contains(&decl.name.as_str()))
     }
+}
+
+/// The generic parameter name behind one minted type variable: the
+/// shared counter mints `${name}#N` (both `#` and `$` sit outside the
+/// identifier charset, so the split is unambiguous). Two minting sites
+/// exist — instance declaration and body checking — and their atoms
+/// differ, so consumers bridging the two (the runtime-evidence seam) key
+/// by this name.
+pub(crate) fn var_param_name(universe: &ds_check::Universe, atom: TypeId) -> Option<String> {
+    let decl = universe
+        .atom_decl(atom)
+        .ok()
+        .filter(|decl| decl.name.starts_with('$'))?;
+    let base = decl.name.strip_prefix('$')?;
+    base.rsplit_once('#').map(|(name, _)| name.to_owned())
 }
 
 fn word_of(index: usize) -> Result<u8, LowerError> {

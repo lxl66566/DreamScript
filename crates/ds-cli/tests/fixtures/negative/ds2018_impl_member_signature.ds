@@ -1,0 +1,12 @@
+// A trait impl member whose signature disagrees with its trait member [B6]:
+// the trait member's registered signature is the contract call sites check
+// against, so the divergence refuses at both sites.
+
+tag int
+tag string
+trait shows {
+  fn show(self) -> string
+}
+impl shows for int {
+  fn show(self) -> int { 1 }
+}

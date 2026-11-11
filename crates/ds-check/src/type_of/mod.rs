@@ -41,9 +41,8 @@
 //! # Out of scope here
 //!
 //! Effect rows; the affine/move pass (assumption bounds like `[t: json]`
-//! feed method selection, `~Copyable` is M4); conditional instance heads
-//! seen through substitution (H3); ranges, indexing, and `in`-containment
-//! (they need the M3 stdlib's type vocabulary).
+//! feed method selection, `~Copyable` is M4); ranges, indexing, and
+//! `in`-containment (they need the M3 stdlib's type vocabulary).
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -60,6 +59,7 @@ use crate::{
     error::Error,
     extraction::Extraction,
     instance::InstanceId,
+    instance_solve::Resolution,
     resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
     universe::Ty,
 };
@@ -145,7 +145,7 @@ pub struct Checked {
 /// in-scope assumption (the receiver's type is a bound type variable)
 /// records nothing — that site is the runtime-resolved evidence form, and
 /// its dispatch waits for the runtime-tag shape.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TraitCall {
     /// The selected trait member.
     pub method: MethodId,
@@ -158,8 +158,16 @@ pub struct TraitCall {
     pub impl_site: Option<Span>,
     /// The receiver's solved type at the call site.
     pub recv: Ty,
+    /// The runtime evidence a call into a generic impl's body needs (H3):
+    /// one entry per declared bound of the solved instance — the bound's
+    /// trait, the type variable it constrains, and the unique instance
+    /// serving the substituted type at this call site (`None` when none
+    /// serves it uniquely). Empty for monomorphic instances, whose
+    /// bodies need no evidence.
+    pub bounds: Vec<(TypeId, TraitId, Option<InstanceId>)>,
 }
 
+mod impl_sig;
 mod ops;
 use ops::compound_op;
 mod pattern;
@@ -414,13 +422,55 @@ impl Bodies<'_> {
                 self.impl_item(item, imp);
             },
             ItemKind::Local(local) => self.top_level_local(local),
+            ItemKind::Struct(s) => self.struct_item(s),
             ItemKind::ExternFn(_)
-            | ItemKind::Struct(_)
             | ItemKind::Enum(_)
             | ItemKind::Tag(_)
             | ItemKind::TypeAlias(_)
             | ItemKind::Import(_) => {},
         }
+    }
+
+    /// Type-checks every declared `deinit` body (C5): `self` is the
+    /// dying instance, borrowed, typed the struct's own atom; the body
+    /// types as a unit-returning function body. The recorded facts —
+    /// the `self` binder at the member's span, the body's expression
+    /// types — are what the deinit's runtime half consumes.
+    fn struct_item(&mut self, s: &ds_parse::StructDecl) {
+        let Some(def) = self.package.lookup_type(&s.name.name) else {
+            return;
+        };
+        let Some(atom) = self.decls.atoms.get(&def).copied() else {
+            return;
+        };
+        let generics: Vec<GenericParam> = s.generics.iter().map(generic_of).collect();
+        self.push_generics(&generics);
+        for member in &s.members {
+            let ds_parse::StructMember::Deinit { span, body } = member else {
+                continue;
+            };
+            let Ok(self_ty) = self.decls.universe.atom_ty(atom) else {
+                continue;
+            };
+            let saved = self.snapshot();
+            self.locals.clear();
+            self.refined.clear();
+            self.bind_local(*span, Binding {
+                ty: self_ty,
+                mutable: false,
+            });
+            let unit = self.unit();
+            let old_ret = self.ret;
+            self.ret = Some(unit);
+            let block = Expr::Block(body.clone());
+            let val = self.expr(&block, Some(unit));
+            if !val.diverges {
+                self.expect_contains(val, unit, body.span, "a deinit body");
+            }
+            self.ret = old_ret;
+            self.restore(saved);
+        }
+        self.pop_generics();
     }
 
     fn impl_item(&mut self, item: &Item, imp: &ds_parse::ImplDecl) {
@@ -443,14 +493,19 @@ impl Bodies<'_> {
             self.pop_generics();
             return;
         };
-        let member_names: Option<Vec<String>> = imp.trait_ref.as_ref().and_then(|tr| {
+        let trait_def = imp.trait_ref.as_ref().and_then(|tr| {
             let [only] = tr.path.segments.as_slice() else {
                 return None
             };
-            self.package
-                .lookup_type(&only.name)
-                .and_then(|def| self.decls.trait_members.get(&def).cloned())
+            self.package.lookup_type(&only.name)
         });
+        let member_names: Option<Vec<String>> =
+            trait_def.and_then(|def| self.decls.trait_members.get(&def).cloned());
+        // `Self` resolves to the impl's target while the written member
+        // signatures compare (B6).
+        self.type_vars
+            .push(HashMap::from([("Self".to_owned(), target)]));
+        let subst = self.trait_arg_subst(imp, trait_def);
         for f in &imp.fns {
             if let Some(members) = &member_names {
                 if !members.iter().any(|m| m == &f.name.name) {
@@ -462,10 +517,53 @@ impl Bodies<'_> {
                     );
                     continue;
                 }
+                if let (Some(def), Some(subst)) = (trait_def, &subst) {
+                    if let Some((sig, sig_span)) =
+                        decls::trait_member_sig(self.package, self.decls, def, &f.name.name)
+                    {
+                        impl_sig::agree_member_signature(self, f, &sig, sig_span, subst);
+                    }
+                }
             }
             self.fn_decl(f, Some(target));
         }
+        self.type_vars.pop();
         self.pop_generics();
+    }
+
+    /// The trait's generic parameters substituted by the impl's trait
+    /// reference, positionally (B6): every name the trait declares maps
+    /// to the argument the reference spells. A trait declaring generics
+    /// the reference does not spell reports once — its member signatures
+    /// could not be spelled in the impl's scope at all.
+    fn trait_arg_subst(
+        &mut self,
+        imp: &ds_parse::ImplDecl,
+        trait_def: Option<DefId>,
+    ) -> Option<HashMap<String, Type>> {
+        let reference = imp.trait_ref.as_ref()?;
+        let def = trait_def?;
+        let names = self.decls.trait_generics.get(&def)?.clone();
+        if names.len() != reference.args.len() {
+            self.error(
+                ErrorCode::ImplMemberSignatureMismatch,
+                format!(
+                    "the trait declares {} generic parameter(s); the impl's trait reference \
+                     spells {} argument(s)",
+                    names.len(),
+                    reference.args.len()
+                ),
+                reference.span,
+                "unsubstituted trait generics",
+            );
+            return None;
+        }
+        Some(
+            names
+                .into_iter()
+                .zip(reference.args.iter().cloned())
+                .collect(),
+        )
     }
 
     /// A top-level binding: its initializer is typed (memoized for
@@ -606,12 +704,24 @@ impl Bodies<'_> {
         });
         let old_ret = self.ret;
         self.ret = ret;
+        let mut body_val: Option<Val> = None;
         if let Some(body) = &f.body {
             let val = self.block_expected(body, ret);
             if let Some(ret) = ret {
                 if !val.diverges {
                     self.expect_contains(val, ret, body.span, "function body");
                 }
+            }
+            body_val = Some(val);
+        }
+        // An impl-member body's solved return rides the declaration
+        // tables for the lowering pass: a member function has no package
+        // DefId, so its solved signature lives here — the written return
+        // against `Self`, or the body's own checked type when inferred.
+        if self_ty.is_some() {
+            let solved = ret.or_else(|| body_val.as_ref().filter(|v| !v.poisoned).map(|v| v.ty));
+            if let Some(ty) = solved {
+                self.decls.impl_fn_rets.insert(f.span, ty);
             }
         }
         self.ret = old_ret;
@@ -3061,10 +3171,13 @@ impl Bodies<'_> {
     }
 
     /// Records one selected trait method's solved dispatch at the call's
-    /// own span: the unique containing instance for the receiver's type,
-    /// when the environment statically solved one. An inherent-impl
-    /// survivor records nothing, and a site satisfied only through an
-    /// in-scope assumption records nothing — its dispatch is the
+    /// own span: the instance the environment resolved for the
+    /// receiver's type — a containing head, or a generic head that
+    /// unifies under provable bounds (B6). The solved instance is the
+    /// declared one; the recorded receiver type carries the
+    /// substitution. An inherent-impl survivor records nothing, and a
+    /// site satisfied only through an in-scope assumption with no
+    /// resolving instance records nothing — its dispatch is the
     /// runtime-resolved evidence form.
     fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
         let MethodOwner::Trait(def) = &self.package.method(method).owner else {
@@ -3073,16 +3186,31 @@ impl Bodies<'_> {
         let Some(&trait_id) = self.decls.traits.get(def) else {
             return;
         };
-        let Some(instance) = self.solved_instance(trait_id, recv) else {
-            return;
-        };
-        self.trait_calls.insert(span, TraitCall {
-            method,
-            trait_id,
-            instance,
-            impl_site: self.decls.instance_impls.get(&instance).copied(),
-            recv,
-        });
+        match self.instance_resolution(trait_id, recv) {
+            Resolution::Unique(instance) => {
+                // a generic impl's body dispatches on runtime evidence:
+                // record the per-bound instances the substitution serves,
+                // so the lowering side stages them without re-deriving types
+                let bounds = crate::instance_solve::evidence_bounds(
+                    &mut self.decls.universe,
+                    &self.decls.instances,
+                    instance,
+                    recv,
+                );
+                self.trait_calls.insert(span, TraitCall {
+                    method,
+                    trait_id,
+                    instance,
+                    impl_site: self.decls.instance_impls.get(&instance).copied(),
+                    recv,
+                    bounds,
+                });
+            },
+            Resolution::Ambiguous(candidates) => {
+                self.instance_ambiguity(trait_id, recv, &candidates, span);
+            },
+            Resolution::None | Resolution::BoundUnsat { .. } => {},
+        }
     }
 
     /// One selected method's call check: the member signature with `Self`
@@ -4495,47 +4623,114 @@ impl Bodies<'_> {
         }
     }
 
-    /// Whether a trait holds for a type: an in-scope assumption, or a
-    /// unique containing instance head (B6). Diagnoses on failure.
+    /// Whether a trait holds for a type: an in-scope assumption covers
+    /// it, or the environment resolves an instance — a containing head
+    /// for concrete receivers, or a generic head that unifies with the
+    /// receiver under provable bounds (B6). Diagnoses on failure.
     fn trait_satisfied(&mut self, trait_id: TraitId, ty: Ty, span: Span) -> bool {
-        if self.trait_satisfied_quiet(trait_id, ty) {
+        if self.assumption_covers(trait_id, ty) {
             return true;
         }
-        self.error(
-            ErrorCode::UnsatisfiedConstraint,
-            format!(
-                "no instance of `{}` for `{}`",
-                self.trait_name(trait_id),
-                self.decls.universe.render(ty)
-            ),
-            span,
-            "unimplemented trait",
-        );
-        false
+        match self.instance_resolution(trait_id, ty) {
+            Resolution::Unique(_) => true,
+            Resolution::Ambiguous(candidates) => {
+                self.instance_ambiguity(trait_id, ty, &candidates, span);
+                false
+            },
+            Resolution::None => {
+                self.error(
+                    ErrorCode::UnsatisfiedConstraint,
+                    format!(
+                        "no instance of `{}` for `{}`",
+                        self.trait_name(trait_id),
+                        self.decls.universe.render(ty)
+                    ),
+                    span,
+                    "unimplemented trait",
+                );
+                false
+            },
+            Resolution::BoundUnsat { bound, target, .. } => {
+                let miss = self.render_members(&target);
+                self.error(
+                    ErrorCode::UnsatisfiedConstraint,
+                    format!(
+                        "no instance of `{}` for {}: the `{}` impl's bound is unsatisfied there",
+                        self.trait_name(bound),
+                        miss,
+                        self.trait_name(trait_id)
+                    ),
+                    span,
+                    "unsatisfied bound",
+                );
+                false
+            },
+        }
     }
 
     fn trait_satisfied_quiet(&self, trait_id: TraitId, ty: Ty) -> bool {
-        if self
-            .assumptions
+        self.assumption_covers(trait_id, ty) || self.instance_resolution(trait_id, ty).satisfied()
+    }
+
+    /// Whether an in-scope generic bound (`[t: json]`) assumes the trait
+    /// for the type.
+    fn assumption_covers(&self, trait_id: TraitId, ty: Ty) -> bool {
+        self.assumptions
             .iter()
             .rev()
             .any(|(t, assumed)| *t == trait_id && self.decls.universe.contains(*assumed, ty))
-        {
-            return true;
-        }
-        self.solved_instance(trait_id, ty).is_some()
     }
 
-    /// The unique containing instance for a receiver type (B6), when the
-    /// environment statically solved one; `None` for an unsatisfied trait,
-    /// a site only an in-scope assumption covers, or the impossible
-    /// multi-head answer over a coherent environment.
-    fn solved_instance(&self, trait_id: TraitId, ty: Ty) -> Option<InstanceId> {
-        self.decls
-            .instances
-            .resolve_unique(&self.decls.universe, trait_id, ty)
-            .ok()
-            .flatten()
+    /// The environment's call-site resolution (B6): the instance whose
+    /// head contains the receiver, or — for a generic impl's head — the
+    /// one whose pattern unifies with it under provable bounds. The
+    /// solved instance is the declared instance; a per-substitution
+    /// instance is never minted, because the call's own receiver type
+    /// (recorded beside it) carries the substitution the dispatch seam
+    /// needs.
+    fn instance_resolution(&self, trait_id: TraitId, ty: Ty) -> Resolution {
+        crate::instance_solve::resolve(
+            &self.decls.universe,
+            &self.decls.instances,
+            &self.assumptions,
+            trait_id,
+            ty,
+        )
+    }
+
+    /// Several impls serve one call site (B6): declared heads are
+    /// pairwise disjoint, but a generic head is opaque to the set
+    /// algebra, so two generic impls of one trait can both serve one
+    /// receiver. A compile error, never a priority order.
+    fn instance_ambiguity(
+        &mut self,
+        trait_id: TraitId,
+        recv: Ty,
+        candidates: &[InstanceId],
+        span: Span,
+    ) {
+        let mut diag = Diagnostic::error(
+            ErrorCode::AmbiguousInstance,
+            format!(
+                "{} impls of `{}` accept receiver `{}`; dispatch must pick one [B6]",
+                candidates.len(),
+                self.trait_name(trait_id),
+                self.decls.universe.render(recv)
+            ),
+        )
+        .with_primary(span, "ambiguous dispatch");
+        for &id in candidates {
+            if let (Ok(head), Some(site)) = (
+                self.decls.instances.head(id),
+                self.decls.instance_impls.get(&id),
+            ) {
+                diag = diag.with_secondary(
+                    *site,
+                    format!("instance head `{}`", self.decls.universe.render(head)),
+                );
+            }
+        }
+        self.diags.push(diag);
     }
 
     fn trait_name(&self, trait_id: TraitId) -> String {

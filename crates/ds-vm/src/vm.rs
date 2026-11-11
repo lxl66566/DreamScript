@@ -55,6 +55,7 @@ use ds_abi::{
 };
 
 use crate::{
+    EVIDENCE_MODULE,
     fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
     module::{ModuleRegistry, ModuleVersion},
     native::{
@@ -752,6 +753,26 @@ fn read_ref(
         Value::Ref(v) => Ok(v),
         _ => unreachable!("slot_type agrees with the variant"),
     }
+}
+
+/// The reference one RC op moves, when the word holds one: a `Raw` slot's
+/// kind is a runtime fact (a type-variable value), so its inc/dec apply
+/// only when the word is a reference at runtime and no-op on scalars;
+/// every other slot classification keeps the strict typed read.
+fn read_counted(
+    stack: &Segment,
+    fp: usize,
+    slot: u8,
+    slots: &[SlotType],
+    body_len: usize,
+) -> Result<Option<u32>, Trap> {
+    if slots[usize::from(slot)] == SlotType::Raw {
+        return Ok(match read_value(stack, fp, slot, slots, body_len)? {
+            Value::Ref(id) => Some(id),
+            _ => None,
+        });
+    }
+    read_ref(stack, fp, slot, slots, body_len).map(Some)
 }
 
 /// Writes a value into a slot, checking it against the slot's static type:
@@ -2265,16 +2286,20 @@ impl Vm {
                         major: RC_MAJOR, ..
                     }) => match RcOp::decode(code[idx]) {
                         Ok(RcOp::Inc { src }) => {
-                            let id = read_ref(&self.stack, fp, src, slots, body_len)
-                                .map_err(|e| (e, pc))?;
-                            self.objects.inc(id).map_err(|e| (e, pc))?;
+                            if let Some(id) = read_counted(&self.stack, fp, src, slots, body_len)
+                                .map_err(|e| (e, pc))?
+                            {
+                                self.objects.inc(id).map_err(|e| (e, pc))?;
+                            }
                             pc.0 += 1;
                             continue;
                         },
                         Ok(RcOp::Dec { src }) => {
-                            let id = read_ref(&self.stack, fp, src, slots, body_len)
-                                .map_err(|e| (e, pc))?;
-                            self.objects.dec(id).map_err(|e| (e, pc))?;
+                            if let Some(id) = read_counted(&self.stack, fp, src, slots, body_len)
+                                .map_err(|e| (e, pc))?
+                            {
+                                self.objects.dec(id).map_err(|e| (e, pc))?;
+                            }
                             pc.0 += 1;
                             continue;
                         },
@@ -3094,15 +3119,150 @@ impl Vm {
                                 pc,
                             ));
                         };
-                        if self.registry.has_uop(module, *func) {
-                            // a lowered generic body has no constraint list yet
-                            return Err((
-                                Trap::UnknownCallee {
-                                    module: module.clone(),
-                                    func: *func,
-                                },
-                                pc,
-                            ));
+                        // A runtime-resolved trait dispatch inside a
+                        // generic impl body [H3]: the sentinel FuncRef
+                        // names the calling frame's evidence slot, and
+                        // the word staged there by the site that entered
+                        // the body names the serving member body in the
+                        // enclosing module — the dispatch reads it and
+                        // transfers exactly like a CALL's uop callee.
+                        if module == EVIDENCE_MODULE {
+                            let slot = u8::try_from(*func).map_err(|_| {
+                                (
+                                    Trap::UnknownCallee {
+                                        module: module.clone(),
+                                        func: *func,
+                                    },
+                                    pc,
+                                )
+                            })?;
+                            let word = read_value(&self.stack, fp, slot, slots, body_len)
+                                .map_err(|e| (e, pc))?;
+                            let Value::I64(target_idx) = word else {
+                                return Err((
+                                    Trap::SlotTypeMismatch {
+                                        slot,
+                                        expected: SlotType::I64,
+                                        actual: word.slot_type(),
+                                    },
+                                    pc,
+                                ));
+                            };
+                            let version = Arc::clone(&active.version);
+                            let index = usize::try_from(target_idx)
+                                .ok()
+                                .filter(|index| *index < version.functions().len());
+                            let Some(index) = index else {
+                                return Err((
+                                    Trap::UnknownCallee {
+                                        module: module.clone(),
+                                        func: target_idx.try_into().unwrap_or(u32::MAX),
+                                    },
+                                    pc,
+                                ));
+                            };
+                            let func_id = u32::try_from(index).expect("guarded above");
+                            let target = &version.functions()[func_id as usize];
+                            let entry = target.entry.resolve();
+                            if entry != func_id as usize {
+                                return Err((
+                                    Trap::EntryWordMismatch {
+                                        resolved: entry,
+                                        expected: func_id as usize,
+                                    },
+                                    pc,
+                                ));
+                            }
+                            if usize::from(nargs) != target.layout.params_len() {
+                                return Err((
+                                    Trap::ArityMismatch {
+                                        expected: target.layout.params_len(),
+                                        given: usize::from(nargs),
+                                    },
+                                    pc,
+                                ));
+                            }
+                            let mut st = stack_state!();
+                            let t = st
+                                .call(version, func_id, &f.layout, fp, pc.0 + 1)
+                                .map_err(|e| (e, pc))?;
+                            active = Active {
+                                version: t.version,
+                                func: t.func,
+                            };
+                            pc = CodePc(0);
+                            continue 'transfer;
+                        }
+                        // A user trait-method dispatch site [H3]: the
+                        // FuncRef names the impl body the lowering resolved
+                        // from the call's statically solved instance. The
+                        // staged words past `nargs` carry the runtime
+                        // evidence a generic impl body claims as its
+                        // trailing parameters (one per the body's nested
+                        // demands, validated as I64 words), then the
+                        // solved declared-instance id riding past them —
+                        // validated here, carried rather than
+                        // re-dispatched (the instance-keyed cache story
+                        // keys off this word later). The body transfers
+                        // exactly like a CALL's uop callee: the carried
+                        // word sits past the callee's parameters, so the
+                        // callee's frame never claims it.
+                        if let Some((version, func_id)) =
+                            self.registry.resolve_indexed(module, *func)
+                        {
+                            let target = &version.functions()[func_id as usize];
+                            let entry = target.entry.resolve();
+                            if entry != func_id as usize {
+                                return Err((
+                                    Trap::EntryWordMismatch {
+                                        resolved: entry,
+                                        expected: func_id as usize,
+                                    },
+                                    pc,
+                                ));
+                            }
+                            let params_len = target.layout.params_len();
+                            if usize::from(nargs) > params_len {
+                                return Err((
+                                    Trap::ArityMismatch {
+                                        expected: params_len,
+                                        given: usize::from(nargs),
+                                    },
+                                    pc,
+                                ));
+                            }
+                            // the staged evidence parameters the body
+                            // claims, then the solved instance word
+                            let ev_count = params_len - usize::from(nargs);
+                            let ev_body_len = f.layout.slots().len() - f.layout.arg_area_len();
+                            for i in 0..=ev_count {
+                                let ev_slot = u8::try_from(
+                                    f.layout.arg_area().start + usize::from(nargs) + i,
+                                )
+                                .expect("slot index fits u8");
+                                let word = read_value(&self.stack, fp, ev_slot, slots, ev_body_len)
+                                    .map_err(|e| (e, pc))?;
+                                if word.slot_type() != SlotType::I64 {
+                                    return Err((
+                                        Trap::SlotTypeMismatch {
+                                            slot: ev_slot,
+                                            expected: SlotType::I64,
+                                            actual: word.slot_type(),
+                                        },
+                                        pc,
+                                    ));
+                                }
+                            }
+                            let mut st = stack_state!();
+                            let t = st
+                                .call(version, func_id, &f.layout, fp, pc.0 + 1)
+                                .map_err(|e| (e, pc))?;
+                            active = Active {
+                                version: t.version,
+                                func: t.func,
+                            };
+                            pc = CodePc(0);
+                            continue 'transfer;
                         }
                         let g = crate::native::resolve_generic(module, *func).ok_or((
                             Trap::UnknownCallee {

@@ -65,7 +65,8 @@
 //!   (E5, M3).
 //! * The loop audit checks one re-execution round (the condition and body of `while`, the body of
 //!   `for`) against the merged state; a use the forward walk already reported is never reported
-//!   twice.
+//!   twice. A loop nested inside an outer audit round skips its own round — the audit walk mutates
+//!   nothing, so the round is a duplicate re-check that compounded per nesting level.
 //! * The uninitialized state is infrastructure: every binding form in the M2 surface carries an
 //!   initializer and the resolver binds in flow order, so [`ErrorCode::UninitializedUse`] fires
 //!   only once a surface form can defer initialization.
@@ -479,7 +480,10 @@ impl<'a> Lin<'a> {
                     }
                 }
             },
-            ItemKind::Struct(s) => self.deinit_shape(s),
+            ItemKind::Struct(s) => {
+                self.deinit_shape(s);
+                self.deinit_bodies(s);
+            },
             ItemKind::Local(_)
             | ItemKind::ExternFn(_)
             | ItemKind::Enum(_)
@@ -500,6 +504,23 @@ impl<'a> Lin<'a> {
             self.block(body);
         }
         self.drop_scope(f.body.as_ref().map_or(f.name.span, |b| b.span));
+    }
+
+    /// Walks every declared `deinit` body like a borrowed-receiver
+    /// function body (C5): `self` is the dying instance, never owned by
+    /// this frame, so its uses borrow and its fields' last-use facts —
+    /// what the deinit function's own lowering consumes — record here.
+    fn deinit_bodies(&mut self, s: &'a StructDecl) {
+        for member in &s.members {
+            let StructMember::Deinit { span, body } = member else {
+                continue;
+            };
+            self.scopes.push(Vec::new());
+            let copyable = self.facts.get(span).is_none_or(|fact| fact.copyable);
+            self.bind_binder(*span, "self", copyable, false);
+            self.block(body);
+            self.drop_scope(*span);
+        }
     }
 
     /// The declarative deinit checks (C5): `deinit` lives on `~Copyable`
@@ -1065,13 +1086,19 @@ impl<'a> Lin<'a> {
         self.block(body);
         let merged = merge_states(&entry, &self.state);
         // The loop re-executes the condition and body on the back edge:
-        // one audit round against the merged state [C1].
-        let audited = self.audit;
-        self.state = merged.clone();
-        self.audit = true;
-        self.expr(cond, true);
-        self.block(body);
-        self.audit = audited;
+        // one audit round against the merged state [C1]. A loop nested
+        // inside an outer audit round skips its own: the audit walk
+        // mutates nothing, so the round would re-check the same reads
+        // against the same state, and the re-walk compounded per nesting
+        // level (exponential in loop depth).
+        if !self.audit {
+            let audited = self.audit;
+            self.state = merged.clone();
+            self.audit = true;
+            self.expr(cond, true);
+            self.block(body);
+            self.audit = audited;
+        }
         self.state = merged;
         false
     }
@@ -1086,12 +1113,18 @@ impl<'a> Lin<'a> {
         self.drop_scope(body.span());
         let merged = merge_states(&entry, &self.state);
         // The body re-executes per iteration; pattern binders are fresh
-        // each round, so only outer bindings matter here.
-        let audited = self.audit;
-        self.state = merged.clone();
-        self.audit = true;
-        self.expr(body, true);
-        self.audit = audited;
+        // each round, so only outer bindings matter here. A loop nested
+        // inside an outer audit round skips its own round: the audit
+        // walk mutates nothing, so the round re-checks the same reads
+        // against the same state, and the re-walk compounded per
+        // nesting level (exponential in loop depth).
+        if !self.audit {
+            let audited = self.audit;
+            self.state = merged.clone();
+            self.audit = true;
+            self.expr(body, true);
+            self.audit = audited;
+        }
         self.state = merged;
         false
     }

@@ -1,5 +1,5 @@
 // source: F3 method tier — the inherent-impl checker surface (the R26 live signature table, owner-typed this round)
-// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); execution refuses at lowering until impl-body dispatch lands (the trait-dispatch phase 3 seam)
+// purpose: inherent impls dot-call through the owner-typed method table (two owners share one name, wrong receivers report at the dot); execution refuses at lowering — inherent impl bodies stay outside the dispatch seam, the refusal names the UFCS alternative
 // items:
 // counter: stage: typecheck
 // timer: stage: typecheck

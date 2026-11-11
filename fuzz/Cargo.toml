@@ -60,3 +60,10 @@ path = "fuzz_targets/fuzz_vm.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_check_gen"
+path = "fuzz_targets/fuzz_check_gen.rs"
+test = false
+doc = false
+bench = false

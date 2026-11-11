@@ -11,6 +11,13 @@ fn shout_at(words: list[string], i: int) -> string {
   list_get(words, i).ok((w: string) => w.to_upper()).err((_: none) => "?")
 }
 
+trait shouty {
+  fn shout(self) -> string
+}
+impl shouty for string {
+  fn shout(self) -> string { to_upper(self) }
+}
+
 fn main() -> () {
   const line = "set types, affine values, no GC"
   const words = split(line, ' ')
@@ -18,6 +25,7 @@ fn main() -> () {
   println("words: ${len(words)}")
   println("first: ${shout_at(words, 0)}")
   println("tenth: ${shout_at(words, 9)}")
+  println("shouted: ${line.shout()}")
 
   const all = list_concat(words, ["tail", "calls"])
   var scanned: int = 0
@@ -40,12 +48,13 @@ line: set types, affine values, no GC
 words: 6
 first: SET
 tenth: ?
+shouted: SET TYPES, AFFINE VALUES, NO GC
 scanned: 8 of 8
 sum: 12
 0
 ```
 
-The lowered subset behind that block: `const`/`var` bindings with compound assignment, `fn` declarations and lambdas (capturing closures included), set-algebra types with `T?` and `is` narrowing, enum blocks and struct construction, list literals with the `list[t]()` constructor and `list_push`, `map[k, v]()` builder calls, anonymous tuples with destructuring, `for x in a..b`/`a..=b` with `in` membership, `while`/`if`/`match`, the combinator surface (`map`/`filter`/`reduce` and the container closes `cons`/`head`/`tail`/`collect`/`first`/`max`), the early exits `return`/`?`/`.ok`/`.err` with the extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`), string interpolation over printable primitives, char literals, script-entry top-level statements, and guaranteed self-and-mutual tail calls at constant stack. Constructs outside the subset fail with a diagnostic naming the seam they need.
+The lowered subset behind that block: `const`/`var` bindings with compound assignment, `fn` declarations and lambdas (capturing closures included), set-algebra types with `T?` and `is` narrowing, enum blocks and struct construction, list literals with the `list[t]()` constructor and `list_push`, `map[k, v]()` builder calls, anonymous tuples with destructuring, `for x in a..b`/`a..=b` and `for x in xs` over lists with `in` membership over ranges and lists (map iteration and non-list membership refuse with a diagnostic), `while`/`if`/`match`, the combinator surface (`map`/`filter`/`reduce` and the container closes `cons`/`head`/`tail`/`collect`/`first`/`max`), the early exits `return`/`?`/`.ok`/`.err` with the extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`), string interpolation over printable primitives, char literals, script-entry top-level statements, and guaranteed self-and-mutual tail calls at constant stack. The trait surface lowers end to end: impl member bodies compile under mangled identity and statically-solved trait call sites dispatch through CALLG with an instance-id evidence word (generic impl call sites check clean and refuse at lowering naming the runtime-evidence seam). Declared `deinit` blocks on `~Copyable` structs execute at the value's unique death — scope exit, early return, `?`, overwrite, frame exit. Constructs outside the subset fail with a diagnostic naming the seam they need.
 
 ## The `ds` CLI
 
@@ -56,7 +65,7 @@ The lowered subset behind that block: `const`/`var` bindings with compound assig
 | `ds check <files...>` | Runs the static story alone — parse, resolve, bidirectional typing with refinement, linearity, effect rows. `--no-ambient`; `--error-format json` renders one JSON object per diagnostic. |
 | `ds fmt <files...>` | Rewrites `.ds` sources in place through the zero-option formatter (no style flags exist). `--check` reports would-change files without writing and exits 1. |
 
-The stdlib ambient registers before user sources: the string/list/map natives, the generic vocabulary (`len`, `str`, the combinators, the container closes, the extraction family), and the failure taxonomy the fallible reads answer — `read_file -> string | io_err`, `parse_int -> int | parse_err`, `fetch -> response | net_err` with `net_err` the two-case `timeout | refused` — plus the `config` struct and the `urls` const. An unhandled fallible-native failure prints `io error: <message>` (or `net error:`) and exits 1; a handled one checks clean and today refuses at lowering (DS4009) at the documented run-level seam where the platform's two-word span meets a source-level union.
+The stdlib ambient registers before user sources: the string/list/map natives, the generic vocabulary (`len`, `str`, the combinators, the container closes, the extraction family), and the failure taxonomy the fallible reads answer — `read_file -> string | io_err`, `parse_int -> int | parse_err`, `fetch -> response | net_err` with `net_err` the two-case `timeout | refused` — plus the `config` struct and the `urls` const. An unhandled fallible-native failure prints `io error: <message>` (or `net error:`) and exits 1; a handled one re-spans the platform's two-word span into the call-site union (`.ok`/`.err`/`?` extraction over the success-typed ambient) and runs.
 
 ## Design highlights
 
@@ -70,7 +79,7 @@ The stdlib ambient registers before user sources: the string/list/map natives, t
 
 ## Status
 
-The front end, the checker, and the tier-1 pipeline run: `ds run` compiles in-process — parse, static check, Perceus dup/drop placement, lowering — and executes on the tier-1 VM; the M5 substrate (fiber pool, nursery join with first-failure cancellation, boundary error unioning) is landed, with the in-language `nursery`/`spawn` surface waiting on its round. Hardening rounds have pinned the locked contracts to their encoders — the uop field map (a sentinel assertion per variant), the dsmod reader, DefId packing, trap attribution, `.err` member re-spanning — and the ambient failure taxonomy gives the fallible reads real success unions. Designed and recorded, not yet running: M6 derives and comptime (trait impl bodies are the dispatch seam), M7 modules, packages, FFI, and tooling, and the M8 JIT tiers. Gates: the conformance corpus with golden diagnostics, fuzz targets (parse, check, dsmod reader, query engine) with nextest mirrors in CI, and the cross-language benchmark suite. The ruled surface is [docs/en/tutorial.md](docs/en/tutorial.md); the authoritative decisions are [docs/en/design-decisions.md](docs/en/design-decisions.md); milestone state lives in [docs/en/implementation-plan.md](docs/en/implementation-plan.md#progress-log).
+The front end, the checker, and the tier-1 pipeline run: `ds run` compiles in-process — parse, static check, Perceus dup/drop placement, lowering — and executes on the tier-1 VM — trait call sites dispatch through CALLG over impl member bodies, and declared `deinit` blocks run at the value's unique death; the M5 substrate (fiber pool, nursery join with first-failure cancellation, boundary error unioning) is landed, with the in-language `nursery`/`spawn` surface waiting on its round. Hardening rounds have pinned the locked contracts to their encoders — the uop field map (a sentinel assertion per variant), the dsmod reader, DefId packing, trap attribution, `.err` member re-spanning — and the ambient failure taxonomy gives the fallible reads real success unions. Designed and recorded, not yet running: M6 derives and comptime (the open trait seam is the generic-impl lowerer half: impl bodies in the plan plus runtime-resolved evidence through the FuncRef instance registry), M7 modules, packages, FFI, and tooling, and the M8 JIT tiers. Gates: the conformance corpus with golden diagnostics, fuzz targets (parse, check, checker generator, dsmod reader, query engine, VM program generator) with nextest mirrors in CI, and the cross-language benchmark suite. The ruled surface is [docs/en/tutorial.md](docs/en/tutorial.md); the authoritative decisions are [docs/en/design-decisions.md](docs/en/design-decisions.md); milestone state lives in [docs/en/implementation-plan.md](docs/en/implementation-plan.md#milestone-status).
 
 ## Repository layout
 
@@ -90,7 +99,7 @@ The front end, the checker, and the tier-1 pipeline run: `ds run` compiles in-pr
 | `crates/ds-diag` | Span model, error-code registry, human and JSON diagnostic rendering |
 | `conformance/` | Seed corpus ported to the decided surface, with per-item stage expectations |
 | `benchmarks/` | Cross-language kernel suite (ds, python, lua, node) with correctness goldens |
-| `fuzz/` | cargo-fuzz targets: parse, check, dsmod reader, query engine |
+| `fuzz/` | cargo-fuzz targets: parse, check, checker generator, dsmod reader, query engine, VM program generator |
 | `docs/` | Tutorial, decision record, implementation plan |
 
 ## Building and testing
@@ -126,13 +135,13 @@ cargo run -- ds build examples/hello.ds -o hello.dsmod
 cargo run -- ds run hello.dsmod                   # the built module, identical output
 ```
 
-Entries default to `main` (`--entry <name>` overrides). Most examples run green; `files.ds` and `mutation.ds` check clean and refuse at the documented fallible-native seam instead — a stage expectation [docs/en/implementation-plan.md](docs/en/implementation-plan.md) records.
+Entries default to `main` (`--entry <name>` overrides). Every example runs green, including the fallible reads in `files.ds` and `mutation.ds`.
 
 ## Documentation
 
 - [docs/en/tutorial.md](docs/en/tutorial.md) — the entire v1 surface in one short tutorial (the explainability-budget artifact).
 - [docs/en/design-decisions.md](docs/en/design-decisions.md) — the authoritative record of all 44 language decisions.
-- [docs/en/implementation-plan.md](docs/en/implementation-plan.md) — milestones M0-M9, progress log, and status table.
+- [docs/en/implementation-plan.md](docs/en/implementation-plan.md) — milestones M0-M9, the status table, standing pitfalls, and the ranked next-round queue.
 - [AGENTS.md](AGENTS.md) — the project charter: expectations, philosophy, constraints.
 - [old-README.md](old-README.md) — the author's historical vision document, kept for background.
 
