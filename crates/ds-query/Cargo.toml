@@ -15,6 +15,9 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# The engine's internal maps are keyed by small integer-packed keys: the
+# hasher is the whole cost, so the std SipHash is the wrong default.
+rustc-hash = "2"
 ds-diag = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
 ds-check = { path = "../ds-check" }

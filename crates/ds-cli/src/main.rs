@@ -2,9 +2,11 @@
 //!
 //! `ds check` runs the static story over .ds sources, `ds run` executes
 //! one module — a dsmod file, or a .ds source compiled in-process —, `ds
-//! build` compiles a .ds source to a dsmod module, and `ds fmt` rewrites
-//! .ds sources in place. Every further subcommand (info, dev, save, bind,
-//! link) lands when the backend it drives lands — no stub commands.
+//! build` compiles a .ds source to a dsmod module, `ds fmt` rewrites
+//! .ds sources in place, and `ds repl` reads-eval-prints against the
+//! in-process pipeline with a persistent session. Every further
+//! subcommand (info, dev, save, bind, link) lands when the backend it
+//! drives lands — no stub commands.
 
 use std::process::ExitCode;
 
@@ -13,6 +15,7 @@ use clap::{Parser, Subcommand};
 mod build;
 mod check;
 mod fmt;
+mod repl;
 mod run;
 mod source;
 
@@ -38,6 +41,8 @@ enum Command {
     Build(build::BuildArgs),
     /// Format .ds sources in place (zero style options)
     Fmt(fmt::FmtArgs),
+    /// Interactive read-eval-print loop over the in-process pipeline
+    Repl(repl::ReplArgs),
 }
 
 fn main() -> ExitCode {
@@ -47,6 +52,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run::run(&args).map(|()| ExitCode::SUCCESS),
         Command::Build(args) => build::build(&args).map(|()| ExitCode::SUCCESS),
         Command::Fmt(args) => Ok(fmt::fmt(&args)),
+        Command::Repl(args) => repl::repl(&args),
     };
     match result {
         // the subcommand reports its own exit code (diagnostics vs clean)

@@ -1,0 +1,31 @@
+// source: M5, the cross-nursery join interlock round
+// purpose: the recursive nursery block — a spawned child's body joining its own fresh nursery while an enclosing drive owns the child — stands one interlock frame per recursion level, and the iterative interlock drains them without the Rust stack (the recursive driver overflowed the process near depth 50)
+// items:
+// deep: stage: run
+// main: stage: run
+
+fn deep(n: int) -> int | net_err {
+  if n <= 0 {
+    0
+  } else {
+    nursery {
+      spawn {
+        deep(n - 1)
+      }
+    }
+    0
+  }
+}
+
+fn main() -> () {
+  match deep(3) {
+    timeout => println("t")
+    refused => println("r")
+    n => println("three ${n}")
+  }
+  match deep(2000) {
+    timeout => println("t")
+    refused => println("r")
+    n => println("two-thousand ${n}")
+  }
+}

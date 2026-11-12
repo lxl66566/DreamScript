@@ -1,12 +1,13 @@
 //! The two-slot module table [H6 item 5]: versioned module slots and
 //! fully-qualified function resolution.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
 use ds_abi::{EntryDescriptor, Inst, InstDecodeError, Uop};
 
 use crate::{
     native::NativeFunction,
+    platform::Platform,
     program::{Const, ConstKind, FunctionDef},
 };
 
@@ -213,7 +214,8 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
         // which pool kinds each loading opcode accepts, and the primary
         // kind its trap names: KIMM loads i64 entries, KCONST the non-i64
         // constant words (this VM executes f64, bool, and fn words), KSTR
-        // the string entries, CALL/CALLT/CALLG the function references
+        // the string entries, CALL/CALLT/CALLG/CALLTG the function
+        // references
         let (kidx, accepts, expected): (_, &[_], _) = match op {
             Uop::Kimm { kidx, .. } => (kidx, &[ConstKind::I64], ConstKind::I64),
             Uop::Kconst { kidx, .. } => (
@@ -221,10 +223,13 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
                 &[ConstKind::F64, ConstKind::Bool, ConstKind::FuncRef],
                 ConstKind::F64,
             ),
-            Uop::Kstr { kidx, .. } => (kidx, &[ConstKind::Str], ConstKind::Str),
-            Uop::Call { callee, .. } | Uop::Callt { callee, .. } | Uop::Callg { callee, .. } => {
-                (callee, &[ConstKind::FuncRef], ConstKind::FuncRef)
+            Uop::Kstr { kidx, .. } | Uop::KstrBorrow { kidx, .. } => {
+                (kidx, &[ConstKind::Str], ConstKind::Str)
             },
+            Uop::Call { callee, .. }
+            | Uop::Callt { callee, .. }
+            | Uop::Callg { callee, .. }
+            | Uop::Calltg { callee, .. } => (callee, &[ConstKind::FuncRef], ConstKind::FuncRef),
             _ => continue,
         };
         let found = def
@@ -248,6 +253,9 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
 
 #[derive(Debug)]
 pub struct ModuleSlots {
+    /// The module id a scalar FuncRef word addresses (F2): this name's
+    /// first-install position in the registry's id space.
+    id: u32,
     current: Arc<ModuleVersion>,
     retiring: Option<Arc<ModuleVersion>>,
 }
@@ -279,18 +287,41 @@ impl ModuleSlots {
 pub struct ModuleRegistry {
     modules: BTreeMap<String, ModuleSlots>,
     natives: BTreeMap<String, Arc<Vec<NativeFunction>>>,
+    /// The installed platform handlers, by name (H5.5, E1): the world
+    /// surface's capability gate — a world call site's FuncRef resolves
+    /// through the platform's table only when the platform serves the
+    /// op's capability.
+    platforms: BTreeMap<String, Arc<Platform>>,
     /// The module-id space scalar FuncRef words address (F2): one id per
     /// module name, assigned at first install and stable across swaps.
-    /// Name-keyed modules are the interim until the ds-mod link table
-    /// assigns module indices, mirroring the pool FuncRef's name-keyed
-    /// interim.
+    /// Name-keyed modules are the interim until the M7 loading round's
+    /// link table assigns module indices, mirroring the pool FuncRef's
+    /// name-keyed interim. This vector is the id-to-name direction; the
+    /// name-to-id direction rides each slot's own `id`, so a name lookup
+    /// is one `modules` descent.
     id_names: Vec<String>,
+    /// The last run entry [`ModuleRegistry::resolve`] answered, as of
+    /// `generation`: a host drive re-entering one entry skips both name
+    /// lookups. A hint beside the authoritative lookup, so a miss costs one
+    /// full resolution, and a module install clears it.
+    entry: RefCell<Option<ResolvedEntry>>,
     /// Bumped by every install (module version or native table): the
     /// version stamp the CALL-site inline cache validates against. Any
     /// swap redirects subsequent calls through the current slot, so one
     /// monotonic counter covering both tables is the whole invalidation
     /// story — a stamped hit is a resolution no install has undone.
     generation: u64,
+}
+
+/// One run entry resolution: the names it answered for, the install
+/// generation it ran against, and its answer.
+#[derive(Debug)]
+struct ResolvedEntry {
+    module: String,
+    func: String,
+    stamp: u64,
+    version: Arc<ModuleVersion>,
+    func_id: u32,
 }
 
 impl ModuleRegistry {
@@ -305,24 +336,22 @@ impl ModuleRegistry {
     /// retired (dropped). Returns the shared handle to the installed version.
     pub fn install(&mut self, version: ModuleVersion) -> Arc<ModuleVersion> {
         let installed = Arc::new(version);
-        match self.modules.get_mut(&installed.name) {
-            Some(slots) => {
-                slots.retiring = Some(std::mem::replace(
-                    &mut slots.current,
-                    Arc::clone(&installed),
-                ));
-            },
-            None => {
-                self.modules.insert(installed.name.clone(), ModuleSlots {
-                    current: Arc::clone(&installed),
-                    retiring: None,
-                });
-            },
-        }
-        if !self.id_names.iter().any(|n| n == &installed.name) {
+        if let Some(slots) = self.modules.get_mut(&installed.name) {
+            slots.retiring = Some(std::mem::replace(
+                &mut slots.current,
+                Arc::clone(&installed),
+            ));
+        } else {
+            let id = u32::try_from(self.id_names.len()).expect("module count fits u32");
             self.id_names.push(installed.name.clone());
+            self.modules.insert(installed.name.clone(), ModuleSlots {
+                id,
+                current: Arc::clone(&installed),
+                retiring: None,
+            });
         }
         self.generation += 1;
+        self.entry.borrow_mut().take();
         installed
     }
 
@@ -336,10 +365,11 @@ impl ModuleRegistry {
     }
 
     /// The module id a scalar FuncRef word addresses (F2): assigned at
-    /// first install, kept across hot-reload swaps.
+    /// first install, kept across hot-reload swaps, and answered by the
+    /// module's own slot.
     #[must_use]
     pub fn module_id(&self, module: &str) -> Option<u32> {
-        u32::try_from(self.id_names.iter().position(|n| n == module)?).ok()
+        self.modules.get(module).map(|slots| slots.id)
     }
 
     /// The module name an id addresses, for call-time resolution of
@@ -349,12 +379,29 @@ impl ModuleRegistry {
     }
 
     /// Resolves a function by name through the module's current slot, for
-    /// run entries: the version plus the function's table index.
+    /// run entries: the version plus the function's table index. The last
+    /// answer is kept in the `entry` hint, so a drive re-entering one entry
+    /// answers without either name lookup.
     #[must_use]
     pub fn resolve(&self, module: &str, func: &str) -> Option<(Arc<ModuleVersion>, u32)> {
-        let version = &self.modules.get(module)?.current;
+        {
+            let entry = self.entry.borrow();
+            if let Some(entry) = entry.as_ref() {
+                if entry.stamp == self.generation && entry.module == module && entry.func == func {
+                    return Some((Arc::clone(&entry.version), entry.func_id));
+                }
+            }
+        }
+        let version = Arc::clone(&self.modules.get(module)?.current);
         let &func_id = version.index.get(func)?;
-        Some((Arc::clone(version), func_id))
+        *self.entry.borrow_mut() = Some(ResolvedEntry {
+            module: module.to_owned(),
+            func: func.to_owned(),
+            stamp: self.generation,
+            version: Arc::clone(&version),
+            func_id,
+        });
+        Some((version, func_id))
     }
 
     /// Resolves a pool FuncRef through the target module's current slot
@@ -371,8 +418,9 @@ impl ModuleRegistry {
     }
 
     /// Whether a uop module under `module`'s current slot would resolve
-    /// `func`: the shadow check the generic-call site runs per call,
-    /// without materializing a version handle.
+    /// `func`: the bounds-only existence check, without materializing a
+    /// version handle. The generic-call site's shadow check and install-time
+    /// FuncRef validation run it.
     #[must_use]
     pub fn has_uop(&self, module: &str, func: u32) -> bool {
         match self.modules.get(module) {
@@ -385,6 +433,34 @@ impl ModuleRegistry {
     #[must_use]
     pub fn slots(&self, module: &str) -> Option<&ModuleSlots> {
         self.modules.get(module)
+    }
+
+    /// Installs a platform handler (H5.5, E1): the world surface `platform`
+    /// serves, under its own name — the module name the source's platform
+    /// declaration bakes into the lowered world calls' pool FuncRefs. The
+    /// platform's op table installs as a native table (served ops' bodies,
+    /// unserved ops as reserved traps), and the registry records the
+    /// platform so install-time FuncRef validation can refuse a call site
+    /// whose op the platform does not serve. A same-named prior platform
+    /// replaces it, exactly like a native table.
+    pub fn install_platform(&mut self, platform: Platform) {
+        let name = platform.name().to_owned();
+        let shared = Arc::new(platform);
+        let table = crate::platform::platform_module(&shared);
+        self.natives.insert(name.clone(), Arc::new(table));
+        self.generation += 1;
+        self.platforms.insert(name, shared);
+    }
+
+    /// Whether an installed platform named `module` serves the world op
+    /// at `index` of the fixed table: `None` when no such platform is
+    /// installed (the call site resolves like any uninstalled native
+    /// module), `Some(false)` when the platform does not serve the op's
+    /// capability.
+    #[must_use]
+    pub fn platform_serves(&self, module: &str, index: u32) -> Option<bool> {
+        let platform = self.platforms.get(module)?;
+        Some(platform.serves(index))
     }
 
     /// Installs a native module: a name plus its function table, whose
@@ -441,6 +517,35 @@ mod tests {
             assert_eq!(f.entry.resolve(), position);
         }
         assert_eq!(version.function("b").map(|f| f.entry.resolve()), Some(1));
+    }
+
+    #[test]
+    fn resolve_answers_the_current_slot_and_follows_a_swap() {
+        let mut reg = ModuleRegistry::new();
+        let v1 = reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        let (first, func_id) = reg.resolve("m", "b").expect("installed");
+        assert_eq!(func_id, 1);
+        assert!(Arc::ptr_eq(&first, &v1));
+        // the repeat query answers from the hint, and a name the hint does
+        // not carry falls back to the full lookup
+        assert!(Arc::ptr_eq(
+            &reg.resolve("m", "b").expect("installed").0,
+            &v1
+        ));
+        assert!(reg.resolve("m", "nowhere").is_none());
+        // the swap retires v1: the hint holds no handle of its own, so the
+        // retiring slot plus the caller's are the only two
+        drop(first);
+        let v2 = reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        assert_eq!(Arc::strong_count(&v1), 2);
+        assert!(Arc::ptr_eq(
+            &reg.resolve("m", "b").expect("installed").0,
+            &v2
+        ));
     }
 
     #[test]

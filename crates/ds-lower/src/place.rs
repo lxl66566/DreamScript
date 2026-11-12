@@ -22,13 +22,31 @@
 //!   the value's death, else ownership survives to a later death;
 //! * staging into the overlay: a local callee's borrow parameter owns its word (the callee balances
 //!   with its own exit drops), so a dying source forwards its count and a live source dups; a
-//!   native is a transient borrow window (C2) — never a dup, and a dying source drops right after
-//!   the call. The window opens before the call's operand evaluation and pins every word its CALL
-//!   reads: a death firing inside that window (a later operand's own last-use dec) defers to the
-//!   window's flush, so the object survives the CALL; nested windows flush LIFO, and a word several
-//!   nested calls read dies at the outermost reading window's flush;
+//!   consuming (`move`-mode) parameter's staging is the hand-off — the count and any deinit claim
+//!   ride into the callee, whose bind-time claim fires the hook at its own death sites; a native is
+//!   a transient borrow window (C2) — never a dup, and a dying source drops right after the call.
+//!   The window opens before the call's operand evaluation and pins every word its CALL reads: a
+//!   death firing inside that window (a later operand's own last-use dec) defers to the window's
+//!   flush, so the object survives the CALL; nested windows flush LIFO, and a word several nested
+//!   calls read dies at the outermost reading window's flush;
 //! * exits (RET/RETSPAN/CALLT) transfer the returned words and drop every other still-owned word,
 //!   in ascending slot order; HALT ends the program, where the heap dies whole — no drops.
+//!
+//! # The temporary classification (stage three's KSTR slice)
+//!
+//! A KSTR-produced word whose count never moves inside its frame — no dup,
+//! no call-staging forward, no foreign count written into its slot, no exit
+//! transfer, no loop carry, no claim fold — is a designated temporary: its
+//! only count traffic is the load's intern acquire and the terminal dec, so
+//! the pass deletes both (the emission rewrites the load to `KstrBorrow`,
+//! whose word borrows the intern map's canonical copy). The pass proves it
+//! by elimination: every count-moving site marks the slot as transited, and
+//! a slot qualifies exactly when it survives to finalization with only
+//! `produced_kstr` productions. The proof is path-insensitive by
+//! construction — the rewrite happens once per frame after the whole walk,
+//! so a transition on any branch keeps the acquire for every path. Frames
+//! bump-allocate slots, so a slot's decs in the emitted stream all belong to
+//! the words it hosted, and a qualifying slot hosted only borrow loads.
 //!
 //! Branches fork the ownership map per arm and rejoin by intersection: a
 //! word stays owned after the join exactly when every non-diverging arm
@@ -40,6 +58,19 @@
 //! stages the value's whole word span, calls the synthesized deinit
 //! function while the fields are still live, then emits the `RCDEC` on
 //! the count words.
+//!
+//! Every claim also owns an *establishment band*: one dedicated frame
+//! word holding [`super::shape::CLAIM_BAND_SET`] from the claim's birth
+//! to its death — a fact the VM's teardown doors read straight off the
+//! dying frame, independent of any `Ref` word the claim ledger counts
+//! (a Ref-free span never enters the ledger, and a dead claim's counts
+//! can survive it on an outstanding borrow). The band sets at
+//! registration, clears at every death path and every consuming move
+//! (a moved claim's hook fires where it lands, never twice), and rides
+//! the drop shape out of the body: the clear op immediately after the
+//! hook call is what the VM's claim directory decodes the band word
+//! from. Band tags live below every user-mintable tag id, so a stale
+//! word in a recycled frame region can never read as a set band.
 //!
 //! # Conservative corners (dup or defer rather than risk a premature free)
 //!
@@ -89,6 +120,10 @@ pub(crate) struct Owned {
     /// the hook without any `Ref` count, and the span's other `Ref`
     /// words fold into the claim (their decs fire with the hook's).
     hook: Option<Hook>,
+    /// The establishment band word of the claim `hook` names: the
+    /// teardown doors' liveness witness, set at registration and cleared
+    /// at every death path. `None` exactly when `hook` is.
+    band: Option<u8>,
     /// Whether the word carries a `Ref` count alongside any hook. A
     /// claimed base word keeps this clear — its decs are the hook's.
     count: bool,
@@ -126,9 +161,9 @@ pub(crate) struct Placement {
     /// The checker's final use per binder span: (use span, borrowed).
     last_use: HashMap<Span, (Span, bool)>,
     /// The checker's consuming uses (binder, at): a move forces the death
-    /// test true at exactly that use. Empty in the lowerable subset
-    /// (borrow parameters only); consumed so a linear surface slots in
-    /// without re-deriving affine facts.
+    /// test true at exactly that use — a rebinding in value position, or a
+    /// `move`-mode parameter's argument (C2). Consumed so a linear surface
+    /// slots in without re-deriving affine facts.
     moves: HashSet<(Span, Span)>,
     /// Owned words, ascending slot order (every emission iterates it, so
     /// output is deterministic).
@@ -147,6 +182,11 @@ pub(crate) struct Placement {
     /// Words whose count forwarded into a callee at the current use (the
     /// `f(s, s)` corner).
     forwarded: HashSet<u8>,
+    /// Words a borrowed registration names (a borrow parameter, a
+    /// handler member alias, a pattern field): the binder aliases the
+    /// owner's value, so the frame never anchors its deinit claim
+    /// there — the owner's own drop site fires the hook (C5).
+    borrowed: HashSet<u8>,
     /// Loop nesting depth of the current walk position.
     loop_depth: usize,
     /// The words owned at each enclosing loop's entry: a loop-carried
@@ -160,6 +200,19 @@ pub(crate) struct Placement {
     /// fork (an arm that exits never reaches the join, so its state
     /// must not constrain what the join keeps).
     diverged: bool,
+    /// The slots whose productions so far are all KSTR loads and whose
+    /// counts never moved: a slot qualifies for the borrow rewrite
+    /// exactly when it is still here at finalization (see the module
+    /// docs' temporary classification).
+    kstr_slots: HashSet<u8>,
+    /// The slots whose sole production so far is a fresh concatenation
+    /// and whose counts never moved: the arena-serving candidates, the
+    /// STRCAT slice of the same classification. A slot stays only when
+    /// its word also dies inside the loop it was born in — loop_exit
+    /// drops every still-owned word of the loop's own depth, because a
+    /// word alive across the back edge would outlive the back-edge
+    /// restore that reclaims its arena bytes.
+    strcat_slots: HashSet<u8>,
 }
 
 impl Placement {
@@ -185,24 +238,75 @@ impl Placement {
             death: HashMap::new(),
             seen: HashMap::new(),
             forwarded: HashSet::new(),
+            borrowed: HashSet::new(),
             loop_depth: 0,
             loop_claims: Vec::new(),
             windows: Vec::new(),
             diverged: false,
+            kstr_slots: HashSet::new(),
+            strcat_slots: HashSet::new(),
         }
     }
 
     // ---- productions and binders ------------------------------------------------
 
-    /// A fresh reference landed in `slot` (KSTR, STRCAT, a call result
-    /// copied off the overlay, a zero-init dead Ref payload word).
+    /// A fresh reference landed in `slot` (STRCAT, a call result
+    /// copied off the overlay, a zero-init dead Ref payload word — and
+    /// KSTR loads through [`Self::produced_kstr`]). A non-KSTR
+    /// production disqualifies the slot's borrow classification: the
+    /// word's count traces to another producer.
     pub(crate) fn produced(&mut self, slot: u8) {
+        self.kstr_slots.remove(&slot);
+        self.strcat_slots.remove(&slot);
         self.owned.insert(slot, Owned {
             hook: None,
+            band: None,
             count: true,
             pinned: false,
             depth: self.loop_depth,
         });
+    }
+
+    /// A KSTR load landed in `slot` at the walk's current position: the
+    /// word qualifies for the borrow rewrite when the slot survives to
+    /// finalization with only these productions and no transition.
+    pub(crate) fn produced_kstr(&mut self, slot: u8) {
+        self.produced(slot);
+        self.kstr_slots.insert(slot);
+    }
+
+    /// A fresh STRCAT result landed in `slot` at the walk's current
+    /// position: the word qualifies for arena serving (the rewrite to
+    /// STRCAT_ARENA at finalization) when the slot survives to
+    /// finalization with only this production and no transition, and no
+    /// back edge ever carries it alive.
+    pub(crate) fn produced_strcat(&mut self, slot: u8) {
+        self.produced(slot);
+        self.strcat_slots.insert(slot);
+    }
+
+    /// One count-moving site touched `slot` (a dup inc, a call-staging
+    /// forward, a foreign count written into the slot, an exit transfer,
+    /// a loop carry, a claim fold): the borrow rewrite no longer
+    /// applies, on any path — the acquire keeps the count's movement
+    /// honest.
+    fn transit(&mut self, slot: u8) {
+        self.kstr_slots.remove(&slot);
+        self.strcat_slots.remove(&slot);
+    }
+
+    /// The slots that qualified for the borrow rewrite: drained at
+    /// finalization, after the whole walk, so a transition on any path
+    /// has already disqualified its slot.
+    pub(crate) fn take_kstr_slots(&mut self) -> HashSet<u8> {
+        std::mem::take(&mut self.kstr_slots)
+    }
+
+    /// The slots that qualified for arena serving: drained at
+    /// finalization, after the whole walk (see the module docs'
+    /// temporary classification).
+    pub(crate) fn take_strcat_slots(&mut self) -> HashSet<u8> {
+        std::mem::take(&mut self.strcat_slots)
     }
 
     /// Registers one deinit-carrying value's claim (C5): the hook
@@ -213,16 +317,50 @@ impl Placement {
     /// anchoring its own nested claim keeps it (the nested value's
     /// death stays its own). Every already-owned word of the value
     /// pins — its uses are borrows, never deaths.
-    pub(crate) fn claimed(&mut self, base: u8, hook: Hook, words: &[u8]) {
+    ///
+    /// `band` is the claim's establishment word: this emits its SET,
+    /// the fact the teardown doors read off the dying frame (a site
+    /// re-registered at its binder — a literal's temp — keeps the band
+    /// it already has and writes nothing).
+    pub(crate) fn claimed(
+        &mut self,
+        code: &mut Vec<Op>,
+        base: u8,
+        hook: Hook,
+        band: u8,
+        words: &[u8],
+    ) {
+        // an aliased borrow anchors no claim: the word's count and its
+        // deinit both belong to the owning frame, whose own drop site
+        // fires the hook — a local binding the same word (a const
+        // alias, a match binder, a discard) re-establishing one here
+        // would fire it early, while the owner still holds the value
+        if self.borrowed.contains(&base) {
+            return;
+        }
+        self.transit(base);
+        match self.owned.get_mut(&base).and_then(|owned| owned.band) {
+            // the site's own band, re-registered at its binder: set once
+            Some(live) if live == band => {},
+            // a replaced hook's band retires with it (its drop shapes
+            // die at the replacement); the orphan word is never read
+            Some(retired) => {
+                Self::emit_band(code, retired, false);
+                Self::emit_band(code, band, true);
+            },
+            None => Self::emit_band(code, band, true),
+        }
         match self.owned.get_mut(&base) {
             Some(owned) => {
                 owned.hook = Some(hook);
+                owned.band = Some(band);
                 owned.count = false;
                 owned.pinned = true;
             },
             None => {
                 self.owned.insert(base, Owned {
                     hook: Some(hook),
+                    band: Some(band),
                     count: false,
                     pinned: true,
                     depth: self.loop_depth,
@@ -230,6 +368,7 @@ impl Placement {
             },
         }
         for &word in words {
+            self.transit(word);
             match self.owned.get_mut(&word) {
                 // a plain count word of the span folds into the claim
                 Some(owned) if owned.hook.is_none() => {
@@ -257,6 +396,13 @@ impl Placement {
             .is_some_and(|owned| owned.hook.is_some())
     }
 
+    /// The establishment band word of the claim anchored at `base`, for
+    /// re-registering one site (a literal's temp at its binder): the
+    /// band is per site, so both registrations write the same word.
+    pub(crate) fn claim_band(&self, base: u8) -> Option<u8> {
+        self.owned.get(&base).and_then(|owned| owned.band)
+    }
+
     /// The base word of the span claim covering `word`, if one does: a
     /// folded word of a deinit value answers its claim's base, so a
     /// hand-off can fire the claim while the value's words are live.
@@ -275,10 +421,10 @@ impl Placement {
     /// count whose word escapes rides the hand-off untouched — the
     /// claim is spent, the count is the returned value's.
     pub(crate) fn fire_claim(&mut self, code: &mut Vec<Op>, word: u8, escaping: &[u8]) {
-        let Some(hook) = self
+        let Some((hook, band)) = self
             .owned
             .get_mut(&word)
-            .and_then(|owned| owned.hook.take())
+            .and_then(|owned| owned.hook.take().zip(owned.band.take()))
         else {
             return;
         };
@@ -292,6 +438,7 @@ impl Placement {
             callee: hook.pool,
             nargs: hook.width,
         });
+        Self::emit_band(code, band, false);
         for &offset in hook.refs.iter() {
             let count_word = word + offset;
             if !escaping.contains(&count_word) {
@@ -310,6 +457,25 @@ impl Placement {
             self.binders.entry(word).or_default().insert(binder);
             self.recompute_death(word);
         }
+    }
+
+    /// A borrowing binder's registration (a parameter, a handler's
+    /// member alias, a pattern field): `base` is the aliased value's
+    /// own word, so it joins the borrowed set — a local later binding
+    /// the same word (a const alias, a match binder, a discard) must
+    /// not re-establish this frame's claim over it, the owner's drop
+    /// firing the hook once.
+    pub(crate) fn bound_borrowed(&mut self, binder: Span, base: u8, words: &[u8]) {
+        self.borrowed.insert(base);
+        self.bound(binder, words);
+    }
+
+    /// Whether the frame may anchor a deinit claim at `base`: a
+    /// borrowed word never anchors one (the owner's own drop fires
+    /// the hook), everything else — a produced temp, a moved hand-off,
+    /// a fresh word — does.
+    pub(crate) fn anchors_claim(&self, base: u8) -> bool {
+        !self.borrowed.contains(&base)
     }
 
     /// A binder's scope ends: drop what only it kept alive. Bind order is
@@ -419,21 +585,31 @@ impl Placement {
             // A pinned word belongs to a deinit value: the copy site is
             // the checker's consuming move (a linear value never
             // alias-copies), so the claim and its count transfer with no
-            // dup.
+            // dup. The transfer spends the site's establishment: the
+            // hook rides the word to its new slot and fires at its own
+            // death there, so a teardown door never fires a moved claim
+            // where it left (the pinned-transfer rule).
+            self.transit(src);
+            self.transit(dst);
             if owned.pinned || self.dies_at(src) {
+                if let Some(band) = owned.band {
+                    Self::emit_band(code, band, false);
+                }
                 // the count moves with the word
                 self.owned.remove(&src);
                 self.owned.insert(dst, owned);
             } else {
-                Self::emit_inc(code, src);
+                self.emit_inc(code, src);
                 self.owned.insert(dst, owned);
             }
             return;
         }
         if self.claim_base_of(src).is_some() && self.claim_base_of(dst).is_none() {
-            Self::emit_inc(code, src);
+            self.emit_inc(code, src);
+            self.transit(dst);
             self.owned.insert(dst, Owned {
                 hook: None,
+                band: None,
                 count: true,
                 pinned: false,
                 depth: self.loop_depth,
@@ -449,9 +625,11 @@ impl Placement {
     /// does not apply.
     pub(crate) fn duped(&mut self, code: &mut Vec<Op>, dst: u8, src: u8) {
         if self.owned.contains_key(&src) {
-            Self::emit_inc(code, src);
+            self.emit_inc(code, src);
+            self.transit(dst);
             let owned = Owned {
                 hook: None,
+                band: None,
                 count: true,
                 pinned: false,
                 depth: self.loop_depth,
@@ -505,19 +683,20 @@ impl Placement {
     pub(crate) fn staged_local(&mut self, code: &mut Vec<Op>, src: u8) {
         if self.owned.contains_key(&src) {
             if self.dies_at(src) && self.enclosing_window_reads(src) {
-                Self::emit_inc(code, src);
+                self.emit_inc(code, src);
             } else if self.dies_at(src) {
+                self.transit(src);
                 self.owned.remove(&src);
                 self.forwarded.insert(src);
             } else {
-                Self::emit_inc(code, src);
+                self.emit_inc(code, src);
             }
         } else if self.forwarded.contains(&src) || self.claim_base_of(src).is_some() {
             // the count already left at this use, or the word belongs to
             // a span claim (a deinit value's borrow): the extra handed
             // word needs its own (the callee drops each parameter once,
             // the claim keeps its count for the hook)
-            Self::emit_inc(code, src);
+            self.emit_inc(code, src);
         }
     }
 
@@ -530,6 +709,30 @@ impl Placement {
             .is_some_and(|below| below.iter().any(|w| w.readers.contains(&word)))
     }
 
+    /// One staged word of a consuming (`move`-mode) argument: the
+    /// callee's own parameter binding owns the value's death (C2), so
+    /// the count and any claim the word anchors ride the staging
+    /// together — the callee's bind-time claim fires the hook exactly
+    /// once at its own death site, so this frame never fires it (a
+    /// borrowed tail transfer fires its claim because the callee never
+    /// will; the consuming form is the silent inverse). The claim's
+    /// establishment clears here — the value lives in the callee now,
+    /// whose own registration sets the band it reads — so a door on
+    /// this frame stays silent. A word already forwarded at this use
+    /// (`f(s, s)`) hands the second count its own inc.
+    pub(crate) fn staged_move(&mut self, code: &mut Vec<Op>, src: u8) {
+        if self.owned.contains_key(&src) || self.claim_base_of(src).is_some() {
+            self.transit(src);
+            if let Some(band) = self.owned.get(&src).and_then(|owned| owned.band) {
+                Self::emit_band(code, band, false);
+            }
+            self.owned.remove(&src);
+            self.forwarded.insert(src);
+        } else if self.forwarded.contains(&src) {
+            self.emit_inc(code, src);
+        }
+    }
+
     /// One Ref word staged for a local callee the frame tail-transfers
     /// to: the transfer ends the frame, so no post-transfer position
     /// exists for a dup or a drop — the count rides the callee (its own
@@ -538,11 +741,12 @@ impl Placement {
     /// the span's non-escaping `Ref` words dec-ing behind the hook.
     pub(crate) fn staged_tail_local(&mut self, code: &mut Vec<Op>, src: u8) {
         if self.owned.contains_key(&src) {
+            self.transit(src);
             self.fire_claim(code, src, &[src]);
             self.owned.remove(&src);
             self.forwarded.insert(src);
         } else if self.forwarded.contains(&src) {
-            Self::emit_inc(code, src);
+            self.emit_inc(code, src);
         }
     }
 
@@ -562,6 +766,12 @@ impl Placement {
         if !self.owned.contains_key(&src) {
             return;
         }
+        // a staged word can be retained by the native; an arena temporary
+        // has no count and no object for a retention to acquire, so the
+        // staging keeps the counted spelling (a borrow word carries no
+        // count and every native retains from the store, so KSTR keeps
+        // its classification here)
+        self.strcat_slots.remove(&src);
         if tail {
             self.owned.remove(&src);
             return;
@@ -586,10 +796,11 @@ impl Placement {
 
     /// Registers words the innermost open window's CALL will read: each
     /// staged Ref argument and, eagerly, the body words the call's
-    /// already-evaluated operands resolved to.
-    pub(crate) fn native_reads(&mut self, words: &[u8]) {
+    /// already-evaluated operands resolved to. Any word source serves, so a
+    /// call site hands its addresses over without staging a list.
+    pub(crate) fn native_reads(&mut self, words: impl IntoIterator<Item = u8>) {
         if let Some(window) = self.windows.last_mut() {
-            window.readers.extend(words.iter().copied());
+            window.readers.extend(words);
         }
     }
 
@@ -664,6 +875,7 @@ impl Placement {
         }
         let owned = self.owned.remove(&word).unwrap_or(Owned {
             hook: None,
+            band: None,
             count: true,
             pinned: false,
             depth: 0,
@@ -673,8 +885,11 @@ impl Placement {
 
     /// Emits one drop without touching the ownership map — the exit path
     /// emits from a snapshot so sibling paths keep their counts. A claim
-    /// stages its whole span, calls the hook, then decs every `Ref` word
-    /// of the span (the hook's refs); an unclaimed count decs alone.
+    /// stages its whole span, calls the hook, clears its establishment
+    /// band (the clear op the VM's claim directory decodes the band word
+    /// from, so it must sit immediately after the call), then decs every
+    /// `Ref` word of the span (the hook's refs); an unclaimed count decs
+    /// alone.
     fn emit_drop(code: &mut Vec<Op>, word: u8, owned: Owned) {
         if let Some(hook) = owned.hook {
             for index in 0..hook.width {
@@ -687,6 +902,9 @@ impl Placement {
                 callee: hook.pool,
                 nargs: hook.width,
             });
+            if let Some(band) = owned.band {
+                Self::emit_band(code, band, false);
+            }
             for &offset in hook.refs.iter() {
                 code.push(Op::RcDec {
                     src: super::func::Slot::body(word + offset),
@@ -701,7 +919,21 @@ impl Placement {
         }
     }
 
-    fn emit_inc(code: &mut Vec<Op>, word: u8) {
+    /// Writes one establishment band word: `set` lands the SET tag of a
+    /// fresh claim, else the CLEAR tag that spends it. A plain TagNew —
+    /// the band tags sit below every user-mintable id, so no pool
+    /// constant and no user word can collide with either side.
+    fn emit_band(code: &mut Vec<Op>, band: u8, set: bool) {
+        code.push(Op::TagNew {
+            dst: super::func::Slot::body(band),
+            tag: if set { super::shape::CLAIM_BAND_SET } else { super::shape::CLAIM_BAND_CLEAR },
+        });
+    }
+
+    /// One dup inc on `word`: the count moves into the copy's life, so
+    /// the word leaves the borrow classification.
+    fn emit_inc(&mut self, code: &mut Vec<Op>, word: u8) {
+        self.transit(word);
         code.push(Op::RcInc {
             src: super::func::Slot::body(word),
         });
@@ -762,12 +994,25 @@ impl Placement {
     /// claims — their in-body deaths stay suppressed so a loop-carried
     /// slot keeps exactly one live claim across every iteration.
     pub(crate) fn loop_enter(&mut self) {
+        for word in self.owned.keys().copied().collect::<Vec<_>>() {
+            self.transit(word);
+        }
         self.loop_claims.push(self.owned.keys().copied().collect());
         self.loop_depth += 1;
     }
 
     pub(crate) fn loop_exit(&mut self) {
         self.loop_claims.pop();
+        // a word still owned here was born inside the loop (its birth
+        // depth is the body depth) and lives across the back edge: its
+        // arena bytes would be reclaimed by the back-edge restore while
+        // the word still reads them, so it keeps the counted spelling (a
+        // borrowed KSTR word carries no arena bytes and may cross freely)
+        for (slot, owned) in &self.owned {
+            if owned.depth == self.loop_depth {
+                self.strcat_slots.remove(slot);
+            }
+        }
         self.loop_depth -= 1;
     }
 
@@ -862,6 +1107,9 @@ impl Placement {
     /// so walk positions after the exit (unreachable code, or sibling arms
     /// that forked their own state) never re-drop the same counts.
     pub(crate) fn exit(&mut self, code: &mut Vec<Op>, transferred: &[u8]) {
+        for word in transferred {
+            self.transit(*word);
+        }
         let dying: Vec<(u8, Owned)> = self
             .owned
             .iter()
@@ -904,8 +1152,10 @@ mod tests {
     }
 
     /// The deinit hook (C5): a dying value's claim stages its whole word
-    /// span, calls the synthesized deinit, then decs every `Ref` word of
-    /// the span — the structure every drop site routes through.
+    /// span, calls the synthesized deinit, clears its establishment band
+    /// (the op the VM's claim directory reads the band word from), then
+    /// decs every `Ref` word of the span — the structure every drop site
+    /// routes through.
     #[test]
     fn a_deinit_death_calls_the_hook_before_the_decs() {
         let mut rc = placement();
@@ -914,7 +1164,16 @@ mod tests {
         // count folds into the claim, both dec behind the hook
         rc.produced(3);
         rc.produced(4);
-        rc.claimed(3, hook(42, 2, &[0, 1]), &[3, 4]);
+        rc.claimed(&mut code, 3, hook(42, 2, &[0, 1]), 9, &[3, 4]);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(9),
+                tag: super::super::shape::CLAIM_BAND_SET,
+            }],
+            "registration lands the establishment band"
+        );
+        let mut code = Vec::new();
         rc.drop_word(&mut code, 3);
         assert_eq!(
             code,
@@ -931,10 +1190,14 @@ mod tests {
                     callee: 42,
                     nargs: 2,
                 },
+                Op::TagNew {
+                    dst: Slot::body(9),
+                    tag: super::super::shape::CLAIM_BAND_CLEAR,
+                },
                 Op::RcDec { src: Slot::body(3) },
                 Op::RcDec { src: Slot::body(4) },
             ],
-            "the hook stages the span, calls, then decs every Ref word"
+            "the hook stages the span, calls, clears the band, then decs every Ref word"
         );
         assert!(
             !rc.owned.contains_key(&4),
@@ -943,7 +1206,8 @@ mod tests {
         // a scalar base word: the hook fires alone, nothing decs
         let mut rc = placement();
         let mut code = Vec::new();
-        rc.claimed(7, hook(42, 1, &[]), &[]);
+        rc.claimed(&mut code, 7, hook(42, 1, &[]), 8, &[]);
+        let mut code = Vec::new();
         rc.drop_word(&mut code, 7);
         assert_eq!(
             code,
@@ -956,8 +1220,12 @@ mod tests {
                     callee: 42,
                     nargs: 1,
                 },
+                Op::TagNew {
+                    dst: Slot::body(8),
+                    tag: super::super::shape::CLAIM_BAND_CLEAR,
+                },
             ],
-            "a scalar claim never decs"
+            "a scalar claim never decs; its band still clears"
         );
     }
 
@@ -968,12 +1236,13 @@ mod tests {
     fn a_hand_off_fires_the_covering_claim_and_decs_the_rest() {
         let mut rc = placement();
         let mut code = Vec::new();
-        rc.claimed(3, hook(42, 3, &[0, 2]), &[3, 5]);
+        rc.claimed(&mut code, 3, hook(42, 3, &[0, 2]), 6, &[3, 5]);
         // a folded word answers its claim's base (the anchor included)
         assert_eq!(rc.claim_base_of(5), Some(3));
         assert_eq!(rc.claim_base_of(3), Some(3));
         assert_eq!(rc.claim_base_of(9), None);
         // the word at offset 1 escapes (a scalar field read of the span)
+        let mut code = Vec::new();
         rc.fire_claim(&mut code, 3, &[4]);
         assert_eq!(
             code,
@@ -994,11 +1263,42 @@ mod tests {
                     callee: 42,
                     nargs: 3,
                 },
+                Op::TagNew {
+                    dst: Slot::body(6),
+                    tag: super::super::shape::CLAIM_BAND_CLEAR,
+                },
                 Op::RcDec { src: Slot::body(3) },
                 Op::RcDec { src: Slot::body(5) },
             ],
             "the claim decs the Ref words the hand-off leaves behind"
         );
+    }
+
+    /// The establishment band's lifecycle: one band word per site, set
+    /// once at registration (a re-registration at the binder writes
+    /// nothing), spent by a consuming staging, and a plain word's claim
+    /// mints its own.
+    #[test]
+    fn the_establishment_band_sets_once_and_spends_at_the_consuming_move() {
+        let mut rc = placement();
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 3, hook(42, 1, &[0]), 7, &[3]);
+        assert_eq!(rc.claim_band(3), Some(7));
+        // the binder's re-registration of the same site: silent
+        rc.claimed(&mut code, 3, hook(42, 1, &[0]), 7, &[3]);
+        assert_eq!(code.len(), 1, "the band sets exactly once per site");
+        // the consuming staging spends it: the value lives in the callee
+        let mut code = Vec::new();
+        rc.staged_move(&mut code, 3);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(7),
+                tag: super::super::shape::CLAIM_BAND_CLEAR,
+            }],
+            "the consuming move clears the band this frame's doors read"
+        );
+        assert_eq!(rc.claim_band(3), None, "the claim left with the word");
     }
 
     /// A copy of a word folded into a claim borrows: the destination owns
@@ -1008,7 +1308,8 @@ mod tests {
     fn a_folded_word_copies_as_a_borrow() {
         let mut rc = placement();
         rc.produced(4);
-        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 3, hook(9, 2, &[1]), 6, &[4]);
         let mut code = Vec::new();
         rc.copied(&mut code, 8, 4);
         assert_eq!(
@@ -1018,9 +1319,11 @@ mod tests {
         );
         assert!(rc.owned.contains_key(&8));
         // a whole-value move lands inside the moved claim's span: silent
+        // (the span-transfer branch clears the band into the old buffer)
         let mut rc = placement();
         rc.produced(4);
-        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        let mut scratch = Vec::new();
+        rc.claimed(&mut scratch, 3, hook(9, 2, &[1]), 6, &[4]);
         rc.copied(&mut code, 10, 3);
         let mut code = Vec::new();
         rc.copied(&mut code, 11, 4);
@@ -1028,7 +1331,8 @@ mod tests {
         // a staged folded word borrows with an inc (the callee decs it)
         let mut rc = placement();
         rc.produced(4);
-        rc.claimed(3, hook(9, 2, &[1]), &[4]);
+        let mut scratch = Vec::new();
+        rc.claimed(&mut scratch, 3, hook(9, 2, &[1]), 6, &[4]);
         let mut code = Vec::new();
         rc.staged_local(&mut code, 4);
         assert_eq!(
@@ -1046,16 +1350,26 @@ mod tests {
         let b = binder_span(10);
         let use_at = binder_span(60);
         rc.last_use.insert(b, (use_at, true));
-        rc.claimed(7, hook(9, 1, &[]), &[7]);
+        let mut establishment = Vec::new();
+        rc.claimed(&mut establishment, 7, hook(9, 1, &[]), 10, &[7]);
         rc.bound(b, &[7]);
         rc.use_of(b, use_at);
         let mut code = Vec::new();
         rc.read(&mut code, &[7]);
         assert!(code.is_empty(), "the borrowed use is not the death");
-        // a copy is the consuming move: the claim transfers, no dup
+        // a copy is the consuming move: the claim transfers, no dup, and
+        // the site's band clears — the hook fires at the destination's
+        // own death, never at a door on this frame
         let mut code = Vec::new();
         rc.copied(&mut code, 8, 7);
-        assert_eq!(code, Vec::new(), "a pinned copy transfers silently");
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(10),
+                tag: super::super::shape::CLAIM_BAND_CLEAR,
+            }],
+            "a pinned copy transfers the claim and spends its band"
+        );
         assert!(!rc.owned.contains_key(&7) && rc.owned.contains_key(&8));
         let mut code = Vec::new();
         rc.exit(&mut code, &[]);
@@ -1069,6 +1383,10 @@ mod tests {
                 Op::Call {
                     callee: 9,
                     nargs: 1,
+                },
+                Op::TagNew {
+                    dst: Slot::body(10),
+                    tag: super::super::shape::CLAIM_BAND_CLEAR,
                 },
             ],
             "the exit fires the transferred claim exactly once"
@@ -1216,7 +1534,7 @@ mod tests {
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
-        rc.native_reads(&[4]);
+        rc.native_reads([4]);
         // a later operand's own use fires the binder's last-use dec
         rc.use_of(b, death);
         let mut code = Vec::new();
@@ -1247,7 +1565,7 @@ mod tests {
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
-        rc.native_reads(&[4]);
+        rc.native_reads([4]);
         rc.native_open();
         rc.use_of(b, death);
         rc.staged_native(4, false);
@@ -1282,7 +1600,7 @@ mod tests {
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
-        rc.native_reads(&[4]);
+        rc.native_reads([4]);
         rc.native_open();
         rc.use_of(b, death);
         let mut code = Vec::new();
@@ -1328,7 +1646,7 @@ mod tests {
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
-        rc.native_reads(&[4]);
+        rc.native_reads([4]);
         rc.use_of(b, death);
         let mut code = Vec::new();
         rc.read(&mut code, &[4]);

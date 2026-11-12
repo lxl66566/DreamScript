@@ -1,9 +1,12 @@
 // Probe: value-level match tests over non-union scrutinees — tuple
 // elements tested in place with short-circuit jumps, scalar and string
-// literal arms, guards with fall-through (a guarded arm over a
-// Ref-carrying scrutinee binds its binder a copy so the guard's
-// consumption cannot eat the scrutinee's own count), a tail-position
-// match, and a literal arm past a catchall (dead code the chain lowers).
+// literal arms, or-arms (disjunctive alternatives over the whole
+// scrutinee, word-level or-ladders over elements, and a catchall
+// alternative closing a chain without `_`), guards with fall-through
+// (a guarded arm over a Ref-carrying scrutinee binds its binder a copy
+// so the guard's consumption cannot eat the scrutinee's own count), a
+// tail-position match, and a literal arm past a catchall (dead code the
+// chain lowers).
 
 tag int
 tag string
@@ -80,6 +83,30 @@ fn guard_list(xs: list[int]) -> string {
   }
 }
 
+fn or_pick(t: (int, int)) -> string {
+  match t {
+    (0, _) | (1, _) => "low",
+    (2, 3) | (3, 2) => "cross",
+    (a, 7) | (a, 8) => "anchor",
+    _ => "rest",
+  }
+}
+
+fn or_elem(t: (int, int)) -> string {
+  match t {
+    (9, 1 | 2 | 3) => "nine",
+    _ => "rest",
+  }
+}
+
+fn or_catchall(n: int) -> string {
+  match n {
+    1 => "one",
+    2 => "two",
+    a | a => "got",
+  }
+}
+
 fn main() -> bool {
   println(classify((0, 0)))
   println(classify((0, 9)))
@@ -97,5 +124,9 @@ fn main() -> bool {
   println(dead_after_catchall(1))
   println(guard_list([1, 2, 3]))
   println(guard_list([1]))
+  println("${or_pick((0, 9))} ${or_pick((1, 1))} ${or_pick((2, 3))} ${or_pick((3, 2))} ${or_pick((5, 7))} ${or_pick((5, 8))} ${or_pick((4, 4))}")
+  println("${or_elem((9, 1))} ${or_elem((9, 3))} ${or_elem((9, 4))} ${or_elem((8, 2))}")
+  println(or_catchall(1))
+  println(or_catchall(9))
   classify((0, 0)) == "diag" && tail_pick((2, 2)) == 0
 }

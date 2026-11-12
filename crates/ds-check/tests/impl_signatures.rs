@@ -1,8 +1,16 @@
 //! Impl-member signature agreement (B6): every member of a trait impl
 //! must declare what its trait member declares — arity, receiver
-//! spelling, passing modes, parameter types, return — because the trait
-//! member's registered signature is the contract call sites check
-//! against. A divergent member refuses with DS2018 at both sites.
+//! spelling, passing modes, parameter types, return, and no parameter
+//! defaults of its own — because the trait member's registered signature
+//! is the contract call sites check against. A divergent member refuses
+//! with DS2018 at both sites; a re-declared default (the trait
+//! declaration is a defaulted parameter's single authority) refuses
+//! with DS2019; an impl-only default (inert, since the registered
+//! signature carries no default to stage) refuses with DS2020; and a
+//! trait member with neither a bodied impl member nor a trait default
+//! body refuses with DS2023 at the impl's own door (call sites check
+//! against the registered signature alone, so the missing body would
+//! surface only at the dispatch seam).
 
 use ds_check::analyze;
 use ds_diag::Files;
@@ -233,5 +241,290 @@ fn unsubstituted_trait_generic_refuses() {
              argument(s)"
         )),
         "the unspelled reference reports: {rendered:?}"
+    );
+}
+
+#[test]
+fn redeclared_default_refuses_at_both_sites() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn pad(self, by: int = 1) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "  fn pad(self, by: int = 2) -> int { self + by }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("redecl.ds", source);
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2019")
+        .expect("the re-declared default reports as DS2019");
+    assert!(
+        diag.message.contains(
+            "parameter `by` of impl member `pad` re-declares the default its trait member owns"
+        ),
+        "the message names the parameter and the authority: {}",
+        diag.message
+    );
+    assert_eq!(
+        diag.labels.len(),
+        2,
+        "the re-declared default and the trait member"
+    );
+    assert_eq!(
+        diag.labels[0].label, "re-declared default",
+        "the primary points at the impl's own default"
+    );
+    assert_eq!(
+        diag.labels[1].label, "trait member signature",
+        "the secondary points back at the trait member"
+    );
+}
+
+#[test]
+fn omitted_default_in_the_impl_body_stays_clean() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn pad(self, by: int = 1) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "  fn pad(self, by: int) -> int { self + by }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("omit.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "an impl member omitting the trait's default checks clean: {rendered:?}"
+    );
+}
+
+/// The DS2019 asymmetry's other half: an impl member declaring a default
+/// its trait member does not have is inert, never checked against the
+/// call contract and never staged at a call site, so it refuses with its
+/// own code naming the trait member having no default to override.
+#[test]
+fn impl_only_default_refuses_at_both_sites() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn pad(self, by: int) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "  fn pad(self, by: int = 2) -> int { self + by }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("implonly.ds", source);
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2020")
+        .expect("the impl-only default reports as DS2020");
+    assert!(
+        diag.message.contains(
+            "parameter `by` of impl member `pad` declares a default its trait member does not \
+             have; the trait member has no default to override"
+        ),
+        "the message names the trait member having no default: {}",
+        diag.message
+    );
+    assert_eq!(
+        diag.labels.len(),
+        2,
+        "the impl-only default and the trait member"
+    );
+    assert_eq!(
+        diag.labels[0].label, "impl-only default",
+        "the primary points at the impl's own default"
+    );
+    assert_eq!(
+        diag.labels[1].label, "trait member signature",
+        "the secondary points back at the trait member"
+    );
+}
+
+/// The call site keeps staging nothing for an impl-only default: the
+/// dispatch call checks against the trait member's registered signature,
+/// so an omitted argument stays a missing-argument refusal beside the
+/// declaration's own DS2020 — the written literal never reaches a call.
+#[test]
+fn a_dispatch_call_stages_nothing_for_an_impl_only_default() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn pad(self, by: int) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "  fn pad(self, by: int = 2) -> int { self + by }\n",
+        "}\n",
+        "fn main() -> int { 1.pad() }\n",
+    );
+    let analyzed = analyze_source("stagepin.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.iter().any(|m| m.starts_with("DS2020")),
+        "the declaration refuses: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|m| m.starts_with("DS2007") && m.contains("missing argument(s): `by`")),
+        "the omitted argument still refuses; the impl's default never stages: {rendered:?}"
+    );
+}
+
+/// A member's signature declares its receiver as its first parameter
+/// (F3): both call forms feed the receiver first and the trait dispatch
+/// keys on its type, so a signature with no `self` has no reachable call
+/// form — the declaration refuses at its own site, the trait member and
+/// the impl member alike.
+#[test]
+fn a_member_without_a_receiver_refuses_at_both_declarations() {
+    let source = concat!(
+        "tag int\n",
+        "trait shows {\n",
+        "  fn show() -> int\n",
+        "}\n",
+        "impl shows for int {\n",
+        "  fn show() -> int { 1 }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("norecv.ds", source);
+    let rendered = messages(&analyzed);
+    let norecv: Vec<&String> = rendered
+        .iter()
+        .filter(|m| m.starts_with("DS2021"))
+        .collect();
+    assert_eq!(
+        norecv.len(),
+        2,
+        "the trait member and the impl member each refuse: {rendered:?}"
+    );
+    assert!(
+        norecv[0].contains("member `show` declares its receiver as its first parameter"),
+        "the refusal names the receiver seam: {norecv:?}"
+    );
+}
+
+/// The call site checks through a refused member instead of panicking:
+/// the declaration refusals stand alone, and neither the dot form nor
+/// the qualified form adds its own diagnostic over them.
+#[test]
+fn a_zero_parameter_member_call_checks_through_the_refused_signature() {
+    let source = concat!(
+        "tag int\n",
+        "trait shows {\n",
+        "  fn show() -> int\n",
+        "}\n",
+        "impl shows for int {\n",
+        "  fn show() -> int { 1 }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const a = 2.show()\n",
+        "  const b = shows::show(2)\n",
+        "  a + b\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("call.ds", source);
+    let rendered = messages(&analyzed);
+    assert_eq!(
+        rendered.len(),
+        2,
+        "the two declaration refusals stand alone; the calls add nothing: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().all(|m| m.starts_with("DS2021")),
+        "no call-site cascade: {rendered:?}"
+    );
+}
+
+/// An inherent member without a receiver is equally unreachable: the
+/// dot form feeds the receiver first, so the impl's own member
+/// declaration refuses.
+#[test]
+fn an_inherent_member_without_a_receiver_refuses() {
+    let source = concat!(
+        "tag int\n",
+        "struct counter { n: int }\n",
+        "impl counter {\n",
+        "  fn five() -> int { 5 }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("inherent.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered
+            .iter()
+            .any(|m| m.starts_with("DS2021") && m.contains("member `five`")),
+        "the inherent member refuses at its declaration: {rendered:?}"
+    );
+}
+
+#[test]
+fn partial_impl_missing_member_refuses_at_the_impl() {
+    let analyzed = analyze_source("missing.ds", &format!("{SHOWS}impl shows for int {{\n}}\n"));
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2023")
+        .expect("the incomplete impl reports as DS2023");
+    assert!(
+        diag.message.contains(
+            "the impl of `int` implements no `show` member, and the trait member declares no \
+             default body"
+        ),
+        "the message names the missing member and the absent default: {}",
+        diag.message
+    );
+    assert_eq!(diag.labels.len(), 2, "the impl and the trait member");
+    assert_eq!(
+        diag.labels[1].label, "trait member with no default body",
+        "the secondary points back at the trait member"
+    );
+}
+
+#[test]
+fn bodiless_impl_member_refuses() {
+    let analyzed = analyze_source(
+        "bodiless.ds",
+        &format!("{SHOWS}impl shows for int {{\n  fn show(self) -> string\n}}\n"),
+    );
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2023")
+        .expect("the bodiless impl member reports as DS2023");
+    assert!(
+        diag.message.contains(
+            "impl member `show` declares no body, and its trait member declares no default body"
+        ),
+        "the message names the bodiless member: {}",
+        diag.message
+    );
+}
+
+#[test]
+fn omitted_defaulted_member_stays_clean() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait shows {\n",
+        "  fn show(self) -> string { \"d\" }\n",
+        "}\n",
+        "impl shows for int {\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("defaulted.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "a member whose trait declares a default body may be omitted by the impl: {rendered:?}"
     );
 }

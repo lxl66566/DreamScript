@@ -8,7 +8,7 @@ use crate::{
     FORMAT_VERSION, MAGIC,
     hash::Hash128,
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
-    module::{Constant, DebugSpan, Function, FunctionError, Module, jump_target_of, slot_from_tag},
+    module::{Constant, DebugSpan, Function, Module, jump_target_of, slot_from_tag},
     write::BLOCKS_PAYLOAD_VERSION,
 };
 
@@ -66,17 +66,6 @@ pub enum ReadError {
         at: usize,
         /// What is wrong there.
         reason: &'static str,
-    },
-    /// A function record fails [`Function::new`] re-validation (DS4004).
-    /// The concrete cause — a jump escaping the body, a word that cannot
-    /// re-encode at its pc — rides along as the error source instead of
-    /// being flattened into a generic reason.
-    #[error("function record fails validation: {source}")]
-    FunctionValidation {
-        /// Offset of the record's first byte.
-        at: usize,
-        /// The underlying [`FunctionError`].
-        source: FunctionError,
     },
     /// The stored source hash does not match the actual source (DS4001).
     #[error("stored source hash {stored} does not match the actual source hash {computed}")]
@@ -150,8 +139,7 @@ impl ReadError {
             | Self::UnexpectedEof { .. }
             | Self::MalformedUleb { .. }
             | Self::InvalidUtf8 { .. }
-            | Self::Malformed { .. }
-            | Self::FunctionValidation { .. } => ErrorCode::BytecodeMalformed,
+            | Self::Malformed { .. } => ErrorCode::BytecodeMalformed,
         }
     }
 
@@ -167,7 +155,6 @@ impl ReadError {
             | Self::MalformedUleb { at }
             | Self::InvalidUtf8 { at }
             | Self::Malformed { at, .. }
-            | Self::FunctionValidation { at, .. }
             | Self::UnknownSectionKind { at, .. }
             | Self::NonCanonicalSectionOrder { at, .. } => Some(*at),
             Self::HashMismatch { .. }
@@ -230,7 +217,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
     };
     let name = p.utf8()?.to_owned();
     let dep_count = p.count()?;
-    let mut deps = Vec::new();
+    let mut deps = Vec::with_capacity(p.capacity_for(dep_count, 17));
     for _ in 0..dep_count {
         let name = p.utf8()?.to_owned();
         let content_hash = p.hash16()?;
@@ -241,7 +228,8 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
     // Section directory: (kind byte offset, kind, payload offset, length).
     let section_count = p.count()?;
     let mut sections: [Option<(usize, usize)>; 5] = [None; 5];
-    let mut entries: Vec<(usize, SectionKind, usize, usize)> = Vec::new();
+    let mut entries: Vec<(usize, SectionKind, usize, usize)> =
+        Vec::with_capacity(p.capacity_for(section_count, 3));
     for _ in 0..section_count {
         let at = p.abs();
         let tag = p.u8()?;
@@ -276,12 +264,11 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
         }
     }
     // Canonical kind order: the writer emits kinds in `SectionKind::ALL`
-    // order (DebugSpans last and optional), and the entry count here is 4
-    // or 5, so the directory must match that order position for position.
+    // order (DebugSpans last and optional), and a directory holds at most
+    // five distinct kinds, so zipping against `ALL` walks every entry.
     // Transposed rows with equal-length payloads still tile below, but the
     // writer re-emits canonical order, so they must not be accepted.
-    for (position, &(at, kind, ..)) in entries.iter().enumerate() {
-        let expected = SectionKind::ALL[position];
+    for (&(at, kind, ..), &expected) in entries.iter().zip(SectionKind::ALL.iter()) {
         if kind != expected {
             return Err(ReadError::NonCanonicalSectionOrder { kind, expected, at });
         }
@@ -358,7 +345,7 @@ pub fn read_checked(bytes: &[u8], source: &[u8]) -> Result<Module, ReadError> {
 fn parse_constants(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Constant>, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let count = p.count()?;
-    let mut constants = Vec::new();
+    let mut constants = Vec::with_capacity(p.capacity_for(count, 2));
     for _ in 0..count {
         constants.push(parse_constant(&mut p)?);
     }
@@ -392,9 +379,10 @@ fn parse_constant(p: &mut Cursor<'_>) -> Result<Constant, ReadError> {
     }
 }
 
-/// Parses the blocks payload, version 1 (BL-7): per-function records, each
-/// validated through [`Function::new`] — every code word must decode at
-/// its pc, and every jump must land inside the function's own body.
+/// Parses the blocks payload, version 1 (BL-7): per-function records. Each
+/// body word is decoded once — every word must decode canonically at its
+/// pc, and every jump must land inside the function's own body — and the
+/// stored words are what the loader takes.
 fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let at = p.abs();
@@ -402,23 +390,24 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
         return Err(malformed(at, "unsupported section payload version"));
     }
     let count = p.count()?;
-    let mut functions = Vec::new();
+    let mut functions = Vec::with_capacity(p.capacity_for(count, 14));
     for _ in 0..count {
         let record_at = p.abs();
         let name = p.utf8()?.to_owned();
         let params_len = p.count()?;
         let arg_area_len = p.count()?;
         let slot_count = p.count()?;
-        let mut slots = Vec::new();
-        for _ in 0..slot_count {
-            let at = p.abs();
-            let tag = p.u8()?;
+        let slots_at = p.abs();
+        let slot_bytes = p.run(slot_count, 1)?;
+        let mut slots = Vec::with_capacity(slot_count);
+        for (index, &tag) in slot_bytes.iter().enumerate() {
+            let at = slots_at + index;
             slots.push(slot_from_tag(tag).ok_or_else(|| malformed(at, "unknown frame slot type"))?);
         }
         let layout = FrameLayout::new(slots, params_len, arg_area_len)
             .map_err(|_| malformed(record_at, "frame layout overruns its slots"))?;
         let const_count = p.count()?;
-        let mut constants = Vec::new();
+        let mut constants = Vec::with_capacity(p.capacity_for(const_count, 2));
         for _ in 0..const_count {
             constants.push(parse_constant(&mut p)?);
         }
@@ -428,10 +417,14 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
         // mid-loop panic (the reader never panics on any input)
         let code_count = u32::try_from(code_count)
             .map_err(|_| malformed(count_at, "code word count exceeds the u32 pc range"))?;
-        let mut code = Vec::new();
-        for pc in 0..code_count {
-            let at = p.abs();
-            let word = p.u32le()?;
+        let code_len = usize::try_from(code_count)
+            .map_err(|_| malformed(count_at, "code word count exceeds usize"))?;
+        let code_at = p.abs();
+        let code_bytes = p.run(code_len, 4)?;
+        let mut code = Vec::with_capacity(code_len);
+        let mut at = code_at;
+        for (pc, chunk) in (0..code_count).zip(code_bytes.chunks_exact(4)) {
+            let word = u32::from_le_bytes(chunk.try_into().expect("a chunk of four bytes"));
             let inst = Inst::decode(pc, word)
                 .map_err(|_| malformed(at, "code word does not decode to an instruction"))?;
             if let Inst::Uop(uop) = inst {
@@ -441,7 +434,8 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
                     }
                 }
             }
-            code.push(inst);
+            code.push(word);
+            at += 4;
         }
         // Entry-descriptor placeholder word pair: zero on disk; the loader
         // fills the tier pointers at install time.
@@ -452,13 +446,7 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
                 "entry descriptor words must be zero on disk",
             ));
         }
-        let function = Function::new(name, layout, constants, code).map_err(|source| {
-            ReadError::FunctionValidation {
-                at: record_at,
-                source,
-            }
-        })?;
-        functions.push(function);
+        functions.push(Function::from_words(name, layout, constants, code));
     }
     p.exhausted("trailing bytes in blocks section")?;
     Ok(functions)
@@ -483,11 +471,13 @@ fn parse_placeholder(bytes: &[u8], offset: usize, len: usize) -> Result<(), Read
 fn parse_debug_spans(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<DebugSpan>, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let count = p.count()?;
-    let mut spans = Vec::new();
-    for _ in 0..count {
-        let at = p.abs();
-        let start = p.u32le()?;
-        let end = p.u32le()?;
+    let spans_at = p.abs();
+    let span_bytes = p.run(count, 8)?;
+    let mut spans = Vec::with_capacity(count);
+    for (index, span) in span_bytes.chunks_exact(8).enumerate() {
+        let at = spans_at + index * 8;
+        let start = u32::from_le_bytes(span[..4].try_into().expect("a half of the span pair"));
+        let end = u32::from_le_bytes(span[4..].try_into().expect("a half of the span pair"));
         if start > end {
             return Err(malformed(at, "span start exceeds end"));
         }
@@ -532,13 +522,29 @@ impl<'a> Cursor<'a> {
         self.origin + self.pos
     }
 
+    /// Bytes left in this cursor's buffer.
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
+    /// A presized capacity for a declared count, clamped to what the
+    /// remaining bytes can hold at `min_elem` bytes per element: a corrupt
+    /// count cannot allocate ahead of the loop that rejects it.
+    fn capacity_for(&self, count: usize, min_elem: usize) -> usize {
+        count.min(self.remaining() / min_elem)
+    }
+
+    /// The next `n` bytes, or `UnexpectedEof` when the run escapes the
+    /// buffer.
     fn take(&mut self, n: usize) -> Result<&'a [u8], ReadError> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|&end| end <= self.buf.len())
-            .ok_or(ReadError::UnexpectedEof { at: self.abs() })?;
-        let bytes = &self.buf[self.pos..end];
+        let at = self.abs();
+        // A `wrapping_add` lands below `pos` only on overflow, and `get`
+        // rejects that reversed range like any other over-long one.
+        let end = self.pos.wrapping_add(n);
+        let bytes = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(ReadError::UnexpectedEof { at })?;
         self.pos = end;
         Ok(bytes)
     }
@@ -553,6 +559,16 @@ impl<'a> Cursor<'a> {
             out.copy_from_slice(bytes);
             out
         })
+    }
+
+    /// A run of `count` fixed-size elements of `elem` bytes each, taken in
+    /// one bounds check and walked from the returned slice.
+    fn run(&mut self, count: usize, elem: usize) -> Result<&'a [u8], ReadError> {
+        let at = self.abs();
+        let len = count
+            .checked_mul(elem)
+            .ok_or(ReadError::UnexpectedEof { at })?;
+        self.take(len)
     }
 
     fn u32le(&mut self) -> Result<u32, ReadError> {

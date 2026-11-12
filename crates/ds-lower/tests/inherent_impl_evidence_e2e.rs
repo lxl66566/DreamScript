@@ -17,7 +17,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/inherent_impl_evidence_probe.ds");
 
@@ -54,8 +54,8 @@ fn run_lowered(source: &str, lowered: &Lowered) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm
@@ -120,10 +120,12 @@ fn two_instantiations_run_the_generic_member_shape() {
 }
 
 /// The entering sites stage the serving member body's table index per
-/// the body's demand — a Kimm word trailing the receiver — and the call
-/// is the ordinary CALL: an inherent impl has no instance word, so no
-/// CALLG exists at an inherent site, and the uop names the full staged
-/// count (the receiver plus the evidence word).
+/// the body's demand — the pair's whole area trailing the receiver (the
+/// serving body, then the follow words padded with the body itself once
+/// the chain ends at a concrete impl) — and the call is the ordinary
+/// CALL: an inherent impl has no instance word, so no CALLG exists at an
+/// inherent site, and the uop names the full staged count (the receiver
+/// plus the pair area).
 #[test]
 fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
     let (_, lowered) = lower_probe();
@@ -141,8 +143,9 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
             .expect("the string member body is planned"),
     );
     // the staged evidence words immediately before each member CALL: one
-    // serving body per entering site, in call order (describe int,
-    // describe string, render int, render string)
+    // pair area per entering site, in call order (describe int, describe
+    // string, render int, render string) — the concrete serving bodies
+    // end their chains at once, so the follow words pad with the index
     let mut evidence: Vec<i64> = Vec::new();
     let mut pending: Vec<i64> = Vec::new();
     for op in placed {
@@ -164,8 +167,13 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
     );
     assert_eq!(
         evidence,
-        vec![int_body, string_body, int_body, string_body],
-        "each entering site stages the serving body its demand calls"
+        vec![int_body; 3]
+            .into_iter()
+            .chain([string_body; 3])
+            .chain([int_body; 3])
+            .chain([string_body; 3])
+            .collect::<Vec<_>>(),
+        "each entering site stages the serving body its demand calls, follow words padded"
     );
     // no dispatch uop exists at an inherent site
     let main_shape = shape(&lowered, "main");
@@ -175,10 +183,10 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
     );
 }
 
-/// The member body claims its evidence word as a trailing parameter: the
-/// declared receiver plus one I64 parameter per recorded demand, and the
-/// nested runtime dispatch reads the word from its frame slot through
-/// the sentinel CALLG.
+/// The member body claims the pair's evidence area as trailing
+/// parameters: the declared receiver, then one I64 word per recorded
+/// demand plus its follow words, and the nested runtime dispatch reads
+/// the slot word from its frame through the sentinel CALLG.
 #[test]
 fn the_member_body_claims_its_evidence_parameter() {
     let (_, lowered) = lower_probe();
@@ -188,13 +196,14 @@ fn the_member_body_claims_its_evidence_parameter() {
     let function = &lowered.module().functions()[index as usize];
     assert_eq!(
         function.layout().params_len(),
-        2,
-        "the receiver plus the one evidence word"
+        4,
+        "the receiver plus the pair's slot and two follow words"
     );
-    assert_eq!(
-        function.layout().slots()[1],
-        SlotType::I64,
-        "the evidence word binds as the trailing I64 parameter"
+    assert!(
+        function.layout().slots()[1..4]
+            .iter()
+            .all(|slot| *slot == SlotType::I64),
+        "the evidence area binds as trailing I64 parameters"
     );
     let placed = lowered.placed("list[t]#describe").expect("the body lowers");
     let pool = &lowered.module().functions()[index as usize].constants();
@@ -294,5 +303,94 @@ fn a_member_call_tail_transfers_through_callt_with_the_evidence_word() {
         vm.max_stack_len() < 64,
         "the stack stays constant across every slide ({} words)",
         vm.max_stack_len()
+    );
+}
+
+/// An inherent callee inside a generic trait body whose demand coincides
+/// with a pair the frame already stages: the runtime-form words read the
+/// enclosing frame's slot by the receiver's peeled variable and the
+/// callee's demanded member, so the callee's frame rides the same chain
+/// and its nested dispatches slide it one level per hop — the demand
+/// walk never collects the callee's own demands, so a divergent demand
+/// keeps its refusal (pinned in `generic_impl_refusals.rs`). The depth-2
+/// line interleaves both members' dispatches through the shared slot.
+#[test]
+fn an_inherent_callee_rides_the_frames_slot_when_its_demand_coincides() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "extern fn println (s: string) -> ()\n",
+        "extern fn concat (a: string, b: string) -> string\n",
+        "trait shows {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "impl shows for int {\n",
+        "  fn show(self) -> string { \"n\" }\n",
+        "}\n",
+        "impl[t: shows] list[t] {\n",
+        "  fn describe(self) -> string {\n",
+        "    var acc = \"d\"\n",
+        "    for x in self {\n",
+        "      acc = \"${acc}${x.show()}\"\n",
+        "    }\n",
+        "    acc\n",
+        "  }\n",
+        "}\n",
+        "impl[t: shows] shows for list[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    var acc = \"l\"\n",
+        "    for x in self {\n",
+        "      acc = \"${acc}${x.show()}\"\n",
+        "    }\n",
+        "    concat(acc, self.describe())\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  println([1].show())\n",
+        "  println([[1]].show())\n",
+        "  println([1].describe())\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("shared_slot_probe.ds", source);
+    let asts = [parse(&files, id).expect("the shared-slot probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the shared-slot probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "shared_slot_probe",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the shared-slot probe lowers");
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("shared_slot_probe", "main", &[]),
+        Ok(Value::I64(0)),
+        "main returns its declared int"
+    );
+    // show([1]) = "ln" + describe([1]) = "dn"; show([[1]]) iterates show
+    // of [1] (which itself calls describe) then describes [[1]], whose
+    // inner show does the same — the shared slot answers every level
+    assert_eq!(
+        vm.captured_output(),
+        "lndn\nllndndlndn\ndn\n".as_bytes(),
+        "the callee's demands answer through the frame's shared slot at every chain depth"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
     );
 }

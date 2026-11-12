@@ -816,3 +816,108 @@ fn a_spawn_copy_in_round_trips_one_captured_count() {
     assert_eq!(vm.objects().str_at(id.id()), Ok("shared"));
     assert_eq!(vm.objects().len(), 2, "the captured word and the closure");
 }
+
+/// Exact claim ownership at the spawn seam: a spawned child's body that
+/// decs its captured `Ref` word twice owns only the copy-in's one claim,
+/// so the second dec releases nothing — not the closure's capture edge,
+/// not the spawner's intern claim. Without the ownership gate the extra
+/// dec steals the closure's edge count, the string frees while the
+/// closure still stores its reference, and the next drain (here the
+/// second run's root-reset door) dies on the cascade's
+/// `a stored element reference is live` — the fuzz_vm campaign's
+/// spawn-drain crash in a hand-assembled ds shape.
+#[test]
+fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
+    let mut reg = ModuleRegistry::new();
+    // the child: one copy-in claim on its Ref parameter, two decs
+    let mut child = def("child", &[SlotType::I64, SlotType::Ref], 2, 0, &[
+        Uop::Funcf { frame_slots: 2 }.into(),
+        RcOp::Dec { src: 1 }.into(),
+        RcOp::Dec { src: 1 }.into(),
+        Uop::Kimm { dst: 0, kidx: k(0) }.into(),
+        Uop::Ret { src: 0 }.into(),
+    ]);
+    let mut main = def(
+        "main",
+        &[
+            SlotType::I64,
+            SlotType::Raw,
+            SlotType::Raw,
+            SlotType::Raw,
+            SlotType::Raw,
+        ],
+        0,
+        2,
+        &[
+            Uop::Funcf { frame_slots: 5 }.into(),
+            // open: the fresh nursery's id lands on overlay word 0
+            Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            }
+            .into(),
+            Uop::Mov { dst: 0, src: 3 }.into(),
+            // the closure: the child word plus an i64 and a string capture
+            // (the capture edge acquires the string's second count)
+            Uop::Kconst { dst: 1, kidx: k(5) }.into(),
+            Uop::Kimm { dst: 3, kidx: k(6) }.into(),
+            Uop::Kstr { dst: 4, kidx: k(4) }.into(),
+            Uop::ClosureNew {
+                dst: 2,
+                func: 1,
+                n: 2,
+            }
+            .into(),
+            Uop::Mov { dst: 3, src: 0 }.into(),
+            Uop::Mov { dst: 4, src: 2 }.into(),
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+            // the boundary drives the child to death under its two decs
+            Uop::Mov { dst: 3, src: 0 }.into(),
+            Uop::Kimm { dst: 4, kidx: k(3) }.into(),
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            }
+            .into(),
+            Uop::Kimm { dst: 0, kidx: k(6) }.into(),
+            Uop::Ret { src: 0 }.into(),
+        ],
+    );
+    main.pool = vec![
+        builtin(ds_vm::native::BUILTIN_NURSERY_OPEN),
+        builtin(ds_vm::native::BUILTIN_NURSERY_SPAWN),
+        builtin(ds_vm::native::BUILTIN_NURSERY_BOUNDARY),
+        Const::I64(-1), // the mask contains every tag
+        Const::Str("shared".into()),
+        Const::FuncRef {
+            module: "sd".into(),
+            func: 0,
+        },
+        Const::I64(0),
+    ];
+    child.pool = vec![Const::I64(0)];
+    reg.install(ModuleVersion::new("sd", vec![child, main]).expect("valid spawn module"));
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("sd", "main", &[]),
+        Ok(Value::I64(0)),
+        "the spawn, the two decs, and the boundary ran clean"
+    );
+    // the frame kept its intern and closure claims (hand-assembled: no
+    // exit drops), so the pair survives the child's extra dec
+    assert_eq!(vm.objects().len(), 2, "the captured word and the closure");
+    // the next run's root-reset drain releases the leftover pair: the
+    // closure's free cascades onto the string whose edge count the extra
+    // dec would have stolen — exactly once each, never a stored-reference
+    // death
+    assert_eq!(
+        vm.run("sd", "main", &[]),
+        Ok(Value::I64(0)),
+        "the root-reset drain frees the leftover pair cleanly"
+    );
+    assert_eq!(vm.objects().len(), 2, "the second round's own pair");
+}

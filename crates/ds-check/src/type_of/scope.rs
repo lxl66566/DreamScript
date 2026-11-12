@@ -10,9 +10,8 @@
 //! revives them, while the logged puts/removals of the cleared scope are
 //! replayed first, so the table is exactly what it was at the mark.
 
-use std::collections::HashMap;
-
 use ds_diag::Span;
+use rustc_hash::FxHashMap;
 
 /// One logged mutation: what a put overwrote, or a clear's prior epoch.
 enum Undo<V> {
@@ -22,7 +21,7 @@ enum Undo<V> {
 
 /// A `Span -> V` map whose changes can be rolled back to a mark.
 pub(crate) struct ScopedMap<V> {
-    entries: HashMap<Span, (V, u32)>,
+    entries: FxHashMap<Span, (V, u32)>,
     epoch: u32,
     undo: Vec<Undo<V>>,
 }
@@ -30,7 +29,7 @@ pub(crate) struct ScopedMap<V> {
 impl<V> Default for ScopedMap<V> {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: FxHashMap::default(),
             epoch: 0,
             undo: Vec::new(),
         }

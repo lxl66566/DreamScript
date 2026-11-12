@@ -1,11 +1,15 @@
 //! Impl-member signature agreement (B6): a trait impl's member must
 //! declare what its trait member declares — same arity, same receiver
-//! spelling, same passing modes, same parameter types, same return.
-//! The trait member's registered signature is the call-site contract
-//! (call sites check arguments against it, never against the impl's own
-//! signature), so a divergent impl member would stage its body against a
-//! contract it disagrees with and trap at the VM; agreement is proven at
-//! check time instead.
+//! spelling, same passing modes, same parameter types, same return, and
+//! no parameter defaults of its own (a re-declared default would mint a
+//! second source for the staged literal; an impl-only default is inert,
+//! since the trait member's registered signature carries no default to
+//! stage). The trait member's
+//! registered signature is the call-site contract (call sites check
+//! arguments against it, never against the impl's own signature), so a
+//! divergent impl member would stage its body against a contract it
+//! disagrees with and trap at the VM; agreement is proven at check time
+//! instead.
 //!
 //! The comparison runs on the written signatures with the trait's
 //! generic parameters substituted through the impl's trait reference;
@@ -14,14 +18,16 @@
 //! equality is agreement modulo spelling (aliases and union reorderings
 //! solve equal). A member return left unannotated is agreed after
 //! the body checks, through the body's own checked tail type
-//! (`agree_inferred_return`).
-
-use std::collections::HashMap;
+//! (`agree_inferred_return`). Impl completeness rides the same door
+//! (`agree_impl_completeness`): every trait member without a default
+//! body must arrive with a bodied impl member, because call sites check
+//! the registered signature alone.
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
-use ds_parse::{FnDecl, ParamMode, Type};
+use ds_parse::{FnDecl, ImplDecl, ParamMode, Type};
+use rustc_hash::FxHashMap;
 
-use crate::{decls::FnSig, type_of::Bodies, universe::Ty};
+use crate::{decls, decls::FnSig, resolve::DefId, type_of::Bodies, universe::Ty};
 
 /// Compares one impl member's written signature with its trait member's
 /// registered signature, reporting every disagreement at both sites.
@@ -30,7 +36,7 @@ pub(super) fn agree_member_signature(
     f: &FnDecl,
     sig: &FnSig,
     sig_span: Span,
-    subst: &HashMap<String, Type>,
+    subst: &FxHashMap<String, Type>,
 ) {
     let trait_recv = sig.params.first().is_some_and(|p| p.name == "self");
     let impl_recv = f.params.first().is_some_and(|p| p.name.name == "self");
@@ -89,6 +95,46 @@ pub(super) fn agree_member_signature(
                 .with_primary(written.name.span, "impl member signature")
                 .with_secondary(declared.span, "trait member signature"),
             );
+        }
+        // The trait declaration is the single authority for a defaulted
+        // member parameter: call sites stage and check the trait's
+        // declared default, so an impl body re-declaring it would mint a
+        // second, never-checked source for the staged literal. Inherent
+        // members own their defaults (no trait declaration exists). The
+        // mirror asymmetry refuses too: an impl-only default is inert —
+        // the trait member's registered signature carries no default, so
+        // an omitted argument stays a missing-argument error at every
+        // call site and the written literal never stages anywhere.
+        match (declared.default.is_some(), written.default.as_ref()) {
+            (true, Some(default)) => {
+                this.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImplMemberDefaultRedeclared,
+                        format!(
+                            "parameter `{}` of impl member `{}` re-declares the default its trait \
+                             member owns; the trait declaration is the default's single authority",
+                            written.name.name, f.name.name
+                        ),
+                    )
+                    .with_primary(default.span(), "re-declared default")
+                    .with_secondary(declared.span, "trait member signature"),
+                );
+            },
+            (false, Some(default)) => {
+                this.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImplMemberDefaultWithoutTrait,
+                        format!(
+                            "parameter `{}` of impl member `{}` declares a default its trait \
+                             member does not have; the trait member has no default to override",
+                            written.name.name, f.name.name
+                        ),
+                    )
+                    .with_primary(default.span(), "impl-only default")
+                    .with_secondary(declared.span, "trait member signature"),
+                );
+            },
+            _ => {},
         }
         if index == 0 && trait_recv {
             continue;
@@ -165,7 +211,7 @@ fn modes_agree(a: ParamMode, b: ParamMode) -> bool {
 /// Rewrites a written type with the impl's trait-reference arguments in
 /// place of the trait's generic-parameter names: every bare path naming a
 /// substituted parameter takes the argument's written type.
-fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+fn substitute_type(ty: &Type, subst: &FxHashMap<String, Type>) -> Type {
     match ty {
         Type::Path { span, path, args } => {
             if args.is_empty() {
@@ -235,6 +281,63 @@ fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     }
 }
 
+/// A trait impl must provide a body for every trait member that
+/// declares no default body: call sites check against the trait
+/// member's registered signature alone, so a member with neither an
+/// impl body nor a trait default would check clean at every call site
+/// and trap at the dispatch seam. Both incomplete shapes refuse here
+/// at the impl's own door — the member spelled bodiless, or omitted
+/// entirely (the impl's trait reference is then the primary site, since
+/// no member span exists) — with the trait member as the secondary.
+pub(super) fn agree_impl_completeness(
+    this: &mut Bodies<'_>,
+    imp: &ImplDecl,
+    trait_def: DefId,
+    members: &[String],
+) {
+    for name in members {
+        let defaulted = this
+            .decls
+            .trait_member_defaults
+            .get(&trait_def)
+            .is_some_and(|defaults| defaults.iter().any(|d| d == name));
+        if defaulted {
+            continue;
+        }
+        let spelled = imp.fns.iter().find(|f| f.name.name == *name);
+        if spelled.is_some_and(|f| f.body.is_some()) {
+            continue;
+        }
+        let Some((_, sig_span)) =
+            decls::trait_member_sig(this.package, this.decls, trait_def, name)
+        else {
+            continue;
+        };
+        let (primary, message) = match spelled {
+            Some(f) => (
+                f.name.span,
+                format!(
+                    "impl member `{name}` declares no body, and its trait member declares no \
+                     default body"
+                ),
+            ),
+            None => (
+                imp.trait_ref.as_ref().map_or(imp.span, |tr| tr.span),
+                format!(
+                    "the impl of `{}` implements no `{name}` member, and the trait member \
+                     declares no default body",
+                    decls::render_type(&imp.target)
+                ),
+            ),
+        };
+        this.diags.push(
+            Diagnostic::error(ErrorCode::ImplMemberWithoutBody, message)
+                .with_primary(primary, "no body for the trait member")
+                .with_secondary(sig_span, "trait member with no default body"),
+        );
+    }
+}
+
 /// An impl member whose return is unannotated agrees with the trait
 /// member's declared return through its body's checked tail type: the
 /// registered signature is the call-site contract, so an inferred body
@@ -245,7 +348,7 @@ pub(super) fn agree_inferred_return(
     f: &FnDecl,
     sig: &FnSig,
     sig_span: Span,
-    subst: &HashMap<String, Type>,
+    subst: &FxHashMap<String, Type>,
     inferred: Ty,
 ) {
     let Some(ret) = sig.ret.as_ref() else {

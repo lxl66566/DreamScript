@@ -25,9 +25,9 @@ use ds_vm::{
     native::{
         BUILTIN_CHAR_AT, BUILTIN_CONCAT, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_NEW,
         BUILTIN_LIST_PUSH, BUILTIN_PARSE_INT, BUILTIN_SPLIT, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
-        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_PARSE_ERR, STD_PLATFORM_MODULE,
-        STD_PRINTLN, std_platform_module,
+        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_PARSE_ERR,
     },
+    platform::{OP_PRINTLN, Platform, STD_NAME},
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -43,7 +43,7 @@ fn builtin(index: u32) -> Const {
 
 fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: STD_PLATFORM_MODULE.into(),
+        module: STD_NAME.into(),
         func: index,
     }
 }
@@ -60,7 +60,7 @@ fn pool() -> Vec<Const> {
         builtin(BUILTIN_TRIM),      // k5
         builtin(BUILTIN_LEN),       // k6
         builtin(BUILTIN_STR_INT),   // k7
-        platform(STD_PRINTLN),      // k8
+        platform(OP_PRINTLN),       // k8
         builtin(BUILTIN_CONCAT),    // k9
         builtin(BUILTIN_TO_LOWER),  // k10
         builtin(BUILTIN_SPLIT),     // k11
@@ -81,7 +81,7 @@ fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     // the fixtures call println: the std platform table is the host's to
     // install (`Vm::new` only adds the builtin core)
-    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
+    reg.install_platform(Platform::std());
     reg.install(ModuleVersion::new("st", defs).expect("valid fixture module"));
     reg
 }

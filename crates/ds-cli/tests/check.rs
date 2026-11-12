@@ -110,6 +110,18 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // zero noise — the spawn/join/cancel/unioning items are
     // self-contained under the ambient (M5, the nursery surface round)
     assert_corpus_clean("nursery_surface.ds", 0);
+    // zero noise — the defaulted-parameter spellings are self-contained
+    // under the ambient (F7, the trait-default authority round)
+    assert_corpus_clean("trait_defaults.ds", 0);
+    // zero noise — the list[record] items ride the ambient list surface
+    // (the native result span channel round)
+    assert_corpus_clean("records_lists.ds", 0);
+    // zero noise — the generic impl heads and their nested dispatch are
+    // self-contained under the ambient (H3, the transitive evidence round)
+    assert_corpus_clean("transitive_dispatch.ds", 0);
+    // zero noise — the nursery teardown items are self-contained under
+    // the ambient (E5, the drain-doors round)
+    assert_corpus_clean("teardown_deinit.ds", 0);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

@@ -381,88 +381,81 @@ impl Ctx {
         };
         let mut acc = first;
         for c in iter {
-            let end = self.span(&c).end;
-            let start = acc.span().start;
-            acc = match c.as_rule() {
-                Rule::postfix_call => {
-                    let args = inner(&c).next().map(|a| self.args(&a)).unwrap_or_default();
-                    Expr::Call {
-                        span: Span::new(self.file, start, end),
-                        callee: Box::new(acc),
-                        args,
-                        trailing: None,
-                    }
-                },
-                Rule::postfix_lambda => {
-                    let lambda = inner(&c).next().map(|b| {
-                        let bspan = self.span(&b);
-                        Expr::Lambda {
-                            span: bspan,
-                            generics: Vec::new(),
-                            params: Vec::new(),
-                            ret: None,
-                            arrow: false,
-                            body: Box::new(Expr::Block(self.block(b))),
-                        }
-                    });
-                    match (lambda, acc) {
-                        // The block feeds the directly preceding call's
-                        // final parameter as its zero-argument lambda [F7],
-                        // so it attaches to that call instead of wrapping a
-                        // second, computed-callee call around it.
-                        (
-                            Some(lambda),
-                            Expr::Call {
-                                callee,
-                                args,
-                                trailing: None,
-                                ..
-                            },
-                        ) => Expr::Call {
-                            span: Span::new(self.file, start, end),
-                            callee,
-                            args,
-                            trailing: Some(Box::new(lambda)),
-                        },
-                        (Some(lambda), recv) => Expr::Call {
-                            span: Span::new(self.file, start, end),
-                            callee: Box::new(recv),
-                            args: Vec::new(),
-                            trailing: Some(Box::new(lambda)),
-                        },
-                        (None, recv) => recv,
-                    }
-                },
-                Rule::postfix_index => {
-                    let index = inner(&c).next().map(|e| Box::new(self.bracket_arg(e)));
-                    match index {
-                        Some(index) => Expr::Index {
-                            span: Span::new(self.file, start, end),
-                            recv: Box::new(acc),
-                            index,
-                        },
-                        None => acc,
-                    }
-                },
-                Rule::postfix_try => Expr::Try {
-                    span: Span::new(self.file, start, end),
-                    expr: Box::new(acc),
-                },
-                Rule::postfix_dot => {
-                    let name = inner(&c).next().map(|i| self.ident(i));
-                    match name {
-                        Some(name) => Expr::Field {
-                            span: Span::new(self.file, start, end),
-                            recv: Box::new(acc),
-                            name,
-                        },
-                        None => acc,
-                    }
-                },
-                _ => acc,
-            };
+            acc = self.apply_postfix(acc, c);
         }
         acc
+    }
+
+    /// Applies one postfix op to `acc`; the op pair's children name the shape
+    /// it carries.
+    fn apply_postfix(&mut self, acc: Expr, p: Pair<'_, Rule>) -> Expr {
+        let start = acc.span().start;
+        let end = self.span(&p).end;
+        let span = Span::new(self.file, start, end);
+        match inner(&p).next() {
+            Some(c) if c.as_rule() == Rule::args => Expr::Call {
+                span,
+                callee: Box::new(acc),
+                args: self.args(&c),
+                trailing: None,
+            },
+            Some(c) if c.as_rule() == Rule::block_expr => {
+                let bspan = self.span(&c);
+                let lambda = Expr::Lambda {
+                    span: bspan,
+                    generics: Vec::new(),
+                    params: Vec::new(),
+                    ret: None,
+                    arrow: false,
+                    body: Box::new(Expr::Block(self.block(c))),
+                };
+                match acc {
+                    // The block feeds the directly preceding call's final
+                    // parameter as its zero-argument lambda [F7], so it
+                    // attaches to that call instead of wrapping a second,
+                    // computed-callee call around it.
+                    Expr::Call {
+                        callee,
+                        args,
+                        trailing: None,
+                        ..
+                    } => Expr::Call {
+                        span,
+                        callee,
+                        args,
+                        trailing: Some(Box::new(lambda)),
+                    },
+                    recv => Expr::Call {
+                        span,
+                        callee: Box::new(recv),
+                        args: Vec::new(),
+                        trailing: Some(Box::new(lambda)),
+                    },
+                }
+            },
+            Some(c) if c.as_rule() == Rule::postfix_index => match inner(&c).next() {
+                Some(arg) => Expr::Index {
+                    span,
+                    recv: Box::new(acc),
+                    index: Box::new(self.bracket_arg(arg)),
+                },
+                None => acc,
+            },
+            Some(c) if c.as_rule() == Rule::field_name => {
+                match inner(&c).next().map(|i| self.ident(i)) {
+                    Some(name) => Expr::Field {
+                        span,
+                        recv: Box::new(acc),
+                        name,
+                    },
+                    None => acc,
+                }
+            },
+            _ => Expr::Try {
+                span,
+                expr: Box::new(acc),
+            },
+        }
     }
 
     /// One constructor bracket's content: a fn type converts onto its

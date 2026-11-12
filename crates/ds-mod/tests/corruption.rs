@@ -3,8 +3,8 @@
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{
-    Constant, FunctionError, Hash128, MAGIC, Module, ReadError, SectionKind, TargetClass, read,
-    read_checked, write,
+    Constant, Hash128, MAGIC, Module, ReadError, SectionKind, TargetClass, read, read_checked,
+    write,
 };
 
 const SOURCE: &[u8] = b"const x = 1";
@@ -305,6 +305,9 @@ fn bad_code_word_rejected() {
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
 }
 
+/// The single decode pass owns the jump-target bound: a target one word
+/// past the body surfaces as the spanned `Malformed` reason at the jump
+/// word, in the same error class every other malformed body word uses.
 #[test]
 fn jump_out_of_body_rejected() {
     use ds_abi::{FrameLayout, Uop};
@@ -337,36 +340,18 @@ fn jump_out_of_body_rejected() {
         .expect("biased field encodable at pc 1");
     bytes[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
     let error = read(&bytes).expect_err("jump escapes body");
-    assert!(matches!(error, ReadError::Malformed {
+    assert!(matches!(&error, ReadError::Malformed {
         reason: "jump target escapes the function body",
-        ..
-    }));
+        at,
+    } if *at == pos));
+    assert_eq!(error.offset(), Some(pos));
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
-}
-
-/// The Function::new re-validation error keeps its concrete cause: the
-/// pc, target, and body length reach the caller instead of a flattened
-/// generic message. The reader's own word loop makes the failure
-/// unreachable from real bytes (it validates the same facts first), so
-/// the wiring is pinned directly.
-#[test]
-fn function_validation_error_carries_the_cause() {
-    let error = ReadError::FunctionValidation {
-        at: 9,
-        source: FunctionError::JumpEscapesBody {
-            pc: 1,
-            target: 5,
-            len: 3,
-        },
-    };
-    assert_eq!(
-        error.to_string(),
-        "function record fails validation: jump target 5 at pc 1 escapes the function body (3 \
-         words)"
+    assert!(
+        error
+            .to_string()
+            .contains("jump target escapes the function body"),
+        "the error must name the escaping jump: {error}"
     );
-    assert_eq!(error.code(), ErrorCode::BytecodeMalformed);
-    assert_eq!(error.offset(), Some(9));
-    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
 }
 
 /// A blocks payload declaring 2^32 code words: the count itself must
@@ -425,5 +410,23 @@ fn code_word_count_beyond_u32_rejected() {
             ..
         } | ReadError::MalformedUleb { .. }
     ));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+/// A dependency count far past the payload: the capacity hint clamps to the
+/// bytes left, so the reader rejects the stream at its first absent byte
+/// instead of reserving room for the declared count.
+#[test]
+fn huge_declared_count_rejected() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&[3, 0, 0, 0]); // version, target tag, flags, collector flags
+    bytes.extend_from_slice(&[0u8; 16]); // collector hook slots
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // max call depth
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // IR-version checksum
+    bytes.extend_from_slice(&[1, b'm']); // module name
+    bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x20]); // dep count 2^40
+    let error = read(&bytes).expect_err("the first dependency is absent");
+    assert_eq!(error, ReadError::UnexpectedEof { at: bytes.len() });
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
 }

@@ -1,0 +1,61 @@
+// purpose: runtime evidence across a spawned child's entry frame — a
+// generic impl member body spawns children whose bodies make
+// bound-demanding calls; the spawn site stages the pair's whole
+// evidence area (the serving member body's slot plus its follow words)
+// from the enclosing frame's evidence slots into the child's entry
+// argument area beside the captures, where the spawned fiber's entry
+// frame writes it, and the sentinel CALLG dispatches from there. Two
+// instantiations of one body run, int and string, the latter exercising
+// the Raw runtime word's kind-checked counts; the children mutate a
+// shared captured list, so the join drives them in spawn order.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn list_new[t] () -> list[t]
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = list[string]()
+    nursery {
+      for x in self {
+        spawn {
+          const s = x.show()
+          acc.list_push(s)
+        }
+      }
+    }
+    join(acc, ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].show())
+  println(["a", "b"].show())
+  0
+}

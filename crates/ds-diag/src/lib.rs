@@ -4,7 +4,8 @@
 //! a source registered in [`Files`], a stable [`ErrorCode`], and a
 //! [`Diagnostic`] carrying labeled spans, notes, and structured suggestions.
 //! Two renderers turn diagnostics into text: [`render::human`] for
-//! terminals and logs, [`render::to_json`] for `--error-format=json`.
+//! terminals and logs, and `render::to_json` (behind the `json` feature)
+//! for `--error-format=json`.
 //!
 //! # Two-span linear errors
 //!
@@ -35,8 +36,11 @@
 //! assert!(text.contains(" --> main.ds:2:5"));
 //! assert!(text.contains("^ used again here after move"));
 //!
-//! let json = render::to_json(&diagnostic, &files);
-//! assert!(json.starts_with(r#"{"code":"DS3001""#));
+//! #[cfg(feature = "json")]
+//! {
+//!     let json = render::to_json(&diagnostic, &files);
+//!     assert!(json.starts_with(r#"{"code":"DS3001""#));
+//! }
 //! ```
 
 #![warn(missing_docs)]
@@ -49,4 +53,6 @@ pub mod render;
 pub use code::{ErrorClass, ErrorCode};
 pub use diagnostic::{Diagnostic, LabelStyle, LabeledSpan, Severity, Suggestion};
 pub use files::{FileId, Files, Location, Span};
-pub use render::{human, to_json};
+pub use render::human;
+#[cfg(feature = "json")]
+pub use render::to_json;

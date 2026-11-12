@@ -124,6 +124,24 @@ pub enum SlotType {
     Raw,
 }
 
+/// How a generic dispatch's staged real words map onto the table entry's
+/// named parameter words: one word per named parameter; one element span
+/// leading the named words (a `cons` head's whole inline span rides the
+/// front, the list `Ref` trailing); or one span staged between the leading
+/// and trailing named words (a fold's accumulator between the list and the
+/// callable). The span's own words are the call site's fact and carry no
+/// table-side kind check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staging {
+    /// The named words are the whole staged span, position by position.
+    Fixed,
+    /// One element span precedes the trailing named words.
+    Leading,
+    /// One span sits between the leading named words and the final named
+    /// word, so the final named word's position is dynamic per call.
+    Interior,
+}
+
 /// Invariant violation in a [`FrameLayout`] construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutError {
@@ -140,18 +158,34 @@ pub enum LayoutError {
 /// argument-area slot range (the overlay region), and the frame size.
 ///
 /// `ds-lower` assigns this layout per function; the dsmod per-function
-/// frame-slot-type table (BL-7) is its serialized form.
+/// frame-slot-type table (BL-7) is its serialized form. The derived
+/// constants ride along, so the frame arithmetic every call and every
+/// frame entry reads is a field load instead of a re-derivation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameLayout {
     slots: Vec<SlotType>,
     params_len: usize,
     arg_area_len: usize,
+    /// `slots.len() - arg_area_len`: the parameters and locals, the span
+    /// below the call word (see the pinned mapping in the module docs).
+    body_len: usize,
+    /// `slots.len() + 2`: the metadata word, the value slots, the call
+    /// word.
+    frame_size: u32,
+    /// Whether any outgoing-argument slot is `Raw`: the staging shape
+    /// whose call-site check reads the staged words' runtime kinds.
+    arg_area_has_raw: bool,
 }
 
 impl FrameLayout {
     /// Builds a layout whose slots are `params_len` parameters,
     /// `slots.len() - params_len - arg_area_len` locals, then an
     /// `arg_area_len`-slot outgoing-argument area at the tail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame's word span does not fit in a `u32`, which the
+    /// uop format's 256-slot cap rules out for any constructed layout.
     pub fn new(
         slots: Vec<SlotType>,
         params_len: usize,
@@ -164,10 +198,16 @@ impl FrameLayout {
                 slot_count: slots.len(),
             });
         }
+        let body_len = slots.len() - arg_area_len;
+        let frame_size = u32::try_from(slots.len() + 2).expect("frame word span exceeds u32");
+        let arg_area_has_raw = slots[body_len..].contains(&SlotType::Raw);
         Ok(Self {
             slots,
             params_len,
             arg_area_len,
+            body_len,
+            frame_size,
+            arg_area_has_raw,
         })
     }
 
@@ -189,24 +229,40 @@ impl FrameLayout {
         self.params_len
     }
 
+    /// The body slots — parameters then locals — which sit below the
+    /// frame's call word (fp+1+i for slot i) and so index the first
+    /// outgoing-argument slot.
+    #[must_use]
+    pub fn body_len(&self) -> usize {
+        self.body_len
+    }
+
     /// The non-parameter locals between the parameters and the overlay.
     #[must_use]
     pub fn locals(&self) -> &[SlotType] {
-        &self.slots[self.params_len..self.slots.len() - self.arg_area_len]
+        &self.slots[self.params_len..self.body_len]
     }
 
     /// The outgoing-argument slot types (the caller-side half of the
     /// overlay).
     #[must_use]
     pub fn arg_types(&self) -> &[SlotType] {
-        &self.slots[self.slots.len() - self.arg_area_len..]
+        &self.slots[self.body_len..]
     }
 
     /// The outgoing-argument slot range within [`FrameLayout::slots`]:
     /// the overlay region, always the frame tail.
     #[must_use]
     pub fn arg_area(&self) -> std::ops::Range<usize> {
-        self.slots.len() - self.arg_area_len..self.slots.len()
+        self.body_len..self.slots.len()
+    }
+
+    /// Whether any outgoing-argument slot carries [`SlotType::Raw`]: only
+    /// then does a call site read the staged words' runtime kinds (a
+    /// concretely staged area is fully checked by the slide plan).
+    #[must_use]
+    pub fn arg_area_has_raw(&self) -> bool {
+        self.arg_area_has_raw
     }
 
     /// Length of the outgoing-argument area: the max over this function's
@@ -220,19 +276,15 @@ impl FrameLayout {
     /// value slots. This is the value stored in [`crate::FrameMetadata`]'s
     /// `frame_size`; a frame pop restores the stack pointer past exactly
     /// this many words.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the word span does not fit in a `u32`.
     #[must_use]
     pub fn frame_size(&self) -> u32 {
-        u32::try_from(self.slots.len() + 2).expect("frame word span exceeds u32")
+        self.frame_size
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use SlotType::{Bool, F64, I64, Ref};
+    use SlotType::{Bool, F64, I64, Raw, Ref};
 
     use super::*;
 
@@ -242,10 +294,21 @@ mod tests {
         assert_eq!(l.slots(), &[I64, Bool, Ref, F64]);
         assert_eq!(l.params(), &[I64]);
         assert_eq!(l.params_len(), 1);
+        assert_eq!(l.body_len(), 2);
         assert_eq!(l.locals(), &[Bool]);
         assert_eq!(l.arg_types(), &[Ref, F64]);
         assert_eq!(l.arg_area(), 2..4);
         assert_eq!(l.arg_area_len(), 2);
+        assert!(!l.arg_area_has_raw());
+    }
+
+    #[test]
+    fn a_raw_staging_slot_is_visible_on_the_layout() {
+        let l = FrameLayout::new(vec![I64, Raw, Raw], 1, 2).expect("valid layout");
+        assert!(l.arg_area_has_raw());
+        // a body Raws do not make the call site read staged words
+        let body_only = FrameLayout::new(vec![Raw, I64], 0, 1).expect("valid layout");
+        assert!(!body_only.arg_area_has_raw());
     }
 
     #[test]

@@ -1,0 +1,58 @@
+// purpose: runtime evidence across a spawned child and onward through a
+// lambda inside it — the spawn site stages the pair's evidence area
+// into the spawned child's entry argument area, and a lambda lexically
+// inside the spawned body stages the same words again from the child
+// frame's evidence slots into its capture block, so the demand crosses
+// two child-frame boundaries (the entry area, then the capture block)
+// before the sentinel CALLG dispatches. One body runs under both
+// instantiations, int and string.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+extern fn list_new[t] () -> list[t]
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn join (parts: list[string], sep: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { concat("$self", "!") }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = list[string]()
+    nursery {
+      spawn {
+        const parts = self.map((x) => x.show())
+        acc.list_push(join(parts, "+"))
+      }
+    }
+    join(acc, ";")
+  }
+}
+
+fn main() -> int {
+  println([1, 2].show())
+  println(["a", "b"].show())
+  0
+}

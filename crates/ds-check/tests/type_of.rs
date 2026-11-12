@@ -64,7 +64,7 @@ fn boundary_parameters_require_annotations() {
                                                   has no expected type \
                                                   to infer from; \
                                                   annotate it [B2]"]);
-    assert_eq!(check("trait t {\n  fn g(x) -> int\n}\n"), [
+    assert_eq!(check("trait t {\n  fn g(self, x) -> int\n}\n"), [
         "DS2002 parameter `x` needs a type annotation at this boundary [B2]"
     ]);
 }
@@ -1084,6 +1084,78 @@ fn trailing_block_arguments_feed_the_final_lambda_parameter() {
     );
 }
 
+/// A lambda literal's own arity matches the expected fn type's exactly:
+/// the call ABI stages the declared parameter count, so a lambda taking
+/// fewer (or more) parameters than the fn type would trap at the arity
+/// validation the moment it is called — the mismatch refuses at the
+/// literal's check over every expectation source (the direct call, the
+/// generic call's solved fn-typed parameter, and the trailing block's
+/// sugar-fed slot), with the arity refusal as the single root cause.
+#[test]
+fn lambda_literals_match_the_expected_fn_type_arity() {
+    // The direct call: fewer and more parameters than `fn(int) -> int`.
+    assert_eq!(
+        check(concat!(
+            "fn take(f: fn(int) -> int) -> int { f(1) }\n",
+            "fn main() -> int { take(() => 3) }\n",
+        )),
+        ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
+    );
+    assert_eq!(
+        check(concat!(
+            "fn take(f: fn(int) -> int) -> int { f(1) }\n",
+            "fn main() -> int { take((x, y) => 3) }\n",
+        )),
+        ["DS2007 the lambda takes 2 parameters, the expected fn type takes 1"]
+    );
+    // The generic call's fn-typed parameter (the seam the few-params
+    // acceptance left open: both spellings checked clean and trapped at
+    // the hosted per-element arity validation).
+    assert_eq!(
+        check(concat!(
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn main() -> int {\n",
+            "  const ys = map([1, 2], () => 3)\n",
+            "  0\n",
+            "}\n",
+        )),
+        ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
+    );
+    assert_eq!(
+        check(concat!(
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn main() -> int {\n",
+            "  const ys = map([1, 2]) { 3 }\n",
+            "  0\n",
+            "}\n",
+        )),
+        ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
+    );
+    // An annotated binding keeps its own refusal: the lambda types with
+    // no fn-typed expectation and the boundary containment catches the
+    // distinct fn atoms.
+    assert_eq!(
+        check(concat!(
+            "fn main() -> () {\n",
+            "  const g: fn(int) -> int = () => 3\n",
+            "}\n",
+        )),
+        [
+            "DS2001 `annotated binding` has type `fn() -> int`, not contained in `fn(int) -> int` \
+             [B2]"
+        ]
+    );
+    // The arity-matched spellings stay clean, block and written both.
+    clean(concat!(
+        "fn take(f: fn(int) -> int) -> int { f(1) }\n",
+        "fn main() -> int { take((x: int) => x * 2) }\n",
+    ));
+    clean(concat!(
+        "fn take() -> int { 1 }\n",
+        "fn main() -> int { take() }\n",
+    ));
+}
+
 #[test]
 fn generic_calls_enforce_their_parameter_bounds() {
     // The solved instantiation carries each parameter's declared trait
@@ -1630,4 +1702,38 @@ fn a_top_level_initializer_is_its_own_frame() {
     assert_eq!(check("const k = break\n"), [
         "DS2002 loop exit outside a loop"
     ]);
+}
+
+/// A value-level arm subtracts nothing from the remainder [B2
+/// value-match remainder]: an arm carrying a literal test may fail at
+/// run, so a later member arm checks over the full scrutinee type (it
+/// may be dead, never wrong), and so do two tested struct arms over a
+/// single-member scrutinee.
+#[test]
+fn a_value_tested_arm_subtracts_nothing_from_the_remainder() {
+    clean(concat!(
+        "enum shape {\n",
+        "  dot\n",
+        "  at(int)\n",
+        "}\n",
+        "fn f(s: shape) -> int {\n",
+        "  match s {\n",
+        "    at(1) => 1,\n",
+        "    at(n) => n,\n",
+        "    dot => 2,\n",
+        "  }\n",
+        "  0\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "struct pt { x: int, y: int }\n",
+        "fn f(p: pt) -> int {\n",
+        "  match p {\n",
+        "    pt { x: 1, y: _ } => 1,\n",
+        "    pt { x: _, y: 2 } => 2,\n",
+        "    other => 3,\n",
+        "  }\n",
+        "  0\n",
+        "}\n",
+    ));
 }

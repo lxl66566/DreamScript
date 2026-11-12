@@ -16,11 +16,40 @@ pub struct FuncId(pub u32);
 pub struct FrameMetadata {
     /// Where the caller resumes when this frame returns.
     pub return_pc: CodePc,
-    /// Total physical words of this frame ([`crate::FrameLayout::frame_size`]).
+    /// Total physical words of this frame ([`crate::FrameLayout::frame_size`]),
+    /// with the top bit the runtime arena flag: set at the frame's first
+    /// arena allocation (which serves its entry mark) and cleared by the
+    /// return-side close and every tail-transfer frame-size write, so the
+    /// packed metadata stays one 16-byte frame word (a frame's word
+    /// count is far below the flag's range). Runtime state; the word
+    /// never serializes.
     pub frame_size: u32,
     /// Tail-chain state for honest backtraces under TCO (H2).
     pub tail: TailChain,
 }
+
+impl FrameMetadata {
+    /// Whether this frame allocated arena temporaries: the return-side
+    /// close pops the entry mark exactly once, and a tail transfer's
+    /// frame-size write clears the flag for the reused frame.
+    #[must_use]
+    pub fn arena_active(&self) -> bool {
+        self.frame_size & ARENA_FLAG != 0
+    }
+
+    /// Marks the frame as arena-active at its first arena allocation.
+    pub fn mark_arena_active(&mut self) {
+        self.frame_size |= ARENA_FLAG;
+    }
+
+    /// Clears the arena flag after the entry mark popped.
+    pub fn clear_arena_active(&mut self) {
+        self.frame_size &= !ARENA_FLAG;
+    }
+}
+
+/// The runtime arena flag rides `frame_size`'s top bit.
+const ARENA_FLAG: u32 = 1 << 31;
 
 impl FrameMetadata {
     /// CALLT metadata update: the frame is reused, so the return address is
@@ -108,6 +137,30 @@ mod tests {
         assert_eq!(m.return_pc, CodePc(7));
         assert_eq!(m.frame_size, 9);
         assert_eq!(m.tail.elided, 1);
+    }
+
+    #[test]
+    fn the_arena_flag_rides_the_frame_size_word() {
+        let mut m = FrameMetadata {
+            return_pc: CodePc(7),
+            frame_size: 5,
+            tail: TailChain::default(),
+        };
+        assert!(!m.arena_active());
+        m.mark_arena_active();
+        assert!(m.arena_active());
+        assert_eq!(
+            m.frame_size & !(1 << 31),
+            5,
+            "the word count survives the flag"
+        );
+        // a tail transfer's frame-size write clears the flag for the
+        // reused frame
+        m.enter_tail_call(9);
+        assert!(!m.arena_active());
+        m.mark_arena_active();
+        m.clear_arena_active();
+        assert!(!m.arena_active());
     }
 
     #[test]

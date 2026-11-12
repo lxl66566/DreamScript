@@ -174,6 +174,9 @@ const LISTS_AMBIENT: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
+    "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
+    "extern fn tail[t] (xs: list[t]) -> list[t]\n",
+    "extern fn collect[t] (xs: list[t]) -> list[t]\n",
     "extern fn join (parts: list[string], sep: string) -> string\n",
     "extern fn println (msg: string) -> ()\n",
 );
@@ -211,6 +214,56 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
     "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
     "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
+);
+
+/// Ambient stdlib stubs for trait_defaults: the primitives, `len` (the
+/// word receiver's field read feeds it), and `println`; the file owns
+/// its trait, both impls, and the receiver types.
+const TRAIT_DEFAULTS_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "extern fn len[t] (xs: t) -> int\n",
+    "extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs for records_lists: the ambient list surface the
+/// pushed records and checked reads build against.
+const RECORDS_LISTS_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "extern fn list_len[t] (xs: list[t]) -> int\n",
+    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs for transitive_dispatch: the primitives, the
+/// list type (the generic impl heads name it), and `println`; the file
+/// owns both traits and the four impls.
+const TRANSITIVE_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "struct list[t]\n",
+    "extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs for teardown_deinit: the ambient-owned net
+/// failure taxonomy, the generic cancel seam, and `println`; the file
+/// owns its deinit-carrying `resource`.
+const TEARDOWN_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "enum net_err {\n",
+    "  timeout\n",
+    "  refused\n",
+    "}\n",
+    "trait Copyable { }\n",
+    "extern fn println (msg: string) -> ()\n",
+    "extern fn cancel[t] (e: t) -> ()\n",
 );
 
 fn items_of(ast: &Ast) -> Vec<&Item> {
@@ -829,7 +882,7 @@ fn item_declares(item: &Item) -> Option<String> {
             ds_parse::Pattern::Binding { name, .. } => &name.name,
             _ => return None,
         },
-        ItemKind::Impl(_) | ItemKind::Import(_) => return None,
+        ItemKind::Impl(_) | ItemKind::Import(_) | ItemKind::Platform(_) => return None,
     };
     Some(name.clone())
 }
@@ -837,9 +890,9 @@ fn item_declares(item: &Item) -> Option<String> {
 /// closures_surface.ds: lambda values in every argument shape —
 /// fn-typed parameters, trailing block and parenthesized arguments,
 /// let-stored and passed lambdas, a capturing lambda — all check clean
-/// [F2, F7]; every parenthesized shape lowers through CALLS (the
-/// capturing closure included), and the two trailing-block items wait
-/// on the block-argument round.
+/// [F2, F7]; every item lowers (the trailing block staging exactly like
+/// the written trailing lambda), and the runs live in the ds-lower
+/// block_arg e2e suite.
 #[test]
 fn closures_surface_items_check_clean() {
     let rejects = gate("../../conformance/closures_surface.ds", CLOSURES_AMBIENT);
@@ -956,4 +1009,115 @@ fn toplevel_consumption_checks_with_cross_file_consumer_clean() {
         "the moved-twice reject is the only diagnostic in the two-file package"
     );
     assert_eq!(only.code.as_str(), "DS3001");
+}
+
+/// trait_defaults.ds: the trait-member default authority round — every
+/// item (the trait's defaulted signature, the omitting impls, and the
+/// inherent member's own body default included) checks clean; the run
+/// goldens live in the CLI conformance gate.
+#[test]
+fn trait_defaults_items_check_clean() {
+    let rejects = gate(
+        "../../conformance/trait_defaults.ds",
+        TRAIT_DEFAULTS_AMBIENT,
+    );
+    assert!(
+        rejects.is_empty(),
+        "the trait defaults surface declares no reject item"
+    );
+}
+
+/// records_lists.ds: the list[record] round — every item checks clean
+/// under the ambient list surface (the `.ok`/`.err` extraction chains
+/// over the checked `list_get` read included); the run goldens live in
+/// the CLI conformance gate.
+#[test]
+fn records_lists_items_check_clean() {
+    let rejects = gate("../../conformance/records_lists.ds", RECORDS_LISTS_AMBIENT);
+    assert!(
+        rejects.is_empty(),
+        "the records lists surface declares no reject item"
+    );
+}
+
+/// transitive_dispatch.ds: the transitive evidence round — every item
+/// (the generic impl heads over `list[t]` and the nested dispatch inside
+/// the serving body included) checks clean; the run goldens live in the
+/// CLI conformance gate.
+#[test]
+fn transitive_dispatch_items_check_clean() {
+    let rejects = gate(
+        "../../conformance/transitive_dispatch.ds",
+        TRANSITIVE_AMBIENT,
+    );
+    assert!(
+        rejects.is_empty(),
+        "the transitive dispatch surface declares no reject item"
+    );
+}
+
+/// teardown_deinit.ds: the E5 teardown round — every item (the
+/// deinit-carrying `resource`, the nursery passes, and the boundary
+/// matches) checks clean under the nursery-shaped ambient; the run
+/// goldens live in the CLI conformance gate.
+#[test]
+fn teardown_deinit_items_check_clean() {
+    let rejects = gate("../../conformance/teardown_deinit.ds", TEARDOWN_AMBIENT);
+    assert!(
+        rejects.is_empty(),
+        "the teardown deinit surface declares no reject item"
+    );
+}
+
+/// The corpus header discipline over every conformance file, not only
+/// the gated ones: the unresolved-filtered stage count equals the item
+/// count (a mismatch makes `item_stages` answer None, so the whole file
+/// runs unstaged and every diagnostic turns fatal), and each item that
+/// declares a name pairs with the header id at its position — a
+/// count-right-order-wrong header otherwise drifts staging silently,
+/// since `item_stages` zips positionally and the stage ids are only
+/// names. An item-id keeps the declared identifier (either hyphen or
+/// underscore spelling); items declaring no name (impls, imports) carry
+/// descriptive slugs and check nothing here.
+#[test]
+fn every_corpus_header_aligns_with_its_items() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("the corpus directory lists")
+        .filter_map(|entry| {
+            let path = entry.expect("the entry reads").path();
+            path.extension()
+                .is_some_and(|ext| ext == "ds")
+                .then_some(path)
+        })
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "the corpus directory holds files");
+    for path in &paths {
+        let source = std::fs::read_to_string(path).expect("the corpus file reads");
+        let name = path.file_name().expect("a corpus name").to_string_lossy();
+        let mut files = Files::new();
+        let id = files.add_source("corpus.ds", &source);
+        let ast = parse(&files, id).expect("the corpus file parses");
+        let stages: Vec<Stage> = stages(&source)
+            .into_iter()
+            .filter(|stage| !stage.stage.starts_with("unresolved"))
+            .collect();
+        let items = items_of(&ast);
+        assert_eq!(
+            items.len(),
+            stages.len(),
+            "{name}: header items and parsed items disagree"
+        );
+        for (item, stage) in items.iter().zip(stages.iter()) {
+            let Some(declared) = item_declares(item) else {
+                continue;
+            };
+            assert_eq!(
+                stage.id.replace('-', "_"),
+                declared.replace('_', "-").replace('-', "_"),
+                "{name}: the header entry at item `{declared}` names another item"
+            );
+        }
+    }
 }

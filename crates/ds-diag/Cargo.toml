@@ -13,6 +13,11 @@ readme.workspace       = true
 [lints]
 workspace = true
 
+[features]
+# the `--error-format=json` renderer; off by default so the checker path
+# carries no serializer
+json = ["dep:serde", "dep:sonic-rs"]
+
 [dependencies]
-serde.workspace     = true
-serde_json.workspace = true
+serde    = { workspace = true, optional = true }
+sonic-rs = { workspace = true, optional = true }

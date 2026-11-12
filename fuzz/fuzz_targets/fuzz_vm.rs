@@ -16,11 +16,22 @@
 // re-audit note live in the shared `vm_gen` module; nextest-runnable
 // mirrors live in crates/ds-vm/tests/fuzz_vm.rs (the base sweep) and
 // crates/ds-vm/tests/fuzz_vm_fibers.rs (the fiber-coverage sweep).
+//
+// The source leg (`exec_gen`) drives the same input through the whole
+// chain over one well-typed program drawn from the landed match and
+// fork-join vocabulary: parse, check, lower, round trip, install, run —
+// the captured answers must equal the generator's oracle and the heap
+// must drain. Its nextest mirror lives in
+// crates/ds-lower/tests/fuzz_exec_gen.rs.
 #[path = "../vm_gen.rs"]
 mod vm_gen;
+
+#[path = "../exec_gen.rs"]
+mod exec_gen;
 
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     vm_gen::exercise(data);
+    exec_gen::exercise(data);
 });

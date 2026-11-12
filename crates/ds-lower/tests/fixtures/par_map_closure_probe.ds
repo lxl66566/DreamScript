@@ -1,0 +1,30 @@
+// purpose: the par_map closure callable seam end to end — a capturing
+// lambda argument lowers through the callable-defaulted Fn parameter,
+// the fork stages the capture block per spawn into the child's entry
+// frame past the element's arguments, and the answers assemble in input
+// order.
+// items:
+// at: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn main() -> () {
+  const xs = [1, 2, 3]
+  const bias = 10
+  const shifted = xs.par_map((x: int) => x + bias)
+  println("first ${at(shifted, 0)} last ${at(shifted, 2)} len ${len(shifted)}")
+}

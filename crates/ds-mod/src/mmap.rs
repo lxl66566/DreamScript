@@ -26,6 +26,14 @@ impl MappedModule {
         &self.module
     }
 
+    /// The parsed module, consumed (the mapping drops with this value):
+    /// the owning install path takes the function bodies over without
+    /// copying them.
+    #[must_use]
+    pub fn into_module(self) -> Module {
+        self.module
+    }
+
     /// The full mapped dsmod bytes.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {

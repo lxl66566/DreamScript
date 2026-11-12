@@ -34,8 +34,8 @@ pub enum Const {
     /// A fully-qualified callee: the target module plus the function's index
     /// in that module's function table. This is the skeleton-registry form
     /// of the contract's "module index + function index" FuncRef: modules
-    /// are name-keyed until the ds-mod link table assigns module indices
-    /// [BL-7], and the function index is the entry-descriptor word-0
+    /// are name-keyed until the M7 loading round's link table assigns
+    /// module indices [BL-7], and the function index is the entry-descriptor word-0
     /// convention. Resolution goes through the target module's current slot,
     /// so a hot-reload swap redirects subsequent calls [H6 item 5].
     FuncRef {

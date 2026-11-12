@@ -9,8 +9,10 @@
 // ===== spacing, comments, newlines =====
 
 nl = _{ "\r\n" | "\n" }
-// `///` is the reserved doc-comment prefix: trivia today, like any other
-// `//` comment; the doc-comment system itself is future work.
+// `///` is the reserved doc-comment prefix. It lexes as an ordinary line
+// comment; attachment to the following definition (the `doc` slots on items
+// and members) is decided in conversion from the source text, not the
+// grammar.
 line_comment = @{ "//" ~ (!nl ~ ANY)* }
 block_comment = @{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 comment = _{ line_comment | block_comment }
@@ -57,14 +59,28 @@ kw_mut      = @{ "mut" ~ !ident_cont }
 kw_nursery  = @{ "nursery" ~ !ident_cont }
 kw_spawn    = @{ "spawn" ~ !ident_cont }
 kw_defer    = @{ "defer" ~ !ident_cont }
+kw_platform = @{ "platform" ~ !ident_cont }
 kw_true     = @{ "true" ~ !ident_cont }
 kw_false    = @{ "false" ~ !ident_cont }
 
-keyword = _{ kw_const | kw_var | kw_fn | kw_if | kw_else | kw_match | kw_while
-           | kw_for | kw_in | kw_break | kw_continue | kw_return | kw_is
-           | kw_struct | kw_enum | kw_tag | kw_type | kw_trait | kw_impl
-           | kw_import | kw_pub | kw_extern | kw_mut | kw_nursery | kw_spawn
-           | kw_defer | kw_true | kw_false }
+// Grouped by first byte: the ident guard below then needs one comparison per
+// distinct first byte instead of one per keyword, and the group spelling keeps
+// each keyword's `!ident_cont` boundary. Add new keywords to their group.
+keyword = @{ (("c" ~ ("onst" | "ontinue"))
+            | ("v" ~ "ar")
+            | ("f" ~ ("n" | "or" | "alse"))
+            | ("i" ~ ("f" | "s" | "n" | "mpl" | "mport"))
+            | ("e" ~ ("lse" | "xtern" | "num"))
+            | ("m" ~ ("atch" | "ut"))
+            | ("w" ~ "hile")
+            | ("t" ~ ("ag" | "ype" | "rait" | "rue"))
+            | ("r" ~ "eturn")
+            | ("b" ~ "reak")
+            | ("n" ~ "ursery")
+            | ("s" ~ ("truct" | "pawn"))
+            | ("p" ~ ("ub" | "latform"))
+            | ("d" ~ "efer"))
+            ~ !ident_cont }
 
 ident = @{ !keyword ~ ident_start ~ ident_cont* }
 // Parameter modes: `mut` is reserved; `move`/`comptime` are contextual.
@@ -160,14 +176,18 @@ ret_ann = { h ~ "->" ~ sp ~ type_expr }
 
 pattern = { pat_or }
 pat_or = { pat_single ~ (sp ~ "|" ~ sp ~ pat_single)* }
-pat_single = _{ pat_literal | pat_struct | pat_call | pat_wild | tuple_pattern | pat_ident }
+pat_single = _{ pat_literal | pat_wild | tuple_pattern | pat_ident | pat_head }
 
 pat_wild = { "_" ~ !ident_cont }
-pat_ident = { ident }
+// A plain name binds, so it is matched before the tail-taking shapes and only
+// when no call, struct, or qualified tail follows.
+pat_ident = { ident ~ !(h ~ ("::" | "(" | "{")) }
 pat_neg = @{ "-" }
 pat_literal = { pat_neg? ~ (float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false) }
-pat_call = { path ~ h ~ "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ sp ~ ","?)? ~ sp ~ ")" }
-pat_struct = { path ~ h ~ "{" ~ sp ~ (pat_field ~ (sp ~ "," ~ sp ~ pat_field)* ~ sp ~ ","?)? ~ sp ~ "}" }
+// A qualified or tail-taking name pattern: one path parse for both shapes.
+pat_head = { path ~ h ~ (pat_call | pat_struct) }
+pat_call = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ sp ~ ","?)? ~ sp ~ ")" }
+pat_struct = { "{" ~ sp ~ (pat_field ~ (sp ~ "," ~ sp ~ pat_field)* ~ sp ~ ","?)? ~ sp ~ "}" }
 pat_field = { ident ~ (h ~ ":" ~ sp ~ pattern)? }
 tuple_pattern = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ pt_trail?)? ~ sp ~ ")" }
 
@@ -216,12 +236,15 @@ unary_lvl = { (neg_op ~ sp)* ~ postfix_lvl }
 // index, or `?` must open on the same line as their operand. A call may take
 // one trailing block, which becomes its final zero-argument lambda.
 postfix_lvl = { primary ~ postfix_op* }
-postfix_op = _{ postfix_call | postfix_lambda | postfix_index | postfix_try | postfix_dot }
-postfix_call = { h ~ "(" ~ sp ~ args ~ sp ~ ")" }
-postfix_lambda = { h ~ block_expr }
-postfix_index = { h ~ "[" ~ sp ~ ctor_arg ~ sp ~ "]" }
-postfix_try = { h ~ "?" }
-postfix_dot = { sp ~ "." ~ h ~ field_name }
+// One rule for every shape: the trivia scan and the rule entry are shared, and
+// the shape is read from the matched children (`args`, a block, a constructor
+// bracket, a field name, or none for `?`).
+postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
+                  | block_expr
+                  | postfix_index
+                  | "?"
+                  | sp ~ "." ~ h ~ field_name ) }
+postfix_index = { "[" ~ sp ~ ctor_arg ~ sp ~ "]" }
 // A keyword is a legal field name after `.` (the record uses `f.type`).
 
 // A constructor bracket's content: a type spelled as an expression, or
@@ -335,7 +358,11 @@ nos_add = { nos_mul ~ (h ~ add_op ~ sp ~ nos_mul)* }
 nos_mul = { nos_unary ~ (h ~ mul_op ~ sp ~ nos_unary)* }
 nos_unary = { (neg_op ~ sp)* ~ nos_postfix }
 nos_postfix = { primary_nos ~ nos_postfix_op* }
-nos_postfix_op = _{ postfix_call | postfix_index | postfix_try | postfix_dot }
+// As `postfix_op`, without the trailing block (control headers own their `{`).
+nos_postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
+                      | postfix_index
+                      | "?"
+                      | sp ~ "." ~ h ~ field_name ) }
 primary_nos = { lambda | list_lit | paren_tuple | control | literal | block_expr | path_atom }
 
 // ===== items and file structure =====
@@ -349,7 +376,8 @@ attr_arg = { path }
 vis = { kw_pub ~ ("(" ~ h ~ "pkg" ~ !ident_cont ~ h ~ ")")? }
 
 item_kind = _{ import_item | local | fn_item | extern_fn_item | struct_item
-             | enum_item | tag_item | type_item | trait_item | impl_item }
+             | enum_item | tag_item | type_item | trait_item | impl_item
+             | platform_item }
 
 import_item = { kw_import ~ sp ~ import_path ~ (sp ~ import_select)? ~ (sp ~ import_alias)? ~ (sp ~ import_cond)? }
 import_path = { "@"? ~ ident ~ ("/" ~ h? ~ ident)* }
@@ -357,6 +385,14 @@ import_select = { "(" ~ sp ~ (sel_item ~ (sp ~ "," ~ sp ~ sel_item)* ~ h ~ ","?)
 sel_item = { ident ~ (h ~ "as" ~ !ident_cont ~ sp ~ ident)? }
 import_alias = { "as" ~ !ident_cont ~ sp ~ ident }
 import_cond = { kw_if ~ sp ~ expr_nos }
+
+// H5: `platform "std" provides <console, fsys, net, time>` — the platform
+// a package is checked against (the checker's effect-subset gate). The
+// provides clause is optional: a platform that provides nothing
+// (`platform "embed"`) is the embed target.
+platform_item = { kw_platform ~ sp ~ string_lit ~ (sp ~ provides_list)? }
+provides_list = { "provides" ~ !ident_cont ~ sp ~ "<" ~ sp ~ (provides_cap ~ (sp ~ "," ~ sp ~ provides_cap)* ~ h ~ ","?)? ~ sp ~ ">" }
+provides_cap = { ident }
 
 generics = { "[" ~ sp ~ (gparam ~ (sp ~ "," ~ sp ~ gparam)* ~ sp ~ ","?)? ~ sp ~ "]" }
 gparam = { ident ~ (h ~ ":" ~ sp ~ type_expr)? }

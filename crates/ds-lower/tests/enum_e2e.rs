@@ -9,7 +9,7 @@ use ds_diag::Files;
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install.
@@ -35,8 +35,8 @@ fn build_vm() -> (Vm, Lowered) {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
 

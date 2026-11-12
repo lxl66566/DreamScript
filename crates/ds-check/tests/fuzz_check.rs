@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use ds_check::{DeclaredRows, Effect, EffectRow, check, effects_of};
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, check, effects_of};
 use ds_diag::{Files, render};
 use ds_parse::parse;
 
@@ -72,7 +72,7 @@ fn property(data: &[u8]) {
     let Ok(ast) = parse(&files, file) else {
         return;
     };
-    let effects = effects_of(&[&ast], &declared_rows(data));
+    let effects = effects_of(&[&ast], &declared_rows(data), &WorldCaps::new());
     let (checked, linearity) = check(&files, &[ast]);
     let _ = (
         checked.diags.len(),

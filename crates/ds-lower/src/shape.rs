@@ -149,6 +149,11 @@ impl UnionShape {
     }
 }
 
+/// The word types of one value's span, shared from the type cache: a
+/// read-only list, so a call site clones this handle and never builds a
+/// fresh list per read.
+pub(crate) type SpanWords = Rc<[SlotType]>;
+
 /// The representation of one value type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Shape {
@@ -164,14 +169,35 @@ pub(crate) enum Shape {
     Union(UnionShape),
 }
 
+impl Shape {
+    /// One union member's fields: the slice handle a union read borrows
+    /// instead of copying the field list.
+    pub(crate) fn member_fields(&self, atom: TypeId) -> Option<&[MemberField]> {
+        match self {
+            Shape::Union(u) => u.member(atom).map(|member| member.fields.as_slice()),
+            _ => None,
+        }
+    }
+}
+
+/// The claim-band tags of the teardown establishment marker (see the
+/// placement pass): a deinit claim's dedicated band word holds SET while
+/// the claim lives and CLEAR once any death path or consuming move spent
+/// it. They sit at the bottom of the reservation so a stale user word can
+/// never spoof a set band in a recycled frame region; mirrored in the
+/// VM's claim directory (crates/ds-vm/src/claims.rs), which decodes them
+/// from the drop shape's own clear op.
+pub(crate) const CLAIM_BAND_SET: u8 = u8::MAX - 8;
+pub(crate) const CLAIM_BAND_CLEAR: u8 = u8::MAX - 9;
+
 /// The first tag id the platform reserves at the top of the u8 space,
 /// counting down from the fallible-native success discriminant through
-/// the cancellation tag: module lowering mints ids upward from 0 and a
-/// mint that reached the reserved range would alias a user member with
-/// a platform span discriminant (TAG_TEST dispatch is byte equality).
-/// Pinned against the VM's deepest reservation by the native-table
-/// drift test.
-pub(crate) const FIRST_RESERVED_TAG: u8 = u8::MAX - 5;
+/// the cancellation tag to the claim-band pair: module lowering mints
+/// ids upward from 0 and a mint that reached the reserved range would
+/// alias a user member with a platform span discriminant (TAG_TEST
+/// dispatch is byte equality). Pinned against the VM's deepest
+/// reservation by the native-table drift test.
+pub(crate) const FIRST_RESERVED_TAG: u8 = CLAIM_BAND_CLEAR;
 
 /// Shapes of the types of one package, plus the module-wide tag ids.
 pub(crate) struct Shapes<'a> {
@@ -181,6 +207,16 @@ pub(crate) struct Shapes<'a> {
     /// refuse against it.
     declared_deinits: std::collections::HashSet<ds_check::DefId>,
     cache: HashMap<Ty, Rc<Shape>>,
+    word_cache: HashMap<Ty, SpanWords>,
+    /// Shapes of single atoms, cached for this `Shapes` lifetime: `atom_shape`
+    /// reads only `analyzed` and `declared_deinits`, both fixed at
+    /// construction, and mints no tag id, so an entry never goes stale
+    /// (unlike `Universe::atom_ty`, which a mint clears).
+    atom_cache: HashMap<TypeId, Rc<Shape>>,
+    /// Word spans of the member lists the runtime-evidence chain
+    /// substitutes per link: those lists key no `Ty`, so the cache is
+    /// keyed by the list itself.
+    member_cache: HashMap<Box<[TypeId]>, SpanWords>,
     tags: HashMap<TypeId, u8>,
     next_tag: u8,
 }
@@ -194,6 +230,9 @@ impl<'a> Shapes<'a> {
             analyzed,
             declared_deinits,
             cache: HashMap::new(),
+            word_cache: HashMap::new(),
+            atom_cache: HashMap::new(),
+            member_cache: HashMap::new(),
             tags: HashMap::new(),
             next_tag: 0,
         }
@@ -269,29 +308,47 @@ impl<'a> Shapes<'a> {
         if let Some(shape) = self.cache.get(&ty) {
             return Ok(shape.clone());
         }
-        let members = self.analyzed.decls.universe.members(ty).to_vec();
-        let shape = match members.as_slice() {
+        // The member set is the analysis's own: reading it through the
+        // analyzed reference keeps it borrowed across the shape walk below.
+        let members = self.analyzed.decls.universe.members(ty);
+        let shape = match members {
             [] => Shape::Word(SlotType::I64), // the empty type; never flows
             [only] => self.atom_shape(*only)?,
-            _ => self.union_shape(&members)?,
+            _ => self.union_shape(members)?,
         };
         let shape = Rc::new(shape);
         self.cache.insert(ty, shape.clone());
         Ok(shape)
     }
 
-    /// The word types of one solved type's span.
-    pub(crate) fn words(&mut self, ty: Ty) -> Result<Vec<SlotType>, LowerError> {
-        let shape = self.shape(ty)?;
-        Ok(match &*shape {
-            Shape::Word(slot) => vec![*slot],
-            Shape::Struct(s) | Shape::Tuple(s) => s
-                .fields
-                .iter()
-                .flat_map(|f| f.slots.iter().copied())
-                .collect(),
-            Shape::Union(u) => u.words.clone(),
-        })
+    /// The word types of one solved type's span, cached per type.
+    pub(crate) fn words(&mut self, ty: Ty) -> Result<SpanWords, LowerError> {
+        if let Some(words) = self.word_cache.get(&ty) {
+            return Ok(words.clone());
+        }
+        let words: SpanWords = shape_words(&*self.shape(ty)?).into();
+        self.word_cache.insert(ty, words.clone());
+        Ok(words)
+    }
+
+    /// The word types of one solved member list's span — the member-slice
+    /// form of [`words`](Self::words), for substituted types the checker
+    /// solved without minting a `Ty` the lowering side can name (the
+    /// runtime-evidence chain's per-link substitutions). Cached by the
+    /// list: a chain re-substitutes the same lists at every link, and the
+    /// shape walk allocates per member.
+    pub(crate) fn member_words(&mut self, members: &[TypeId]) -> Result<SpanWords, LowerError> {
+        if let Some(words) = self.member_cache.get(members) {
+            return Ok(words.clone());
+        }
+        let shape = match members {
+            [] => Shape::Word(SlotType::I64), // the empty type; never flows
+            [only] => self.atom_shape(*only)?,
+            _ => self.union_shape(members)?,
+        };
+        let words: SpanWords = shape_words(&shape).into();
+        self.member_cache.insert(members.into(), words.clone());
+        Ok(words)
     }
 
     /// A union span: the tag word plus the shared payload region, member
@@ -308,11 +365,11 @@ impl<'a> Shapes<'a> {
             let payload = self.payload_fields(*atom, 0)?;
             let mut claimed = vec![false; region.len()];
             let mut fields = Vec::with_capacity(payload.len());
-            for field in &payload {
+            for field in payload {
                 let word = claim_span(&mut region, &mut claimed, &field.slots)?;
                 fields.push(MemberField {
-                    name: field.name.clone(),
-                    slots: field.slots.clone(),
+                    name: field.name,
+                    slots: field.slots,
                     word,
                 });
             }
@@ -332,7 +389,16 @@ impl<'a> Shapes<'a> {
 
     /// A single-atom type: a primitive or unit-tag word, a bare struct
     /// span, or the arity-0 tuple's unit word.
-    fn atom_shape(&mut self, atom: TypeId) -> Result<Shape, LowerError> {
+    pub(crate) fn atom_shape(&mut self, atom: TypeId) -> Result<Shape, LowerError> {
+        if let Some(shape) = self.atom_cache.get(&atom) {
+            return Ok(Shape::clone(shape));
+        }
+        let shape = self.atom_shape_uncached(atom)?;
+        self.atom_cache.insert(atom, Rc::new(shape.clone()));
+        Ok(shape)
+    }
+
+    fn atom_shape_uncached(&mut self, atom: TypeId) -> Result<Shape, LowerError> {
         let universe = &self.analyzed.decls.universe;
         let Ok(decl) = universe.atom_decl(atom) else {
             return Err(unsupported("a value", "its atom has no declaration"));
@@ -408,9 +474,13 @@ impl<'a> Shapes<'a> {
     /// One atom's payload: the member's fields as word-type spans. Unit
     /// tags carry no payload; primitives carry their own word; struct
     /// members carry their declared fields, a struct-typed field carrying
-    /// its whole flattened span. Union, tuple, and application field
-    /// types refuse.
-    fn payload_fields(&self, atom: TypeId, depth: usize) -> Result<Vec<PayloadField>, LowerError> {
+    /// its whole flattened span; a tuple member carries one positional
+    /// word per element. Union and application field types refuse.
+    fn payload_fields(
+        &mut self,
+        atom: TypeId,
+        depth: usize,
+    ) -> Result<Vec<PayloadField>, LowerError> {
         let universe = &self.analyzed.decls.universe;
         let Ok(decl) = universe.atom_decl(atom) else {
             return Err(unsupported("a value", "its atom has no declaration"));
@@ -445,20 +515,41 @@ impl<'a> Shapes<'a> {
                     )),
                 })
                 .collect(),
-            ds_check::AtomKind::Tuple(_) => Err(unsupported(
-                "a tuple member of a union",
-                "a tuple payload spans several words the region would have to carry as one \
-                 contiguous claim; the region takes struct member fields only",
-            )),
+            // A tuple member's positional slots claim the region like a
+            // struct member's fields — one span per element, no word
+            // shared among them; the gather walks them positionally.
+            ds_check::AtomKind::Tuple(elements) => {
+                let mut out = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let Shape::Word(slot) = self.atom_shape(*element)? else {
+                        return Err(unsupported(
+                            "a multi-word tuple member element",
+                            "tuple elements lower as one plain frame word; a wider element needs \
+                             its whole span staged per element, which tuple spans do not carry yet",
+                        ));
+                    };
+                    out.push(PayloadField::word(None, slot));
+                }
+                Ok(out)
+            },
             // A callable member's payload is the one Fn word (F2): the
             // checked read hands the element word out under the element's
             // own classification — a closure element refuses at the
             // construction guard, so the word reaching a payload slot is
             // the scalar FuncRef.
             ds_check::AtomKind::FnSig(..) => Ok(vec![PayloadField::word(None, SlotType::Fn)]),
+            // A heap-reference application member (a list, a map): the
+            // same one Ref word `atom_shape` rules the bare value — the
+            // object behind it owned by the runtime — claimed positionally
+            // exactly like a tuple member's element word
+            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
+                Ok(vec![PayloadField::word(None, SlotType::Ref)])
+            },
             _ => Err(unsupported(
-                "an enum, application, or function member",
-                "the M3 runtime contract covers unit, primitive, and struct atoms only",
+                "an enum or non-heap application member",
+                "a union member lowers as unit, primitive, struct, tuple, callable, or heap- \
+                 reference application words; anything else waits on the seam its own value shape \
+                 names",
             )),
         }
     }
@@ -471,7 +562,7 @@ impl<'a> Shapes<'a> {
     /// field type has no finite span, and the budget refuses it typed
     /// instead of recursing.
     fn field_span(
-        &self,
+        &mut self,
         expr: &TypeExpr,
         depth: usize,
     ) -> Result<Option<Vec<SlotType>>, LowerError> {
@@ -541,9 +632,10 @@ impl<'a> Shapes<'a> {
     /// statically-resolved instance reference a CALLG site stages as
     /// its evidence words. The covered vocabulary is the builtin
     /// instance set — `string`, the `list`/`map` container constructors,
-    /// and the `int`/`float` scalars — a single-atom type check, so
-    /// unions and unresolved variables answer None and the call site
-    /// reports the uncovered receiver.
+    /// the `int`/`float` scalars, and the record instance a struct value
+    /// names (the element-taking closes' wider head) — a single-atom
+    /// type check, so unions and unresolved variables answer None and
+    /// the call site reports the uncovered receiver.
     pub(crate) fn builtin_instance(&self, ty: Ty) -> Option<BuiltinInstance> {
         let universe = &self.analyzed.decls.universe;
         let [only] = universe.members(ty) else {
@@ -559,6 +651,7 @@ impl<'a> Shapes<'a> {
                     _ => None,
                 }
             },
+            ds_check::AtomKind::Struct(_) => Some(BuiltinInstance::Record),
             _ => match decl.name.as_str() {
                 "string" => Some(BuiltinInstance::Str),
                 "int" => Some(BuiltinInstance::Int),
@@ -629,6 +722,19 @@ fn span_fits(region: &[SlotType], claimed: &[bool], span: &[SlotType], start: us
 
 fn word_of(index: usize) -> Result<u8, LowerError> {
     u8::try_from(index).map_err(|_| unsupported("a value span", "more than 255 payload words"))
+}
+
+/// The word types of one shape's span.
+fn shape_words(shape: &Shape) -> Vec<SlotType> {
+    match shape {
+        Shape::Word(slot) => vec![*slot],
+        Shape::Struct(s) | Shape::Tuple(s) => s
+            .fields
+            .iter()
+            .flat_map(|f| f.slots.iter().copied())
+            .collect(),
+        Shape::Union(u) => u.words.clone(),
+    }
 }
 
 fn unsupported(what: &'static str, reason: &'static str) -> LowerError {

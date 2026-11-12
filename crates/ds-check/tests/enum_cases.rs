@@ -184,3 +184,82 @@ fn generic_enums_keep_the_opaque_atom_until_substitution_lands() {
         "{found:?}"
     );
 }
+
+/// `none` is the predeclared unit atom (B4), so a payloaded case named
+/// `none` claims no atom of its own: the construction refuses at its own
+/// seam instead of typing the binding empty and surfacing the nonsense
+/// match diagnostics later.
+#[test]
+fn a_payloaded_case_named_none_refuses_at_its_construction() {
+    for (label, source) in [
+        (
+            "statement binding",
+            concat!(
+                "tag int\n",
+                "enum opt {\n",
+                "  none(int)\n",
+                "}\n",
+                "fn mk() -> int {\n",
+                "  const g = none(7)\n",
+                "  0\n",
+                "}\n",
+            ),
+        ),
+        (
+            "top-level binding",
+            concat!(
+                "tag int\n",
+                "enum opt {\n",
+                "  none(int)\n",
+                "}\n",
+                "const g = none(7)\n",
+            ),
+        ),
+        (
+            "named payload",
+            concat!(
+                "tag int\n",
+                "enum opt {\n",
+                "  none { x: int }\n",
+                "}\n",
+                "fn mk() -> int {\n",
+                "  const g = none(x: 7)\n",
+                "  0\n",
+                "}\n",
+            ),
+        ),
+    ] {
+        let found = codes(source);
+        assert_eq!(
+            found.len(),
+            1,
+            "{label}: the construction's refusal stands alone: {found:?}"
+        );
+        let (code, message) = &found[0];
+        assert_eq!(*code, "DS2022", "{label}: the refusal code pins");
+        assert!(
+            message.contains("`none` is the predeclared unit atom"),
+            "{label}: the refusal names the unit-atom seam: {message}"
+        );
+    }
+}
+
+/// A payloaded case with a minted atom types the binding with the case's
+/// own atom — the union member carrying its payload span — so the match
+/// arm binds the payload and the construction stays clean.
+#[test]
+fn a_payloaded_case_construction_types_the_binding_with_the_case_atom() {
+    clean(concat!(
+        "tag int\n",
+        "enum opt {\n",
+        "  boxed(int)\n",
+        "  nada\n",
+        "}\n",
+        "fn mk() -> int {\n",
+        "  const g = boxed(7)\n",
+        "  match g {\n",
+        "    boxed(n) => n,\n",
+        "  }\n",
+        "}\n",
+    ));
+}

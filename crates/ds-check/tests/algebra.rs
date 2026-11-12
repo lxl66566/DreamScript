@@ -457,3 +457,41 @@ fn solving_is_hash_consed_and_stable() {
     let txt2_ty = f.ty(txt2);
     assert!(f.universe.contains(after, txt2_ty));
 }
+
+#[test]
+fn cached_singleton_and_universe_types_stay_correct_across_mints() {
+    let mut f = fixture();
+    let io = f.atoms[1];
+    let singleton = f.ty(io);
+    assert_eq!(
+        f.ty(io),
+        singleton,
+        "a repeated singleton answers one handle"
+    );
+    let full = f.universe.universe_ty();
+    assert_eq!(
+        f.universe.universe_ty(),
+        full,
+        "a repeated full type answers one handle"
+    );
+    // A mint widens the universe: the full type is a fresh snapshot, the
+    // singletons minted before it keep their handles.
+    let fresh = f.universe.declare_tag("fresh").unwrap();
+    let widened = f.universe.universe_ty();
+    assert_ne!(widened, full, "a new atom widens the full type");
+    assert!(f.universe.contains(widened, full));
+    let fresh_ty = f.ty(fresh);
+    assert!(f.universe.contains(widened, fresh_ty));
+    assert_eq!(f.ty(io), singleton);
+    assert!(f.universe.contains(widened, singleton));
+    // Structural atoms mint too, so the full type tracks them as well.
+    let pair = f
+        .universe
+        .solve(&TypeExpr::tuple(vec![
+            TypeExpr::atom(io),
+            TypeExpr::atom(fresh),
+        ]))
+        .unwrap();
+    let regrown = f.universe.universe_ty();
+    assert!(f.universe.contains(regrown, pair));
+}

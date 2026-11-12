@@ -1,0 +1,34 @@
+// The defaulted-parameter surface across every call spelling: the trait
+// declaration is a member default's single authority (the impl bodies
+// omit it), the dot-call and the `Trait::method` spelling stage the
+// declared literal identically when the argument is omitted and stage
+// the written argument when present, and an inherent member keeps its
+// own body default — the impl block, not a trait, is the authority
+// there.
+
+trait sized {
+  fn pad(self, by: int = 1) -> int
+}
+
+impl sized for int {
+  fn pad(self, by: int) -> int { self + by }
+}
+
+impl sized for string {
+  fn pad(self, by: int) -> int { len(self) + by }
+}
+
+struct counter { ticks: int }
+
+impl counter {
+  fn bump(self, by: int = 3) -> int { self.ticks + by }
+}
+
+fn main() -> () {
+  const n = 3
+  const w = "beta"
+  println("int ${n.pad()} ${sized::pad(n)} ${n.pad(10)} ${sized::pad(n, 10)}")
+  println("str ${w.pad()} ${sized::pad(w)} ${w.pad(5)}")
+  const c = counter { ticks: 1 }
+  println("counter ${c.bump()} ${c.bump(10)}")
+}

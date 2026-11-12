@@ -13,12 +13,13 @@ use super::{
         Mov, Ref, Tag,
     },
     Uop::{
-        self, AddF64, AddI64, Call as UCall, Callg as UCallg, Calls as UCalls, Callt,
-        Calltg as UCalltg, ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool,
-        EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif,
-        JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, LeF64, LeI64, LtF64, LtI64,
-        ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat,
-        SubF64, SubI64, TagNew, TagTest, TagTestNot,
+        self, AddF64, AddI64, ArenaMark, ArenaRestore, Call as UCall, Callg as UCallg,
+        Calls as UCalls, Callt, Calltg as UCalltg, ClosureNew as UClosureNew, CvtF2I, CvtI2F,
+        DivF64, DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64,
+        Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr,
+        KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64,
+        NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, StrCatArena, SubF64, SubI64, TagNew,
+        TagTest, TagTestNot,
     },
 };
 
@@ -106,6 +107,10 @@ impl Uop {
                     dst: a,
                     kidx: ConstIdx(d),
                 }),
+                3 => Ok(UKstrBorrow {
+                    dst: a,
+                    kidx: ConstIdx(d),
+                }),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             IntArith => match minor {
@@ -156,6 +161,7 @@ impl Uop {
                     func: b,
                     n: c,
                 }),
+                4 => r3!(StrCatArena),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Tag => match minor {
@@ -208,6 +214,16 @@ impl Uop {
                     Ok(Jmp {
                         target: super::jump_target(d, pc)?,
                     })
+                },
+                3 => {
+                    cx(b == 0)?;
+                    cx(c == 0)?;
+                    Ok(ArenaMark { dst: a })
+                },
+                4 => {
+                    cx(b == 0)?;
+                    cx(c == 0)?;
+                    Ok(ArenaRestore { src: a })
                 },
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
@@ -302,15 +318,24 @@ impl Uop {
             | TagNew { .. }
             | Jmp { .. }
             | Ret { .. } => 2,
-            // minor 3 spans majors: DIVI64/GEI64/RETSPAN and CLOSURE_NEW
-            DivI64 { .. }
+            // minor 3 spans majors: KSTR_BORROW, DIVI64/GEI64/RETSPAN
+            // and CLOSURE_NEW
+            UKstrBorrow { .. }
+            | DivI64 { .. }
             | DivF64 { .. }
             | GeI64 { .. }
             | GeF64 { .. }
             | RetSpan { .. }
-            | UClosureNew { .. } => 3,
-            // minor 4 spans majors: MODI64/LEI64/LEF64 and CALLG
-            ModI64 { .. } | LeI64 { .. } | LeF64 { .. } | UCallg { .. } => 4,
+            | UClosureNew { .. }
+            | ArenaMark { .. } => 3,
+            // minor 4 spans majors: MODI64/LEI64/LEF64, CALLG, and
+            // STRCAT_ARENA
+            ModI64 { .. }
+            | LeI64 { .. }
+            | LeF64 { .. }
+            | UCallg { .. }
+            | ArenaRestore { .. }
+            | StrCatArena { .. } => 4,
             // minor 5 spans majors: GTI64/GTF64 and CALLTG
             GtI64 { .. } | GtF64 { .. } | UCalltg { .. } => 5,
             UCalls { .. } => 6,
@@ -347,7 +372,10 @@ impl Uop {
             | EqStr { dst, .. }
             | NeqStr { dst, .. }
             | StrCat { dst, .. }
+            | StrCatArena { dst, .. }
+            | ArenaMark { dst }
             | UKstr { dst, .. }
+            | UKstrBorrow { dst, .. }
             | TagTest { dst, .. }
             | TagTestNot { dst, .. }
             | TagNew { dst, .. }
@@ -361,7 +389,7 @@ impl Uop {
             | UCallg { nargs, .. }
             | UCalltg { nargs, .. }
             | UCalls { nargs, .. } => nargs,
-            Ret { src } | RetSpan { src, .. } => src,
+            Ret { src } | RetSpan { src, .. } | ArenaRestore { src } => src,
             UHalt { slot } => slot,
             Jmp { .. } | Funcf { .. } => 0,
         }
@@ -369,7 +397,10 @@ impl Uop {
 
     fn bc_field(self, pc: u32) -> Result<Bc, EncodeError> {
         Ok(match self {
-            UKimm { kidx, .. } | UKconst { kidx, .. } | UKstr { kidx, .. } => Bc::Wide(kidx.0),
+            UKimm { kidx, .. }
+            | UKconst { kidx, .. }
+            | UKstr { kidx, .. }
+            | UKstrBorrow { kidx, .. } => Bc::Wide(kidx.0),
             UCall { callee, .. }
             | Callt { callee, .. }
             | UCallg { callee, .. }
@@ -422,8 +453,9 @@ impl Uop {
             | NeqBool { lhs, rhs, .. }
             | EqStr { lhs, rhs, .. }
             | NeqStr { lhs, rhs, .. }
-            | StrCat { lhs, rhs, .. } => Bc::Reg { b: lhs, c: rhs },
-            Ret { .. } | UHalt { .. } => Bc::Wide(0),
+            | StrCat { lhs, rhs, .. }
+            | StrCatArena { lhs, rhs, .. } => Bc::Reg { b: lhs, c: rhs },
+            Ret { .. } | UHalt { .. } | ArenaMark { .. } | ArenaRestore { .. } => Bc::Wide(0),
         })
     }
 }

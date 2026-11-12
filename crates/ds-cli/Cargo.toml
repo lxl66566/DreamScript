@@ -21,7 +21,7 @@ workspace = true
 anyhow.workspace    = true
 clap.workspace      = true
 ds-check.workspace  = true
-ds-diag.workspace   = true
+ds-diag             = { workspace = true, features = ["json"] }
 ds-query.workspace  = true
 ds-stdlib.workspace = true
 ds-mod.workspace    = true

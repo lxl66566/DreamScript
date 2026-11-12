@@ -13,7 +13,7 @@ use ds_abi::{
     uop::{ConstIdx, Inst, Uop},
 };
 use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
-use ds_vm::{ModuleRegistry, Trap, Value, Vm, native};
+use ds_vm::{ModuleRegistry, Platform, Trap, Value, Vm};
 
 fn func(
     name: &str,
@@ -143,9 +143,9 @@ fn run_joiner_reentry(callee: u32, tail: Uop) -> Result<Value, Trap> {
     let back = read(&bytes).expect("the writer's output is canonical");
 
     let mut registry = ModuleRegistry::new();
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    registry.install_platform(Platform::std());
     let mut vm = Vm::with_limit(registry, 128);
-    assert!(vm.install_dsmod(&back).is_ok(), "the probe module installs");
+    assert!(vm.install_dsmod(back).is_ok(), "the probe module installs");
     // never a panic: the drive ends on a structured value or trap
     vm.run("probe", "main", &[])
 }
@@ -311,9 +311,9 @@ fn boundary_survives_a_gone_joiner_trap_re_raise() {
     let back = read(&bytes).expect("the writer's output is canonical");
 
     let mut registry = ModuleRegistry::new();
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    registry.install_platform(Platform::std());
     let mut vm = Vm::with_limit(registry, 128);
-    assert!(vm.install_dsmod(&back).is_ok(), "the probe module installs");
+    assert!(vm.install_dsmod(back).is_ok(), "the probe module installs");
     // the child's divide-by-zero surfaces at the boundary as a structured
     // trap; the duplicate attribution onto the drained ledger drops
     let result = vm.run("probe2", "main", &[]);

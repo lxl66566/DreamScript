@@ -3,8 +3,8 @@
 
 use ds_diag::{ErrorCode, Files, Location};
 use ds_parse::{
-    Ast, BlockExpr, Expr, ItemKind, Literal, Pattern, StmtKind, StrPart, StructMember, TriviaKind,
-    Type, parse,
+    Ast, BlockExpr, EnumPayload, Expr, ItemKind, Literal, Pattern, StmtKind, StrPart, StructMember,
+    TraitMember, TriviaKind, Type, parse,
 };
 
 fn ok(src: &str) -> Ast {
@@ -101,13 +101,14 @@ fn separator_rest_of_line_is_text() {
 
 #[test]
 fn doc_comment_prefix_is_reserved_trivia() {
-    // `///` is the reserved doc-comment prefix: trivia today, one more
-    // `//` comment form — and the retired `///|` spelling reads as one.
+    // `///` is the reserved doc-comment prefix: one more `//` comment form
+    // — and the retired `///|` spelling reads as one, so both lines attach.
     let ast = ok("/// doc\n///| retired spelling\ntag a\n");
     assert_eq!(ast.blocks.len(), 1);
     let lead = &ast.blocks[0].items[0].leading_trivia;
     assert_eq!(lead.len(), 2);
     assert!(lead.iter().all(|t| t.kind == TriviaKind::Line));
+    assert_eq!(ast.blocks[0].items[0].doc.len(), 2);
 }
 
 #[test]
@@ -1067,6 +1068,322 @@ fn statement_trivia_in_blocks() {
     assert_eq!(body.stmts[1].trailing_trivia.len(), 1);
 }
 
+/// Parses `src` and returns the ast plus the source, for tests that read
+/// trivia text back out of spans.
+fn ok_with_source(src: &str) -> (Ast, String) {
+    let mut files = Files::new();
+    let f = files.add_source("t.ds", src);
+    let ast = parse(&files, f).unwrap_or_else(|d| panic!("should parse: {}", d[0].message));
+    (ast, src.to_owned())
+}
+
+/// The `///` text of one doc trivia.
+fn doc_text<'a>(src: &'a str, t: &ds_parse::Trivia) -> &'a str {
+    &src[t.span.start as usize..t.span.end as usize]
+}
+
+#[test]
+fn doc_runs_attach_across_definition_kinds() {
+    let src = concat!(
+        "/// the import\nimport @std/csv (reader)\n",
+        "/// the constant\nconst one = 1\n",
+        "/// the function\nfn f(x: int) -> int { x }\n",
+        "/// the extern\nextern fn open(p: *const c.char) -> int\n",
+        "/// the struct\nstruct point { x: int, y: int }\n",
+        "/// the enum\nenum color { red, green(int) }\n",
+        "/// the tag\ntag timeout\n",
+        "/// the alias\ntype t = int\n",
+        "/// the trait\ntrait show { fn show(self) -> string }\n",
+        "/// the impl\nimpl show for int { fn show(self) -> string { \"\" }\n}\n",
+    );
+    let (ast, src) = ok_with_source(src);
+    let expected = [
+        "/// the import",
+        "/// the constant",
+        "/// the function",
+        "/// the extern",
+        "/// the struct",
+        "/// the enum",
+        "/// the tag",
+        "/// the alias",
+        "/// the trait",
+        "/// the impl",
+    ];
+    assert_eq!(ast.blocks[0].items.len(), expected.len());
+    for (item, want) in ast.blocks[0].items.iter().zip(expected) {
+        assert_eq!(item.doc.len(), 1, "one doc line attaches");
+        assert_eq!(doc_text(&src, &item.doc[0]), want);
+        // The attached doc stays in the leading trivia: the slot is pure
+        // attachment data, not a move.
+        assert_eq!(item.leading_trivia.len(), 1);
+    }
+}
+
+#[test]
+fn doc_run_spans_consecutive_lines_only() {
+    let (ast, src) =
+        ok_with_source("// preamble\n/// line one\n/// line two\nfn f() -> int { 0 }\n");
+    let item = &ast.blocks[0].items[0];
+    // The ordinary comment stays plain leading trivia; the two doc lines
+    // attach, in source order.
+    assert_eq!(item.leading_trivia.len(), 3);
+    assert_eq!(item.doc.len(), 2);
+    assert_eq!(doc_text(&src, &item.doc[0]), "/// line one");
+    assert_eq!(doc_text(&src, &item.doc[1]), "/// line two");
+    // A blank line inside the run keeps only the lines directly above the
+    // definition: the earlier half stays loose.
+    let (ast, src) = ok_with_source("/// a\n\n/// b\nfn f() -> int { 0 }\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.leading_trivia.len(), 2);
+    assert_eq!(item.doc.len(), 1);
+    assert_eq!(doc_text(&src, &item.doc[0]), "/// b");
+}
+
+#[test]
+fn blank_line_between_doc_and_definition_leaves_it_loose() {
+    let (ast, _) = ok_with_source("/// loose\n\nfn f() -> int { 0 }\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc, [], "a blank line cuts the run off");
+    // Loose is not lost: the doc line stays leading trivia.
+    assert_eq!(item.leading_trivia.len(), 1);
+}
+
+#[test]
+fn ordinary_comments_never_attach_and_break_the_run() {
+    // An ordinary comment alone never attaches.
+    let (ast, _) = ok_with_source("// note\ntag a\n");
+    assert_eq!(ast.blocks[0].items[0].doc, []);
+    // Between the doc run and the definition it breaks immediacy: the run
+    // stays loose.
+    let (ast, _) = ok_with_source("/// a\n// b\nfn f() -> int { 0 }\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc, []);
+    assert_eq!(item.leading_trivia.len(), 2);
+    // The same for a block comment.
+    let (ast, _) = ok_with_source("/// a\n/* b */\nfn f() -> int { 0 }\n");
+    assert_eq!(ast.blocks[0].items[0].doc, []);
+}
+
+#[test]
+fn doc_above_attributes_attaches_inside_them_stays_deep_trivia() {
+    // Above the item's first token (the attribute): attaches.
+    let (ast, src) = ok_with_source("/// doc\n#[derive(show)]\ntag a\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc.len(), 1);
+    assert_eq!(doc_text(&src, &item.doc[0]), "/// doc");
+    // Inside the item (attribute above the doc): attachment rides the
+    // leading-trivia channel only, so the run stays deep trivia, which
+    // migrates to the trailing slot like every interior comment.
+    let (ast, _) = ok_with_source("#[derive(show)]\n/// inner\ntag a\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc, []);
+    assert_eq!(item.trailing_trivia.len(), 1);
+}
+
+#[test]
+fn same_line_and_eof_docs_stay_loose() {
+    // A `///` on the line of another definition is that definition's
+    // trailing trivia, never an attachment.
+    let (ast, _) = ok_with_source("tag a /// tail\ntag b\n");
+    assert!(ast.blocks[0].items.iter().all(|i| i.doc.is_empty()));
+    assert_eq!(ast.blocks[0].items[0].trailing_trivia.len(), 1);
+    // An ownerless doc at EOF is loose trivia, not a diagnostic.
+    let (ast, _) = ok_with_source("fn f() -> int { 0 }\n/// orphan\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc, []);
+    assert_eq!(ast.blocks[0].trailing_trivia.len(), 1);
+}
+
+#[test]
+fn four_slash_lines_are_ordinary_comments() {
+    // A doc line is `///` followed by end-or-non-slash (Rust's convention):
+    // `////` and longer are the ordinary separator-comment form.
+    let (ast, src) = ok_with_source("//// section\n/// doc\ntag a\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.leading_trivia.len(), 2);
+    assert_eq!(item.doc.len(), 1);
+    assert_eq!(doc_text(&src, &item.doc[0]), "/// doc");
+    // Alone above a definition: plain leading trivia, no attachment.
+    let (ast, _) = ok_with_source("////\ntag a\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc, []);
+    assert_eq!(item.leading_trivia.len(), 1);
+    // More slashes stay ordinary too.
+    let (ast, _) = ok_with_source("///// deep\ntag a\n");
+    assert_eq!(ast.blocks[0].items[0].doc, []);
+    // Between a run and the definition it breaks immediacy, like any other
+    // ordinary comment.
+    let (ast, _) = ok_with_source("/// a\n//// b\ntag a\n");
+    assert_eq!(ast.blocks[0].items[0].doc, []);
+    // `///doc` without a space is a doc line.
+    let (ast, src) = ok_with_source("///doc\ntag a\n");
+    let item = &ast.blocks[0].items[0];
+    assert_eq!(item.doc.len(), 1);
+    assert_eq!(doc_text(&src, &item.doc[0]), "///doc");
+}
+
+#[test]
+fn member_fn_docs_attach_in_trait_and_impl_bodies() {
+    let (ast, src) = ok_with_source("trait animal {\n/// speaks\nfn speak(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc.len(), 1);
+    assert_eq!(doc_text(&src, &fd.doc[0]), "/// speaks");
+    // The same trivia stay deep trivia of the enclosing item — the slot is
+    // pure attachment data, not a move.
+    assert_eq!(ast.blocks[0].items[0].trailing_trivia.len(), 1);
+
+    let (ast, src) = ok_with_source(
+        "impl animal for int {\n/// the impl\nfn speak(self) -> string { \"\" }\n}\n",
+    );
+    let ItemKind::Impl(i) = &ast.blocks[0].items[0].kind else {
+        panic!("impl item");
+    };
+    assert_eq!(i.fns[0].doc.len(), 1);
+    assert_eq!(doc_text(&src, &i.fns[0].doc[0]), "/// the impl");
+}
+
+#[test]
+fn struct_and_enum_field_docs_attach() {
+    let (ast, src) = ok_with_source(concat!(
+        "struct point {\n",
+        "/// x coord\n",
+        "x: int\n",
+        "/// y line one\n",
+        "/// y line two\n",
+        "y: int\n",
+        "}\n",
+    ));
+    let ItemKind::Struct(s) = &ast.blocks[0].items[0].kind else {
+        panic!("struct item");
+    };
+    let [StructMember::Field(x), StructMember::Field(y)] = &s.members[..] else {
+        panic!("two fields");
+    };
+    assert_eq!(x.doc.len(), 1);
+    assert_eq!(doc_text(&src, &x.doc[0]), "/// x coord");
+    assert_eq!(y.doc.len(), 2);
+    assert_eq!(doc_text(&src, &y.doc[0]), "/// y line one");
+    assert_eq!(doc_text(&src, &y.doc[1]), "/// y line two");
+    // Both runs stay deep trivia of the item.
+    assert_eq!(ast.blocks[0].items[0].trailing_trivia.len(), 3);
+
+    let (ast, src) = ok_with_source("enum shape {\npoint {\n/// radius\nr: int\n}\n}\n");
+    let ItemKind::Enum(e) = &ast.blocks[0].items[0].kind else {
+        panic!("enum item");
+    };
+    let EnumPayload::Struct(fields) = &e.cases[0].payload else {
+        panic!("struct payload");
+    };
+    assert_eq!(fields[0].doc.len(), 1);
+    assert_eq!(doc_text(&src, &fields[0].doc[0]), "/// radius");
+}
+
+#[test]
+fn member_docs_follow_the_same_run_rules() {
+    // A blank line between the run and the member leaves it loose.
+    let (ast, _) = ok_with_source("trait t {\n/// loose\n\nfn a(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    assert_eq!(ast.blocks[0].items[0].trailing_trivia.len(), 1);
+    // An ordinary comment between the run and the member breaks immediacy.
+    let (ast, _) = ok_with_source("trait t {\n/// a\n// o\nfn a(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    // `////` above a member is an ordinary comment there too.
+    let (ast, _) = ok_with_source("trait t {\n////\nfn a(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    // A `///` behind the previous member on its line trails it, never
+    // leads the member below.
+    let (ast, _) =
+        ok_with_source("trait t {\nfn a(self) -> string /// tail\nfn b(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let [TraitMember::Fn(a), TraitMember::Fn(b)] = &t.members[..] else {
+        panic!("two members");
+    };
+    assert_eq!(a.doc, []);
+    assert_eq!(b.doc, []);
+    // A doc on the header's own line trails the header: stays loose.
+    let (ast, _) = ok_with_source("trait t { /// header line\nfn a(self) -> string\n}\n");
+    let ItemKind::Trait(t) = &ast.blocks[0].items[0].kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    // A doc after the last member owns nothing below it: loose deep trivia.
+    let (ast, _) = ok_with_source("trait t {\nfn a(self) -> string\n/// orphan\n}\n");
+    let item = &ast.blocks[0].items[0];
+    let ItemKind::Trait(t) = &item.kind else {
+        panic!("trait item");
+    };
+    let Some(TraitMember::Fn(fd)) = t.members.first() else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    assert_eq!(item.trailing_trivia.len(), 1);
+}
+
+#[test]
+fn member_kinds_without_doc_slots_stay_loose() {
+    // Associated types, `deinit` members, and enum case names carry no doc
+    // slot: their docs stay plain deep trivia of the enclosing item.
+    let (ast, _) = ok_with_source("trait t {\n/// the assoc\ntype a\nfn f(self) -> string\n}\n");
+    let item = &ast.blocks[0].items[0];
+    let ItemKind::Trait(t) = &item.kind else {
+        panic!("trait item");
+    };
+    assert!(matches!(t.members[0], TraitMember::AssocType { .. }));
+    let TraitMember::Fn(fd) = &t.members[1] else {
+        panic!("fn member");
+    };
+    assert_eq!(fd.doc, []);
+    assert_eq!(item.trailing_trivia.len(), 1);
+
+    let (ast, _) =
+        ok_with_source("struct file {\nfd: int\n/// teardown\ndeinit { close(fd) }\n}\n");
+    let item = &ast.blocks[0].items[0];
+    let ItemKind::Struct(s) = &item.kind else {
+        panic!("struct item");
+    };
+    let [StructMember::Field(f), StructMember::Deinit { .. }] = &s.members[..] else {
+        panic!("field then deinit");
+    };
+    assert_eq!(f.doc, []);
+    assert_eq!(item.trailing_trivia.len(), 1);
+
+    let (ast, _) = ok_with_source("enum e {\n/// the case\nred\n}\n");
+    let item = &ast.blocks[0].items[0];
+    let ItemKind::Enum(e) = &item.kind else {
+        panic!("enum item");
+    };
+    assert!(matches!(e.cases[0].payload, EnumPayload::None));
+    assert_eq!(item.trailing_trivia.len(), 1);
+}
+
 #[test]
 fn spans_cover_their_nodes() {
     let src = "const one = 1\n";
@@ -1359,6 +1676,54 @@ fn pattern_atoms_keep_their_shape() {
     );
     assert!(matches!(&arms[1].pat, Pattern::Tuple { pats, .. } if pats.len() == 2));
     assert!(matches!(&arms[2].pat, Pattern::Wildcard(_)));
+}
+
+/// A name-headed pattern is a binding, a call, or a struct pattern: the tail
+/// decides, and the binding form refuses a following tail or qualification.
+#[test]
+fn name_headed_patterns_split_binding_call_and_struct() {
+    let ast = ok(concat!(
+        "fn f(x) -> () {
+",
+        "  match x {
+",
+        "    pkt(v) => 1,
+",
+        "    pkt { port: p } => 2,
+",
+        "    ns::make(v) => 3,
+",
+        "    bare => 4,
+",
+        "    _ => 5,
+",
+        "  }
+",
+        "}
+",
+    ));
+    let Expr::Match { arms, .. } = first_stmt_expr(&ast) else {
+        panic!("match");
+    };
+    assert_eq!(arms.len(), 5);
+    assert!(
+        matches!(&arms[0].pat, Pattern::Call { path, args, .. }
+        if path.text() == "pkt" && args.len() == 1),
+        "a call pattern keeps its head path and arguments"
+    );
+    assert!(
+        matches!(&arms[1].pat, Pattern::Struct { path, fields, .. }
+        if path.text() == "pkt" && fields.len() == 1),
+        "a struct pattern keeps its head path and fields"
+    );
+    assert!(
+        matches!(&arms[2].pat, Pattern::Call { path, .. } if path.text() == "ns::make"),
+        "a call pattern admits a qualified head"
+    );
+    assert!(
+        matches!(&arms[3].pat, Pattern::Binding { name, .. } if name.name == "bare"),
+        "a plain name binds"
+    );
 }
 
 /// The tuple corners [B3]: `(e)` is grouping, `(e,)` a 1-tuple, `()` the

@@ -19,7 +19,9 @@
 //! in ds-parse's unit suite instead. The mut-window round adds DS3006
 //! (a `const` binding fed to a `mut` window parameter [D2]). The
 //! signature-agreement round adds DS2018 (an impl member diverging from
-//! its trait member's registered signature); the trait-residuals round
+//! its trait member's registered signature) and DS2019 (an impl member
+//! re-declaring a defaulted parameter, whose single authority is the
+//! trait declaration); the trait-residuals round
 //! adds its inferred-return route and the generic-head route of DS2006
 //! (the instantiation probe's witness). The check_all wiring round adds
 //! DS2006's package-level route: the ordering-hidden generic pair whose
@@ -130,6 +132,11 @@ const CASES: &[Case] = &[
         stem: "ds2018_impl_member_signature",
         human: include_str!("goldens/ds2018_impl_member_signature.human"),
         json: include_str!("goldens/ds2018_impl_member_signature.json"),
+    },
+    Case {
+        stem: "ds2019_impl_member_default",
+        human: include_str!("goldens/ds2019_impl_member_default.human"),
+        json: include_str!("goldens/ds2019_impl_member_default.json"),
     },
     Case {
         stem: "ds2018_inferred_impl_return",

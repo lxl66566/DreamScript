@@ -1,0 +1,51 @@
+// purpose: the trait-default x evidence-rider intersections — a static
+// dispatch into a generic impl body (runtime-evidence riders trail the
+// real arguments) stages the trait's declared default among those real
+// arguments for its omitted parameter, both spellings and both argument
+// states agreeing; the transitive chain (`[[3]].pad()`, the nested site
+// dispatching through the sentinel into the generic serving body) omits
+// the defaulted member at the nested site and stages the same declared
+// default there. The concrete multi-word spelling this file's struct-free
+// story leaves to multiword_instantiation_probe: struct elements at a
+// generic-impl entering site refuse at the one-word instantiation
+// boundary (generic_impl_refusals pins it).
+// items:
+// int: stage: run
+// string: stage: run
+// sized: stage: run
+// sized-int: stage: run
+// sized-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println(s: string) -> ()
+
+trait sized {
+  fn pad(self, by: int = 1) -> int
+}
+
+impl sized for int {
+  fn pad(self, by: int) -> int { self + by }
+}
+
+impl[u: sized] sized for list[u] {
+  fn pad(self, by: int) -> int {
+    var acc = by
+    for x in self {
+      acc = acc + x.pad()
+    }
+    acc
+  }
+}
+
+fn main() -> int {
+  println("${[3].pad()}")
+  println("${[3].pad(5)}")
+  println("${sized::pad([3])}")
+  println("${[[3]].pad()}")
+  0
+}

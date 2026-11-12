@@ -1,0 +1,8 @@
+error[DS2019]: parameter `by` of impl member `pad` re-declares the default its trait member owns; the trait declaration is the default's single authority
+ --> tests/fixtures/negative/ds2019_impl_member_default.ds:11:26
+   |
+11 |   fn pad(self, by: int = 2) -> int { self + by }
+   |                          ^ re-declared default
+   |
+ 8 |   fn pad(self, by: int = 1) -> int
+   |                -- trait member signature

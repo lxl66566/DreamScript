@@ -124,7 +124,7 @@ fn json_loc(files: &Files, span: Span) -> JsonLoc {
 /// `--error-format=json` prints per diagnostic.
 #[must_use]
 pub fn to_json(diagnostic: &Diagnostic, files: &Files) -> String {
-    serde_json::to_string(&JsonDiagnostic::new(diagnostic, files))
+    sonic_rs::to_string(&JsonDiagnostic::new(diagnostic, files))
         .expect("serializing a diagnostic cannot fail")
 }
 

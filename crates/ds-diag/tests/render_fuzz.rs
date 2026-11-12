@@ -96,6 +96,7 @@ fn property(rng: &mut Rng, files: &Files) {
         diag = diag.with_suggestion(suggestion);
     }
     std::hint::black_box(render::human(&diag, files));
+    #[cfg(feature = "json")]
     std::hint::black_box(render::to_json(&diag, files));
 }
 

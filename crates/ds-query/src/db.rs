@@ -1,12 +1,10 @@
 //! The database: inputs, memo table, dependency edges, and the
 //! verify-or-recompute cycle that drives them.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 use ds_diag::{FileId, Files};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     error::QueryError,
@@ -48,14 +46,46 @@ struct Memo {
 }
 
 /// One active-stack entry: a key being computed (dependencies accumulate in
-/// `deps`) or being deep-verified (`deps` stays empty). `seen` is the set
-/// view of `deps` for duplicate suppression: package-grain computes record
-/// one dependency per registered file, so a linear `contains` went
-/// quadratic in the file count.
+/// `deps`) or being deep-verified (`deps` stays empty).
 struct Frame {
     key: QueryKey,
-    deps: Vec<Dependency>,
-    seen: HashSet<Dependency>,
+    deps: Deps,
+}
+
+/// How many recorded dependencies a frame dedupes by linear scan before it
+/// upgrades to a hash set: a package-grain compute records one dependency
+/// per registered file, so a linear `contains` over every recorded read went
+/// quadratic in the file count.
+const SEEN_LINEAR_MAX: usize = 16;
+
+/// The dependency set of one computing frame: recorded once each, in read
+/// order. Duplicate suppression is a linear scan while the set is small and
+/// a hash set past [`SEEN_LINEAR_MAX`].
+#[derive(Debug, Default)]
+struct Deps {
+    recorded: Vec<Dependency>,
+    index: Option<FxHashSet<Dependency>>,
+}
+
+impl Deps {
+    /// Records `dep` unless an equal one is already recorded.
+    fn insert(&mut self, dep: Dependency) {
+        if let Some(index) = &mut self.index {
+            if index.insert(dep) {
+                self.recorded.push(dep);
+            }
+            return;
+        }
+        if self.recorded.contains(&dep) {
+            return;
+        }
+        if self.recorded.len() >= SEEN_LINEAR_MAX {
+            let index = self.index.get_or_insert_with(FxHashSet::default);
+            index.extend(self.recorded.iter().copied());
+            index.insert(dep);
+        }
+        self.recorded.push(dep);
+    }
 }
 
 /// The query database: the only owner of inputs and memos, and the only path
@@ -81,29 +111,42 @@ pub struct Db {
     /// Revision of the last change to the registered file set (a file
     /// registration), read as the [`InputKey::FileSet`] input.
     file_set_changed_at: Revision,
-    memos: HashMap<QueryKey, Memo>,
-    /// Reverse dependency edges: dependency -> keys whose memos read it.
-    reverse: HashMap<Dependency, HashSet<QueryKey>>,
-    computes: HashMap<QueryKind, ComputeFn>,
-    compute_counts: HashMap<QueryKey, usize>,
+    memos: FxHashMap<QueryKey, Memo>,
+    /// Reverse dependency edges: dependency -> keys whose memos read it. A
+    /// dependency's reader list is short (every pass is memoized at its own
+    /// grain, so a parse is read by a handful of keys), so a flat vector
+    /// beats a set; a duplicate reader is harmless because invalidation and
+    /// the renewal marking are idempotent.
+    reverse: FxHashMap<Dependency, Vec<QueryKey>>,
+    computes: FxHashMap<QueryKind, ComputeFn>,
+    /// Per-key compute counters. Written in debug builds only: they serve
+    /// test introspection, so a release build does not pay a map write per
+    /// compute and reads zero from an empty table.
+    compute_counts: FxHashMap<QueryKey, usize>,
     /// The declared effect rows the effects pass reads (E1): the ambient
-    /// stdlib table, later merged with M7's platform declarations. Fixed
-    /// for the database's life, so no memo can go stale against it.
+    /// stdlib table. Fixed for the database's life, so no memo can go
+    /// stale against it.
     declared_rows: ds_check::DeclaredRows,
+    /// The world functions' capability attribution the effects pass reads
+    /// beside the rows (H5): the ambient stdlib table, licensing the
+    /// package's world usage per capability. Fixed like the rows.
+    world_caps: ds_check::WorldCaps,
 }
 
 impl Db {
     /// Creates an empty database with the computes for
     /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`],
     /// [`QueryKey::BlockSource`], [`QueryKey::Resolve`],
-    /// [`QueryKey::TypeOf`], [`QueryKey::LinearityCheck`], and
-    /// [`QueryKey::EffectsOf`] registered: `ds-parse` for the tree and
+    /// [`QueryKey::CheckedPackage`], [`QueryKey::FileLinearity`],
+    /// [`QueryKey::PackageEffects`], [`QueryKey::TypeOf`],
+    /// [`QueryKey::LinearityCheck`], [`QueryKey::EffectsOf`], and
+    /// [`QueryKey::PlatformCheck`] registered: `ds-parse` for the tree and
     /// diagnostics, the tree's block spans for the index, the block-text
     /// seam for sources, the ds-check collection and resolution passes
-    /// over the registered files (G3), the bidirectional check sliced per
-    /// definition (B2), the M2 affine pass (C1, C5) per definition, and
-    /// the ds-check effects pass over the registered files (E1) (see the
-    /// crate docs).
+    /// over the registered files (G3), the bidirectional check (B2), the M2
+    /// affine pass (C1, C5) per file, the ds-check effects pass over the
+    /// registered files (E1), and the per-definition slices of those three
+    /// (see the crate docs).
     #[must_use]
     pub fn new() -> Self {
         let mut db = Self::default();
@@ -111,9 +154,13 @@ impl Db {
         db.set_compute(QueryKind::BlockIndex, crate::queries::block_index);
         db.set_compute(QueryKind::BlockSource, crate::queries::block_source);
         db.set_compute(QueryKind::Resolve, crate::queries::resolve);
+        db.set_compute(QueryKind::CheckedPackage, crate::queries::checked_package);
+        db.set_compute(QueryKind::FileLinearity, crate::queries::file_linearity);
+        db.set_compute(QueryKind::PackageEffects, crate::queries::package_effects);
         db.set_compute(QueryKind::TypeOf, crate::queries::type_of);
         db.set_compute(QueryKind::LinearityCheck, crate::queries::linearity_check);
         db.set_compute(QueryKind::EffectsOf, crate::queries::effects_of);
+        db.set_compute(QueryKind::PlatformCheck, crate::queries::platform_check);
         db
     }
 
@@ -126,6 +173,16 @@ impl Db {
         let mut db = Self::new();
         db.declared_rows = rows;
         db
+    }
+
+    /// A database whose effects pass also reads `caps` (H5): the ambient's
+    /// world functions' capability attribution, licensing world usage per
+    /// capability against the package's platform declaration. Set before
+    /// the first query, like [`Db::with_declared_rows`].
+    #[must_use]
+    pub fn with_world_caps(mut self, caps: ds_check::WorldCaps) -> Self {
+        self.world_caps = caps;
+        self
     }
 
     /// Registers `content` under `name` and returns its file id. File ids
@@ -243,6 +300,7 @@ impl Db {
 
     /// How many times the query's compute function has actually run (debug
     /// and test introspection; memo hits are invisible here by design).
+    /// Release builds count nothing and answer zero.
     #[must_use]
     pub fn compute_count(&self, key: &QueryKey) -> usize {
         self.compute_counts.get(key).copied().unwrap_or(0)
@@ -272,7 +330,7 @@ impl Db {
     /// happens later, in deep verification.
     fn invalidate_from(&mut self, dep: Dependency) {
         let mut queue = VecDeque::from([dep]);
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         while let Some(dep) = queue.pop_front() {
             let dependents = self.reverse.get(&dep).cloned().unwrap_or_default();
             for dependent in dependents {
@@ -339,6 +397,13 @@ impl Ctx<'_> {
         &self.db.declared_rows
     }
 
+    /// The world functions' capability attribution the effects pass reads
+    /// beside the rows (H5): the database's ambient table.
+    #[must_use]
+    pub fn world_caps(&self) -> &ds_check::WorldCaps {
+        &self.db.world_caps
+    }
+
     /// The source registry all query spans address (the parse compute hands
     /// it to `ds-parse`; renderers get theirs from [`Db::files`]).
     #[must_use]
@@ -357,9 +422,7 @@ impl Ctx<'_> {
             .frames
             .last_mut()
             .expect("reads happen only inside a computation");
-        if frame.seen.insert(dep) {
-            frame.deps.push(dep);
-        }
+        frame.deps.insert(dep);
     }
 }
 
@@ -383,24 +446,21 @@ fn ensure(db: &mut Db, key: QueryKey, frames: &mut Vec<Frame>) -> Result<QueryVa
     {
         return Ok(value);
     }
-    // Dirty memo: deep-verify before recomputing.
-    if let Some((deps, verified_at)) = db
-        .memos
-        .get(&key)
-        .filter(|memo| memo.dirty)
-        .map(|memo| (memo.deps.clone(), memo.verified_at))
-    {
-        if verify(db, key, &deps, verified_at, frames)? {
-            let revision = db.revision;
-            let memo = db
-                .memos
-                .get_mut(&key)
-                .expect("memo existed when its deps were cloned");
+    // Dirty memo: deep-verify before recomputing. Taking the memo out of the
+    // table hands verification its dependency list without a clone; it goes
+    // back before any recompute needs the old value for the renewal compare,
+    // and a read that closes a cycle through this key is caught by the
+    // frame check above either way.
+    if let Some(mut memo) = db.memos.remove(&key).filter(|memo| memo.dirty) {
+        if verify(db, key, &memo.deps, memo.verified_at, frames)? {
             memo.dirty = false;
-            memo.verified_at = revision;
-            return Ok(memo.value.clone());
+            memo.verified_at = db.revision;
+            let value = memo.value.clone();
+            db.memos.insert(key, memo);
+            return Ok(value);
         }
         // A dependency genuinely moved: fall through and recompute.
+        db.memos.insert(key, memo);
     }
 
     let Some(&compute) = db.computes.get(&key.kind()) else {
@@ -408,8 +468,7 @@ fn ensure(db: &mut Db, key: QueryKey, frames: &mut Vec<Frame>) -> Result<QueryVa
     };
     frames.push(Frame {
         key,
-        deps: Vec::new(),
-        seen: HashSet::new(),
+        deps: Deps::default(),
     });
     let mut ctx = Ctx { db, frames };
     let result = compute(&mut ctx, key);
@@ -429,12 +488,12 @@ fn ensure(db: &mut Db, key: QueryKey, frames: &mut Vec<Frame>) -> Result<QueryVa
     if let Some(memo) = db.memos.get(&key) {
         for dep in &memo.deps {
             if let Some(dependents) = db.reverse.get_mut(dep) {
-                dependents.remove(&key);
+                dependents.retain(|reader| *reader != key);
             }
         }
     }
-    for dep in &frame.deps {
-        db.reverse.entry(*dep).or_default().insert(key);
+    for dep in &frame.deps.recorded {
+        db.reverse.entry(*dep).or_default().push(key);
     }
     // If this value actually moved, everything reading it must re-verify.
     // Input-change marking usually covered these; this guards interleavings
@@ -452,11 +511,14 @@ fn ensure(db: &mut Db, key: QueryKey, frames: &mut Vec<Frame>) -> Result<QueryVa
         }
     }
 
-    *db.compute_counts.entry(key).or_insert(0) += 1;
+    #[cfg(debug_assertions)]
+    {
+        *db.compute_counts.entry(key).or_insert(0) += 1;
+    }
     let out = value.clone();
     db.memos.insert(key, Memo {
         value,
-        deps: frame.deps,
+        deps: frame.deps.recorded,
         verified_at: db.revision,
         changed_at,
         dirty: false,
@@ -505,8 +567,7 @@ fn verify(
 
     frames.push(Frame {
         key,
-        deps: Vec::new(),
-        seen: HashSet::new(),
+        deps: Deps::default(),
     });
     let result = walk(db, deps, verified_at, frames);
     frames.pop();

@@ -10,17 +10,21 @@
 //! - block-bodied members (struct/enum/trait/impl) render newline-separated without commas when
 //!   multiline; match arms drop commas only where the grammar's newline separation allows
 //!   (block-bodied followers).
+//! - an attached member/field `///` doc run renders immediately above its member at the member's
+//!   indent (member-grain placement, the parse layer's doc slots as the placement input); every
+//!   other interior comment keeps the item-trailing migration.
 
+use ds_diag::Span;
 use ds_parse::{
     Attribute, EnumCase, EnumDecl, EnumPayload, Expr, FieldDecl, FnDecl, ImplDecl, ImportDecl,
-    Item, ItemKind, LocalDecl, Pattern, StructDecl, StructMember, TagDecl, TraitDecl, TraitMember,
-    TypeAliasDecl, Vis,
+    Item, ItemKind, LocalDecl, Pattern, PlatformDecl, StructDecl, StructMember, TagDecl, TraitDecl,
+    TraitMember, Trivia, TypeAliasDecl, Vis,
 };
 
 use crate::{
     ctx::Ctx,
     expr::{push_indent, write_block, write_expr, write_local},
-    ty::{write_generics, write_params, write_ty, write_type_ref},
+    ty::{write_generics, write_params, write_path, write_ty, write_type_ref},
 };
 
 /// Renders one top-level item as one or more lines (no trailing newline);
@@ -51,6 +55,25 @@ pub(crate) fn write_item(ctx: &Ctx, out: &mut String, base: usize, item: &Item) 
         ItemKind::TypeAlias(t) => write_type_alias(ctx, out, t),
         ItemKind::Trait(t) => write_trait(ctx, out, base, t),
         ItemKind::Impl(i) => write_impl(ctx, out, base, i),
+        ItemKind::Platform(d) => write_platform(out, d),
+    }
+}
+
+/// One platform declaration: the name's literal is re-quoted, the
+/// provides list comma-separated inside angle brackets.
+fn write_platform(out: &mut String, d: &PlatformDecl) {
+    out.push_str("platform \"");
+    out.push_str(&d.name.name);
+    out.push('"');
+    if !d.provides.is_empty() {
+        out.push_str(" provides <");
+        for (i, cap) in d.provides.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&cap.name);
+        }
+        out.push('>');
     }
 }
 
@@ -108,7 +131,7 @@ fn write_attr(out: &mut String, a: &Attribute) {
             if i > 0 {
                 out.push_str(", ");
             }
-            out.push_str(&p.text());
+            write_path(out, p);
         }
         out.push(')');
     }
@@ -189,12 +212,48 @@ fn write_struct(ctx: &Ctx, out: &mut String, base: usize, s: &StructDecl) {
     } else {
         out.push_str(" {\n");
         for m in &s.members {
+            if let StructMember::Field(f) = m {
+                push_doc(ctx, out, base + 1, &f.doc);
+            }
             push_indent(out, base + 1);
             write_struct_member(ctx, out, base + 1, m);
             out.push('\n');
         }
         push_indent(out, base);
         out.push('}');
+    }
+}
+
+/// One attached member/field doc run, printed where it stood: each line
+/// verbatim at the member's own indent, immediately above the member.
+fn push_doc(ctx: &Ctx, out: &mut String, indent: usize, doc: &[Trivia]) {
+    for t in doc {
+        push_indent(out, indent);
+        out.push_str(ctx.comment_text(t));
+        out.push('\n');
+    }
+}
+
+/// Whether `span` is a trivia of an attached member/field doc run in the
+/// item: the trivia the item's trailing migration must skip, because the
+/// member sites above print them at their members instead.
+pub(crate) fn is_member_doc(kind: &ItemKind, span: Span) -> bool {
+    let hit = |doc: &[Trivia]| doc.iter().any(|t| t.span == span);
+    match kind {
+        ItemKind::Trait(t) => t.members.iter().any(|m| match m {
+            TraitMember::Fn(f) => hit(&f.doc),
+            TraitMember::AssocType { .. } => false,
+        }),
+        ItemKind::Impl(i) => i.fns.iter().any(|f| hit(&f.doc)),
+        ItemKind::Struct(s) => s.members.iter().any(|m| match m {
+            StructMember::Field(f) => hit(&f.doc),
+            StructMember::Deinit { .. } => false,
+        }),
+        ItemKind::Enum(e) => e.cases.iter().any(|c| match &c.payload {
+            EnumPayload::Struct(fields) => fields.iter().any(|f| hit(&f.doc)),
+            _ => false,
+        }),
+        _ => false,
     }
 }
 
@@ -286,6 +345,7 @@ fn write_enum_case(ctx: &Ctx, out: &mut String, base: usize, c: &EnumCase) {
             } else {
                 out.push_str(" {\n");
                 for (i, f) in fields.iter().enumerate() {
+                    push_doc(ctx, out, base + 1, &f.doc);
                     push_indent(out, base + 1);
                     write_field(ctx, out, f);
                     if i + 1 < fields.len() {
@@ -331,6 +391,9 @@ fn write_trait(ctx: &Ctx, out: &mut String, base: usize, t: &TraitDecl) {
     } else {
         out.push_str(" {\n");
         for m in &t.members {
+            if let TraitMember::Fn(f) = m {
+                push_doc(ctx, out, base + 1, &f.doc);
+            }
             push_indent(out, base + 1);
             write_trait_member(ctx, out, base + 1, m);
             out.push('\n');
@@ -370,6 +433,7 @@ fn write_impl(ctx: &Ctx, out: &mut String, base: usize, i: &ImplDecl) {
     } else {
         out.push_str(" {\n");
         for f in &i.fns {
+            push_doc(ctx, out, base + 1, &f.doc);
             push_indent(out, base + 1);
             write_fn(ctx, out, base + 1, f);
             out.push('\n');

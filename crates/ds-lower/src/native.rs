@@ -1,12 +1,13 @@
 //! The native vocabulary the lowering contract covers.
 //!
-//! `ds_vm::native` owns the two reserved native modules' tables and
-//! index assignment (the `builtin` core and the `std` platform module,
-//! the H5.5 layering); this module is the lowerer's mirror of both. The
-//! tables must stay aligned — the drift tests pin the pairing, and the
-//! platform tag id below is pinned against the VM's `PLATFORM_IO_OK`.
+//! `ds_vm::native` owns the builtin core's table and index assignment,
+//! and `ds_vm::platform` the platform ABI's fixed world-op table — the
+//! H5.5 layering after its M7 migration; this module is the lowerer's
+//! mirror of both. The tables must stay aligned — the drift tests pin
+//! the pairing, and the platform tag id below is pinned against the
+//! VM's `PLATFORM_IO_OK`.
 
-use ds_abi::{BuiltinInstance, SlotType};
+use ds_abi::{BuiltinInstance, SlotType, Staging};
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share.
@@ -28,25 +29,25 @@ pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 /// user package can collide.
 pub(crate) const EVIDENCE_MODULE: &str = "$evidence";
 
-/// Which reserved native module a covered native's pool FuncRef
-/// addresses: the VM's `builtin` core or the `std` platform module.
+/// The builtin core's reserved module name, as pool FuncRefs address it.
+pub(crate) const BUILTIN_MODULE_NAME: &str = "builtin";
+
+/// The default platform's name (H5, E1): what the world natives address
+/// when the package declares no platform of its own — the `ds` CLI's
+/// provider. The VM's platform table carries the same name; the drift
+/// test pins the pair.
+pub(crate) const DEFAULT_PLATFORM_NAME: &str = "std";
+
+/// Which native surface a covered native's pool FuncRef addresses: the
+/// VM's `builtin` core, or the platform handler the host installs behind
+/// the source's platform declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeModule {
     /// The `builtin` core: the pure primitives every VM carries.
     Builtin,
-    /// The `std` platform native module: the world surface, installed by
-    /// the host that provides the platform.
-    StdPlatform,
-}
-
-impl NativeModule {
-    /// The module's name, as pool FuncRefs address it.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Builtin => "builtin",
-            Self::StdPlatform => "std",
-        }
-    }
+    /// The platform handler: the world surface, served by the host's
+    /// installed platform under the declaration's name.
+    Platform,
 }
 
 /// A native's result shape on the caller's overlay words.
@@ -81,6 +82,14 @@ pub(crate) enum NativeShape {
     /// the table records as the keying, resolved from the call's result
     /// type like the instance keying resolves from the evidence.
     TotalByResultType,
+    /// The tag-less multi-word total: the answer's N words carry no
+    /// discriminant, their kinds the call's own checked result type's
+    /// (`partition`'s two-list tuple, one `Ref` per list) — the
+    /// degenerate sibling of [`NativeShape::Checked`]'s span (the span
+    /// channel fronts its payload with a discriminant; the total's
+    /// words ARE the answer). The resident body's static floor is two
+    /// words; a wider fold joining later widens its own floor.
+    TaglessTotal,
 }
 
 /// One covered native: its call name, module, reserved index, result
@@ -115,13 +124,13 @@ pub(crate) struct Native {
 pub(crate) const NATIVES: &[Native] = &[
     Native {
         name: "println",
-        module: NativeModule::StdPlatform,
+        module: NativeModule::Platform,
         index: 0,
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
     Native {
         name: "print",
-        module: NativeModule::StdPlatform,
+        module: NativeModule::Platform,
         index: 1,
         shape: NativeShape::Total(SlotType::I64),
     },
@@ -226,8 +235,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "read_file",
-        module: NativeModule::StdPlatform,
-        index: 5,
+        module: NativeModule::Platform,
+        index: 2,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
             err_prefix: "io error: ",
@@ -235,8 +244,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "write_file",
-        module: NativeModule::StdPlatform,
-        index: 6,
+        module: NativeModule::Platform,
+        index: 3,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
             err_prefix: "io error: ",
@@ -244,14 +253,14 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "file_exists",
-        module: NativeModule::StdPlatform,
-        index: 7,
+        module: NativeModule::Platform,
+        index: 4,
         shape: NativeShape::Total(SlotType::Bool),
     },
     Native {
         name: "fs_list",
-        module: NativeModule::StdPlatform,
-        index: 8,
+        module: NativeModule::Platform,
+        index: 5,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref, // the list object
             err_prefix: "io error: ",
@@ -259,8 +268,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "file_size",
-        module: NativeModule::StdPlatform,
-        index: 9,
+        module: NativeModule::Platform,
+        index: 6,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
             err_prefix: "io error: ",
@@ -268,8 +277,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "net_connect",
-        module: NativeModule::StdPlatform,
-        index: 20,
+        module: NativeModule::Platform,
+        index: 7,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
             err_prefix: "net error: ",
@@ -277,8 +286,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "net_send",
-        module: NativeModule::StdPlatform,
-        index: 21,
+        module: NativeModule::Platform,
+        index: 8,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
             err_prefix: "net error: ",
@@ -286,8 +295,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "net_recv",
-        module: NativeModule::StdPlatform,
-        index: 22,
+        module: NativeModule::Platform,
+        index: 9,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
             err_prefix: "net error: ",
@@ -295,8 +304,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "net_close",
-        module: NativeModule::StdPlatform,
-        index: 23,
+        module: NativeModule::Platform,
+        index: 10,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
             err_prefix: "net error: ",
@@ -304,8 +313,8 @@ pub(crate) const NATIVES: &[Native] = &[
     },
     Native {
         name: "http_get",
-        module: NativeModule::StdPlatform,
-        index: 24,
+        module: NativeModule::Platform,
+        index: 11,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
             err_prefix: "net error: ",
@@ -360,10 +369,19 @@ pub(crate) struct GenericNative {
     pub index: u32,
     /// The evidence-word count the callee's constraint list carries.
     pub evidence: u8,
-    /// The real arguments' expected word kinds — the VM table's mirror,
-    /// so a staged closure word can be checked against a callable-defaulted
-    /// `Fn` parameter before dispatch.
+    /// The real arguments' expected word kinds — the named words of the
+    /// entry's `staging` discipline, the VM table's mirror, so a staged
+    /// closure word can be checked against a callable-defaulted `Fn`
+    /// parameter before dispatch. A `Leading` entry's `params` cover the
+    /// trailing named words (`cons`: the head element's whole span rides
+    /// the front, the list `Ref` is the trailing named word); an
+    /// `Interior` entry's cover the leading named word plus the final
+    /// named word (a fold's accumulator span sits between them).
     pub params: &'static [SlotType],
+    /// How the staged words map onto `params` — the VM table's mirror,
+    /// pinned by the drift test; the call site reads it to place a
+    /// closure word against the dynamic span an `Interior` entry stages.
+    pub staging: Staging,
     /// The result shape.
     pub shape: NativeShape,
     /// The builtin instances the one body implements: a receiver whose
@@ -385,10 +403,15 @@ pub(crate) struct GenericNative {
 /// `collect`, `head`, `first` are element-agnostic over the list
 /// instance, and `max` dispatches on the numeric instance its evidence
 /// word names, its result word keyed to that instance. The
-/// lambda-taking combinators (38-40) join them over the list instance
-/// too: the staged lambda parameter is the callable-defaulted `Fn` word
-/// (the scalar FuncRef or a closure object's `Ref` word), and the VM
-/// body reenters the dispatcher per element. The table
+/// lambda-taking combinators (38-40, and `partition` at 46) join them
+/// over the list instance too: the staged lambda parameter is the
+/// callable-defaulted `Fn` word (the scalar FuncRef or a closure
+/// object's `Ref` word), and the VM body reenters the dispatcher per
+/// element. The fork-join combinators (47 and 48) join them over the
+/// list instance with the same callable-defaulted word: the fork
+/// spawns the callable's own function per element (a closure's body,
+/// the capture block staged per spawn), the callable's checker-proved
+/// signature governing its answer's width. The table
 /// mirrors the VM's generic table exactly (the drift tests pin the
 /// pairing); adding an entry there without one here (or vice versa) is
 /// a contract break.
@@ -399,6 +422,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 10,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::I64),
         instances: &[BuiltinInstance::Str, BuiltinInstance::List],
     },
@@ -408,6 +432,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 21,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::I64),
         instances: &[BuiltinInstance::List],
     },
@@ -417,6 +442,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 22,
         evidence: 1,
         params: &[SlotType::Ref, SlotType::I64],
+        staging: Staging::Fixed,
         shape: NativeShape::Checked,
         instances: &[BuiltinInstance::List],
     },
@@ -426,6 +452,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 23,
         evidence: 1,
         params: &[SlotType::Ref, SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[BuiltinInstance::List],
     },
@@ -435,6 +462,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 29,
         evidence: 2,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::I64),
         instances: &[BuiltinInstance::Map],
     },
@@ -444,19 +472,22 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 30,
         evidence: 2,
         params: &[SlotType::Ref, SlotType::Raw],
+        staging: Staging::Fixed,
         shape: NativeShape::Checked,
         instances: &[BuiltinInstance::Map],
     },
     GenericNative {
         // the receiver is the element: the evidence word names the
         // element's instance (the constraint list's `t`), and the gate
-        // is the full vocabulary — the body prepends any single word,
+        // is the full vocabulary — the one body prepends any element's
+        // whole word span (the record instance covers the wider head),
         // and an element type no instance names refuses before staging
         name: "cons",
         module: NativeModule::Builtin,
         index: 32,
         evidence: 1,
-        params: &[SlotType::Raw, SlotType::Ref],
+        params: &[SlotType::Ref],
+        staging: Staging::Leading,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[
             BuiltinInstance::Str,
@@ -464,6 +495,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
             BuiltinInstance::Map,
             BuiltinInstance::Int,
             BuiltinInstance::Float,
+            BuiltinInstance::Record,
         ],
     },
     GenericNative {
@@ -472,6 +504,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 33,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Checked,
         instances: &[BuiltinInstance::List],
     },
@@ -481,6 +514,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 34,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[BuiltinInstance::List],
     },
@@ -490,6 +524,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 35,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[BuiltinInstance::List],
     },
@@ -499,6 +534,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 36,
         evidence: 1,
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         shape: NativeShape::Checked,
         instances: &[BuiltinInstance::List],
     },
@@ -508,6 +544,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 37,
         evidence: 1,
         params: &[SlotType::Raw, SlotType::Raw],
+        staging: Staging::Fixed,
         shape: NativeShape::TotalByInstance,
         instances: &[BuiltinInstance::Int, BuiltinInstance::Float],
     },
@@ -522,6 +559,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 38,
         evidence: 2,
         params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[BuiltinInstance::List],
     },
@@ -531,18 +569,72 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 39,
         evidence: 1,
         params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::Ref),
         instances: &[BuiltinInstance::List],
     },
     GenericNative {
-        // the result is the folded element word: its kind is the call's
-        // own result type's, a per-call-site fact (the receiver's list
-        // instance says nothing about the element)
+        // the result is the folded value's whole word span: its words
+        // are the call's own result type's, a per-call-site fact (the
+        // receiver's list instance says nothing about the element), and
+        // the init's whole span stages between the list and the
+        // callable — the interior span, the callable word riding at the
+        // staged span's end
         name: "reduce",
         module: NativeModule::Builtin,
         index: 40,
         evidence: 1,
-        params: &[SlotType::Ref, SlotType::Raw, SlotType::Fn],
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Interior,
+        shape: NativeShape::TotalByResultType,
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        // the constraint list is [t, r] like `map`'s — two evidence
+        // words recording the receiver's list instance — and the
+        // callable is the callable-defaulted `Fn` word like the hosted
+        // combinators': the fork spawns the callable's own function per
+        // element (a closure's body, the capture block staged per
+        // spawn), its answer the whole span the spawned child's
+        // completion carries, the width the callable's checker-proved
+        // signature
+        name: "par_map",
+        module: NativeModule::Builtin,
+        index: 47,
+        evidence: 2,
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        // the result is the two-list tuple — the tag-less multi-word
+        // total: two `Ref` words with no discriminant, their kinds the
+        // call's own result type's; the predicate stages like filter's
+        // (the callable-defaulted `Fn` word, one evidence word naming
+        // the receiver's list instance)
+        name: "partition",
+        module: NativeModule::Builtin,
+        index: 46,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        shape: NativeShape::TaglessTotal,
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        // reduce's interior staging over the fork: the init's whole
+        // word span stages between the leading list `Ref` and the
+        // trailing callable word, the fold chains one spawned child per
+        // element answering the next accumulator whole (the callable
+        // the callable-defaulted `Fn` word, its checker-proved answer
+        // width the fold's own)
+        name: "par_reduce",
+        module: NativeModule::Builtin,
+        index: 48,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Interior,
         shape: NativeShape::TotalByResultType,
         instances: &[BuiltinInstance::List],
     },
@@ -562,8 +654,14 @@ pub(crate) fn lookup(name: &str) -> Option<&'static Native> {
 mod drift {
     use super::*;
 
+    /// The resident tag-less total's static result floor: partition
+    /// answers two list `Ref`s. A wider fold joining the shape widens
+    /// its own floor.
+    const TAGLESS_TOTAL_FLOOR: usize = 2;
+
     /// The mirror stays aligned with the VM's two tables: every entry's
-    /// name sits at its reserved index in its own module's table, and the
+    /// name sits at its reserved index in its own surface's table — the
+    /// builtin core's, or the default platform handler's — and the
     /// fallible and checked natives' result spans are two words wide.
     /// `len` stays deliberately absent from NATIVES (its ambient spelling
     /// is generic); it lives in the generic mirror `natives_match` pins
@@ -571,26 +669,32 @@ mod drift {
     #[test]
     fn natives_match_the_vm_native_tables() {
         let core = ds_vm::native::builtin_module();
-        let platform = ds_vm::native::std_platform_module();
+        let platform = ds_vm::platform::platform_module(&ds_vm::platform::Platform::std());
         for native in NATIVES {
             let table = match native.module {
                 NativeModule::Builtin => &core,
-                NativeModule::StdPlatform => &platform,
+                NativeModule::Platform => &platform,
             };
+            assert!(
+                (native.index as usize) < table.len(),
+                "{} index {} is outside its table",
+                native.name,
+                native.index
+            );
             let fns = &table[native.index as usize];
             assert_eq!(
-                fns.name,
-                native.name,
-                "{} index {} in `{}` drifted",
-                native.name,
-                native.index,
-                native.module.name()
+                fns.name, native.name,
+                "{} index {} in its surface's table drifted",
+                native.name, native.index
             );
             let words = match native.shape {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
                 NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                // no monomorphic resident yet; the floor is the resident
+                // generic body's two list refs
+                NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
             };
             assert_eq!(
                 usize::from(fns.result_words),
@@ -638,11 +742,19 @@ mod drift {
                 "{}'s real-argument word kinds drifted",
                 g.name
             );
+            assert_eq!(
+                resolved.staging, g.staging,
+                "{}'s staged-span discipline drifted",
+                g.name
+            );
             let words = match g.shape {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
                 NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                // the resident tag-less total answers two list refs; a
+                // wider fold joining the shape widens its own floor
+                NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
             };
             assert_eq!(
                 usize::from(resolved.result_words),
@@ -662,16 +774,24 @@ mod drift {
             ds_vm::EVIDENCE_MODULE,
             "the runtime-evidence sentinel matches the VM's reservation"
         );
-        assert_eq!(NativeModule::Builtin.name(), ds_vm::native::BUILTIN_MODULE);
+        // the module names the lowering emits are the VM's reservations
+        assert_eq!(BUILTIN_MODULE_NAME, ds_vm::native::BUILTIN_MODULE);
+        assert_eq!(DEFAULT_PLATFORM_NAME, ds_vm::platform::STD_NAME);
         assert_eq!(
-            NativeModule::StdPlatform.name(),
-            ds_vm::native::STD_PLATFORM_MODULE
+            ds_vm::platform::Platform::std().capabilities().len(),
+            4,
+            "the default platform serves every capability"
         );
         assert_eq!(PLATFORM_IO_OK, ds_vm::native::PLATFORM_IO_OK);
-        assert_eq!(
-            crate::shape::FIRST_RESERVED_TAG,
-            ds_vm::native::PLATFORM_CANCELLED
-        );
+        // the mint ceiling covers the whole countdown: the nursery
+        // boundary discriminants and the claim-band pair sit above it
+        const {
+            assert!(
+                crate::shape::FIRST_RESERVED_TAG < ds_vm::native::NURSERY_BOUNDARY_ERR,
+                "the mint ceiling must cover every reserved tag"
+            );
+            assert!(crate::shape::CLAIM_BAND_CLEAR < ds_vm::native::NURSERY_BOUNDARY_ERR);
+        }
         assert_eq!(NURSERY_BOUNDARY_OK, ds_vm::native::NURSERY_BOUNDARY_OK);
         assert_eq!(NURSERY_BOUNDARY_ERR, ds_vm::native::NURSERY_BOUNDARY_ERR);
     }

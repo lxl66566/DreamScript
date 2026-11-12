@@ -1,7 +1,7 @@
 //! Byte-stable write-then-read round trips [G3.5 acceptance].
 
 use ds_abi::{
-    FrameLayout, SlotType,
+    FrameLayout, Inst, SlotType,
     uop::{ConstIdx, Uop},
 };
 use ds_mod::{
@@ -10,6 +10,21 @@ use ds_mod::{
 };
 
 const SOURCE: &[u8] = b"fn even(n: int) -> Bool {\n  n == 0 || odd(n - 1)\n}\n";
+
+/// The canonical word of one instruction at `pc`.
+fn encoded(uop: Uop, pc: u32) -> u32 {
+    Inst::Uop(uop)
+        .encode(pc)
+        .expect("fixture instruction encodes")
+}
+
+/// The canonical words of a body, each encoded at its own pc.
+fn words(body: Vec<Uop>) -> Vec<u32> {
+    body.into_iter()
+        .enumerate()
+        .map(|(pc, uop)| encoded(uop, u32::try_from(pc).expect("pc fits u32")))
+        .collect()
+}
 
 fn sample_module() -> Module {
     Module::new(
@@ -184,38 +199,12 @@ fn checked_hash_validation_accepts_and_rejects() {
 
 #[test]
 fn mmap_loader_round_trips_from_disk() {
-    let dir = tempfile_dir();
+    let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("pipeline.dsmod");
     std::fs::write(&path, write(&sample_module())).expect("write artifact");
     let mapped = read_mmap(&path).expect("mmap valid module");
     assert_eq!(mapped.module().name(), "pipeline");
     assert_eq!(mapped.bytes(), &write(&sample_module())[..]);
-    drop(mapped);
-    dir.close().expect("cleanup temp dir");
-}
-
-/// tempfile-style scratch directory without a tempfile dependency: a new
-/// directory under std's temp base, removed on drop.
-struct ScratchDir(std::path::PathBuf);
-
-impl ScratchDir {
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-
-    fn close(self) -> std::io::Result<()> {
-        std::fs::remove_dir_all(&self.0)
-    }
-}
-
-fn tempfile_dir() -> ScratchDir {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let unique = std::process::id()
-        ^ u32::try_from(COUNTER.fetch_add(1, Ordering::Relaxed) << 16).unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("ds-mod-test-{unique}"));
-    std::fs::create_dir_all(&path).expect("create scratch dir");
-    ScratchDir(path)
 }
 
 // The mutual `even`/`odd` of H2's example, a local
@@ -347,11 +336,8 @@ fn even_odd_two_function_module_round_trips() {
     let (even, odd) = (&read_back.functions()[0], &read_back.functions()[1]);
     assert_eq!(even.name(), "even");
     assert_eq!(odd.name(), "odd");
-    let expected = |code: Vec<Uop>| -> Vec<ds_abi::Inst> {
-        code.into_iter().map(ds_abi::Inst::from).collect()
-    };
-    assert_eq!(even.code(), expected(even_code()).as_slice());
-    assert_eq!(odd.code(), expected(odd_code()).as_slice());
+    assert_eq!(even.code(), words(even_code()).as_slice());
+    assert_eq!(odd.code(), words(odd_code()).as_slice());
     assert_eq!(even.layout(), &even_odd_layout());
     assert_eq!(even.constants()[0], Constant::I64(0));
     assert_eq!(even.constants()[3], Constant::FuncRef {
@@ -360,10 +346,13 @@ fn even_odd_two_function_module_round_trips() {
     });
     assert_eq!(odd.constants()[2], Constant::Bool(false));
     // The tail-call word survived: CALLT with nargs 1 and pool index 3.
-    assert!(even.code().contains(&ds_abi::Inst::Uop(Uop::Callt {
-        callee: ConstIdx(3),
-        nargs: 1
-    })));
+    assert!(even.code().contains(&encoded(
+        Uop::Callt {
+            callee: ConstIdx(3),
+            nargs: 1
+        },
+        0
+    )));
 }
 
 #[test]
@@ -382,7 +371,7 @@ fn empty_function_round_trips() {
     assert_eq!(write(&read_back), bytes);
     let function = &read_back.functions()[0];
     assert_eq!(function.name(), "nop");
-    assert_eq!(function.code(), &[ds_abi::Inst::Uop(Uop::Ret { src: 0 })]);
+    assert_eq!(function.code(), &[encoded(Uop::Ret { src: 0 }, 0)]);
     assert_eq!(function.layout().frame_size(), 2); // metadata + call words only
 }
 

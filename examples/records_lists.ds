@@ -1,0 +1,42 @@
+// The record-element list over the native result span channel: each
+// element is a whole inline word span staged by list_push at the
+// per-list element stride, the checked list_get read answers
+// `item | none` re-spanned whole, the `.ok`/`.err` chain extracts (a
+// missing index handled on the none side through the fallback record
+// riding the err handler's capture), and the fields project out of the
+// extracted element. The cursor and combinator words still refuse over
+// wider elements — the explicit list_get spelling is the read surface
+// today.
+
+struct item { name: string, qty: int, price: int }
+
+fn cost(e: item) -> int {
+  e.qty * e.price
+}
+
+fn at(xs: list[item], i: int) -> item {
+  const cell = list_get(xs, i)
+  cell.ok((e: item) => e).err((_: none) => item { name: "none", qty: 0, price: 0 })
+}
+
+fn main() -> () {
+  var xs = list[item]()
+  xs.list_push(item { name: "pen", qty: 2, price: 7 })
+  xs.list_push(item { name: "pad", qty: 1, price: 13 })
+  xs.list_push(item { name: "mug", qty: 3, price: 5 })
+  const blank = item { name: "none", qty: 0, price: 0 }
+  const first = list_get(xs, 0)
+  const mug = list_get(xs, 2)
+  const miss = list_get(xs, 9)
+  const head = first.ok((e: item) => e.name).err((_: none) => "?")
+  const mug_cost = mug.ok((e: item) => cost(e)).err((_: none) => 0)
+  const missing = miss.ok((e: item) => e.name).err((_: none) => blank.name)
+  println("count ${len(xs)} first ${head} mug ${mug_cost} miss ${missing}")
+  var total = 0
+  var i = 0
+  while i < len(xs) {
+    total += cost(at(xs, i))
+    i += 1
+  }
+  println("total ${total}")
+}

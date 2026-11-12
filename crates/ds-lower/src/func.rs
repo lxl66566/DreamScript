@@ -9,16 +9,18 @@
 //! slots — that callers read or widen into their own spans.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     rc::Rc,
 };
 
-use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Uop};
+use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
 use ds_check::{
-    Analyzed, BinderFact, DefId, DotRes, Extraction, InherentCallBounds, MethodId, MethodOwner,
-    Res, Resolutions, TraitCall, TraitId, Ty, TypeId, Val,
+    Analyzed, AtomKind, BinderFact, DefId, DotRes, Extraction, GenericCallBounds,
+    InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
+    Ty, TypeId, Val,
 };
-use ds_diag::Span;
+use ds_diag::{FileId, Span};
 use ds_mod::Constant;
 use ds_parse::{
     BinaryOp, BlockExpr, CallArg, EnumPayload, Expr, Ident, Literal, LocalDecl, MatchArm, Param,
@@ -32,7 +34,7 @@ use crate::{
         GENERIC_NATIVES, GenericNative, NURSERY_BOUNDARY_ERR, Native, NativeShape, PLATFORM_IO_OK,
     },
     place::{Hook, Owned, Placement},
-    shape::{MemberField, Shape, Shapes},
+    shape::{MemberField, Shape, Shapes, SpanWords, StructShape},
 };
 
 /// One symbolic frame slot: a body word, or an outgoing-overlay word that
@@ -85,6 +87,7 @@ pub(crate) enum DataOp {
     NeqBool,
     EqStr,
     StrCat,
+    StrCatArena,
 }
 
 impl DataOp {
@@ -114,12 +117,14 @@ impl DataOp {
             Self::NeqBool => Uop::NeqBool { dst, lhs, rhs },
             Self::EqStr => Uop::EqStr { dst, lhs, rhs },
             Self::StrCat => Uop::StrCat { dst, lhs, rhs },
+            Self::StrCatArena => Uop::StrCatArena { dst, lhs, rhs },
         }
     }
 
     /// The result word type of this op.
     fn result_slot(self, lhs: SlotType) -> SlotType {
         match self {
+            Self::StrCat | Self::StrCatArena => SlotType::Ref,
             Self::AddI64
             | Self::SubI64
             | Self::MulI64
@@ -147,6 +152,14 @@ pub(crate) enum Op {
         kidx: u16,
     },
     Kstr {
+        dst: Slot,
+        kidx: u16,
+    },
+    /// The claim-free KSTR form (stage three's temporary slice): the
+    /// word borrows the intern map's canonical copy, so the load claims
+    /// no count and the frame's terminal dec is deleted. The placement
+    /// pass emits this only for slots it proved count-free.
+    KstrBorrow {
         dst: Slot,
         kidx: u16,
     },
@@ -180,6 +193,15 @@ pub(crate) enum Op {
     },
     Jmp {
         target: usize,
+    },
+    /// The loop-head mark: packs the arena cursor into a body word the
+    /// paired restore reads at the back edge.
+    ArenaMark {
+        dst: Slot,
+    },
+    /// The back-edge restore: rewinds the arena to the packed cursor.
+    ArenaRestore {
+        src: Slot,
     },
     Jmpif {
         cond: Slot,
@@ -270,6 +292,15 @@ struct LoopCtx {
     body_depth: usize,
 }
 
+/// One loop's stream brackets: the head position (an ARENA_MARK inserts
+/// there, the label stays pointing at it) and the back-edge jump's
+/// position (an ARENA_RESTORE inserts before it).
+#[derive(Clone, Copy)]
+struct LoopSpan {
+    head: usize,
+    back: usize,
+}
+
 /// A walked expression's result: its place plus the use's static type.
 struct TypedPlace {
     place: Place,
@@ -320,7 +351,7 @@ struct DeinitClaim {
     /// word offsets (the decs fire per span word).
     hook: Hook,
     /// The value's word types, in span order — the hook's staging.
-    staged: Vec<SlotType>,
+    staged: SpanWords,
 }
 
 /// One planned function: its table name plus the lambda that is its
@@ -356,48 +387,60 @@ pub(crate) struct PlannedFn {
     /// function has no def-typed entry the signature path reads.
     pub(crate) ret: Option<Ty>,
     /// The runtime-evidence pairs this frame's body demands, in body
-    /// order — a generic impl member body's own sites plus every demand
-    /// lexically inside its lambdas, or a lambda's own demands (through
-    /// its nested lambdas) when the entry is one. Empty outside generic
-    /// impl bodies.
+    /// order — a generic body's own sites, every demand lexically
+    /// inside its lambdas and spawned subtrees, and every generic
+    /// callee's own demands its call sites' records answer in the
+    /// runtime form (a lambda's or spawned child's entry carries its own
+    /// body's collection when the entry is one). Empty outside generic
+    /// bodies.
     pub(crate) evidence: Rc<Vec<RuntimePair>>,
     /// The declared bounds of the generic impl whose member body this
-    /// entry lowers (empty elsewhere): a lambda lexically inside the
-    /// body inherits them, so its own demands collect at its
-    /// construction.
+    /// entry lowers (empty elsewhere): a lambda or spawned child
+    /// lexically inside the body inherits them, so its own demands
+    /// collect at its construction or spawn site.
     pub(crate) bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     /// Whether this entry is a `spawn` expression's child [E2]: the
     /// capture block is the entry's own argument area — the spawned
     /// fiber's entry frame writes it exactly where a run entry writes
-    /// its parameters.
+    /// its parameters, evidence words trailing the captures.
     pub(crate) spawn_child: bool,
+    /// Whether this entry is a free generic fn's ONE body [H3]: its
+    /// declared parameters may sit over the fn's own type variables
+    /// (one Raw word each — the runtime kind is the caller's fact), and
+    /// every call site entering it stages the body's runtime-evidence
+    /// demands as trailing words after the true arguments. False for
+    /// impl-member declared bodies, whose parameters stay concrete.
+    pub(crate) free_generic: bool,
 }
 
-/// One declared impl-member function's lowering shape: its parameters
-/// (binder facts live in the checked tables, keyed by name span) and
-/// its body wrapped as the block expression the tail walk lowers.
+/// One declared body's lowering shape (an impl member's or a free
+/// generic fn's): its parameters (binder facts live in the checked
+/// tables, keyed by name span) and its body wrapped as the block
+/// expression the tail walk lowers.
 pub(crate) struct DeclFn {
     pub(crate) params: Rc<Vec<Param>>,
     pub(crate) body: Rc<Expr>,
 }
 
-/// One runtime-evidence demand inside a generic impl member's body: the
-/// bound type variable a nested trait-method call receives on, plus the
-/// member it calls. The body's plan carries the pairs in body order; the
-/// call site that enters the body stages one function-table word per
-/// pair — the serving member body under its own substitution — and the
-/// nested site dispatches through the word at its frame slot.
+/// One runtime-evidence demand inside a generic body (a generic impl
+/// member's or a free generic fn's): the bound type variable a nested
+/// trait-method call receives on, plus the member it calls. The body's
+/// plan carries the pairs in body order; the call site that enters the
+/// body stages one function-table word per pair — the serving member
+/// body under its own substitution — and the nested site dispatches
+/// through the word at its frame slot.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct RuntimePair {
-    /// The impl's generic parameter name (`t` in `[t: shows]`): the
-    /// instance declaration and the body's checking mint their own
-    /// variable atoms, so the demand keys by the written name they share.
+    /// The declaration's generic parameter name (`t` in `[t: shows]`):
+    /// the instance or fn declaration and the body's checking mint their
+    /// own variable atoms, so the demand keys by the written name they
+    /// share.
     pub(crate) var: String,
     /// The trait member the body calls on it.
     pub(crate) method: MethodId,
 }
 
-/// A generic impl body's runtime-evidence environment: the demand
+/// A generic body's runtime-evidence environment: the demand
 /// pairs the body's frame stages slots for, plus the declared bounds
 /// they collected against — the bounds ride along so a lambda lexically
 /// inside the body inherits them and collects its own demands at its
@@ -405,6 +448,67 @@ pub(crate) struct RuntimePair {
 pub(crate) struct EvidenceEnv {
     pub(crate) pairs: Rc<Vec<RuntimePair>>,
     pub(crate) bounds: Rc<HashMap<String, HashSet<TraitId>>>,
+}
+
+/// One generic body the package's demand table keys: a free generic fn
+/// by its definition, a generic impl's member by the impl item's span
+/// and member name, a trait's declared default body by the trait's
+/// definition and member name.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum BodyId {
+    Free(DefId),
+    Member { impl_site: Span, member: String },
+    Default { trait_def: DefId, member: String },
+}
+
+/// Every generic body's runtime-evidence demands after the package-wide
+/// propagation: a body's walk collects its own dot-calls plus, at every
+/// call entering another generic body (a free generic fn or a generic
+/// inherent member), that callee's own demands whose per-call record
+/// answers in the runtime form — keyed onto the calling frame's
+/// variables, the same peel the staging's slot lookup runs. A callee's
+/// demands may themselves carry callee demands, so the pass iterates
+/// until no body's list grows; the walk always reads a callee's list
+/// through this table, keyed by the callee's identity.
+#[derive(Default, Clone)]
+pub(crate) struct Demands {
+    pairs: HashMap<BodyId, Rc<Vec<RuntimePair>>>,
+}
+
+impl Demands {
+    pub(crate) fn insert(&mut self, id: BodyId, pairs: Rc<Vec<RuntimePair>>) {
+        self.pairs.insert(id, pairs);
+    }
+
+    pub(crate) fn get(&self, id: &BodyId) -> Option<&[RuntimePair]> {
+        self.pairs.get(id).map(|pairs| pairs.as_slice())
+    }
+
+    /// One body's list as an `Rc` clone (the planning pushes move it
+    /// into their `EvidenceEnv`).
+    pub(crate) fn rc(&self, id: &BodyId) -> Option<Rc<Vec<RuntimePair>>> {
+        self.pairs.get(id).cloned()
+    }
+}
+
+/// The transitive follow words trailing every runtime-evidence slot in a
+/// frame's evidence area: a nested runtime dispatch whose slot word names
+/// a generic serving body slides that body's own evidence area in, one
+/// chain level per hop, so the frame carries the serving-body word plus
+/// this many follow words. A chain deeper than the area keeps its honest
+/// refusal at the entering site.
+const FOLLOW_WORDS: usize = 2;
+
+/// One staged evidence word's source: a function-table constant (the
+/// entering site's substitution is concrete), or a frame slot read (a
+/// nested site inside a generic body whose substitution is that frame's
+/// own — the word rides the frame's evidence area).
+#[derive(Clone, Copy)]
+enum EvidenceSrc {
+    /// The serving member body's function-table index.
+    Const(u32),
+    /// This frame's evidence-area word (a `Mov` into the overlay).
+    Slot(u8),
 }
 
 /// A solved trait-method call site's dispatch [B6, H3].
@@ -416,18 +520,22 @@ pub(crate) enum TraitDispatch {
     Static { index: u32, call: TraitCall },
     /// A bound-variable receiver inside a generic impl body: dispatch
     /// resolves at runtime from the frame's evidence slot the call site
-    /// entering the body staged.
-    Runtime { slot: u8 },
+    /// entering the body staged. The trait member the evidence pair
+    /// names rides along so omitted defaulted parameters stage the
+    /// trait's declared defaults (the call-site contract).
+    Runtime { slot: u8, method: MethodId },
     /// A solved inherent-method call site: the impl body's
     /// function-table index plus the checker-recorded bounds when the
-    /// body is a generic impl's (empty for a monomorphic impl's). The
-    /// receiver's own type picked the body at check time, so the call
+    /// body is a generic impl's (empty for a monomorphic impl's), the
+    /// method id naming the impl item the transitive chain starts from.
+    /// The receiver's own type picked the body at check time, so the call
     /// dispatches like a plain local callee — no instance word and no
     /// dispatch uop; a generic body's evidence words stage trailing the
     /// arguments and the body claims them as its trailing parameters.
     Inherent {
         index: u32,
         bounds: InherentCallBounds,
+        method: MethodId,
     },
 }
 
@@ -443,6 +551,12 @@ pub(crate) struct Plan {
     /// generic impls): call sites dispatching into them refuse with the
     /// seam they wait on.
     runtime_impls: HashSet<Span>,
+    /// The trait's declared default bodies keyed by (trait definition,
+    /// member name): a dispatch whose solving impl spells no member
+    /// reaches the trait's default body through this tie.
+    default_index: HashMap<(DefId, String), u32>,
+    /// The function-table indexes of every planned trait default body.
+    default_bodies: HashSet<u32>,
     /// The function-table index of every planned struct deinit, keyed
     /// by the struct's definition.
     deinits: HashMap<DefId, u32>,
@@ -450,6 +564,10 @@ pub(crate) struct Plan {
     /// planned or not (a generic struct's deinit declares but cannot
     /// plan — monomorphic instantiation is the CALL_GENERIC seam).
     declared_deinits: HashSet<DefId>,
+    /// Every generic body's final demand table: the planning pushes read
+    /// their own body's list here, and the lambda/spawn walks at
+    /// lowering time read callee bodies' lists through it.
+    demands: Demands,
 }
 
 impl Plan {
@@ -459,9 +577,24 @@ impl Plan {
             index: HashMap::new(),
             impl_index: HashMap::new(),
             runtime_impls: HashSet::new(),
+            default_index: HashMap::new(),
+            default_bodies: HashSet::new(),
             deinits: HashMap::new(),
             declared_deinits: HashSet::new(),
+            demands: Demands::default(),
         }
+    }
+
+    /// Installs the package's propagated demand table before any body
+    /// plans.
+    pub(crate) fn set_demands(&mut self, demands: Demands) {
+        self.demands = demands;
+    }
+
+    /// One generic body's final demands: a body outside the table (a
+    /// boundless one) demands nothing.
+    pub(crate) fn demand(&self, id: &BodyId) -> Rc<Vec<RuntimePair>> {
+        self.demands.rc(id).unwrap_or_else(|| Rc::new(Vec::new()))
     }
 
     pub(crate) fn push(&mut self, name: String, def: DefId, local: &LocalDecl) {
@@ -480,6 +613,48 @@ impl Plan {
             evidence: Rc::new(Vec::new()),
             bounds: Rc::new(HashMap::new()),
             spawn_child: false,
+            free_generic: false,
+        });
+    }
+
+    /// Registers one free generic fn's ONE body [H3]: the fn lowers
+    /// once, never per instantiation, under its own name (a package def
+    /// is unique, and the impl members' `#` mangles sit outside the
+    /// identifier charset). `local.init` is the fn's lambda shape; its
+    /// parameters and block become the declared body the walk lowers
+    /// like an impl member's, and the entering call sites stage the
+    /// evidence words its runtime pairs demand after the true
+    /// arguments. `None` return: the checker's def type carries the
+    /// fn's signature over its minted variables.
+    pub(crate) fn push_free_generic(
+        &mut self,
+        name: String,
+        def: DefId,
+        local: &LocalDecl,
+        evidence: EvidenceEnv,
+    ) {
+        let Expr::Lambda { params, body, .. } = &local.init else {
+            unreachable!("push_free_generic receives a lambda-armed local");
+        };
+        self.index.insert(
+            def,
+            u32::try_from(self.functions.len()).expect("function index fits u32"),
+        );
+        self.functions.push(PlannedFn {
+            name,
+            lambda: local.init.clone(),
+            def: Some(def),
+            deinit: None,
+            captures: Rc::new(Vec::new()),
+            decl: Some(Rc::new(DeclFn {
+                params: Rc::new(params.clone()),
+                body: Rc::new((**body).clone()),
+            })),
+            ret: None,
+            evidence: evidence.pairs,
+            bounds: evidence.bounds,
+            spawn_child: false,
+            free_generic: true,
         });
     }
 
@@ -511,6 +686,7 @@ impl Plan {
             evidence,
             bounds,
             spawn_child: false,
+            free_generic: false,
         });
         (index, captures)
     }
@@ -520,7 +696,11 @@ impl Plan {
     /// body will bind: the block becomes a zero-parameter lambda over the
     /// same capture list the lambda construction uses. The child's
     /// checked unit type rides the spawn expression's own span, so the
-    /// plan entry carries the return directly.
+    /// plan entry carries the return directly. A child lexically inside a
+    /// generic impl body carries its own runtime-evidence pairs (staged
+    /// from the spawning frame's slots into the entry argument area) and
+    /// inherits the impl's bounds so its nested lambdas and spawns
+    /// collect their demands the same way.
     pub(crate) fn push_spawn(
         &mut self,
         enclosing: &str,
@@ -528,6 +708,8 @@ impl Plan {
         res: &Resolutions,
         binders: &HashMap<Span, BinderFact>,
         ret: Ty,
+        evidence: Rc<Vec<RuntimePair>>,
+        bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     ) -> (u32, Rc<Vec<(Span, Ty)>>) {
         let Expr::Spawn { span, body, .. } = spawn else {
             unreachable!("push_spawn receives a spawn expression");
@@ -550,9 +732,10 @@ impl Plan {
             captures: captures.clone(),
             decl: None,
             ret: Some(ret),
-            evidence: Rc::new(Vec::new()),
-            bounds: Rc::new(HashMap::new()),
+            evidence,
+            bounds,
             spawn_child: true,
+            free_generic: false,
         });
         (index, captures)
     }
@@ -586,6 +769,48 @@ impl Plan {
             evidence: evidence.pairs,
             bounds: evidence.bounds,
             spawn_child: false,
+            free_generic: false,
+        });
+        index
+    }
+
+    /// Registers one trait's declared default body under its mangled
+    /// table name and returns its index. The mangle `<trait>#<member>`
+    /// cannot collide with an impl member's three-part mangle or an
+    /// inherent impl's two-part one (a trait and a type share one
+    /// namespace, and `#` sits outside the identifier charset). The
+    /// body is the ONE generic shape over the trait's own variables:
+    /// its declared parameters may sit over them (`self` typed `Self`
+    /// among them — one Raw word each, the runtime kind the caller's
+    /// fact), and the dispatch sites entering it stage the body's
+    /// runtime-evidence demands as trailing words after the true
+    /// arguments, the same shape a free generic fn's entering sites
+    /// stage.
+    pub(crate) fn push_default_body(
+        &mut self,
+        name: String,
+        trait_def: DefId,
+        member: String,
+        params: Rc<Vec<Param>>,
+        body: Rc<Expr>,
+        ret: Option<Ty>,
+        evidence: EvidenceEnv,
+    ) -> u32 {
+        let index = u32::try_from(self.functions.len()).expect("function index fits u32");
+        self.default_index.insert((trait_def, member), index);
+        self.default_bodies.insert(index);
+        self.functions.push(PlannedFn {
+            name,
+            lambda: (*body).clone(),
+            def: None,
+            deinit: None,
+            captures: Rc::new(Vec::new()),
+            decl: Some(Rc::new(DeclFn { params, body })),
+            ret,
+            evidence: evidence.pairs,
+            bounds: evidence.bounds,
+            spawn_child: false,
+            free_generic: true,
         });
         index
     }
@@ -603,6 +828,19 @@ impl Plan {
         self.impl_index
             .get(&(impl_site, member.to_owned()))
             .copied()
+    }
+
+    /// The trait's declared default body for one member.
+    pub(crate) fn default_body(&self, trait_def: DefId, member: &str) -> Option<u32> {
+        self.default_index
+            .get(&(trait_def, member.to_owned()))
+            .copied()
+    }
+
+    /// Whether one function-table entry is a trait's declared default
+    /// body.
+    pub(crate) fn is_default_body(&self, index: u32) -> bool {
+        self.default_bodies.contains(&index)
     }
 
     /// Whether an impl item's bodies wait on runtime evidence.
@@ -632,6 +870,7 @@ impl Plan {
             evidence: Rc::new(Vec::new()),
             bounds: Rc::new(HashMap::new()),
             spawn_child: false,
+            free_generic: false,
         });
     }
 
@@ -722,15 +961,34 @@ fn stray_exit(block: &BlockExpr) -> Option<Span> {
 /// separate frames and stay skipped (their own sites answer their own
 /// boundaries).
 fn cancel_operands(block: &BlockExpr, out: &mut Vec<Span>) {
+    cancel_operands_walk(block, out, false);
+}
+
+/// The spawn-site containment proof's walk: a spawned block's own cancel
+/// sites, recursing through nested nursery blocks (an over-conservative
+/// proof is legal — a false site only adds a redundant check) but not
+/// through nested spawns (their cancels answer their own boundary).
+fn cancel_operands_walk(block: &BlockExpr, out: &mut Vec<Span>, through_spawns: bool) {
     for stmt in &block.stmts {
         match &stmt.kind {
-            StmtKind::Local(local) => cancel_operands_expr(&local.init, out),
-            StmtKind::Expr(expr) => cancel_operands_expr(expr, out),
+            StmtKind::Local(local) => {
+                cancel_operands_expr(&local.init, out, through_spawns);
+            },
+            StmtKind::Expr(expr) => cancel_operands_expr(expr, out, through_spawns),
         }
     }
 }
 
-fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
+/// The boundary join's walk: the cancel sites whose payloads can answer
+/// this block's own boundary — recursing through the spawned bodies (a
+/// spawned child cancels into this nursery) but not into nested nursery
+/// blocks (their cancels answer their own boundary, and their failures
+/// re-raise as the child's completion value, never as a payload).
+fn spawned_cancel_operands(block: &BlockExpr, out: &mut Vec<Span>) {
+    cancel_operands_walk(block, out, true);
+}
+
+fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>, through_spawns: bool) {
     if let Expr::Call { callee, args, .. } = e
         && let Expr::Path { path, .. } = &**callee
         && path.segments.len() == 1
@@ -747,7 +1005,7 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
         Expr::Paren { inner, .. }
         | Expr::Unary { expr: inner, .. }
         | Expr::Is { expr: inner, .. }
-        | Expr::Try { expr: inner, .. } => cancel_operands_expr(inner, out),
+        | Expr::Try { expr: inner, .. } => cancel_operands_expr(inner, out, through_spawns),
         Expr::Binary { left, right, .. }
         | Expr::Range {
             start: left,
@@ -755,69 +1013,83 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
             ..
         }
         | Expr::Assign { left, right, .. } => {
-            cancel_operands_expr(left, out);
-            cancel_operands_expr(right, out);
+            cancel_operands_expr(left, out, through_spawns);
+            cancel_operands_expr(right, out, through_spawns);
         },
         Expr::Str { parts, .. } => {
             for part in parts {
                 if let StrPart::Expr { expr, .. } = part {
-                    cancel_operands_expr(expr, out);
+                    cancel_operands_expr(expr, out, through_spawns);
                 }
             }
         },
         Expr::Call { callee, args, .. } => {
-            cancel_operands_expr(callee, out);
+            cancel_operands_expr(callee, out, through_spawns);
             for arg in args {
-                cancel_operands_expr(&arg.value, out);
+                cancel_operands_expr(&arg.value, out, through_spawns);
             }
         },
-        Expr::Field { recv, .. } | Expr::Index { recv, .. } => cancel_operands_expr(recv, out),
+        Expr::Field { recv, .. } | Expr::Index { recv, .. } => {
+            cancel_operands_expr(recv, out, through_spawns);
+        },
         Expr::MapApply { key, value, .. } => {
-            cancel_operands_expr(key, out);
-            cancel_operands_expr(value, out);
+            cancel_operands_expr(key, out, through_spawns);
+            cancel_operands_expr(value, out, through_spawns);
         },
         Expr::Struct { fields, .. } => {
             for (_, value) in fields {
                 if let Some(value) = value {
-                    cancel_operands_expr(value, out);
+                    cancel_operands_expr(value, out, through_spawns);
                 }
             }
         },
         Expr::Tuple { items, .. } | Expr::List { items, .. } => {
             for item in items {
-                cancel_operands_expr(item, out);
+                cancel_operands_expr(item, out, through_spawns);
             }
         },
         Expr::If {
             cond, then, else_, ..
         } => {
-            cancel_operands_expr(cond, out);
-            cancel_operands(then, out);
+            cancel_operands_expr(cond, out, through_spawns);
+            cancel_operands_walk(then, out, through_spawns);
             if let Some(else_) = else_ {
-                cancel_operands_expr(else_, out);
+                cancel_operands_expr(else_, out, through_spawns);
             }
         },
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            cancel_operands_expr(scrutinee, out);
+            cancel_operands_expr(scrutinee, out, through_spawns);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    cancel_operands_expr(guard, out);
+                    cancel_operands_expr(guard, out, through_spawns);
                 }
-                cancel_operands_expr(&arm.body, out);
+                cancel_operands_expr(&arm.body, out, through_spawns);
             }
         },
         Expr::While { cond, body, .. } => {
-            cancel_operands_expr(cond, out);
-            cancel_operands(body, out);
+            cancel_operands_expr(cond, out, through_spawns);
+            cancel_operands_walk(body, out, through_spawns);
         },
         Expr::For { iter, body, .. } => {
-            cancel_operands_expr(iter, out);
-            cancel_operands_expr(body, out);
+            cancel_operands_expr(iter, out, through_spawns);
+            cancel_operands_expr(body, out, through_spawns);
         },
-        Expr::Nursery { body, .. } => cancel_operands(body, out),
-        Expr::Block(block) => cancel_operands(block, out),
+        // the two traversal modes split exactly here: the proof walk
+        // skips nested spawns and recurses into nurseries, the boundary
+        // walk recurses into spawns and skips nurseries
+        Expr::Nursery { body, .. } => {
+            if !through_spawns {
+                cancel_operands_walk(body, out, through_spawns);
+            }
+        },
+        Expr::Spawn { body, .. } => {
+            if through_spawns {
+                cancel_operands_walk(body, out, through_spawns);
+            }
+        },
+        Expr::Block(block) => cancel_operands_walk(block, out, through_spawns),
         Expr::Literal { .. }
         | Expr::RawStr { .. }
         | Expr::Path { .. }
@@ -826,7 +1098,6 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>) {
         | Expr::Break(_)
         | Expr::Continue(_)
         | Expr::Lambda { .. }
-        | Expr::Spawn { .. }
         | Expr::Defer { .. } => {},
     }
 }
@@ -1046,23 +1317,26 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
 }
 
 /// Collects one frame's runtime-evidence demands, in body order: every
-/// trait-method call whose receiver's checked type is the impl's own
-/// bound type variable (the checker satisfied it through the impl's
-/// in-scope bound, so no solved instance records there). Value-site
-/// lambda subtrees stay in — their demands ride the capture block as
-/// evidence words, staged from this frame's slots — while spawned
-/// subtrees stay out: a spawned child's frame has no evidence channel,
-/// so its runtime sites refuse at their own lowering.
+/// trait-method call whose receiver's checked type is the body's own
+/// bound type variable (the checker satisfied it through the body's
+/// in-scope bound, so no solved instance records there), plus every
+/// generic callee's own demands the site's record answers in the
+/// runtime form (below). Value-site lambda and spawned subtrees stay
+/// in — their demands ride the child's own entry words (a lambda's
+/// capture block, a spawned child's entry argument area), staged from
+/// this frame's evidence slots at the construction or spawn site.
 pub(crate) fn runtime_pairs(
     analyzed: &Analyzed,
     res: &Resolutions,
     bounds: &HashMap<String, HashSet<TraitId>>,
     body: &Expr,
+    demands: &Demands,
 ) -> Vec<RuntimePair> {
     let mut walk = PairWalk {
         analyzed,
         res,
         bounds,
+        demands,
         seen: HashSet::new(),
         out: Vec::new(),
     };
@@ -1070,18 +1344,46 @@ pub(crate) fn runtime_pairs(
     walk.out
 }
 
+/// The generic parameter one single-atom receiver covers: the atom itself
+/// when it is a minted variable, else the variable at the deepest
+/// single-argument constructor chain inside it (`list[t]` and
+/// `list[list[t]]` both demand on `t`). Union receivers and variable-free
+/// atoms cover nothing — the demand walk and the nested-site lookup key
+/// by this one name.
+fn peeled_param(universe: &ds_check::Universe, atom: TypeId) -> Option<String> {
+    if let Some(param) = crate::shape::var_param_name(universe, atom) {
+        return Some(param);
+    }
+    let decl = universe.atom_decl(atom).ok()?;
+    let AtomKind::Apply(_, args) = &decl.kind else {
+        return None;
+    };
+    let [only] = args.as_ref() else {
+        return None;
+    };
+    let [member] = universe.members(*only) else {
+        return None;
+    };
+    peeled_param(universe, *member)
+}
+
 /// The pair-collecting walk over one member body.
 struct PairWalk<'a> {
     analyzed: &'a Analyzed,
     res: &'a Resolutions,
     bounds: &'a HashMap<String, HashSet<TraitId>>,
+    demands: &'a Demands,
     seen: HashSet<(String, MethodId)>,
     out: Vec<RuntimePair>,
 }
 
 impl PairWalk<'_> {
-    /// One dot-call whose receiver is a bounded type variable demands one
-    /// evidence word: the member it calls, recorded once.
+    /// One dot-call whose receiver covers a bounded type variable demands
+    /// one evidence word: the member it calls, recorded once. The receiver
+    /// is the variable itself (a nested runtime site) or a constructor
+    /// over it (a transitive site whose serving body is itself a generic
+    /// impl member — its rider words ride this frame's area for the same
+    /// pair, so the walk collects the demand here too).
     fn call(&mut self, callee: &Expr, recv: &Expr) {
         let Expr::Field { name, .. } = callee else {
             return;
@@ -1092,12 +1394,12 @@ impl PairWalk<'_> {
         let Some(val) = self.analyzed.checked.expr_types.get(&recv.span()) else {
             return;
         };
-        let [var] = self.analyzed.decls.universe.members(val.ty) else {
+        let [only] = self.analyzed.decls.universe.members(val.ty) else {
             return;
         };
         // the instance declaration and the body's checking mint their own
         // variable atoms; the written parameter name bridges them
-        let Some(param) = crate::shape::var_param_name(&self.analyzed.decls.universe, *var) else {
+        let Some(param) = peeled_param(&self.analyzed.decls.universe, *only) else {
             return;
         };
         let Some(traits) = self.bounds.get(&param) else {
@@ -1119,6 +1421,137 @@ impl PairWalk<'_> {
         }
     }
 
+    /// A call site entering a generic body — a free generic fn (named,
+    /// or a UFCS dot-call feeding its first parameter) or a generic
+    /// inherent impl's member — stages the callee's own runtime-evidence
+    /// demands as the callee's trailing words. The checker's per-call
+    /// record answers each demanded bound under this site's
+    /// substitution, keyed by the callee's own variable name: a solved
+    /// answer stages constants at the site, while a `None` answer (only
+    /// an in-scope assumption covers it, so the substitution is this
+    /// frame's own variable) reads this frame's evidence slots — the
+    /// walk collects that demand here, keyed by the frame variable the
+    /// staging's slot lookup peels. A trait dispatch site collects
+    /// nothing here: the follow chain its entering site carries serves
+    /// the transitive level.
+    fn callee_demands(&mut self, callee: &Expr, call: Span, recv: Option<&Expr>) {
+        let id = match callee {
+            Expr::Field { name, .. } => match self.res.get(name.span) {
+                Some(Res::Dot(DotRes::Free { func, .. })) => BodyId::Free(*func),
+                Some(Res::Dot(DotRes::Methods { .. })) => {
+                    // the checker-selected inherent member, when one won
+                    let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) else {
+                        return;
+                    };
+                    let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
+                        return;
+                    };
+                    BodyId::Member {
+                        impl_site,
+                        member: self.analyzed.package.method(method).name.clone(),
+                    }
+                },
+                _ => return,
+            },
+            Expr::Path { span, .. } => match self.res.get(*span) {
+                Some(Res::Def(def)) => BodyId::Free(*def),
+                _ => return,
+            },
+            _ => return,
+        };
+        let Some(pairs) = self.demands.get(&id) else {
+            return;
+        };
+        for pair in pairs {
+            let MethodOwner::Trait(def) = self.analyzed.package.method(pair.method).owner else {
+                continue;
+            };
+            let Some(&trait_id) = self.analyzed.decls.traits.get(&def) else {
+                continue;
+            };
+            let universe = &self.analyzed.decls.universe;
+            // the runtime form's substituted type: the free fn's record
+            // carries the solved type itself; the inherent record carries
+            // none, and the receiver's checked type peels the same frame
+            // variable the staging's slot lookup reads
+            let solved = match &id {
+                BodyId::Free(_) => {
+                    let Some((_, _, served, solved)) = self
+                        .analyzed
+                        .checked
+                        .generic_call_bounds
+                        .get(&call)
+                        .and_then(|record| {
+                            record.iter().find(|(var, bound, ..)| {
+                                crate::shape::var_param_name(universe, *var).as_deref()
+                                    == Some(pair.var.as_str())
+                                    && *bound == trait_id
+                            })
+                        })
+                    else {
+                        continue;
+                    };
+                    if served.is_some() {
+                        continue;
+                    }
+                    *solved
+                },
+                BodyId::Member { .. } => {
+                    let Some((_, _, served)) = self
+                        .analyzed
+                        .checked
+                        .inherent_call_bounds
+                        .get(&call)
+                        .and_then(|record| {
+                            record.iter().find(|(var, bound, _)| {
+                                crate::shape::var_param_name(universe, *var).as_deref()
+                                    == Some(pair.var.as_str())
+                                    && *bound == trait_id
+                            })
+                        })
+                    else {
+                        continue;
+                    };
+                    if served.is_some() {
+                        continue;
+                    }
+                    let Some(recv) = recv else {
+                        continue;
+                    };
+                    let Some(val) = self.analyzed.checked.expr_types.get(&recv.span()) else {
+                        continue;
+                    };
+                    val.ty
+                },
+                // a dispatch target reaches its default body through the
+                // trait path, never a name
+                BodyId::Default { .. } => return,
+            };
+            let [only] = universe.members(solved) else {
+                continue;
+            };
+            let Some(param) = peeled_param(universe, *only) else {
+                continue;
+            };
+            // the frame's declared bounds carry the trait (the checker
+            // satisfied the callee's bound through one), mirroring the
+            // walk's own dot-call collection
+            if !self
+                .bounds
+                .get(&param)
+                .is_some_and(|traits| traits.contains(&trait_id))
+            {
+                continue;
+            }
+            if self.seen.insert((param.clone(), pair.method)) {
+                self.out.push(RuntimePair {
+                    var: param,
+                    method: pair.method,
+                });
+            }
+        }
+    }
+
     fn expr(&mut self, e: &Expr) {
         let block = |walk: &mut Self, block: &BlockExpr| {
             for stmt in &block.stmts {
@@ -1129,15 +1562,17 @@ impl PairWalk<'_> {
             }
         };
         match e {
-            // a spawned block is its own frame with no evidence
-            // channel: its runtime sites refuse at their own lowering
             Expr::Literal { .. }
             | Expr::RawStr { .. }
             | Expr::Break(_)
             | Expr::Continue(_)
             | Expr::FnType { .. }
-            | Expr::Path { .. }
-            | Expr::Spawn { .. } => {},
+            | Expr::Path { .. } => {},
+            // a spawned block's demands ride its entry argument area,
+            // staged from this frame's evidence slots at the spawn site,
+            // so this frame must carry a slot for every demand lexically
+            // inside it, transitively
+            Expr::Spawn { body, .. } => block(self, body),
             // a value-site lambda's body sites demand evidence too: the
             // construction stages the words from this frame's slots into
             // the capture block, so this frame must carry a slot for
@@ -1167,6 +1602,7 @@ impl PairWalk<'_> {
                 }
             },
             Expr::Call {
+                span,
                 callee,
                 args,
                 trailing,
@@ -1174,8 +1610,10 @@ impl PairWalk<'_> {
             } => {
                 if let Expr::Field { recv, .. } = &**callee {
                     self.call(callee, recv);
+                    self.callee_demands(callee, *span, Some(recv));
                     self.expr(recv);
                 } else {
+                    self.callee_demands(callee, *span, None);
                     self.expr(callee);
                 }
                 for arg in args {
@@ -1246,9 +1684,9 @@ impl PairWalk<'_> {
 /// A call target: a module-local function or a contract builtin.
 #[derive(Clone, Copy)]
 enum Callee {
-    /// A builtin native in one of the two reserved native modules (the
-    /// `builtin` core or the `std` platform module — the native's own
-    /// routing says which).
+    /// A native in one of the reserved native surfaces (the `builtin`
+    /// core or the platform handler — the native's own routing says
+    /// which).
     Builtin(&'static Native),
     /// A generic builtin's ONE body: the call routes through CALLG with
     /// the instantiated-type evidence words staged after the real
@@ -1269,6 +1707,10 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     plan: &'p mut Plan,
     shapes: &'s mut Shapes<'a>,
     name: String,
+    /// The platform name the world natives' pool FuncRefs address: the
+    /// package's `platform "..."` declaration's name, the default
+    /// platform `std` when no declaration names one.
+    platform: String,
     /// Whether this function is a synthesized lambda value's body: a use
     /// of a binder the walk never bound is a capture there.
     synth: bool,
@@ -1284,6 +1726,11 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     code: Vec<Op>,
     labels: Vec<usize>,
     pool: Vec<Constant>,
+    /// Position of every non-string pool entry, keyed by value.
+    pool_index: HashMap<Constant, u16>,
+    /// Position of every string pool entry, keyed by contents: a hit on a
+    /// repeated literal allocates nothing.
+    pool_strings: HashMap<String, u16>,
     /// Binder span -> place.
     binders: HashMap<Span, Place>,
     /// Lambda-value words -> their synthesized function's table index:
@@ -1307,13 +1754,14 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     rc: Placement,
     /// This body's runtime-evidence pairs to their frame slots: a nested
     /// trait-method call on a bound type variable dispatches through the
-    /// word at its slot (empty outside generic impl bodies and their
+    /// word at its slot (empty outside generic bodies and their
     /// lambdas).
     evidence: HashMap<(String, MethodId), u8>,
-    /// The declared bounds of the generic impl whose member body this
-    /// frame lowers, or the ones the enclosing member body carried when
-    /// this frame is one of its lambdas: a lambda's own evidence demands
-    /// collect against them at its construction.
+    /// The declared bounds of the generic body this frame lowers (an
+    /// impl member's or a free generic fn's), or the ones the enclosing
+    /// generic body carried when this frame is one of its lambdas: a
+    /// lambda's own evidence demands collect against them at its
+    /// construction.
     bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     /// This function's table index: a dead Fn payload word zero-writes
     /// the frame's own scalar FuncRef (a copyable word the dead member
@@ -1321,6 +1769,11 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     index: u32,
     /// The enclosing loops, innermost last.
     loops: Vec<LoopCtx>,
+    /// Every lowered loop's head and back-edge stream positions: the
+    /// slots finalize pairs an ARENA_MARK/ARENA_RESTORE into for the loops
+    /// enclosing designated arena temporaries. Positions shift with the
+    /// epilogue splices, like labels.
+    loop_spans: Vec<LoopSpan>,
     /// The innermost open nurseries' id words [E2], innermost last: the
     /// `spawn` sites of one `nursery` block stage the top word.
     nurseries: Vec<u8>,
@@ -1329,6 +1782,10 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// against the nursery-owning function's return union, so the child's
     /// own lowering skips them.
     spawn_child: bool,
+    /// The frame's canonical unit word: allocated at its first use, its
+    /// single `Kimm 0` spliced at the frame top in `finalize`. Every unit
+    /// value in the frame is this one place.
+    unit_slot: Option<u8>,
 }
 
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
@@ -1342,6 +1799,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         lin: &ds_check::Linearity,
         planned: &PlannedFn,
         index: u32,
+        platform: String,
     ) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
         // A declared impl-member body lowers its declaration's params (the
         // `Self` receiver among them) and block body; every other entry
@@ -1364,7 +1822,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // and the pool-call slide checks words against the callee's
         // typed parameters — so those members refuse here, honestly,
         // until the representation ruling that names their word shape.
-        if let Some(decl) = &planned.decl {
+        // A free generic fn's body is the exception: its parameters and
+        // returns over the fn's own type variables are the Raw-word
+        // shape the entering call sites guard at their one-word
+        // instantiation boundary.
+        if let Some(decl) = &planned.decl
+            && !planned.free_generic
+        {
             for param in decl.params.iter() {
                 let Some(fact) = analyzed.checked.binders.get(&param.name.span) else {
                     continue;
@@ -1428,6 +1892,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             ret
         };
         if planned.decl.is_some()
+            && !planned.free_generic
             && let [only] = analyzed.decls.universe.members(ret)
             && shapes.is_var_atom(*only)
         {
@@ -1444,6 +1909,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             plan,
             shapes,
             name: planned.name.clone(),
+            platform,
             synth: planned.def.is_none() && planned.decl.is_none(),
             root: planned.name == "main",
             ret_ty: ret,
@@ -1452,6 +1918,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             code: Vec::new(),
             labels: Vec::new(),
             pool: Vec::new(),
+            pool_index: HashMap::new(),
+            pool_strings: HashMap::new(),
             binders: HashMap::new(),
             fn_words: HashMap::new(),
             scalar_fn_words: HashSet::new(),
@@ -1463,8 +1931,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             bounds: planned.bounds.clone(),
             index,
             loops: Vec::new(),
+            loop_spans: Vec::new(),
             nurseries: Vec::new(),
             spawn_child: planned.spawn_child,
+            unit_slot: None,
         };
         if planned.deinit.is_some() {
             this.bind_deinit_param(params)?;
@@ -1472,7 +1942,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // a spawned child has no declared parameters: its capture
             // block IS the entry's argument area, laid out from the frame
             // start exactly where the spawned fiber's entry frame writes
-            // it
+            // it — the spawn site staged the evidence words into that
+            // same block, so they bind as the entry area's trailing
+            // parameters
             this.bind_captures(&planned.captures)?;
             this.params_len = this.slots.len();
             this.bind_evidence(&planned.evidence)?;
@@ -1504,8 +1976,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .ok_or_else(|| LowerError::unsupported(span, "an expression", "it has no checked type"))
     }
 
-    fn members(&self, ty: Ty) -> Vec<TypeId> {
-        self.analyzed.decls.universe.members(ty).to_vec()
+    fn members(&self, ty: Ty) -> &'a [TypeId] {
+        self.analyzed.decls.universe.members(ty)
     }
 
     /// Allocates body slots, returning the base.
@@ -1550,6 +2022,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.code.push(op);
     }
 
+    /// One KSTR load into the body word `dst`: the word starts in the
+    /// borrow classification and keeps it unless a count-moving site
+    /// transits it before finalization (the placement pass owns the
+    /// proof; the rewrite happens in `finalize`).
+    fn kstr(&mut self, dst: u8, kidx: u16) {
+        self.emit(Op::Kstr {
+            dst: Slot::body(dst),
+            kidx,
+        });
+        self.rc.produced_kstr(dst);
+    }
+
     fn label(&mut self) -> usize {
         self.labels.push(usize::MAX);
         self.labels.len() - 1
@@ -1576,6 +2060,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 *pos += len;
             }
         }
+        for span in &mut self.loop_spans {
+            if span.head > at {
+                span.head += len;
+            }
+            if span.back != usize::MAX && span.back > at {
+                span.back += len;
+            }
+        }
+    }
+
+    /// Records the innermost open loop's back edge at the next emission
+    /// position. The spans persist through the walk (finalize pairs marks
+    /// into the loops enclosing designated concatenations), so the
+    /// innermost open one is the last span whose back edge is not yet
+    /// recorded - inner loops close before their enclosing back edge
+    /// runs.
+    fn loop_back_edge(&mut self) {
+        let at = self.code.len();
+        self.loop_spans
+            .iter_mut()
+            .rev()
+            .find(|span| span.back == usize::MAX)
+            .expect("a loop is open")
+            .back = at;
     }
 
     /// One fall-through arm's epilogue: the words the join does not keep
@@ -1600,14 +2108,34 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// Adds one pool constant (deduplicated), returning its index.
+    /// Adds one pool constant (deduplicated by value), returning its index.
     fn pool(&mut self, constant: Constant) -> u16 {
-        if let Some(index) = self.pool.iter().position(|c| *c == constant) {
-            return u16::try_from(index).expect("pool index fits u16");
+        if let Constant::Str(text) = constant {
+            return self.pool_str(&text);
         }
-        let index = u16::try_from(self.pool.len()).expect("pool index fits u16");
+        if let Some(&index) = self.pool_index.get(&constant) {
+            return index;
+        }
+        let index = self.pool_len();
+        self.pool_index.insert(constant.clone(), index);
         self.pool.push(constant);
         index
+    }
+
+    /// Adds one pool string constant (deduplicated by contents), returning
+    /// its index.
+    fn pool_str(&mut self, text: &str) -> u16 {
+        if let Some(&index) = self.pool_strings.get(text) {
+            return index;
+        }
+        let index = self.pool_len();
+        self.pool_strings.insert(text.to_owned(), index);
+        self.pool.push(Constant::Str(text.to_owned()));
+        index
+    }
+
+    fn pool_len(&self) -> u16 {
+        u16::try_from(self.pool.len()).expect("pool index fits u16")
     }
 
     /// The Ref-typed body words of one value: where a value of `ty` at
@@ -1638,7 +2166,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// variables: its single value word is Raw and its runtime kind is
     /// the caller's fact.
     fn is_var_ty(&self, ty: Ty) -> bool {
-        match self.members(ty).as_slice() {
+        match self.members(ty) {
             [only] => self.shapes.is_var_atom(*only),
             _ => false,
         }
@@ -1656,14 +2184,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(words)
     }
 
+    /// The establishment band word of one claim site: a fresh Tag body
+    /// word at the first registration, the site's own at a
+    /// re-registration (a literal's temp re-bound at its binder writes
+    /// the same band once).
+    fn claim_band_word(&mut self, base: u8) -> Result<u8, LowerError> {
+        match self.rc.claim_band(base) {
+            Some(band) => Ok(band),
+            None => self.temp_word(SlotType::Tag),
+        }
+    }
+
     /// The words a discarded value must account for: its tracked Ref
     /// words plus the deinit claim's base when the value carries one —
     /// a deinit value dying unnamed at a statement still runs its hook.
     fn discard_words(&mut self, place: &Place, ty: Ty, span: Span) -> Result<Vec<u8>, LowerError> {
         let mut words = self.tracked_words(place, ty)?;
-        if let Some(claim) = self.deinit_claim(ty, span)? {
+        if let Some(claim) = self.deinit_claim(ty, span)?
+            && self.rc.anchors_claim(place.base)
+        {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
-            self.rc.claimed(place.base, claim.hook, &words);
+            let band = self.claim_band_word(place.base)?;
+            self.rc
+                .claimed(&mut self.code, place.base, claim.hook, band, &words);
             if !words.contains(&place.base) {
                 words.insert(0, place.base);
             }
@@ -1680,13 +2223,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// grows to hold the hook's staging.
     fn rc_bind(&mut self, binder: Span, place: &Place, ty: Ty) -> Result<(), LowerError> {
         let mut words = self.tracked_words(place, ty)?;
-        if let Some(claim) = self.deinit_claim(ty, binder)? {
+        if let Some(claim) = self.deinit_claim(ty, binder)?
+            && self.rc.anchors_claim(place.base)
+        {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
-            self.rc.claimed(place.base, claim.hook, &words);
+            let band = self.claim_band_word(place.base)?;
+            self.rc
+                .claimed(&mut self.code, place.base, claim.hook, band, &words);
             if !words.contains(&place.base) {
                 words.insert(0, place.base);
             }
         }
+        // a binder aliasing a borrowed word (a parameter, a member
+        // alias) keeps no claim here: the word never anchors one, the
+        // owner's own drop site firing the hook once
         self.rc.bound(binder, &words);
         Ok(())
     }
@@ -1694,10 +2244,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Registers a borrowing binder (a parameter, a handler's member
     /// alias, a pattern field): its Ref words only. A borrow never owns
     /// the value's deinit — the owning frame's drop site fires the
-    /// hook.
+    /// hook — so the base word joins the borrowed set and a later
+    /// binder aliasing it (a const alias, a match binder) never
+    /// re-establishes one.
     fn rc_bind_borrowed(&mut self, binder: Span, base: u8, ty: Ty) -> Result<(), LowerError> {
         let words = self.count_words(base, ty)?;
-        self.rc.bound(binder, &words);
+        self.rc.bound_borrowed(binder, base, &words);
         Ok(())
     }
 
@@ -1720,7 +2272,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// deinit-less structs carry none.
     fn deinit_hook(&mut self, ty: Ty, span: Span) -> Result<Option<Hook>, LowerError> {
         let members = self.members(ty);
-        let [atom] = members.as_slice() else {
+        let [atom] = members else {
             return Ok(None);
         };
         let Some(def) = self.analyzed.decls.defs_of_atoms.get(atom).copied() else {
@@ -1761,13 +2313,32 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     fn bind_params(&mut self, params: &[Param]) -> Result<(), LowerError> {
         for param in params {
-            if !matches!(param.mode, ds_parse::ParamMode::Borrow) {
-                return Err(LowerError::unsupported(
-                    param.span,
-                    "a non-borrow parameter mode",
-                    "the lowered subset takes borrow parameters only; mut/move/comptime windows \
-                     have no runtime contract yet",
-                ));
+            use ds_parse::ParamMode;
+            match param.mode {
+                // a comptime parameter is the metaprogramming round's
+                // seam; the two runtime modes lower below
+                ParamMode::Comptime(_) => {
+                    return Err(LowerError::unsupported(
+                        param.span,
+                        "a comptime parameter",
+                        "comptime evaluation is the metaprogramming round's seam; spell the \
+                         parameter mut or move",
+                    ));
+                },
+                // a mut parameter is a re-storable slot over the borrowed
+                // staging: the assignment machinery re-stores its words
+                // (store_over decs the incoming count the caller handed),
+                // so the only seam is the var-typed word whose count the
+                // overwrite contract cannot see yet
+                ParamMode::Mut(_) if self.param_is_var_ty(param) => {
+                    return Err(LowerError::unsupported(
+                        param.span,
+                        "a mut parameter over a type variable",
+                        "a reassignment would drop the previous word's count by runtime kind, and \
+                         the placement has no overwrite contract for it yet",
+                    ));
+                },
+                _ => {},
             }
             let Some(fact) = self.analyzed.checked.binders.get(&param.name.span).copied() else {
                 return Err(LowerError::unsupported(
@@ -1785,14 +2356,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 Shape::Word(slot) => PlaceShape::Word(*slot),
                 _ => PlaceShape::Span(fact.ty),
             };
-            self.binders.insert(param.name.span, Place { base, shape });
-            // a borrow parameter owns its incoming reference: the caller
+            let place = Place { base, shape };
+            self.binders.insert(param.name.span, place.clone());
+            // every parameter owns its incoming reference: the caller
             // handed a count (dup or forward at its staging) and this
             // frame's drops balance it (C2/C4)
             for word in self.count_words(base, fact.ty)? {
                 self.rc.produced(word);
             }
-            self.rc_bind_borrowed(param.name.span, base, fact.ty)?;
+            match param.mode {
+                // a consuming parameter owns the value's death: the
+                // deinit claim its type carries registers here, so the
+                // hook fires at this frame's own death sites (the scope
+                // end, an assignment's replaced content, a re-consuming
+                // move) — the caller's staging spent its claim riding
+                // the call
+                ParamMode::Consume(_) => self.rc_bind(param.name.span, &place, fact.ty)?,
+                _ => self.rc_bind_borrowed(param.name.span, base, fact.ty)?,
+            }
             self.scopes
                 .last_mut()
                 .expect("the root scope exists")
@@ -1802,15 +2383,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// Binds one generic impl member body's runtime-evidence slots:
-    /// one I64 parameter word per recorded pair, appended after the
-    /// declared parameters. The call site entering this body stages the
-    /// words (the serving member body per pair, under its own
-    /// substitution); the nested sites dispatch through them.
+    /// Whether one parameter's checked type is a generic impl's type
+    /// variable (the mut-window seam the var-binding refusal mirrors).
+    fn param_is_var_ty(&self, param: &Param) -> bool {
+        self.analyzed
+            .checked
+            .binders
+            .get(&param.name.span)
+            .copied()
+            .is_some_and(|fact| self.is_var_ty(fact.ty))
+    }
+
+    /// Binds one generic impl member body's runtime-evidence slots: one
+    /// I64 parameter word per recorded pair plus its follow words,
+    /// appended after the declared parameters. The call site entering
+    /// this body stages the words (the serving member body per pair and
+    /// its transitive chain, under its own substitution); the nested
+    /// sites dispatch through them.
     fn bind_evidence(&mut self, pairs: &[RuntimePair]) -> Result<(), LowerError> {
         for pair in pairs {
             let slot = self.temp_word(SlotType::I64)?;
-            self.params_len += 1;
+            for _ in 0..FOLLOW_WORDS {
+                self.temp_word(SlotType::I64)?;
+            }
+            self.params_len += 1 + FOLLOW_WORDS;
             self.evidence.insert((pair.var.clone(), pair.method), slot);
         }
         Ok(())
@@ -1819,11 +2415,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Binds one lambda's runtime-evidence words as the trailing
     /// capture words: the construction site staged them from the
     /// enclosing frame's evidence slots, and the CALLS copy-in writes
-    /// them right after the real captures. They are plain I64 words —
-    /// never counted, never a binder.
+    /// them right after the real captures — one word per pair plus its
+    /// follow words, read back by the pair's dispatch riders. They are
+    /// plain I64 words — never counted, never a binder.
     fn bind_capture_evidence(&mut self, pairs: &[RuntimePair]) -> Result<(), LowerError> {
         for pair in pairs {
-            let slot = self.alloc(&[SlotType::I64])?;
+            let slot = self.alloc(&[SlotType::I64; 1 + FOLLOW_WORDS])?;
             self.evidence.insert((pair.var.clone(), pair.method), slot);
         }
         Ok(())
@@ -1920,7 +2517,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The atom of a single-atom type.
     fn only_atom(&self, ty: Ty, span: Span) -> Result<TypeId, LowerError> {
-        match self.members(ty).as_slice() {
+        match self.members(ty) {
             [only] => Ok(*only),
             _ => Err(LowerError::unsupported(
                 span,
@@ -1953,15 +2550,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let atom = self.only_atom(ty, no_span())?;
                 // a single-member span holds the member's own words, so
                 // a word-shaped member sits at the span base itself
-                if self.members(*underlying).as_slice() == [atom] {
+                if self.members(*underlying) == [atom] {
                     return Ok(vec![WordAddr {
                         name: None,
                         slot: place.base,
                         slot_ty: *slot,
                     }]);
                 }
-                let fields = self.member_fields(*underlying, atom)?;
-                match fields.as_slice() {
+                let layout = self.shapes.shape(*underlying)?;
+                let fields = layout
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member read"))?;
+                match fields {
                     [] => Ok(vec![WordAddr {
                         name: None,
                         slot: place.base,
@@ -1987,7 +2587,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         .collect());
                 }
                 let atom = self.only_atom(ty, no_span())?;
-                let fields = self.member_fields(*underlying, atom)?;
+                let fields = place_shape
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member field"))?;
                 let mut out = Vec::new();
                 for field in &s.fields {
                     let member = fields
@@ -2000,12 +2602,28 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             (Shape::Tuple(s), PlaceShape::Span(underlying)) => {
                 let place_shape = self.shapes.shape(*underlying)?;
-                if !matches!(&*place_shape, Shape::Tuple(_)) {
-                    return Err(mismatch("a tuple use against a non-tuple span"));
+                if matches!(&*place_shape, Shape::Tuple(_)) {
+                    return Ok(s
+                        .fields
+                        .iter()
+                        .flat_map(|f| field_addrs(place.base, f))
+                        .collect());
+                }
+                // a tuple member inside a union region: the elements
+                // gather from the member's claimed, possibly scattered
+                // offsets — positionally, the tuple's own field map has
+                // no names to match by
+                let atom = self.only_atom(ty, no_span())?;
+                let fields = place_shape
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a tuple member read"))?;
+                if fields.len() != s.fields.len() {
+                    return Err(mismatch("a tuple member's arity"));
                 }
                 Ok(s.fields
                     .iter()
-                    .flat_map(|f| field_addrs(place.base, f))
+                    .zip(fields.iter())
+                    .flat_map(|(_, member)| field_addrs(place.base, member))
                     .collect())
             },
             (Shape::Union(u), PlaceShape::Span(underlying)) if *underlying == ty => Ok(u
@@ -2035,22 +2653,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// The fields of one member atom inside a union type's layout.
-    fn member_fields(
-        &mut self,
-        union_ty: Ty,
-        atom: TypeId,
-    ) -> Result<Vec<MemberField>, LowerError> {
-        let shape = self.shapes.shape(union_ty)?;
-        let Shape::Union(u) = &*shape else {
-            return Err(mismatch("a union member read"));
-        };
-        let member = u
-            .member(atom)
-            .ok_or_else(|| mismatch("a union member read"))?;
-        Ok(member.fields.clone())
-    }
-
     /// Moves one field's whole word span from `srcs` (the source value's
     /// word addresses, in span order) into the words at `base +
     /// field.word`: a Mov per word, an RC copy per Ref word.
@@ -2078,6 +2680,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     fn is_span_ty(&self, ty: Ty) -> bool {
         self.members(ty).len() > 1
+    }
+
+    /// Whether a checked binder's type is a bare struct span: its
+    /// runtime representation is its own field words, however many — a
+    /// one-word struct still binds and reads as a span, never as a
+    /// scalar word.
+    fn struct_typed(&mut self, ty: Ty) -> bool {
+        match self.shapes.shape(ty) {
+            Ok(shape) => matches!(&*shape, Shape::Struct(_)),
+            Err(_) => false,
+        }
     }
 
     // ---- statements ------------------------------------------------------------
@@ -2111,22 +2724,61 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// The unit value: one I64 word, matching the native unit convention.
+    /// The unit value: the frame's canonical unit word, one I64 slot
+    /// matching the native unit convention. Unit words are idempotent
+    /// and carry no counts, so every unit value in the frame shares the
+    /// one place instead of materializing a fresh zero per use.
     fn unit_value(&mut self, span: Span) -> Result<TypedPlace, LowerError> {
         let ty = self.val(span).map_or(self.ret_ty, |v| v.ty);
-        let base = self.temp_word(SlotType::I64)?;
-        let kidx = self.pool(Constant::I64(0));
-        self.emit(Op::Kimm {
-            dst: Slot::body(base),
-            kidx,
-        });
         Ok(TypedPlace {
-            place: Place {
-                base,
-                shape: PlaceShape::Word(SlotType::I64),
-            },
+            place: self.canonical_unit()?,
             ty,
         })
+    }
+
+    /// The frame's one unit word: allocated at first use, zero-written by
+    /// a single `Kimm 0` `finalize` splices at the frame top — the write
+    /// dominates every later read (branch arms read the word on paths
+    /// that never ran the first use, and frame words carry the previous
+    /// frame's garbage), and no site ever writes the word afterwards, so
+    /// one entry store serves the whole frame.
+    fn canonical_unit(&mut self) -> Result<Place, LowerError> {
+        if let Some(base) = self.unit_slot {
+            return Ok(Place {
+                base,
+                shape: PlaceShape::Word(SlotType::I64),
+            });
+        }
+        let base = self.temp_word(SlotType::I64)?;
+        self.unit_slot = Some(base);
+        Ok(Place {
+            base,
+            shape: PlaceShape::Word(SlotType::I64),
+        })
+    }
+
+    /// The unit type `()`: the solved member set is exactly the arity-0
+    /// tuple atom [B3] — distinct from the unit tags (`none`, `io_err`),
+    /// which are Tag words, and from `int`, which shares the I64 slot.
+    fn is_unit_ty(&self, ty: Ty) -> bool {
+        let [atom] = self.members(ty) else {
+            return false;
+        };
+        matches!(
+            self.analyzed.decls.universe.atom_decl(*atom),
+            Ok(decl)
+                if matches!(&decl.kind, AtomKind::Tuple(elements) if elements.is_empty())
+        )
+    }
+
+    /// The join span a value-position if/match widens its arms into: a
+    /// fresh temp span, except a unit join reuses the canonical unit
+    /// word — a statement if pays no result span and no per-arm Mov,
+    /// because every arm's unit value is that same word, so each
+    /// widen degenerates to the in-place no-op and the expression's
+    /// place is the unit word itself.
+    fn join_span(&mut self, ty: Ty) -> Result<Place, LowerError> {
+        if self.is_unit_ty(ty) { self.canonical_unit() } else { self.temp_span(ty) }
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), LowerError> {
@@ -2173,7 +2825,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn local_stmt(&mut self, local: &LocalDecl) -> Result<TypedPlace, LowerError> {
-        let init = self.value(&local.init)?;
         // A one-element paren pattern `(a)` is the inner pattern; the
         // parser keeps the tuple node and both layers collapse it.
         let pat = match &local.pat {
@@ -2184,6 +2835,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             } if pats.len() == 1 => &pats[0],
             other => other,
         };
+        // A scalar var's int/float literal init writes the var's own
+        // word directly: the constant has no other consumer, a scalar
+        // word carries no count, and a literal trips neither of the
+        // general path's closure/deinit guards, so its temp + re-store
+        // reduces to the one constant load.
+        if local.mutable
+            && let Some(landed) = self.scalar_var_init(local, pat)?
+        {
+            return Ok(landed);
+        }
+        let init = self.value(&local.init)?;
         let declared = match pat {
             Pattern::Binding { span, .. } => self
                 .analyzed
@@ -2197,7 +2859,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if self.is_var_ty(declared) {
                 return Err(LowerError::unsupported(
                     local.span,
-                    "a var binding over a generic impl's type variable",
+                    "a var binding over a type variable",
                     "a reassignment would drop the previous word's count by runtime kind, and the \
                      placement has no overwrite contract for it yet",
                 ));
@@ -2214,7 +2876,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 init.place.clone()
             } else {
                 let target = self.temp_span(declared)?;
-                self.widen_into(&target, declared, &init)?;
+                self.widen_into(&target, declared, &init, local.span)?;
                 self.place_of_ty(target.base, declared)?
             }
         } else if declared != init.ty && self.is_union_ty(declared)? {
@@ -2225,7 +2887,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // if/match join uses instead of aliasing one word.
             let target = self.temp_span(declared)?;
             self.refuse_closure_init(&init, local.span)?;
-            self.widen_into(&target, declared, &init)?;
+            self.widen_into(&target, declared, &init, local.span)?;
             self.place_of_ty(target.base, declared)?
         } else {
             init.place.clone()
@@ -2274,6 +2936,71 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
+    /// `var x = <int/float literal>` over a scalar word: allocates the
+    /// var's span and writes the constant straight into it, so the
+    /// binding answers its own word with no temp and no re-store.
+    /// Declines for every other shape (an annotated non-scalar, a
+    /// type-variable word, a suffixed or unparseable spelling), where
+    /// the general path keeps its refusals and staging — the probe
+    /// precedes the allocation, so a declined literal leaves no dead
+    /// frame word behind.
+    fn scalar_var_init(
+        &mut self,
+        local: &LocalDecl,
+        pat: &Pattern,
+    ) -> Result<Option<TypedPlace>, LowerError> {
+        let Pattern::Binding { span, name } = pat else {
+            return Ok(None);
+        };
+        let Expr::Literal { lit, .. } = peel_parens(&local.init) else {
+            return Ok(None);
+        };
+        let Some(fact) = self.analyzed.checked.binders.get(span).copied() else {
+            return Ok(None);
+        };
+        if self.is_var_ty(fact.ty) {
+            return Ok(None);
+        }
+        let Ok(shape) = self.shapes.shape(fact.ty) else {
+            return Ok(None);
+        };
+        let Shape::Word(slot @ (SlotType::I64 | SlotType::F64)) = &*shape else {
+            return Ok(None);
+        };
+        let Some(constant) = scalar_const(lit, *slot) else {
+            return Ok(None);
+        };
+        let target = self.temp_span(fact.ty)?;
+        self.scalar_const_into(constant, target.base);
+        let place = self.place_of_ty(target.base, fact.ty)?;
+        self.guard_deinit_union_member(fact.ty, fact.ty, local.span)?;
+        self.binders.insert(*span, place.clone());
+        self.rc_bind(*span, &place, fact.ty)?;
+        self.scope_insert(&name.name, *span);
+        Ok(Some(TypedPlace { place, ty: fact.ty }))
+    }
+
+    /// Loads one probed scalar constant into the word `dst` with the
+    /// literal arm's own op spelling (Kimm for I64, Kconst for F64).
+    fn scalar_const_into(&mut self, constant: ScalarConst, dst: u8) {
+        match constant {
+            ScalarConst::I64(value) => {
+                let kidx = self.pool(Constant::I64(value));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+            },
+            ScalarConst::F64(value) => {
+                let kidx = self.pool(Constant::F64(value));
+                self.emit(Op::Kconst {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+            },
+        }
+    }
+
     /// Binds one destructuring `var`'s elements to fresh per-element
     /// slots: each width-1 element word copies into its own var slot (a
     /// Ref word inc's at the copy), so an assignment through an element
@@ -2314,7 +3041,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if self.is_var_ty(fact.ty) {
                 return Err(LowerError::unsupported(
                     *span,
-                    "a var element over a generic impl's type variable",
+                    "a var element over a type variable",
                     "a reassignment would drop the previous word's count by runtime kind, and the \
                      placement has no overwrite contract for it yet",
                 ));
@@ -2406,7 +3133,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .ok_or_else(|| mismatch("an assignment place"))?
             .ty;
         let assigned = match op {
-            ds_parse::AssignOp::Plain => self.value(right)?,
+            ds_parse::AssignOp::Plain => {
+                // An int/float literal stores straight into a scalar
+                // var word: the constant has no other consumer and a
+                // scalar word carries no count, so the temp + re-store
+                // reduces to the one constant load (a declined spelling
+                // keeps the temp path and its refusals)
+                if let PlaceShape::Word(slot @ (SlotType::I64 | SlotType::F64)) = place.shape
+                    && let Expr::Literal { lit, .. } = peel_parens(right)
+                    && let Some(constant) = scalar_const(lit, slot)
+                {
+                    self.scalar_const_into(constant, place.base);
+                    TypedPlace {
+                        place: place.clone(),
+                        ty: declared,
+                    }
+                } else {
+                    self.value(right)?
+                }
+            },
             ds_parse::AssignOp::Add
             | ds_parse::AssignOp::Sub
             | ds_parse::AssignOp::Mul
@@ -2440,8 +3185,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     let words = self
                         .word_addrs(&place, declared)
                         .map_err(|err| err.respanned(right.span()))?;
-                    self.rc
-                        .native_reads(&words.iter().map(|addr| addr.slot).collect::<Vec<_>>());
+                    self.rc.native_reads(words.iter().map(|addr| addr.slot));
                 }
                 let rhs = self.value(right)?;
                 let result = if str_add {
@@ -2449,6 +3193,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     // compound store re-stores the concat result, a
                     // fresh Ref word
                     self.concat_value(&current, &rhs, declared, left.span())?
+                } else if let PlaceShape::Word(SlotType::I64 | SlotType::F64) = place.shape {
+                    // a scalar compound store writes the var word
+                    // itself: the VM reads both operands before writing
+                    // dst, so the word safely aliases its own read, and
+                    // the re-store below degenerates to the in-place
+                    // no-op (a scalar word carries no count)
+                    self.arith_at(int_op, float_op, &current, &rhs, place.base, left.span())?
                 } else {
                     self.arith(int_op, float_op, &current, &rhs, left.span())?
                 };
@@ -2481,7 +3232,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         self.refuse_closure_widen(&assigned, declared, e.span())?;
         self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
-        self.widen_into(&place, declared, &assigned)?;
+        self.widen_into(&place, declared, &assigned, e.span())?;
         Ok(self.unit_value(e.span())?.place)
     }
 
@@ -2516,6 +3267,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let entry = self.rc.save();
         let carried: Vec<u8> = entry.keys().copied().collect();
         self.rc.loop_enter();
+        self.loop_spans.push(LoopSpan {
+            head: self.code.len(),
+            back: usize::MAX,
+        });
         self.bind_label(head);
         let cond_val = self.value(cond)?;
         let cond_word = single(&self.word_addrs(&cond_val.place, cond_val.ty)?, cond.span())?;
@@ -2531,6 +3286,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.loop_exit();
         let body_end = self.rc.take();
         self.rc.join(&[entry, body_end]);
+        self.loop_back_edge();
         self.emit(Op::Jmp { target: head });
         self.bind_label(exit);
         // an anonymous cond operand consumed in-loop has no scope of its
@@ -2633,6 +3389,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // loop-fork the ownership map exactly like the while shape
         let entry = self.rc.save();
         self.rc.loop_enter();
+        self.loop_spans.push(LoopSpan {
+            head: self.code.len(),
+            back: usize::MAX,
+        });
         self.scope_push();
         match pat {
             Pattern::Binding {
@@ -2675,6 +3435,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             lhs: Slot::body(ind),
             rhs: Slot::body(step),
         });
+        self.loop_back_edge();
         self.emit(Op::Jmp { target: head });
         self.bind_label(exit);
         self.loops.pop();
@@ -2683,12 +3444,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// A `for x in xs` over one list [F7]: the iterable evaluates once,
     /// then an index-counted fetch loop — one hidden induction word,
-    /// `list_get` per iteration over its ok/none span, the none span
-    /// exits. The pattern binder names one per-iteration element word:
-    /// the native's handed-out count dies at the binding's scope end
-    /// each rollover, never carried across the back edge, while the
-    /// iterable's count survives the whole loop (a loop-carried borrow
-    /// the fetch re-stages per iteration) and dies past it.
+    /// `list_get` per iteration over its ok/none span (one payload word
+    /// per element word at the list's stride), the none span exits. The
+    /// pattern binder names the gathered element — one word or a whole
+    /// struct span: the native's handed-out counts (one per `Ref` word)
+    /// die at the binding's scope end each rollover, never carried
+    /// across the back edge, while the iterable's count survives the
+    /// whole loop (a loop-carried borrow the fetch re-stages per
+    /// iteration) and dies past it.
     fn for_list_value(
         &mut self,
         pat: &Pattern,
@@ -2705,7 +3468,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  ordered-entries native",
             ));
         };
-        let slot = self.element_word(element, span)?;
+        let elem_words = self.element_words(element, span)?;
         let list_w = single(&self.word_addrs(&iter_tp.place, iter_tp.ty)?, iter.span())?;
         let ind = self.temp_word(SlotType::I64)?;
         let zero = self.pool(Constant::I64(0));
@@ -2724,6 +3487,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // decs it in-body
         let entry = self.rc.save();
         self.rc.loop_enter();
+        self.loop_spans.push(LoopSpan {
+            head: self.code.len(),
+            back: usize::MAX,
+        });
         let head = self.label();
         let exit = self.label();
         let back = self.label();
@@ -2737,7 +3504,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             body_depth: self.scopes.len(),
         });
         self.bind_label(head);
-        self.fetch_element(list_w.slot, ind, slot)?;
+        self.fetch_element(list_w.slot, ind, &elem_words)?;
         let cond = self.temp_word(SlotType::Bool)?;
         self.emit(Op::TagTest {
             dst: Slot::body(cond),
@@ -2749,21 +3516,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             target: exit,
         });
         self.scope_push();
-        let elem = self.temp_word(slot)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(elem),
-            src: Slot::overlay(1),
-        });
-        // a Raw element word is a type variable's runtime word: the
-        // fetch handed a Ref out with a count when the element is one,
-        // so the word is owned here and the kind-checked drop balances it
-        if slot == SlotType::Ref || slot == SlotType::Raw {
-            self.rc.produced(elem);
-        }
-        let elem_place = Place {
-            base: elem,
-            shape: PlaceShape::Word(slot),
-        };
+        let elem_place = self.gather_element(&elem_words, element)?;
         match pat {
             Pattern::Binding {
                 span: bind_span,
@@ -2808,6 +3561,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             lhs: Slot::body(ind),
             rhs: Slot::body(step),
         });
+        self.loop_back_edge();
         self.emit(Op::Jmp { target: head });
         self.bind_label(exit);
         // an anonymous iterable (a literal, a call result) has no scope
@@ -2872,20 +3626,28 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Stages one `list_get` fetch through CALLG [H3]: the list word and
     /// the index as the real arguments, the list instance as the one
     /// evidence word behind them, and the ok/none span answering on the
-    /// overlay — word 0 the discriminant, word 1 the element payload.
-    /// The list word stages as the native's transient borrow window.
-    fn fetch_element(&mut self, list: u8, index: u8, slot: SlotType) -> Result<(), LowerError> {
+    /// overlay — word 0 the discriminant, then one payload word per
+    /// element word (`elem_words`, the native channel's span). The list
+    /// word stages as the native's transient borrow window.
+    fn fetch_element(
+        &mut self,
+        list: u8,
+        index: u8,
+        elem_words: &[SlotType],
+    ) -> Result<(), LowerError> {
         let generic = GENERIC_NATIVES
             .iter()
             .find(|native| native.name == "list_get")
             .expect("the list_get body is tabled");
-        self.guard_staged_count(3)?;
+        let mut result_words = vec![SlotType::Tag];
+        result_words.extend_from_slice(elem_words);
+        self.guard_staged_count(3.max(result_words.len()))?;
         self.rc.native_open();
-        self.rc.native_reads(&[list]);
-        self.overlay_site(&[SlotType::Ref, SlotType::I64, SlotType::I64], &[
-            SlotType::Tag,
-            slot,
-        ]);
+        self.rc.native_reads([list]);
+        self.overlay_site(
+            &[SlotType::Ref, SlotType::I64, SlotType::I64],
+            &result_words,
+        );
         self.emit(Op::Mov {
             dst: Slot::overlay(0),
             src: Slot::body(list),
@@ -2900,31 +3662,102 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::overlay(2),
             kidx: evidence,
         });
-        let callee = self.pool(funcref_const(Callee::Generic(generic)));
+        let callee = self.pool(self.funcref_const(Callee::Generic(generic)));
         self.emit(Op::Callg { callee, nargs: 2 });
         self.rc.native_done(&mut self.code);
         Ok(())
     }
 
-    /// The word kind of one list element type: the native hands exactly
-    /// one payload word out, so the element must lower as one scalar
-    /// word; struct, tuple, and union elements refuse until the native channel.
-    fn element_word(&mut self, element: Ty, span: Span) -> Result<SlotType, LowerError> {
-        match &*self.shapes.shape(element)? {
+    /// Gathers one fetched element out of the overlay span into a fresh
+    /// element place: one word per element word moved in declaration
+    /// order (a struct's flattened words are contiguous), each `Ref`
+    /// word produced for the frame — the fetch handed one count per
+    /// `Ref` word, which this place owns until its death. The one-word
+    /// shape stays a bare word (a `Raw` element word is a type
+    /// variable's runtime word, owned and kind-checked at its drop).
+    fn gather_element(
+        &mut self,
+        elem_words: &[SlotType],
+        element: Ty,
+    ) -> Result<Place, LowerError> {
+        if let [only] = elem_words {
+            let elem = self.temp_word(*only)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(elem),
+                src: Slot::overlay(1),
+            });
+            if *only == SlotType::Ref || *only == SlotType::Raw {
+                self.rc.produced(elem);
+            }
+            return Ok(Place {
+                base: elem,
+                shape: PlaceShape::Word(*only),
+            });
+        }
+        let base = self.alloc(elem_words)?;
+        for (index, slot) in elem_words.iter().enumerate() {
+            let word = base + u8::try_from(index).expect("span width fits u8");
+            self.emit(Op::Mov {
+                dst: Slot::body(word),
+                src: Slot::overlay(u8::try_from(1 + index).expect("overlay word fits u8")),
+            });
+            if *slot == SlotType::Ref {
+                self.rc.produced(word);
+            }
+        }
+        Ok(Place {
+            base,
+            shape: PlaceShape::Span(element),
+        })
+    }
+
+    /// The word kinds of one list element type for the iteration and
+    /// membership fetches: one scalar word stays the one-word shape,
+    /// a struct's flattened words ride the native channel's span, and
+    /// every other shape (tuple, union) keeps the checked-read refusal
+    /// family's name — the element cannot form its optional or compare
+    /// atomically.
+    fn element_words(&mut self, element: Ty, span: Span) -> Result<SpanWords, LowerError> {
+        let shape = self.shapes.shape(element)?;
+        match &*shape {
             Shape::Word(
-                slot @ (SlotType::I64
+                SlotType::I64
                 | SlotType::F64
                 | SlotType::Bool
                 | SlotType::Tag
                 | SlotType::Ref
                 | SlotType::Raw
-                | SlotType::Fn),
-            ) => Ok(*slot),
+                | SlotType::Fn,
+            ) => self.shapes.words(element),
+            Shape::Struct(_) => {
+                // the list's edge retention owns counts, never claims
+                // (the element guard's own refusal)
+                if self.deinit_hook(element, span)?.is_some() {
+                    return Err(LowerError::unsupported(
+                        span,
+                        "a deinit-carrying list element",
+                        "the iteration binder would own a claim the list's edge retention cannot \
+                         honor; per-span deinit claims own the seam",
+                    ));
+                }
+                self.shapes
+                    .words(element)
+                    .map_err(|err| err.respanned(span))
+            },
+            Shape::Tuple(_) => {
+                // one positional word per element — the same flat span a
+                // struct's flattened words ride, gathered positionally
+                // (a tuple element can carry no deinit: a multi-word
+                // element refuses its own shape)
+                self.shapes
+                    .words(element)
+                    .map_err(|err| err.respanned(span))
+            },
             _ => Err(LowerError::unsupported(
                 span,
-                "a list element wider than one word",
-                "list elements lower as one scalar word; struct, tuple, and union elements wait \
-                 on the native channel's span read-out",
+                "a list element of this shape",
+                "iteration and membership bind one scalar word, one struct's flattened span, or a \
+                 tuple's positional words; union elements keep the checked-read refusal",
             )),
         }
     }
@@ -2945,12 +3778,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Expr::Str { parts, .. } => self.string_expr(parts)?,
             Expr::RawStr { text, .. } => {
                 let dst = self.temp_word(SlotType::Ref)?;
-                let kidx = self.pool(Constant::Str(text.clone()));
-                self.emit(Op::Kstr {
-                    dst: Slot::body(dst),
-                    kidx,
-                });
-                self.rc.produced(dst);
+                let kidx = self.pool_str(text);
+                self.kstr(dst, kidx);
                 Place {
                     base: dst,
                     shape: PlaceShape::Word(SlotType::Ref),
@@ -3084,12 +3913,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // a char rides the string Ref as its one-char string (the
                 // runtime convention the list natives' separator pins)
                 let dst = self.temp_word(SlotType::Ref)?;
-                let kidx = self.pool(Constant::Str(c.to_string()));
-                self.emit(Op::Kstr {
-                    dst: Slot::body(dst),
-                    kidx,
-                });
-                self.rc.produced(dst);
+                let kidx = self.pool_str(c.encode_utf8(&mut [0u8; 4]));
+                self.kstr(dst, kidx);
                 Ok(Place {
                     base: dst,
                     shape: PlaceShape::Word(SlotType::Ref),
@@ -3142,17 +3967,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 *span,
                 "a generic lambda value",
-                "generic bodies are the M6 CALL_GENERIC seam",
+                "the word carries no instantiation and a call through it has no site to stage the \
+                 body's evidence words; free generic fns carry the generic call surface",
             ));
         }
         // a lambda lexically inside a generic impl body carries its own
         // evidence demands: the pairs its body calls (through its own
-        // nested lambdas), staged from this frame's evidence slots into
-        // the capture block
+        // nested lambdas), plus the callee demands its call sites read
+        // from the plan's table, staged from this frame's evidence slots
+        // into the capture block
         let evidence = if self.bounds.is_empty() {
             Rc::new(Vec::new())
         } else {
-            Rc::new(runtime_pairs(self.analyzed, self.res, &self.bounds, body))
+            Rc::new(runtime_pairs(
+                self.analyzed,
+                self.res,
+                &self.bounds,
+                body,
+                &self.plan.demands,
+            ))
         };
         let (index, captures) = self.plan.push_lambda(
             &self.name,
@@ -3255,17 +4088,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
         }
         // the lambda's evidence words ride the capture block as its
-        // trailing words: this frame staged them at its own entry, so
-        // the moves read the evidence slots and the closure carries the
-        // words into every frame the callable enters
+        // trailing words — the pair's whole area, slot plus follow words:
+        // this frame staged them at its own entry, so the moves read the
+        // evidence slots and the closure carries the words into every
+        // frame the callable enters
         for pair in evidence {
             let slot = self
                 .evidence
                 .get(&(pair.var.clone(), pair.method))
                 .copied()
                 .ok_or_else(|| mismatch("a lambda's runtime-evidence demand"))?;
-            moves.push(slot);
-            staged.push(SlotType::I64);
+            for i in 0..=FOLLOW_WORDS {
+                moves.push(slot + u8::try_from(i).expect("follow word fits u8"));
+                staged.push(SlotType::I64);
+            }
         }
         self.guard_staged_count(staged.len())?;
         for (word, slot) in moves.iter().enumerate() {
@@ -3316,7 +4152,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         self.overlay_site(&kinds, result);
         let kidx = self.pool(Constant::FuncRef {
-            module: native.module.name().to_owned(),
+            module: self.native_module(native.module),
             func: native.index,
         });
         self.emit(Op::Call {
@@ -3362,10 +4198,49 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let body_val = self.block_inner(body);
         self.nurseries.pop();
         let _ = body_val?;
-        let mask = self.boundary_mask(*span)?;
+        // The payloaded members this block's spawned bodies can cancel:
+        // the operands' member sets over the spawned children's cancel
+        // sites (the containment proof's own walk), kept to the return
+        // union's members that carry payload words — exactly the members
+        // the mask must admit beyond its bare set. Each member's flat
+        // word span is the boundary answer's tail (one overlay word per
+        // payload word in declaration order), so the joiner's overlay
+        // widens per member too.
+        let layout = self.shapes.shape(self.ret_ty)?;
+        let mut payloaded: Vec<(TypeId, u8, &[MemberField])> = Vec::new();
+        if let Shape::Union(u) = &*layout {
+            let mut operand_spans = Vec::new();
+            spawned_cancel_operands(body, &mut operand_spans);
+            let mut reachable: Vec<TypeId> = Vec::new();
+            for operand in &operand_spans {
+                let ty = self.val(*operand)?.ty;
+                for member in self.members(ty) {
+                    if !reachable.contains(member) {
+                        reachable.push(*member);
+                    }
+                }
+            }
+            for member in &reachable {
+                let Some(entry) = u.member(*member) else {
+                    continue;
+                };
+                if entry.fields.is_empty() {
+                    continue;
+                }
+                let tag = self.shapes.tag_id(*member)?;
+                payloaded.push((*member, tag, entry.fields.as_slice()));
+            }
+            for (_, _, fields) in &payloaded {
+                let mut result = vec![SlotType::Tag, SlotType::Tag];
+                result.extend(fields.iter().flat_map(|f| f.slots.iter().copied()));
+                self.overlay_site(&[], &result);
+            }
+        }
+        let mask = self.boundary_mask(*span, &payloaded)?;
         // the mask word always stages (the native's parameter count is
         // fixed); a zero mask answers nothing but clean joins — every
-        // contained cancel site was refused statically
+        // member a spawned cancel site could deliver was refused
+        // statically
         let mask_word = self.temp_word(SlotType::I64)?;
         let kidx = self.pool(Constant::I64(mask));
         self.emit(Op::Kimm {
@@ -3378,10 +4253,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             &[SlotType::Tag, SlotType::Tag],
         )?;
         let answer = if mask != 0 {
-            // the failing member's own tag word re-spans whole: bare
-            // members' tag ids are module-wide, so the union's tag slot
-            // takes it and the dead payload words zero-init (the
-            // construction convention)
             let words = self.shapes.words(self.ret_ty)?.clone();
             let fail = self.label();
             let disc = self.temp_word(SlotType::Bool)?;
@@ -3402,6 +4273,70 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.emit(Op::Jmp { target: done });
             self.bind_label(fail);
             let target = self.temp_span(self.ret_ty)?;
+            if !payloaded.is_empty() {
+                // The delivered member is dynamic: dispatch on the
+                // channel's tag word (overlay word 1) per payloaded
+                // member, gathering the flat payload words into the
+                // member's claimed, possibly scattered region offsets —
+                // the checked read's ok-arm gather — with the delivered
+                // `Ref` words' claims registering as the frame's own
+                // (the joiner's ledger acquired them at the death
+                // handoff). A bare member falls through to the
+                // whole-tag path below.
+                let mut labels = Vec::with_capacity(payloaded.len());
+                for (_, tag, _) in &payloaded {
+                    let cond = self.temp_word(SlotType::Bool)?;
+                    self.emit(Op::TagTest {
+                        dst: Slot::body(cond),
+                        src: Slot::overlay(1),
+                        tag: *tag,
+                    });
+                    let label = self.label();
+                    self.emit(Op::Jmpif {
+                        cond: Slot::body(cond),
+                        target: label,
+                    });
+                    labels.push(label);
+                }
+                let n = u8::try_from(words.len()).expect("span width fits u8");
+                let transferred: Vec<u8> = (0..n).map(|index| target.base + index).collect();
+                for ((_, _, fields), label) in payloaded.iter().zip(labels) {
+                    self.bind_label(label);
+                    self.emit(Op::Mov {
+                        dst: Slot::body(target.base),
+                        src: Slot::overlay(1),
+                    });
+                    self.zero_init_member(target.base, &words, fields)?;
+                    let mut flat = 0usize;
+                    for field in *fields {
+                        for offset in 0..field.width() {
+                            let word = target.base
+                                + field.word
+                                + u8::try_from(offset).expect("field span offset fits u8");
+                            self.emit(Op::Mov {
+                                dst: Slot::body(word),
+                                src: Slot::overlay(
+                                    u8::try_from(2 + flat + offset).expect("overlay word fits u8"),
+                                ),
+                            });
+                            if field.slots[offset] == SlotType::Ref {
+                                self.rc.produced(word);
+                            }
+                        }
+                        flat += field.width();
+                    }
+                    self.rc.exit(&mut self.code, &transferred);
+                    self.emit(Op::RetSpan {
+                        src: Slot::body(target.base),
+                        n,
+                    });
+                    self.rc.restore(ok_state.clone());
+                }
+            }
+            // a bare member's own tag word re-spans whole: bare members'
+            // tag ids are module-wide, so the union's tag slot takes it
+            // and the dead payload words zero-init (the construction
+            // convention)
             self.emit(Op::Mov {
                 dst: Slot::body(target.base),
                 src: Slot::overlay(1),
@@ -3428,23 +4363,40 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The join's containment mask [E2]: one bit per bare member of the
-    /// function's return union — exactly the members a `cancel` payload
-    /// can be this round. A non-union return keeps the zero mask (every
-    /// cancel site refused statically at its own span).
-    fn boundary_mask(&mut self, span: Span) -> Result<i64, LowerError> {
+    /// function's return union plus one per payloaded member a spawned
+    /// body can cancel — exactly the members a `cancel` payload can be
+    /// through this boundary. A non-union return keeps the zero mask
+    /// (every cancel site refused statically at its own span).
+    fn boundary_mask(
+        &mut self,
+        span: Span,
+        payloaded: &[(TypeId, u8, &[MemberField])],
+    ) -> Result<i64, LowerError> {
         let mut mask = 0i64;
         let shape = self.shapes.shape(self.ret_ty)?;
         let Shape::Union(u) = &*shape else {
             return Ok(mask);
         };
         for member in self.members(self.ret_ty) {
-            let Some(entry) = u.member(member) else {
+            let Some(entry) = u.member(*member) else {
                 continue;
             };
             if !entry.fields.is_empty() {
                 continue;
             }
-            let tag = self.shapes.tag_id(member)?;
+            let tag = self.shapes.tag_id(*member)?;
+            if tag >= 64 {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a nursery boundary",
+                    "the return union's error-member tags pass the one-word containment mask; \
+                     keep the module's tag space under 64",
+                ));
+            }
+            mask |= 1i64 << tag;
+        }
+        for (_, tag, _) in payloaded {
+            let tag = *tag;
             if tag >= 64 {
                 return Err(LowerError::unsupported(
                     span,
@@ -3491,7 +4443,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         for operand in operands {
             let ty = self.val(operand)?.ty;
             let members = self.members(ty);
-            if !set_diff(&members, &self.members(self.ret_ty)).is_empty() {
+            if !set_diff(members, self.members(self.ret_ty)).is_empty() {
                 return Err(LowerError::unsupported(
                     operand,
                     "a `cancel` payload",
@@ -3500,14 +4452,37 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 ));
             }
         }
-        let (index, captures) =
-            self.plan
-                .push_spawn(&self.name, e, self.res, &self.analyzed.checked.binders, ret);
+        // a spawned child lexically inside a generic impl body carries its
+        // own evidence demands: the pairs its body calls (through its own
+        // nested lambdas and spawns), plus the callee demands its call
+        // sites read from the plan's table, staged from this frame's
+        // evidence slots into the child's entry argument area beside the
+        // captures — the closure object's capture block becomes the
+        // spawned fiber's entry arguments verbatim, so the words ride
+        // exactly like a lambda's capture-block evidence
+        let evidence = if self.bounds.is_empty() {
+            Rc::new(Vec::new())
+        } else {
+            Rc::new(runtime_pairs(
+                self.analyzed,
+                self.res,
+                &self.bounds,
+                &Expr::Block(body.clone()),
+                &self.plan.demands,
+            ))
+        };
+        let (index, captures) = self.plan.push_spawn(
+            &self.name,
+            e,
+            self.res,
+            &self.analyzed.checked.binders,
+            ret,
+            evidence.clone(),
+            self.bounds.clone(),
+        );
         let native = crate::native::lookup("nursery_spawn")
             .ok_or_else(|| mismatch("the nursery spawn seam"))?;
-        // a spawned child carries no evidence channel: its body's
-        // bound-demanding sites refuse at their own lowering
-        let (callable, kind) = self.child_callable(*span, index, &captures, &[])?;
+        let (callable, kind) = self.child_callable(*span, index, &captures, &evidence)?;
         self.seam_call(native, &[(id_word, SlotType::I64), (callable, kind)], &[
             SlotType::I64,
         ])?;
@@ -3541,9 +4516,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .and_then(|def| self.analyzed.checked.def_types.get(&def).copied())
                     .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
                     .and_then(|(params, _)| {
-                        let mut words = Vec::new();
+                        let mut words = Vec::with_capacity(params.len());
                         for ty in params {
-                            words.extend(self.shapes.words(*ty).ok()?);
+                            words.extend_from_slice(&self.shapes.words(*ty).ok()?);
                         }
                         Some(words)
                     })
@@ -3571,9 +4546,34 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// A closure value widened into a var span refuses here: the span
-    /// classifies its fn-typed word Fn, so the re-storable slot would
-    /// hold a Ref word behind the type's back.
+    /// A closure word against an interior-span generic: the dynamic span
+    /// (a fold's init) shifts every word behind it, so the static
+    /// expected list names the leading and trailing named words alone.
+    /// A closure admits the trailing callable slot — the final named
+    /// word — never the span's own words, which are the folded value.
+    fn guard_interior_closure_slot(
+        expected: Option<&[SlotType]>,
+        trailing: bool,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        if !trailing || !expected.is_some_and(|words| words.last() == Some(&SlotType::Fn)) {
+            return Err(LowerError::unsupported(
+                span,
+                "a capturing closure as a call argument",
+                "the parameter is not a callable-defaulted fn slot; a closure is a Ref word and \
+                 only a fn-typed parameter admits it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A callable value widened into a var span refuses here: the span
+    /// classifies its fn-typed word Fn, so the re-storable slot takes
+    /// only the proven scalar words (a named fn, a non-capturing
+    /// lambda). A capturing closure is Ref-classified behind the use,
+    /// and an unproven callable word (a callable-defaulted binding, an
+    /// alias of one) may hold a closure's Ref at runtime — either lands
+    /// a Ref word in the re-storable Fn slot and traps at the store.
     fn refuse_closure_widen(
         &mut self,
         val: &TypedPlace,
@@ -3586,6 +4586,102 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "a capturing closure in a var binding",
                 "a var's fn-typed slot is re-storable and stays the scalar Fn word; construct a \
                  fresh closure for each binding instead",
+            ));
+        }
+        if matches!(&*self.shapes.shape(declared)?, Shape::Word(SlotType::Fn))
+            && let [addr] = self.word_addrs(&val.place, val.ty)?.as_slice()
+            && addr.slot_ty == SlotType::Fn
+            && !self.scalar_fn_words.contains(&addr.slot)
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "an unproven callable in a var binding",
+                "the word may hold a closure's Ref at runtime; only a named fn or a non-capturing \
+                 lambda inhabits a re-storable fn-typed var slot",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A callable word widened into a union region's fn-typed payload
+    /// slot keeps the var slot's provenance rule: the payload word is
+    /// Fn-classified and every extraction re-reads it, so a capturing
+    /// closure (a Ref-classified word) or an unproven callable word (a
+    /// callable-defaulted binding's, an alias of one — the word may hold
+    /// a closure's Ref at runtime) lands a Ref word there and traps;
+    /// only the proven scalar words (a named fn, a non-capturing
+    /// lambda) inhabit the slot.
+    fn refuse_union_fn_payload(&mut self, src: &TypedPlace, span: Span) -> Result<(), LowerError> {
+        // a word addressed inside a span place entered through its own
+        // provenance guard (a union region's construction here, a
+        // collection element's or a tuple element's staging), so a
+        // read-back re-widen trusts it
+        if matches!(src.place.shape, PlaceShape::Span(_)) {
+            return Ok(());
+        }
+        if self.is_closure_word(&src.place, src.ty)? {
+            return Err(LowerError::unsupported(
+                span,
+                "a capturing closure in a union payload slot",
+                "the union's fn-typed payload slot is Fn-classified and the closure word is a Ref \
+                 word; store the closure in a plain fn-typed binding instead",
+            ));
+        }
+        if let [addr] = self.word_addrs(&src.place, src.ty)?.as_slice()
+            && addr.slot_ty == SlotType::Fn
+            && !self.scalar_fn_words.contains(&addr.slot)
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "an unproven callable in a union payload slot",
+                "the word may hold a closure's Ref at runtime; only a named fn or a non-capturing \
+                 lambda inhabits a union's fn-typed payload slot",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A fn-typed word answer keeps the var slot's provenance rule at
+    /// every staging site — the join arms, the extraction family's
+    /// fallbacks and handler bodies: the answer word is Fn-classified
+    /// and every later re-read (the call, the binding, the re-storable
+    /// slot) trusts it scalar, so a capturing closure (a Ref-classified
+    /// word) or an unproven callable word (a callable-defaulted
+    /// binding's, an alias of one) lands a Ref word there, traps, and
+    /// strands the count; only the proven scalar words answer. A word
+    /// addressed inside a span place passed its own guard and stays
+    /// trusted.
+    fn refuse_fn_word_answer(
+        &mut self,
+        dst_ty: Ty,
+        src: &TypedPlace,
+        span: Span,
+        closure_what: &'static str,
+        unproven_what: &'static str,
+    ) -> Result<(), LowerError> {
+        if !matches!(&*self.shapes.shape(dst_ty)?, Shape::Word(SlotType::Fn)) {
+            return Ok(());
+        }
+        if matches!(src.place.shape, PlaceShape::Span(_)) {
+            return Ok(());
+        }
+        if self.is_closure_word(&src.place, src.ty)? {
+            return Err(LowerError::unsupported(
+                span,
+                closure_what,
+                "the answer word is Fn-classified and the closure word is a Ref word; keep the \
+                 closure behind a callable-defaulted parameter instead",
+            ));
+        }
+        if let [addr] = self.word_addrs(&src.place, src.ty)?.as_slice()
+            && addr.slot_ty == SlotType::Fn
+            && !self.scalar_fn_words.contains(&addr.slot)
+        {
+            return Err(LowerError::unsupported(
+                span,
+                unproven_what,
+                "the word may hold a closure's Ref at runtime; only a named fn, a non-capturing \
+                 lambda, or a proven call result answers here",
             ));
         }
         Ok(())
@@ -3637,12 +4733,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let word = match part {
                 StrPart::Text { text, .. } => {
                     let dst = self.temp_word(SlotType::Ref)?;
-                    let kidx = self.pool(Constant::Str(text.clone()));
-                    self.emit(Op::Kstr {
-                        dst: Slot::body(dst),
-                        kidx,
-                    });
-                    self.rc.produced(dst);
+                    let kidx = self.pool_str(text);
+                    self.kstr(dst, kidx);
                     dst
                 },
                 StrPart::Expr { expr, .. } => {
@@ -3671,7 +4763,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     });
                     // the operands are reads; the result is a fresh owner
                     self.rc.read(&mut self.code, &[left, word]);
-                    self.rc.produced(dst);
+                    self.rc.produced_strcat(dst);
                     dst
                 },
             });
@@ -3681,12 +4773,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         } else {
             // the empty string literal: a plain constant, not a chain
             let dst = self.temp_word(SlotType::Ref)?;
-            let kidx = self.pool(Constant::Str(String::new()));
-            self.emit(Op::Kstr {
-                dst: Slot::body(dst),
-                kidx,
-            });
-            self.rc.produced(dst);
+            let kidx = self.pool_str("");
+            self.kstr(dst, kidx);
             dst
         };
         Ok(Place {
@@ -3700,7 +4788,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// a lowering error (the `show` derive is the M6 CALL_GENERIC seam).
     fn hole_word(&mut self, span: Span, val: &TypedPlace) -> Result<u8, LowerError> {
         let members = self.members(val.ty);
-        let [atom] = members.as_slice() else {
+        let [atom] = members else {
             return Err(LowerError::unsupported(
                 span,
                 "an interpolation hole",
@@ -3774,7 +4862,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             dst: Slot::overlay(0),
             src: Slot::body(only.slot),
         });
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: 1,
@@ -3842,6 +4930,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         // evidence words per call site, so neither has a
                         // callable word.
                         if let Some(index) = self.plan.index_of(*def) {
+                            if self.plan.functions()[index as usize].free_generic {
+                                return Err(LowerError::unsupported(
+                                    span,
+                                    "a generic function value",
+                                    "the word carries no instantiation, and a call through it has \
+                                     no site to stage the body's evidence words; generic calls \
+                                     name their callee directly",
+                                ));
+                            }
                             let kidx = self.pool(Constant::FuncRef {
                                 module: String::new(), // the enclosing module
                                 func: index,
@@ -3857,12 +4954,26 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                                 base: dst,
                                 shape: PlaceShape::Word(SlotType::Fn),
                             })
-                        } else if kind == ds_check::DefKind::Fn {
+                        } else if kind == ds_check::DefKind::Fn
+                            || self
+                                .analyzed
+                                .checked
+                                .def_types
+                                .get(def)
+                                .copied()
+                                .is_some_and(|ty| {
+                                    fn_sig_of(&self.analyzed.decls.universe, ty).is_some()
+                                })
+                        {
+                            // a bodied fn that did not plan (a `var`-bound
+                            // generic fn) still carries a checked fn type,
+                            // so the fn type — not the def kind — routes it
+                            // here
                             Err(LowerError::unsupported(
                                 span,
                                 "a function value",
                                 "only planned module functions mint callable words; native and \
-                                 generic callees have no word this round",
+                                 unplanned generic callees have no word",
                             ))
                         } else {
                             Err(LowerError::unsupported(
@@ -3906,12 +5017,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn is_value(&mut self, expr: &Expr, ty: &Type, span: Span) -> Result<Place, LowerError> {
         let operand = self.value(expr)?;
         let operand_ty = self.val(expr.span())?.ty;
-        let tested = match self.type_atom(ty) {
-            Ok(atom) => vec![atom],
-            Err(path_err) => match self.solved_is_members(span) {
-                Some(members) => members,
-                None => return Err(path_err),
-            },
+        // A nominal written type tests its one atom; any other written
+        // type tests the members the checker solved for the test.
+        let atom = self.type_atom(ty);
+        let tested: &[TypeId] = match &atom {
+            Ok(atom) => std::slice::from_ref(atom),
+            Err(path_err) => self
+                .solved_is_members(span)
+                .ok_or_else(|| path_err.clone())?,
         };
         let members = self.members(operand_ty);
         // the operand's member set decides the test: its whole coverage
@@ -4002,7 +5115,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// `is` test and recorded it keyed by the expression's span, so the
     /// solution's members are what the TAG_TESTs discriminate by.
     /// Anything else keeps the path spelling's refusal.
-    fn solved_is_members(&self, span: Span) -> Option<Vec<TypeId>> {
+    fn solved_is_members(&self, span: Span) -> Option<&'a [TypeId]> {
         let &solved = self.analyzed.checked.is_tests.get(&span)?;
         Some(self.members(solved))
     }
@@ -4051,12 +5164,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(mismatch("a field access on a scalar"));
         };
         let place_shape = self.shapes.shape(underlying)?;
-        let field = match &*place_shape {
+        let field: &MemberField = match &*place_shape {
             Shape::Union(_) => {
                 let atom = self.only_atom(recv_ty, e.span())?;
-                let fields = self.member_fields(underlying, atom)?;
+                let fields = place_shape
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member field"))?;
                 fields
-                    .into_iter()
+                    .iter()
                     .find(|f| f.name.as_deref() == Some(name.name.as_str()))
                     .ok_or_else(|| mismatch("a union member field"))?
             },
@@ -4064,7 +5179,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .fields
                 .iter()
                 .find(|f| f.name.as_deref() == Some(name.name.as_str()))
-                .cloned()
                 .ok_or_else(|| mismatch("a struct field"))?,
             Shape::Word(_) | Shape::Tuple(_) => return Err(mismatch("a field access")),
         };
@@ -4092,7 +5206,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // deinit-carrying member refuses at the literal's own span
         if self.members(static_ty).len() > 1 {
             for atom in self.members(static_ty) {
-                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(&atom).copied()
+                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(atom).copied()
                     && self.plan.declares_deinit(def)
                 {
                     return Err(LowerError::unsupported(
@@ -4115,7 +5229,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .fields
                 .iter()
                 .find(|f| f.name.as_deref() == Some(name.name.as_str()))
-                .ok_or_else(|| mismatch("a struct literal field"))?;
+                .ok_or_else(|| {
+                    LowerError::unsupported(
+                        name.span,
+                        "a struct literal field",
+                        "the field's type stayed outside the core's span vocabulary (a callable- \
+                         or foreign-typed field), so the planned shape carries no such field",
+                    )
+                })?;
             let addrs = if let Some(expr) = value {
                 let v = self.value(expr)?;
                 self.word_addrs(&v.place, v.ty)
@@ -4166,7 +5287,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if let Some(claim) = self.deinit_claim(static_ty, e.span())? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
             let words = self.ref_words(target.base, static_ty)?;
-            self.rc.claimed(target.base, claim.hook, &words);
+            let band = self.claim_band_word(target.base)?;
+            self.rc
+                .claimed(&mut self.code, target.base, claim.hook, band, &words);
         }
         Ok(target)
     }
@@ -4197,6 +5320,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let field = &s.fields[index];
             let v = self.value(item)?;
             let addr = single(&self.word_addrs(&v.place, v.ty)?, item.span())?;
+            // a callable element proves a non-capturing scalar word: the
+            // span's count traffic copies only Ref-classified fields, so a
+            // closure's count rides untracked and the read-back hands a Ref
+            // word to a Fn-classified element slot
+            if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
+                return Err(LowerError::unsupported(
+                    item.span(),
+                    "a callable tuple element",
+                    "the element must prove a non-capturing scalar word (a named fn, a \
+                     non-capturing lambda); a closure or an unproven callable binding cannot \
+                     inhabit a tuple element",
+                ));
+            }
             self.emit(Op::Mov {
                 dst: Slot::body(target.base + field.word),
                 src: Slot::body(addr.slot),
@@ -4260,8 +5396,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let words = self
                 .word_addrs(&lhs.place, lhs.ty)
                 .map_err(|err| err.respanned(*span))?;
-            self.rc
-                .native_reads(&words.iter().map(|addr| addr.slot).collect::<Vec<_>>());
+            self.rc.native_reads(words.iter().map(|addr| addr.slot));
         }
         let rhs = self.value(right)?;
         let place = match op {
@@ -4330,6 +5465,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.emit_data(op, lhs, rhs, span)
     }
 
+    /// arith writing the pinned word `dst` — the compound assignment's
+    /// direct scalar store over the var's own word.
+    fn arith_at(
+        &mut self,
+        int_op: DataOp,
+        float_op: DataOp,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        dst: u8,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let op = self.pick_int_float(int_op, float_op, lhs, span)?;
+        self.emit_data_at(op, lhs, rhs, dst, span)
+    }
+
     /// Both operands solve to the string atom: `+` is the concat
     /// call's spelling [B8]. The checked-type-only probe answers before
     /// operand evaluation, so the call's borrow window opens in time to
@@ -4363,7 +5513,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc.staged_native(word, false);
         }
         self.overlay_site(&[SlotType::Ref, SlotType::Ref], &[SlotType::Ref]);
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: 2,
@@ -4436,8 +5586,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         span: Span,
     ) -> Result<Place, LowerError> {
         let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
-        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
         let dst = self.temp_word(op.result_slot(l.slot_ty))?;
+        self.emit_data_at(op, lhs, rhs, dst, span)
+    }
+
+    /// The data op writing the pinned word `dst` — the direct scalar
+    /// store. The VM reads both operands before writing dst, so `dst`
+    /// may alias an operand word (the compound store reads the var's
+    /// current value and overwrites it in one op).
+    fn emit_data_at(
+        &mut self,
+        op: DataOp,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        dst: u8,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
+        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
         self.emit(Op::Data {
             op,
             dst: Slot::body(dst),
@@ -4586,11 +5752,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// `x in xs` over one list [F7]: a scan over once-evaluated
     /// operands — one hidden induction word, `list_get` per iteration
     /// over its ok/none span (the none span answers false), one
-    /// comparison per element, the first match answers true. The
-    /// element word's handed-out count dies at the comparison read
-    /// each iteration; the operands' counts are loop-carried and die
-    /// past the loop, so the match path and the exhausted scan both
-    /// balance.
+    /// comparison per element (a wider element compares through the
+    /// structural `==` chain, field words pairwise), the first match
+    /// answers true. The gathered element's handed-out counts die right
+    /// at the gather — the values stay readable through the list's own
+    /// edge counts, so the comparison's reads never own and every exit
+    /// path balances — while the operands' counts are loop-carried and
+    /// die past the loop.
     fn in_list_value(
         &mut self,
         left: &Expr,
@@ -4602,20 +5770,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Some(element) = self.shapes.list_element(list_tp.ty) else {
             return Err(mismatch("a list membership's list"));
         };
-        let slot = self.element_word(element, span)?;
-        if !matches!(
-            slot,
-            SlotType::I64 | SlotType::F64 | SlotType::Bool | SlotType::Ref
-        ) {
+        let elem_words = self.element_words(element, span)?;
+        let wide = elem_words.len() > 1;
+        if !wide
+            && !matches!(
+                elem_words[0],
+                SlotType::I64 | SlotType::F64 | SlotType::Bool | SlotType::Ref
+            )
+        {
             return Err(LowerError::unsupported(
                 span,
                 "a membership over tag or callable elements",
                 "membership compares int, float, bool, and string elements",
             ));
         }
-        let op = eq_op(slot)?;
-        let x_w = single(&self.word_addrs(&x_tp.place, x_tp.ty)?, left.span())?;
+        let op = (!wide).then(|| eq_op(elem_words[0])).transpose()?;
+        let mut operand_words: Vec<u8> = self
+            .word_addrs(&x_tp.place, x_tp.ty)
+            .map_err(|err| err.respanned(span))?
+            .iter()
+            .map(|addr| addr.slot)
+            .collect();
+        let x_w = if wide { None } else { Some(operand_words[0]) };
         let list_w = single(&self.word_addrs(&list_tp.place, list_tp.ty)?, right.span())?;
+        operand_words.push(list_w.slot);
         let ind = self.temp_word(SlotType::I64)?;
         let zero = self.pool(Constant::I64(0));
         self.emit(Op::Kimm {
@@ -4631,12 +5809,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let dst = self.temp_word(SlotType::Bool)?;
         let entry = self.rc.save();
         self.rc.loop_enter();
+        self.loop_spans.push(LoopSpan {
+            head: self.code.len(),
+            back: usize::MAX,
+        });
         let head = self.label();
         let next = self.label();
         let exhausted = self.label();
         let found = self.label();
         self.bind_label(head);
-        self.fetch_element(list_w.slot, ind, slot)?;
+        self.fetch_element(list_w.slot, ind, &elem_words)?;
         let cond = self.temp_word(SlotType::Bool)?;
         self.emit(Op::TagTest {
             dst: Slot::body(cond),
@@ -4647,29 +5829,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             cond: Slot::body(cond),
             target: exhausted,
         });
-        let elem = self.temp_word(slot)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(elem),
-            src: Slot::overlay(1),
-        });
-        // a Raw element word is a type variable's runtime word: the
-        // fetch handed a Ref out with a count when the element is one,
-        // so the word is owned here and the kind-checked drop balances it
-        if slot == SlotType::Ref || slot == SlotType::Raw {
-            self.rc.produced(elem);
-        }
-        let cmp = self.temp_word(SlotType::Bool)?;
-        self.emit(Op::Data {
-            op,
-            dst: Slot::body(cmp),
-            lhs: Slot::body(x_w.slot),
-            rhs: Slot::body(elem),
-        });
-        if op == DataOp::EqStr {
-            self.rc.read(&mut self.code, &[x_w.slot, elem]);
-        }
+        let elem_place = self.gather_element(&elem_words, element)?;
+        let cmp_place = if wide {
+            // the handed-out counts die here, straight-line on every
+            // path: the values stay readable through the list's own edge
+            // counts, so the equality chain's reads never own and a
+            // fail-fast field mismatch cannot strand a later field's
+            // count
+            let dying = self.tracked_words(&elem_place, element)?;
+            self.rc.discard(&mut self.code, &dying);
+            self.eq_chain(
+                &x_tp,
+                &TypedPlace {
+                    place: elem_place,
+                    ty: element,
+                },
+                span,
+            )?
+        } else {
+            // the one-word shape keeps its emission exactly (the word's
+            // count dies at the comparison read)
+            let (Some(word), Some(op)) = (x_w, op) else {
+                return Err(mismatch("a membership comparison"));
+            };
+            let cmp = self.temp_word(SlotType::Bool)?;
+            self.emit(Op::Data {
+                op,
+                dst: Slot::body(cmp),
+                lhs: Slot::body(word),
+                rhs: Slot::body(elem_place.base),
+            });
+            if op == DataOp::EqStr {
+                self.rc.read(&mut self.code, &[word, elem_place.base]);
+            }
+            Place {
+                base: cmp,
+                shape: PlaceShape::Word(SlotType::Bool),
+            }
+        };
         self.emit(Op::JmpifNot {
-            cond: Slot::body(cmp),
+            cond: Slot::body(cmp_place.base),
             target: next,
         });
         let truth = self.pool(Constant::Bool(true));
@@ -4685,6 +5884,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             lhs: Slot::body(ind),
             rhs: Slot::body(step),
         });
+        self.loop_back_edge();
         self.emit(Op::Jmp { target: head });
         self.rc.loop_exit();
         let back = self.rc.take();
@@ -4698,8 +5898,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.bind_label(found);
         // an anonymous operand (a literal, a call result) has no scope of
         // its own: its consumed count dies here, once per evaluation
-        self.rc
-            .drop_unnamed(&mut self.code, &[x_w.slot, list_w.slot]);
+        self.rc.drop_unnamed(&mut self.code, &operand_words);
         Ok(Place {
             base: dst,
             shape: PlaceShape::Word(SlotType::Bool),
@@ -4714,6 +5913,27 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         rhs: &TypedPlace,
         span: Span,
     ) -> Result<Place, LowerError> {
+        // A multi-atom value never compares against one member's payload
+        // value: the per-member tag dispatch needs a tag word on both
+        // sides, and a narrowed value of one member carries none — the
+        // union rides the dispatch side (a unit-tag value against it
+        // compares from either side), and every other mixed spelling
+        // refuses naming the narrowing seam.
+        let l_union = matches!(&*self.shapes.shape(lhs.ty)?, Shape::Union(_));
+        let r_union = matches!(&*self.shapes.shape(rhs.ty)?, Shape::Union(_));
+        let tag_word = |place: &Place| matches!(place.shape, PlaceShape::Word(SlotType::Tag));
+        if l_union != r_union && !tag_word(&lhs.place) && !tag_word(&rhs.place) {
+            return Err(LowerError::unsupported(
+                span,
+                "an equality over a multi-atom value against one member's value",
+                "the per-member tag dispatch needs a tag word on both sides and one member's \
+                 payload value carries none; narrow the union with `is` or a match arm before \
+                 comparing",
+            ));
+        }
+        if r_union && !l_union {
+            return self.eq_chain(rhs, lhs, span);
+        }
         let lty = lhs.ty;
         let shape = self.shapes.shape(lty)?;
         let dst = match &*shape {
@@ -4830,13 +6050,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Shape::Union(u) = &*shape else {
             return Err(mismatch("a union equality"));
         };
-        let members = u.members.clone();
+        let members = &u.members;
         let ltag = self.tag_addr(&lhs.place)?;
         let rtag = self.tag_addr(&rhs.place)?;
         let false_lbl = self.label();
         let done = self.label();
         let dst = self.temp_word(SlotType::Bool)?;
-        for member in &members {
+        for member in members {
             let next = self.label();
             self.emit(Op::TagTest {
                 dst: Slot::body(dst),
@@ -4863,9 +6083,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     kidx: truth,
                 });
             } else {
-                let field = member.fields[0].clone();
-                let l = field_addrs(lhs.place.base, &field);
-                let r = field_addrs(rhs.place.base, &field);
+                let field = &member.fields[0];
+                let l = field_addrs(lhs.place.base, field);
+                let r = field_addrs(rhs.place.base, field);
                 self.emit_word_compares(&l, &r, false_lbl)?;
             }
             self.emit(Op::Jmp { target: done });
@@ -4957,7 +6177,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let cond_val = self.value(cond)?;
         let cond_word = single(&self.word_addrs(&cond_val.place, cond_val.ty)?, cond.span())?;
-        let result = self.temp_span(ty)?;
+        let result = self.join_span(ty)?;
         let else_lbl = self.label();
         let join = self.label();
         self.emit(Op::JmpifNot {
@@ -4968,7 +6188,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // with its own value; the join keeps what both arms kept
         let base = self.rc.save();
         let then_tp = self.block_value(then)?;
-        self.widen_into(&result, ty, &then_tp)?;
+        self.refuse_fn_word_answer(
+            ty,
+            &then_tp,
+            then.span,
+            "a capturing closure in a fn-typed join arm",
+            "an unproven callable in a fn-typed join arm",
+        )?;
+        self.widen_into(&result, ty, &then_tp, then.span)?;
         let arm_then = self.rc.take();
         let then_div = self.rc.diverged();
         let then_jmp = self.code.len();
@@ -4977,12 +6204,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.bind_label(else_lbl);
         if let Some(else_expr) = else_ {
             let else_tp = self.value(else_expr)?;
-            self.widen_into(&result, ty, &else_tp)?;
+            self.refuse_fn_word_answer(
+                ty,
+                &else_tp,
+                else_expr.span(),
+                "a capturing closure in a fn-typed join arm",
+                "an unproven callable in a fn-typed join arm",
+            )?;
+            self.widen_into(&result, ty, &else_tp, else_expr.span())?;
         } else {
             // a missing else is the unit else [B2]: the checker already
             // types the if as the then-type united with unit
             let unit = self.unit_value(e.span())?;
-            self.widen_into(&result, ty, &unit)?;
+            self.widen_into(&result, ty, &unit, e.span())?;
         }
         let arm_else = self.rc.take();
         let else_div = self.rc.diverged();
@@ -5008,7 +6242,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(mismatch("a match expression"));
         };
         let scrut = self.value(scrutinee)?;
-        let result = self.temp_span(ty)?;
+        let result = self.join_span(ty)?;
         let join = self.label();
         self.match_arms(&scrut, arms, Some((&result, ty, join)))?;
         self.bind_label(join);
@@ -5031,7 +6265,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// arms TAG_TEST and jump in (an or-arm tests each alternative's
     /// tag), the catchall receives the fall-through; a catchall-free
     /// match is exhaustive by the checker's proof, so its dispatch chain
-    /// has no live fall-through.
+    /// has no live fall-through. A member arm may carry value-level tests
+    /// over its own bound payload words (a case constructor pattern's
+    /// argument, a struct member pattern's field): the tests run at the
+    /// arm section's top and a mismatch slides to the next arm's
+    /// dispatch entry, re-running its tag tests over the full scrutinee —
+    /// the B2 remainder rule's tag-dispatch form, no reordering — so a
+    /// can-fail arm (value tests or a guard) needs a later arm it lands
+    /// in.
     fn match_arms(
         &mut self,
         scrut: &TypedPlace,
@@ -5042,17 +6283,95 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return self.match_single(scrut, arms, value);
         }
         let labels: Vec<usize> = arms.iter().map(|_| self.label()).collect();
+        // one dispatch-entry label per arm plus the chain tail: a failed
+        // value test inside a member arm's section slides to the next
+        // entry, continuing the dispatch from that arm onward
+        let entries: Vec<usize> = (0..=arms.len()).map(|_| self.label()).collect();
+        let arm_atoms: Vec<Vec<TypeId>> = arms
+            .iter()
+            .map(|arm| self.pattern_atoms(&arm.pat))
+            .collect::<Result<_, _>>()?;
         let mut catchall = None;
         for (index, arm) in arms.iter().enumerate() {
-            let atoms = self.pattern_atoms(&arm.pat)?;
+            let atoms = &arm_atoms[index];
+            // every arm owns an entry label: a slide into it finds a
+            // bound target, and a catchall's intercepts the chain at its
+            // position (arm order kept) unless the tail already jumps
+            // there
+            self.bind_label(entries[index]);
             if atoms.is_empty() {
+                if arm.guard.is_some() {
+                    return Err(LowerError::unsupported(
+                        arm.span,
+                        "a guarded catchall arm over union dispatch",
+                        "a failed catchall guard slides to the next entry, and a value no later \
+                         arm holds re-enters the catchall through the tail in a loop; bind a name \
+                         and test it inside the body",
+                    ));
+                }
                 catchall = Some(index);
+                if index + 1 < arms.len() {
+                    self.emit(Op::Jmp {
+                        target: labels[index],
+                    });
+                }
                 continue;
+            }
+            // the vocabulary checks over the collected atoms: a tested
+            // alternative's payload words are live only under its own
+            // tag, so or-alternatives with tests must name one member;
+            // and a can-fail arm's slide (value tests or a guard)
+            // must land, per atom, in a later settling arm (no tests,
+            // no guard) covering it, or the catchall — otherwise the
+            // failed test would fall off the checker-proved-exhaustive
+            // chain tail into the first section
+            let tested = Self::carries_member_tests(&arm.pat);
+            if let Pattern::Or { pats, .. } = &arm.pat
+                && tested
+            {
+                let mut distinct: Vec<TypeId> = Vec::new();
+                for alt in pats {
+                    for atom in self.pattern_atoms(alt)? {
+                        if !distinct.contains(&atom) {
+                            distinct.push(atom);
+                        }
+                    }
+                }
+                if distinct.len() > 1 {
+                    return Err(LowerError::unsupported(
+                        arm.span,
+                        "an or-pattern of member tests",
+                        "a tested alternative's payload words are live only under its own tag, so \
+                         alternatives with payload tests must name one member; split the \
+                         alternatives into arms",
+                    ));
+                }
+            }
+            if tested || arm.guard.is_some() {
+                let mut distinct = atoms.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                for atom in &distinct {
+                    let lands = arms[index + 1..].iter().enumerate().any(|(ahead, later)| {
+                        let at = index + 1 + ahead;
+                        let settles =
+                            !Self::carries_member_tests(&later.pat) && later.guard.is_none();
+                        settles && (arm_atoms[at].is_empty() || arm_atoms[at].contains(atom))
+                    });
+                    if !lands {
+                        return Err(LowerError::unsupported(
+                            arm.span,
+                            "a member arm's value test or guard",
+                            "the failed test would slide past the last arm into no landing \
+                             section; add a binding arm for the member or a catchall arm",
+                        ));
+                    }
+                }
             }
             for atom in atoms {
                 let cond = self.temp_word(SlotType::Bool)?;
                 let src = self.tag_addr(&scrut.place)?;
-                let tag = self.shapes.tag_id(atom)?;
+                let tag = self.shapes.tag_id(*atom)?;
                 self.emit(Op::TagTest {
                     dst: Slot::body(cond),
                     src: Slot::body(src),
@@ -5064,6 +6383,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 });
             }
         }
+        self.bind_label(entries[arms.len()]);
         if let Some(catchall) = catchall {
             self.emit(Op::Jmp {
                 target: labels[catchall],
@@ -5077,23 +6397,67 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let mut divs = Vec::with_capacity(arms.len());
         for (index, arm) in arms.iter().enumerate() {
             self.bind_label(labels[index]);
-            if arm.guard.is_some() || arm.ann.is_some() {
+            if arm.ann.is_some() {
                 return Err(LowerError::unsupported(
                     arm.span,
-                    "a guarded or annotated match arm over a union",
-                    "union dispatch tests tags before any arm runs, so a guard's fall-through \
-                     needs the dispatch reordering; a non-union match lowers guards as a test \
-                     chain",
+                    "an annotated match arm over a union",
+                    "annotations narrow through the member machinery; union arms stay unannotated",
                 ));
             }
             self.rc.restore(base.clone());
-            self.bind_arm_pattern(&arm.pat, scrut)?;
+            self.emit_member_tests(&arm.pat, scrut, entries[index + 1])?;
+            // a guard runs after the member tests: their failure edge is
+            // base-equivalent (borrow reads), while the guard's edge
+            // drops the section's transients before the slide
+            let mut cleanup = None;
+            if let Some(guard) = &arm.guard {
+                let copy = self.guard_scrut_copy(arm, scrut)?;
+                if let Some(copy) = &copy {
+                    self.bind_guarded(&arm.pat, copy, scrut)?;
+                } else {
+                    self.bind_arm_pattern(&arm.pat, scrut)?;
+                }
+                let cond = self.value(guard)?;
+                let after = self.rc.save();
+                // the slide re-enters the dispatch over the base state:
+                // a count the guard took would dec again at a later
+                // section's exit, so the guard must leave it unchanged
+                if base.keys().any(|word| !self.rc.owns(*word)) {
+                    return Err(LowerError::unsupported(
+                        arm.span,
+                        "a guard taking a count over union dispatch",
+                        "the failed guard slides to the next arm's entry, which re-enters the \
+                         dispatch over the base state; keep a use after the match",
+                    ));
+                }
+                let outstanding: Vec<(u8, Owned)> = after
+                    .iter()
+                    .filter(|(word, _)| !base.contains_key(word))
+                    .map(|(word, owned)| (*word, owned.clone()))
+                    .collect();
+                let word = single(&self.word_addrs(&cond.place, cond.ty)?, arm.span)?;
+                let label = self.label();
+                self.emit(Op::JmpifNot {
+                    cond: Slot::body(word.slot),
+                    target: label,
+                });
+                cleanup = Some((label, outstanding));
+            } else {
+                self.bind_arm_pattern(&arm.pat, scrut)?;
+            }
             // a value arm decs at its own jump what only it kept; a tail
             // arm exits the frame, its exit path dropping from its own
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                self.widen_into(result, ty, &body_tp)?;
+                self.refuse_fn_word_answer(
+                    ty,
+                    &body_tp,
+                    arm.body.span(),
+                    "a capturing closure in a fn-typed join arm",
+                    "an unproven callable in a fn-typed join arm",
+                )?;
+                self.widen_into(result, ty, &body_tp, arm.body.span())?;
                 states.push(self.rc.take());
                 divs.push(self.rc.diverged());
                 let at = self.code.len();
@@ -5104,6 +6468,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 states.push(self.rc.take());
                 divs.push(self.rc.diverged());
                 jumps.push(None);
+            }
+            if let Some((label, outstanding)) = cleanup {
+                self.bind_label(label);
+                Placement::emit_drops(&mut self.code, &outstanding);
+                self.emit(Op::Jmp {
+                    target: entries[index + 1],
+                });
             }
         }
         let forked: Vec<_> = states.into_iter().zip(divs).collect();
@@ -5165,7 +6536,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 ));
             }
             match &arm.pat {
-                Pattern::Tuple { .. } | Pattern::Binding { .. } | Pattern::Wildcard(_) => {},
+                // a catchall-classified struct pattern (no field tests)
+                // destructures directly, its classification already run
+                Pattern::Tuple { .. }
+                | Pattern::Binding { .. }
+                | Pattern::Wildcard(_)
+                | Pattern::Struct { .. } => {},
                 _ => {
                     return Err(LowerError::unsupported(
                         pattern_span(&arm.pat),
@@ -5178,7 +6554,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             match value {
                 Some((result, ty, _join)) => {
                     let body = self.value(&arm.body)?;
-                    self.widen_into(result, ty, &body)?;
+                    self.refuse_fn_word_answer(
+                        ty,
+                        &body,
+                        arm.body.span(),
+                        "a capturing closure in a fn-typed join arm",
+                        "an unproven callable in a fn-typed join arm",
+                    )?;
+                    self.widen_into(result, ty, &body, arm.body.span())?;
                 },
                 None => self.tail(&arm.body)?,
             }
@@ -5236,10 +6619,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     Some(copy) => self.bind_guarded(&arm.pat, copy, scrut)?,
                     None => self.bind_arm_pattern(&arm.pat, scrut)?,
                 }
-                // a guard that consumes the scrutinee's own Ref word (a
-                // direct outer-name reference; the binder copy shields
-                // the bound spelling) frees it before later entries test
-                // it, so the walk refuses the moment it sees the count go
+                // a guard must not take the scrutinee's own Ref word's
+                // count (a direct outer-name reference; the binder copy
+                // shields the bound spelling): chain paths bypass the
+                // guard while a later entry or body may re-read the word,
+                // so the walk refuses the moment it sees the count go — a
+                // guard that only reads the word keeps its count when the
+                // death sits past the chain (a use after the match)
                 let before = self.scrut_owned(scrut)?;
                 let cond = self.value(guard)?;
                 let eaten = before
@@ -5249,8 +6635,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Err(LowerError::unsupported(
                         arm.span,
                         "a guard consuming the scrutinee",
-                        "the fall-through path keeps testing the scrutinee after the guard, so \
-                         its count must survive the guard; bind a name for the tested arm instead",
+                        "chain paths bypass the guard while a later entry may re-read the word, \
+                         so the guard must not take the scrutinee's count; keep a use after the \
+                         match, or bind a name for the tested arm instead",
                     ));
                 }
                 let word = single(&self.word_addrs(&cond.place, cond.ty)?, arm.span)?;
@@ -5267,7 +6654,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                self.widen_into(result, ty, &body_tp)?;
+                self.refuse_fn_word_answer(
+                    ty,
+                    &body_tp,
+                    arm.body.span(),
+                    "a capturing closure in a fn-typed join arm",
+                    "an unproven callable in a fn-typed join arm",
+                )?;
+                self.widen_into(result, ty, &body_tp, arm.body.span())?;
                 states.push(self.rc.take());
                 divs.push(self.rc.diverged());
                 let at = self.code.len();
@@ -5307,19 +6701,32 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// member — a guard cannot reach the scrutinee through them). A
     /// deinit-carrying scrutinee refuses: the copy would anchor a second
     /// claim, so the value would deinit twice.
+    /// Whether a guarded arm's pattern binds a plain name reading the
+    /// scrutinee's words (through the binder, so a guard consuming one
+    /// needs the copy): a plain binding, tuple or constructor payload
+    /// binders, punned or plain-name struct fields, and an or-arm
+    /// through any alternative that binds.
+    fn pattern_binds_words(&self, pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Binding { name, .. } => self.binding_atom(&name.name).is_none(),
+            Pattern::Tuple { pats, .. } | Pattern::Call { args: pats, .. } => {
+                pats.iter().any(|sub| self.pattern_binds_words(sub))
+            },
+            Pattern::Struct { fields, .. } => fields.iter().any(|(_, sub)| match sub {
+                None => true,
+                Some(sub) => self.pattern_binds_words(sub),
+            }),
+            Pattern::Or { pats, .. } => pats.iter().any(|alt| self.pattern_binds_words(alt)),
+            _ => false,
+        }
+    }
+
     fn guard_scrut_copy(
         &mut self,
         arm: &MatchArm,
         scrut: &TypedPlace,
     ) -> Result<Option<TypedPlace>, LowerError> {
-        let binds = match &arm.pat {
-            Pattern::Binding { name, .. } => self.binding_atom(&name.name).is_none(),
-            Pattern::Tuple { pats, .. } => pats.iter().any(|sub| {
-                matches!(sub, Pattern::Binding { name, .. }
-                    if self.binding_atom(&name.name).is_none())
-            }),
-            _ => false,
-        };
+        let binds = self.pattern_binds_words(&arm.pat);
         if arm.guard.is_none() || !binds {
             return Ok(None);
         }
@@ -5355,8 +6762,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Binds one guarded arm's pattern over its scrutinee copy: the
     /// plain binding aliases the copy's whole span, a tuple pattern its
-    /// elements (a literal element tested nothing to bind), and a
-    /// wildcard or atom-named binding binds nothing at all.
+    /// elements (a literal element tested nothing to bind), a member
+    /// arm's fields or payload binders (and an or-arm's last
+    /// alternative) read the copy's words, and a wildcard or atom-named
+    /// binding binds nothing at all.
     fn bind_guarded(
         &mut self,
         pat: &Pattern,
@@ -5371,6 +6780,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 Ok(())
             },
             Pattern::Tuple { pats, .. } => self.bind_tuple_pattern(pats, copy, true),
+            Pattern::Struct { .. } | Pattern::Call { .. } | Pattern::Or { .. } => {
+                self.bind_arm_pattern(pat, copy)
+            },
             _ => self.bind_arm_pattern(pat, scrut),
         }
     }
@@ -5400,11 +6812,145 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
+    /// Whether a member arm's pattern carries value-level tests over its
+    /// own bound payload words: a case constructor pattern with a tested
+    /// argument, a struct member pattern with a tested field, or an
+    /// or-arm of such alternatives.
+    fn carries_member_tests(pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Call { args, .. } => args.iter().any(Self::carries_word_tests),
+            Pattern::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, sub)| sub.as_ref().is_some_and(Self::carries_word_tests)),
+            Pattern::Or { pats, .. } => pats.iter().any(Self::carries_member_tests),
+            _ => false,
+        }
+    }
+
+    /// Whether a one-word or nested-struct sub-pattern carries a test:
+    /// a literal, an or-ladder of tests, or a nested struct sub-pattern
+    /// with a tested inner field at any depth.
+    fn carries_word_tests(sub: &Pattern) -> bool {
+        match sub {
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => true,
+            // a nested struct sub-pattern tests its inner fields at the
+            // struct-typed field's own offsets; pure binders and skips
+            // test nothing
+            Pattern::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, sub)| sub.as_ref().is_some_and(Self::carries_word_tests)),
+            Pattern::Or { pats, .. } => pats.iter().any(Self::carries_word_tests),
+            _ => false,
+        }
+    }
+
+    /// Emits one member arm's value tests over its own bound payload
+    /// words, in payload order, a mismatch sliding to the next dispatch
+    /// entry (the value chain's short-circuit discipline over the
+    /// member's claimed region offsets; the tested words are borrows
+    /// across every arm's tests, the tag word's own discipline).
+    /// Binding-only arms and catchalls test nothing.
+    fn emit_member_tests(
+        &mut self,
+        pat: &Pattern,
+        scrut: &TypedPlace,
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        match pat {
+            Pattern::Call { path, args, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Ok(());
+                };
+                let Some(atom) = self.path_atom(&only.name) else {
+                    return Ok(());
+                };
+                let layout = self.shapes.shape(scrut.ty)?;
+                let fields = layout
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member read"))?;
+                for (arg, field) in args.iter().zip(fields.iter()) {
+                    // a struct-typed payload's nested struct sub-pattern
+                    // tests its fields at the payload's own offsets
+                    if let Pattern::Struct { .. } = arg {
+                        self.emit_struct_sub_tests(arg, scrut.place.base + field.word, fail)?;
+                        continue;
+                    }
+                    if Self::word_sub_kind(arg, "a case payload test")? == ValueArmKind::Tested {
+                        let addr = WordAddr {
+                            name: field.name.clone(),
+                            slot: scrut.place.base + field.word,
+                            slot_ty: field.slot(),
+                        };
+                        self.emit_word_tests(arg, &addr, fail)?;
+                    }
+                }
+                Ok(())
+            },
+            Pattern::Struct { path, fields, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Ok(());
+                };
+                let Some(atom) = self.path_atom(&only.name) else {
+                    return Ok(());
+                };
+                let layout = self.shapes.shape(scrut.ty)?;
+                let member_fields = layout
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member read"))?;
+                for (name, sub) in fields {
+                    let Some(field) = member_fields
+                        .iter()
+                        .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                    else {
+                        return Err(mismatch("a pattern field"));
+                    };
+                    if let Some(inner @ Pattern::Struct { .. }) = sub {
+                        self.emit_struct_sub_tests(inner, scrut.place.base + field.word, fail)?;
+                        continue;
+                    }
+                    if let Some(sub) = sub
+                        && Self::word_sub_kind(sub, "a struct field test")? == ValueArmKind::Tested
+                    {
+                        let addr = WordAddr {
+                            name: field.name.clone(),
+                            slot: scrut.place.base + field.word,
+                            slot_ty: field.slot(),
+                        };
+                        self.emit_word_tests(sub, &addr, fail)?;
+                    }
+                }
+                Ok(())
+            },
+            Pattern::Or { pats, .. } => {
+                // the alternative ladder: a non-last alternative's tests
+                // slide to the next alternative on mismatch and jump past
+                // the rest on success; the last one's mismatch slides to
+                // the arm's own next entry
+                let ok = self.label();
+                for (index, sub) in pats.iter().enumerate() {
+                    if index + 1 == pats.len() {
+                        self.emit_member_tests(sub, scrut, fail)?;
+                    } else {
+                        let next = self.label();
+                        self.emit_member_tests(sub, scrut, next)?;
+                        self.emit(Op::Jmp { target: ok });
+                        self.bind_label(next);
+                    }
+                }
+                self.bind_label(ok);
+                Ok(())
+            },
+            _ => Ok(()),
+        }
+    }
+
     /// How one arm's pattern tests a non-union scrutinee: `_`, a plain
     /// binding, an atom naming the scrutinee's sole member (always true,
     /// binding nothing), and a destructuring tuple without literal
     /// elements run no test; literal elements and scalar literals test
-    /// the value in place.
+    /// the value in place, and an or-pattern tests its alternatives'
+    /// tests as a disjunction (any catchall alternative makes the whole
+    /// arm catch no test).
     fn value_arm_kind(
         &mut self,
         pat: &Pattern,
@@ -5435,51 +6981,239 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 let mut tested = false;
                 for sub in pats {
-                    tested |= Self::tuple_elem_tested(sub)?;
+                    tested |=
+                        Self::word_sub_kind(sub, "a tuple element test")? == ValueArmKind::Tested;
                 }
                 Ok(if tested { ValueArmKind::Tested } else { ValueArmKind::Catchall })
             },
-            Pattern::Or { .. } => Err(LowerError::unsupported(
-                pattern_span(pat),
-                "an or-pattern over a non-union value",
-                "each alternative would need its own value-test chain; or-arms test union tags \
-                 this round",
-            )),
+            Pattern::Or { pats, .. } => {
+                self.or_binder_agreement(pats, scrut)?;
+                for sub in pats {
+                    if self.value_arm_kind(sub, scrut)? == ValueArmKind::Catchall {
+                        // a catchall alternative always matches, so the
+                        // disjunction never fails
+                        return Ok(ValueArmKind::Catchall);
+                    }
+                }
+                Ok(ValueArmKind::Tested)
+            },
             Pattern::Path { .. } | Pattern::Call { .. } => Err(LowerError::unsupported(
                 pattern_span(pat),
                 "a member-test pattern on a non-union value",
                 "a single-member scrutinee has no tags to test",
             )),
-            Pattern::Struct { .. } => Err(LowerError::unsupported(
-                pattern_span(pat),
-                "a struct pattern over a non-union value",
-                "struct fields test in place with the span rework's width slices; union payload \
-                 patterns are the same seam",
+            Pattern::Struct { path, fields, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Err(mismatch("a pattern path"));
+                };
+                // the checker proved the pattern's atom is the
+                // scrutinee's sole member, so the fields classify
+                if self.path_atom(&only.name).is_none() {
+                    return Err(mismatch("a pattern's member atom"));
+                }
+                let shape = self.shapes.shape(scrut.ty)?;
+                let Shape::Struct(s) = &*shape else {
+                    return Err(mismatch("a struct pattern's scrutinee"));
+                };
+                let mut tested = false;
+                for (name, sub) in fields {
+                    if s.fields
+                        .iter()
+                        .all(|f| f.name.as_deref() != Some(name.name.as_str()))
+                    {
+                        return Err(mismatch("a pattern field"));
+                    }
+                    if let Some(sub) = sub {
+                        tested |= Self::word_sub_kind(sub, "a struct field test")?
+                            == ValueArmKind::Tested;
+                    }
+                }
+                Ok(if tested { ValueArmKind::Tested } else { ValueArmKind::Catchall })
+            },
+        }
+    }
+
+    /// The kind of a one-word sub-pattern (a tuple element, a struct
+    /// field): `_` and bindings test nothing (bindings bind at arm
+    /// entry; an atom-named sub binds nothing per the member-test
+    /// predicate), literals test the word, and an or-pattern tests its
+    /// alternatives' tests as a disjunction. Wider sub-patterns have no
+    /// word to test against.
+    fn word_sub_kind(sub: &Pattern, what: &'static str) -> Result<ValueArmKind, LowerError> {
+        match sub {
+            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(ValueArmKind::Catchall),
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
+                Ok(ValueArmKind::Tested)
+            },
+            Pattern::Or { pats, .. } => {
+                for alt in pats {
+                    if Self::word_sub_kind(alt, what)? == ValueArmKind::Catchall {
+                        return Ok(ValueArmKind::Catchall);
+                    }
+                }
+                Ok(ValueArmKind::Tested)
+            },
+            // a nested struct sub-pattern over a struct-typed field
+            // tests its inner fields; pure binders and skips catch
+            // nothing
+            Pattern::Struct { fields, .. } => {
+                let tested = fields
+                    .iter()
+                    .any(|(_, sub)| sub.as_ref().is_some_and(Self::carries_word_tests));
+                Ok(if tested { ValueArmKind::Tested } else { ValueArmKind::Catchall })
+            },
+            _ => Err(LowerError::unsupported(
+                pattern_span(sub),
+                what,
+                "one word tests as a literal or an or-ladder of literals, binds as a plain name, \
+                 or skips as `_`; nested patterns need the word's whole span",
             )),
         }
     }
 
-    /// Whether one tuple element pattern contributes a value test: `_`
-    /// and bindings test nothing (bindings bind at arm entry; an
-    /// atom-named element binds nothing per the member-test predicate),
-    /// literals test the element word, other shapes refuse.
-    fn tuple_elem_tested(sub: &Pattern) -> Result<bool, LowerError> {
-        match sub {
-            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(false),
-            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => Ok(true),
-            _ => Err(LowerError::unsupported(
-                pattern_span(sub),
-                "a tuple element test",
-                "elements test as literals, bind as plain names, or skip as `_`; nested patterns \
-                 need multi-word elements",
+    /// Every alternative of a value-level or-pattern binds its binders
+    /// on the same words: the arm body binds the last alternative's
+    /// binders (the scope's name map keeps the last binding), so an
+    /// alternative binding a name at a different word would read the
+    /// wrong value on its own path. The checker keeps the alternatives'
+    /// name set and its order, never the words.
+    fn or_binder_agreement(
+        &mut self,
+        pats: &[Pattern],
+        scrut: &TypedPlace,
+    ) -> Result<(), LowerError> {
+        let words = self.shapes.words(scrut.ty)?;
+        let mut agreed: Option<Vec<(String, u8, Vec<SlotType>)>> = None;
+        for sub in pats {
+            let mut binds = self.alt_binder_words(sub, scrut, 0, &words)?;
+            binds.sort_by(|a, b| a.0.cmp(&b.0));
+            if let Some(expected) = &agreed
+                && expected != &binds
+            {
+                return Err(LowerError::unsupported(
+                    pattern_span(sub),
+                    "or-pattern alternatives binding different words",
+                    "the arm body binds the last alternative's words, so an alternative binding a \
+                     name elsewhere would read the wrong value on its own path",
+                ));
+            }
+            agreed = Some(binds);
+        }
+        Ok(())
+    }
+
+    /// One or-alternative's binder words as (name, word offset, slot
+    /// span) triples: a plain binding names the walked span, tuple and
+    /// struct alternatives bind through their elements and fields, and
+    /// a nested or-ladder contributes every alternative's binders (the
+    /// agreement check compares whole alternatives).
+    fn alt_binder_words(
+        &mut self,
+        pat: &Pattern,
+        scrut: &TypedPlace,
+        off: u8,
+        slots: &[SlotType],
+    ) -> Result<Vec<(String, u8, Vec<SlotType>)>, LowerError> {
+        if let Pattern::Tuple {
+            pats,
+            trailing_comma: false,
+            ..
+        } = pat
+        {
+            if pats.len() == 1 {
+                return self.alt_binder_words(&pats[0], scrut, off, slots);
+            }
+        }
+        match pat {
+            Pattern::Wildcard(_)
+            | Pattern::Literal { .. }
+            | Pattern::Str { .. }
+            | Pattern::RawStr { .. } => Ok(Vec::new()),
+            Pattern::Binding { name, .. } => {
+                if self.binding_atom(&name.name).is_some() {
+                    return Err(LowerError::unsupported(
+                        pattern_span(pat),
+                        "a member-test or-pattern alternative",
+                        "an or-pattern over a non-union value tests values; a tag arm needs a \
+                         union scrutinee",
+                    ));
+                }
+                Ok(vec![(name.name.clone(), off, slots.to_vec())])
+            },
+            Pattern::Tuple { pats, .. } => {
+                let shape = self.shapes.shape(scrut.ty)?;
+                let Shape::Tuple(s) = &*shape else {
+                    return Err(mismatch("a tuple destructuring"));
+                };
+                if pats.len() != s.fields.len() {
+                    return Err(mismatch("a tuple pattern's arity"));
+                }
+                let mut out = Vec::new();
+                for (sub, field) in pats.iter().zip(s.fields.iter()) {
+                    out.extend(self.alt_binder_words(
+                        sub,
+                        scrut,
+                        off + field.word,
+                        &field.slots,
+                    )?);
+                }
+                Ok(out)
+            },
+            Pattern::Or { pats, .. } => {
+                let mut out = Vec::new();
+                for sub in pats {
+                    out.extend(self.alt_binder_words(sub, scrut, off, slots)?);
+                }
+                Ok(out)
+            },
+            Pattern::Struct { .. } => {
+                // the pattern's own atom owns the field offsets (the
+                // checker proved it is the walked type), so a nested
+                // struct sub-pattern resolves its own fields one level
+                // deeper the same way
+                let struct_shape = self.struct_sub_shape(pat)?;
+                let fields = &struct_shape.fields;
+                let Pattern::Struct { fields: pats, .. } = pat else {
+                    return Err(mismatch("a struct pattern"));
+                };
+                let mut out = Vec::new();
+                for (name, sub) in pats {
+                    let Some(field) = fields
+                        .iter()
+                        .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                    else {
+                        return Err(mismatch("a pattern field"));
+                    };
+                    match sub {
+                        // punning binds the field's name at its span
+                        None => {
+                            out.push((name.name.clone(), off + field.word, field.slots.clone()));
+                        },
+                        Some(sub) => out.extend(self.alt_binder_words(
+                            sub,
+                            scrut,
+                            off + field.word,
+                            &field.slots,
+                        )?),
+                    }
+                }
+                Ok(out)
+            },
+            Pattern::Path { .. } | Pattern::Call { .. } => Err(LowerError::unsupported(
+                pattern_span(pat),
+                "a member-test pattern on a non-union value",
+                "a single-member scrutinee has no tags to test",
             )),
         }
     }
 
     /// Emits one arm's value tests in place, in element order: each
     /// literal word compares against its constant and jumps to `fail`
-    /// on the first mismatch (short-circuit); a catchall arm emits
-    /// nothing.
+    /// on the first mismatch (short-circuit), and an or-pattern's
+    /// alternatives test as a disjunction — each alternative's tests
+    /// run in order, a mismatch sliding to the next alternative and
+    /// the last mismatch jumping to `fail`, so the arm survives on the
+    /// first alternative that matches. A catchall arm emits nothing.
     fn emit_value_tests(
         &mut self,
         pat: &Pattern,
@@ -5513,15 +7247,169 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
                 for (sub, addr) in pats.iter().zip(addrs.iter()) {
-                    if Self::tuple_elem_tested(sub)? {
-                        let (place, slot) = self.pattern_const(sub)?;
-                        self.emit_value_eq(addr, &place, slot, fail)?;
+                    if Self::word_sub_kind(sub, "a tuple element test")? == ValueArmKind::Tested {
+                        self.emit_word_tests(sub, addr, fail)?;
                     }
                 }
                 Ok(())
             },
+            Pattern::Struct { path, fields, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Err(mismatch("a pattern path"));
+                };
+                let Some(_atom) = self.path_atom(&only.name) else {
+                    return Err(mismatch("a pattern's member atom"));
+                };
+                let shape = self.shapes.shape(scrut.ty)?;
+                let Shape::Struct(s) = &*shape else {
+                    return Err(mismatch("a struct pattern's scrutinee"));
+                };
+                // the field words are the scrutinee's own consecutive
+                // span words; each tested field compares its word in
+                // place, a mismatch jumping to the next arm entry
+                let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
+                for (name, sub) in fields {
+                    let Some(field) = s
+                        .fields
+                        .iter()
+                        .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                    else {
+                        return Err(mismatch("a pattern field"));
+                    };
+                    if let Some(inner @ Pattern::Struct { .. }) = sub {
+                        self.emit_struct_sub_tests(inner, scrut.place.base + field.word, fail)?;
+                        continue;
+                    }
+                    let addr = addrs
+                        .get(usize::from(field.word))
+                        .ok_or_else(|| mismatch("a pattern field's word"))?;
+                    if let Some(sub) = sub
+                        && Self::word_sub_kind(sub, "a struct field test")? == ValueArmKind::Tested
+                    {
+                        self.emit_word_tests(sub, addr, fail)?;
+                    }
+                }
+                Ok(())
+            },
+            Pattern::Or { pats, .. } => {
+                // the alternative ladder: a non-last alternative's tests
+                // slide to the next alternative on mismatch and jump
+                // past the remaining ones on success; the last
+                // alternative's mismatch is the arm's own failure
+                let ok = self.label();
+                for (index, sub) in pats.iter().enumerate() {
+                    if index + 1 == pats.len() {
+                        self.emit_value_tests(sub, scrut, fail)?;
+                    } else {
+                        let next = self.label();
+                        self.emit_value_tests(sub, scrut, next)?;
+                        self.emit(Op::Jmp { target: ok });
+                        self.bind_label(next);
+                    }
+                }
+                self.bind_label(ok);
+                Ok(())
+            },
             _ => Err(mismatch("a value test the classification passed")),
         }
+    }
+
+    /// Emits a one-word sub-pattern's tests (a tuple element, a struct
+    /// field): a literal compares its word and jumps to `fail` on
+    /// mismatch, an or-ladder tests its alternatives against the same
+    /// word, and bindings and wildcards test nothing.
+    fn emit_word_tests(
+        &mut self,
+        sub: &Pattern,
+        addr: &WordAddr,
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        match sub {
+            Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(()),
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
+                let (place, slot) = self.pattern_const(sub)?;
+                self.emit_value_eq(addr, &place, slot, fail)
+            },
+            Pattern::Or { pats, .. } => {
+                let ok = self.label();
+                for (index, alt) in pats.iter().enumerate() {
+                    if index + 1 == pats.len() {
+                        self.emit_word_tests(alt, addr, fail)?;
+                    } else {
+                        let next = self.label();
+                        self.emit_word_tests(alt, addr, next)?;
+                        self.emit(Op::Jmp { target: ok });
+                        self.bind_label(next);
+                    }
+                }
+                self.bind_label(ok);
+                Ok(())
+            },
+            _ => Err(mismatch("a value test the classification passed")),
+        }
+    }
+
+    /// The declared fields of the struct a nested struct sub-pattern's
+    /// path names: the checker proved the pattern's atom is the
+    /// struct-typed field's own type, so the atom's declaration owns the
+    /// nested field offsets. The shape carries the fields by value, so
+    /// the walk reads them without copying the list.
+    fn struct_sub_shape(&mut self, pat: &Pattern) -> Result<StructShape, LowerError> {
+        let Pattern::Struct { path, .. } = pat else {
+            return Err(mismatch("a nested struct sub-pattern"));
+        };
+        let [only] = path.segments.as_slice() else {
+            return Err(mismatch("a pattern path"));
+        };
+        let Some(atom) = self.path_atom(&only.name) else {
+            return Err(mismatch("a struct sub-pattern's atom"));
+        };
+        let shape = self.shapes.atom_shape(atom)?;
+        let Shape::Struct(s) = shape else {
+            return Err(mismatch("a nested struct sub-pattern's field"));
+        };
+        Ok(s)
+    }
+
+    /// Emits a nested struct sub-pattern's field tests at `base`, the
+    /// offset its struct-typed field claims: the inner fields test in
+    /// declaration order at the nested span's own consecutive words, a
+    /// mismatch sliding to `fail` like any member test, and a
+    /// struct-typed inner field's own nested sub-pattern recurses at
+    /// the shifted base. Binding-only fields test nothing here.
+    fn emit_struct_sub_tests(
+        &mut self,
+        pat: &Pattern,
+        base: u8,
+        fail: usize,
+    ) -> Result<(), LowerError> {
+        let struct_shape = self.struct_sub_shape(pat)?;
+        let fields = &struct_shape.fields;
+        let Pattern::Struct { fields: pats, .. } = pat else {
+            return Err(mismatch("a nested struct sub-pattern"));
+        };
+        for (name, sub) in pats {
+            let Some(field) = fields
+                .iter()
+                .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+            else {
+                return Err(mismatch("a pattern field"));
+            };
+            let Some(sub) = sub else { continue };
+            if let Pattern::Struct { .. } = sub {
+                self.emit_struct_sub_tests(sub, base + field.word, fail)?;
+            } else if Self::word_sub_kind(sub, "a nested struct field test")?
+                == ValueArmKind::Tested
+            {
+                let addr = WordAddr {
+                    name: field.name.clone(),
+                    slot: base + field.word,
+                    slot_ty: field.slot(),
+                };
+                self.emit_word_tests(sub, &addr, fail)?;
+            }
+        }
+        Ok(())
     }
 
     /// One equality test against a constant word: the tested word's slot
@@ -5563,14 +7451,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// literal family lowers like the expression literal, a string
     /// pattern its interned constant (interpolation holes refuse).
     fn pattern_const(&mut self, pat: &Pattern) -> Result<(Place, SlotType), LowerError> {
-        let intern = |me: &mut Self, text: String| -> Result<(Place, SlotType), LowerError> {
+        let intern = |me: &mut Self, text: &str| -> Result<(Place, SlotType), LowerError> {
             let dst = me.temp_word(SlotType::Ref)?;
-            let kidx = me.pool(Constant::Str(text));
-            me.emit(Op::Kstr {
-                dst: Slot::body(dst),
-                kidx,
-            });
-            me.rc.produced(dst);
+            let kidx = me.pool_str(text);
+            me.kstr(dst, kidx);
             Ok((
                 Place {
                     base: dst,
@@ -5587,7 +7471,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 };
                 Ok((place, slot))
             },
-            Pattern::RawStr { text, .. } => intern(self, text.clone()),
+            Pattern::RawStr { text, .. } => intern(self, text),
             Pattern::Str { parts, span, .. } => {
                 let mut text = String::new();
                 for part in parts {
@@ -5603,7 +7487,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         },
                     }
                 }
-                intern(self, text)
+                intern(self, &text)
             },
             _ => Err(mismatch("a literal pattern")),
         }
@@ -5663,17 +7547,33 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Pattern::Tuple { .. } => Err(LowerError::unsupported(
                 pattern_span(pat),
                 "a tuple pattern in a member-test position",
-                "a tuple member of a union is a multi-word payload, outside this frame contract; \
-                 destructure after a member test",
+                "the dispatch resolves a member arm from the pattern's own shape, and a tuple \
+                 pattern names no member; bind the member and destructure it in the arm body",
             )),
-            Pattern::Literal { .. }
-            | Pattern::Str { .. }
-            | Pattern::RawStr { .. }
-            | Pattern::Call { .. } => Err(LowerError::unsupported(
-                pattern_span(pat),
-                "a literal or constructor pattern",
-                "member, or-, and catchall patterns cover the M3 surface",
-            )),
+            // a case constructor pattern names its case's atom [B3]: the
+            // dispatch jumps in on the case's tag and the section tests
+            // the pattern's payload sub-patterns over the case's claimed
+            // region offsets
+            Pattern::Call { path, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Err(LowerError::unsupported(
+                        pattern_span(pat),
+                        "a multi-segment pattern path",
+                        "qualified patterns are not in the M3 contract",
+                    ));
+                };
+                self.path_atom(&only.name)
+                    .map(|atom| vec![atom])
+                    .ok_or_else(|| mismatch("a pattern's member atom"))
+            },
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
+                Err(LowerError::unsupported(
+                    pattern_span(pat),
+                    "a literal pattern in a member-test position",
+                    "a literal tests no member tag; test it inside a constructor pattern's \
+                     payload or bind the member and compare in the arm body",
+                ))
+            },
         }
     }
 
@@ -5689,6 +7589,93 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Binds one arm's pattern binders to scrutinee words.
+    /// Binds a nested struct sub-pattern's fields at `base`, the offset
+    /// its struct-typed field claims: the same field vocabulary as an
+    /// arm's own struct pattern — punning, plain names, or-ladders
+    /// through their last alternative — binding borrowed aliases at the
+    /// nested span's own consecutive words; a struct-typed inner
+    /// field's own nested sub-pattern recurses at the shifted base, and
+    /// tested fields (the section's or the chain's) bind nothing.
+    /// Binds a nested struct sub-pattern's fields at `base`, the offset
+    /// its struct-typed field claims: the same field vocabulary as an
+    /// arm's own struct pattern — punning, plain names, or-ladders
+    /// through their last alternative — binding borrowed aliases at the
+    /// nested span's own consecutive words; a struct-typed inner
+    /// field's own nested sub-pattern recurses at the shifted base, and
+    /// tested fields (the section's or the chain's) bind nothing.
+    fn bind_struct_sub_pattern(&mut self, pat: &Pattern, base: u8) -> Result<(), LowerError> {
+        let struct_shape = self.struct_sub_shape(pat)?;
+        let fields = &struct_shape.fields;
+        let Pattern::Struct { fields: pats, .. } = pat else {
+            return Err(mismatch("a nested struct sub-pattern"));
+        };
+        for (name, sub) in pats {
+            let Some(field) = fields
+                .iter()
+                .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+            else {
+                return Err(mismatch("a pattern field"));
+            };
+            if let Some(inner @ Pattern::Struct { .. }) = sub {
+                self.bind_struct_sub_pattern(inner, base + field.word)?;
+                continue;
+            }
+            let bind = match sub {
+                None => Some((name.span, name.name.clone())),
+                Some(Pattern::Binding { span, name }) => Some((*span, name.name.clone())),
+                Some(Pattern::Wildcard(_)) => None,
+                Some(sub) => match sub {
+                    // the section or the chain tested the literals and
+                    // ladders at the field's word; they bind nothing
+                    Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => None,
+                    Pattern::Or { pats, .. } => match pats.last().map(last_alt) {
+                        None
+                        | Some(
+                            Pattern::Wildcard(_)
+                            | Pattern::Literal { .. }
+                            | Pattern::Str { .. }
+                            | Pattern::RawStr { .. },
+                        ) => None,
+                        Some(Pattern::Binding { span, name }) => Some((*span, name.name.clone())),
+                        _ => {
+                            return Err(LowerError::unsupported(
+                                pattern_span(sub),
+                                "a nested or-ladder field",
+                                "a field binds as a plain name or skips as `_`, and tests as a \
+                                 literal or an or-ladder of literals",
+                            ))
+                        },
+                    },
+                    other => {
+                        return Err(LowerError::unsupported(
+                            pattern_span(other),
+                            "a nested struct field",
+                            "fields bind as plain names or skip as `_`, and test as literals at \
+                             match time; tuple and member sub-patterns wait on the field's own \
+                             span; bind the field and destructure it in the arm body",
+                        ))
+                    },
+                },
+            };
+            let Some(bind) = bind else { continue };
+            let at = base + field.word;
+            // a struct-typed inner field binds the span its checked
+            // type names, however many words it spans; every other
+            // field binds its one word
+            let fact = self.analyzed.checked.binders.get(&bind.0).copied();
+            let shape = match fact {
+                Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
+                _ => PlaceShape::Word(field.slot()),
+            };
+            self.binders.insert(bind.0, Place { base: at, shape });
+            if let Some(fact) = self.analyzed.checked.binders.get(&bind.0).copied() {
+                self.rc_bind_borrowed(bind.0, at, fact.ty)?;
+            }
+            self.scope_insert(&bind.1, bind.0);
+        }
+        Ok(())
+    }
+
     fn bind_arm_pattern(&mut self, pat: &Pattern, scrut: &TypedPlace) -> Result<(), LowerError> {
         match pat {
             Pattern::Binding { span, name } => {
@@ -5711,29 +7698,131 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let PlaceShape::Span(underlying) = scrut.place.shape else {
                     return Err(mismatch("a struct pattern on a scalar"));
                 };
-                let member_fields = self.member_fields(underlying, atom)?;
+                // a union scrutinee places the member's fields at their
+                // claimed region offsets and the dispatch slide emits the
+                // field tests at the section's top; a bare struct
+                // scrutinee places its own consecutive words and the
+                // value chain emits them — both test positions skip what
+                // the chain already tested
+                let layout = self.shapes.shape(underlying)?;
+                let (member_fields, value_chain): (&[MemberField], bool) = match &*layout {
+                    Shape::Union(_) => (
+                        layout
+                            .member_fields(atom)
+                            .ok_or_else(|| mismatch("a union member read"))?,
+                        false,
+                    ),
+                    Shape::Struct(s) => (s.fields.as_slice(), true),
+                    _ => return Err(mismatch("a struct pattern's scrutinee")),
+                };
                 for (name, sub) in fields {
                     let field = member_fields
                         .iter()
                         .find(|f| f.name.as_deref() == Some(name.name.as_str()))
                         .ok_or_else(|| mismatch("a pattern field"))?;
+                    // a nested struct sub-pattern over a struct-typed
+                    // field binds its fields at the field's own offset,
+                    // the same vocabulary one level deeper (both chains
+                    // share it)
+                    if let Some(inner @ Pattern::Struct { .. }) = sub {
+                        self.bind_struct_sub_pattern(inner, scrut.place.base + field.word)?;
+                        continue;
+                    }
+                    // the binder the field names: punning binds the field's
+                    // own name, a plain-name sub its binder; on the value
+                    // chain a tested field (a literal, or an or-ladder
+                    // binding through its last alternative — the
+                    // alternatives agree on the same words) binds nothing,
+                    // and `_` skips outright
                     let bind = match sub {
-                        None => (name.span, name.name.clone()),
-                        Some(Pattern::Binding { span, name }) => (*span, name.name.clone()),
-                        _ => {
-                            return Err(LowerError::unsupported(
-                                name.span,
-                                "a nested pattern field",
-                                "only binding sub-patterns lower this round",
-                            ))
+                        None => Some((name.span, name.name.clone())),
+                        Some(Pattern::Binding { span, name }) => Some((*span, name.name.clone())),
+                        Some(Pattern::Wildcard(_)) => None,
+                        Some(sub) if value_chain => match sub {
+                            Pattern::Literal { .. }
+                            | Pattern::Str { .. }
+                            | Pattern::RawStr { .. } => None,
+                            Pattern::Or { pats, .. } => match pats.last().map(last_alt) {
+                                // the last alternative binds nothing when
+                                // it tests or skips; the alternatives
+                                // agreed on the same binder words
+                                None
+                                | Some(
+                                    Pattern::Wildcard(_)
+                                    | Pattern::Literal { .. }
+                                    | Pattern::Str { .. }
+                                    | Pattern::RawStr { .. },
+                                ) => None,
+                                Some(Pattern::Binding { span, name }) => {
+                                    Some((*span, name.name.clone()))
+                                },
+                                _ => {
+                                    return Err(LowerError::unsupported(
+                                        pattern_span(sub),
+                                        "a nested pattern field",
+                                        "fields bind as plain names or skip as `_`, and test as \
+                                         literals at match time; nested patterns wait on the \
+                                         field's whole-span staging",
+                                    ))
+                                },
+                            },
+                            _ => {
+                                return Err(LowerError::unsupported(
+                                    pattern_span(sub),
+                                    "a nested pattern field",
+                                    "fields bind as plain names or skip as `_`, and test as \
+                                     literals at match time; nested patterns wait on the field's \
+                                     whole-span staging",
+                                ))
+                            },
+                        },
+                        // the union side takes the same resolution: the
+                        // dispatch slide tested literals and or-ladders in
+                        // the section, so they bind nothing here
+                        Some(sub) => match sub {
+                            Pattern::Literal { .. }
+                            | Pattern::Str { .. }
+                            | Pattern::RawStr { .. } => None,
+                            Pattern::Or { pats, .. } => match pats.last().map(last_alt) {
+                                None
+                                | Some(
+                                    Pattern::Wildcard(_)
+                                    | Pattern::Literal { .. }
+                                    | Pattern::Str { .. }
+                                    | Pattern::RawStr { .. },
+                                ) => None,
+                                Some(Pattern::Binding { span, name }) => {
+                                    Some((*span, name.name.clone()))
+                                },
+                                _ => {
+                                    return Err(LowerError::unsupported(
+                                        pattern_span(sub),
+                                        "a nested pattern field",
+                                        "nested patterns wait on the field's whole span; bind the \
+                                         field and destructure it in the arm body",
+                                    ))
+                                },
+                            },
+                            _ => {
+                                return Err(LowerError::unsupported(
+                                    pattern_span(sub),
+                                    "a nested pattern field",
+                                    "nested patterns wait on the field's whole span; bind the \
+                                     field and destructure it in the arm body",
+                                ))
+                            },
                         },
                     };
+                    let Some(bind) = bind else {
+                        continue;
+                    };
                     let base = scrut.place.base + field.word;
-                    // a one-word field binds its word; a multi-word field
-                    // (a struct-typed field) binds the span its checked
-                    // type names
-                    let shape = match self.analyzed.checked.binders.get(&bind.0) {
-                        Some(fact) if field.width() > 1 => PlaceShape::Span(fact.ty),
+                    // a struct-typed field binds the span its checked
+                    // type names, however many words it spans; every
+                    // other field binds its one word
+                    let fact = self.analyzed.checked.binders.get(&bind.0).copied();
+                    let shape = match fact {
+                        Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
                         _ => PlaceShape::Word(field.slot()),
                     };
                     self.binders.insert(bind.0, Place { base, shape });
@@ -5744,8 +7833,119 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 Ok(())
             },
+            Pattern::Call { path, args, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return Err(mismatch("a pattern path"));
+                };
+                let Some(atom) = self.path_atom(&only.name) else {
+                    return Err(mismatch("a pattern's member atom"));
+                };
+                let PlaceShape::Span(underlying) = scrut.place.shape else {
+                    return Err(mismatch("a struct pattern on a scalar"));
+                };
+                if !matches!(&*self.shapes.shape(underlying)?, Shape::Union(_)) {
+                    return Err(mismatch("a case pattern's scrutinee"));
+                }
+                let layout = self.shapes.shape(scrut.ty)?;
+                let member_fields = layout
+                    .member_fields(atom)
+                    .ok_or_else(|| mismatch("a union member read"))?;
+                if member_fields.len() != args.len() {
+                    return Err(mismatch("a case pattern's arity"));
+                }
+                for (arg, field) in args.iter().zip(member_fields.iter()) {
+                    match arg {
+                        // a struct-typed payload's nested struct
+                        // sub-pattern binds its fields at the payload's
+                        // own offsets, the same vocabulary one level
+                        // deeper
+                        Pattern::Struct { .. } => {
+                            self.bind_struct_sub_pattern(arg, scrut.place.base + field.word)?;
+                        },
+                        // the section tested literals and or-ladders at
+                        // the claimed offsets already, and `_` skips;
+                        // neither binds anything here
+                        Pattern::Wildcard(_)
+                        | Pattern::Literal { .. }
+                        | Pattern::Str { .. }
+                        | Pattern::RawStr { .. } => {},
+                        Pattern::Or { pats, .. } => {
+                            // binding alternatives bind through the last;
+                            // literal ladders tested in the section
+                            if let Some(Pattern::Binding { span, name }) = pats.last().map(last_alt)
+                            {
+                                let base = scrut.place.base + field.word;
+                                let fact = self.analyzed.checked.binders.get(span).copied();
+                                let shape = match fact {
+                                    Some(fact) if self.struct_typed(fact.ty) => {
+                                        PlaceShape::Span(fact.ty)
+                                    },
+                                    _ => PlaceShape::Word(field.slot()),
+                                };
+                                self.binders.insert(*span, Place { base, shape });
+                                if let Some(fact) = self.analyzed.checked.binders.get(span).copied()
+                                {
+                                    self.rc_bind_borrowed(*span, base, fact.ty)?;
+                                }
+                                self.scope_insert(&name.name, *span);
+                            }
+                        },
+                        Pattern::Binding { span, name } => {
+                            // an atom-named payload binding resolves
+                            // through the type namespace [F9], so it is a
+                            // member test binding nothing — and the
+                            // payload has no union of its own to test
+                            // (union-typed payload fields refuse at their
+                            // shape)
+                            if self.binding_atom(&name.name).is_some() {
+                                return Err(LowerError::unsupported(
+                                    *span,
+                                    "an atom-named case payload sub-pattern",
+                                    "the name resolves through the type namespace as a type atom, \
+                                     so it binds nothing; a payload binder needs a plain name",
+                                ));
+                            }
+                            let base = scrut.place.base + field.word;
+                            // a struct-typed payload binds the span its
+                            // checked type names, however many words it
+                            // spans; every other field binds its one word
+                            let fact = self.analyzed.checked.binders.get(span).copied();
+                            let shape = match fact {
+                                Some(fact) if self.struct_typed(fact.ty) => {
+                                    PlaceShape::Span(fact.ty)
+                                },
+                                _ => PlaceShape::Word(field.slot()),
+                            };
+                            self.binders.insert(*span, Place { base, shape });
+                            if let Some(fact) = self.analyzed.checked.binders.get(span).copied() {
+                                self.rc_bind_borrowed(*span, base, fact.ty)?;
+                            }
+                            self.scope_insert(&name.name, *span);
+                        },
+                        sub => {
+                            return Err(LowerError::unsupported(
+                                pattern_span(sub),
+                                "a nested case payload sub-pattern",
+                                "nested patterns wait on the field's whole span; bind the payload \
+                                 and destructure it in the arm body",
+                            ))
+                        },
+                    }
+                }
+                Ok(())
+            },
             Pattern::Tuple { pats, .. } => {
                 self.bind_tuple_pattern(pats, scrut, true)?;
+                Ok(())
+            },
+            Pattern::Or { pats, .. } => {
+                // the alternatives bind the same names on the same words
+                // (the classification's agreement check), and the body
+                // reads the last alternative's binders — the scope's
+                // name map keeps the last binding
+                if let Some(last) = pats.last() {
+                    self.bind_arm_pattern(last_alt(last), scrut)?;
+                }
                 Ok(())
             },
             _ => Ok(()),
@@ -5755,9 +7955,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Binds one tuple pattern's elements to the tuple span's words:
     /// one word per element, bound in place (aliases, the const
     /// convention). A test position skips what the dispatch already
-    /// tested: literal elements bind nothing, and an atom-named element
-    /// is a member test binding nothing [F9] — the same resolution the
-    /// checker's pattern walk applies, so the two layers never disagree.
+    /// tested: literal elements bind nothing, an atom-named element is
+    /// a member test binding nothing [F9], and an or-ladder element
+    /// binds its last alternative's binders (the alternatives bind the
+    /// same names on the same word) — the same resolution the checker's
+    /// pattern walk applies, so the two layers never disagree.
     /// Declaration positions bind every name and refuse literals: a
     /// declaration cannot fail a test.
     fn bind_tuple_pattern(
@@ -5770,9 +7972,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Shape::Tuple(s) = &*shape else {
             return Err(mismatch("a tuple destructuring"));
         };
-        for (index, sub) in pats.iter().enumerate() {
-            let Some(field) = s.fields.get(index) else {
-                return Err(mismatch("a tuple pattern's arity"));
+        if pats.len() != s.fields.len() {
+            return Err(mismatch("a tuple pattern's arity"));
+        }
+        // the elements bind at their whole-word addresses — consecutive
+        // words for a bare tuple, the member's claimed offsets for a
+        // tuple member read out of a union region
+        let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
+        for (index, raw) in pats.iter().enumerate() {
+            let addr = addrs
+                .get(index)
+                .ok_or_else(|| mismatch("a tuple pattern's arity"))?;
+            let base = addr.slot;
+            let sub = match raw {
+                Pattern::Or { pats, .. } if arm => pats.last().map_or(raw, last_alt),
+                _ => raw,
             };
             match sub {
                 Pattern::Wildcard(_) => {},
@@ -5782,10 +7996,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         // nothing binds
                         continue;
                     }
-                    let base = scrut.place.base + field.word;
                     self.binders.insert(*span, Place {
                         base,
-                        shape: PlaceShape::Word(field.slot()),
+                        shape: PlaceShape::Word(addr.slot_ty),
                     });
                     if let Some(fact) = self.analyzed.checked.binders.get(span).copied() {
                         self.rc_bind_borrowed(*span, base, fact.ty)?;
@@ -5808,14 +8021,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     // ---- calls ------------------------------------------------------------------
 
-    /// The one-word-element guard both list construction paths share: a
-    /// pushed element must be one scalar word — int, float, bool, tag, a
-    /// heap Ref, or a callable's scalar FuncRef (a named fn or
-    /// non-capturing lambda value). A bare struct or tuple element stages
-    /// its raw field words, so a one-field struct would store its field's
-    /// word as the element and reading it back hands that word to a place
-    /// typed as the struct; inline element spans arrive with the native
-    /// channel's staged-count and read-out span seam.
+    /// The element guard both list construction paths share: a pushed
+    /// element stages its whole inline word span — one scalar word (int,
+    /// float, bool, tag, a heap Ref, a callable's scalar FuncRef) or a
+    /// struct's flattened field words at the per-list element stride the
+    /// first push fixes (the native channel's staged-count and read-out
+    /// span seam). Tuple elements ride the same flat span, one word per
+    /// element, gathered positionally. Union elements refuse (the
+    /// checked read extracts one atom), and a
+    /// deinit-carrying element refuses (the list's edge retention owns
+    /// counts, never claims; per-span deinit claims own the seam).
     /// A callable element must prove scalar provenance: a closure word (or
     /// a callable-defaulted parameter that may hold one at runtime) would
     /// leave its count invisible to the element staging and read back as a
@@ -5826,61 +8041,59 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         span: Span,
         what: &'static str,
     ) -> Result<(), LowerError> {
-        let one_word = matches!(self.shapes.words(val.ty)?.as_slice(), [SlotType::I64
-            | SlotType::F64
-            | SlotType::Bool
-            | SlotType::Tag
-            | SlotType::Ref
-            | SlotType::Raw
-            | SlotType::Fn]);
-        let bare_fields = matches!(
-            &*self.shapes.shape(val.ty)?,
-            Shape::Struct(_) | Shape::Tuple(_)
-        );
-        if !one_word || bare_fields {
-            return Err(
-                LowerError::unsupported(
-                    span,
-                    what,
-                    "list elements lower as one scalar word; struct and tuple elements would \
-                     store their raw field words as the element; inline element spans arrive with \
-                     the \n                 native channel",
-                ),
-            );
-        }
-        if matches!(&*self.shapes.shape(val.ty)?, Shape::Word(SlotType::Fn)) {
-            let addrs = self.word_addrs(&val.place, val.ty)?;
-            let proven = addrs.len() == 1 && self.scalar_fn_words.contains(&addrs[0].slot);
-            if !proven {
-                return Err(LowerError::unsupported(
-                    span,
-                    what,
-                    "a callable element must prove a non-capturing scalar word; a closure or an \
-                     unproven callable parameter cannot inhabit a collection element",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// A reentrant combinator's callable argument must answer one word:
-    /// the VM's hosted-call seam returns a single value, and a
-    /// multi-word (struct or tuple) return would silently keep only its
-    /// first word. A non-fn-typed argument is not this guard's business
-    /// — the call site's own checks report it.
-    fn guard_hosted_lambda(&mut self, val: &TypedPlace, span: Span) -> Result<(), LowerError> {
-        let Some((_, ret)) = fn_sig_of(&self.analyzed.decls.universe, val.ty) else {
-            return Ok(());
-        };
-        if self.shapes.words(ret)?.len() != 1 {
-            return Err(LowerError::unsupported(
+        match &*self.shapes.shape(val.ty)? {
+            Shape::Struct(_) => {
+                if self.deinit_hook(val.ty, span)?.is_some() {
+                    return Err(LowerError::unsupported(
+                        span,
+                        what,
+                        "a deinit-carrying element's hook has no claim inside the list's edge \
+                         retention; per-span deinit claims own the seam",
+                    ));
+                }
+                Ok(())
+            },
+            Shape::Tuple(s) => {
+                // the tuple's one-word elements ride the channel like a
+                // struct's flattened span, gathered positionally; a
+                // callable element word keeps the scalar-provenance rule
+                // (a closure word would read back as a Ref behind a
+                // Fn-classified payload slot)
+                let addrs = self.word_addrs(&val.place, val.ty)?;
+                for (field, addr) in s.fields.iter().zip(addrs.iter()) {
+                    if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
+                        return Err(LowerError::unsupported(
+                            span,
+                            what,
+                            "a callable element must prove a non-capturing scalar word; a closure \
+                             or an unproven callable parameter cannot inhabit a collection element",
+                        ));
+                    }
+                }
+                Ok(())
+            },
+            Shape::Union(_) => Err(LowerError::unsupported(
                 span,
-                "a container-combinator callable",
-                "the hosted per-element call answers one word; a multi-word return arrives when \
-                 the native channel carries whole spans",
-            ));
+                what,
+                "a union element stages its whole region, and the checked read extracts one atom; \
+                 narrow the element before the list",
+            )),
+            Shape::Word(_) => {
+                if matches!(&*self.shapes.shape(val.ty)?, Shape::Word(SlotType::Fn)) {
+                    let addrs = self.word_addrs(&val.place, val.ty)?;
+                    let proven = addrs.len() == 1 && self.scalar_fn_words.contains(&addrs[0].slot);
+                    if !proven {
+                        return Err(LowerError::unsupported(
+                            span,
+                            what,
+                            "a callable element must prove a non-capturing scalar word; a closure \
+                             or an unproven callable parameter cannot inhabit a collection element",
+                        ));
+                    }
+                }
+                Ok(())
+            },
         }
-        Ok(())
     }
 
     /// The staged-span shape guards a call refuses before dispatch.
@@ -5959,7 +8172,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // evaluation (an element expression may itself call) and
             // pins the list word plus every word the push stages
             self.rc.native_open();
-            self.rc.native_reads(&[list]);
+            self.rc.native_reads([list]);
             let item_val = self.value(item)?;
             self.guard_list_element(&item_val, item.span(), "a list literal element")?;
             let push = crate::native::lookup("list_push")
@@ -5986,7 +8199,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
             }
             self.overlay_site(&staged, &[SlotType::I64]); // the unit word
-            let kidx = self.pool(funcref_const(Callee::Builtin(push)));
+            let kidx = self.pool(self.funcref_const(Callee::Builtin(push)));
             self.emit(Op::Call {
                 callee: kidx,
                 nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
@@ -6008,7 +8221,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .expect("the list surface is covered by the native table");
         self.overlay_site(&[], &[SlotType::Ref]);
         self.rc.native_open();
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: 0,
@@ -6081,7 +8294,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .expect("the map surface is covered by the native table");
         self.overlay_site(&[], &[SlotType::Ref]);
         self.rc.native_open();
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: 0,
@@ -6149,14 +8362,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         else {
             return Err(mismatch("a call"));
         };
-        if let Some(block) = trailing {
-            return Err(LowerError::unsupported(
-                block.span(),
-                "a trailing block argument",
-                "block-argument sugar lowers in its own round; pass the lambda inline in \
-                 parentheses",
-            ));
-        }
         // the call's own span is the trait-dispatch table's key (the
         // checker records the solved instance there); the callee-shape
         // destructure below rebinds `span` to the callee path's own
@@ -6202,7 +8407,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // trait-method site carries no def: the solved instance names
         // the impl body (the dispatch side channel below), and `None`
         // marks the trait path.
-        let (def, callee_span, arg_exprs, trait_dispatch): (
+        let (def, callee_span, mut arg_exprs, trait_dispatch): (
             Option<DefId>,
             Span,
             Vec<&Expr>,
@@ -6300,7 +8505,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             } else if let Some(Res::Local { bind }) = self.res.get(*span) {
                 // a clean check makes this a fn-typed binding: the
                 // call dispatches through its Fn word [F2]
-                return self.calls_value(ty, *bind, *span, args, tail);
+                let mut arg_exprs: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
+                if let Some(block) = trailing {
+                    arg_exprs.push(&**block);
+                }
+                return self.calls_value(ty, *bind, *span, &arg_exprs, tail);
             } else {
                 return Err(LowerError::unsupported(
                     *span,
@@ -6309,6 +8518,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 ));
             }
         };
+        // The block-argument sugar [F7]: the checker fed the parser's
+        // zero-parameter trailing block at the next open positional slot,
+        // and with named arguments refused above that slot is exactly the
+        // written arguments' end, so the block stages below like a
+        // written trailing lambda argument — pure sugar, no calling-
+        // convention surface of its own.
+        if let Some(block) = trailing {
+            arg_exprs.push(&**block);
+        }
         if case_ctor.is_some() && case_ctor == def {
             return self.case_value(args, ty);
         }
@@ -6337,18 +8555,34 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index, .. }) => {
                 Callee::Local(*index)
             },
-            Some(TraitDispatch::Runtime { slot }) => Callee::Evidence(*slot),
+            Some(TraitDispatch::Runtime { slot, .. }) => Callee::Evidence(*slot),
             None => {
                 self.resolve_callee(def.expect("a named callee resolves to a def"), callee_span)?
             },
         };
         // a member call stages its omitted literal defaults at the call
-        // site like the free-fn spelling [F7]
+        // site like the free-fn spelling [F7]: a trait dispatch stages
+        // the trait's declared defaults (the declaration is the single
+        // authority — call sites check those literals), while an
+        // inherent dispatch stages the impl body's own
         let member_defaults: Vec<Expr>;
-        let arg_exprs = match (def, target) {
+        let arg_exprs = match (def, &trait_dispatch) {
             (Some(def), _) => self.defaulted_args(def, target, arg_exprs),
-            (None, Callee::Local(index)) => {
-                member_defaults = self.member_default_exprs(index, arg_exprs.len(), callee_span)?;
+            (_, Some(TraitDispatch::Static { call, .. })) => {
+                member_defaults = self.trait_default_exprs(call.method, arg_exprs.len());
+                let mut staged = arg_exprs;
+                staged.extend(member_defaults.iter());
+                staged
+            },
+            (_, Some(TraitDispatch::Runtime { method, .. })) => {
+                member_defaults = self.trait_default_exprs(*method, arg_exprs.len());
+                let mut staged = arg_exprs;
+                staged.extend(member_defaults.iter());
+                staged
+            },
+            (None, Some(TraitDispatch::Inherent { index, .. })) => {
+                member_defaults =
+                    self.member_default_exprs(*index, arg_exprs.len(), callee_span)?;
                 let mut staged = arg_exprs;
                 staged.extend(member_defaults.iter());
                 staged
@@ -6356,27 +8590,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => arg_exprs,
         };
         // A direct `list_push` stages its (list, value) pair with the
-        // value as one word — the same element guard the literal path
-        // applies, extended to this path so a struct argument rejects
-        // here instead of trapping (or silently mis-staging one field
-        // wide) in the VM. `cons` mirrors it with the element in the
-        // receiver position: the one body prepends exactly one word.
-        // `reduce`'s init seeds the folded accumulator with exactly one
-        // word, so the same element guard covers it.
+        // value's whole word span — the same element guard the literal
+        // path applies (a struct element stages its flattened words at
+        // the stride the first push fixes). `cons` mirrors it with the
+        // element's whole span in the receiver position (the stride-aware
+        // prepend's head). `reduce`'s init needs no element guard: the
+        // checker proves it the fold's own type, so any element that
+        // could inhabit the list already passed this guard, and the
+        // fold's interior span carries the init's whole width.
         let element_slot = match target {
             Callee::Builtin(native) if native.name == "list_push" => {
                 Some((1usize, "a list_push element"))
             },
             Callee::Generic(generic) if generic.name == "cons" => Some((0usize, "a cons element")),
-            Callee::Generic(generic) if generic.name == "reduce" => Some((1usize, "a reduce init")),
             _ => None,
         };
-        // the reentrant combinators reenter the dispatcher per element,
-        // and the hosted call answers one value word
-        let hosted_lambda = matches!(
-            target,
-            Callee::Generic(generic) if matches!(generic.name, "map" | "filter" | "reduce")
-        );
         // stage: evaluate every argument to a place, then move its words
         // into the overlay area (argument evaluation may itself call)
         let mut staged: Vec<SlotType> = Vec::new();
@@ -6385,12 +8613,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // check the kind, so a scalar instantiation is a no-op)
         let mut counted: Vec<bool> = Vec::new();
         let mut moves: Vec<(usize, u8)> = Vec::new();
+        // the written argument each staged word belongs to: a consuming
+        // (`move`) parameter's words stage as a hand-off (C2)
+        let mut word_arg: Vec<usize> = Vec::new();
         // staged indices whose Ref word lands in a callable-defaulted `Fn`
         // parameter (the closure-capable callable surface): the callee
         // reads the word and never owns its count, so the staging is a
         // borrow window, never a dup or a forward
         let mut defaulted: Vec<usize> = Vec::new();
         let expected_words = self.expected_param_words(target);
+        // an interior-span generic stages one dynamic span between its
+        // leading and trailing named words, so a staged closure word's
+        // position is dynamic and the callable-defaulted slot is the
+        // trailing named word alone
+        let interior_span = matches!(target, Callee::Generic(g) if g.staging == Staging::Interior);
         // a local callee's per-parameter checked types, when its
         // signature is static: a union-typed parameter re-spans a bare
         // member or a strict sub-union argument into its whole region
@@ -6399,6 +8635,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Callee::Local(index) => self.callee_param_types(index),
             _ => None,
         };
+        // whether each written argument position feeds a consuming
+        // (`move`) parameter: the staging then forwards the source's
+        // count and any deinit claim — the checker's forced move makes
+        // the death test true at exactly this use (C2/C1)
+        let consuming = self.consuming_args(target, trait_dispatch.as_ref(), arg_exprs.len());
         // the receiver's checked type mints a generic call's evidence
         // words (the builtin instance it addresses) [H3]
         let mut receiver_ty: Option<Ty> = None;
@@ -6423,7 +8664,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                          the value's deinit runs only at its binding's death",
                     ));
                 }
-                if tail && matches!(target, Callee::Local(_)) {
+                if tail && matches!(target, Callee::Local(_)) && !consuming[index] {
                     return Err(LowerError::unsupported(
                         arg.span(),
                         "a deinit-carrying argument in tail position",
@@ -6438,13 +8679,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     self.guard_list_element(&arg_val, arg.span(), what)?;
                 }
             }
-            if hosted_lambda && index + 1 == arg_exprs.len() {
-                self.guard_hosted_lambda(&arg_val, arg.span())?;
-            }
             // a closure argument lands only in a callable-defaulted `Fn`
-            // parameter; its one Ref word marks the borrow-window index
+            // parameter; its one Ref word marks the borrow-window index.
+            // An interior-span generic's callable word rides at the end
+            // of the staged span, so the static expected list cannot
+            // name its position there
             if self.is_closure_word(&arg_val.place, arg_val.ty)? {
-                Self::guard_callable_staged(expected_words.as_deref(), staged.len(), arg.span())?;
+                if interior_span {
+                    Self::guard_interior_closure_slot(
+                        expected_words.as_deref(),
+                        index + 1 == arg_exprs.len(),
+                        arg.span(),
+                    )?;
+                } else {
+                    Self::guard_callable_staged(
+                        expected_words.as_deref(),
+                        staged.len(),
+                        arg.span(),
+                    )?;
+                }
                 defaulted.push(staged.len());
             }
             // a union-typed parameter takes its member's whole region: a
@@ -6468,7 +8721,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         ));
                     }
                     let temp = self.temp_span(param_ty)?;
-                    self.widen_into(&temp, param_ty, &arg_val)?;
+                    self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
                     TypedPlace {
                         place: temp,
                         ty: param_ty,
@@ -6477,14 +8730,37 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 _ => arg_val,
             };
             let var_word = self.is_var_ty(arg_val.ty);
-            for addr in self
+            let addrs = self
                 .word_addrs(&arg_val.place, arg_val.ty)
-                .map_err(|err| err.respanned(arg.span()))?
-            {
-                self.rc.native_reads(&[addr.slot]);
+                .map_err(|err| err.respanned(arg.span()))?;
+            // a free generic fn's parameter over its own type variable
+            // claims the argument as the variable's single Raw word, so
+            // an argument spanning more than one word refuses here —
+            // the one-word instantiation boundary, at the site where
+            // the type is concrete
+            let var_param = param_types
+                .as_ref()
+                .and_then(|types| types.get(index))
+                .is_some_and(|&param_ty| self.is_var_ty(param_ty));
+            if var_param {
+                self.guard_one_word_instantiation(
+                    self.members(arg_val.ty),
+                    "a generic call's argument",
+                    arg.span(),
+                )?;
+            }
+            for addr in addrs {
+                self.rc.native_reads([addr.slot]);
                 moves.push((staged.len(), addr.slot));
-                staged.push(addr.slot_ty);
+                // the variable's single word stages as the wildcard: the
+                // overlay word records Raw (the runtime kind is the
+                // callee's fact), so the ABI slide admits the pairing
+                // whatever the source's static kind — a scalar staged at
+                // an overlay index no other type visits would otherwise
+                // fail the slide's static check against the Raw parameter
+                staged.push(if var_param { SlotType::Raw } else { addr.slot_ty });
                 counted.push(addr.slot_ty == SlotType::Ref || var_word);
+                word_arg.push(index);
             }
         }
         // a closure word in a callable-defaulted parameter has no CALLT
@@ -6520,6 +8796,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     src: Slot::body(slot),
                 });
             }
+            // a staged word of a consuming (`move`) parameter: the callee
+            // owns the value's death, so the count and any deinit claim
+            // ride the staging as a hand-off — the checker's forced move
+            // spent the source's death at exactly this use. A plain
+            // count keeps the dup-or-forward death test outside the tail
+            // transfer (a live copyable source dups), while a word a
+            // claim covers always rides (a borrowed inc would leave the
+            // caller's hook armed beside the callee's own)
+            let consumes = word_arg
+                .get(index)
+                .is_some_and(|&arg| consuming.get(arg).copied().unwrap_or(false));
             // a staged Ref: a local callee's borrow parameter owns the
             // handed word (forward on the source's death, dup otherwise);
             // a native is a transient borrow window that never dups. A
@@ -6540,14 +8827,27 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         Callee::Builtin(_) | Callee::Generic(_) => {
                             self.rc.staged_native(slot, tail && self.root);
                         },
+                        Callee::Local(_) | Callee::Evidence(_) if tail_transfer && consumes => {
+                            self.rc.staged_move(&mut self.code, slot);
+                        },
                         Callee::Local(_) | Callee::Evidence(_) if tail_transfer => {
                             self.rc.staged_tail_local(&mut self.code, slot);
+                        },
+                        Callee::Local(_) | Callee::Evidence(_)
+                            if consumes && self.rc.claim_base_of(slot).is_some() =>
+                        {
+                            self.rc.staged_move(&mut self.code, slot);
                         },
                         Callee::Local(_) | Callee::Evidence(_) => {
                             self.rc.staged_local(&mut self.code, slot);
                         },
                     }
                 }
+            } else if consumes && self.rc.claim_base_of(slot).is_some() {
+                // a consuming scalar claim anchor (no Ref count of its
+                // own): the hook rides the staging silently, or this
+                // frame's scope end would fire it beside the callee's
+                self.rc.staged_move(&mut self.code, slot);
             }
         }
         self.guard_staged_width(target, &staged, callee_span)?;
@@ -6592,32 +8892,55 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         // a trait-method dispatch site [H3]: a call into a generic impl
         // body stages the runtime-evidence words its substitution
-        // resolves (one serving member body per demand, in body order)
-        // and then the solved declared-instance word; a call into a
-        // monomorphic body stages the instance word alone — and a nested
-        // bound-variable site stages none of these (the sentinel FuncRef
-        // dispatches from the frame's evidence slot, staged by the site
-        // that entered this body). The staged types register here (the
-        // overlay span sizes from them); on the tail path the Kimm
-        // stores defer past the exit claims, staged after them like
-        // every tail-staged word (a claim's overlay window would clobber
-        // words staged before it)
-        let mut trait_evidence: Vec<u32> = Vec::new();
+        // resolves (one serving member body plus its follow chain per
+        // demand, in body order) and then the solved declared-instance
+        // word; a call into a monomorphic body stages the instance word
+        // alone. A nested bound-variable site stages none of these — its
+        // slot word rides below — and a nested site whose serving body is
+        // itself generic stages the callee's words from this frame's own
+        // evidence area. The staged types register here (the overlay span
+        // sizes from them); on the tail path the stores defer past the
+        // exit claims, staged after them like every tail-staged word (a
+        // claim's overlay window would clobber words staged before it)
+        let mut trait_evidence: Vec<EvidenceSrc> = Vec::new();
         let trait_evidence_at = staged.len();
         if let Some(TraitDispatch::Static { index, call }) = &trait_dispatch {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
-            self.guard_staged_count(staged.len() + pairs.len() + 1)?;
+            self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS) + 1)?;
             for pair in pairs.iter() {
-                let word = self.evidence_word(
-                    pair,
-                    &call.bounds,
-                    "a trait-method call into a generic impl body",
-                    callee_span,
-                )?;
-                trait_evidence.push(word);
+                let mut words = if self.plan.is_default_body(*index) && pair.var == "Self" {
+                    // the entered body is the trait's declared default: its
+                    // Self-keyed demand is served under this site's own
+                    // solved instance, the receiver substituting Self, so
+                    // the chain starts at the receiver's member set and
+                    // the declared bounds record answers nothing
+                    self.chain_words(
+                        pair,
+                        self.pair_trait_id(
+                            pair,
+                            "a trait-method call into a declared default body",
+                            callee_span,
+                        )?,
+                        call.instance,
+                        Some(Cow::Borrowed(self.members(call.recv))),
+                        "a trait-method call into a declared default body",
+                        callee_span,
+                    )?
+                } else {
+                    self.evidence_words(
+                        pair,
+                        &call.bounds,
+                        Some(call.instance),
+                        None,
+                        Some(call.recv),
+                        "a trait-method call into a generic impl body",
+                        callee_span,
+                    )?
+                };
+                trait_evidence.append(&mut words);
             }
-            trait_evidence.push(call.instance.index());
-            for _ in &trait_evidence {
+            trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
+            for _ in 0..=pairs.len() * (1 + FOLLOW_WORDS) {
                 staged.push(SlotType::I64);
             }
             if !tail_transfer {
@@ -6631,29 +8954,117 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // its trailing evidence parameters, so the ordinary CALL below —
         // and a tail site's CALLT — names the whole staged count; no
         // dispatch uop exists. The staged types register here (the
-        // overlay span sizes from them), while the Kimm stores defer
-        // past the exit claims on the tail path (a claim's overlay
-        // window would clobber words staged before it)
-        let mut member_evidence: Vec<u32> = Vec::new();
+        // overlay span sizes from them), while the stores defer past the
+        // exit claims on the tail path (a claim's overlay window would
+        // clobber words staged before it)
+        let mut member_evidence: Vec<EvidenceSrc> = Vec::new();
         let member_evidence_at = staged.len();
-        if let Some(TraitDispatch::Inherent { index, bounds }) = &trait_dispatch {
+        if let Some(TraitDispatch::Inherent {
+            index,
+            bounds,
+            method,
+        }) = &trait_dispatch
+        {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
             if !pairs.is_empty() {
-                self.guard_staged_count(staged.len() + pairs.len())?;
+                self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS))?;
+                let inherent_site = self.analyzed.decls.inherent_impls.get(method).copied();
                 for pair in pairs.iter() {
-                    member_evidence.push(self.evidence_word(
+                    let mut words = self.evidence_words(
                         pair,
                         bounds,
+                        None,
+                        inherent_site,
+                        receiver_ty,
                         "an inherent method call into a generic impl body",
                         callee_span,
-                    )?);
+                    )?;
+                    member_evidence.append(&mut words);
                 }
-                for _ in &member_evidence {
+                for _ in 0..pairs.len() * (1 + FOLLOW_WORDS) {
                     staged.push(SlotType::I64);
                 }
                 if !tail_transfer {
                     self.stage_member_evidence(&member_evidence, member_evidence_at);
                 }
+            }
+        }
+        // a free generic fn's call site [H3]: the callee's ONE body
+        // claims its runtime-evidence demands as trailing parameters,
+        // so the entering site stages them after the true arguments in
+        // this outgoing-argument area — one serving member body plus
+        // its follow chain per demand, the checker's per-call record
+        // answering each bound under this site's own substitution. The
+        // ordinary CALL below (a tail site's CALLT) names the whole
+        // staged count, like the inherent generic body's entering site.
+        // The staged types register here (the overlay span sizes from
+        // them), while the stores defer past the exit claims on the
+        // tail path (a claim's overlay window would clobber words
+        // staged before it)
+        let mut free_evidence: Vec<EvidenceSrc> = Vec::new();
+        let free_evidence_at = staged.len();
+        if let Callee::Local(index) = target {
+            let pairs = self.plan.functions()[index as usize].evidence.clone();
+            // a dispatch target (a trait's declared default body) stages
+            // its evidence words through the dispatch branch above; this
+            // free-fn staging serves named callees alone
+            if trait_dispatch.is_none()
+                && self.plan.functions()[index as usize].free_generic
+                && !pairs.is_empty()
+            {
+                let Some(record) = self
+                    .analyzed
+                    .checked
+                    .generic_call_bounds
+                    .get(&call_span)
+                    .cloned()
+                else {
+                    return Err(LowerError::unsupported(
+                        callee_span,
+                        "a call into a free generic fn's body",
+                        "the checker recorded no bound answer at this site; report the construct",
+                    ));
+                };
+                self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS))?;
+                for pair in pairs.iter() {
+                    let mut words = self.free_evidence_words(
+                        pair,
+                        &record,
+                        "a call into a free generic fn's body",
+                        callee_span,
+                    )?;
+                    free_evidence.append(&mut words);
+                }
+                for _ in 0..pairs.len() * (1 + FOLLOW_WORDS) {
+                    staged.push(SlotType::I64);
+                }
+                if !tail_transfer {
+                    self.stage_member_evidence(&free_evidence, free_evidence_at);
+                }
+            }
+        }
+        // a nested runtime-resolved site: the target rides the frame's
+        // evidence slot. When that word names a generic serving body, the
+        // dispatch slides the body's own evidence area — staged here from
+        // this frame's follow chain one level down, the last word padded
+        // with the chain's end (the deepest live level never reads past
+        // it); a concrete target ignores the riders past its parameters
+        let mut runtime_riders = 0usize;
+        let mut runtime_evidence: Vec<EvidenceSrc> = Vec::new();
+        let runtime_evidence_at = staged.len();
+        if let Some(TraitDispatch::Runtime { slot, .. }) = &trait_dispatch {
+            runtime_riders = FOLLOW_WORDS + 1;
+            self.guard_staged_count(staged.len() + runtime_riders)?;
+            let last = slot + u8::try_from(FOLLOW_WORDS).expect("follow words fit u8");
+            runtime_evidence = (1..=FOLLOW_WORDS)
+                .map(|i| EvidenceSrc::Slot(slot + u8::try_from(i).expect("follow word fits u8")))
+                .collect();
+            runtime_evidence.push(EvidenceSrc::Slot(last));
+            for _ in 0..runtime_riders {
+                staged.push(SlotType::I64);
+            }
+            if !tail_transfer {
+                self.stage_member_evidence(&runtime_evidence, runtime_evidence_at);
             }
         }
         // a checked generic read (`list_get`, `map_get`): the staged span
@@ -6670,7 +9081,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .callee_result_words(target, generic_instance, ty)
             .map_err(|err| err.respanned(callee_span))?;
         self.overlay_site(&staged, &result_words);
-        let kidx = self.pool(funcref_const(target));
+        let kidx = self.pool(self.funcref_const(target));
         // A native tail call transfers control only from the root frame:
         // CALLT-to-native (and CALLTG-to-generic) pops the frame inside
         // the instruction, so the staged borrows' decs have no code
@@ -6702,14 +9113,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc.native_tail_transfer();
             self.rc.exit(&mut self.code, &[]);
             self.stage_member_evidence(&member_evidence, member_evidence_at);
+            self.stage_member_evidence(&free_evidence, free_evidence_at);
             if let (Some(generic), Some(instance)) = (generic_target, generic_instance) {
                 // the deferred evidence stores: one instance word per
                 // constraint-list entry, staged after the exit claims
                 let word = u32::try_from(instance as i64).expect("instance ids fit u32");
-                let words = vec![word; usize::from(generic.evidence)];
+                let words = vec![EvidenceSrc::Const(word); usize::from(generic.evidence)];
                 self.stage_member_evidence(&words, generic_tail_at);
             }
             self.stage_member_evidence(&trait_evidence, trait_evidence_at);
+            self.stage_member_evidence(&runtime_evidence, runtime_evidence_at);
             self.stage_moves(&moves);
             if dispatch_tail {
                 // the dispatch tail's uop names the real arguments; the
@@ -6717,9 +9130,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let real_args = if let Some(generic) = generic_target {
                     staged.len() - usize::from(generic.evidence)
                 } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
-                    staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len()
-                } else {
                     staged.len()
+                        - 1
+                        - self.plan.functions()[*index as usize].evidence.len() * (1 + FOLLOW_WORDS)
+                } else {
+                    staged.len() - runtime_riders
                 };
                 self.emit(Op::Calltg {
                     callee: kidx,
@@ -6750,22 +9165,26 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
         } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
-            // the evidence words trail the real arguments (one per the
-            // body's runtime demands, then the solved instance), so the
-            // uop names the real-argument count and the callee claims
-            // the rest as its trailing evidence parameters
-            let real_args =
-                staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len();
+            // the evidence words trail the real arguments (the pair's
+            // area per the body's runtime demands, then the solved
+            // instance), so the uop names the real-argument count and the
+            // callee claims the rest as its trailing evidence parameters
+            let real_args = staged.len()
+                - 1
+                - self.plan.functions()[*index as usize].evidence.len() * (1 + FOLLOW_WORDS);
             self.emit(Op::Callg {
                 callee: kidx,
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
         } else if matches!(trait_dispatch, Some(TraitDispatch::Runtime { .. })) {
             // a nested runtime-resolved site: the sentinel FuncRef names
-            // the frame's evidence slot and dispatches from it
+            // the frame's evidence slot and dispatches from it; the
+            // follow riders trail the real arguments for the generic
+            // body the slot may name
+            let real_args = staged.len() - runtime_riders;
             self.emit(Op::Callg {
                 callee: kidx,
-                nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+                nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
         } else {
             self.emit(Op::Call {
@@ -6775,6 +9194,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         self.rc.native_done(&mut self.code);
         let place = self.result_place(ty, &result_words, callee_span)?;
+        // a known-function callee's fn-typed result is the scalar its own
+        // provenance proved (a factory's result classifies Ref instead),
+        // so the result word joins the provenance oracle and widens into
+        // a re-storable slot like a named fn value
+        if *result_words == [SlotType::Fn] && matches!(target, Callee::Local(_)) {
+            self.scalar_fn_words.insert(place.base);
+        }
         if in_place_tail {
             // the in-place tail call (a non-root native or generic tail,
             // or a local tail staging a closure into a callable-defaulted
@@ -6829,7 +9255,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if let Some(claim) = self.deinit_claim(ty, span)? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
             let words = self.ref_words(base, ty)?;
-            self.rc.claimed(base, claim.hook, &words);
+            let band = self.claim_band_word(base)?;
+            self.rc
+                .claimed(&mut self.code, base, claim.hook, band, &words);
         }
         let shape = match &*self.shapes.shape(ty)? {
             // the copy-out word's own kind leads: a factory's fn-typed
@@ -6862,7 +9290,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         ty: Ty,
         bind: Span,
         callee_span: Span,
-        args: &[CallArg],
+        arg_exprs: &[&Expr],
         tail: bool,
     ) -> Result<Place, LowerError> {
         let callee_ty = self.val(callee_span)?.ty;
@@ -6897,14 +9325,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .contains(&word.slot)
             .then(|| self.fn_words.get(&word.slot).copied())
             .flatten();
-        let expected_words: Vec<SlotType> = params
-            .iter()
-            .map(|ty| self.shapes.words(*ty))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut expected_words: Vec<SlotType> = Vec::with_capacity(params.len());
+        for ty in params {
+            expected_words.extend_from_slice(&self.shapes.words(*ty)?);
+        }
         let expected = expected_words.len();
+        // the planned body the callee word names, when this frame
+        // constructed it (a scalar Fn word or a closure object): its own
+        // parameter modes stay readable, so a deinit-carrying argument
+        // can be checked against its contract. A word this frame did not
+        // construct (a fn-typed parameter's) erases them.
+        let callee_index = self.fn_words.get(&word.slot).copied();
+        let param_modes = callee_index.and_then(|index| self.planned_param_modes(index));
         // stage: evaluate every argument to a place, then move its words
         // into the overlay area (argument evaluation may itself call).
         // The borrow window opens before that evaluation and pins the
@@ -6920,36 +9352,56 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // (the callee's borrow would outlive a transferred frame)
         let mut deinit_arg = false;
         self.rc.native_open();
-        self.rc.native_reads(&[word.slot]);
-        for (index, arg) in args.iter().enumerate() {
-            let arg_val = self.value(&arg.value)?;
-            if tail && self.deinit_claim(arg_val.ty, arg.value.span())?.is_some() {
-                deinit_arg = true;
+        self.rc.native_reads([word.slot]);
+        for (index, &arg) in arg_exprs.iter().enumerate() {
+            let arg_val = self.value(arg)?;
+            if self.deinit_claim(arg_val.ty, arg.span())?.is_some() {
+                // a consuming parameter behind a callable word has no
+                // claim contract: the affine pass borrows the argument
+                // at an indirect call (the fn type erases the mode), so
+                // the callee's own claim would double this frame's —
+                // and an untraceable word cannot promise borrow mode
+                // either. Per-span claims own the seam; named callees
+                // carry the mode.
+                match param_modes.as_ref().and_then(|modes| modes.get(index)) {
+                    Some(ds_parse::ParamMode::Borrow | ds_parse::ParamMode::Mut(_)) => {},
+                    _ => {
+                        return Err(LowerError::unsupported(
+                            arg.span(),
+                            "a deinit-carrying argument at a callable value",
+                            "the callable's fn type erases the parameter mode, so the claim \
+                             contract cannot be established; pass the value to a named function",
+                        ));
+                    },
+                }
+                if tail {
+                    deinit_arg = true;
+                }
             }
             // a closure argument lands only in a callable-defaulted `Fn`
             // parameter, staged as a borrow window
             if self.is_closure_word(&arg_val.place, arg_val.ty)? {
-                Self::guard_callable_staged(Some(&expected_words), staged.len(), arg.value.span())?;
+                Self::guard_callable_staged(Some(&expected_words), staged.len(), arg.span())?;
                 defaulted.push(staged.len());
             }
             // a union-typed parameter takes its member's whole region: a
-            // bare member or a strict sub-union argument re-spans into a
-            // staging temp of the parameter's region, the named-callee
+            // bare member or a strict sub-union argument re-spans into
+            // a staging temp of the parameter's region, the named-callee
             // widening family's value-site spelling
             let arg_val = match params.get(index) {
                 Some(&param_ty) if param_ty != arg_val.ty && self.is_union_ty(param_ty)? => {
                     // the same staging-temp backstop as the named
                     // callee path
-                    if self.deinit_claim(arg_val.ty, arg.value.span())?.is_some() {
+                    if self.deinit_claim(arg_val.ty, arg.span())?.is_some() {
                         return Err(LowerError::unsupported(
-                            arg.value.span(),
+                            arg.span(),
                             "a deinit-carrying argument into a union parameter",
                             "the re-span's staging temp is anonymous, so it carries no claim \
                              contract of its own; the deinit arc owns the seam",
                         ));
                     }
                     let temp = self.temp_span(param_ty)?;
-                    self.widen_into(&temp, param_ty, &arg_val)?;
+                    self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
                     TypedPlace {
                         place: temp,
                         ty: param_ty,
@@ -6959,9 +9411,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             };
             for addr in self
                 .word_addrs(&arg_val.place, arg_val.ty)
-                .map_err(|err| err.respanned(arg.value.span()))?
+                .map_err(|err| err.respanned(arg.span()))?
             {
-                self.rc.native_reads(&[addr.slot]);
+                self.rc.native_reads([addr.slot]);
                 moves.push((staged.len(), addr.slot));
                 staged.push(addr.slot_ty);
             }
@@ -7015,10 +9467,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // classifies Ref (a binding carrying an unknown fn value keeps
         // the scalar classification — a closure returned through it traps
         // at the call, the recorded return-flow seam)
-        if result_words.as_slice() == [SlotType::Fn] {
+        if *result_words == [SlotType::Fn] {
             if let Some(&index) = self.fn_words.get(&word.slot) {
                 if self.tail_builds_a_closure(index) {
-                    result_words = vec![SlotType::Ref];
+                    result_words = Rc::from([SlotType::Ref]);
                 }
             }
         }
@@ -7057,6 +9509,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc.read(&mut self.code, &[word.slot]);
         }
         let place = self.result_place(ty, &result_words, callee_span)?;
+        // the same trust as the named-callee path: the factory check ran
+        // over this word and left the scalar classification, so the
+        // result word is a proven scalar; an unproven callee word keeps
+        // no trust (its result may hold a closure's Ref at runtime)
+        if *result_words == [SlotType::Fn] && self.fn_words.contains_key(&word.slot) {
+            self.scalar_fn_words.insert(place.base);
+        }
         if tail {
             // the in-place tail (the unproven maybe-Ref word): the CALLS
             // runs inside this frame, the post-call flush settles the
@@ -7219,27 +9678,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // call site entering this body staged.
             if let Some(recv) = recv
                 && let Ok(val) = self.val(recv.span())
-                && let [var] = self.members(val.ty).as_slice()
+                && let [var] = self.members(val.ty)
                 && self.shapes.is_var_atom(*var)
                 && let Some(param) =
                     crate::shape::var_param_name(&self.analyzed.decls.universe, *var)
             {
-                let matching: Vec<u8> = self
+                let matching: Vec<(MethodId, u8)> = self
                     .evidence
                     .iter()
                     .filter(|((pair_var, method), _)| {
                         pair_var == &param && candidates.contains(method)
                     })
-                    .map(|(_, slot)| *slot)
+                    .map(|((_, method), slot)| (*method, *slot))
                     .collect();
                 return match matching.as_slice() {
-                    [slot] => Ok(TraitDispatch::Runtime { slot: *slot }),
+                    [(method, slot)] => Ok(TraitDispatch::Runtime {
+                        slot: *slot,
+                        method: *method,
+                    }),
                     [] => Err(LowerError::unsupported(
                         what,
                         "a trait-method call on a bound type variable",
-                        "this body carries no runtime evidence slot for the member (a spawned \
-                         child or a generic function body has none); the evidence seam covers the \
-                         impl member body and its lambdas",
+                        "this body carries no runtime evidence slot for the member (the body \
+                         demands no such pair, or the frame is outside the evidence seam); the \
+                         seam covers generic bodies, their lambdas, and their spawned children",
                     )),
                     _ => Err(LowerError::unsupported(
                         what,
@@ -7270,6 +9732,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let member = self.analyzed.package.method(tc.method).name.clone();
         if let Some(index) = self.plan.impl_body(impl_site, &member) {
+            return Ok(TraitDispatch::Static { index, call: tc });
+        }
+        // A defaulted member is omittable exactly because the trait's
+        // declaration carries the dispatch target: an impl spelling no
+        // member dispatches into the declared default body, the same
+        // staged shape (evidence demands trailing the true arguments,
+        // the solved instance word trailing them).
+        if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
+            && let Some(index) = self.plan.default_body(def, &member)
+        {
             return Ok(TraitDispatch::Static { index, call: tc });
         }
         Err(LowerError::unsupported(
@@ -7318,61 +9790,109 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .get(&call)
             .cloned()
             .unwrap_or_default();
-        Ok(TraitDispatch::Inherent { index, bounds })
+        Ok(TraitDispatch::Inherent {
+            index,
+            bounds,
+            method,
+        })
     }
 
-    /// The one runtime-evidence word a call site entering a generic impl
-    /// body stages for one of the body's demands: the serving member
-    /// body's function-table index, resolved through the checker-recorded
-    /// bounds of this call site's solved dispatch — the trait form's
-    /// per-bound instance record, or the inherent form's call-site
-    /// record minus the instance word.
-    fn evidence_word(
+    /// The trait one evidence pair's member belongs to: the walk's key
+    /// into the checker's per-site bound records.
+    fn pair_trait_id(
         &self,
         pair: &RuntimePair,
-        bounds: &InherentCallBounds,
         what: &'static str,
         span: Span,
-    ) -> Result<u32, LowerError> {
+    ) -> Result<TraitId, LowerError> {
         let method = self.analyzed.package.method(pair.method);
         let MethodOwner::Trait(def) = method.owner else {
             return Err(LowerError::unsupported(
                 span,
-                "a runtime-evidence demand",
+                what,
                 "the body's member call did not resolve to a trait member; report the construct",
             ));
         };
-        let Some(&trait_id) = self.analyzed.decls.traits.get(&def) else {
-            return Err(LowerError::unsupported(
-                span,
-                "a runtime-evidence demand",
-                "the member's trait is missing from the declaration tables",
-            ));
-        };
-        // the recorded bounds key by the declaration's own minted variable;
-        // the written parameter name bridges the two mintings
-        let universe = &self.analyzed.decls.universe;
-        let Some(Some(instance)) = bounds
-            .iter()
-            .find(|(var, bound, _)| {
-                crate::shape::var_param_name(universe, *var).as_deref() == Some(pair.var.as_str())
-                    && *bound == trait_id
+        self.analyzed
+            .decls
+            .traits
+            .get(&def)
+            .copied()
+            .ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    what,
+                    "the member's trait is missing from the declaration tables",
+                )
             })
-            .map(|(_, _, served)| served)
-        else {
+    }
+
+    /// The runtime form's evidence words for one pair: this site's
+    /// substitution is its own frame's, so the receiver's single
+    /// variable peels to the frame's written parameter name and the
+    /// pair's area — its slot plus the follow words — reads verbatim
+    /// from the frame's evidence slots.
+    fn slot_evidence(
+        &self,
+        recv: Ty,
+        pair: &RuntimePair,
+        what: &'static str,
+        span: Span,
+    ) -> Result<Vec<EvidenceSrc>, LowerError> {
+        let universe = &self.analyzed.decls.universe;
+        let [only] = universe.members(recv) else {
             return Err(LowerError::unsupported(
                 span,
                 what,
-                "the element type's bound has no unique serving instance at this site (or the \
-                 receiver is a union across branches); runtime evidence resolves one body per \
-                 bound",
+                "the receiver unions members across branches; per-branch runtime evidence has no \
+                 single serving body",
             ));
         };
+        let Some(param) = peeled_param(universe, *only) else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the receiver's type carries no type variable of this body, so the demand keys no \
+                 frame evidence slot",
+            ));
+        };
+        let Some(&slot) = self.evidence.get(&(param, pair.method)) else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "this frame carries no runtime-evidence slot for the member (a demand the walk \
+                 does not collect); the evidence seam covers generic bodies, their lambdas, and \
+                 their spawned children",
+            ));
+        };
+        Ok((0..=FOLLOW_WORDS)
+            .map(|i| EvidenceSrc::Slot(slot + u8::try_from(i).expect("follow word fits u8")))
+            .collect())
+    }
+
+    /// The staged evidence words for one pair a statically-resolved
+    /// instance serves: the serving member body's function-table index
+    /// plus its follow words, walked from the chain-start substitution
+    /// `start` — the serving body's own bound, substituted at this
+    /// site. A serving body that is itself a generic impl member is
+    /// allowed: its index rides the slot and the follow words carry the
+    /// chain a nested runtime dispatch slides, one level per hop.
+    fn chain_words(
+        &mut self,
+        pair: &RuntimePair,
+        trait_id: TraitId,
+        instance: InstanceId,
+        start: Option<Cow<'a, [TypeId]>>,
+        what: &'static str,
+        span: Span,
+    ) -> Result<Vec<EvidenceSrc>, LowerError> {
+        let universe = &self.analyzed.decls.universe;
+        let env = &self.analyzed.decls.instances;
         let impl_site = self
             .analyzed
             .decls
             .instance_impls
-            .get(instance)
+            .get(&instance)
             .copied()
             .ok_or_else(|| {
                 LowerError::unsupported(
@@ -7381,35 +9901,346 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     "the serving instance's impl item is missing from the declaration tables",
                 )
             })?;
-        if self.plan.is_runtime_impl(impl_site) {
+        let mut index = self.serving_body(impl_site, pair.method, what, span)?;
+        let mut words = vec![EvidenceSrc::Const(index)];
+        // the chain start: the substituted type the entered body's own
+        // bound on this pair's variable demands at this receiver — the
+        // follow words serve the dispatches into generic bodies down it.
+        // The entry level is the entering site's own member set; every
+        // deeper link owns the set the previous one solved.
+        let mut cur = start;
+        // the one-word instantiation boundary: the first serving body is
+        // entered by a nested dispatch that stages the bound variable's
+        // single runtime word, so a substitution spanning more must refuse
+        // at this entering site, where the type is concrete
+        if let Some(members) = cur.as_deref() {
+            self.guard_one_word_instantiation(members, what, span)?;
+        }
+        let mut chain_instance = instance;
+        let mut chain_site = impl_site;
+        while words.len() <= FOLLOW_WORDS {
+            let pairs = self.plan.functions()[index as usize].evidence.clone();
+            if pairs.is_empty() {
+                // the chain ends: a concrete body, or a generic one whose
+                // body demands nothing — the remaining words pad with the
+                // last index (the deepest live level never reads past it)
+                while words.len() <= FOLLOW_WORDS {
+                    words.push(words[words.len() - 1]);
+                }
+                return Ok(words);
+            }
+            // a runtime dispatch into this generic body slides its own
+            // area, so the chain must stay on this member: one demand, the
+            // same method — positional follow words cannot re-key another
+            // member's frame
+            if pairs.len() > 1 || pairs[0].method != pair.method {
+                return Err(LowerError::unsupported(
+                    span,
+                    what,
+                    "the transitive serving body demands a different member (or several); the \
+                     frame's evidence area carries one chain per pair",
+                ));
+            }
+            if self.plan.is_default_body(index) {
+                // the serving body is a trait's declared default: its
+                // demand stays on `Self`, substituted with the receiver
+                // this level received, so the same member re-serves the
+                // same substitution and the remaining follow words name
+                // the default body itself. A demand over the trait's own
+                // generic variables carries this level's substitution in
+                // no record the entering site can read — it refuses here.
+                if pairs[0].var != "Self" {
+                    return Err(LowerError::unsupported(
+                        span,
+                        what,
+                        "the transitive serving body's own bound is not resolvable at this site; \
+                         report the construct",
+                    ));
+                }
+                while words.len() <= FOLLOW_WORDS {
+                    words.push(words[words.len() - 1]);
+                }
+                return Ok(words);
+            }
+            let Some(members) = cur.as_deref() else {
+                return Err(LowerError::unsupported(
+                    span,
+                    what,
+                    "the transitive serving body's own bound is not resolvable at this site; \
+                     report the construct",
+                ));
+            };
+            // the serving body's own demand variable names the chain's next
+            // bound: the serving impl declares it, so its conditions key
+            // by that written name
+            let Some((next, Some(next_instance))) = ds_check::instance_solve::evidence_step(
+                universe,
+                env,
+                chain_instance,
+                members,
+                Some(pairs[0].var.as_str()),
+                trait_id,
+            ) else {
+                return Err(LowerError::unsupported(
+                    span,
+                    what,
+                    "the element type's transitive bound has no unique serving instance at this \
+                     site; runtime evidence resolves one body per bound",
+                ));
+            };
+            // the same boundary one level down: the next link's serving
+            // body receives this substitution as its receiver
+            self.guard_one_word_instantiation(&next, what, span)?;
+            let next_site = self
+                .analyzed
+                .decls
+                .instance_impls
+                .get(&next_instance)
+                .copied()
+                .ok_or_else(|| {
+                    LowerError::unsupported(
+                        span,
+                        what,
+                        "the serving instance's impl item is missing from the declaration tables",
+                    )
+                })?;
+            index = self.serving_body(next_site, pair.method, what, span)?;
+            words.push(EvidenceSrc::Const(index));
+            cur = Some(Cow::Owned(next));
+            chain_instance = next_instance;
+            chain_site = next_site;
+        }
+        // the area is full: the last serving body must be concrete (or
+        // demand nothing) — a deeper chain has no words left to slide
+        let pairs = self.plan.functions()[index as usize].evidence.clone();
+        if self.plan.is_runtime_impl(chain_site) && !pairs.is_empty() {
             return Err(LowerError::unsupported(
                 span,
                 what,
-                "the element type's serving body is itself generic; transitive runtime evidence \
-                 staging is the next seam",
+                "the transitive evidence chain is deeper than the frame's follow words; the seam \
+                 carries two levels past the serving body",
             ));
         }
-        self.plan.impl_body(impl_site, &method.name).ok_or_else(|| {
-            LowerError::unsupported(
-                span,
-                what,
-                "the element type's serving impl body did not plan; report the construct",
-            )
-        })
+        Ok(words)
     }
 
-    /// Emits one generic inherent member call's evidence words as Kimm
-    /// stores into the overlay span trailing the arguments, at the
-    /// recorded staged indexes: one function-table index per the body's
-    /// runtime demands, a constant word each (never counted, never a
-    /// binder).
-    fn stage_member_evidence(&mut self, words: &[u32], at: usize) {
+    /// The dispatch target one solved instance names for one member: the
+    /// impl's spelled body, or — when the impl spells no member — the
+    /// trait's declared default body (the member is omittable exactly
+    /// because the declaration carries the dispatch target).
+    fn serving_body(
+        &self,
+        impl_site: Span,
+        method: MethodId,
+        what: &'static str,
+        span: Span,
+    ) -> Result<u32, LowerError> {
+        let method = self.analyzed.package.method(method);
+        if let Some(index) = self.plan.impl_body(impl_site, &method.name) {
+            return Ok(index);
+        }
+        if let MethodOwner::Trait(def) = method.owner
+            && let Some(index) = self.plan.default_body(def, &method.name)
+        {
+            return Ok(index);
+        }
+        Err(LowerError::unsupported(
+            span,
+            what,
+            "the element type's serving impl body did not plan; report the construct",
+        ))
+    }
+
+    /// The staged evidence words a call site entering a generic impl body
+    /// stages for one of the body's demands: the checker-recorded bounds
+    /// of this call site's solved dispatch answer the pair's bound — a
+    /// concrete answer walks the serving chain, a `None` answer (the
+    /// site sits inside a generic body whose substitution is that
+    /// frame's own) reads the frame's evidence slots.
+    fn evidence_words(
+        &mut self,
+        pair: &RuntimePair,
+        bounds: &InherentCallBounds,
+        entered: Option<InstanceId>,
+        inherent_site: Option<Span>,
+        recv: Option<Ty>,
+        what: &'static str,
+        span: Span,
+    ) -> Result<Vec<EvidenceSrc>, LowerError> {
+        let trait_id = self.pair_trait_id(pair, what, span)?;
+        let universe = &self.analyzed.decls.universe;
+        let env = &self.analyzed.decls.instances;
+        // the recorded bounds key by the declaration's own minted variable;
+        // the written parameter name bridges the two mintings
+        let entry = bounds.iter().find(|(var, bound, _)| {
+            crate::shape::var_param_name(universe, *var).as_deref() == Some(pair.var.as_str())
+                && *bound == trait_id
+        });
+        let Some((_, _, served)) = entry else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the element type's bound has no unique serving instance at this site (or the \
+                 receiver is a union across branches); runtime evidence resolves one body per \
+                 bound",
+            ));
+        };
+        let Some(instance) = served else {
+            // the runtime form: this site's substitution is its own frame's
+            let Some(recv) = recv else {
+                return Err(LowerError::unsupported(
+                    span,
+                    what,
+                    "the site's receiver type is missing; report the construct",
+                ));
+            };
+            return self.slot_evidence(recv, pair, what, span);
+        };
+        let instance = *instance;
+        // the chain start: the entered instance's own bound on this
+        // pair's variable, substituted with the receiver this site
+        // entered the body with
+        let start = match (entered, inherent_site) {
+            (Some(entered), _) => recv.and_then(|recv| {
+                Self::chain_start(universe, env, entered, recv, &pair.var, trait_id)
+            }),
+            (None, Some(site)) => recv.and_then(|recv| {
+                self.analyzed
+                    .decls
+                    .inherent_impl_bounds
+                    .get(&site)
+                    .and_then(|record| {
+                        ds_check::instance_solve::inherent_evidence_step(
+                            universe,
+                            env,
+                            record.head,
+                            &record.conditions,
+                            universe.members(recv),
+                            Some(pair.var.as_str()),
+                            trait_id,
+                        )
+                    })
+                    .map(|(target, _)| target)
+            }),
+            (None, None) => None,
+        }
+        .map(Cow::Owned);
+        self.chain_words(pair, trait_id, instance, start, what, span)
+    }
+
+    /// The staged evidence words a call into a free generic fn's body
+    /// stages for one of the body's demands [H3]: the checker's
+    /// per-call record answers the pair's bound under this site's own
+    /// substitution — a concrete answer stages the serving member body
+    /// plus its follow chain, and a `None` answer (the substitution is
+    /// the calling frame's own variable) reads the frame's evidence
+    /// area for the pair.
+    fn free_evidence_words(
+        &mut self,
+        pair: &RuntimePair,
+        record: &GenericCallBounds,
+        what: &'static str,
+        span: Span,
+    ) -> Result<Vec<EvidenceSrc>, LowerError> {
+        let trait_id = self.pair_trait_id(pair, what, span)?;
+        let universe = &self.analyzed.decls.universe;
+        let Some((_, _, served, solved)) = record.iter().find(|(var, bound, ..)| {
+            crate::shape::var_param_name(universe, *var).as_deref() == Some(pair.var.as_str())
+                && *bound == trait_id
+        }) else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the call site recorded no bound answer for the parameter; report the construct",
+            ));
+        };
+        let Some(instance) = served else {
+            return self.slot_evidence(*solved, pair, what, span);
+        };
+        let instance = *instance;
+        // the chain start is the solved type itself: the demand's
+        // variable takes it at this site, and the first follow word
+        // serves the body the serving instance's own head re-substitutes
+        // it into
+        let start = Some(Cow::Borrowed(universe.members(*solved)));
+        self.chain_words(pair, trait_id, instance, start, what, span)
+    }
+
+    /// The one-hop chain-start substitution: the instance's declared
+    /// bound on the pair's variable, solved for the receiver this site
+    /// hands the body.
+    fn chain_start(
+        universe: &ds_check::Universe,
+        env: &ds_check::instance::InstanceEnv,
+        instance: InstanceId,
+        recv: Ty,
+        var: &str,
+        trait_id: TraitId,
+    ) -> Option<Vec<TypeId>> {
+        ds_check::instance_solve::evidence_step(
+            universe,
+            env,
+            instance,
+            universe.members(recv),
+            Some(var),
+            trait_id,
+        )
+        .map(|(target, _)| target)
+    }
+
+    /// The one-word instantiation boundary of the runtime-evidence seam:
+    /// the one generic body lowers a type variable's value to a single
+    /// Raw word — the stride-1 element iteration, the binder, and every
+    /// nested dispatch's staging carry that one word — while a serving
+    /// body claims the substituted type's whole span as its receiver,
+    /// so a multi-word substitution must refuse at the entering site
+    /// (where the type is concrete), never slide at runtime. The
+    /// whole-span vocabulary carries width-static spans alone (concrete
+    /// call sites, signature-governed answers); the variable's width
+    /// never reaches the frame, so no rider shape can carry it. Reboxing
+    /// stays rejected, and per-instantiation frames are the JIT
+    /// specialization tier's, never the interpreter's. A shape with no
+    /// lowering answer refuses at its own staging, so an error here
+    /// stays an error there.
+    fn guard_one_word_instantiation(
+        &mut self,
+        members: &[TypeId],
+        what: &'static str,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let wide = matches!(self.shapes.member_words(members), Ok(ref words) if words.len() > 1);
+        if wide {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the substituted type spans more than one word, while the one generic body lowers \
+                 the variable's value to a single Raw word (the stride-1 element read, the \
+                 binder, the nested dispatch's staging each carry that one word); reboxing stays \
+                 rejected, and per-instantiation frames are the JIT specialization tier's, never \
+                 the interpreter's",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Emits one dispatch site's evidence words into the overlay span at
+    /// the recorded staged index: a constant word per Kimm store, a frame
+    /// word per Mov — neither counted, neither a binder.
+    fn stage_member_evidence(&mut self, words: &[EvidenceSrc], at: usize) {
         for (offset, word) in words.iter().enumerate() {
-            let kidx = self.pool(Constant::I64(i64::from(*word)));
-            self.emit(Op::Kimm {
-                dst: Slot::overlay(u8::try_from(at + offset).expect("overlay word fits u8")),
-                kidx,
-            });
+            let dst = Slot::overlay(u8::try_from(at + offset).expect("overlay word fits u8"));
+            match word {
+                EvidenceSrc::Const(index) => {
+                    let kidx = self.pool(Constant::I64(i64::from(*index)));
+                    self.emit(Op::Kimm { dst, kidx });
+                },
+                EvidenceSrc::Slot(slot) => {
+                    self.emit(Op::Mov {
+                        dst,
+                        src: Slot::body(*slot),
+                    });
+                },
+            }
         }
     }
 
@@ -7429,7 +10260,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 return Err(LowerError::unsupported(
                     span,
                     "a generic callee",
-                    "a generic body's dispatch is the M6 CALL_GENERIC seam",
+                    "the generic body did not plan (an extern, `var`-bound, or bodiless generic \
+                     fn lowers nothing), so no dispatch reaches it",
                 ));
             }
         }
@@ -7476,20 +10308,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         staged
     }
 
-    /// The literal-only parameter defaults [F7] an impl-member call
-    /// stages at the call site for its omitted trailing parameters:
-    /// the checker proves each default's literal against the
-    /// parameter type at the call, so the call lowers them exactly
-    /// like written arguments — the same staging the free-fn spelling
-    /// applies, over the impl body's own declaration (the plan entry
-    /// the dispatch resolved). The staged exprs are span-preserving
-    /// clones, so the checker's span-keyed tables resolve them
-    /// unchanged. A default the checker never typed — a trait impl
-    /// body's own re-declared default, whose call sites check the
-    /// trait's declared signature — refuses naming the seam. A
-    /// non-defaulted omission is the checker's to reject; the
-    /// staged-width guard at the call names anything that slips
-    /// through.
+    /// The literal-only parameter defaults [F7] a trait-method dispatch
+    /// call stages at the call site for its omitted trailing parameters:
+    /// the trait declaration is a defaulted member parameter's single
+    /// authority, so the dot spelling and the qualified
+    /// `Trait::method` spelling stage the trait member's registered
+    /// defaults — the same literals the checker proved against the
+    /// parameter types at this call site — exactly like written
+    /// arguments. The staged exprs are span-preserving clones of the
+    /// trait's declared literals, so the checker's span-keyed tables
+    /// resolve them unchanged. A non-defaulted omission is the
+    /// checker's to reject; the staged-width guard at the call names
+    /// anything that slips through.
+    fn trait_default_exprs(&self, method: MethodId, written: usize) -> Vec<Expr> {
+        let Some(sig) = self.analyzed.decls.members.get(&method) else {
+            return Vec::new();
+        };
+        let Some(missing) = sig.params.get(written..) else {
+            return Vec::new();
+        };
+        if !missing.iter().all(|param| param.default.is_some()) {
+            return Vec::new();
+        }
+        missing
+            .iter()
+            .map(|param| param.default.clone().expect("checked directly above"))
+            .collect()
+    }
+
+    /// The literal-only parameter defaults [F7] an inherent-member call
+    /// stages at the call site for its omitted trailing parameters: the
+    /// checker proves each default's literal against the parameter type
+    /// at the call (inherent members own their body defaults — no trait
+    /// declaration exists), so the call lowers them exactly like written
+    /// arguments — the same staging the free-fn spelling applies, over
+    /// the impl body's own declaration (the plan entry the dispatch
+    /// resolved). The staged exprs are span-preserving clones, so the
+    /// checker's span-keyed tables resolve them unchanged. A default the
+    /// checker never typed refuses naming the seam; a non-defaulted
+    /// omission is the checker's to reject, and the staged-width guard
+    /// at the call names anything that slips through.
     fn member_default_exprs(
         &self,
         index: u32,
@@ -7543,7 +10401,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn decl_param_words(&mut self, index: u32) -> Option<Vec<SlotType>> {
         let planned = self.plan.functions().get(index as usize)?;
         let decl = planned.decl.clone()?;
-        let mut words = Vec::new();
+        let mut words = Vec::with_capacity(decl.params.len());
         for param in decl.params.iter() {
             let fact = self
                 .analyzed
@@ -7551,7 +10409,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .binders
                 .get(&param.name.span)
                 .copied()?;
-            words.extend(self.shapes.words(fact.ty).ok()?);
+            words.extend_from_slice(&self.shapes.words(fact.ty).ok()?);
         }
         Some(words)
     }
@@ -7579,6 +10437,60 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let fn_ty = self.analyzed.checked.def_types.get(&def).copied()?;
         let (params, _) = fn_sig_of(&self.analyzed.decls.universe, fn_ty)?;
         Some(params.to_vec())
+    }
+
+    /// The declared parameter modes of one planned function (a declared
+    /// body's or a lambda's own parameters, a def's recorded signature):
+    /// a consuming (`move`) parameter's staging forwards its argument's
+    /// count and any deinit claim (C2) — the checker's forced move makes
+    /// the death test true at exactly that use. `None` when the body's
+    /// parameters are not statically readable here.
+    fn planned_param_modes(&self, index: u32) -> Option<Vec<ds_parse::ParamMode>> {
+        let planned = self.plan.functions().get(index as usize)?;
+        if let Some(decl) = &planned.decl {
+            return Some(decl.params.iter().map(|param| param.mode).collect());
+        }
+        if let Some(def) = planned.def {
+            let sig = self.analyzed.decls.fns.get(&def)?;
+            return Some(sig.params.iter().map(|param| param.mode).collect());
+        }
+        if let Expr::Lambda { params, .. } = &planned.lambda {
+            return Some(params.iter().map(|param| param.mode).collect());
+        }
+        None
+    }
+
+    /// Whether the parameter at one written-argument position consumes
+    /// its argument (`move` mode, C2): the callee is a planned body (a
+    /// local callee or a trait dispatch's impl body) or a runtime
+    /// dispatch through the trait member's declared signature (impl
+    /// bodies agree with the declaration). Natives carry no modes, and a
+    /// position with no readable mode borrows.
+    fn consuming_args(
+        &self,
+        target: Callee,
+        dispatch: Option<&TraitDispatch>,
+        args: usize,
+    ) -> Vec<bool> {
+        let modes: Option<Vec<ds_parse::ParamMode>> = match target {
+            Callee::Local(index) => self.planned_param_modes(index),
+            Callee::Evidence(_) => match dispatch {
+                Some(TraitDispatch::Runtime { method, .. }) => self
+                    .analyzed
+                    .decls
+                    .members
+                    .get(method)
+                    .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
+                _ => None,
+            },
+            Callee::Builtin(_) | Callee::Generic(_) => None,
+        };
+        match modes {
+            Some(modes) => (0..args)
+                .map(|index| matches!(modes.get(index), Some(ds_parse::ParamMode::Consume(_))))
+                .collect(),
+            None => vec![false; args],
+        }
     }
 
     fn callee_param_words(&mut self, index: u32) -> Option<usize> {
@@ -7640,10 +10552,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         target: Callee,
         instance: Option<BuiltinInstance>,
         ty: Ty,
-    ) -> Result<Vec<SlotType>, LowerError> {
+    ) -> Result<SpanWords, LowerError> {
         match target {
             Callee::Builtin(native) => match native.shape {
-                NativeShape::Total(slot) => Ok(vec![slot]),
+                NativeShape::Total(slot) => Ok(Rc::from([slot])),
                 // call_impl routes fallible and checked natives through
                 // their own tag-test paths; this generic copy never sees
                 // them
@@ -7651,15 +10563,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 NativeShape::Checked => Err(mismatch("a checked-read native result")),
                 NativeShape::TotalByInstance => Err(mismatch("an instance-keyed native result")),
                 NativeShape::TotalByResultType => Err(mismatch("a result-keyed native result")),
+                NativeShape::TaglessTotal => Err(mismatch("a tag-less-total native result")),
             },
             Callee::Generic(generic) => match generic.shape {
-                NativeShape::Total(slot) => Ok(vec![slot]),
+                NativeShape::Total(slot) => Ok(Rc::from([slot])),
                 NativeShape::TotalByInstance => match instance {
-                    Some(BuiltinInstance::Int) => Ok(vec![SlotType::I64]),
-                    Some(BuiltinInstance::Float) => Ok(vec![SlotType::F64]),
+                    Some(BuiltinInstance::Int) => Ok(Rc::from([SlotType::I64])),
+                    Some(BuiltinInstance::Float) => Ok(Rc::from([SlotType::F64])),
                     _ => Err(mismatch("an instance-keyed generic result")),
                 },
-                NativeShape::TotalByResultType => self.shapes.words(ty),
+                // the tag-less total answers the call's own result
+                // type's words with no discriminant (partition's
+                // two-list tuple: two Ref words the destructuring binds)
+                NativeShape::TotalByResultType | NativeShape::TaglessTotal => self.shapes.words(ty),
                 NativeShape::Fallible { .. } | NativeShape::Checked => {
                     Err(mismatch("a generic builtin result"))
                 },
@@ -7667,10 +10583,33 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Callee::Evidence(_) => self.shapes.words(ty),
             Callee::Local(index) => {
                 let planned = &self.plan.functions()[index as usize];
+                if planned.free_generic {
+                    // the ONE body returns the type variable's single
+                    // Raw word, so the site's solved answer must span
+                    // one word too when the declared return is the
+                    // variable — the same boundary the arguments guard
+                    // (a trait's declared default body carries its solved
+                    // return on the plan entry; no def signature names it)
+                    let words = self.shapes.words(ty)?;
+                    let declared = planned
+                        .def
+                        .and_then(|def| self.analyzed.checked.def_types.get(&def).copied())
+                        .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                        .map(|(_, ret)| ret)
+                        .or(planned.ret);
+                    if declared.is_some_and(|ret| self.is_var_ty(ret)) {
+                        self.guard_one_word_instantiation(
+                            self.members(ty),
+                            "a generic call's result",
+                            no_span(), // re-pointed at the call site
+                        )?;
+                    }
+                    return Ok(words);
+                }
                 if let Some(ret) = planned.ret {
                     let words = self.shapes.words(ret)?;
-                    if words.as_slice() == [SlotType::Fn] && self.tail_builds_a_closure(index) {
-                        return Ok(vec![SlotType::Ref]);
+                    if *words == [SlotType::Fn] && self.tail_builds_a_closure(index) {
+                        return Ok(Rc::from([SlotType::Ref]));
                     }
                     return Ok(words);
                 }
@@ -7694,8 +10633,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // result keeps the scalar classification (a closure
                 // returned through such a callee traps at the call — the
                 // recorded return-flow seam).
-                if words.as_slice() == [SlotType::Fn] && self.tail_builds_a_closure(index) {
-                    return Ok(vec![SlotType::Ref]);
+                if *words == [SlotType::Fn] && self.tail_builds_a_closure(index) {
+                    return Ok(Rc::from([SlotType::Ref]));
                 }
                 Ok(words)
             },
@@ -7723,7 +10662,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
             return self.fallible_native_union(native, ty, payload, staged);
         }
-        if self.shapes.words(ty)? != [payload] {
+        if *self.shapes.words(ty)? != [payload] {
             return Err(LowerError::unsupported(
                 no_span(),
                 "a fallible native call",
@@ -7732,7 +10671,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             ));
         }
         self.overlay_fallible(staged, payload);
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
@@ -7757,12 +10696,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             src: Slot::overlay(0),
         });
         let prefix = self.temp_word(SlotType::Ref)?;
-        let kidx = self.pool(Constant::Str(err_prefix.to_owned()));
-        self.emit(Op::Kstr {
-            dst: Slot::body(prefix),
-            kidx,
-        });
-        self.rc.produced(prefix);
+        let kidx = self.pool_str(err_prefix);
+        self.kstr(prefix, kidx);
         let message = self.temp_word(SlotType::Ref)?;
         self.emit(Op::Mov {
             dst: Slot::body(message),
@@ -7777,7 +10712,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             rhs: Slot::body(message),
         });
         self.rc.read(&mut self.code, &[prefix, message]);
-        self.rc.produced(text);
+        self.rc.produced_strcat(text);
         self.emit(Op::Mov {
             dst: Slot::overlay(0),
             src: Slot::body(text),
@@ -7785,7 +10720,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.rc.native_open();
         self.rc.staged_native(text, false);
         let println = crate::native::lookup("println").expect("the console native is covered");
-        let kidx = self.pool(funcref_const(Callee::Builtin(println)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(println)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: 1,
@@ -7879,7 +10814,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.overlay.resize(self.overlay_len, HashSet::new());
         }
         self.overlay[1].insert(SlotType::Ref);
-        let kidx = self.pool(funcref_const(Callee::Builtin(native)));
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
@@ -7964,16 +10899,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.overlay[1].insert(SlotType::Ref);
     }
 
-    /// One checked-read native call (`list_get`, `map_get`): the
-    /// two-word ok/none span lands like a fallible native's, but neither
-    /// side is a failure — it re-spans into the call's own `t | none`
-    /// union: ok writes the element member with the payload word, none
-    /// the predeclared unit member, so `?`, `.ok`, and match see an
-    /// ordinary optional value. The element must be one single-word
-    /// atom; the rejected index the none side carries has no member
-    /// field to surface in, so it drops. The generic spelling routes the
-    /// same span through CALLG, the evidence words staged behind the
-    /// real arguments.
+    /// One checked-read native call (`list_get`, `map_get`): the ok/none
+    /// span lands like a fallible native's, but neither side is a
+    /// failure — it re-spans into the call's own `t | none` union: ok
+    /// writes the element member with the payload's whole word span (the
+    /// native channel: one overlay word per element word, a count per
+    /// `Ref` word produced), none the predeclared unit member, so `?`,
+    /// `.ok`, and match see an ordinary optional value. The element must
+    /// be one atom; the rejected index the none side carries has no
+    /// member field to surface in, so it drops. The generic spelling
+    /// routes the same span through CALLG, the evidence words staged
+    /// behind the real arguments.
     fn checked_native_result(
         &mut self,
         target: Callee,
@@ -7991,9 +10927,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let none_member = u
             .member(TypeId::NONE)
-            .ok_or_else(|| mismatch("a checked read's none member"))?
-            .clone();
-        let element = set_diff(&self.members(ty), &[TypeId::NONE]);
+            .ok_or_else(|| mismatch("a checked read's none member"))?;
+        let element = set_diff(self.members(ty), &[TypeId::NONE]);
         let [elem] = element.as_slice() else {
             return Err(LowerError::unsupported(
                 no_span(),
@@ -8003,17 +10938,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let elem_member = u
             .member(*elem)
-            .ok_or_else(|| mismatch("a checked read's element member"))?
-            .clone();
-        let [field] = elem_member.fields.as_slice() else {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a checked-read native call",
-                "the element type must be one word; wider elements arrive when the native \n                 channel carries whole spans",
-            ));
-        };
-        self.overlay_site(staged, &[SlotType::Tag, field.slot()]);
-        let kidx = self.pool(funcref_const(target));
+            .ok_or_else(|| mismatch("a checked read's element member"))?;
+        // the ok payload's flat word span: the member's fields flattened
+        // in declaration order — the native answers the element's whole
+        // span, one overlay word per element word
+        let elem_words: Vec<SlotType> = elem_member
+            .fields
+            .iter()
+            .flat_map(|field| field.slots.iter().copied())
+            .collect();
+        let mut result_words = vec![SlotType::Tag];
+        result_words.extend_from_slice(&elem_words);
+        self.guard_staged_count(staged.len().max(result_words.len()))?;
+        self.overlay_site(staged, &result_words);
+        let kidx = self.pool(self.funcref_const(target));
         match target {
             // the staged span of a generic call ends in its evidence
             // words; nargs names the real arguments, the constraint list
@@ -8067,12 +11005,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             tag,
         });
         self.zero_init_member(result.base, &u.words, &elem_member.fields)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(result.base + field.word),
-            src: Slot::overlay(1),
-        });
-        if field.slot() == SlotType::Ref {
-            self.rc.produced(result.base + field.word);
+        // the payload copies from the flat overlay span into the member's
+        // claimed words (fields may claim scattered region offsets; the
+        // flat index walks the element's declaration order)
+        let mut flat = 0usize;
+        for field in &elem_member.fields {
+            for (offset, slot) in field.slots.iter().enumerate() {
+                let word = result.base + field.word + u8::try_from(offset).expect("offset fits u8");
+                self.emit(Op::Mov {
+                    dst: Slot::body(word),
+                    src: Slot::overlay(
+                        u8::try_from(1 + flat + offset).expect("overlay word fits u8"),
+                    ),
+                });
+                if *slot == SlotType::Ref {
+                    self.rc.produced(word);
+                }
+            }
+            flat += field.slots.len();
         }
         let arm_ok = self.rc.take();
         let dying = self.rc.reconcile(&[(arm_none, false), (arm_ok, false)]);
@@ -8102,7 +11052,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "`.err` takes a lambda that inlines at the call site",
             ));
         };
-        let handled = set_diff(&self.members(src_ty), &self.members(ty));
+        let handled = set_diff(self.members(src_ty), self.members(ty));
         let result = self.temp_span(ty)?;
         let handler_lbl = self.label();
         let join = self.label();
@@ -8127,15 +11077,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // handled member contributed a word shape the kept set does
         // not need
         let base = self.rc.save();
-        let kept = set_diff(&self.members(src_ty), &handled);
+        let kept = set_diff(self.members(src_ty), &handled);
         if kept.len() == 1 && !self.is_span_ty(ty) {
             // the result is the one kept atom itself: claiming that
             // atom is honest — the word-address path extracts the
             // member's payload words out of the operand's layout
-            self.widen_into(&result, ty, &TypedPlace {
-                place: src.place.clone(),
+            self.widen_into(
+                &result,
                 ty,
-            })?;
+                &TypedPlace {
+                    place: src.place.clone(),
+                    ty,
+                },
+                recv.span(),
+            )?;
         } else {
             let labels: Vec<usize> = kept.iter().map(|_| self.label()).collect();
             for (member, label) in kept.iter().zip(&labels) {
@@ -8171,6 +11126,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let [param] = params.as_slice() else {
                 return Err(mismatch("a handler parameter"));
             };
+            if !matches!(param.mode, ds_parse::ParamMode::Borrow) {
+                return Err(LowerError::unsupported(
+                    param.span,
+                    "a mode on a handler parameter",
+                    "the inlined handler binds its parameter as an alias of the payload word; the \
+                     extraction seam owns no claim hand-off yet",
+                ));
+            }
             self.binders.insert(param.name.span, Place {
                 base: src.place.base,
                 shape: src.place.shape.clone(),
@@ -8184,7 +11147,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
-            self.widen_into(&result, ty, &body_tp)?;
+            self.refuse_fn_word_answer(
+                ty,
+                &body_tp,
+                body.span(),
+                "a capturing closure in a handler's answer",
+                "an unproven callable in a handler's answer",
+            )?;
+            self.widen_into(&result, ty, &body_tp, body.span())?;
             self.scope_pop();
         }
         let arm_err = self.rc.take();
@@ -8217,6 +11187,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let [param] = params.as_slice() else {
             return Err(mismatch("a handler parameter"));
         };
+        if !matches!(param.mode, ds_parse::ParamMode::Borrow) {
+            return Err(LowerError::unsupported(
+                param.span,
+                "a mode on a handler parameter",
+                "the inlined handler binds its parameter as an alias of the payload word; the \
+                 extraction seam owns no claim hand-off yet",
+            ));
+        }
         let handled = self.ok_side(param, body, src_ty)?;
         let result = self.temp_span(ty)?;
         let handler_lbl = self.label();
@@ -8238,17 +11216,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // the difference side flows into the result; the fall-through and
         // the handler arm fork the ownership map
         let base = self.rc.save();
-        let remainder = set_diff(&self.members(src_ty), &handled);
+        let remainder = set_diff(self.members(src_ty), &handled);
         let mut flow_jmps = Vec::new();
         if remainder.is_empty() {
             // every member jumps to the handler; the fallthrough is dead
             self.emit(Op::Jmp { target: join });
         } else if self.members(src_ty).len() == 1 {
             // a single-member operand: the value itself flows, no tags
-            self.widen_into(&result, ty, &TypedPlace {
-                place: src.place.clone(),
-                ty: src_ty,
-            })?;
+            self.widen_into(
+                &result,
+                ty,
+                &TypedPlace {
+                    place: src.place.clone(),
+                    ty: src_ty,
+                },
+                recv.span(),
+            )?;
             flow_jmps.push(self.code.len());
             self.emit(Op::Jmp { target: join });
         } else {
@@ -8295,7 +11278,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
-            self.widen_into(&result, ty, &body_tp)?;
+            self.refuse_fn_word_answer(
+                ty,
+                &body_tp,
+                body.span(),
+                "a capturing closure in a handler's answer",
+                "an unproven callable in a handler's answer",
+            )?;
+            self.widen_into(&result, ty, &body_tp, body.span())?;
             self.scope_pop();
         }
         let arm_ok = self.rc.take();
@@ -8379,13 +11369,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The family's receiver decomposition: the checked `t | none`
-    /// union's none member and its single one-word t side — the same
-    /// restriction the checked reads carry; wider sides wait on the native channel.
-    fn optional_side(
-        &mut self,
-        recv_ty: Ty,
-        span: Span,
-    ) -> Result<(TypeId, MemberField), LowerError> {
+    /// union's none member and its extracted t side's atom. The side's
+    /// words may span any width — a struct member's fields claim their
+    /// region spans — and the consumers gather them through
+    /// [`fn extracted_words`](Self::extracted_words).
+    fn optional_side(&mut self, recv_ty: Ty, span: Span) -> Result<TypeId, LowerError> {
         let shape = self.shapes.shape(recv_ty)?;
         let Shape::Union(u) = &*shape else {
             return Err(LowerError::unsupported(
@@ -8397,7 +11385,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if u.member(TypeId::NONE).is_none() {
             return Err(mismatch("an optional receiver's none member"));
         }
-        let diff = set_diff(&self.members(recv_ty), &[TypeId::NONE]);
+        let diff = set_diff(self.members(recv_ty), &[TypeId::NONE]);
         let [elem] = diff.as_slice() else {
             return Err(LowerError::unsupported(
                 span,
@@ -8405,31 +11393,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "the extracted side must be one atom; narrow the receiver first",
             ));
         };
-        let elem_member = u
-            .member(*elem)
-            .ok_or_else(|| mismatch("an optional receiver's extracted member"))?
-            .clone();
-        let [field] = elem_member.fields.as_slice() else {
-            return Err(LowerError::unsupported(
-                span,
-                "an extraction-family receiver",
-                "the extracted side must be one word; wider members arrive when the native \
-                 channel carries whole spans",
-            ));
-        };
-        Ok((*elem, field.clone()))
+        Ok(*elem)
     }
 
-    /// The receiver's one-word t side read out of its union span; the
-    /// call's own checked type is the extracted type, so it shapes the
-    /// payload place.
-    fn extracted_place(
-        &mut self,
-        base: u8,
-        field: &MemberField,
-        ty: Ty,
-    ) -> Result<Place, LowerError> {
-        self.place_of_ty(base + field.word, ty)
+    /// The extracted side's word addresses inside the receiver's union
+    /// span: the element type's own field map over the span place, so a
+    /// member whose fields claim scattered region offsets gathers
+    /// correctly — the same discipline the checked read's ok arm copies
+    /// by.
+    fn extracted_words(&mut self, src: &Place, elem: Ty) -> Result<Vec<WordAddr>, LowerError> {
+        self.word_addrs(src, elem)
     }
 
     /// `x.unwrap_or(y)` [E4]: the eager fallback — both operands evaluate,
@@ -8443,7 +11416,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        let (_, field) = self.optional_side(src_ty, span)?;
+        self.optional_side(src_ty, span)?;
         let fb = self.value(fallback)?;
         let result = self.temp_span(ty)?;
         let cond = self.temp_word(SlotType::Bool)?;
@@ -8462,18 +11435,40 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         // path-fork: the fallback and the payload each own the result
         let base = self.rc.save();
-        self.widen_into(&result, ty, &TypedPlace {
-            place: fb.place.clone(),
-            ty: fb.ty,
-        })?;
+        self.refuse_fn_word_answer(
+            ty,
+            &fb,
+            fallback.span(),
+            "a capturing closure in unwrap_or's fallback",
+            "an unproven callable in unwrap_or's fallback",
+        )?;
+        self.widen_into(
+            &result,
+            ty,
+            &TypedPlace {
+                place: fb.place.clone(),
+                ty: fb.ty,
+            },
+            span,
+        )?;
         let arm_none = self.rc.take();
         let none_div = self.rc.diverged();
         let none_jmp = self.code.len();
         self.emit(Op::Jmp { target: join });
         self.rc.restore(base);
         self.bind_label(ok_lbl);
-        let payload = self.extracted_place(src.place.base, &field, ty)?;
-        self.widen_into(&result, ty, &TypedPlace { place: payload, ty })?;
+        // the payload gathers out of the receiver's union span (fields may
+        // claim scattered offsets) into the result's contiguous words
+        for (index, addr) in self.extracted_words(&src.place, ty)?.iter().enumerate() {
+            let word = result.base + u8::try_from(index).expect("span width fits u8");
+            self.emit(Op::Mov {
+                dst: Slot::body(word),
+                src: Slot::body(addr.slot),
+            });
+            if addr.slot_ty == SlotType::Ref {
+                self.rc.copied(&mut self.code, word, addr.slot);
+            }
+        }
         let arm_ok = self.rc.take();
         let dying = self.rc.reconcile(&[(arm_none, none_div), (arm_ok, false)]);
         if let [none, ok] = &dying[..] {
@@ -8498,7 +11493,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        let (_, field) = self.optional_side(src_ty, span)?;
+        self.optional_side(src_ty, span)?;
         let Expr::Lambda { params, body, .. } = fallback else {
             return Err(LowerError::unsupported(
                 fallback.span(),
@@ -8528,7 +11523,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let base = self.rc.save();
         self.scope_push();
         let body_tp = self.value(body)?;
-        self.widen_into(&result, ty, &body_tp)?;
+        self.refuse_fn_word_answer(
+            ty,
+            &body_tp,
+            body.span(),
+            "a capturing closure in unwrap_or_else's fallback",
+            "an unproven callable in unwrap_or_else's fallback",
+        )?;
+        self.widen_into(&result, ty, &body_tp, body.span())?;
         self.scope_pop();
         let arm_none = self.rc.take();
         let none_div = self.rc.diverged();
@@ -8536,8 +11538,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.emit(Op::Jmp { target: join });
         self.rc.restore(base);
         self.bind_label(ok_lbl);
-        let payload = self.extracted_place(src.place.base, &field, ty)?;
-        self.widen_into(&result, ty, &TypedPlace { place: payload, ty })?;
+        // the payload gathers out of the receiver's union span like
+        // `unwrap_or`'s ok arm
+        for (index, addr) in self.extracted_words(&src.place, ty)?.iter().enumerate() {
+            let word = result.base + u8::try_from(index).expect("span width fits u8");
+            self.emit(Op::Mov {
+                dst: Slot::body(word),
+                src: Slot::body(addr.slot),
+            });
+            if addr.slot_ty == SlotType::Ref {
+                self.rc.copied(&mut self.code, word, addr.slot);
+            }
+        }
         let arm_ok = self.rc.take();
         let dying = self.rc.reconcile(&[(arm_none, none_div), (arm_ok, false)]);
         if let [none, ok] = &dying[..] {
@@ -8573,34 +11585,42 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        let (elem, field) = self.optional_side(src_ty, span)?;
+        let elem = self.optional_side(src_ty, span)?;
         let ev = self.value(err)?;
         let err_atom = self.only_atom(ev.ty, err.span())?;
         let err_words = self.word_addrs(&ev.place, ev.ty)?;
+        // the err arm stages its words directly into the result member's
+        // fields, so the union payload's provenance guard runs here
+        // instead of the widening write
+        self.refuse_union_fn_payload(&ev, err.span())?;
         let result = self.temp_span(ty)?;
         let shape = self.shapes.shape(ty)?;
         let Shape::Union(u) = &*shape else {
             return Err(mismatch("an ok_or result union"));
         };
+        // the payload's gathered addresses inside the receiver's span: the
+        // elem member's fields, scattered region offsets included
+        let src_shape = self.shapes.shape(src_ty)?;
+        let Shape::Union(src_u) = &*src_shape else {
+            return Err(mismatch("an ok_or receiver union"));
+        };
+        let src_elem = src_u
+            .member(elem)
+            .ok_or_else(|| mismatch("an ok_or receiver's extracted member"))?;
+        let elem_words: Vec<WordAddr> = src_elem
+            .fields
+            .iter()
+            .flat_map(|field| field_addrs(src.place.base, field))
+            .collect();
         let none_tag = self.shapes.tag_id(TypeId::NONE)?;
         let err_tag = self.shapes.tag_id(err_atom)?;
         let elem_tag = self.shapes.tag_id(elem)?;
         let err_member = u
             .member(err_atom)
-            .ok_or_else(|| mismatch("an ok_or error member"))?
-            .clone();
+            .ok_or_else(|| mismatch("an ok_or error member"))?;
         let elem_dst = u
             .member(elem)
-            .ok_or_else(|| mismatch("an ok_or result's extracted member"))?
-            .clone();
-        let [dst_field] = elem_dst.fields.as_slice() else {
-            return Err(LowerError::unsupported(
-                span,
-                "an ok_or result",
-                "the extracted side must be one word; wider members arrive when the native \
-                 channel carries whole spans",
-            ));
-        };
+            .ok_or_else(|| mismatch("an ok_or result's extracted member"))?;
         let cond = self.temp_word(SlotType::Bool)?;
         let src_word = self.tag_addr(&src.place)?;
         self.emit(Op::TagTest {
@@ -8621,8 +11641,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             tag: err_tag,
         });
         self.zero_init_member(result.base, &u.words, &err_member.fields)?;
-        for dst_field in &err_member.fields {
-            let srcs = field_srcs(&err_words, dst_field)?;
+        let srcs = ordered_field_srcs(&err_words, &err_member.fields)?;
+        for (dst_field, srcs) in err_member.fields.iter().zip(srcs) {
             self.store_field_span(result.base, dst_field, srcs);
         }
         let arm_err = self.rc.take();
@@ -8636,16 +11656,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             tag: elem_tag,
         });
         self.zero_init_member(result.base, &u.words, &elem_dst.fields)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(result.base + dst_field.word),
-            src: Slot::body(src.place.base + field.word),
-        });
-        if dst_field.slot() == SlotType::Ref {
-            self.rc.copied(
-                &mut self.code,
-                result.base + dst_field.word,
-                src.place.base + field.word,
-            );
+        // the payload stores per field like the err arm's, gathered out of
+        // the receiver's span (scattered offsets name-match by field)
+        let srcs = ordered_field_srcs(&elem_words, &elem_dst.fields)?;
+        for (dst_field, srcs) in elem_dst.fields.iter().zip(srcs) {
+            self.store_field_span(result.base, dst_field, srcs);
         }
         let arm_ok = self.rc.take();
         let dying = self.rc.reconcile(&[(arm_err, err_div), (arm_ok, false)]);
@@ -8670,7 +11685,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let src = self.value(expr)?;
         let src_ty = self.val(expr.span())?.ty;
-        let propagated = set_diff(&self.members(src_ty), &self.members(ty));
+        let propagated = set_diff(self.members(src_ty), self.members(ty));
         let continue_lbl = self.label();
         let mut exits = Vec::with_capacity(propagated.len());
         for member in &propagated {
@@ -8714,12 +11729,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let src = self.value(operand)?;
         let src_ty = self.val(operand.span())?.ty;
         let members = self.members(src_ty);
-        match members.as_slice() {
+        match members {
             [] => Err(mismatch("a `?` over an empty operand union")),
             [_] => self.emit_return(&src.place, src_ty, operand.span()),
             _ => {
                 let mut exits = Vec::with_capacity(members.len());
-                for member in &members {
+                for member in members {
                     let exit = self.label();
                     let cond = self.temp_word(SlotType::Bool)?;
                     let src_word = self.tag_addr(&src.place)?;
@@ -8866,7 +11881,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 span,
                 "a `cancel` call",
-                "stage exactly the error value; the payload is one member word",
+                "stage exactly the error value; the payload is one member's word span",
             ));
         };
         let tp = self.value(operand)?;
@@ -8878,19 +11893,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Shape::Word(SlotType::Tag) => true,
             _ => false,
         };
-        if !bare {
-            return Err(LowerError::unsupported(
-                operand.span(),
-                "a `cancel` payload",
-                "the error value must be a bare enum member this round; payloaded members wait on \
-                 the span rework's native channel",
-            ));
-        }
         // the containment proof belongs to the function that owns the
         // nursery the fiber cancels into: the parent's spawn site checks
         // a spawned body's payloads against its own return union, so a
         // child frame skips the check here
-        if !self.spawn_child && !set_diff(&payload_members, &self.members(self.ret_ty)).is_empty() {
+        if !self.spawn_child && !set_diff(payload_members, self.members(self.ret_ty)).is_empty() {
             return Err(LowerError::unsupported(
                 operand.span(),
                 "a `cancel` payload",
@@ -8898,15 +11905,156 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  nursery boundary unions child errors out through the return",
             ));
         }
-        let addr = single(&self.word_addrs(&tp.place, tp.ty)?, operand.span())?;
-        if addr.slot_ty != SlotType::Tag {
-            return Err(LowerError::unsupported(
-                operand.span(),
-                "a `cancel` payload",
-                "the error value must be a bare enum member this round",
-            ));
+        if bare {
+            let addr = single(&self.word_addrs(&tp.place, tp.ty)?, operand.span())?;
+            if addr.slot_ty != SlotType::Tag {
+                return Err(LowerError::unsupported(
+                    operand.span(),
+                    "a `cancel` payload",
+                    "the error value must be a bare enum member this round",
+                ));
+            }
+            self.seam_call(native, &[(addr.slot, SlotType::Tag)], &[SlotType::I64])?;
+            return Ok(self.unit_value(span)?.place);
         }
-        self.seam_call(native, &[(addr.slot, SlotType::Tag)], &[SlotType::I64])?;
+        // The payloaded staging: the channel is the failing value's flat
+        // word span — word 0 the member's tag, the tail the live
+        // member's payload words in declaration order (the native
+        // channel's staging shape), the words past the live member's
+        // width plain-zeroed so a stale overlay word never rides the
+        // trap. A union operand dispatches on its own tag word per
+        // payloaded member (the operand's region claim layout is this
+        // site's fact); any other operand mints its member's tag ahead
+        // of its whole span. The staged `Ref` sources keep their counts
+        // — a borrow window exactly like any native staging — and the
+        // dying fiber's drain hands the delivered words' claims to the
+        // joiner.
+        self.rc.native_open();
+        let layout = self.shapes.shape(tp.ty)?;
+        if let Shape::Union(_) = &*layout {
+            let tag_word = self.tag_addr(&tp.place)?;
+            let mut arms: Vec<(u8, &[MemberField])> = Vec::new();
+            for member in payload_members {
+                let fields = layout
+                    .member_fields(*member)
+                    .ok_or_else(|| mismatch("a union member read"))?;
+                if fields.is_empty() {
+                    continue;
+                }
+                let tag = self.shapes.tag_id(*member)?;
+                arms.push((tag, fields));
+            }
+            let width = arms
+                .iter()
+                .map(|(_, fields)| fields.iter().map(MemberField::width).sum::<usize>())
+                .max()
+                .unwrap_or(0);
+            self.guard_staged_count(1 + width)?;
+            self.emit(Op::Mov {
+                dst: Slot::overlay(0),
+                src: Slot::body(tag_word),
+            });
+            for index in 1..=width {
+                let kidx = self.pool(Constant::I64(0));
+                self.emit(Op::Kimm {
+                    dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
+                    kidx,
+                });
+            }
+            let mut labels = Vec::with_capacity(arms.len());
+            for (tag, _) in &arms {
+                let cond = self.temp_word(SlotType::Bool)?;
+                self.emit(Op::TagTest {
+                    dst: Slot::body(cond),
+                    src: Slot::body(tag_word),
+                    tag: *tag,
+                });
+                let label = self.label();
+                self.emit(Op::Jmpif {
+                    cond: Slot::body(cond),
+                    target: label,
+                });
+                labels.push(label);
+            }
+            let call = self.label();
+            self.emit(Op::Jmp { target: call });
+            for ((_, fields), label) in arms.iter().zip(labels) {
+                self.bind_label(label);
+                let mut flat = 0usize;
+                for field in *fields {
+                    for offset in 0..field.width() {
+                        let at =
+                            field.word + u8::try_from(offset).expect("field span offset fits u8");
+                        self.emit(Op::Mov {
+                            dst: Slot::overlay(
+                                u8::try_from(1 + flat + offset).expect("overlay word fits u8"),
+                            ),
+                            src: Slot::body(tag_word + at),
+                        });
+                        if field.slots[offset] == SlotType::Ref {
+                            self.rc.staged_native(tag_word + at, false);
+                        }
+                    }
+                    flat += field.width();
+                }
+                self.emit(Op::Jmp { target: call });
+            }
+            self.bind_label(call);
+            // the staged kinds: word 0 the tag, the tail one set per index
+            // across the members (mixed indices widen to Raw)
+            for (_, fields) in &arms {
+                let mut staged = vec![SlotType::Tag];
+                staged.extend(fields.iter().flat_map(|f| f.slots.iter().copied()));
+                self.overlay_site(&staged, &[]);
+            }
+            self.overlay_site(&[], &[SlotType::I64]);
+            let kidx = self.pool(Constant::FuncRef {
+                module: self.native_module(native.module),
+                func: native.index,
+            });
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: u8::try_from(1 + width).expect("argument count fits u8"),
+            });
+        } else {
+            let addrs = self.word_addrs(&tp.place, tp.ty)?;
+            let kinds = self.shapes.words(tp.ty)?;
+            self.guard_staged_count(1 + addrs.len())?;
+            let [member] = payload_members else {
+                return Err(mismatch("a payloaded cancel member"));
+            };
+            let tag = self.shapes.tag_id(*member)?;
+            let tag_word = self.temp_word(SlotType::Tag)?;
+            self.emit(Op::TagNew {
+                dst: Slot::body(tag_word),
+                tag,
+            });
+            self.emit(Op::Mov {
+                dst: Slot::overlay(0),
+                src: Slot::body(tag_word),
+            });
+            for (index, (addr, kind)) in addrs.iter().zip(kinds.iter()).enumerate() {
+                self.emit(Op::Mov {
+                    dst: Slot::overlay(u8::try_from(1 + index).expect("overlay word fits u8")),
+                    src: Slot::body(addr.slot),
+                });
+                if *kind == SlotType::Ref {
+                    self.rc.staged_native(addr.slot, false);
+                }
+            }
+            let mut staged = vec![SlotType::Tag];
+            staged.extend_from_slice(&kinds);
+            self.overlay_site(&staged, &[SlotType::I64]);
+            let kidx = self.pool(Constant::FuncRef {
+                module: self.native_module(native.module),
+                func: native.index,
+            });
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: u8::try_from(1 + addrs.len()).expect("argument count fits u8"),
+            });
+        }
+        self.rc.native_done(&mut self.code);
         Ok(self.unit_value(span)?.place)
     }
 
@@ -9064,6 +12212,28 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn emit_return_inner(&mut self, place: &Place, src_ty: Ty) -> Result<(), LowerError> {
+        // A fn-typed return slot keeps the provenance rule over the
+        // unproven callable words: the caller classifies the result
+        // word Fn unless the tail is the factory lambda, so a
+        // callable-defaulted word returned here hands the caller a Ref
+        // behind the Fn trust and traps at the call. A closure word's
+        // own return keeps the factory boundary (the recorded
+        // return-flow seam) outside this guard, and a word addressed
+        // inside a span place passed its own guard.
+        if matches!(&*self.shapes.shape(self.ret_ty)?, Shape::Word(SlotType::Fn))
+            && !matches!(place.shape, PlaceShape::Span(_))
+            && let [addr] = self.word_addrs(place, src_ty)?.as_slice()
+            && addr.slot_ty == SlotType::Fn
+            && !self.scalar_fn_words.contains(&addr.slot)
+        {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "an unproven callable in a fn-typed return",
+                "the caller classifies the fn-typed result word Fn, so a closure riding the \
+                 callable word would trap at the call; only a named fn, a non-capturing lambda, \
+                 or a proven call result returns here",
+            ));
+        }
         // A returned value that is a part of a deinit-carrying value (a
         // field read) leaves with the dying value's own words: the span
         // claim covering the read fires here, the struct's death staged
@@ -9125,8 +12295,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let target = self.temp_span(self.ret_ty)?;
                 let addrs = self.word_addrs(place, src_ty)?;
                 self.transfer_claim(target.base, place, src_ty)?;
-                for field in &s.fields {
-                    let srcs = field_srcs(&addrs, field)?;
+                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+                for (field, srcs) in s.fields.iter().zip(srcs) {
                     self.store_field_span(target.base, field, srcs);
                 }
                 let transferred: Vec<u8> = addrs
@@ -9180,7 +12350,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if src_members.len() > 1 {
                     let src_word = self.tag_addr(place)?;
                     let mut exits = Vec::with_capacity(src_members.len());
-                    for member in &src_members {
+                    for member in src_members {
                         let exit = self.label();
                         let cond = self.temp_word(SlotType::Bool)?;
                         let tag = self.shapes.tag_id(*member)?;
@@ -9204,8 +12374,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let atom = self.only_atom(src_ty, no_span())?;
                 let member = u
                     .member(atom)
-                    .ok_or_else(|| mismatch("a union member return"))?
-                    .clone();
+                    .ok_or_else(|| mismatch("a union member return"))?;
+                // the return union's fn-typed payload slot keeps the
+                // same provenance rule; the caller-side respan lifts the
+                // refusal onto the returned expression's own span
+                self.refuse_union_fn_payload(
+                    &TypedPlace {
+                        place: place.clone(),
+                        ty: src_ty,
+                    },
+                    no_span(),
+                )?;
                 let target = self.temp_span(self.ret_ty)?;
                 let tag = self.shapes.tag_id(atom)?;
                 self.emit(Op::TagNew {
@@ -9214,8 +12393,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 });
                 self.zero_init_member(target.base, &u.words, &member.fields)?;
                 let addrs = self.word_addrs(place, src_ty)?;
-                for field in &member.fields {
-                    let srcs = field_srcs(&addrs, field)?;
+                let srcs = ordered_field_srcs(&addrs, &member.fields)?;
+                for (field, srcs) in member.fields.iter().zip(srcs) {
                     self.store_field_span(target.base, field, srcs);
                 }
                 let transferred: Vec<u8> = (0..u8::try_from(u.words.len())
@@ -9270,8 +12449,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let entry = u
             .member(member)
-            .ok_or_else(|| mismatch("a re-span member"))?
-            .clone();
+            .ok_or_else(|| mismatch("a re-span member"))?;
         let src_tag = self.tag_addr(src)?;
         self.emit(Op::Mov {
             dst: Slot::body(dst.base),
@@ -9281,12 +12459,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let PlaceShape::Span(underlying) = src.shape else {
             return Err(mismatch("a re-span source"));
         };
-        let fields = self.member_fields(underlying, member)?;
-        for field in &entry.fields {
-            let src_field = fields
-                .iter()
-                .find(|f| f.name == field.name)
-                .ok_or_else(|| mismatch("a re-span field"))?;
+        let src_layout = self.shapes.shape(underlying)?;
+        let fields = src_layout
+            .member_fields(member)
+            .ok_or_else(|| mismatch("a re-span member"))?;
+        for (index, field) in entry.fields.iter().enumerate() {
+            // a positional field (a tuple member's) matches by position —
+            // the None names all compare equal, so the name-find would
+            // return the first field for every element
+            let src_field = if field.name.is_some() {
+                fields
+                    .iter()
+                    .find(|f| f.name == field.name)
+                    .ok_or_else(|| mismatch("a re-span field"))?
+            } else {
+                fields
+                    .get(index)
+                    .ok_or_else(|| mismatch("a re-span field"))?
+            };
             let srcs = field_addrs(src.base, src_field);
             self.store_field_span(dst.base, field, &srcs);
         }
@@ -9311,7 +12501,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    fn widen_into(&mut self, dst: &Place, dst_ty: Ty, src: &TypedPlace) -> Result<(), LowerError> {
+    fn widen_into(
+        &mut self,
+        dst: &Place,
+        dst_ty: Ty,
+        src: &TypedPlace,
+        span: Span,
+    ) -> Result<(), LowerError> {
         self.transfer_claim(dst.base, &src.place, src.ty)?;
         if src.ty == dst_ty {
             let addrs = self.word_addrs(&src.place, src.ty)?;
@@ -9365,8 +12561,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             Shape::Struct(s) => {
                 let addrs = self.word_addrs(&src.place, src.ty)?;
-                for field in &s.fields {
-                    let srcs = field_srcs(&addrs, field)?;
+                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+                for (field, srcs) in s.fields.iter().zip(srcs) {
                     self.store_field_span(dst.base, field, srcs);
                 }
                 Ok(())
@@ -9401,7 +12597,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     let src_word = self.tag_addr(&src.place)?;
                     let continue_lbl = self.label();
                     let mut exits = Vec::with_capacity(src_members.len());
-                    for member in &src_members {
+                    for member in src_members {
                         let exit = self.label();
                         let cond = self.temp_word(SlotType::Bool)?;
                         let tag = self.shapes.tag_id(*member)?;
@@ -9426,11 +12622,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     self.bind_label(continue_lbl);
                     return Ok(());
                 }
-                let atom = self.only_atom(src.ty, no_span())?;
+                let atom = self.only_atom(src.ty, span)?;
                 let member = u
                     .member(atom)
-                    .ok_or_else(|| mismatch("a union member write"))?
-                    .clone();
+                    .ok_or_else(|| mismatch("a union member write"))?;
+                // a callable word entering the union's fn-typed
+                // payload slot keeps the var slot's provenance rule:
+                // the payload word is Fn-classified and every extraction
+                // re-reads it, so a closure's Ref word traps there the
+                // same way it traps a re-storable var slot
+                self.refuse_union_fn_payload(src, span)?;
                 let tag = self.shapes.tag_id(atom)?;
                 self.emit(Op::TagNew {
                     dst: Slot::body(dst.base),
@@ -9438,8 +12639,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 });
                 self.zero_init_member(dst.base, &u.words, &member.fields)?;
                 let addrs = self.word_addrs(&src.place, src.ty)?;
-                for field in &member.fields {
-                    let srcs = field_srcs(&addrs, field)?;
+                let srcs = ordered_field_srcs(&addrs, &member.fields)?;
+                for (field, srcs) in member.fields.iter().zip(srcs) {
                     self.store_field_span(dst.base, field, srcs);
                 }
                 Ok(())
@@ -9455,7 +12656,174 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// dispatches both. FUNCF occupies word 0 and every op occupies one
     /// word, so a label's stream position is its op index plus one; jump
     /// targets cannot shift.
-    fn finalize(self) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
+    fn finalize(mut self) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
+        // The canonical unit word's one `Kimm 0` enters at the frame top:
+        // a use inside a branch arm must not own the only write (a path
+        // through another arm would read the previous frame's garbage),
+        // and a loop head bound at stream position 0 must not pick the
+        // store up per back edge — so every label and loop span shifts
+        // past it, keeping each jump target on its own op.
+        if let Some(word) = self.unit_slot {
+            let kidx = self.pool(Constant::I64(0));
+            self.code.insert(0, Op::Kimm {
+                dst: Slot::body(word),
+                kidx,
+            });
+            for pos in &mut self.labels {
+                if *pos != usize::MAX {
+                    *pos += 1;
+                }
+            }
+            for span in &mut self.loop_spans {
+                span.head += 1;
+                if span.back != usize::MAX {
+                    span.back += 1;
+                }
+            }
+        }
+        // Stage three's temporary slices: every slot the placement pass
+        // still classifies count-free takes its count-free spelling — a
+        // KSTR load becomes a borrow load (KSTR -> KSTR_BORROW), a
+        // STRCAT result becomes an arena serving (STRCAT ->
+        // STRCAT_ARENA) — and its terminal decs leave the stream. Slots
+        // bump-allocate, so each dec belongs to a word the pass hosted
+        // there, and the classification survived the whole walk, so no
+        // path moves a deleted count. A loop body carrying a designated
+        // arena word gains a mark/restore pair at its head and back
+        // edge, one fresh body word per marked loop (appended after the
+        // walk, so only qualifying frames grow). Deleting and inserting
+        // words shift the stream, so bound labels rebase against both
+        // movements: a label bound at a removed dec lands on the op
+        // that followed it, and a loop's head label stays on the
+        // inserted mark (a jump lands on the re-mark).
+        let borrow = self.rc.take_kstr_slots();
+        let mut arena = self.rc.take_strcat_slots();
+        let mut insertions: Vec<(usize, Op)> = Vec::new();
+        if !arena.is_empty() {
+            // a marked loop's body holds a designated concatenation
+            // somewhere between its head and back edge
+            let designated = |index: usize, arena: &HashSet<u8>| match self.code[index] {
+                Op::Data {
+                    op: DataOp::StrCat,
+                    dst:
+                        Slot {
+                            index: word,
+                            overlay: false,
+                        },
+                    ..
+                } => arena.contains(&word),
+                _ => false,
+            };
+            let marked: Vec<usize> = self
+                .loop_spans
+                .iter()
+                .enumerate()
+                .filter(|(_, span)| (span.head..span.back).any(|index| designated(index, &arena)))
+                .map(|(span_index, _)| span_index)
+                .collect();
+            // the mark words must fit beside the body and overlay words;
+            // a frame that cannot host them keeps the counted spelling
+            if u8::try_from(self.slots.len() + self.overlay_len + marked.len()).is_ok() {
+                for &span_index in &marked {
+                    let word = u8::try_from(self.slots.len()).expect("mark word fits u8");
+                    self.slots.push(SlotType::I64);
+                    let span = self.loop_spans[span_index];
+                    insertions.push((span.head, Op::ArenaMark {
+                        dst: Slot::body(word),
+                    }));
+                    insertions.push((span.back, Op::ArenaRestore {
+                        src: Slot::body(word),
+                    }));
+                }
+            } else {
+                arena.clear();
+            }
+        }
+        if !borrow.is_empty() || !arena.is_empty() {
+            let mut dead = Vec::new();
+            for index in 0..self.code.len() {
+                match self.code[index] {
+                    Op::Kstr {
+                        dst:
+                            Slot {
+                                index: word,
+                                overlay: false,
+                            },
+                        kidx,
+                    } if borrow.contains(&word) => {
+                        self.code[index] = Op::KstrBorrow {
+                            dst: Slot::body(word),
+                            kidx,
+                        };
+                    },
+                    Op::Data {
+                        op: DataOp::StrCat,
+                        dst:
+                            Slot {
+                                index: word,
+                                overlay: false,
+                            },
+                        lhs,
+                        rhs,
+                    } if arena.contains(&word) => {
+                        self.code[index] = Op::Data {
+                            op: DataOp::StrCatArena,
+                            dst: Slot::body(word),
+                            lhs,
+                            rhs,
+                        };
+                    },
+                    Op::RcDec {
+                        src:
+                            Slot {
+                                index: word,
+                                overlay: false,
+                            },
+                    } if borrow.contains(&word) || arena.contains(&word) => {
+                        dead.push(index);
+                    },
+                    _ => {},
+                }
+            }
+            // `dead` rises with the forward walk and `insertions` sorts
+            // into code order, so one forward pass splices the survivors
+            // and the mark ops and a second answers every label's shift
+            insertions.sort_by_key(|&(at, _)| at);
+            let mut rebuilt = Vec::with_capacity(self.code.len() + insertions.len() - dead.len());
+            let mut at = 0;
+            let mut dead_at = 0;
+            for (index, op) in self.code.iter().enumerate() {
+                while at < insertions.len() && insertions[at].0 == index {
+                    rebuilt.push(insertions[at].1);
+                    at += 1;
+                }
+                if dead_at < dead.len() && dead[dead_at] == index {
+                    dead_at += 1;
+                    continue;
+                }
+                rebuilt.push(*op);
+            }
+            self.code = rebuilt;
+            let mut moved: Vec<usize> = (0..self.labels.len())
+                .filter(|&label| self.labels[label] != usize::MAX)
+                .collect();
+            moved.sort_unstable_by_key(|&label| self.labels[label]);
+            let (mut removed, mut added) = (0usize, 0usize);
+            for label in moved {
+                // both movements count against the original position
+                // (a deletion before the label removes one op, an
+                // insertion before it adds one; the insertions cannot
+                // underflow because each removal sits strictly below)
+                let base = self.labels[label];
+                while removed < dead.len() && dead[removed] < base {
+                    removed += 1;
+                }
+                while added < insertions.len() && insertions[added].0 < base {
+                    added += 1;
+                }
+                self.labels[label] = base - removed + added;
+            }
+        }
         let body_len = self.slots.len();
         // one word type per overlay slot, or Raw when shapes mix there
         let mut overlay_words = Vec::with_capacity(self.overlay_len);
@@ -9510,6 +12878,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     dst: body(dst),
                     kidx: ConstIdx(kidx),
                 }),
+                Op::KstrBorrow { dst, kidx } => PlacedOp::Uop(Uop::KstrBorrow {
+                    dst: body(dst),
+                    kidx: ConstIdx(kidx),
+                }),
                 Op::Data { op, dst, lhs, rhs } => {
                     PlacedOp::Uop(op.uop(body(dst), body(lhs), body(rhs)))
                 },
@@ -9529,6 +12901,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 Op::RcInc { src } => PlacedOp::Rc(RcOp::Inc { src: body(src) }),
                 Op::RcDec { src } => PlacedOp::Rc(RcOp::Dec { src: body(src) }),
                 Op::Jmp { target: at } => PlacedOp::Uop(Uop::Jmp { target: target(at) }),
+                Op::ArenaMark { dst } => PlacedOp::Uop(Uop::ArenaMark { dst: body(dst) }),
+                Op::ArenaRestore { src } => PlacedOp::Uop(Uop::ArenaRestore { src: body(src) }),
                 Op::Jmpif { cond, target: at } => PlacedOp::Uop(Uop::Jmpif {
                     cond: body(cond),
                     target: target(at),
@@ -9578,6 +12952,40 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 // whole-span moves and typed callee parameters never see a foreign kind
 // (the live member's words are the only ones ever read [BL-2])
 impl FnLower<'_, '_, '_> {
+    /// The module name a native surface's pool FuncRef addresses: the
+    /// builtin core's reserved name, or the platform declaration's
+    /// name for the world surface.
+    fn native_module(&self, module: crate::native::NativeModule) -> String {
+        match module {
+            crate::native::NativeModule::Builtin => crate::native::BUILTIN_MODULE_NAME.to_owned(),
+            crate::native::NativeModule::Platform => self.platform.clone(),
+        }
+    }
+
+    /// The pool FuncRef of a callee: a builtin or platform native's
+    /// reserved index, the enclosing module for a local function, the
+    /// runtime-evidence sentinel for a staged dispatch site.
+    fn funcref_const(&self, target: Callee) -> Constant {
+        match target {
+            Callee::Builtin(native) => Constant::FuncRef {
+                module: self.native_module(native.module),
+                func: native.index,
+            },
+            Callee::Generic(generic) => Constant::FuncRef {
+                module: self.native_module(generic.module),
+                func: generic.index,
+            },
+            Callee::Local(index) => Constant::FuncRef {
+                module: String::new(), // the enclosing module
+                func: index,
+            },
+            Callee::Evidence(slot) => Constant::FuncRef {
+                module: crate::native::EVIDENCE_MODULE.to_owned(),
+                func: u32::from(slot),
+            },
+        }
+    }
+
     fn zero_word(&mut self, dst: u8, slot: SlotType) {
         let kidx = match slot {
             SlotType::I64 => {
@@ -9591,14 +12999,11 @@ impl FnLower<'_, '_, '_> {
             SlotType::F64 => self.pool(Constant::F64(0.0)),
             SlotType::Bool => self.pool(Constant::Bool(false)),
             SlotType::Ref => {
-                let k = self.pool(Constant::Str(String::new()));
-                self.emit(Op::Kstr {
-                    dst: Slot::body(dst),
-                    kidx: k,
-                });
                 // the dead payload word owns its interned empty-string
-                // reference like any production
-                self.rc.produced(dst);
+                // reference like any production — a borrow candidate like
+                // every KSTR load
+                let k = self.pool_str("");
+                self.kstr(dst, k);
                 return;
             },
             // Fn words need kind-true content too: the call slide
@@ -9632,17 +13037,13 @@ impl FnLower<'_, '_, '_> {
         words: &[SlotType],
         member_fields: &[MemberField],
     ) -> Result<(), LowerError> {
-        let mut live: HashSet<u8> = HashSet::new();
-        for field in member_fields {
-            for offset in 0..field.width() {
-                live.insert(
-                    field.word + u8::try_from(offset).map_err(|_| mismatch("a union span"))?,
-                );
-            }
-        }
         for (index, slot) in words.iter().enumerate().skip(1) {
             let word = u8::try_from(index).map_err(|_| mismatch("a union span"))?;
-            if !live.contains(&word) {
+            let live = member_fields.iter().any(|field| {
+                let start = usize::from(field.word);
+                (start..start + field.width()).contains(&usize::from(word))
+            });
+            if !live {
                 self.zero_word(base + word, *slot);
             }
         }
@@ -9668,27 +13069,6 @@ fn eq_op(slot: SlotType) -> Result<DataOp, LowerError> {
     })
 }
 
-fn funcref_const(target: Callee) -> Constant {
-    match target {
-        Callee::Builtin(native) => Constant::FuncRef {
-            module: native.module.name().to_owned(),
-            func: native.index,
-        },
-        Callee::Generic(generic) => Constant::FuncRef {
-            module: generic.module.name().to_owned(),
-            func: generic.index,
-        },
-        Callee::Local(index) => Constant::FuncRef {
-            module: String::new(), // the enclosing module
-            func: index,
-        },
-        Callee::Evidence(slot) => Constant::FuncRef {
-            module: crate::native::EVIDENCE_MODULE.to_owned(),
-            func: u32::from(slot),
-        },
-    }
-}
-
 /// The single identifier of a one-segment path expression, if it is one.
 fn single_path_ident(expr: &Expr) -> Option<&Ident> {
     match expr {
@@ -9702,6 +13082,20 @@ fn peel_parens(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren { inner, .. } => peel_parens(inner),
         _ => expr,
+    }
+}
+
+/// Strips parentheses around a pattern: a single-element tuple pattern
+/// without a trailing comma is its inner pattern parenthesized, so an
+/// or-arm binds the last alternative's innermost pattern.
+fn last_alt(pat: &Pattern) -> &Pattern {
+    match pat {
+        Pattern::Tuple {
+            pats,
+            trailing_comma: false,
+            ..
+        } if pats.len() == 1 => last_alt(&pats[0]),
+        _ => pat,
     }
 }
 
@@ -9719,20 +13113,41 @@ fn single(addrs: &[WordAddr], span: Span) -> Result<WordAddr, LowerError> {
 /// The source words of one field inside a flattened address list: the
 /// addresses group by field in span order, each group's base word
 /// carrying the field's name.
-fn field_srcs<'a>(
+/// The per-field source slices of one member's ordered fields over a
+/// value's whole word addresses: a named field name-matches anywhere in
+/// the list (a bare struct's addresses carry their field names), a
+/// positional field consumes the next words in order (a tuple's
+/// addresses carry no names — the walk is positional exactly where the
+/// fields are). The fields arrive in declaration order and the
+/// addresses in span order, so both walks stay monotone.
+fn ordered_field_srcs<'a>(
     addrs: &'a [WordAddr],
-    field: &MemberField,
-) -> Result<&'a [WordAddr], LowerError> {
-    let start = addrs
-        .iter()
-        .position(|a| match field.name.as_deref() {
-            Some(name) => a.name.as_deref() == Some(name),
-            None => a.name.is_none(),
-        })
-        .ok_or_else(|| mismatch("a value field"))?;
-    addrs
-        .get(start..start + field.width())
-        .ok_or_else(|| mismatch("a value field span"))
+    fields: &[MemberField],
+) -> Result<Vec<&'a [WordAddr]>, LowerError> {
+    let mut out = Vec::with_capacity(fields.len());
+    let mut pos = 0usize;
+    for field in fields {
+        let width = field.width();
+        if field.name.is_some() {
+            let start = addrs
+                .iter()
+                .position(|a| a.name.as_deref() == field.name.as_deref())
+                .ok_or_else(|| mismatch("a value field"))?;
+            out.push(
+                addrs
+                    .get(start..start + width)
+                    .ok_or_else(|| mismatch("a value field span"))?,
+            );
+        } else {
+            out.push(
+                addrs
+                    .get(pos..pos + width)
+                    .ok_or_else(|| mismatch("a value field span"))?,
+            );
+            pos += width;
+        }
+    }
+    Ok(out)
 }
 
 /// Set difference over member lists.
@@ -9758,7 +13173,7 @@ fn mismatch(what: &'static str) -> LowerError {
 }
 
 fn no_span() -> Span {
-    Span::new(ds_diag::FileId::new(0), 0, 0)
+    Span::new(FileId::new(0), 0, 0)
 }
 
 /// The span of one pattern node (no `span()` method on the enum).
@@ -9789,4 +13204,29 @@ fn parse_int(text: &str) -> Option<i64> {
             (10, text)
         };
     i64::from_str_radix(digits, radix).ok()
+}
+
+/// The constant one scalar literal writes: the direct-store fast paths
+/// (a scalar var's literal init, a literal assignment over a scalar
+/// var) load it straight into the destination word.
+#[derive(Clone, Copy)]
+enum ScalarConst {
+    I64(i64),
+    F64(f64),
+}
+
+/// Probes one literal against a scalar word's slot: suffixed or
+/// unparseable spellings and kind disagreements answer None, so the
+/// fast paths decline and the temp path (`literal`) owns the refusals.
+fn scalar_const(lit: &Literal, slot: SlotType) -> Option<ScalarConst> {
+    match (lit, slot) {
+        (Literal::Int { suffix, text }, SlotType::I64) if suffix.is_empty() => {
+            Some(ScalarConst::I64(parse_int(text)?))
+        },
+        (Literal::Float { suffix, text }, SlotType::F64) if suffix.is_empty() => {
+            Some(ScalarConst::F64(text.parse::<f64>().ok()?))
+        },
+        (Literal::Byte(b), SlotType::I64) => Some(ScalarConst::I64(i64::from(*b))),
+        _ => None,
+    }
 }

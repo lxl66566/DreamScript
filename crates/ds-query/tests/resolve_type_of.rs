@@ -96,6 +96,36 @@ fn an_edit_recomputes_the_changed_story_and_renews_the_rest() {
 }
 
 #[test]
+fn a_block_holding_several_bindings_slices_all_of_them() {
+    // One block, two top-level bindings plus a type declaration: the
+    // slice answers every fact the block holds and nothing from the
+    // neighbouring block.
+    const MULTI: &str = concat!(
+        "tag int
+",
+        "const first = 1
+",
+        "const second = 2
+",
+        "##
+",
+        "const third = 3
+",
+    );
+    let mut db = Db::new();
+    db.add_file("t.ds", MULTI);
+
+    let first = db.get::<TypeOf>(def(0, 0)).unwrap();
+    assert!(first.diags.is_empty());
+    let names: Vec<&str> = first.types.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["first", "second"]);
+
+    let second = db.get::<TypeOf>(def(0, 1)).unwrap();
+    assert_eq!(second.types.len(), 1);
+    assert_eq!(second.types[0].0, "third");
+}
+
+#[test]
 fn registering_a_file_invalidates_the_package_queries() {
     let mut db = Db::new();
     let first = db.add_file("first.ds", "tag int\nfn size(s: int) -> int { 1 }\n");

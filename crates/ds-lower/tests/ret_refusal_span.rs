@@ -1,11 +1,12 @@
 //! The return-union shape refusal probe: a function whose written
-//! return union contains a generic application (`list[int] | net_err`)
-//! checks clean and then refuses at lowering — the application member
-//! has no payload word shape this round. The refusal must report at the
-//! user's own code (the tail expression whose value needs the return
-//! span), never at the type-keyed sentinel span that renders against
-//! the first file's first line — which is the stdlib ambient in the
-//! CLI pipeline, nowhere near the user's source.
+//! return union contains a member whose payload is itself a union
+//! checks clean and then refuses at lowering — the union payload has no
+//! flat word shape this round (a heap-ref application member like
+//! `list[int]` lowers; the enum-payload member is the refusing shape).
+//! The refusal must report at the user's own code (the tail expression
+//! whose value needs the return span), never at the type-keyed sentinel
+//! span that renders against the first file's first line — which is the
+//! stdlib ambient in the CLI pipeline, nowhere near the user's source.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -15,18 +16,16 @@ use ds_parse::parse;
 
 const SOURCE: &str = concat!(
     "tag int\n",
-    "struct list[t]\n",
+    "tag none\n",
     "enum net_err {\n",
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "extern fn list_new[t] () -> list[t]\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "fn plain(n: int) -> list[int] | net_err {\n",
-    "  var xs = list[int]()\n",
-    "  xs.list_push(n)\n",
-    "  const r = xs\n",
-    "  r\n",
+    "enum wrap {\n",
+    "  carrier(int | none)\n",
+    "}\n",
+    "fn plain(n: int) -> wrap | net_err {\n",
+    "  carrier(n)\n",
     "}\n",
     "fn main() -> () {\n",
     "  const r = plain(3)\n",
@@ -34,7 +33,7 @@ const SOURCE: &str = concat!(
 );
 
 #[test]
-fn a_return_union_over_a_generic_application_refuses_at_the_tail_expression() {
+fn a_return_union_over_a_union_payload_member_refuses_at_the_tail_expression() {
     let mut files = Files::new();
     let id = files.add_source("ret_refusal_probe.ds", SOURCE);
     let asts = [parse(&files, id).expect("the probe parses")];
@@ -55,7 +54,7 @@ fn a_return_union_over_a_generic_application_refuses_at_the_tail_expression() {
         &asts,
         &analyzed,
     ) else {
-        panic!("the application member has no payload word shape yet")
+        panic!("the union-payload member has no flat word shape yet")
     };
     let LowerError::Unsupported { span, .. } = &error else {
         panic!("the refusal is Unsupported, got {error:?}")
@@ -63,14 +62,15 @@ fn a_return_union_over_a_generic_application_refuses_at_the_tail_expression() {
     assert!(
         error
             .to_string()
-            .contains("an enum, application, or function member"),
+            .contains("a struct payload field is outside the M3 runtime contract"),
         "the seam is named: {error}"
     );
-    // the tail expression `r`, not the sentinel span over the file start
-    let needle = "\n  r";
+    // the tail expression `carrier(n)`, not the sentinel span over the
+    // file start
+    let needle = "\n  carrier(n)";
     let offset = SOURCE
         .rfind(needle)
-        .map(|index| index + needle.len() - 1)
+        .map(|index| index + "\n  ".len())
         .expect("the tail expression is in the probe source");
     assert_eq!(
         span.start,

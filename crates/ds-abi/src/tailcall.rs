@@ -51,6 +51,7 @@ impl SlidePlan {
     /// [`SlideDirection::Ascending`], because a CALLT destination is the
     /// frame base and the staging area sits above it; `Descending` exists
     /// so this core is a total memmove rule.
+    #[inline]
     pub fn try_new(src: Range<usize>, dst: Range<usize>) -> Result<Self, SlideError> {
         if src.len() != dst.len() {
             return Err(SlideError::LengthMismatch {
@@ -68,42 +69,49 @@ impl SlidePlan {
 
     /// Source slot range (the staged arguments' positions).
     #[must_use]
+    #[inline]
     pub fn src(&self) -> Range<usize> {
         self.src.start..self.src.end
     }
 
     /// Destination slot range (always the frame base for a CALLT plan).
     #[must_use]
+    #[inline]
     pub fn dst(&self) -> Range<usize> {
         self.dst.start..self.dst.end
     }
 
     /// How many words the slide moves.
     #[must_use]
+    #[inline]
     pub fn len(&self) -> usize {
         self.src.len()
     }
 
     /// Whether the slide moves nothing.
     #[must_use]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.src.is_empty()
     }
 
     /// The overlap-safe copy direction.
     #[must_use]
+    #[inline]
     pub fn direction(&self) -> SlideDirection {
         self.direction
     }
 
     /// Displacement between source and destination in words.
     #[must_use]
+    #[inline]
     pub fn delta(&self) -> usize {
         self.src.start.abs_diff(self.dst.start)
     }
 
     /// Whether the source and destination ranges intersect.
     #[must_use]
+    #[inline]
     pub fn overlaps(&self) -> bool {
         self.src.start < self.dst.end && self.dst.start < self.src.end
     }
@@ -119,6 +127,7 @@ impl SlidePlan {
     /// # Panics
     ///
     /// Panics in debug builds if `words` does not cover both ranges.
+    #[inline]
     pub fn apply(&self, words: &mut [u64]) {
         debug_assert!(
             self.src.end <= words.len() && self.dst.end <= words.len(),
@@ -172,9 +181,13 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 /// Cost: n word copies at displacement [`SlidePlan::delta`] — the O(delta)
 /// argument slide plus a jump of (H2); the stack never grows at any depth,
 /// in any tier. Argument words move as raw words: a tail call moving
-/// arguments transfers ownership with zero RC traffic.
+/// arguments transfers ownership with zero RC traffic. The VM rebuilds the
+/// plan at each call site (hand-assembled code is never trusted), so the
+/// per-hop read is one compare per parameter word: the equality test alone
+/// on the common path, the two exemptions only once a pairing disagrees.
 // caller/callee is this contract's domain vocabulary, not a naming slip.
 #[allow(clippy::similar_names)]
+#[inline]
 pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePlan, SlideError> {
     let needed = callee.params_len();
     let available = caller.arg_area_len();
@@ -203,7 +216,8 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
             });
         }
     }
-    let src = caller.arg_area().start..caller.arg_area().start + needed;
+    let arg_area = caller.arg_area();
+    let src = arg_area.start..arg_area.start + needed;
     let dst = 0..needed;
     // Both ranges span `needed` slots, so the direction rule is total.
     let direction = plan_direction(&src, &dst);

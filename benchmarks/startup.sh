@@ -1,0 +1,202 @@
+#!/bin/sh
+# Startup bench: cold-start medians for the ds CLI over three fixed
+# stages (M9 performance-gate prep; the mmap-hit variant arrives with
+# M7 loading). Modes:
+#   startup.sh bench [--json] [-n runs] [metric...]
+#       metric... filters the stages: floor trivial small-real.
+# Stages:
+#   floor       `ds --version` — the process + allocator + CLI-parse
+#               floor; no compiler or VM code runs.
+#   trivial     `ds run startup/trivial.ds` — three statements of pure
+#               arithmetic plus one print: front-end + check + lower +
+#               VM entry on an empty program graph.
+#   small-real  `ds run startup/small-real.ds` — one list literal, a map
+#               through the interim constructor + map_set, one reduce:
+#               the same pipeline plus first-allocations cost.
+# Adjacent deltas are the diagnostic (trivial - floor is pipeline entry
+# cost; small-real - trivial is first-allocation cost).
+#
+# Numbers are meaningful ONLY under an exclusive lock with the machine
+# otherwise idle (same discipline as run.sh bench; in the parallel
+# worktree setup, via the shared withlock helper). A single run is
+# noise; medians under ~30 runs on a loaded machine are indicative
+# only. Timings are printed, never committed — performance rounds
+# record the medians in commit messages.
+#
+# Correctness: every timed run's `result:` line is checked against the
+# fixture's .golden (floor checks its version line); any mismatch or
+# nonzero exit fails loudly — a wrong-result benchmark is worse than
+# none.
+#
+# The ds interpreter is the release CLI, resolved exactly like run.sh:
+# DS_BIN wins, else <repo>/target/release/ds(.exe). Build it first with
+#   CARGO_TARGET_DIR=<shared target> cargo build -p ds-cli --release
+
+set -u
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+sdir="$here/startup"
+
+# ---- arguments ---------------------------------------------------------------
+
+mode=${1:-}
+[ $# -gt 0 ] && shift
+
+usage() {
+    echo "usage: startup.sh bench [--json] [-n runs] [metric...]" >&2
+    echo "  metrics: floor trivial small-real" >&2
+    exit 2
+}
+
+runs=30
+json=0
+selected=""
+while [ $# -gt 0 ]; do
+    case $1 in
+    -n)
+        [ $# -ge 2 ] || usage
+        runs=$2
+        shift
+        ;;
+    --json) json=1 ;;
+    --*) usage ;;
+    -*) usage ;;
+    *) selected="$selected $1" ;;
+    esac
+    shift
+done
+selected=${selected# }
+
+[ "$mode" = bench ] || usage
+case $runs in
+'' | *[!0-9]*) usage ;;
+esac
+[ "$runs" -gt 0 ] || usage
+
+# ---- ds binary ----------------------------------------------------------------
+# DS_BIN wins, else the repo's shared target dir (release/ds.exe on
+# Windows, release/ds elsewhere) — same resolution as run.sh.
+
+ds_bin=""
+if [ -n "${DS_BIN:-}" ]; then
+    [ -x "$DS_BIN" ] && ds_bin=$DS_BIN
+else
+    for candidate in "$here/../target/release/ds.exe" "$here/../target/release/ds"; do
+        if [ -x "$candidate" ]; then
+            ds_bin=$candidate
+            break
+        fi
+    done
+fi
+if [ -z "$ds_bin" ]; then
+    echo "startup.sh: no ds binary (set DS_BIN or build: CARGO_TARGET_DIR=<target> cargo build -p ds-cli --release)" >&2
+    exit 1
+fi
+
+all_metrics="floor trivial small-real"
+metrics=""
+for name in $all_metrics; do
+    keep=0
+    if [ -z "$selected" ]; then
+        keep=1
+    else
+        for want in $selected; do
+            [ "$want" = "$name" ] && keep=1
+        done
+    fi
+    [ "$keep" = 1 ] && metrics="$metrics $name"
+done
+metrics=${metrics# }
+if [ -z "$metrics" ]; then
+    echo "startup.sh: no metric matches:$selected" >&2
+    exit 2
+fi
+
+for name in $metrics; do
+    case $name in
+    trivial | small-real)
+        [ -f "$sdir/$name.ds" ] || {
+            echo "startup.sh: missing fixture $sdir/$name.ds" >&2
+            exit 1
+        }
+        [ -s "$sdir/$name.golden" ] || {
+            echo "startup.sh: missing golden $sdir/$name.golden" >&2
+            exit 1
+        }
+        ;;
+    esac
+done
+
+# ---- bench -------------------------------------------------------------------
+# One untimed warmup per stage (fs/av caches), then N timed runs, each
+# verified against the golden before its timing is kept.
+
+outtmp=$(mktemp 2>/dev/null) || outtmp="/tmp/ds-startup-out.$$"
+valstmp=$(mktemp 2>/dev/null) || valstmp="/tmp/ds-startup-vals.$$"
+trap 'rm -f "$outtmp" "$valstmp"' EXIT
+trap 'exit 1' INT TERM
+
+die() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# Runs the stage once, stdout into $outtmp; caller checks status.
+run_stage() {
+    stage=$1
+    case $stage in
+    floor) "$ds_bin" --version ;;
+    *) "$ds_bin" run "$sdir/$stage.ds" ;;
+    esac >"$outtmp" 2>/dev/null
+}
+
+# Verifies the just-run stage's output line against its expectation.
+check_stage() {
+    stage=$1
+    if [ "$stage" = floor ]; then
+        out=$(sed -n 's/\r$//;1p' "$outtmp")
+        case $out in
+        ds\ *) return 0 ;;
+        *) die "floor: expected a version line, got [$out]" ;;
+        esac
+    fi
+    golden=$(sed -n 's/\r$//;1p' "$sdir/$stage.golden")
+    out=$(sed 's/\r$//' "$outtmp" | grep '^result:' | tail -n 1)
+    [ -n "$out" ] || die "$stage: no \`result:\` line on stdout (did the script run?)"
+    [ "$out" = "$golden" ] || die "$stage: expected [$golden] got [$out]"
+}
+
+if [ "$json" = 0 ]; then
+    printf '# ds: %s (%s) runs=%s\n' "$ds_bin" "$("$ds_bin" --version 2>/dev/null)" "$runs"
+    printf '%-12s %5s %11s %11s %11s\n' METRIC RUNS MEDIAN_MS MIN_MS P95_MS
+fi
+
+for metric in $metrics; do
+    run_stage "$metric" || die "$metric: warmup run exited $?"
+    check_stage "$metric"
+    : >"$valstmp"
+    i=0
+    while [ "$i" -lt "$runs" ]; do
+        t0=$(date +%s%N)
+        run_stage "$metric"
+        status=$?
+        t1=$(date +%s%N)
+        [ "$status" -eq 0 ] || die "$metric: run $((i + 1)) exited $status"
+        check_stage "$metric"
+        printf '%s\n' $((t1 - t0)) >>"$valstmp"
+        i=$((i + 1))
+    done
+    sort -n "$valstmp" | awk -v metric="$metric" -v runs="$runs" -v json="$json" '
+        { a[NR] = $1 }
+        END {
+            min = a[1]
+            if (NR % 2) med = a[(NR + 1) / 2]
+            else med = (a[NR / 2] + a[NR / 2 + 1]) / 2
+            r = int(NR * 0.95)
+            if (r < NR * 0.95) r += 1
+            if (json)
+                printf "{\"metric\":\"%s\",\"runs\":%d,\"median_ms\":%.3f,\"min_ms\":%.3f,\"p95_ms\":%.3f}\n", metric, runs, med / 1000000, min / 1000000, a[r] / 1000000
+            else
+                printf "%-12s %5d %11.3f %11.3f %11.3f\n", metric, runs, med / 1000000, min / 1000000, a[r] / 1000000
+        }'
+done

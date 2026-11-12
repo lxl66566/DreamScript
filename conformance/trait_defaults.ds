@@ -1,0 +1,39 @@
+// source: F7 default staging — the trait-default authority round and the inherent default round 2026-11-12
+// purpose: the trait declaration is a defaulted member parameter's single authority (both impls omit it), every call spelling stages the declared literal identically when the argument is omitted and the written argument when present, and an inherent member keeps its own body default
+// items:
+// sized: stage: typecheck
+// word: stage: typecheck
+// sized-int: stage: run
+// sized-word: stage: run
+// gauge: stage: typecheck
+// impl-gauge: stage: run
+// main: stage: run
+
+trait sized {
+  fn pad(self, by: int = 2) -> int
+}
+
+struct word { text: string }
+
+impl sized for int {
+  fn pad(self, by: int) -> int { self + by }
+}
+
+impl sized for word {
+  fn pad(self, by: int) -> int { len(self.text) + by }
+}
+
+struct gauge { notches: int }
+
+impl gauge {
+  fn bump(self, by: int = 5) -> int { self.notches + by }
+}
+
+fn main() -> () {
+  const n = 10
+  const w = word { text: "cord" }
+  println("int ${n.pad()} ${sized::pad(n)} ${n.pad(3)} ${sized::pad(n, 3)}")
+  println("word ${w.pad()} ${sized::pad(w)} ${w.pad(1)}")
+  const g = gauge { notches: 2 }
+  println("gauge ${g.bump()} ${g.bump(9)}")
+}

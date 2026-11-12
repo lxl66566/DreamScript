@@ -7,6 +7,13 @@
 //! transfer: its CALLT ends the program, where the heap dies whole (the
 //! named corner). The fixtures pin the balance end to end under the diag
 //! tripwires and the placed shapes structurally.
+//!
+//! Stage three's temporary slice changed two emissions deliberately: a
+//! KSTR literal whose count never moves in its frame loads as
+//! KSTR_BORROW with no terminal dec, so `bang`'s "!" literal carries no
+//! birth count and the root's staged "done" abandons nothing — its
+//! count never existed. The forwarded parameter count (a word staged
+//! into a local callee) keeps its dec, and the frames still drain.
 
 use ds_abi::RcOp;
 use ds_check::analyze;
@@ -14,7 +21,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PRELUDE: &str = "
 tag int
@@ -98,8 +105,8 @@ fn run_lowered(lowered: &Lowered, source: &str) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm
@@ -175,8 +182,10 @@ fn a_fn_frame_tail_native_call_lowers_in_place_but_main_keeps_the_transfer() {
     let between = &kinds[call_at + 1..ret_at];
     assert_eq!(
         between,
-        ["Rc", "Rc", "Mov"],
-        "the two borrow-window decs flush right after the call, then the result copies out"
+        ["Rc", "Mov"],
+        "the forwarded parameter's borrow-window dec flushes right after the call, then the \
+         result copies out; the literal is a count-free borrow load (KSTR_BORROW), so no \
+         birth-count dec exists"
     );
     let rc_ops: Vec<RcOp> = bang
         .iter()
@@ -187,8 +196,13 @@ fn a_fn_frame_tail_native_call_lowers_in_place_but_main_keeps_the_transfer() {
         .collect();
     assert_eq!(
         rc_ops,
-        [RcOp::Dec { src: 0 }, RcOp::Dec { src: 1 }],
-        "the forwarded parameter count and the literal's birth count both drop"
+        [RcOp::Dec { src: 0 }],
+        "only the forwarded parameter count drops — the literal borrowed the intern map's copy"
+    );
+    assert!(
+        bang.iter()
+            .any(|op| matches!(op, PlacedOp::Uop(ds_abi::Uop::KstrBorrow { .. }))),
+        "the count-free literal loads as KSTR_BORROW: {kinds:?}"
     );
     let main = lowered.placed("main").expect("main is planned");
     let main_kinds: Vec<String> = main.iter().filter_map(uop_kind).collect();
@@ -197,8 +211,10 @@ fn a_fn_frame_tail_native_call_lowers_in_place_but_main_keeps_the_transfer() {
         1,
         "the root frame's tail native call keeps the CALLT transfer: {main_kinds:?}"
     );
-    // the corner's by-design abandon: the root CALLT strands its staged
-    // word, observable as one live object after the run
+    // the corner after the temporary slice: the root CALLT still strands
+    // what it stages, but the staged "done" is a count-free borrow load,
+    // so nothing countable was ever handed to the transfer — the store
+    // drains to zero (a staged ACQUIRING word would still strand live)
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("native_frame_balance", "main", &[]),
@@ -208,7 +224,7 @@ fn a_fn_frame_tail_native_call_lowers_in_place_but_main_keeps_the_transfer() {
     assert_eq!(vm.captured_output(), b"ab!\ndone\n");
     assert_eq!(
         vm.objects().len(),
-        1,
-        "only the abandoned staged word stays live"
+        0,
+        "the staged borrow word had no count to abandon, so the store drains"
     );
 }

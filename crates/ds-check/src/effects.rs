@@ -4,10 +4,12 @@
 //! v1 has no effect syntax (E1) — rows are computed, never written. The
 //! computation is a pure walk over the package's trees and the resolution
 //! side table [`crate::resolve`]: it emits no diagnostics, and unresolved
-//! names contribute nothing (the ambient row table [`DeclaredRows`] is the
-//! surface for world-touching functions until M7's platform declaration
-//! supplies it). Rows carry the record's five-effect vocabulary
-//! ([`Effect`]).
+//! names contribute nothing. World-touching ambient functions enter
+//! through the row table [`DeclaredRows`] with their platform capability
+//! attribution beside it ([`crate::WorldCaps`], the platform declaration's
+//! provides list its licenser); the package's platform declaration is
+//! checked against the computed rows by [`crate::check_platform`]. Rows
+//! carry the record's five-effect vocabulary ([`Effect`]).
 //!
 //! # Composition
 //!
@@ -42,7 +44,7 @@
 //! # Example
 //!
 //! ```
-//! use ds_check::{DeclaredRows, Effect, EffectRow, effects_of};
+//! use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, effects_of};
 //! use ds_diag::Files;
 //! use ds_parse::parse;
 //!
@@ -59,7 +61,7 @@
 //!     "fetch",
 //!     EffectRow::of(Effect::World) | EffectRow::of(Effect::Error),
 //! );
-//! let effects = effects_of(&[ast], &declared);
+//! let effects = effects_of(&[ast], &declared, &WorldCaps::new());
 //!
 //! // `body` unions the declared ambient row with its own `?` [E4].
 //! let body = effects.of_name("body").expect("row-bearing definition");
@@ -75,7 +77,10 @@ use ds_parse::{
     LocalDecl, MatchArm, Path, Pattern, StmtKind, StrPart, TraitDecl, TraitMember, UnaryOp,
 };
 
-use crate::resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions};
+use crate::{
+    platform::WorldCaps,
+    resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
+};
 
 /// One named effect. The vocabulary is the record's set: `error` (B5, E4)
 /// — union-member failure a definition can hand to its caller; `trap`
@@ -195,10 +200,11 @@ impl std::ops::BitOrAssign for EffectRow {
 
 /// Rows the embedding surface declares for ambient functions — externs,
 /// the stdlib, platform capabilities (E1, H5). v1 has no effect syntax, so
-/// this table is the only row input the surface cannot express; M7's
-/// `platform "..." provides <...>` declaration is its source. Applied by
+/// this table is the only row input the surface cannot express. Applied by
 /// name; a declared row is a lower bound on the computed row. Absent names
-/// carry [`EffectRow::PURE`].
+/// carry [`EffectRow::PURE`]. World rows pair with their capability
+/// attribution in [`crate::WorldCaps`]; the platform declaration's
+/// provides list (checked by [`crate::check_platform`]) is the licenser.
 #[derive(Clone, Debug, Default)]
 pub struct DeclaredRows {
     rows: HashMap<String, EffectRow>,
@@ -238,8 +244,15 @@ pub struct DefEffects {
     pub name: String,
     /// What the definition is.
     pub kind: DefKind,
+    /// The defining name occurrence (carries the file): the platform
+    /// check's diagnostic span.
+    pub span: Span,
     /// The computed row.
     pub row: EffectRow,
+    /// The world capabilities the definition's world usage needs (the
+    /// platform subset check's finer grain, H5): a bitmask over the
+    /// capability vocabulary, zero when the row is world-free.
+    pub caps: u8,
 }
 
 /// The computed rows of one package: every value-producing definition
@@ -313,6 +326,10 @@ struct Edge {
 struct Info {
     /// Own contributions: declared row and intrinsics.
     base: EffectRow,
+    /// Own world-capability contributions: the bitmask of the platform
+    /// capabilities the node's declared world row names (the platform
+    /// subset check's finer grain, solved beside the row).
+    base_caps: u8,
     /// Call edges.
     edges: Vec<Edge>,
 }
@@ -354,15 +371,32 @@ const fn traps_assign(op: AssignOp) -> bool {
 /// every tree passed here, in order (G3). `T: Borrow<Ast>` lets callers
 /// pass owned trees or shared arcs (Borrow is the reflexive bound).
 #[must_use]
-pub fn effects_of<T>(asts: &[T], declared: &DeclaredRows) -> Effects
+pub fn effects_of<T>(asts: &[T], declared: &DeclaredRows, world: &WorldCaps) -> Effects
 where
     T: std::borrow::Borrow<Ast>,
 {
-    let mut package = Package::new();
-    for ast in asts {
-        // duplicate-name diagnostics belong to the resolve query
-        let _ = package.add_file(ast.borrow());
-    }
+    let (package, resolutions, _) = crate::resolve::resolve_package(asts);
+    effects_of_resolved(asts, &package, &resolutions, declared, world)
+}
+
+/// Computes the package's effect rows over an already collected and
+/// resolved package: `asts` and `resolutions` align positionally with the
+/// package's collected files, like
+/// [`check_resolved`](crate::type_of::check_resolved). Same contract as
+/// [`effects_of`], which collects and resolves the trees first; callers
+/// holding a resolve result pass it in instead of re-running the pass per
+/// file.
+#[must_use]
+pub fn effects_of_resolved<T>(
+    asts: &[T],
+    package: &Package,
+    resolutions: &[Resolutions],
+    declared: &DeclaredRows,
+    world: &WorldCaps,
+) -> Effects
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let count = u32::try_from(package.len()).expect("definition count fits u32");
     let mut graph = HashMap::new();
     // nodes up front, so edges are order-independent across files [G3]
@@ -375,13 +409,13 @@ where
             graph.insert(Node::Def(def), Info::default());
         }
     }
-    for ast in asts {
+    for (ast, res) in asts.iter().zip(resolutions) {
         let ast = ast.borrow();
-        let (res, _) = package.resolve(ast);
         let mut walker = Walker {
-            package: &package,
+            package,
             declared,
-            res: &res,
+            world,
+            res,
             graph: &mut graph,
             node: Node::Anon(Span::new(ds_diag::FileId::new(0), 0, 0)),
         };
@@ -391,7 +425,7 @@ where
             }
         }
     }
-    let rows = solve(&graph);
+    let solved = solve(&graph);
     let mut defs = Vec::new();
     let mut index = vec![None; package.len()];
     let mut names = HashMap::new();
@@ -400,14 +434,17 @@ where
         let def = package.def(def_id);
         if matches!(def.kind, DefKind::Fn | DefKind::Const | DefKind::Var) {
             index[raw as usize] = Some(u32::try_from(defs.len()).expect("def count fits u32"));
+            let (row, caps) = solved
+                .get(&Node::Def(def_id))
+                .copied()
+                .unwrap_or((EffectRow::PURE, 0));
             defs.push(DefEffects {
                 def: def_id,
                 name: def.name.clone(),
                 kind: def.kind,
-                row: rows
-                    .get(&Node::Def(def_id))
-                    .copied()
-                    .unwrap_or(EffectRow::PURE),
+                span: def.span,
+                row,
+                caps,
             });
         }
         names.entry(def.name.clone()).or_insert(def_id);
@@ -415,31 +452,37 @@ where
     Effects { defs, index, names }
 }
 
-/// Rows to the least fixpoint over the call graph: each node's row unions
-/// its base with its edges' masked callee rows until nothing grows. Rows
-/// only grow and the lattice is finite (two to the vocabulary size), so
-/// this terminates.
-fn solve(graph: &HashMap<Node, Info>) -> HashMap<Node, EffectRow> {
-    let mut rows: HashMap<Node, EffectRow> = graph
+/// Rows and world-capability sets to the least fixpoint over the call
+/// graph: each node's row unions its base with its edges' masked callee
+/// rows, and its capability set unions its base with its edges' callee
+/// sets (unmasked — the error masks never touch world), until nothing
+/// grows. Both lattices only grow and are finite, so this terminates.
+fn solve(graph: &HashMap<Node, Info>) -> HashMap<Node, (EffectRow, u8)> {
+    let mut solved: HashMap<Node, (EffectRow, u8)> = graph
         .iter()
-        .map(|(node, info)| (*node, info.base))
+        .map(|(node, info)| (*node, (info.base, info.base_caps)))
         .collect();
     loop {
         let mut changed = false;
         for (node, info) in graph {
             let mut row = info.base;
+            let mut caps = info.base_caps;
             for edge in &info.edges {
-                let callee = rows.get(&edge.callee).copied().unwrap_or(EffectRow::PURE);
-                row = row.union(callee.minus(edge.mask));
+                let (callee_row, callee_caps) = solved
+                    .get(&edge.callee)
+                    .copied()
+                    .unwrap_or((EffectRow::PURE, 0));
+                row = row.union(callee_row.minus(edge.mask));
+                caps |= callee_caps;
             }
-            let solved = rows.get_mut(node).expect("every node is seeded");
-            if *solved != row {
-                *solved = row;
+            let entry = solved.get_mut(node).expect("every node is seeded");
+            if *entry != (row, caps) {
+                *entry = (row, caps);
                 changed = true;
             }
         }
         if !changed {
-            return rows;
+            return solved;
         }
     }
 }
@@ -448,6 +491,7 @@ fn solve(graph: &HashMap<Node, Info>) -> HashMap<Node, EffectRow> {
 struct Walker<'a, 'g> {
     package: &'a Package,
     declared: &'a DeclaredRows,
+    world: &'a WorldCaps,
     res: &'a Resolutions,
     graph: &'g mut HashMap<Node, Info>,
     /// The node being contributed to; every walk path enters its node
@@ -471,9 +515,27 @@ impl Walker<'_, '_> {
         info.base = info.base.union(row);
     }
 
+    /// The world-capability bits of `name`'s declared row: zero when the
+    /// declared row carries no world effect or the capability table does
+    /// not name the function (an unattributed world touch, which the
+    /// platform check licenses on any world-bearing platform).
+    fn declared_caps(&self, name: &str) -> u8 {
+        if self.declared.row(name).contains(Effect::World) { self.world.bit(name) } else { 0 }
+    }
+
     /// Adds one effect to the current node's own contributions.
     fn intrinsic(&mut self, effect: Effect) {
         self.contribute(EffectRow::of(effect));
+    }
+
+    /// Adds world-capability bits to the current node's own
+    /// contributions.
+    fn caps(&mut self, caps: u8) {
+        let info = self
+            .graph
+            .get_mut(&self.node)
+            .expect("walks enter their node first");
+        info.base_caps |= caps;
     }
 
     /// Records one call edge. The callee's row is read at the fixpoint, so
@@ -502,7 +564,8 @@ impl Walker<'_, '_> {
             | ItemKind::Enum(_)
             | ItemKind::Tag(_)
             | ItemKind::TypeAlias(_)
-            | ItemKind::Import(_) => {},
+            | ItemKind::Import(_)
+            | ItemKind::Platform(_) => {},
         }
     }
 
@@ -515,6 +578,7 @@ impl Walker<'_, '_> {
         };
         self.enter(Node::Def(def));
         self.contribute(self.declared.row(&f.name.name));
+        self.caps(self.declared_caps(&f.name.name));
         if let Some(body) = &f.body {
             self.block(body, EffectRow::PURE);
         }
@@ -547,14 +611,17 @@ impl Walker<'_, '_> {
         let scratch = Node::Anon(init.span());
         self.enter(scratch);
         self.expr(init, EffectRow::PURE);
-        let (base, edges) = {
+        let (base, base_caps, edges) = {
             let info = &self.graph[&scratch];
-            (info.base, info.edges.clone())
+            (info.base, info.base_caps, info.edges.clone())
         };
         for def in defs {
-            let declared = self.declared.row(&self.package.def(def).name);
+            let name = &self.package.def(def).name;
+            let declared = self.declared.row(name);
+            let declared_caps = self.declared_caps(name);
             let info = self.graph.entry(Node::Def(def)).or_default();
             info.base = info.base.union(declared).union(base);
+            info.base_caps |= declared_caps | base_caps;
             info.edges.extend(edges.iter().copied());
         }
     }
@@ -575,6 +642,7 @@ impl Walker<'_, '_> {
             };
             self.enter(Node::Method(m));
             self.contribute(self.declared.row(&f.name.name));
+            self.caps(self.declared_caps(&f.name.name));
             if let Some(body) = &f.body {
                 self.block(body, EffectRow::PURE);
             }
@@ -605,6 +673,7 @@ impl Walker<'_, '_> {
                 let anon = Node::Anon(f.name.span);
                 self.enter(anon);
                 self.contribute(declared);
+                self.caps(self.declared_caps(&f.name.name));
                 self.block(body, EffectRow::PURE);
                 if let Some(m) = self.trait_member(trait_def, f) {
                     self.enter(Node::Method(m));
@@ -622,6 +691,7 @@ impl Walker<'_, '_> {
                 };
                 self.enter(Node::Method(m));
                 self.contribute(declared);
+                self.caps(self.declared_caps(&f.name.name));
                 self.block(body, EffectRow::PURE);
             }
         }

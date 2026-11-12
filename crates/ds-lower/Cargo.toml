@@ -22,4 +22,9 @@ ds-mod   = { path = "../ds-mod" }
 ds-parse = { path = "../ds-parse" }
 
 [dev-dependencies]
-ds-vm = { path = "../ds-vm" }
+criterion.workspace = true
+ds-vm     = { path = "../ds-vm" }
+
+[[bench]]
+name    = "lower"
+harness = false

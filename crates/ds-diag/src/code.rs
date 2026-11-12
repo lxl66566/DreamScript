@@ -153,6 +153,16 @@ error_codes! {
     NonRangeIn => "DS2017", Type,
     /// An impl member's signature disagrees with its trait member's arity, parameter modes, parameter types, or return.
     ImplMemberSignatureMismatch => "DS2018", Type,
+    /// An impl member re-declares a parameter default its trait member owns; the trait declaration is the default's single authority.
+    ImplMemberDefaultRedeclared => "DS2019", Type,
+    /// An impl member declares a parameter default its trait member does not have; there is no trait default to override and the literal never stages at a call site.
+    ImplMemberDefaultWithoutTrait => "DS2020", Type,
+    /// A trait or impl member's signature declares no receiver; the first parameter is `self` or `mut self`, typed `Self`.
+    MemberWithoutReceiver => "DS2021", Type,
+    /// An enum case named `none` carries a payload; `none` is the predeclared unit atom, so the case claims no atom of its own and its construction refuses.
+    NonePayloadCase => "DS2022", Type,
+    /// A trait impl provides no body for a trait member that declares no default body; dispatch would have no body to plan.
+    ImplMemberWithoutBody => "DS2023", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -185,6 +195,14 @@ error_codes! {
     ModuleSectionMalformed => "DS4008", Module,
     /// A checked construct the lowering contract does not cover.
     LowerUnsupported => "DS4009", Module,
+    /// A package declares two platform declarations (H5).
+    PlatformDuplicate => "DS4010", Module,
+    /// A platform declaration names a capability outside the world vocabulary (H5).
+    PlatformUnknownCapability => "DS4011", Module,
+    /// A definition's world usage needs a capability its platform does not provide (H5, E1).
+    PlatformNotProvided => "DS4012", Module,
+    /// World-touching code with no platform declaration (H5, E1).
+    PlatformMissing => "DS4013", Module,
 }
 
 #[cfg(test)]
@@ -232,6 +250,11 @@ mod tests {
             ("AnnotatedReceiver", "DS2016", ErrorClass::Type),
             ("NonRangeIn", "DS2017", ErrorClass::Type),
             ("ImplMemberSignatureMismatch", "DS2018", ErrorClass::Type),
+            ("ImplMemberDefaultRedeclared", "DS2019", ErrorClass::Type),
+            ("ImplMemberDefaultWithoutTrait", "DS2020", ErrorClass::Type),
+            ("MemberWithoutReceiver", "DS2021", ErrorClass::Type),
+            ("NonePayloadCase", "DS2022", ErrorClass::Type),
+            ("ImplMemberWithoutBody", "DS2023", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
@@ -247,6 +270,10 @@ mod tests {
             ("ModuleBadTargetClass", "DS4007", ErrorClass::Module),
             ("ModuleSectionMalformed", "DS4008", ErrorClass::Module),
             ("LowerUnsupported", "DS4009", ErrorClass::Module),
+            ("PlatformDuplicate", "DS4010", ErrorClass::Module),
+            ("PlatformUnknownCapability", "DS4011", ErrorClass::Module),
+            ("PlatformNotProvided", "DS4012", ErrorClass::Module),
+            ("PlatformMissing", "DS4013", ErrorClass::Module),
         ];
         assert_eq!(
             ErrorCode::ALL.len(),
@@ -263,7 +290,7 @@ mod tests {
     /// Machine checks the snapshot cannot express alone: every code string is
     /// a well-formed `DSnnnn`, its number sits inside its class's thousands
     /// range, strings are unique, `ALL` is strictly ascending, and the table
-    /// is terminal at DS4009.
+    /// is terminal at DS4013.
     #[test]
     fn all_codes_well_formed_in_range_unique_and_ascending() {
         let mut prev = 0;
@@ -284,6 +311,6 @@ mod tests {
             assert!(n > prev, "{code} ({n}) breaks ascending order after {prev}");
             prev = n;
         }
-        assert_eq!(prev, 4009, "the table's highest code is DS4009");
+        assert_eq!(prev, 4013, "the table's highest code is DS4013");
     }
 }

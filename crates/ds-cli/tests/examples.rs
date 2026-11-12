@@ -75,7 +75,8 @@ fn containers_compose_the_generic_closes() {
 fn combinators_run_their_lambdas_reentrantly() {
     // the lambda-taking combinators dispatch through CALLG and reenter
     // the dispatcher per element: map and filter answer fresh lists,
-    // reduce folds (an empty list would answer its init), and the
+    // reduce folds (an empty list would answer its init), partition
+    // splits into its two-list total at the call site, and the
     // block-body println interleaves in element order
     assert_eq!(
         run_ok(ds().arg("run").arg(example("combinators.ds"))),
@@ -88,8 +89,32 @@ visiting 4
 visiting 5
 traced 10 50
 sum 15 joined alphabeta
+split 3 2
 0
 "
+    );
+}
+
+#[test]
+fn par_map_forks_one_child_per_element_and_joins_in_input_order() {
+    // E3's fork-join slice: each element runs as its own spawned child
+    // under a fresh nursery, the boundary join assembles the answers in
+    // input order (spawn order is the drive order), and the sequential
+    // reduce folds them after
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("par_map.ds"))),
+        "doubled 5 2 10\nsum 30\n0\n"
+    );
+}
+
+#[test]
+fn par_reduce_chains_one_child_per_element_in_input_order() {
+    // E3's fork-join fold: the non-commutative order witness (a string
+    // chain through the native concat), the empty-input init answer,
+    // and the struct-typed fold chaining its whole word span
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("par_reduce.ds"))),
+        "sum 15\njoined alphabetagamma\nempty 12000\npair 123 6\n0\n"
     );
 }
 
@@ -97,7 +122,8 @@ sum 15 joined alphabeta
 fn callables_pass_named_fns_closures_and_collections() {
     // the callable words end to end: a named fn value and a capturing
     // closure arrive through the fn-typed parameter (the callable-
-    // defaulted slot), the factory's fn-typed return builds an add-k
+    // defaulted slot), the trailing block stages its closure like the
+    // written lambda, the factory's fn-typed return builds an add-k
     // closure, the fn collection stores the scalar callable words
     // (named fns and non-capturing lambdas — closures and unproven
     // callable parameters stay refused at the element staging), the
@@ -106,7 +132,7 @@ fn callables_pass_named_fns_closures_and_collections() {
     // beside the `.err` fallback
     assert_eq!(
         run_ok(ds().arg("run").arg(example("callables.ds"))),
-        "named 5 3\nclosure 40\nfactory 42\nfns 2 42\nparsed port 68\nfallback 8\n0\n"
+        "named 5 3\nclosure 40\nblock 42\nfactory 42\nfns 2 42\nparsed port 68\nfallback 8\n0\n"
     );
 }
 
@@ -116,6 +142,22 @@ fn tuples_destructure_in_bindings_and_match_arms() {
         run_ok(ds().arg("run").arg(example("tuples.ds"))),
         "host:8080\nport 5432\nmatched host 8080\nlabel unit\nseven 7\nequal\nvar db:8081\npick \
          zero-five big zero flat\n0\n"
+    );
+}
+
+#[test]
+fn patterns_test_bind_and_guard_every_match_shape() {
+    // the match-pattern surfaces: a struct pattern tests its literal
+    // fields in place and binds the rest, an enum case arm tests and
+    // binds its payload, a nested struct sub-pattern over a
+    // struct-typed payload tests and binds its fields the same way, a
+    // guard on a union arm slides its failure to the next arm's
+    // dispatch entry (scored(9) lands in the binding arm, scored(2)
+    // never reaches the guard), and a tuple member of a union
+    // destructures positionally inside its arm's body
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("patterns.ds"))),
+        "at 2 7\naxis 4\nunit\none\nbig 9\nn 2\nplain\npair 7 0\naxis 5\nat 2 3\nnone\n0\n"
     );
 }
 

@@ -22,3 +22,9 @@ ds-diag = { path = "../ds-diag" }
 
 [dev-dependencies]
 arbitrary.workspace = true
+criterion.workspace = true
+tempfile.workspace   = true
+
+[[bench]]
+name    = "read"
+harness = false

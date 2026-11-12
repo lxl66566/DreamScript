@@ -46,7 +46,7 @@ mod guard;
 mod heap;
 mod rc;
 
-pub use arena::{Arena, ArenaStats, FIRST_CHUNK, MAX_CHUNK, MIN_ALIGN, Mark};
+pub use arena::{Arena, ArenaMisuse, ArenaStats, FIRST_CHUNK, MAX_CHUNK, MIN_ALIGN, Mark};
 pub use guard::RestoreOnDrop;
 pub use heap::{Heap, HeapStats, MAX_REUSE_CLASS, MIN_CLASS, POOL_DEPTH};
 pub use rc::{DeinitFn, ExclusiveBorrow, RcHeader, RcRef, SharedBorrow, drop_deinit};

@@ -145,10 +145,12 @@ pub mod effects;
 pub mod error;
 pub mod expr;
 pub mod extraction;
+pub mod id_table;
 pub mod instance;
 pub mod instance_solve;
 pub mod linearity;
 mod pattern;
+pub mod platform;
 pub mod resolve;
 pub mod type_of;
 pub mod universe;
@@ -161,6 +163,7 @@ pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_
 pub use error::Error;
 pub use expr::TypeExpr;
 pub use extraction::Extraction;
+pub use id_table::{DenseId, IdTable};
 pub use instance::{
     Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId,
 };
@@ -170,8 +173,12 @@ pub use resolve::{
     resolve_package,
 };
 pub use type_of::{
-    Analyzed, Checked, InherentCallBounds, TraitCall, TypedPackage, Val, analyze, check_resolved,
-    type_check,
+    Analyzed, Checked, GenericCallBounds, InherentCallBounds, TraitCall, TypedPackage, Val,
+    analyze, check_resolved, type_check,
 };
 pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};
+
+pub use crate::platform::{
+    CAPABILITIES, WorldCaps, capability_bit, capability_names, check_platform,
+};

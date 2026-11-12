@@ -1,0 +1,38 @@
+// purpose: the par_map multi-word answer seam end to end — the fork-join
+// combinator's callable answers a struct-typed span, the spawned child's
+// completion channel delivering it whole and the join assembling the
+// answers in input order onto the stride-2 result list; the negative
+// probes in the test file pin the fork guards' refusals.
+// items:
+// both: stage: run
+// pair_at: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct pair { left: int, right: int }
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn len[t] (xs: list[t]) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+
+fn both(x: int) -> pair {
+  pair { left: x * 2, right: x * 3 }
+}
+
+fn pair_at(xs: list[pair], i: int) -> pair {
+  const cell = list_get(xs, i)
+  cell.ok((p: pair) => p).err((_: none) => pair { left: 0, right: 0 })
+}
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5]
+  const wide = xs.par_map(both)
+  const first = pair_at(wide, 0)
+  const last = pair_at(wide, 4)
+  println("first ${first.left} ${first.right} last ${last.left} ${last.right} len ${len(wide)}")
+  println("empty ${len(list[int]().par_map(both))}")
+}

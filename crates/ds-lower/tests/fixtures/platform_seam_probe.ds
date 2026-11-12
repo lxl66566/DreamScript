@@ -1,0 +1,18 @@
+// The platform seam's lowering probe (H5.5, E1): the package declares
+// its own platform name, and the world calls' pool FuncRefs address that
+// name — not the default `std`.
+
+tag int
+tag string
+
+platform "host"
+
+extern fn println (msg: string) -> ()
+extern fn file_size (path: string) -> int
+
+fn main () -> () { println("from the host platform") }
+
+fn size (path: string) -> int {
+  const n = file_size(path)
+  n
+}

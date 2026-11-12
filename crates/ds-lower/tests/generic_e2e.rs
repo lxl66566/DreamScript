@@ -12,7 +12,20 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+
+/// The record's body decoded to instructions, one per pc.
+fn insts(function: &ds_mod::Function) -> Vec<Inst> {
+    function
+        .code()
+        .iter()
+        .enumerate()
+        .map(|(pc, word)| {
+            Inst::decode(u32::try_from(pc).expect("pc fits u32"), *word)
+                .expect("ds-mod validated every word")
+        })
+        .collect()
+}
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -45,8 +58,8 @@ fn build_vm() -> (Vm, Lowered) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
 
@@ -104,7 +117,7 @@ fn len_sites_lower_to_one_callg_with_instance_evidence() {
     let (_, lowered) = build_vm();
     let mut sites = 0;
     for f in lowered.module().functions() {
-        let code = f.code();
+        let code = insts(f);
         for (i, uop) in code.iter().enumerate() {
             let Inst::Uop(ds_abi::Uop::Callg { callee, nargs }) = uop else {
                 continue;

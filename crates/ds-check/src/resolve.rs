@@ -88,13 +88,12 @@
 //! # }
 //! ```
 
-use std::collections::HashMap;
-
 use ds_diag::{Diagnostic, ErrorCode, Span, Suggestion};
 use ds_parse::{
     Ast, Expr, FnDecl, Ident, Item, ItemKind, Param, Path, Pattern, Stmt, StmtKind, StructMember,
     TraitMember, Type, TypeParam,
 };
+use rustc_hash::FxHashMap;
 
 /// Identity of one package-level definition inside its [`Package`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -274,14 +273,21 @@ pub enum DotRes {
 /// Checker passes consume it; nothing in it mutates the package.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub struct Resolutions {
-    uses: HashMap<Span, Res>,
+    /// One entry per name use, sorted by span so per-expression lookups
+    /// binary search: `Span` carries no ordering, so the key is its raw
+    /// file and offset triple.
+    uses: Vec<(Span, Res)>,
 }
 
 impl Resolutions {
     /// The resolution recorded at a use span, if any.
     #[must_use]
     pub fn get(&self, span: Span) -> Option<&Res> {
-        self.uses.get(&span)
+        let index = self
+            .uses
+            .binary_search_by_key(&span_key(span), |(use_span, _)| span_key(*use_span))
+            .ok()?;
+        Some(&self.uses[index].1)
     }
 
     /// Number of recorded uses.
@@ -297,6 +303,11 @@ impl Resolutions {
     }
 }
 
+/// The sort key of one use span: file, then byte offsets.
+fn span_key(span: Span) -> (u32, u32, u32) {
+    (span.file.as_u32(), span.start, span.end)
+}
+
 /// A package: the declarations of its files in the type and value
 /// namespaces (G3, F9), plus the method-tier registries (F3). Collection
 /// (`add_file`) is order-independent; use resolution (`resolve`) runs
@@ -306,10 +317,10 @@ impl Resolutions {
 pub struct Package {
     files: Vec<ds_diag::FileId>,
     defs: Vec<Def>,
-    type_names: HashMap<String, DefId>,
-    value_names: HashMap<String, DefId>,
+    type_names: FxHashMap<String, DefId>,
+    value_names: FxHashMap<String, DefId>,
     methods: Vec<MethodDecl>,
-    method_index: HashMap<String, Vec<MethodId>>,
+    method_index: FxHashMap<String, Vec<MethodId>>,
 }
 
 /// Resolves one package (G3): collects every file's declarations into one
@@ -367,22 +378,20 @@ impl Package {
     pub fn resolve(&self, ast: &Ast) -> (Resolutions, Vec<Diagnostic>) {
         let mut resolver = FileResolver {
             package: self,
-            uses: HashMap::new(),
+            uses: Vec::new(),
             diags: Vec::new(),
-            scopes: vec![HashMap::new()],
-            type_scopes: vec![HashMap::new()],
+            scopes: vec![FxHashMap::default()],
+            type_scopes: vec![FxHashMap::default()],
         };
         for block in &ast.blocks {
             for item in &block.items {
                 resolver.item(item);
             }
         }
-        (
-            Resolutions {
-                uses: resolver.uses,
-            },
-            resolver.diags,
-        )
+        let mut uses = resolver.uses;
+        uses.sort_by_key(|(span, _)| span_key(*span));
+        debug_assert!(uses.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        (Resolutions { uses }, resolver.diags)
     }
 
     /// The declaration of a definition.
@@ -454,7 +463,7 @@ impl Package {
 
     fn collect_item(&mut self, item: &Item, diags: &mut Vec<Diagnostic>) {
         match &item.kind {
-            ItemKind::Import(_) => {},
+            ItemKind::Import(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
                 let kind = if local.mutable { DefKind::Var } else { DefKind::Const };
                 self.collect_pattern_defs(&local.pat, kind, diags);
@@ -590,12 +599,12 @@ impl Package {
 /// every name use.
 struct FileResolver<'a> {
     package: &'a Package,
-    uses: HashMap<Span, Res>,
+    uses: Vec<(Span, Res)>,
     diags: Vec<Diagnostic>,
     /// Value scopes, innermost last: binder name to binder span.
-    scopes: Vec<HashMap<String, Span>>,
+    scopes: Vec<FxHashMap<String, Span>>,
     /// Type-variable scopes, innermost last.
-    type_scopes: Vec<HashMap<String, Span>>,
+    type_scopes: Vec<FxHashMap<String, Span>>,
 }
 
 /// What a bare identifier in a pattern names.
@@ -611,7 +620,7 @@ enum ArmTag {
 impl FileResolver<'_> {
     fn item(&mut self, item: &Item) {
         match &item.kind {
-            ItemKind::Import(_) | ItemKind::Tag(_) => {},
+            ItemKind::Import(_) | ItemKind::Tag(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
                 // A top-level binding declares a PACKAGE def [G3], not a
                 // local: the initializer and annotation resolve here, the
@@ -635,7 +644,7 @@ impl FileResolver<'_> {
                         // instance [C5], borrowed; the walk never types it,
                         // so binding the name here is all resolution owes.
                         StructMember::Deinit { span, body } => {
-                            self.scopes.push(HashMap::new());
+                            self.scopes.push(FxHashMap::default());
                             self.bind(
                                 &Ident {
                                     span: *span,
@@ -685,7 +694,7 @@ impl FileResolver<'_> {
                 // A trait member's signatures spell the self type `Self`
                 // [F2, record 6.1].
                 self.type_scopes
-                    .push(HashMap::from([("Self".to_owned(), t.name.span)]));
+                    .push(FxHashMap::from_iter([("Self".to_owned(), t.name.span)]));
                 for member in &t.members {
                     match member {
                         TraitMember::AssocType { .. } => {},
@@ -706,7 +715,7 @@ impl FileResolver<'_> {
                 // An impl's members spell the self type `Self` [F2, record
                 // 6.1], trait and inherent alike.
                 self.type_scopes
-                    .push(HashMap::from([("Self".to_owned(), imp.span)]));
+                    .push(FxHashMap::from_iter([("Self".to_owned(), imp.span)]));
                 self.type_(&imp.target);
                 for f in &imp.fns {
                     self.fn_decl(f, true);
@@ -719,7 +728,7 @@ impl FileResolver<'_> {
 
     /// Binds generic type parameters in a fresh type scope.
     fn type_params(&mut self, params: &[TypeParam]) {
-        let mut scope = HashMap::new();
+        let mut scope = FxHashMap::default();
         for param in params {
             self.record_dup(&mut scope, &param.name);
             if let Some(bound) = &param.bound {
@@ -731,7 +740,7 @@ impl FileResolver<'_> {
 
     fn fn_decl(&mut self, f: &FnDecl, member: bool) {
         self.type_params(&f.generics);
-        self.scopes.push(HashMap::new());
+        self.scopes.push(FxHashMap::default());
         for (index, param) in f.params.iter().enumerate() {
             self.param(param, member && index == 0);
         }
@@ -774,7 +783,7 @@ impl FileResolver<'_> {
     }
 
     fn block(&mut self, block: &ds_parse::BlockExpr) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(FxHashMap::default());
         for stmt in &block.stmts {
             self.stmt(stmt);
         }
@@ -811,7 +820,7 @@ impl FileResolver<'_> {
                 ..
             } => {
                 self.type_params(generics);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(FxHashMap::default());
                 for param in params {
                     self.param(param, false);
                 }
@@ -914,7 +923,7 @@ impl FileResolver<'_> {
                 self.expr(scrutinee);
                 for arm in arms {
                     // Each arm is its own scope nested in the enclosing one.
-                    self.scopes.push(HashMap::new());
+                    self.scopes.push(FxHashMap::default());
                     self.arm_pattern(&arm.pat);
                     if let Some(ann) = &arm.ann {
                         self.type_(ann);
@@ -934,7 +943,7 @@ impl FileResolver<'_> {
                 pat, iter, body, ..
             } => {
                 self.expr(iter);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(FxHashMap::default());
                 self.bind_pattern(pat, false);
                 self.expr(body);
                 self.scopes.pop();
@@ -971,7 +980,7 @@ impl FileResolver<'_> {
             self.unknown_name(name, self.shadowing_candidates());
             return;
         };
-        self.uses.insert(name.span, res);
+        self.uses.push((name.span, res));
     }
 
     /// The callee of a call form (F9): locals first (an indirect call of a
@@ -981,7 +990,7 @@ impl FileResolver<'_> {
     /// both declarations, never a priority search.
     fn call_name_use(&mut self, name: &Ident) {
         if let Some(bind) = self.lookup_local(&name.name) {
-            self.uses.insert(name.span, Res::Local { bind });
+            self.uses.push((name.span, Res::Local { bind }));
             return;
         }
         let res = match (
@@ -1005,7 +1014,7 @@ impl FileResolver<'_> {
                 return;
             },
         };
-        self.uses.insert(name.span, res);
+        self.uses.push((name.span, res));
     }
 
     /// A call-form name present in both namespaces: DS2014, naming both
@@ -1143,8 +1152,8 @@ impl FileResolver<'_> {
                     self.diags.push(diag);
                     return;
                 };
-                self.uses.insert(head.span, Res::Def(def));
-                self.uses.insert(method.span, Res::TraitMethod(id));
+                self.uses.push((head.span, Res::Def(def)));
+                self.uses.push((method.span, Res::TraitMethod(id)));
             },
             _ => {
                 self.diags.push(
@@ -1164,7 +1173,7 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => {
                 if let Some(def) = self.package.lookup_type(&only.name) {
-                    self.uses.insert(only.span, Res::Def(def));
+                    self.uses.push((only.span, Res::Def(def)));
                 } else if only.name != "none" {
                     let candidates = self.type_candidates();
                     self.unknown_name_at(only, candidates, "struct");
@@ -1189,14 +1198,14 @@ impl FileResolver<'_> {
     /// tier searches the VALUE namespace only (F9).
     fn dot_use(&mut self, name: &Ident) {
         if name.name == "err" || name.name == "ok" {
-            self.uses.insert(name.span, Res::Handler);
+            self.uses.push((name.span, Res::Handler));
             return;
         }
         if let Some(func) = self.package.lookup_value(&name.name) {
             // Capability parameters have no syntax yet, so the receiver
             // feeds parameter 0 — the first data parameter [F3].
             self.uses
-                .insert(name.span, Res::Dot(DotRes::Free { func, fed_param: 0 }));
+                .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
             return;
         }
         let candidates: Vec<MethodId> = self.package.method_candidates(&name.name).to_vec();
@@ -1217,7 +1226,7 @@ impl FileResolver<'_> {
             return;
         }
         self.uses
-            .insert(name.span, Res::Dot(DotRes::Methods { candidates }));
+            .push((name.span, Res::Dot(DotRes::Methods { candidates })));
     }
 
     // ---- type positions ----------------------------------------------------
@@ -1300,7 +1309,7 @@ impl FileResolver<'_> {
             self.unknown_name_at(name, candidates, "type");
             return;
         };
-        self.uses.insert(name.span, res);
+        self.uses.push((name.span, res));
     }
 
     // ---- patterns ----------------------------------------------------------
@@ -1334,7 +1343,7 @@ impl FileResolver<'_> {
                 ArmTag::Binding => self.bind(name, or_rebind),
                 ArmTag::BuiltinNone => {},
                 ArmTag::Def(def) => {
-                    self.uses.insert(name.span, Res::Def(def));
+                    self.uses.push((name.span, Res::Def(def)));
                 },
             },
             // Pattern paths are item references, not locals.
@@ -1398,7 +1407,7 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => {
                 if let Some(def) = self.package.lookup_type(&only.name) {
-                    self.uses.insert(only.span, Res::Def(def));
+                    self.uses.push((only.span, Res::Def(def)));
                 } else {
                     let candidates = candidates();
                     self.unknown_name_at(only, candidates, "pattern");
@@ -1407,7 +1416,7 @@ impl FileResolver<'_> {
             // The tail is a case name; case tables are the checker's.
             [head, _case] => {
                 if let Some(def) = self.package.lookup_type(&head.name) {
-                    self.uses.insert(head.span, Res::Def(def));
+                    self.uses.push((head.span, Res::Def(def)));
                 } else {
                     let candidates = candidates();
                     self.unknown_name_at(head, candidates, "pattern");
@@ -1447,7 +1456,7 @@ impl FileResolver<'_> {
     }
 
     /// Records a binder in `scope`, reporting same-scope duplicates.
-    fn record_dup(&mut self, scope: &mut HashMap<String, Span>, name: &Ident) {
+    fn record_dup(&mut self, scope: &mut FxHashMap<String, Span>, name: &Ident) {
         if let Some(&first) = scope.get(&name.name) {
             self.diags.push(
                 Diagnostic::error(

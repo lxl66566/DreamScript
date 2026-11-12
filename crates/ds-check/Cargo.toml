@@ -17,9 +17,12 @@ workspace = true
 thiserror.workspace = true
 ds-diag = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
+rustc-hash = "2"
 
 [dev-dependencies]
 ds-stdlib.workspace = true
+# the fuzz mirrors render `render::to_json`
+ds-diag             = { path = "../ds-diag", features = ["json"] }
 
 [[bench]]
 name    = "check_perf"

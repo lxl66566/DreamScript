@@ -1,0 +1,48 @@
+// purpose: the concrete spelling of the multi-word instantiation
+// boundary — iterating `list[point]` directly binds each element's whole
+// flattened span (the stride-aware iteration the heap-list slice
+// landed), so the per-element dispatch into the concrete `sums for
+// point` body stages both words and answers honestly. The generic
+// spelling (`impl[u: sums] sums for list[u]` entered at `list[point]`)
+// refuses at the entering site naming the one-word instantiation
+// boundary (pinned in generic_impl_refusals): the nested runtime
+// dispatch stages the variable's single word, and a serving body whose
+// `self` spans two would read a staged evidence rider as its missing
+// field word.
+// items:
+// int: stage: run
+// string: stage: run
+// point: stage: run
+// sums: stage: run
+// sums-point: stage: run
+// total: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct list[t]
+struct point { x: int, y: int }
+
+extern fn println(s: string) -> ()
+
+trait sums {
+  fn sum(self) -> int
+}
+
+impl sums for point {
+  fn sum(self) -> int { self.x + self.y }
+}
+
+fn total(ps: list[point]) -> int {
+  var acc = 0
+  for e in ps {
+    acc = acc + e.sum()
+  }
+  acc
+}
+
+fn main() -> int {
+  println("total=${total([point { x: 1, y: 2 }, point { x: 3, y: 4 }])}")
+  0
+}

@@ -8,26 +8,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
-use ds_mod::{LoadError as ModLoadError, Module, ReadError, read_mmap};
+use ds_mod::{LoadError as ModLoadError, ReadError, read_mmap};
 use ds_vm::{
-    LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap, Value, Vm,
+    ArenaMisuse, ArenaPackError, LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap,
+    Value, Vm,
     abi::SlotType,
-    native::{
-        PLATFORM_IO_ERR, PLATFORM_NET_ERR, PLATFORM_NONE, PLATFORM_PARSE_ERR, STD_PLATFORM_MODULE,
-        std_platform_module,
-    },
+    native::{PLATFORM_IO_ERR, PLATFORM_NET_ERR, PLATFORM_NONE, PLATFORM_PARSE_ERR},
+    platform::Platform,
 };
 
 use crate::source;
 
-/// The CLI is the default platform provider (H5.5): every run installs
-/// the `std` platform natives (console, file, net) into its registry.
-/// This must precede [`Vm::install_dsmod`] — the loader validates pool
-/// FuncRefs at install time, so a world-native call site in the module
-/// would fail as an unresolved callee otherwise (`Vm::new` installs the
+/// The CLI is the default platform provider (H5.5, E1): every run
+/// installs the default `std` platform handler (console, fsys, net,
+/// time) into its registry. This must precede [`Vm::install_dsmod`] —
+/// the loader validates pool FuncRefs against the platform's served
+/// ops at install time, so a world call site in the module would fail
+/// as an unprovided or unresolved op otherwise (`Vm::new` installs the
 /// builtin core only, and too late for this path regardless).
 fn provide_platform(registry: &mut ModuleRegistry) {
-    registry.install_native(STD_PLATFORM_MODULE, std_platform_module());
+    registry.install_platform(Platform::std());
 }
 
 /// The `ds run` surface: one module or source file, one entry name, i64
@@ -91,41 +91,58 @@ struct PreparedRun {
     functions: Vec<String>,
 }
 
-/// The existing dsmod path: validated mmap read and install.
+/// The existing dsmod path: validated mmap read and install. The install
+/// consumes the module, so the run's name and function table are read
+/// first.
 fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let module = read_mmap(&args.file).map_err(|error| open_error(&args.file, &error))?;
     let name = module.module().name().to_owned();
+    let functions: Vec<String> = module
+        .module()
+        .functions()
+        .iter()
+        .map(|function| function.name().to_owned())
+        .collect();
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
-    vm.install_dsmod(module.module())
-        .map_err(|error| install_error(module.module(), &error))?;
+    vm.install_dsmod(module.into_module())
+        .map_err(|error| install_error(&name, functions.len(), &error))?;
     Ok(PreparedRun {
         staged: args.args.iter().map(|&value| Value::I64(value)).collect(),
-        functions: module
-            .module()
-            .functions()
-            .iter()
-            .map(|function| function.name().to_owned())
-            .collect(),
+        functions,
         name,
         vm,
     })
 }
 
 /// The source path: compile, install, and stage the entry's arguments per
-/// the entry parameters' checked types.
+/// the entry parameters' checked types. The install consumes the lowered
+/// module, so the staging plan's inputs (the entry plan and the two member
+/// tags the optional-int arm stages) are read first, keeping the install
+/// first in the failure order.
 fn compile_source(args: &RunArgs) -> Result<PreparedRun> {
     let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
+    let name = compiled.name.clone();
+    let functions = compiled.lowered.functions().to_vec();
+    let int_member = compiled.lowered.tag("int");
+    let none_member = compiled.lowered.tag("none");
+    let entry_args = compiled.entry_args;
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
-    vm.install_dsmod(compiled.lowered.module())
-        .map_err(|error| install_error(compiled.lowered.module(), &error))?;
+    vm.install_dsmod(compiled.lowered.into_module())
+        .map_err(|error| install_error(&name, functions.len(), &error))?;
     Ok(PreparedRun {
-        staged: stage_source_args(&compiled, &args.args)?,
-        functions: compiled.lowered.functions().to_vec(),
-        name: compiled.name,
+        staged: stage_source_args(
+            &name,
+            entry_args.as_deref(),
+            int_member,
+            none_member,
+            &args.args,
+        )?,
+        functions,
+        name,
         vm,
     })
 }
@@ -178,22 +195,36 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
 /// checked types (the source pipeline's plan): the scalar atoms stage
 /// their word, an `int | none` parameter stages its two-word union span —
 /// a staged value presenting the int member, an absent value presenting
-/// none. Without a plan (the entry is not a source function) every value
-/// stages as its own i64 word, the dsmod rule.
+/// none. The plan and the two member tags are read before the install
+/// consumes the module. Without a plan (the entry is not a source
+/// function) every value stages as its own i64 word, the dsmod rule.
 // the i64->f64 staging of --args is a lossy host conversion by design
 #[allow(clippy::cast_precision_loss)]
-fn stage_source_args(compiled: &source::CompiledSource, raw: &[i64]) -> Result<Vec<Value>> {
-    let Some(plans) = &compiled.entry_args else {
+fn stage_source_args(
+    entry: &str,
+    plans: Option<&[source::ArgPlan]>,
+    int_member: Option<u8>,
+    none_member: Option<u8>,
+    raw: &[i64],
+) -> Result<Vec<Value>> {
+    let Some(plans) = plans else {
         return Ok(raw.iter().map(|&value| Value::I64(value)).collect());
     };
     if raw.len() > plans.len() {
         return Err(anyhow!(
-            "--args stages {} value(s) but entry `{}` takes {} parameter(s)",
+            "--args stages {} value(s) but entry `{entry}` takes {} parameter(s)",
             raw.len(),
-            compiled.name,
             plans.len()
         ));
     }
+    let member = |tag: Option<u8>, name: &str| {
+        tag.with_context(|| {
+            format!(
+                "the `{name}` member has no module tag id; construct an \\
+                 int|none somewhere so lowering assigns one"
+            )
+        })
+    };
     let mut staged = Vec::new();
     for (index, plan) in plans.iter().enumerate() {
         let value = raw.get(index).copied();
@@ -201,8 +232,7 @@ fn stage_source_args(compiled: &source::CompiledSource, raw: &[i64]) -> Result<V
             source::ArgPlan::Word(slot) => {
                 let Some(value) = value else {
                     return Err(anyhow!(
-                        "entry `{}` parameter {} expects an --args value",
-                        compiled.name,
+                        "entry `{entry}` parameter {} expects an --args value",
                         index + 1
                     ));
                 };
@@ -214,27 +244,18 @@ fn stage_source_args(compiled: &source::CompiledSource, raw: &[i64]) -> Result<V
                 });
             },
             source::ArgPlan::OptionalInt => {
-                let member = |name: &str| {
-                    compiled.lowered.tag(name).with_context(|| {
-                        format!(
-                            "the `{name}` member has no module tag id; construct an \\
-                                 int|none somewhere so lowering assigns one"
-                        )
-                    })
-                };
                 if let Some(value) = value {
-                    staged.push(Value::Tag(member("int")?));
+                    staged.push(Value::Tag(member(int_member, "int")?));
                     staged.push(Value::I64(value));
                 } else {
-                    staged.push(Value::Tag(member("none")?));
+                    staged.push(Value::Tag(member(none_member, "none")?));
                     staged.push(Value::I64(0));
                 }
             },
             source::ArgPlan::Foreign => {
                 return Err(anyhow!(
-                    "--args cannot stage entry `{}`'s parameter {} (int, float, bool, and \\
+                    "--args cannot stage entry `{entry}`'s parameter {} (int, float, bool, and \\
                      int|none parameters stage)",
-                    compiled.name,
                     index + 1
                 ));
             },
@@ -268,20 +289,20 @@ fn render_read_error(path: &Path, error: &ReadError) -> String {
     human(&error.diagnostic(file), &files).trim_end().to_owned()
 }
 
-/// Why a structurally valid module still cannot be installed.
-fn install_error(module: &Module, error: &VmLoadError) -> Error {
+/// Why a structurally valid module still cannot be installed: the module
+/// itself is consumed by the install, so its name and function count are
+/// read beforehand and passed in.
+fn install_error(name: &str, function_count: usize, error: &VmLoadError) -> Error {
     match error {
         VmLoadError::UnresolvedCallee {
             func,
             module: callee,
             index,
         } => {
-            if callee.is_empty() || callee == module.name() {
+            if callee.is_empty() || callee == name {
                 anyhow!(
-                    "function `{func}` references function index {index}, past module `{}`'s own \
-                     table of {} functions",
-                    module.name(),
-                    module.functions().len()
+                    "function `{func}` references function index {index}, past module `{name}`'s \
+                     own table of {function_count} functions"
                 )
             } else {
                 anyhow!(
@@ -290,9 +311,17 @@ fn install_error(module: &Module, error: &VmLoadError) -> Error {
                 )
             }
         },
+        VmLoadError::UnprovidedPlatformOp {
+            func,
+            platform,
+            capability,
+            index,
+        } => anyhow!(
+            "function `{func}` calls world op {index} (`{capability}`), which the platform \
+             `{platform}` does not provide; install a platform whose provides list covers it"
+        ),
         VmLoadError::Build(error) => anyhow!(
-            "module `{}` fails the VM load checks: {}",
-            module.name(),
+            "module `{name}` fails the VM load checks: {}",
             describe_build_error(error)
         ),
     }
@@ -342,19 +371,22 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
 /// Prints the run result to stdout. Unit-result entries halt on the inert
 /// unit word (`I64(0)`), so nothing distinguishes them; a heap reference
 /// prints as its object-table index (the object kind is a VM concern).
-fn print_value(value: &Value) {
+pub(crate) fn print_value(value: &Value) {
     match value {
         Value::I64(v) => println!("{v}"),
         Value::F64(v) => println!("{v:?}"),
         Value::Bool(v) => println!("{v}"),
         Value::Tag(v) => println!("{v}"),
         Value::Ref(v) => println!("<object {}>", v.id()),
+        // the arena word never reaches a print: the placement proof
+        // keeps it inside its own expression; keep the arm honest
+        Value::Arena(_) => println!("<arena>"),
         Value::Fn(f) => println!("<fn {}:{}>", f.module(), f.func()),
     }
 }
 
 /// Formats a trap plus the backtrace summary the VM kept for it.
-fn trap_error(vm: &Vm, trap: &Trap) -> Error {
+pub(crate) fn trap_error(vm: &Vm, trap: &Trap) -> Error {
     use std::fmt::Write;
     // writing into a String cannot fail
     let mut message = format!("trap: {}", describe_trap(trap));
@@ -388,6 +420,9 @@ fn describe_trap(trap: &Trap) -> String {
         },
         Trap::UnknownCallee { module, func } => {
             format!("call into module `{module}` function index {func}, which is not installed")
+        },
+        Trap::UnservedWorldOp { op } => {
+            format!("world op {op} is not served by the installed platform")
         },
         Trap::UnknownModule { module } => {
             format!("callable word names module id {module}, which is not installed")
@@ -433,6 +468,30 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::RetSpanTooWide { span, caller_area } => format!(
             "span return of {span} words exceeds the caller's {caller_area}-slot argument area"
         ),
+        Trap::ElementStride { obj, stride, given } => {
+            format!("list object {obj} holds {stride}-word elements, the call staged {given}")
+        },
+        Trap::ArenaExhausted { field } => match field {
+            ArenaPackError::Length => {
+                "a string concatenation or arena slice hit the 16 MiB length field limit".to_owned()
+            },
+            ArenaPackError::Offset => {
+                "an arena slice's chunk offset hit the 16 MiB field limit".to_owned()
+            },
+            ArenaPackError::Chunk => "an arena's chunk index hit the 64 Ki field limit".to_owned(),
+        },
+        Trap::ArenaHandoff { slot } => {
+            format!("an arena temporary reached a count-bearing site at slot {slot}")
+        },
+        Trap::ArenaHandle { class } => match class {
+            ArenaMisuse::Chunk => {
+                "an arena handle names a chunk its arena never grew to".to_owned()
+            },
+            ArenaMisuse::Range => {
+                "an arena handle or rewind target names memory a restore already freed".to_owned()
+            },
+        },
+        Trap::Utf8Content => "string content reached a text operation as invalid UTF-8".to_owned(),
         Trap::OutputWrite { kind } => format!("output write failed: {kind:?}"),
         Trap::MetaWordCorrupt { fp } => {
             format!("frame metadata word corrupt at stack index {fp}")
@@ -447,5 +506,8 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::NurseryUncontained { .. } => {
             "a nursery child failed with an error outside the boundary's return union".to_owned()
         },
+        Trap::TailForkJoin => "a fork-join combinator (par_map, par_reduce) at a tail dispatch \
+                               site; the join parks through the drive, which needs the CALLG site"
+            .to_owned(),
     }
 }

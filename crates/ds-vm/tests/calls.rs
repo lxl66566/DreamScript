@@ -9,6 +9,8 @@
 //! deep CALLS recursion is bounded by the stack limit like every
 //! non-tail call.
 
+use std::sync::Arc;
+
 use ds_vm::{
     Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
@@ -108,54 +110,117 @@ fn cross_module_calls_word_picks_up_hot_reload_swaps() {
     );
 }
 
+/// The `app` module's entry: stages its parameter and CALLs `lib.scaled`
+/// through a pool FuncRef — the direct-call-site shape the inline cache
+/// serves, against the same hot-reload body `scaled_lib` swaps.
+fn direct_call_module() -> ModuleVersion {
+    ModuleVersion::new("app", vec![def(
+        "apply",
+        &[I64, I64, I64],
+        1,
+        1,
+        vec![Const::FuncRef {
+            module: "lib".into(),
+            func: 0,
+        }],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 2, src: 0 }, // stage n in the arg area
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )])
+    .expect("valid app module")
+}
+
+/// The swap-time cache eviction: a hot-reload swap unstamps every CALL
+/// inline-cache entry, and the unstamped entries release their
+/// swapped-out versions' handles at the swap instead of lingering until
+/// eviction. After the first swap the retired version lives only in the
+/// registry's retiring slot, and after the second swap nowhere but this
+/// test's own handle — the strong count is the witness.
+#[test]
+fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
+    let mut reg = ModuleRegistry::new();
+    let v1 = reg.install(scaled_lib(2));
+    reg.install(direct_call_module());
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("app", "apply", &[Value::I64(21)]),
+        Ok(Value::I64(42))
+    );
+    vm.install_module(scaled_lib(3));
+    assert_eq!(
+        Arc::strong_count(&v1),
+        2,
+        "the retiring slot plus this handle: the cache dropped its entry at the swap"
+    );
+    vm.install_module(scaled_lib(5));
+    assert_eq!(
+        Arc::strong_count(&v1),
+        1,
+        "the second swap retired v1 out of the registry, and nothing lingers for it"
+    );
+    assert_eq!(
+        vm.run("app", "apply", &[Value::I64(21)]),
+        Ok(Value::I64(105)),
+        "the swept site resolves through the current slot (the full lookup stays authoritative)"
+    );
+}
+
 /// `f(self_word, n) = if n == 0 { 0 } else { 1 + f(n - 1) }`, recursing
 /// through its own Fn word: slots [self, n, t, one, staged-word,
 /// staged-n] over a Raw overlay (it stages a Fn word and an i64, then
 /// receives the i64 result on word 0), pool k0=0, k1=1.
+fn recursion_version() -> ModuleVersion {
+    ModuleVersion::new("rec", vec![def(
+        "f",
+        &[FnSlot, I64, Bool, I64, SlotType::Raw, SlotType::Raw],
+        2,
+        2,
+        vec![Const::I64(0), Const::I64(1)],
+        &[
+            Uop::Funcf { frame_slots: 6 },
+            Uop::Kimm { dst: 3, kidx: k(0) }, // one = 0 (the base-path combine word)
+            Uop::Kimm { dst: 4, kidx: k(0) }, // the base-path result word = 0
+            Uop::Kimm { dst: 5, kidx: k(0) }, // stage 0, the == probe
+            Uop::EqI64 {
+                dst: 2,
+                lhs: 1,
+                rhs: 5,
+            }, // t = n == 0
+            Uop::Jmpif {
+                cond: 2,
+                target: 10,
+            }, // base: skip the recursion
+            Uop::Kimm { dst: 3, kidx: k(1) }, // one = 1
+            Uop::Mov { dst: 4, src: 0 },      // stage the fn word
+            Uop::SubI64 {
+                dst: 5,
+                lhs: 1,
+                rhs: 3,
+            }, // stage n - 1
+            Uop::Calls {
+                callee_slot: 0,
+                nargs: 2,
+            }, // result overlays arg word 0
+            Uop::AddI64 {
+                dst: 4,
+                lhs: 4,
+                rhs: 3,
+            }, // result + one
+            Uop::Ret { src: 4 },
+        ],
+    )])
+    .expect("valid recursion module")
+}
+
 fn recursion_module() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
-    reg.install(
-        ModuleVersion::new("rec", vec![def(
-            "f",
-            &[FnSlot, I64, Bool, I64, SlotType::Raw, SlotType::Raw],
-            2,
-            2,
-            vec![Const::I64(0), Const::I64(1)],
-            &[
-                Uop::Funcf { frame_slots: 6 },
-                Uop::Kimm { dst: 3, kidx: k(0) }, // one = 0 (the base-path combine word)
-                Uop::Kimm { dst: 4, kidx: k(0) }, // the base-path result word = 0
-                Uop::Kimm { dst: 5, kidx: k(0) }, // stage 0, the == probe
-                Uop::EqI64 {
-                    dst: 2,
-                    lhs: 1,
-                    rhs: 5,
-                }, // t = n == 0
-                Uop::Jmpif {
-                    cond: 2,
-                    target: 10,
-                }, // base: skip the recursion
-                Uop::Kimm { dst: 3, kidx: k(1) }, // one = 1
-                Uop::Mov { dst: 4, src: 0 },      // stage the fn word
-                Uop::SubI64 {
-                    dst: 5,
-                    lhs: 1,
-                    rhs: 3,
-                }, // stage n - 1
-                Uop::Calls {
-                    callee_slot: 0,
-                    nargs: 2,
-                }, // result overlays arg word 0
-                Uop::AddI64 {
-                    dst: 4,
-                    lhs: 4,
-                    rhs: 3,
-                }, // result + one
-                Uop::Ret { src: 4 },
-            ],
-        )])
-        .expect("valid recursion module"),
-    );
+    reg.install(recursion_version());
     reg
 }
 
@@ -173,6 +238,34 @@ fn calls_recursion_through_a_fn_word_counts() {
     assert_eq!(
         vm.run("rec", "f", &[word, Value::I64(3)]),
         Ok(Value::I64(3))
+    );
+}
+
+/// The RET handle take-back: a same-module return moves the caller's
+/// chain-entry handle back out as the restored Active and the popped
+/// callee entry's handle (the same version) takes its place, so a
+/// return moves no Arc count. The strong count is the witness: a
+/// recursion any depth deep, run twice (the second run clears the first
+/// run's kept entry frame), ends with exactly the registry's current
+/// slot, the run-entry hint, the root fiber's kept entry, and this
+/// test's own handle — a leaked handle per return would move the count
+/// by the recursion depth.
+#[test]
+fn same_module_returns_take_back_handles_without_leaking() {
+    let mut reg = ModuleRegistry::new();
+    let version = reg.install(recursion_version());
+    let mut vm = Vm::new(reg);
+    for _ in 0..2 {
+        let word = recursion_word(&vm);
+        assert_eq!(
+            vm.run("rec", "f", &[word, Value::I64(60)]),
+            Ok(Value::I64(60))
+        );
+    }
+    assert_eq!(
+        Arc::strong_count(&version),
+        4,
+        "current slot + run-entry hint + kept root entry + this handle, nothing per return"
     );
 }
 
@@ -811,6 +904,82 @@ fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
     // metadata + call word + 7 slots, constant across the million-deep
     // runtime-evidence transfers
     assert_eq!(vm.max_stack_len(), 9);
+}
+
+/// The sentinel dispatch's exact arity contract (the P0 review repro's
+/// hand-assembled equivalent): a target claims its real parameters plus
+/// its evidence pairs' rider areas (slot plus two follow words per
+/// pair), and the caller stages its real arguments plus exactly one
+/// pair's area — so a gap of anything but zero or one rider area is an
+/// arity violation. The one-word-short receiver against a two-word
+/// `self` (gap 1, the missing word staged as an I64 rider the relaxed
+/// check read as a field word) must trap, never slide; the one-pair
+/// target (gap 3) keeps transferring.
+#[test]
+fn a_sentinel_dispatch_with_a_rider_eaten_gap_traps() {
+    // the entry shape every probe shares: [evidence, receiver, r0, r1, r2]
+    // with the evidence word naming the target and the rider words staged
+    // past the one real argument
+    fn entry(name: &str) -> FunctionDef {
+        def(
+            name,
+            &[I64, I64, I64, I64, I64],
+            1,
+            4,
+            vec![Const::I64(42), Const::I64(7), Const::FuncRef {
+                module: "$evidence".into(),
+                func: 0,
+            }],
+            &[
+                Uop::Funcf { frame_slots: 5 },
+                Uop::Kimm { dst: 1, kidx: k(0) },
+                Uop::Kimm { dst: 2, kidx: k(1) },
+                Uop::Kimm { dst: 3, kidx: k(1) },
+                Uop::Kimm { dst: 4, kidx: k(1) },
+                Uop::Callg {
+                    callee: k(2),
+                    nargs: 1,
+                },
+                Uop::Ret { src: 1 },
+            ],
+        )
+    }
+    // the one-pair serving body: its receiver plus its rider area (4
+    // parameters), and the two-word `self` body the short staging would
+    // underfeed
+    let pair = def("pair", &[I64, I64, I64, I64], 4, 0, vec![], &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Ret { src: 0 },
+    ]);
+    let wide = def("wide", &[I64, I64], 2, 0, vec![], &[
+        Uop::Funcf { frame_slots: 2 },
+        Uop::Ret { src: 0 },
+    ]);
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("p0exact", vec![entry("ok"), pair, wide, entry("trap")])
+            .expect("valid p0exact module"),
+    );
+    let mut vm = Vm::new(reg);
+    // the gap-3 shape transfers: one real argument plus the rider area
+    // sliding into the pair body's trailing evidence parameters
+    assert_eq!(
+        vm.run("p0exact", "ok", &[Value::I64(1)]),
+        Ok(Value::I64(42)),
+        "the one-pair target takes its riders as its evidence parameters"
+    );
+    // the gap-1 shape traps: the evidence word names `wide` (index 2),
+    // whose two-word `self` is one staged word short — the missing word
+    // sits staged as an I64 rider, exactly the word the relaxed check
+    // read as the receiver's second field word
+    assert_eq!(
+        vm.run("p0exact", "trap", &[Value::I64(2)]),
+        Err(Trap::ArityMismatch {
+            expected: 2,
+            given: 1,
+        }),
+        "a rider-eaten gap is an arity violation, never a silent slide"
+    );
 }
 
 /// A CALLTG addressing a generic builtin runs the one body inside the

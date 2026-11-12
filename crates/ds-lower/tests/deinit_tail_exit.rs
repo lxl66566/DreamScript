@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::{parse, parse_script};
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const ATOMS: &str = concat!(
     "tag int\n",
@@ -68,14 +68,14 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
         .expect("the source lowers");
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the module round-trips");
-    install_and_run(name, &module)
+    install_and_run(name, module)
 }
 
 /// Installs one lowered module and runs its `main` with captured stdout.
-fn install_and_run(name: &str, module: &ds_mod::Module) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn install_and_run(name: &str, module: ds_mod::Module) -> (Vm, Result<Value, ds_vm::Trap>) {
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
+    registry.install_platform(Platform::std());
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
@@ -294,7 +294,7 @@ fn a_script_entry_call_final_transfers_cleanly() {
     .expect("the synthesized main lowers");
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the module round-trips");
-    let (vm, got) = install_and_run("deinit_tail_script", &module);
+    let (vm, got) = install_and_run("deinit_tail_script", module);
     assert_eq!(got, Ok(Value::I64(0)), "the unit entry result");
     assert_eq!(
         vm.captured_output(),

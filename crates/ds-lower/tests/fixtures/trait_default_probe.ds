@@ -1,0 +1,77 @@
+// purpose: the trait-member default authority end to end (F7) — the
+// trait declaration is a defaulted member parameter's single authority:
+// the impl body omits the default (re-declaring it is DS2019 at check
+// time), and every dispatch spelling stages the trait's declared
+// literal at the call site exactly like the free-fn spelling. The dot
+// and the qualified spelling answer identically for the omitted
+// default and the written argument, the string default stages a Ref
+// word whose count balances, the dispatch tail transfers with the
+// staged default aboard, and the generic body's nested calls on the
+// bound variable stage the same declared default through the sentinel
+// dispatch.
+// items:
+// int: stage: run
+// string: stage: run
+// sized: stage: run
+// sized-int: stage: run
+// labels: stage: run
+// labels-int: stage: run
+// sums: stage: run
+// sums-list: stage: run
+// go: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
+
+trait sized {
+  fn pad(self, by: int = 1) -> int
+}
+
+impl sized for int {
+  fn pad(self, by: int) -> int { self + by }
+}
+
+trait labels {
+  fn label(self, suffix: string = "!") -> string
+}
+
+impl labels for int {
+  fn label(self, suffix: string) -> string { concat("$self", "$suffix") }
+}
+
+trait sums {
+  fn total(self) -> int
+}
+
+impl[u: sized] sums for list[u] {
+  fn total(self) -> int {
+    var acc = 0
+    for x in self {
+      acc = acc + x.pad()
+    }
+    acc
+  }
+}
+
+fn go(n: int) -> int {
+  n.pad()
+}
+
+fn main() -> int {
+  const x = 3
+  println("${x.pad()}")
+  println("${sized::pad(x)}")
+  println("${x.pad(5)}")
+  println("${sized::pad(x, 5)}")
+  println(x.label())
+  println(labels::label(x, "?"))
+  println("${[3, 10].total()}")
+  println("${go(x)}")
+  0
+}

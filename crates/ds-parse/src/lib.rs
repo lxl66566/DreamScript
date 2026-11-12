@@ -55,6 +55,7 @@ mod ast;
 mod convert;
 mod guardtail;
 mod lexscan;
+mod worker;
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Files, Span};
 use pest::{
@@ -73,9 +74,9 @@ mod pest_gen {
 pub use ast::{
     AssignOp, Ast, Attribute, BinaryOp, Block, BlockExpr, CallArg, EnumCase, EnumDecl, EnumPayload,
     Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath, ImportSel, Item, ItemKind,
-    Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, Stmt, StmtKind, StrPart,
-    StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, Trivia, TriviaKind, Type,
-    TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
+    Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, PlatformDecl, PlatformName,
+    Stmt, StmtKind, StrPart, StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, Trivia,
+    TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
 };
 pub(crate) use pest_gen::{DsParser, Rule};
 
@@ -84,10 +85,11 @@ pub(crate) use pest_gen::{DsParser, Rule};
 /// (unclosed interpolation holes, mismatched delimiters); raw-string hash
 /// counting is exact via PUSH/POP, so it never mis-lexes.
 ///
-/// The grammar and its conversion run on a dedicated 8 MiB stack: pest's
-/// recursive descent costs roughly 12-30 KiB per bracket-nesting level (the
-/// precedence chain is ~19 rules deep per level), which a default 1 MiB
-/// main-thread stack cannot host even for modestly nested sources. The
+/// The grammar and its conversion run on a worker thread that owns an 8 MiB
+/// stack and is cached per caller thread, so the segment is paid once per
+/// caller: pest's recursive descent costs roughly 12-30 KiB per bracket-nesting
+/// level (the precedence chain is ~19 rules deep per level), which a default
+/// 1 MiB main-thread stack cannot host even for modestly nested sources. The
 /// scanner's depth guard stays as a second line of defense.
 ///
 /// # Panics
@@ -123,24 +125,8 @@ fn parse_mode(files: &Files, file: FileId, script: bool) -> Result<Ast, Vec<Diag
     if let Some(diags) = lexscan::scan(file, src) {
         return Err(diags);
     }
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .stack_size(PARSE_STACK)
-            .spawn_scoped(scope, || run_grammar(file, src, script))
-            .expect("spawning the parse thread cannot fail");
-        // A pest panic would be a parser bug; surface it as a diagnostic
-        // instead of unwinding through the caller.
-        worker.join().unwrap_or_else(|_| {
-            Err(vec![Diagnostic::error(
-                ErrorCode::UnexpectedToken,
-                "internal parser error: the grammar panicked",
-            )])
-        })
-    })
+    worker::run(file, src, script)
 }
-
-/// Stack size for the grammar thread.
-const PARSE_STACK: usize = 8 << 20;
 
 fn run_grammar(file: FileId, src: &str, script: bool) -> Result<Ast, Vec<Diagnostic>> {
     match DsParser::parse(Rule::file, src) {
@@ -225,6 +211,7 @@ fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
         Rule::kw_defer => "`defer`",
         Rule::kw_true => "`true`",
         Rule::kw_false => "`false`",
+        Rule::kw_platform => "`platform`",
         Rule::local_kw => "`const` or `var`",
         // Operators.
         Rule::assign_op

@@ -81,8 +81,9 @@ pub struct BlockId {
 /// The enum is `non_exhaustive`: `Lower` is the remaining placeholder,
 /// documented as such; asking the engine to compute it before its
 /// milestone yields [`QueryError::Unavailable`](crate::QueryError::Unavailable).
-/// Every other variant is a real M2 query: `Resolve`, `TypeOf`,
-/// `LinearityCheck`, and `EffectsOf`.
+/// Every other variant is a real M2 query: the package-grain passes
+/// (`Resolve`, `CheckedPackage`, `PackageEffects`, `PlatformCheck`), the
+/// per-file `FileLinearity`, and the per-definition slices of them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
 pub enum QueryKey {
@@ -98,18 +99,41 @@ pub enum QueryKey {
     /// has one package — every registered file — so the id is always 0
     /// until M7's package loading mints real package identity.
     Resolve(PackageId),
-    /// The type story of one definition (M2): the ds-check bidirectional
-    /// pass over the package, sliced to the definition's block — the
+    /// The type story of one definition (M2): a slice of the package's
+    /// [`QueryKey::CheckedPackage`] value into the definition's block — the
     /// declaration and body diagnostics whose primary labels address it,
     /// plus the solved type of each binding it holds. `DefId` packs
     /// `(file << 8) | block` like [`QueryKey::LinearityCheck`].
     TypeOf(DefId),
-    /// Effect row of one definition (E1): the ds-check effects pass over
-    /// the registered files, keyed by the definition's package index.
+    /// Effect row of one definition (E1): the definition's row out of the
+    /// package's [`QueryKey::PackageEffects`] value.
     EffectsOf(DefId),
-    /// The linearity check of one definition (M2): the affine pass over
-    /// the definition's file, sliced to the definition's block (C1, C5).
+    /// The linearity check of one definition (M2): a slice of its file's
+    /// [`QueryKey::FileLinearity`] facts into the definition's block (C1,
+    /// C5), with the slice taken by the same `DefId` packing as
+    /// [`QueryKey::TypeOf`].
     LinearityCheck(DefId),
+    /// The platform check of one package (H5, E1): the package's
+    /// declarations collected against its platform declaration, the rows of
+    /// [`QueryKey::PackageEffects`] verified inside what the platform
+    /// provides. The `PackageId` is the package grain, like
+    /// [`QueryKey::Resolve`].
+    PlatformCheck(PackageId),
+    /// The whole-package bidirectional check (B2): collection and
+    /// resolution, then the declaration and body pass over every parseable
+    /// file. The substrate every [`QueryKey::TypeOf`] slices, so the pass
+    /// runs once per package instead of once per definition. The
+    /// `PackageId` is the package grain, like [`QueryKey::Resolve`].
+    CheckedPackage(PackageId),
+    /// The M2 affine pass (C1, C5) over one file, run as a single-file
+    /// package. The substrate every [`QueryKey::LinearityCheck`] slices, so
+    /// the pass runs once per file instead of once per definition.
+    FileLinearity(FileId),
+    /// The effect rows (E1) of one package: every value-producing
+    /// definition's row over the registered files. The substrate
+    /// [`QueryKey::EffectsOf`] and [`QueryKey::PlatformCheck`] both read,
+    /// so the pass runs once per package.
+    PackageEffects(PackageId),
     /// Placeholder: lowering of one block (M3).
     Lower(BlockId),
 }
@@ -126,6 +150,10 @@ impl QueryKey {
             Self::TypeOf(_) => QueryKind::TypeOf,
             Self::EffectsOf(_) => QueryKind::EffectsOf,
             Self::LinearityCheck(_) => QueryKind::LinearityCheck,
+            Self::PlatformCheck(_) => QueryKind::PlatformCheck,
+            Self::CheckedPackage(_) => QueryKind::CheckedPackage,
+            Self::FileLinearity(_) => QueryKind::FileLinearity,
+            Self::PackageEffects(_) => QueryKind::PackageEffects,
             Self::Lower(_) => QueryKind::Lower,
         }
     }
@@ -150,6 +178,14 @@ pub enum QueryKind {
     EffectsOf,
     /// Kind of [`QueryKey::LinearityCheck`].
     LinearityCheck,
+    /// Kind of [`QueryKey::PlatformCheck`].
+    PlatformCheck,
+    /// Kind of [`QueryKey::CheckedPackage`].
+    CheckedPackage,
+    /// Kind of [`QueryKey::FileLinearity`].
+    FileLinearity,
+    /// Kind of [`QueryKey::PackageEffects`].
+    PackageEffects,
     /// Kind of [`QueryKey::Lower`].
     Lower,
 }

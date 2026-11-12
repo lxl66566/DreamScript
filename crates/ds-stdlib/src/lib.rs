@@ -1,16 +1,16 @@
 //! The DreamScript stdlib ambient: the checked-declaration layer that
 //! makes corpus sources check clean as-is (M3). The runtime half of the
-//! stdlib is the H5.5 two-module native layer — the ds-vm `builtin` core
-//! (pure primitives, in every VM) and the `std` platform native module
-//! (console/file/net, installed by the host that provides the platform)
-//! — with a ds-source `@std` package layer to come; this crate is the
-//! static half — the vocabulary a `ds check` package receives before
-//! the user's sources, so a corpus file needs no hand-written ambient
+//! stdlib is the ds-vm `builtin` native core (pure primitives, in every
+//! VM) plus the world surface served through the platform handler the
+//! host installs behind the platform declaration (H5.5, E1) — with a
+//! ds-source `@std` package layer to come; this crate is the static
+//! half — the vocabulary a `ds check` package receives before the
+//! user's sources, so a corpus file needs no hand-written ambient
 //! package member.
 //!
 //! # Shape
 //!
-//! The ambient is data, two halves:
+//! The ambient is data, three halves:
 //!
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
@@ -19,8 +19,12 @@
 //!   packages check with `--no-ambient`.
 //! * [`declared_rows`]: the [`ds_check::DeclaredRows`] table of the ambient functions — the
 //!   effect-row surface v1 has no syntax for (E1). The rows enter through the ds-query database's
-//!   ambient-rows seam and are a lower bound on the computed row; M7's platform declarations merge
-//!   through the same seam.
+//!   ambient-rows seam and are a lower bound on the computed row.
+//! * [`world_caps`]: the world functions' capability attribution, read beside the rows — the
+//!   ambient's `platform "std" provides <...>` declaration (H5) licenses per capability.
+//! * [`AMBIENT_SOURCE`] carries the platform declaration itself: the ambient names the default
+//!   platform `std` with every capability, so a package including it is checked against the
+//!   platform the `ds` CLI provides.
 //!
 //! # Scope
 //!
@@ -50,7 +54,50 @@
 
 #![warn(missing_docs)]
 
-use ds_check::{DeclaredRows, Effect, EffectRow};
+use std::sync::LazyLock;
+
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps};
+
+/// The world-capability attribution, built once per process.
+static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
+    WorldCaps::new()
+        .with("println", "console")
+        .with("print", "console")
+        .with("log", "console")
+        .with("read_file", "fsys")
+        .with("write_file", "fsys")
+        .with("file_exists", "fsys")
+        .with("fs_list", "fsys")
+        .with("file_size", "fsys")
+        .with("close", "fsys")
+        .with("load_rows", "fsys")
+        .with("read_config", "fsys")
+        .with("net_connect", "net")
+        .with("net_send", "net")
+        .with("net_recv", "net")
+        .with("net_close", "net")
+        .with("http_get", "net")
+        .with("fetch", "net")
+});
+
+/// The ambient functions' world-capability attribution (E1, H5): the
+/// platform surface each world-touching function belongs to, read by the
+/// effects pass beside [`declared_rows`] — the platform declaration's
+/// provides list licenses per capability, so `fsys` usage under a
+/// console-only platform is a check error. Every world-row name absent
+/// here is an unattributed world touch, which licenses on any
+/// world-bearing platform.
+///
+/// * `console`: the printing pair and `log`.
+/// * `fsys`: the file readers and writers, `close`, and the config/rows readers.
+/// * `net`: the TCP surface, `http_get`, and `fetch`.
+///
+/// The table is built on first read and shared: a consumer that must own
+/// one clones it.
+#[must_use]
+pub fn world_caps() -> &'static WorldCaps {
+    &WORLD_CAPS
+}
 
 /// The ambient package member's file name, for diagnostics that address it.
 pub const AMBIENT_FILE: &str = "std/ambient.ds";
@@ -59,20 +106,8 @@ pub const AMBIENT_FILE: &str = "std/ambient.ds";
 /// surface. Register it as a package member before the user's files.
 pub const AMBIENT_SOURCE: &str = include_str!("ambient.ds");
 
-/// The ambient functions' declared effect rows (E1) — the failure and
-/// world capabilities the v1 surface has no syntax for. Applied by name;
-/// a declared row is a lower bound on the computed row.
-///
-/// * `error`: failure handed to the caller — the parse and IO readers.
-/// * `world`: the world-touching capability surface — IO and logging.
-/// * `trap`: the unhandleable boundary (B7) — `die`.
-/// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
-///
-/// Every other ambient function is row-pure: the combinators run their
-/// lambdas inside the enclosing definition's extent (D3), which the
-/// effects pass already accounts for.
-#[must_use]
-pub fn declared_rows() -> DeclaredRows {
+/// The declared rows, built once per process.
+static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
     let world = EffectRow::of(Effect::World);
     let error = EffectRow::of(Effect::Error);
     DeclaredRows::new()
@@ -97,6 +132,26 @@ pub fn declared_rows() -> DeclaredRows {
         .with("close", world)
         .with("cancel", EffectRow::of(Effect::Cancel))
         .with("die", EffectRow::of(Effect::Trap))
+});
+
+/// The ambient functions' declared effect rows (E1) — the failure and
+/// world capabilities the v1 surface has no syntax for. Applied by name;
+/// a declared row is a lower bound on the computed row.
+///
+/// * `error`: failure handed to the caller — the parse and IO readers.
+/// * `world`: the world-touching capability surface — IO and logging.
+/// * `trap`: the unhandleable boundary (B7) — `die`.
+/// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
+///
+/// Every other ambient function is row-pure: the combinators run their
+/// lambdas inside the enclosing definition's extent (D3), which the
+/// effects pass already accounts for.
+///
+/// The table is built on first read and shared: a consumer that must own
+/// one clones it.
+#[must_use]
+pub fn declared_rows() -> &'static DeclaredRows {
+    &DECLARED_ROWS
 }
 
 #[cfg(test)]

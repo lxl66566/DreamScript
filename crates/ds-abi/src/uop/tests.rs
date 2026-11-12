@@ -36,12 +36,46 @@ fn samples() -> Vec<Uop> {
             dst: 255,
             kidx: KMAX,
         },
+        KstrBorrow { dst: 0, kidx: K0 },
+        KstrBorrow {
+            dst: 255,
+            kidx: KMAX,
+        },
     ];
     s.extend(r3_samples![
-        AddI64, SubI64, MulI64, DivI64, ModI64, AddF64, SubF64, MulF64, DivF64, EqI64, NeqI64,
-        LtI64, GeI64, LeI64, GtI64, EqF64, NeqF64, LtF64, GeF64, LeF64, GtF64, EqBool, NeqBool,
-        EqStr, NeqStr, StrCat,
+        AddI64,
+        SubI64,
+        MulI64,
+        DivI64,
+        ModI64,
+        AddF64,
+        SubF64,
+        MulF64,
+        DivF64,
+        EqI64,
+        NeqI64,
+        LtI64,
+        GeI64,
+        LeI64,
+        GtI64,
+        EqF64,
+        NeqF64,
+        LtF64,
+        GeF64,
+        LeF64,
+        GtF64,
+        EqBool,
+        NeqBool,
+        EqStr,
+        NeqStr,
+        StrCat,
+        StrCatArena,
     ]);
+    s.extend(
+        [ArenaMark { dst: 0 }, ArenaMark { dst: 255 }, ArenaRestore {
+            src: 255,
+        }],
+    );
     s.extend([
         TagTest {
             dst: 0,
@@ -185,6 +219,8 @@ fn round_trip_every_uop_at_boundary_values() {
 
 /// The documented opcode byte for every variant (the doc comments pin them
 /// per variant; this table is the executable cross-check).
+// a data table over every documented opcode, one entry each
+#[allow(clippy::too_many_lines)]
 fn documented_opcodes() -> Vec<(Uop, u8)> {
     vec![
         (Kimm { dst: 0, kidx: K0 }, 0x00),
@@ -401,6 +437,7 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
         (Funcf { frame_slots: 0 }, 0xb0),
         (Halt { slot: 0 }, 0xc0),
         (Kstr { dst: 0, kidx: K0 }, 0x02),
+        (KstrBorrow { dst: 0, kidx: K0 }, 0x03),
         (
             EqStr {
                 dst: 0,
@@ -433,6 +470,16 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
             },
             0xd3,
         ),
+        (
+            StrCatArena {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0xd4,
+        ),
+        (ArenaMark { dst: 0 }, 0x93),
+        (ArenaRestore { src: 0 }, 0x94),
     ]
     .into_iter()
     .chain(documented_call_opcodes())
@@ -527,6 +574,7 @@ fn field_map_matches_the_module_doc_table() {
         (Kimm { dst: 0x11, kidx }, 0x0011_0203),
         (Kconst { dst: 0x11, kidx }, 0x0111_0203),
         (Kstr { dst: 0x11, kidx }, 0x0211_0203),
+        (KstrBorrow { dst: 0x11, kidx }, 0x0311_0203),
         (
             ClosureNew {
                 dst: 0x11,
@@ -595,6 +643,8 @@ fn field_map_matches_the_module_doc_table() {
             0x9111_8204,
         ),
         (Jmp { target: 0x205 }, 0x9200_8204),
+        (ArenaMark { dst: 0x11 }, 0x9311_0000),
+        (ArenaRestore { src: 0x11 }, 0x9411_0000),
         (
             Call {
                 callee: kidx,
@@ -637,9 +687,9 @@ fn field_map_matches_the_module_doc_table() {
         0x10 AddI64, 0x11 SubI64, 0x12 MulI64, 0x13 DivI64, 0x14 ModI64, 0x20 AddF64, 0x21 SubF64,
         0x22 MulF64, 0x23 DivF64, 0x30 EqI64, 0x31 NeqI64, 0x32 LtI64, 0x33 GeI64, 0x34 LeI64,
         0x35 GtI64, 0x40 EqF64, 0x41 NeqF64, 0x42 LtF64, 0x43 GeF64, 0x44 LeF64, 0x45 GtF64,
-        0x50 EqBool, 0x51 NeqBool, 0xD0 EqStr, 0xD1 NeqStr, 0xD2 StrCat,
+        0x50 EqBool, 0x51 NeqBool, 0xD0 EqStr, 0xD1 NeqStr, 0xD2 StrCat, 0xD4 StrCatArena,
     ]);
-    assert_eq!(cases.len(), 47, "one sentinel per variant");
+    assert_eq!(cases.len(), 51, "one sentinel per variant");
     for (uop, word) in cases {
         assert_eq!(uop.encode(0), Ok(word), "field map drift: {uop:?}");
     }
@@ -806,10 +856,10 @@ fn malformed_encodings_are_rejected() {
     }
     // unassigned minor inside the Ref major
     assert_eq!(
-        Uop::decode(0, 0xd4_00_00_00),
+        Uop::decode(0, 0xd5_00_00_00),
         Err(DecodeError::UnknownOpcode {
             major: 0xd,
-            minor: 0x4
+            minor: 0x5
         })
     );
     // CALLTG (0xA.5) decodes with CALL's operand layout and re-encodes to
@@ -916,9 +966,12 @@ fn ret_span_requires_at_least_one_word() {
 fn effects_are_consistent_with_slot_operands() {
     for u in samples() {
         let operands: Vec<u8> = match u {
-            Kimm { dst, .. } | Kconst { dst, .. } | Kstr { dst, .. } | TagNew { dst, .. } => {
-                vec![dst]
-            },
+            Kimm { dst, .. }
+            | Kconst { dst, .. }
+            | Kstr { dst, .. }
+            | KstrBorrow { dst, .. }
+            | TagNew { dst, .. }
+            | ArenaMark { dst } => vec![dst],
             CvtI2F { dst, src }
             | CvtF2I { dst, src }
             | Mov { dst, src }
@@ -926,7 +979,7 @@ fn effects_are_consistent_with_slot_operands() {
             | TagTestNot { dst, src, .. } => vec![dst, src],
             Jmpif { cond, .. } | JmpifNot { cond, .. } => vec![cond],
             ClosureNew { dst, func, .. } => vec![dst, func],
-            Ret { src } | RetSpan { src, .. } => vec![src],
+            Ret { src } | RetSpan { src, .. } | ArenaRestore { src } => vec![src],
             Halt { slot } => vec![slot],
             Calls { callee_slot, .. } => vec![callee_slot],
             Jmp { .. }
@@ -960,7 +1013,8 @@ fn effects_are_consistent_with_slot_operands() {
             | NeqBool { dst, lhs, rhs }
             | EqStr { dst, lhs, rhs }
             | NeqStr { dst, lhs, rhs }
-            | StrCat { dst, lhs, rhs } => vec![dst, lhs, rhs],
+            | StrCat { dst, lhs, rhs }
+            | StrCatArena { dst, lhs, rhs } => vec![dst, lhs, rhs],
         };
         for i in u.reads().as_slice() {
             assert!(
@@ -985,6 +1039,7 @@ fn effects_are_consistent_with_slot_operands() {
             Jmp { .. }
                 | Jmpif { .. }
                 | JmpifNot { .. }
+                | ArenaRestore { .. }
                 | Call { .. }
                 | Callg { .. }
                 | Calls { .. }
@@ -1050,7 +1105,11 @@ fn purity_table_is_exact() {
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }
+                | KstrBorrow { .. }
                 | StrCat { .. }
+                | StrCatArena { .. }
+                | ArenaMark { .. }
+                | ArenaRestore { .. }
                 | ClosureNew { .. }
                 | Funcf { .. }
                 | Halt { .. }

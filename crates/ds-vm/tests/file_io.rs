@@ -24,9 +24,10 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{
-        PLATFORM_IO_ERR, PLATFORM_IO_OK, STD_FILE_EXISTS, STD_FILE_SIZE, STD_FS_LIST,
-        STD_PLATFORM_MODULE, STD_PRINTLN, STD_READ_FILE, STD_WRITE_FILE, std_platform_module,
+    native::{PLATFORM_IO_ERR, PLATFORM_IO_OK},
+    platform::{
+        OP_FILE_EXISTS, OP_FILE_SIZE, OP_FS_LIST, OP_PRINTLN, OP_READ_FILE, OP_WRITE_FILE,
+        Platform, STD_NAME,
     },
 };
 
@@ -36,7 +37,7 @@ fn k(idx: u16) -> ConstIdx {
 
 fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: STD_PLATFORM_MODULE.into(),
+        module: STD_NAME.into(),
         func: index,
     }
 }
@@ -46,12 +47,12 @@ fn platform(index: u32) -> Const {
 /// wrapper (function-table index 5).
 fn pool() -> Vec<Const> {
     vec![
-        platform(STD_READ_FILE),   // k0
-        platform(STD_WRITE_FILE),  // k1
-        platform(STD_FILE_EXISTS), // k2
-        platform(STD_FS_LIST),     // k3
-        platform(STD_FILE_SIZE),   // k4
-        platform(STD_PRINTLN),     // k5
+        platform(OP_READ_FILE),   // k0
+        platform(OP_WRITE_FILE),  // k1
+        platform(OP_FILE_EXISTS), // k2
+        platform(OP_FS_LIST),     // k3
+        platform(OP_FILE_SIZE),   // k4
+        platform(OP_PRINTLN),     // k5
         Const::FuncRef {
             module: "io".into(),
             func: 5, // k6: tail_read
@@ -70,9 +71,9 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 
 fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
-    // the whole surface here is the platform's: the std platform table is
+    // the whole surface here is the platform's: the default platform is
     // the host's to install (`Vm::new` only adds the builtin core)
-    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
+    reg.install_platform(Platform::std());
     reg.install(ModuleVersion::new("io", defs).expect("valid fixture module"));
     reg
 }

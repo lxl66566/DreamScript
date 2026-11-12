@@ -1,0 +1,12 @@
+// A trait impl member re-declaring a defaulted parameter [F7]: the
+// trait declaration is a defaulted parameter's single authority, so an
+// impl body's own default — whose literal no call site ever checks —
+// refuses at both sites.
+
+tag int
+trait sized {
+  fn pad(self, by: int = 1) -> int
+}
+impl sized for int {
+  fn pad(self, by: int = 2) -> int { self + by }
+}

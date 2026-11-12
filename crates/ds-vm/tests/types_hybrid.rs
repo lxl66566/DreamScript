@@ -38,10 +38,12 @@ use ds_vm::{
         BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
         BUILTIN_LIST_PUSH, BUILTIN_MAP, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
         BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL,
-        BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_REDUCE,
-        BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT, BUILTIN_STR_INT, BUILTIN_TAIL, STD_HTTP_GET,
-        STD_NET_CONNECT, STD_NET_RECV, STD_PLATFORM_MODULE, STD_PRINT, STD_PRINTLN,
-        std_platform_module,
+        BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP,
+        BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT,
+        BUILTIN_STR_INT, BUILTIN_TAIL,
+    },
+    platform::{
+        OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_PRINT, OP_PRINTLN, Platform, STD_NAME,
     },
     value::RefId,
 };
@@ -101,10 +103,10 @@ fn pool() -> Vec<Const> {
             module: "cfg".into(),
             func: 4,
         }, // k17: default_config
-        platform(STD_PRINTLN),                       // k18: println
+        platform(OP_PRINTLN),                        // k18: println
         builtin(BUILTIN_STR_INT),                    // k19: str_int
         builtin(BUILTIN_STR_BOOL),                   // k20: str_bool
-        platform(STD_PRINT),                         // k21: print
+        platform(OP_PRINT),                          // k21: print
         builtin(BUILTIN_STR_FLOAT),                  // k22: str_float
     ]
 }
@@ -122,7 +124,7 @@ fn builtin(index: u32) -> Const {
 
 fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: STD_PLATFORM_MODULE.into(),
+        module: STD_NAME.into(),
         func: index,
     }
 }
@@ -140,7 +142,7 @@ fn registry(module: &str, defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     // the fixtures call println/print: the std platform table is the
     // host's to install (`Vm::new` only adds the builtin core)
-    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
+    reg.install_platform(Platform::std());
     reg.install(ModuleVersion::new(module, defs).expect("valid fixture module"));
     reg
 }
@@ -1015,40 +1017,31 @@ fn both_native_modules_are_installed_and_resolvable() {
             .is_some()
     );
     assert!(reg.resolve_native("builtin", BUILTIN_JOIN).is_some());
+    // the reentrant two-list partition (46), the tag-less total's one
+    // body, as a reserved slot
+    assert!(reg.resolve_native("builtin", BUILTIN_PARTITION).is_some());
+    // the fork-join combinator (47) as a reserved slot: its ONE body
+    // lives in the generic table, CALLG-addressed
+    assert!(reg.resolve_native("builtin", BUILTIN_PAR_MAP).is_some());
+    // the fork-join fold (48) as a reserved slot: its ONE body lives in
+    // the generic table, CALLG-addressed
+    assert!(reg.resolve_native("builtin", BUILTIN_PAR_REDUCE).is_some());
     assert!(
-        reg.resolve_native("builtin", 46).is_none(),
-        "46 table entries: the core's, the list block, the fiber pair, the push, the map block, \
-         the generic container closes, the reentrant combinators, the nursery seams, the join"
+        reg.resolve_native("builtin", 49).is_none(),
+        "49 table entries: the core's, the list block, the fiber pair, the push, the map block, \
+         the generic container closes, the reentrant combinators, the nursery seams, the join, \
+         the partition, the fork-join combinator, the fork-join fold"
     );
-    // the std platform module: console, file, net — its own gaps reserved
-    assert!(
-        reg.resolve_native(STD_PLATFORM_MODULE, STD_PRINTLN)
-            .is_some()
-    );
-    assert!(reg.resolve_native(STD_PLATFORM_MODULE, STD_PRINT).is_some());
-    assert!(
-        reg.resolve_native(STD_PLATFORM_MODULE, STD_NET_CONNECT)
-            .is_some()
-    );
-    assert!(
-        reg.resolve_native(STD_PLATFORM_MODULE, STD_NET_RECV)
-            .is_some()
-    );
-    assert!(
-        reg.resolve_native(STD_PLATFORM_MODULE, STD_HTTP_GET)
-            .is_some()
-    );
-    assert!(
-        reg.resolve_native(STD_PLATFORM_MODULE, 19).is_some(),
-        "a gap entry"
-    );
-    assert!(reg.resolve_native(STD_PLATFORM_MODULE, 25).is_none());
+    // the installed platform handler: the dense world-call ABI, every op
+    // served by the default platform
+    assert!(reg.resolve_native(STD_NAME, OP_PRINTLN).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_PRINT).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_NET_CONNECT).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_NET_RECV).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_HTTP_GET).is_some());
+    assert!(reg.resolve_native(STD_NAME, 12).is_none());
     // a bare VM's registry carries no other native module
     let bare = Vm::new(ModuleRegistry::new());
-    assert!(
-        bare.registry()
-            .resolve_native(STD_PLATFORM_MODULE, 0)
-            .is_none()
-    );
+    assert!(bare.registry().resolve_native(STD_NAME, 0).is_none());
     assert!(reg.resolve_native("other", 0).is_none());
 }

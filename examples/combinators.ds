@@ -23,4 +23,6 @@ fn main() -> () {
   const words = ["alpha", "beta"]
   const joined = reduce(words, "", (a: string, b: string) => "${a}${b}")
   println("sum ${sum} joined ${joined}")
+  const (big, small) = xs.partition((x: int) => x > 2)
+  println("split ${len(big)} ${len(small)}")
 }

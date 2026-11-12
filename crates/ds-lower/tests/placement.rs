@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Lowers one inline source through the full pipeline, asserting the
 /// check is clean so failures are the lowerer's.
@@ -46,8 +46,8 @@ fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> Value {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     let result = vm.run("placement", "main", &[]).expect("main runs");
@@ -82,8 +82,9 @@ tag int
 tag string
 tag bool
 extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
 fn main() -> int {
-  const s = \"alpha\"
+  const s = concat(\"al\", \"pha\")
   const t = s
   println(s)
   println(t)
@@ -95,8 +96,9 @@ tag int
 tag string
 tag bool
 extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
 fn main() -> int {
-  const s = \"beta\"
+  const s = concat(\"be\", \"ta\")
   const t = s
   println(t)
   println(s)
@@ -105,7 +107,10 @@ fn main() -> int {
 
 /// A string bound, aliased (`const t = s` names the same word — no copy,
 /// no dup), and last-used in both orders: exactly one drop at the final
-/// use, zero dups, whichever alias dies last.
+/// use, zero dups, whichever alias dies last. The one reference is a
+/// counted STRCAT result (stage three's temporary slice made the KSTR
+/// literals count-free borrow loads, so a literal-bound alias would have
+/// no drop at all); the operand literals load as KSTR_BORROW.
 #[test]
 fn aliasing_places_one_drop_at_the_last_use_in_both_orders() {
     for (source, stdout) in [
@@ -120,6 +125,12 @@ fn aliasing_places_one_drop_at_the_last_use_in_both_orders() {
             "aliasing never dups: {ops:?}"
         );
         assert_eq!(ops.len(), 1, "exactly one drop for the one reference");
+        assert!(
+            placed
+                .iter()
+                .any(|op| matches!(op, PlacedOp::Uop(Uop::KstrBorrow { .. }))),
+            "the operand literals load as count-free borrows"
+        );
         // the drop lands right after the last println call returned
         let drop_at = placed
             .iter()
@@ -193,9 +204,10 @@ tag int
 tag string
 tag bool
 extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
 fn main() -> int {
-  const s = \"kept\"
-  const _ = \"dropped\"
+  const s = concat(\"ke\", \"pt\")
+  const _ = concat(\"dro\", \"pped\")
   const _ = s
   println(s)
   0
@@ -204,7 +216,9 @@ fn main() -> int {
 /// `const _ = e` discards the initializer: the wildcard binds no name,
 /// so a fresh reference dies at the statement (its dec sits right there)
 /// and an aliased one keeps its binder's death untouched. The heap
-/// drains through both.
+/// drains through both. The discarded and kept references are counted
+/// STRCAT results — a bare KSTR literal would be a count-free borrow
+/// load with no dec to place.
 #[test]
 fn a_wildcard_const_binding_discards_and_keeps_alias_deaths() {
     let lowered = lower_inline(WILD_DISCARD_SOURCE);
@@ -218,19 +232,20 @@ fn a_wildcard_const_binding_discards_and_keeps_alias_deaths() {
         "the wildcard discard owns exactly two decs: {ops:?}"
     );
     assert!(ops.iter().all(|op| matches!(op, RcOp::Dec { .. })));
-    // the discard dec precedes the println call (it follows the dropped
-    // literal's own Kstr), the kept dec follows the call
+    // the discard dec precedes the println call (it follows the
+    // discarded concat call it belongs to), the kept dec follows the
+    // println call
     let drop_at = placed
         .iter()
         .position(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
         .expect("the discard dec is placed");
     let call_at = placed
         .iter()
-        .position(|op| matches!(op, PlacedOp::Uop(Uop::Call { .. })))
+        .rposition(|op| matches!(op, PlacedOp::Uop(Uop::Call { .. })))
         .expect("the println call is placed");
     assert!(
         drop_at < call_at,
-        "the discarded literal dies at its statement, before the use"
+        "the discarded value dies at its statement, before the use"
     );
     assert_eq!(
         run_main(
@@ -247,38 +262,61 @@ const REUSE_SOURCE: &str = "
 tag int
 tag string
 tag bool
+extern fn concat (a: string, b: string) -> string
 fn main() -> bool {
-  const a: string = \"x\"
-  const u = a == \"y\"
-  const b: string = \"fresh\"
+  const t = \"y\"
+  const a: string = concat(\"x\", t)
+  const u = a == \"z\"
+  const b: string = concat(\"fr\", t)
   u
 }";
 
 /// A last-use drop immediately preceding an allocation of a compatible
-/// shape: the placed sequence is a plain `Dec` directly before the `Kstr`
-/// — the reuse pairing itself is implicit (a unique death frees the heap
-/// block and the next allocation claims the freed slot), so no alloc-at
-/// uop exists in this ISA.
+/// shape: the placed sequence is a plain `Dec` directly before the
+/// allocating concat — the reuse pairing itself is implicit (a unique
+/// death frees the heap block and the next allocation claims the freed
+/// slot), so no alloc-at uop exists in this ISA. The counted producers
+/// are native concat results: a native's return hands a count the caller
+/// must drop, and the STRCAT temporaries of stage three's arena slice
+/// carry none, so the dec-to-alloc pairing is pinned against the native
+/// allocation across the count-free literal loads.
 #[test]
 fn a_last_use_drop_sits_immediately_before_the_next_string_allocation() {
     let lowered = lower_inline(REUSE_SOURCE);
     let placed = lowered.placed("main").expect("main is planned");
-    // the fresh allocation is the sequence's last KSTR (the "x" and "y"
-    // operands allocate earlier)
+    // the fresh allocation is the sequence's last native concat
     let alloc_at = placed
         .iter()
-        .rposition(|op| matches!(op, PlacedOp::Uop(Uop::Kstr { .. })))
-        .expect("the fresh literal allocates");
+        .rposition(|op| matches!(op, PlacedOp::Uop(Uop::Call { .. })))
+        .expect("the fresh concat allocates");
+    // the dying binder's drop feeds the allocation directly: the dec,
+    // then exactly the count-free literal load, then the STRCAT — the
+    // borrow load allocates nothing, so the freed block is still the
+    // one this allocation claims
     assert!(
-        matches!(placed[alloc_at - 1], PlacedOp::Rc(RcOp::Dec { .. })),
-        "a drop feeds the allocation directly: {:?} then {:?}",
+        matches!(placed[alloc_at - 4], PlacedOp::Rc(RcOp::Dec { .. }))
+            && matches!(placed[alloc_at - 3], PlacedOp::Uop(Uop::KstrBorrow { .. })),
+        "a drop feeds the allocation across the zero-cost load and the staging moves: {:?} {:?} \
+         {:?} {:?} {:?}",
+        placed[alloc_at - 4],
+        placed[alloc_at - 3],
+        placed[alloc_at - 2],
         placed[alloc_at - 1],
         placed[alloc_at]
     );
-    // both the dead binder and the anonymous literal operand drop at the
-    // comparison, the fresh binder at its scope end — plain decs, no
-    // reuse-specific op
-    assert_eq!(rc_ops(placed).len(), 3);
+    // the dead binder drops at the comparison (the operand literals are
+    // count-free borrows), the fresh binder at its scope end — plain
+    // decs, no reuse-specific op
+    assert_eq!(rc_ops(placed).len(), 2);
+    assert!(
+        placed
+            .iter()
+            .any(|op| matches!(op, PlacedOp::Uop(Uop::KstrBorrow { .. })))
+            && !placed
+                .iter()
+                .any(|op| matches!(op, PlacedOp::Uop(Uop::Kstr { .. }))),
+        "every literal loads as a count-free borrow"
+    );
     assert_eq!(run_main(&lowered, REUSE_SOURCE, ""), Value::Bool(false));
 }
 
@@ -299,6 +337,18 @@ fn the_placed_sequence_is_identical_across_runs() {
     }
 }
 
+/// The record's body decoded to instructions, one per pc.
+fn insts(words: &[u32]) -> Vec<ds_abi::Inst> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(pc, word)| {
+            ds_abi::Inst::decode(u32::try_from(pc).expect("pc fits u32"), *word)
+                .expect("ds-mod validated every word")
+        })
+        .collect()
+}
+
 /// The module body is the placed sequence verbatim, RC ops included: the
 /// 0xE words ride beside the uops in the same instruction space, so the
 /// executable stream and the placement contract cannot disagree.
@@ -308,7 +358,7 @@ fn the_module_body_carries_the_rc_ops() {
     let placed = lowered.placed("keep").expect("keep is planned");
     let module = lowered.module();
     let index = lowered.function_index("keep").expect("planned") as usize;
-    let body = &module.functions()[index].code();
+    let body = insts(module.functions()[index].code());
     let expected: Vec<ds_abi::Inst> = placed
         .iter()
         .map(|op| match *op {
@@ -317,11 +367,354 @@ fn the_module_body_carries_the_rc_ops() {
         })
         .collect();
     assert_eq!(
-        body, &expected,
+        body, expected,
         "the module's code is the placed sequence, RC ops included"
     );
     assert!(
         placed.iter().any(|op| matches!(op, PlacedOp::Rc(_))),
         "the placed sequence itself carries the RC ops"
+    );
+}
+
+const ZERO_RC_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+fn main() -> int {
+  if \"a\" == \"b\" {
+    println(\"no\")
+  }
+  println(\"done\")
+  0
+}";
+
+/// Stage three's temporary slice, the zero-RcOps pin: a frame whose
+/// every KSTR word is a designated temporary (read, staged-native, and
+/// discard deaths; no dup, no forward, no exit transfer, no loop carry)
+/// carries zero RC ops — every literal loads as KSTR_BORROW and every
+/// terminal dec is gone.
+#[test]
+fn designated_temporaries_carry_zero_rc_ops() {
+    let lowered = lower_inline(ZERO_RC_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    assert!(
+        rc_ops(placed).is_empty(),
+        "a temporary-only frame pays no count traffic: {placed:?}"
+    );
+    assert!(
+        placed
+            .iter()
+            .filter(|op| { matches!(op, PlacedOp::Uop(Uop::Kstr { .. } | Uop::KstrBorrow { .. })) })
+            .count()
+            > 0
+            && placed
+                .iter()
+                .all(|op| !matches!(op, PlacedOp::Uop(Uop::Kstr { .. }))),
+        "every literal in the frame is a borrow load: {placed:?}"
+    );
+    assert_eq!(run_main(&lowered, ZERO_RC_SOURCE, "done\n"), Value::I64(0));
+}
+
+const ESCAPE_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+fn hand_back() -> string {
+  \"stored\"
+}
+fn carried() -> int {
+  const s = \"held\"
+  var i: int = 0
+  while i < 3 {
+    i += 1
+  }
+  0
+}
+fn main() -> int {
+  println(hand_back())
+  println(hand_back())
+  carried()
+}";
+
+/// The exclusion pin: a literal the proof cannot classify keeps its
+/// count. An exit transfer (the returned literal hands its count to the
+/// caller) and a loop-carried word (produced before the loop entry)
+/// both stay acquiring KSTR loads — the borrow rewrite is a proof, not
+/// a default.
+#[test]
+fn escaping_and_carried_literals_keep_their_counts() {
+    let lowered = lower_inline(ESCAPE_SOURCE);
+    for (name, want_kstr, want_borrow) in [("hand_back", 1, 0), ("carried", 1, 0)] {
+        let placed = lowered.placed(name).expect("the frame is planned");
+        let kstr = placed
+            .iter()
+            .filter(|op| matches!(op, PlacedOp::Uop(Uop::Kstr { .. })))
+            .count();
+        let borrow = placed
+            .iter()
+            .filter(|op| matches!(op, PlacedOp::Uop(Uop::KstrBorrow { .. })))
+            .count();
+        assert_eq!(
+            (kstr, borrow),
+            (want_kstr, want_borrow),
+            "{name} keeps its acquiring load: {placed:?}"
+        );
+    }
+    // hand_back returns its literal's count to the caller, so main pays
+    // the handed dec twice; carried's loop-carried word decs at its own
+    // frame exit — the counts still balance and the run drains
+    let main = lowered.placed("main").expect("main is planned");
+    assert_eq!(
+        rc_ops(main).len(),
+        2,
+        "the two handed-back counts dec at their uses: {main:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, ESCAPE_SOURCE, "stored\nstored\n"),
+        Value::I64(0)
+    );
+}
+
+const LOOP_STRCAT_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+fn main() -> int {
+  var i: int = 0
+  while i < 3 {
+    const hit = \"x${i}y\" == \"x1y\"
+    println(\"<${i}>\")
+    if hit { println(\"hit\") }
+    i += 1
+  }
+  0
+}";
+
+/// Stage three's temporary slice, the STRCAT side: a loop whose body
+/// builds an interpolation chain, compares it, and drops it before the
+/// back edge — every link of the chain takes the arena spelling with
+/// one mark/restore pair for the loop, and the chain's terminal decs
+/// leave the stream — while the interpolation handed to println keeps
+/// its counted spelling (a native can retain its argument, so the proof
+/// refuses to classify it).
+#[test]
+fn designated_loop_concats_serve_from_the_arena() {
+    let lowered = lower_inline(LOOP_STRCAT_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let served: Vec<_> = placed
+        .iter()
+        .filter(|op| matches!(op, PlacedOp::Uop(Uop::StrCatArena { .. })))
+        .collect();
+    assert_eq!(
+        served.len(),
+        3,
+        "both comparison-chain links and the println chain's inner link serve from the arena: \
+         {placed:?}"
+    );
+    let dsts = served
+        .iter()
+        .map(|op| match op {
+            PlacedOp::Uop(Uop::StrCatArena { dst, .. }) => *dst,
+            _ => unreachable!("the filter above matched only arena servings"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        placed
+            .iter()
+            .filter(|op| matches!(op, PlacedOp::Uop(Uop::ArenaMark { .. })))
+            .count(),
+        1,
+        "the marked loop gains exactly one head mark: {placed:?}"
+    );
+    assert_eq!(
+        placed
+            .iter()
+            .filter(|op| matches!(op, PlacedOp::Uop(Uop::ArenaRestore { .. })))
+            .count(),
+        1,
+        "the marked loop gains exactly one back-edge restore: {placed:?}"
+    );
+    assert!(
+        placed.iter().all(|op| match op {
+            PlacedOp::Rc(RcOp::Dec { src }) => !dsts.contains(src),
+            _ => true,
+        }),
+        "the arena temps' counts leave the stream: {placed:?}"
+    );
+    let staged = placed
+        .iter()
+        .filter(|op| matches!(op, PlacedOp::Uop(Uop::StrCat { .. })))
+        .count();
+    assert_eq!(
+        staged, 1,
+        "the println chain's terminal link keeps its counted spelling: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, LOOP_STRCAT_SOURCE, "<0>\n<1>\nhit\n<2>\n"),
+        Value::I64(0)
+    );
+}
+
+const CARRY_STRCAT_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+fn main() -> int {
+  var piece: string = \"a\"
+  var i: int = 0
+  while i < 4 {
+    piece = \"${piece}${piece}\"
+    i += 1
+  }
+  println(piece)
+  0
+}";
+
+/// The exclusion pin: a concatenation whose word crosses the back edge
+/// alive (the doubling piece survives every iteration) keeps its
+/// counted spelling — no arena serving, no mark pair, and the counts
+/// still balance at run end.
+#[test]
+fn a_back_edge_carried_concat_keeps_its_count() {
+    let lowered = lower_inline(CARRY_STRCAT_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    assert!(
+        placed.iter().all(|op| {
+            !matches!(
+                op,
+                PlacedOp::Uop(
+                    Uop::StrCatArena { .. } | Uop::ArenaMark { .. } | Uop::ArenaRestore { .. }
+                )
+            )
+        }),
+        "the carried word keeps the counted spelling: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, CARRY_STRCAT_SOURCE, "aaaaaaaaaaaaaaaa\n"),
+        Value::I64(0)
+    );
+}
+
+const CANONICAL_UNIT_SOURCE: &str = "
+tag int
+fn main() -> int {
+  var x: int = 0
+  var i: int = 0
+  while i < 3 {
+    if x % 2 == 0 {
+      x += 1
+    } else {
+      x += 2
+    }
+    i += 1
+  }
+  x
+}";
+
+/// The canonical unit word: one Kimm 0 at the frame top answers every
+/// unit value in the frame — the loop tail, both statement-if arms, and
+/// both compound assignments share it — and nothing ever writes the word
+/// afterwards, so the unit join carries no result span and no per-arm
+/// Mov, while the run still answers through it.
+#[test]
+fn one_entry_zero_serves_every_unit_value_in_the_frame() {
+    let lowered = lower_inline(CANONICAL_UNIT_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let index = lowered.function_index("main").expect("main is planned");
+    let func = &lowered.module().functions()[index as usize];
+    // placed[0] is FUNCF, so the first uop is the entry zero
+    let PlacedOp::Uop(Uop::Kimm { dst: unit, kidx }) = placed[1] else {
+        panic!(
+            "the frame opens with the canonical unit zero: {:?}",
+            placed[1]
+        );
+    };
+    assert!(
+        matches!(
+            func.constants()[usize::from(kidx.0)],
+            ds_mod::Constant::I64(0)
+        ),
+        "the entry zero writes the 0 constant"
+    );
+    assert!(
+        placed.iter().skip(2).all(|op| {
+            !matches!(
+                op,
+                PlacedOp::Uop(
+                    Uop::Kimm {
+                        dst: word,
+                        ..
+                    }
+                    | Uop::Kconst {
+                        dst: word,
+                        ..
+                    }
+                    | Uop::Mov {
+                        dst: word,
+                        ..
+                    }
+                ) if *word == unit
+            )
+        }),
+        "no later op writes the canonical unit word: {placed:?}"
+    );
+    assert_eq!(run_main(&lowered, CANONICAL_UNIT_SOURCE, ""), Value::I64(5));
+}
+
+const DIRECT_SCALAR_STORE_SOURCE: &str = "
+tag int
+fn main() -> int {
+  var x: int = 5
+  x += 3
+  x = 7
+  x
+}";
+
+/// The direct scalar store: a scalar var's literal init, its compound
+/// assignment, and a literal assignment all write the var's own word —
+/// no compute-into-temp, no re-store Mov — and the compound AddI64
+/// safely aliases its destination with its own lhs read.
+#[test]
+fn scalar_stores_write_the_var_word_directly() {
+    let lowered = lower_inline(DIRECT_SCALAR_STORE_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    assert!(
+        placed
+            .iter()
+            .all(|op| !matches!(op, PlacedOp::Uop(Uop::Mov { .. }))),
+        "no re-store Mov rides the scalar stores: {placed:?}"
+    );
+    let adds: Vec<u8> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(Uop::AddI64 { dst, lhs, .. }) if dst == lhs => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        adds.len(),
+        1,
+        "one compound store over its own word: {placed:?}"
+    );
+    let var_word = adds[0];
+    let loads: Vec<u8> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(Uop::Kimm { dst, .. }) if *dst == var_word => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loads.len(),
+        2,
+        "the init and the reassignment load their constants into the var word: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, DIRECT_SCALAR_STORE_SOURCE, ""),
+        Value::I64(7)
     );
 }

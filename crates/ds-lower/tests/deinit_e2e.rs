@@ -13,13 +13,16 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const ATOMS: &str = concat!(
     "tag int\n",
     "tag string\n",
     "tag oops\n",
     "trait Copyable { }\n",
+    "struct list[t]\n",
+    "extern fn list_new[t] () -> list[t]\n",
+    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "extern fn println (msg: string) -> ()\n",
 );
 
@@ -61,8 +64,8 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     let result = vm.run(name, "main", &[]);
@@ -325,5 +328,215 @@ fn a_deinit_argument_in_tail_position_refuses() {
             "}\n",
         )),
         "the tail call reuses this frame",
+    );
+}
+
+/// A deinit value staged into a native call refuses: the native borrows
+/// its staged words with no drop position of their own, so the value's
+/// hook would never run inside the call — the value's death stays its
+/// own binding's.
+#[test]
+fn a_deinit_value_staged_into_a_native_call_refuses() {
+    refused(
+        &source(concat!(
+            "fn main() -> int {\n",
+            "  var xs = list[res]()\n",
+            "  const r = res { id: 3 }\n",
+            "  xs.list_push(r)\n",
+            "  0\n",
+            "}\n",
+        )),
+        "a native call borrows staged words with no drop position of their own",
+    );
+}
+
+/// The just-inside of the native-argument refusal: a trait dispatch
+/// staging the whole deinit value plans as a plain local callee, so the
+/// claim discipline covers it — the dispatched Ref word's count rides
+/// the call, the hook fires exactly once at the binding's scope end,
+/// and the heap drains.
+#[test]
+fn a_trait_dispatch_stages_a_deinit_value_with_the_claim_intact() {
+    acceptance(
+        "deinit_trait_dispatch",
+        &source(concat!(
+            "trait show { fn show(self) -> string }\n",
+            "struct named: ~Copyable {\n",
+            "  label: string\n",
+            "  deinit { println(\"bye ${self.label}\") }\n",
+            "}\n",
+            "impl show for named {\n",
+            "  fn show(self) -> string { self.label }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "  const s = named { label: \"alpha\" }\n",
+            "  println(s.show())\n",
+            "  0\n",
+            "}\n",
+        )),
+        Value::I64(0),
+        concat!("alpha\n", "bye alpha\n").as_bytes(),
+    );
+}
+
+/// The just-inside of the tail-argument refusal: the same call out of
+/// tail position borrows the value and runs — the callee reads the
+/// field, the hook fires exactly once at the caller's own scope end
+/// (after the call's result lands), and the heap drains.
+#[test]
+fn a_non_tail_call_borrows_the_value_and_the_hook_fires_at_the_caller_scope_end() {
+    acceptance(
+        "deinit_non_tail_call",
+        &source(concat!(
+            "fn use_it (f: res) -> int { f.id }\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const r = res { id: 3 }\n",
+            "  const v = use_it(r)\n",
+            "  println(\"got ${v}\")\n",
+            "  0\n",
+            "}\n",
+        )),
+        Value::I64(0),
+        concat!("got 3\n", "dying 3\n").as_bytes(),
+    );
+}
+
+/// A deinit value nested in another struct's field refuses: the inline
+/// span flattens the field's words with no claim of the field's own, so
+/// the nested value's hook would run at the wrong death (the outer
+/// value's). Per-span deinit claims own the seam.
+#[test]
+fn a_deinit_value_nested_in_a_struct_field_refuses() {
+    refused(
+        &source(concat!(
+            "struct wrap {\n",
+            "  inner: res\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const w = wrap { inner: res { id: 3 } }\n",
+            "  0\n",
+            "}\n",
+        )),
+        "a deinit-carrying field type has no claim of its own inside the inline span",
+    );
+}
+
+/// A deinit value inside an enum member's payload refuses at the same
+/// inline-span seam: the member's payload field flattens the value's
+/// words without a claim, so the hook would fire at the wrong death.
+#[test]
+fn a_deinit_value_inside_an_enum_member_payload_refuses() {
+    refused(
+        &source(concat!(
+            "enum holder {\n",
+            "  empty\n",
+            "  full(res)\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const h = full(res { id: 3 })\n",
+            "  0\n",
+            "}\n",
+        )),
+        "a deinit-carrying field type has no claim of its own inside the inline span",
+    );
+}
+
+/// A generic struct whose declaration carries a deinit refuses at every
+/// value: no monomorphic instantiation synthesizes the hook, and the
+/// application value has no word shape under the M3 contract — the
+/// reachable refusal is the application-value seam, the deinit hook's
+/// own generic arm ("the struct's deinit is generic") guarding behind
+/// it for the seam's later stages.
+#[test]
+fn a_generic_struct_deinit_value_refuses_at_the_application_seam() {
+    refused(
+        &source(concat!(
+            "struct box[t]: ~Copyable {\n",
+            "  v: int\n",
+            "  deinit { println(\"gone\") }\n",
+            "}\n",
+            "\n",
+            "fn mk () -> box[int] {\n",
+            "  box { v: 3 }\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  0\n",
+            "}\n",
+        )),
+        "an enum or application value is outside the M3 runtime contract",
+    );
+}
+
+/// A local binding aliasing a borrowed deinit-carrying value anchors no
+/// claim: the const alias, the match binder, the nested alias chain,
+/// and the `_` discard over a borrow parameter all read the owner's
+/// value without re-establishing this frame's claim, so the hook fires
+/// exactly once at the owning caller's scope end (before the fix the
+/// alias anchored a second claim that fired early at the callee's
+/// exit, then again at the owner's), and the caller's own reads stay
+/// live past every call.
+#[test]
+fn an_aliased_borrow_fires_the_hook_once_at_the_owner() {
+    acceptance(
+        "alias_claim",
+        &source(concat!(
+            "fn take_bind(b: res) -> int {\n",
+            "  const v = b\n",
+            "  v.id\n",
+            "}\n",
+            "\n",
+            "fn take_match(b: res) -> int {\n",
+            "  match b {\n",
+            "    v => v.id,\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn take_nested(b: res) -> int {\n",
+            "  const v1 = b\n",
+            "  const v2 = v1\n",
+            "  v2.id\n",
+            "}\n",
+            "\n",
+            "fn take_discard(b: res) -> int {\n",
+            "  const _ = b\n",
+            "  b.id\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const r = res { id: 7 }\n",
+            "  println(\"${take_bind(r)}${take_match(r)}${take_nested(r)}${take_discard(r)}${r.\
+             id}\")\n",
+            "  0\n",
+            "}\n",
+        )),
+        Value::I64(0),
+        b"77777\ndying 7\n",
+    );
+}
+
+/// A Ref-word deinit value aliased from a borrow keeps its counts
+/// plain: the aliased binder anchors no claim, so the callee's handed
+/// count decs at its own frame exit as a plain dec (never a claim fire),
+/// the caller's own count and read stay live past every call, and the
+/// hook fires once at the owning caller's scope end — the heap draining
+/// proves the dec pairing stayed balanced (before the fix the alias
+/// turned the param's exit dec into an early hook fire).
+#[test]
+fn a_ref_word_aliased_borrow_keeps_the_plain_count_discipline() {
+    let source = format!(
+        "{ATOMS}struct named: ~Copyable {{\n  label: string\n  deinit {{ println(\"bye \
+         ${{self.label}}\") }}\n}}\n\nfn alias_it(b: named) -> string {{\n  const v = b\n  \
+         v.label\n}}\n\nfn main() -> int {{\n  const s = named {{ label: \"alpha\" }}\n  \
+         println(alias_it(s))\n  println(s.label)\n  0\n}}\n",
+    );
+    acceptance(
+        "deinit_ref_alias",
+        &source,
+        Value::I64(0),
+        concat!("alpha\n", "alpha\n", "bye alpha\n").as_bytes(),
     );
 }

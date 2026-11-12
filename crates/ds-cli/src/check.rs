@@ -27,8 +27,8 @@ use clap::{Args, ValueEnum};
 use ds_check::{DefKind, corpus};
 use ds_diag::{Diagnostic, LabelStyle, render};
 use ds_query::{
-    BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile, QueryError, Resolve,
-    TypeOf,
+    BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile, PlatformCheck,
+    QueryError, Resolve, TypeOf,
 };
 
 /// The `ds check` surface: the package's source files and the diagnostic
@@ -65,9 +65,11 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     let mut db = if args.no_ambient {
         Db::new()
     } else {
-        // The ambient's effect rows [E1] ride the database's table; a
-        // package without the ambient gets the pure default.
-        Db::with_declared_rows(ds_stdlib::declared_rows())
+        // The ambient's effect rows [E1] and world-capability
+        // attributions [H5] ride the database's tables; a package
+        // without the ambient gets the pure defaults.
+        Db::with_declared_rows(ds_stdlib::declared_rows().clone())
+            .with_world_caps(ds_stdlib::world_caps().clone())
     };
     let mut files = Vec::with_capacity(args.files.len() + 1);
     if !args.no_ambient {
@@ -109,7 +111,7 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
 
     for &file in &files {
         let index = query(db.get::<BlockIndex>(file), "block index")?;
-        for block in &index.blocks {
+        for block in index.blocks.iter() {
             let def = DefId::from_block(block.id)?;
             let typed = query(db.get::<TypeOf>(def), "type_of")?;
             for diag in &*typed.diags {
@@ -138,6 +140,16 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
         ) {
             query(db.get::<EffectsOf>(DefId::new(raw)), "effects_of")?;
         }
+    }
+
+    // The platform check [H5]: world usage verified inside what the
+    // package's platform declaration provides.
+    let platform = query(db.get::<PlatformCheck>(PackageId::new(0)), "platform_check")?;
+    for diag in &*platform.diags {
+        reports.push(Report {
+            diag: diag.clone(),
+            fatal: !exempt(&scopes, diag),
+        });
     }
 
     // Source order per file: the focus span of each diagnostic, pass order

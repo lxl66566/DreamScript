@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use ds_check::{DeclaredRows, Effect, EffectRow, effects_of};
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, effects_of};
 use ds_diag::Files;
 use ds_parse::parse;
 
@@ -24,7 +24,7 @@ fn effects_of_files(files: &[(&str, &str)], declared: &DeclaredRows) -> ds_check
         let ast = parse(&registry, file).unwrap_or_else(|diags| panic!("{name} parses: {diags:?}"));
         asts.push(ast);
     }
-    effects_of(&asts, declared)
+    effects_of(&asts, declared, &WorldCaps::new())
 }
 
 /// One definition's row, failing loudly when the definition is not

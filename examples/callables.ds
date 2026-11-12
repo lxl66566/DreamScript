@@ -10,6 +10,10 @@ fn apply(f: fn(int) -> int, v: int) -> int {
   f(v)
 }
 
+fn twice(f: fn() -> int) -> int {
+  f() + f()
+}
+
 fn inc(x: int) -> int {
   x + 1
 }
@@ -34,6 +38,7 @@ fn main() -> () {
   println("named ${apply(g, 4)} ${at(raised, 1)}")
   const k = 10
   println("closure ${apply((x: int) => x * k, 4)}")
+  println("block ${twice { k + 11 }}")
   const add5 = make_adder(5)
   println("factory ${add5(37)}")
   var fns = list[fn(int) -> int]()

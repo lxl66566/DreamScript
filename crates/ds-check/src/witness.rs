@@ -65,10 +65,14 @@ impl Universe {
     /// not finished). A type with no shallowly inhabited member returns
     /// [`Error::WitnessOfEmpty`].
     pub fn witness(&mut self, t: Ty) -> Result<Witness, Error> {
-        // Copy members out: solving field types below needs &mut self.
-        let members: Vec<TypeId> = self.members(t).to_vec();
-        for atom in members {
-            // Clone the shape out for the same reason.
+        // Solving field types below takes `&mut self`, so the member set is
+        // read by index: minting appends to the set table and never moves an
+        // existing handle's entry.
+        let len = self.members(t).len();
+        for index in 0..len {
+            let atom = self.members(t)[index];
+            // The declaration borrow ends here: the arms below solve field
+            // types through `&mut self`.
             let kind = self.atom_decl(atom)?.kind.clone();
             match kind {
                 AtomKind::Unit => return Ok(Witness::Unit { atom }),

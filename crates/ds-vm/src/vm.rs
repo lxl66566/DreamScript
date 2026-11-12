@@ -4,17 +4,19 @@
 //!
 //! # Decode strategy: decode on dispatch
 //!
-//! The `Vec<u32>` word stream is the program, and the dispatcher decodes
-//! each word with [`ds_abi::uop::Uop::decode`] immediately before matching
-//! it. A pre-decoded cache is deliberately rejected: the encoded stream is
-//! the authoritative form (the dsmod loader mmaps it [BL-7]), tier
-//! transitions are in-place J-variant rewrites of the encoded words [H1] —
-//! execution must observe them — and a decode cache keyed per version would
-//! be extra state to invalidate across hot-reload swaps [H6 item 5]. Load
-//! decode-checks every word once, so a dispatch-time
+//! The `Vec<u32>` word stream is the program, and the dispatcher keys one
+//! jump table on each word's raw opcode byte, extracting the operand fields
+//! inline per arm; a pre-decoded cache is deliberately rejected on the same
+//! terms: the encoded stream is the authoritative form (the dsmod loader
+//! mmaps it [BL-7]), tier transitions are in-place J-variant rewrites of
+//! the encoded words [H1] — execution must observe them — and a decode
+//! cache keyed per version would be extra state to invalidate across
+//! hot-reload swaps [H6 item 5]. Load decode-checks every word once, and
+//! [`ds_abi::uop::Uop::decode`] stays the canonicity authority: the hot
+//! arms name the same causes it would, and anything they refuse falls to
+//! one slow arm that routes through the decoders, so a dispatch-time
 //! [`Trap::BadEncoding`] is a canonicity violation, not a slow path. The
-//! decode itself is branch-light by construction: the bias arithmetic is
-//! branch-free [BL-1].
+//! bias arithmetic is branch-free [BL-1].
 //!
 //! # Fibers and nurseries
 //!
@@ -29,8 +31,19 @@
 //! Nurseries [E2, E5] layer on top (`crate::nursery`): fibers spawn into a
 //! nursery (the child-of link), the join/teardown driver drives children to
 //! death in spawn order, and a first failure raises the nursery's cancel
-//! flag — observed only at taken backward branches (the `jump!` macro), so
-//! a linear consume in flight is never interrupted.
+//! flag — observed at taken backward branches (the `jump!` macro) and at the
+//! driver's re-entry of a parked child (the resume-shaped point: a parked
+//! child of a cancelled nursery is cut at its next resume instead of
+//! resuming), so a linear consume in flight is never interrupted. A fiber
+//! joining another open nursery parks at its join call and the joined
+//! nursery's drive runs on the interlock stack — frames pushed and consumed
+//! LIFO, each answer delivered onto its parked joiner's call site — so join
+//! nesting depth costs heap, never the Rust stack. The fork-join
+//! combinators [E3] park the same way: a CALLG site's spawn-only body
+//! leaves the children in a fresh nursery and the drive seam carries
+//! the assembly or fold stage, so a nested combinator (a par_map inside
+//! a par_map element) stacks drive frames on the interlock's heap
+//! stack instead of nesting drives on the Rust stack.
 //!
 //! # Reentrant native calls
 //!
@@ -46,19 +59,23 @@
 //! per-element loop; a lambda's own backward jumps observe through the
 //! same `jump!` macro as any code.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasherDefault, Hasher},
+    sync::Arc,
+};
 
 use ds_abi::{
-    CodePc, ConstIdx, FrameLayout, FrameMetadata, RC_MAJOR, RcDecodeError, RcOp, SlideDirection,
-    SlideError, SlotType, TailChain,
-    uop::{DecodeError, Uop},
+    BIAS_J, CodePc, ConstIdx, FrameLayout, FrameMetadata, RC_MAJOR, RcDecodeError, RcOp,
+    SlideDirection, SlideError, SlidePlan, SlotType, Staging, TailChain,
+    uop::{DecodeError, MAX_FRAME_SLOTS},
 };
 
 use crate::{
     EVIDENCE_MODULE,
-    claims::ClaimTable,
+    claims::{CLAIM_BAND_CLEAR, CLAIM_BAND_SET, ClaimTable, HookSite, hook_sites},
     fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
-    module::{ModuleRegistry, ModuleVersion},
+    module::{ModuleRegistry, ModuleSlots, ModuleVersion},
     native::{
         ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction, NativeResult,
         OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
@@ -66,7 +83,7 @@ use crate::{
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::{Heaps, Objects},
     program::{Const, ConstKind},
-    value::{FuncRef, RefId, Value, Word},
+    value::{ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word},
 };
 
 /// Default value-stack limit: 1 Mi words (8 MiB on 64-bit targets).
@@ -117,6 +134,13 @@ pub enum Trap {
         /// The word's module id.
         module: u32,
     },
+    /// A world call reached an op the installed platform does not serve:
+    /// install-time validation refuses such call sites, so this fires
+    /// only under bypassed validation.
+    UnservedWorldOp {
+        /// The unserved op's index in the platform's fixed table.
+        op: u32,
+    },
     /// A call or run passed the wrong argument count.
     ArityMismatch {
         /// Parameter count the callee's layout declares.
@@ -156,19 +180,25 @@ pub enum Trap {
         /// The layout's slot count.
         layout: usize,
     },
-    /// The entry descriptor's resolved word disagrees with the table index.
+    /// The entry descriptor's word 0 disagrees with the function table index.
+    /// Debug-only integrity tripwire: release builds drop the compare.
     EntryWordMismatch {
-        /// What `resolve()` answered.
+        /// The descriptor's word 0.
         resolved: usize,
         /// The function's table index.
         expected: usize,
     },
     /// A pool index is out of range for the current module version's pool.
+    /// Install proves every pool operand's index (module.rs's body
+    /// validation refuses the module there), so no dispatch path raises
+    /// this; the variant stays the trap a future seam would name.
     PoolIndex {
         /// The offending pool index.
         kidx: u16,
     },
-    /// A pool entry was loaded by an opcode of the wrong kind.
+    /// A pool entry was loaded by an opcode of the wrong kind. Install
+    /// proves every pool operand's kind, so the dispatch arms raise this
+    /// only as the corrupted-pool tripwire.
     PoolKind {
         /// The offending pool index.
         kidx: u16,
@@ -214,6 +244,49 @@ pub enum Trap {
         /// The caller's outgoing-argument slot count.
         caller_area: u16,
     },
+    /// A list's per-element stride contract broke: an append staged an
+    /// element span whose width disagrees with the non-empty list's
+    /// stride (or a one-word-element native met a wider list). Lowered
+    /// code cannot trip this — the checker holds one element type per
+    /// list value — so it names hand-assembled code or a host argument.
+    ElementStride {
+        /// The list object's table id.
+        obj: u32,
+        /// The list's own stride.
+        stride: usize,
+        /// The width the call staged.
+        given: usize,
+    },
+    /// An arena concatenation or its packed handle hit a field limit: a
+    /// slice at or past the 24-bit length field, an offset at it, or a
+    /// chunk index at the 16-bit field. Lowered code traps at the
+    /// allocation boundary; hand-assembled code at the packing.
+    ArenaExhausted {
+        /// The field that filled.
+        field: ArenaPackError,
+    },
+    /// An arena word reached a count-bearing site - a reference-count
+    /// op's operand, a counted argument read, or a native's reference
+    /// argument. The placement proof keeps every designated temporary
+    /// away from each site, so lowered code never trips it; hand-assembled
+    /// code does, and the trap is the misclassification tripwire.
+    ArenaHandoff {
+        /// The slot the word came from.
+        slot: u8,
+    },
+    /// A hand-packed arena handle or ARENA_RESTORE cursor named memory its
+    /// arena cannot serve or rewind to: a chunk index past the arena's
+    /// growth, or a range or rewind target below an already-restored
+    /// position. The arena names the misuse class itself.
+    ArenaHandle {
+        /// The arena's own misuse class.
+        class: ds_rt::ArenaMisuse,
+    },
+    /// String content reached a text operation as invalid UTF-8.
+    /// Unreachable from lowered code (every string source is UTF-8 by
+    /// construction); the name keeps a corrupted range a structured
+    /// refusal instead of an unchecked conversion.
+    Utf8Content,
     /// A print/println write failed at the output sink.
     OutputWrite {
         /// The class of the underlying io failure.
@@ -228,21 +301,30 @@ pub enum Trap {
     /// chain; the frames stay for [`Vm::backtrace`].
     ReentrancyRefused,
     /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
-    /// payload is the error value it handed `cancel`; the trap never
+    /// payload is the error value's whole word span — word 0 the
+    /// failing member's tag, the rest its payload words in declaration
+    /// order (the native channel's flat span shape); the trap never
     /// resumes — the trap path ledgers the outcome into the fiber's
     /// nursery and raises the cancel flag, and the boundary seam unions
     /// the payload out at the nursery's join.
     NurseryCancelled {
-        /// The failing child's error value.
-        payload: Value,
+        /// The failing value's word span: the member tag plus its
+        /// payload words.
+        payload: Vec<Value>,
     },
     /// A nursery boundary's first-failure payload sits outside the
     /// caller's return-union containment set, so the join refuses to
     /// union it out; the payload rides for the trap report.
     NurseryUncontained {
-        /// The payload the boundary refused.
-        payload: Value,
+        /// The payload span the boundary refused.
+        payload: Vec<Value>,
     },
+    /// A fork-join combinator (par_map, par_reduce) at a tail dispatch
+    /// site (CALLTG): the tail call returns the reused frame at the
+    /// call, but the join's answer arrives through the drive's delivery
+    /// onto a parked site — the fork combinators need the CALLG site,
+    /// and hand-assembled code traps here instead.
+    TailForkJoin,
 }
 
 /// One entry of the call-info stack: the frame base plus the module version
@@ -269,11 +351,90 @@ struct Transfer {
     func: u32,
 }
 
+/// One `Raw`-staged word a call site reads per call: the parameter
+/// position (the mismatch trap's index), the staged slot's u8 address, and
+/// the callee parameter's static type the word's runtime kind must match.
+#[derive(Clone, Copy, Debug)]
+struct RawStagedWord {
+    index: u8,
+    slot: u8,
+    expected: SlotType,
+}
+
+/// A call site's layout-static facts, derived once per (caller, callee)
+/// layout pair at cache fill and cached beside the callee: the validated
+/// slide plan plus the `Raw`-staged words the site reads per call, or the
+/// plan's layout-static refusal, which the call seam re-raises exactly
+/// where the per-call derivation raised it (never answered as a hit-side
+/// trap: the refusal rides the entry under the same key discipline, so a
+/// refill after any install re-derives it).
+#[derive(Clone, Debug)]
+enum SiteFacts {
+    /// The plan validated; `raw` is `None` when the caller's area stages
+    /// no `Raw` word (then no word is read at all).
+    Ready {
+        plan: SlidePlan,
+        raw: Option<Arc<[RawStagedWord]>>,
+    },
+    /// The layout pair refuses the slide.
+    Refused(SlideError),
+}
+
+impl SiteFacts {
+    /// Derives the facts from a caller/callee layout pair — a pure
+    /// function of the pair, [`ds_abi::slide_plan`] the authority.
+    // caller/callee is this contract's domain vocabulary, not a naming slip.
+    #[allow(clippy::similar_names)]
+    fn derive(caller: &FrameLayout, callee: &FrameLayout) -> Self {
+        match ds_abi::slide_plan(caller, callee) {
+            Ok(plan) => Self::Ready {
+                plan,
+                raw: raw_staged_words(caller, callee),
+            },
+            Err(error) => Self::Refused(error),
+        }
+    }
+
+    /// The refusal, when the pair refused the slide.
+    fn refused(&self) -> SlideError {
+        match self {
+            Self::Refused(error) => *error,
+            Self::Ready { .. } => unreachable!("a ready site carries no refusal"),
+        }
+    }
+}
+
+/// The `Raw`-staged words of a proven plan the call site must read per
+/// call: exactly the staged-`Raw` positions whose callee parameter is not
+/// itself `Raw` (a `Raw` parameter is the wildcard — the word can never
+/// fail, so the site never reads it). `None` when there is nothing to
+/// read.
+// caller/callee is this contract's domain vocabulary, not a naming slip.
+#[allow(clippy::similar_names)]
+fn raw_staged_words(caller: &FrameLayout, callee: &FrameLayout) -> Option<Arc<[RawStagedWord]>> {
+    if !caller.arg_area_has_raw() {
+        return None;
+    }
+    let start = caller.arg_area().start;
+    let words: Vec<RawStagedWord> = caller.arg_types()[..callee.params_len()]
+        .iter()
+        .zip(callee.params())
+        .enumerate()
+        .filter(|&(_, (&staged, &expected))| staged == SlotType::Raw && expected != SlotType::Raw)
+        .map(|(index, (_, &expected))| RawStagedWord {
+            index: u8::try_from(index).expect("parameter index fits u8"),
+            slot: u8::try_from(start + index).expect("slot index fits u8"),
+            expected,
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.into())
+}
+
 /// An owned CALL-site resolution handed to a dispatch arm: the uop shape
-/// carries the callee's version handle (the frame push owns one), the
-/// native shape the shared table handle plus index — borrows of the arm's
-/// own locals, so no loan on the VM outlives the arm's whole-self calls
-/// (the control-native switch).
+/// carries the callee's version handle (the frame push owns one) plus the
+/// site's cached layout facts, the native shape the shared table handle
+/// plus index — borrows of the arm's own locals, so no loan on the VM
+/// outlives the arm's whole-self calls (the control-native switch).
 #[derive(Debug)]
 enum Resolved {
     /// Enter the callee's encoded body.
@@ -282,6 +443,8 @@ enum Resolved {
         version: Arc<ModuleVersion>,
         /// The callee's function-table index.
         func: u32,
+        /// The site's cached layout facts (the plan to transfer under).
+        facts: SiteFacts,
     },
     /// Invoke the native in the caller's frame (no frame push).
     Native {
@@ -293,14 +456,15 @@ enum Resolved {
 }
 
 /// The ownable form of a call-site resolution the inline cache stores: the
-/// uop shape holds the resolved version handle, the native shape the
-/// shared table plus index (natives are not values — the table is the
-/// stable handle, the index the callee).
+/// uop shape holds the resolved version handle plus the site's layout
+/// facts, the native shape the shared table plus index (natives are not
+/// values — the table is the stable handle, the index the callee).
 #[derive(Clone, Debug)]
 enum CachedCallee {
     Uop {
         version: Arc<ModuleVersion>,
         func: u32,
+        facts: SiteFacts,
     },
     Native {
         table: Arc<Vec<NativeFunction>>,
@@ -318,6 +482,8 @@ enum DispatchResolved {
     Uop {
         version: Arc<ModuleVersion>,
         func: u32,
+        /// The site's cached layout facts (the plan to transfer under).
+        facts: SiteFacts,
     },
     /// The FuncRef names no uop function: the generic builtin tables
     /// answer next.
@@ -332,7 +498,12 @@ enum DispatchResolved {
 /// stamp is the registry generation the resolution ran against, so any
 /// install (a two-slot swap, a native-table replacement) invalidates every
 /// entry at once. A miss falls back to the full lookup, so dispatch
-/// correctness never depends on the cache.
+/// correctness never depends on the cache. A uop entry also carries the
+/// site's layout facts (the slide plan and its `Raw`-staged reads), a pure
+/// function of the caller/callee layout pair the key already pins — the
+/// caller address names the caller's layout, the cached callee the
+/// callee's — so the plan is re-derived exactly when the callee is, never
+/// on a hit.
 #[derive(Clone, Debug)]
 struct CallSite {
     caller: usize,
@@ -343,6 +514,141 @@ struct CallSite {
 
 /// CALL-site cache slot count (direct-mapped, one uop per slot).
 const CALL_CACHE_SLOTS: usize = 512;
+
+/// A KSTR intern-row key: the pool's address (stable for its version's
+/// lifetime) and the loading fiber — each heap interns its own copy of a
+/// constant, so a cached id is only ever served against the fiber whose
+/// store minted it.
+type KstrRowKey = (usize, u32);
+
+/// The VM's own table key hasher: the multiply-rotate round the claim
+/// ledger and the intern map use, one per key word, so a per-frame table
+/// probe never pays the default SipHash. The seed is fixed, never
+/// per-process random, so a fuzz run replays exactly.
+#[derive(Default)]
+struct WordKeyHasher(u64);
+
+impl WordKeyHasher {
+    fn mix(&mut self, word: u64) {
+        self.0 = self.0.rotate_left(13) ^ word;
+        self.0 = self.0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+impl Hasher for WordKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.mix(u64::from(byte));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.mix(n);
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.mix(n as u64);
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.mix(u64::from(n));
+    }
+}
+
+type KstrRowIndex = HashMap<KstrRowKey, u32, BuildHasherDefault<WordKeyHasher>>;
+
+/// A derived deinit-hook directory's index: (module version address,
+/// function) keys, hashed by the VM's own round.
+type HookDirIndex = HashMap<(usize, u32), Arc<Vec<HookSite>>, BuildHasherDefault<WordKeyHasher>>;
+
+/// A frame's resolved KSTR intern row: its index in the row list. Reclaim
+/// drops and shifts rows, so the slot is a hint revalidated against the
+/// row's own key on every load — a mismatch costs the frame one key
+/// lookup, never a wrong serve.
+#[derive(Clone, Copy, Debug)]
+struct KstrRowSlot(u32);
+
+/// One (pool, fiber) intern row: the object ids the pool's string
+/// constants interned on that fiber's heap, by const index.
+#[derive(Debug)]
+struct KstrRow {
+    pool: usize,
+    fiber: u32,
+    ids: Vec<Option<u32>>,
+}
+
+impl KstrRow {
+    fn key(&self) -> KstrRowKey {
+        (self.pool, self.fiber)
+    }
+}
+
+/// The KSTR intern rows: a dense row list plus the key index into it. A
+/// frame resolves its row once and its later loads in that frame read the
+/// slot directly instead of probing the key index per load, which is the
+/// literal-load cost that matters.
+#[derive(Debug, Default)]
+struct KstrRows {
+    rows: Vec<KstrRow>,
+    index: KstrRowIndex,
+}
+
+impl KstrRows {
+    /// The row `slot` names, when it is still `key`'s row.
+    fn row(&self, slot: KstrRowSlot, key: KstrRowKey) -> Option<&KstrRow> {
+        self.rows
+            .get(slot.0 as usize)
+            .filter(|row| row.key() == key)
+    }
+
+    /// The key's row, opened when it has none. A reused pool address can
+    /// meet a row of a dead pool's width, so the ids widen before they are
+    /// indexed.
+    fn open(&mut self, key: KstrRowKey, width: usize) -> (KstrRowSlot, &mut KstrRow) {
+        let slot = if let Some(&slot) = self.index.get(&key) {
+            slot
+        } else {
+            let slot = u32::try_from(self.rows.len()).expect("row slots fit u32");
+            self.rows.push(KstrRow {
+                pool: key.0,
+                fiber: key.1,
+                ids: Vec::new(),
+            });
+            self.index.insert(key, slot);
+            slot
+        };
+        let row = &mut self.rows[slot as usize];
+        if row.ids.len() < width {
+            row.ids.resize(width, None);
+        }
+        (KstrRowSlot(slot), row)
+    }
+
+    /// Drops the rows `keep` refuses and rebuilds the index over the
+    /// survivors: the row list stays dense, so nothing outlives its
+    /// reclaim as a tombstone, and a surviving row keeps its ids.
+    fn reclaim(&mut self, keep: impl Fn(&KstrRow) -> bool) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.rows.retain(keep);
+        self.index.clear();
+        for (slot, row) in self.rows.iter().enumerate() {
+            let slot = u32::try_from(slot).expect("row slots fit u32");
+            self.index.insert(row.key(), slot);
+        }
+    }
+
+    /// How many (pool, fiber) rows the table holds — the bounded-memory
+    /// reclamation witness for test assertions.
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
 
 /// Words a native argument list or closure capture block holds before the
 /// staging falls back to the heap: every native table entry and every
@@ -398,16 +704,232 @@ enum RetOutcome {
     },
 }
 
+/// A callable's whole answer span, the fiber-boundary result channel:
+/// the reentry frame of a hosted call (`Vm::call_hosted`) returns it to
+/// its Rust-side driver, and a spawned child's completion rides it
+/// through the nursery ledger (`ChildOutcome::Completed`) — up to four
+/// words inline (every lowered lambda's answer today; the per-element
+/// combinator loop must not pay an allocation), the heap buffer the
+/// wide fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameAnswer {
+    /// The span's first `n` words, `n` = the span's width.
+    Words {
+        head: [Value; FRAME_ANSWER_INLINE],
+        n: usize,
+    },
+    /// A span past four words.
+    Wide(Vec<Value>),
+}
+
+/// The inline width of [`FrameAnswer::Words`]: a span up to this wide
+/// stages without the heap, which is what keeps a narrow answer
+/// allocation-free (every lowered lambda's answer today).
+const FRAME_ANSWER_INLINE: usize = 4;
+
+impl FrameAnswer {
+    /// One word (a scalar body's RET).
+    #[must_use]
+    pub fn one(value: Value) -> Self {
+        let mut head = [Value::I64(0); FRAME_ANSWER_INLINE];
+        head[0] = value;
+        Self::Words { head, n: 1 }
+    }
+
+    /// A whole span, inline while it fits.
+    #[must_use]
+    pub fn many(words: Vec<Value>) -> Self {
+        if words.len() <= FRAME_ANSWER_INLINE {
+            let mut head = [Value::I64(0); FRAME_ANSWER_INLINE];
+            head[..words.len()].copy_from_slice(&words);
+            Self::Words {
+                head,
+                n: words.len(),
+            }
+        } else {
+            Self::Wide(words)
+        }
+    }
+
+    /// A tag-led span: word 0 the tag, then the payload words. Inline
+    /// while it fits, so a span channel's tail answer allocates nothing.
+    fn tagged(tag: u8, payload: &[Value]) -> Self {
+        let n = 1 + payload.len();
+        if n <= FRAME_ANSWER_INLINE {
+            let mut head = [Value::I64(0); FRAME_ANSWER_INLINE];
+            head[0] = Value::Tag(tag);
+            head[1..n].copy_from_slice(payload);
+            return Self::Words { head, n };
+        }
+        let mut words = Vec::with_capacity(n);
+        words.push(Value::Tag(tag));
+        words.extend_from_slice(payload);
+        Self::Wide(words)
+    }
+
+    /// A whole span read from `n` word sources, inline while it fits.
+    fn staged<E>(n: usize, mut word: impl FnMut(usize) -> Result<Value, E>) -> Result<Self, E> {
+        if n <= FRAME_ANSWER_INLINE {
+            let mut head = [Value::I64(0); FRAME_ANSWER_INLINE];
+            for (i, at) in head.iter_mut().enumerate().take(n) {
+                *at = word(i)?;
+            }
+            return Ok(Self::Words { head, n });
+        }
+        let mut words = Vec::with_capacity(n);
+        for i in 0..n {
+            words.push(word(i)?);
+        }
+        Ok(Self::Wide(words))
+    }
+
+    /// The answer's words in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Value] {
+        match self {
+            Self::Words { head, n } => &head[..*n],
+            Self::Wide(words) => words,
+        }
+    }
+}
+
 /// How a drive of the dispatcher ended for its host: the current fiber
-/// completed, it parked at a yield whose resumer is the host, or a
-/// nested drive's reentry frame returned.
+/// completed, it parked at a yield whose resumer is the host, a nested
+/// drive's reentry frame returned, or it parked at a cross-nursery join
+/// whose drive the host must run first.
 enum DriveOutcome {
     /// The current fiber's entry frame returned or `HALT`ed.
     Died(Value),
     /// The current fiber yielded with no in-language resumer.
     Yielded(Value),
-    /// A nested reentrant call's synthetic frame returned.
-    Frame(Value),
+    /// A nested reentrant call's synthetic frame returned: the answer's
+    /// whole word span (one word for a scalar body, the full span for a
+    /// multi-word return — the hosted seam's result channel).
+    Frame(FrameAnswer),
+    /// The current fiber parked at a join of another open nursery: the
+    /// drive hands its host the request, drains the joined nursery, then
+    /// delivers the answer onto the parked call site and continues the
+    /// joiner. Never the Rust stack — program nesting depth must cost
+    /// heap, not stack.
+    Interlock(InterlockRequest),
+}
+
+/// A parked joiner's pending nursery drive: the join/boundary seam parked
+/// the calling fiber and asks its host drive to drain the joined nursery
+/// before the answer is delivered back onto the parked call site.
+struct InterlockRequest {
+    /// The open nursery being joined.
+    nursery: NurseryId,
+    /// The fiber parked at the join call (the joiner).
+    joiner: FiberId,
+    /// The instruction after the parked join call — where the answer lands.
+    resume_pc: CodePc,
+    /// Which seam parked the joiner, deciding the answer's shape.
+    seam: DriveSeam,
+}
+
+/// One nursery's drive on the interlock stack: the spawn-order children
+/// snapshot, the cursor of the child being driven, and who to answer when
+/// the nursery consumes. The stack is the join nesting the driver used to
+/// carry as nested `execute` frames — one entry per cross-nursery join
+/// level, so program nesting depth costs heap, not Rust stack.
+struct NurseryDrive {
+    /// The nursery being driven to consumption.
+    nursery: NurseryId,
+    /// The children in spawn order (the snapshot at push; a child spawned
+    /// later never enters this drive).
+    children: Vec<FiberId>,
+    /// The index of the child being driven.
+    cursor: usize,
+    /// The parked joiner and its resume point — the delivery target at
+    /// consumption; `None` for the host faces (no call site stands).
+    joiner: Option<(FiberId, CodePc)>,
+    /// How the outcomes become the delivered answer.
+    seam: DriveSeam,
+}
+
+/// The answer a consumed nursery owes its parked joiner.
+enum Delivery {
+    /// `call` overlays onto the parked call site; the boundary span
+    /// (`tag`, the payload's whole word list) overlays after the switch
+    /// — word 0 the failing member's tag, the rest its payload words;
+    /// `gone` is what a moved-on joiner's host drive surfaces instead.
+    Answer {
+        call: Value,
+        span: Option<(u8, Vec<Value>)>,
+        gone: Value,
+    },
+    /// The fork seam's whole-span answer with no discriminant: word 0
+    /// delivered by the joiner re-entry's switch payload, the tail
+    /// words overlaid past it — the tag-less total's delivery twin.
+    Words {
+        /// The answer's head word.
+        head: Value,
+        /// The answer's words past the head.
+        tail: Vec<Value>,
+        /// What a moved-on joiner's host drive surfaces instead.
+        gone: Value,
+    },
+    /// A boundary failure the joiner's own drive takes: re-enter the
+    /// joiner so the drive ends on it, then the trap attributes there.
+    Raise(Trap),
+}
+
+/// How the initial frame's drain ended for [`Vm::drive_interlock`].
+enum NurseryDriveEnd {
+    /// The initial face frame consumed: the per-child outcome record.
+    Face(Vec<ChildOutcome>),
+    /// The initial joiner re-entered with its answer: continue its drive
+    /// at this point.
+    Entered(Active, CodePc),
+    /// The initial joiner moved on mid-drive: the answer surfaces to its
+    /// host as the drive's death value.
+    Gone(Value),
+    /// A boundary raise at the initial frame: the trap propagates to the
+    /// interrupted host drive at the join call's pc.
+    Raised(Trap, CodePc),
+}
+
+/// The fork seam's frame end: the fold chain continues with the next
+/// step's frame, or the seam consumed with the outcomes and the
+/// delivery its answer owes the parked joiner.
+enum ForkEnd {
+    /// `par_reduce`'s chain continues: the next element's child spawned
+    /// into its fresh nursery, one drive frame per step.
+    Chain(NurseryDrive),
+    /// The seam consumed: the outcomes and the parked call site's
+    /// delivery (a `Raise` when the stage refused).
+    End(Vec<ChildOutcome>, Option<Delivery>),
+}
+
+/// One drive segment's outcome for the frame loops: quiet, or a parked
+/// cross-nursery join whose frame the stack takes.
+enum StepFlow {
+    /// The segment went quiet (the fiber died, parked at the host, or
+    /// trapped — attributed and ledgered).
+    Quiet,
+    /// The driven fiber parked at a cross-nursery join.
+    Interlock(InterlockRequest),
+}
+
+/// Which seam parked a joiner, and how a consumed nursery's outcomes become
+/// its delivered answer.
+enum DriveSeam {
+    /// The debug count join (`nursery_join`): the answer is the trapped
+    /// count.
+    Count,
+    /// The fork-join combinator's parked CALLG site: the drive's
+    /// consumption runs the assembly or fold stage the spawn phase
+    /// staged, the answers or the final accumulator delivered whole
+    /// onto the parked call site — nesting costs the interlock stack's
+    /// heap frames, never the Rust stack.
+    Fork(crate::native::ForkStage),
+    /// The in-language boundary (`nursery_boundary`): the two-word answer
+    /// span, `mask` being the caller's return-union containment set.
+    Boundary { mask: i64 },
+    /// The host join/teardown faces: outcomes returned raw, no call site
+    /// stands to answer.
+    Face,
 }
 
 /// The result of a control-native switch at a `CALL` site.
@@ -420,6 +942,10 @@ enum SwitchOutcome {
     Bounced,
     /// The switch reached the host: this drive ends with the event.
     Host(DriveOutcome),
+    /// The running fiber parked at a cross-nursery join: the drive unwinds
+    /// to its host with the request (the joined nursery's drive runs on the
+    /// interlock stack, never nested `execute` frames).
+    Interlock(InterlockRequest),
 }
 
 /// The mutable execution state the frame operations share, borrowed disjoint
@@ -477,13 +1003,7 @@ impl StackState<'_> {
                     func: funcref.func(),
                 })?;
         let target = &version.functions()[func_id as usize];
-        let entry = target.entry.resolve();
-        if entry != func_id as usize {
-            return Err(Trap::EntryWordMismatch {
-                resolved: entry,
-                expected: func_id as usize,
-            });
-        }
+        debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
         if usize::from(nargs) != target.layout.params_len() {
             return Err(Trap::ArityMismatch {
                 expected: target.layout.params_len(),
@@ -496,32 +1016,30 @@ impl StackState<'_> {
     /// The per-call-site check for `Raw`-staged arguments: they carry no
     /// static type, so the staged value words are checked against the
     /// callee's parameter types here (concrete staging was already proved
-    /// by [`ds_abi::slide_plan`]).
+    /// by the site's plan). The site's cached word list names exactly the
+    /// `Raw`-staged slots whose parameter is not itself the `Raw`
+    /// wildcard, so a caller staging no `Raw` word reads nothing.
     fn check_raw_staged(
         stack: &Segment,
-        target_params: &[SlotType],
+        raw: &[RawStagedWord],
         caller: &FrameLayout,
         fp: usize,
     ) -> Result<(), Trap> {
-        let body_len = caller.slots().len() - caller.arg_area_len();
-        let start = caller.arg_area().start;
-        for (index, (param, &staged_ty)) in target_params.iter().zip(caller.arg_types()).enumerate()
-        {
-            if staged_ty != SlotType::Raw {
-                continue;
-            }
-            let slot = u8::try_from(start + index).expect("slot index fits u8");
-            let value = read_value(stack, fp, slot, caller.slots(), body_len)?;
+        let body_len = caller.body_len();
+        for word in raw {
+            let value = read_value(stack, fp, word.slot, caller.slots(), body_len)?;
             let staged = value.slot_type();
             // a Ref word staged against a Fn parameter is the
             // callable-defaulted slot (F2): a closure object's word behind
             // a fn-typed parameter, admitted exactly like the slide admits
             // the static pairing
-            if staged != *param && !(staged == SlotType::Ref && *param == SlotType::Fn) {
+            if staged != word.expected
+                && !(staged == SlotType::Ref && word.expected == SlotType::Fn)
+            {
                 return Err(Trap::CallLayout(SlideError::TypeMismatch {
-                    index,
+                    index: usize::from(word.index),
                     staged,
-                    expected: *param,
+                    expected: word.expected,
                 }));
             }
         }
@@ -531,20 +1049,26 @@ impl StackState<'_> {
     /// Non-tail `CALL`: the callee's metadata word lands in the caller's
     /// call word, the staged arguments overlay the caller's outgoing-argument
     /// area with no copying, and the stack grows for the callee's frame
-    /// [BL-6, H2].
+    /// [BL-6, H2]. The plan (the ABI's own overlay fact) arrives proven by
+    /// the site's cached facts; a refused pair re-raises here, exactly
+    /// where the per-call derivation raised it.
     fn call(
         &mut self,
         version: Arc<ModuleVersion>,
         func_id: u32,
+        facts: &SiteFacts,
         caller: &FrameLayout,
         fp: usize,
         return_pc: u32,
     ) -> Result<Transfer, Trap> {
         let target = &version.functions()[func_id as usize];
-        // The ABI's own overlay fact, re-checked at this call site.
-        ds_abi::slide_plan(caller, &target.layout).map_err(Trap::CallLayout)?;
-        Self::check_raw_staged(self.stack, target.layout.params(), caller, fp)?;
-        let callee_fp = fp + 1 + caller.arg_area().start;
+        let SiteFacts::Ready { raw, .. } = facts else {
+            return Err(Trap::CallLayout(facts.refused()));
+        };
+        Self::check_raw_staged(self.stack, raw.as_deref().unwrap_or(&[]), caller, fp)?;
+        // the callee's metadata word lands in the caller's call word:
+        // fp + 1 + body_len (the pinned physical mapping)
+        let callee_fp = fp + 1 + caller.body_len();
         self.grow(callee_fp + target.layout.frame_size() as usize)?;
         self.stack[callee_fp] = Word::Meta(FrameMetadata {
             return_pc: CodePc(return_pc),
@@ -569,17 +1093,22 @@ impl StackState<'_> {
     /// one elided frame), and enter the callee. The stack never grows at any
     /// depth; the only growth here is the one-time span extension when the
     /// callee's frame is physically larger, which is bounded by the largest
-    /// callee frame, not by call depth.
+    /// callee frame, not by call depth. The plan arrives proven by the
+    /// site's cached facts; a refused pair re-raises here, exactly where
+    /// the per-call derivation raised it.
     fn tail_call(
         &mut self,
         version: Arc<ModuleVersion>,
         func_id: u32,
+        facts: &SiteFacts,
         caller: &FrameLayout,
         fp: usize,
     ) -> Result<Transfer, Trap> {
         let target = &version.functions()[func_id as usize];
-        let plan = ds_abi::slide_plan(caller, &target.layout).map_err(Trap::CallLayout)?;
-        Self::check_raw_staged(self.stack, target.layout.params(), caller, fp)?;
+        let SiteFacts::Ready { plan, raw } = facts else {
+            return Err(Trap::CallLayout(facts.refused()));
+        };
+        Self::check_raw_staged(self.stack, raw.as_deref().unwrap_or(&[]), caller, fp)?;
         // The O(delta) slide, per the plan's direction. Two different slot
         // mappings meet here: the source slots are the CALLER's staged
         // arguments, which sit caller-relative (above the caller's call
@@ -587,9 +1116,9 @@ impl StackState<'_> {
         // fp, whose param slot i sits at fp+1+i unconditionally, below the
         // CALLEE's own call word - never mapped through the caller's body,
         // or wide callees (params_len > caller body) would land one word off.
-        let caller_body_len = caller.slots().len() - caller.arg_area_len();
         let n = plan.len();
         let (dst0, src0) = (plan.dst().start, plan.src().start);
+        let caller_body_len = caller.body_len();
         match plan.direction() {
             SlideDirection::None => {},
             SlideDirection::Ascending => {
@@ -621,14 +1150,25 @@ impl StackState<'_> {
 
     /// `RET`: the result word overlays slot 0 (the caller reads it from its
     /// outgoing-argument slot 0 [H2]); the stack restores the caller's frame
-    /// span; the caller resumes at the metadata word's return pc. A nested
-    /// drive's synthetic reentry frame answers [`RetOutcome::Boundary`]
-    /// instead: its caller is Rust-side code (`Vm::call_hosted`), not a
-    /// frame. The sentinel return pc is the frame's identity marker — every
-    /// CALL-pushed frame carries a real return pc, and a fiber switched in
-    /// mid-drive never carries a reentry frame at all (a resumable fiber
-    /// parks only at switch points, never mid-native), so the
-    /// chain-position test cannot false-positive across a switch.
+    /// span; the caller resumes at the metadata word's return pc. The
+    /// restore takes the caller's chain-entry handle back as the new
+    /// [`Active`]: when the popped callee entry's handle names the same
+    /// version (every same-module return), it swaps into the caller's entry
+    /// as the replacement, so the return mints no Arc count and copies no
+    /// `CallInfo`; a different version (a cross-module callee, or a swap
+    /// between the two entries' mints) keeps the mint — the entry retains
+    /// its handle and the restore clones it, so the caller stays pinned to
+    /// the version it was entered under [H6 item 5]. Either way the entry
+    /// always names its frame's version; the frame's one live handle sits
+    /// in the entry while it is suspended and in the dispatcher's snapshot
+    /// while it runs. A nested drive's synthetic reentry frame answers
+    /// [`RetOutcome::Boundary`] instead: its caller is Rust-side code
+    /// (`Vm::call_hosted`), not a frame. The sentinel return pc is the
+    /// frame's identity marker — every CALL-pushed frame carries a real
+    /// return pc, and a fiber switched in mid-drive never carries a
+    /// reentry frame at all (a resumable fiber parks only at switch
+    /// points, never mid-native), so the chain-position test cannot
+    /// false-positive across a switch.
     fn ret(&mut self, value: Value, fp: usize, boundary: usize) -> Result<RetOutcome, Trap> {
         let meta = match self.stack[fp] {
             Word::Meta(m) => m,
@@ -647,8 +1187,12 @@ impl StackState<'_> {
             self.callinfo.pop();
             return Ok(RetOutcome::Boundary(value));
         }
-        let caller = self.callinfo[self.callinfo.len() - 2].clone();
-        let caller_fn = &caller.module.functions()[caller.func as usize];
+        // the caller's entry answers the bounds checks (its version's code
+        // length, its layout's frame span); the borrow ends before the
+        // chain moves
+        let caller_at = self.callinfo.len() - 2;
+        let caller_fn =
+            &self.callinfo[caller_at].module.functions()[self.callinfo[caller_at].func as usize];
         let code_len = code_len_u32(caller_fn.code.len());
         if meta.return_pc.0 >= code_len {
             return Err(Trap::InvalidPc {
@@ -656,11 +1200,26 @@ impl StackState<'_> {
                 code_len,
             });
         }
-        let restore = (caller.fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
+        let restore =
+            (self.callinfo[caller_at].fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
         self.stack.truncate(restore);
-        self.callinfo.pop();
+        let mut popped = self
+            .callinfo
+            .pop()
+            .expect("a caller entry stands below the returning frame");
+        // the take-back: the popped callee handle replaces the entry's
+        // handle when both name one version (no Arc count moves); any other
+        // popped handle drops here and the restore clones the entry's — the
+        // pre-take-back mint discipline
+        let caller = &mut self.callinfo[caller_at];
+        let version = if Arc::ptr_eq(&caller.module, &popped.module) {
+            std::mem::swap(&mut caller.module, &mut popped.module);
+            popped.module
+        } else {
+            Arc::clone(&caller.module)
+        };
         Ok(RetOutcome::Resume {
-            version: caller.module,
+            version,
             func: caller.func,
             pc: meta.return_pc,
         })
@@ -703,6 +1262,57 @@ fn read_value(
     }
 }
 
+/// The rider area one evidence pair claims as its trailing parameters
+/// (H3): the pair's slot word plus its two follow words, the unit both a
+/// serving body's layout and the sentinel dispatch's staged riders count
+/// pairs in.
+const RIDER_WORDS_PER_PAIR: usize = 3;
+
+/// The exact sentinel-arity contract: a runtime-evidence sentinel
+/// dispatch stages its real arguments plus exactly one pair's rider area,
+/// and the target claims its own real parameters plus its evidence pairs
+/// in the same per-pair units — so the parameter count must be the staged
+/// real-argument count plus `RIDER_WORDS_PER_PAIR * pairs`. The
+/// entering-site walk refuses a serving body whose chain demands more
+/// than one member, so a target claims zero or one pair here; any other
+/// gap (the P0 shape: a one-word receiver staged against a multi-word
+/// `self`, the missing word silently taken from a rider) is an arity
+/// violation, never a silent slide of a rider into the parameter span.
+fn sentinel_arity_exact(params_len: usize, nargs: u8) -> bool {
+    let given = usize::from(nargs);
+    given == params_len || given + RIDER_WORDS_PER_PAIR == params_len
+}
+
+/// The evidence riders a runtime-evidence sentinel dispatch stages past
+/// the real arguments (H3), as a defense-in-depth read behind
+/// [`sentinel_arity_exact`]: when the slot word names a generic serving
+/// body, its trailing evidence parameters ride the call and must validate
+/// as count-free I64 words exactly like the static trait path's staged
+/// evidence — a concrete target claims none and the riders stay dead
+/// words past its parameters.
+fn check_evidence_riders(
+    stack: &Segment,
+    params_len: usize,
+    nargs: u8,
+    caller: &FrameLayout,
+    fp: usize,
+) -> Result<(), Trap> {
+    let body_len = caller.body_len();
+    for i in 0..params_len.saturating_sub(usize::from(nargs)) {
+        let slot = u8::try_from(caller.arg_area().start + usize::from(nargs) + i)
+            .expect("slot index fits u8");
+        let word = read_value(stack, fp, slot, caller.slots(), body_len)?;
+        if word.slot_type() != SlotType::I64 {
+            return Err(Trap::SlotTypeMismatch {
+                slot,
+                expected: SlotType::I64,
+                actual: word.slot_type(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reads a slot typed `want`; the value-type check doubles as the check of
 /// the static layout (writes enforce layout and value agreement).
 fn read_typed(
@@ -724,6 +1334,29 @@ fn read_typed(
     Ok(v)
 }
 
+/// The frame word one slot read addresses, with its static bounds: the
+/// shared front of every specialized slot reader (the typed check is the
+/// caller's match on the word itself).
+#[inline]
+fn slot_word<'a>(
+    stack: &'a Segment,
+    fp: usize,
+    slot: u8,
+    slots: &[SlotType],
+    body_len: usize,
+) -> Result<&'a Word, Trap> {
+    let i = usize::from(slot);
+    if i >= slots.len() {
+        return Err(Trap::SlotOutOfRange {
+            slot,
+            frame_slots: slots.len(),
+        });
+    }
+    let at = word_of(fp, i, body_len);
+    debug_assert!(at < stack.len(), "slot inside the frame span");
+    Ok(&stack[at])
+}
+
 fn read_i64(
     stack: &Segment,
     fp: usize,
@@ -731,9 +1364,14 @@ fn read_i64(
     slots: &[SlotType],
     body_len: usize,
 ) -> Result<i64, Trap> {
-    match read_typed(stack, fp, slot, slots, body_len, SlotType::I64)? {
-        Value::I64(v) => Ok(v),
-        _ => unreachable!("slot_type agrees with the variant"),
+    match slot_word(stack, fp, slot, slots, body_len)? {
+        Word::Slot(Value::I64(v)) => Ok(*v),
+        Word::Slot(v) => Err(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::I64,
+            actual: v.slot_type(),
+        }),
+        Word::Meta(_) => Err(Trap::MetaWordCorrupt { fp }),
     }
 }
 
@@ -744,9 +1382,14 @@ fn read_f64(
     slots: &[SlotType],
     body_len: usize,
 ) -> Result<f64, Trap> {
-    match read_typed(stack, fp, slot, slots, body_len, SlotType::F64)? {
-        Value::F64(v) => Ok(v),
-        _ => unreachable!("slot_type agrees with the variant"),
+    match slot_word(stack, fp, slot, slots, body_len)? {
+        Word::Slot(Value::F64(v)) => Ok(*v),
+        Word::Slot(v) => Err(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::F64,
+            actual: v.slot_type(),
+        }),
+        Word::Meta(_) => Err(Trap::MetaWordCorrupt { fp }),
     }
 }
 
@@ -757,9 +1400,14 @@ fn read_bool(
     slots: &[SlotType],
     body_len: usize,
 ) -> Result<bool, Trap> {
-    match read_typed(stack, fp, slot, slots, body_len, SlotType::Bool)? {
-        Value::Bool(v) => Ok(v),
-        _ => unreachable!("slot_type agrees with the variant"),
+    match slot_word(stack, fp, slot, slots, body_len)? {
+        Word::Slot(Value::Bool(v)) => Ok(*v),
+        Word::Slot(v) => Err(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::Bool,
+            actual: v.slot_type(),
+        }),
+        Word::Meta(_) => Err(Trap::MetaWordCorrupt { fp }),
     }
 }
 
@@ -770,9 +1418,14 @@ fn read_tag(
     slots: &[SlotType],
     body_len: usize,
 ) -> Result<u8, Trap> {
-    match read_typed(stack, fp, slot, slots, body_len, SlotType::Tag)? {
-        Value::Tag(v) => Ok(v),
-        _ => unreachable!("slot_type agrees with the variant"),
+    match slot_word(stack, fp, slot, slots, body_len)? {
+        Word::Slot(Value::Tag(v)) => Ok(*v),
+        Word::Slot(v) => Err(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::Tag,
+            actual: v.slot_type(),
+        }),
+        Word::Meta(_) => Err(Trap::MetaWordCorrupt { fp }),
     }
 }
 
@@ -783,9 +1436,18 @@ fn read_ref(
     slots: &[SlotType],
     body_len: usize,
 ) -> Result<RefId, Trap> {
-    match read_typed(stack, fp, slot, slots, body_len, SlotType::Ref)? {
-        Value::Ref(word) => Ok(word),
-        _ => unreachable!("slot_type agrees with the variant"),
+    match slot_word(stack, fp, slot, slots, body_len)? {
+        Word::Slot(Value::Ref(word)) => Ok(*word),
+        // an arena word in a counted read is a broken proof or
+        // hand-assembled code: the design keeps designated temporaries
+        // away from every count funnel, and this trap is the tripwire
+        Word::Slot(Value::Arena(_)) => Err(Trap::ArenaHandoff { slot }),
+        Word::Slot(v) => Err(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::Ref,
+            actual: v.slot_type(),
+        }),
+        Word::Meta(_) => Err(Trap::MetaWordCorrupt { fp }),
     }
 }
 
@@ -801,12 +1463,85 @@ fn read_counted(
     body_len: usize,
 ) -> Result<Option<RefId>, Trap> {
     if slots[usize::from(slot)] == SlotType::Raw {
-        return Ok(match read_value(stack, fp, slot, slots, body_len)? {
-            Value::Ref(word) => Some(word),
-            _ => None,
-        });
+        return match read_value(stack, fp, slot, slots, body_len)? {
+            Value::Ref(word) => Ok(Some(word)),
+            Value::Arena(_) => Err(Trap::ArenaHandoff { slot }),
+            _ => Ok(None),
+        };
     }
     read_ref(stack, fp, slot, slots, body_len).map(Some)
+}
+
+/// The string content behind one operand of the string data ops: a heap
+/// string word routed to its own store, or an arena handle read from the
+/// running fiber's arena. The operands arrive already slot-checked
+/// (`read_typed` against `SlotType::Ref`), so the remaining work is
+/// content routing. The direct field borrows (never a `&self` method)
+/// keep the returned slices alive beside the arena's interior-mutable
+/// allocation in the dispatcher's arms.
+fn str_content<'a>(
+    pool: &'a [Fiber],
+    objects: &'a Objects,
+    ctx_live: bool,
+    current: FiberId,
+    word: Value,
+) -> Result<&'a [u8], Trap> {
+    match word {
+        Value::Ref(id) => {
+            let store = if ctx_live && id.fiber() == current {
+                objects
+            } else {
+                &pool[id.fiber().index()].objects
+            };
+            Ok(store.str_at(id.id())?.as_bytes())
+        },
+        Value::Arena(handle) => {
+            let (chunk, offset, len) = handle.unpack();
+            pool[current.index()]
+                .arena
+                .bytes_at(ds_rt::Mark::at(chunk, offset), len)
+                .map_err(|class| Trap::ArenaHandle { class })
+        },
+        _ => unreachable!("slot kind agrees with the variant"),
+    }
+}
+
+/// Reads and compares both operands' string contents of an EQSTR/NEQSTR:
+/// structural byte equality across both string domains.
+fn str_eq_content(
+    vm: &mut Vm,
+    fp: usize,
+    lhs: u8,
+    rhs: u8,
+    slots: &[SlotType],
+    body_len: usize,
+    pc: CodePc,
+) -> Result<bool, (Trap, CodePc)> {
+    let (x, y) = (
+        read_typed(&vm.stack, fp, lhs, slots, body_len, SlotType::Ref).map_err(|e| (e, pc))?,
+        read_typed(&vm.stack, fp, rhs, slots, body_len, SlotType::Ref).map_err(|e| (e, pc))?,
+    );
+    // interning makes equal string constants one object, and an arena word
+    // names one slice: an equal word pair holds equal content
+    if x == y {
+        return Ok(true);
+    }
+    let xb = str_content(&vm.pool, &vm.objects, vm.ctx_live, vm.current, x).map_err(|e| (e, pc))?;
+    let yb = str_content(&vm.pool, &vm.objects, vm.ctx_live, vm.current, y).map_err(|e| (e, pc))?;
+    Ok(xb == yb)
+}
+
+/// Joins two operand contents into one owned UTF-8 string. Every byte
+/// range reaches here from a heap or pool `str` or from an arena slice the
+/// concat op wrote, so the join is one validation total: a range a
+/// hand-assembled or corrupted operand names stays a named refusal, and
+/// since the join copies every byte of both operands one pass over the
+/// result answers for both.
+fn concat_text(xb: &[u8], yb: &[u8]) -> Result<String, Trap> {
+    let mut joined = Vec::with_capacity(xb.len() + yb.len());
+    joined.extend_from_slice(xb);
+    joined.extend_from_slice(yb);
+    String::from_utf8(joined).map_err(|_| Trap::Utf8Content)
 }
 
 /// Writes a value into a slot, checking it against the slot's static type:
@@ -855,6 +1590,69 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     x.checked_rem(y).ok_or(Trap::IntegerOverflow)
 }
 
+// The peek-next load-op fusion [BL-4, the opcode census' ranked leader]:
+// a constant load whose immediately following word is one of the measured
+// census arith pairs consuming the loaded slot runs both uops inside the
+// load's dispatch arm — one dispatch for two uops, pc += 2. The uop
+// stream and the module format stay byte-identical (no new uops; the peek
+// only reads a word the loader already validated). Three invariants hold
+// by construction: the fused arith's traps and slot errors attribute to
+// its own pc (pc+1), so a trap is indistinguishable from the unfused run;
+// an intervening RC word fails the opcode-byte match (the census adjacency
+// rule), so a counted word between the pair never fuses; and a load at
+// the code end peeks nothing (`get` on the out-of-bounds index). DIVI64
+// stays unfused: the census never measured the pair.
+
+/// The fused pair shape for a KIMM at `idx`: the next word's opcode byte
+/// and register fields when it is an i64 arith (ADD/SUB/MUL/MOD — the
+/// measured census pairs) whose lhs or rhs operand reads the load's dst.
+/// Returns `(opcode, arith dst, lhs, rhs)`.
+fn fused_i64_arith(code: &[u32], idx: usize, dst: u8) -> Option<(u8, u8, u8, u8)> {
+    let [op, adst, lhs, rhs] = code.get(idx + 1)?.to_be_bytes();
+    if lhs != dst && rhs != dst {
+        return None;
+    }
+    matches!(op, OP_ADD_I64 | OP_SUB_I64 | OP_MUL_I64 | OP_MOD_I64).then_some((op, adst, lhs, rhs))
+}
+
+/// The fused pair shape for a KCONST at `idx`: the float counterpart of
+/// [`fused_i64_arith`] over the measured census pairs (ADD/MUL F64).
+fn fused_f64_arith(code: &[u32], idx: usize, dst: u8) -> Option<(u8, u8, u8, u8)> {
+    let [op, adst, lhs, rhs] = code.get(idx + 1)?.to_be_bytes();
+    if lhs != dst && rhs != dst {
+        return None;
+    }
+    matches!(op, OP_ADD_F64 | OP_MUL_F64).then_some((op, adst, lhs, rhs))
+}
+
+// The peek-next compare-branch fusion [BL-4, the opcode census' ranked
+// second family]: a comparison whose immediately following word is the
+// measured census branch spelling — JMPIF_NOT, the universal loop-head
+// exit — testing the compare's own dst takes its branch decision inside
+// the compare's dispatch: one dispatch for two uops, pc += 2, the uop
+// stream and the module format staying byte-identical. The bool write
+// stays (the dst may be read on either path), and the branch runs through
+// the exact JMPIF_NOT arm body, so the `jump!` macro's bounds check, trap
+// attribution, and taken-backward cancel observation read the branch's
+// own pc exactly as the unfused spelling does — a fused back-edge
+// preempts a parked fiber where the two-dispatch run does, jump-to-self
+// included. An intervening word fails the opcode-byte match, and a
+// compare at the code end peeks nothing (`code.get` on the
+// out-of-bounds index). JMPIF consuming the compare's dst never fuses
+// (the census measured no such pair), and neither do the unmeasured
+// compares.
+
+/// The fused pair shape for a comparison at `idx`: the next word's biased
+/// jump field when it is a JMPIF_NOT whose tested cond is the compare's
+/// own dst.
+fn fused_jmpif_not(code: &[u32], idx: usize, dst: u8) -> Option<u16> {
+    let [op, cond, hi, lo] = code.get(idx + 1)?.to_be_bytes();
+    if cond != dst {
+        return None;
+    }
+    (op == OP_JMPIF_NOT).then_some(u16::from_be_bytes([hi, lo]))
+}
+
 /// Reads a closure word's header and stages its capture block through the
 /// shared buffer, routing to the word's own heap. The disjoint-field
 /// parameters keep the staged slice's borrow on the staging buffer alone,
@@ -887,14 +1685,15 @@ fn stage_closure<'s>(
 /// sink), so the registry borrow the callee came from stays alive.
 fn invoke_native(
     nf: &NativeFunction,
+    staged: usize,
     stack: &mut Segment,
     heaps: &mut Heaps,
     out: &mut OutputSink,
     caller: &FrameLayout,
     fp: usize,
 ) -> Result<NativeResult, Trap> {
-    let body_len = caller.slots().len() - caller.arg_area_len();
-    if nf.params.len() > caller.arg_area_len() {
+    let body_len = caller.body_len();
+    if nf.params.len() > caller.arg_area_len() || staged < nf.params.len() {
         return Err(Trap::CallLayout(SlideError::StagingTooSmall {
             available: caller.arg_area_len(),
             needed: nf.params.len(),
@@ -902,18 +1701,21 @@ fn invoke_native(
     }
     let start = caller.arg_area().start;
     // the argument list stages inline — every native table entry sits well
-    // under the inline width — with the heap buffer the oversized fallback
+    // under the inline width — with the heap buffer the oversized fallback;
+    // a variadic native reads the whole staged span (its `params` cover the
+    // named prefix), every other native exactly its parameter count
+    let words = if nf.variadic { staged } else { nf.params.len() };
     let mut inline = [Value::I64(0); INLINE_WORDS];
     let mut heap = Vec::new();
-    let args: &[Value] = if nf.params.len() <= INLINE_WORDS {
-        for (i, word) in inline.iter_mut().enumerate().take(nf.params.len()) {
+    let args: &[Value] = if words <= INLINE_WORDS {
+        for (i, word) in inline.iter_mut().enumerate().take(words) {
             let slot = u8::try_from(start + i).expect("slot index fits u8");
             *word = read_value(stack, fp, slot, caller.slots(), body_len)?;
         }
-        &inline[..nf.params.len()]
+        &inline[..words]
     } else {
-        heap.reserve(nf.params.len());
-        for i in 0..nf.params.len() {
+        heap.reserve(words);
+        for i in 0..words {
             let slot = u8::try_from(start + i).expect("slot index fits u8");
             heap.push(read_value(stack, fp, slot, caller.slots(), body_len)?);
         }
@@ -923,11 +1725,11 @@ fn invoke_native(
         // a `Raw` parameter is the wildcard: the native's argument kind
         // varies by call site (list_push's element), so the body receives
         // whatever word staged
-        let staged = value.slot_type();
-        if staged != want && want != SlotType::Raw {
+        let kind = value.slot_type();
+        if kind != want && want != SlotType::Raw {
             return Err(Trap::CallLayout(SlideError::TypeMismatch {
                 index,
-                staged,
+                staged: kind,
                 expected: want,
             }));
         }
@@ -935,15 +1737,97 @@ fn invoke_native(
     (nf.func)(heaps, out, args)
 }
 
+/// The generic dispatch's staged-span contract shared by the CALLG and
+/// CALLTG paths: the two span forms take at least their named words plus
+/// one span word (`cons`'s head span riding the front, a fold's
+/// accumulator span between the leading and trailing named words), a
+/// fixed entry stages exactly its named count, and the evidence words
+/// need the overlay past the whole staged span either way. Answers the
+/// needed width.
+fn generic_staged_check(g: &crate::native::GenericFunction, nargs: u8) -> Result<usize, Trap> {
+    let given = usize::from(nargs);
+    let arity_ok = match g.staging {
+        Staging::Fixed => given == g.params.len(),
+        Staging::Leading => given >= g.params.len(),
+        Staging::Interior => given > g.params.len(),
+    };
+    if !arity_ok {
+        return Err(Trap::ArityMismatch {
+            expected: g.params.len(),
+            given,
+        });
+    }
+    Ok(given + usize::from(g.evidence))
+}
+
+/// The generic dispatch's kind check over the named words: a `Raw`
+/// parameter is the wildcard (the staged value words carry the call
+/// site's concrete kinds), and a `Ref` word against a `Fn` parameter is
+/// the callable-defaulted slot (F2) — the combinators' staged lambda
+/// may be a closure object. The span forms' dynamic words are the call
+/// site's own fact and stay unchecked: a `Leading` entry checks its
+/// trailing named words, an `Interior` one its leading named words plus
+/// the final named word at the staged span's end. The mismatch's index
+/// names the offending word's position among the named words.
+fn generic_kind_check(g: &crate::native::GenericFunction, args: &[Value]) -> Result<(), Trap> {
+    let check = |index: usize, value: &Value, want: SlotType| -> Result<(), Trap> {
+        let staged = value.slot_type();
+        if staged != want
+            && want != SlotType::Raw
+            && !(staged == SlotType::Ref && want == SlotType::Fn)
+        {
+            return Err(Trap::CallLayout(SlideError::TypeMismatch {
+                index,
+                staged,
+                expected: want,
+            }));
+        }
+        Ok(())
+    };
+    match g.staging {
+        Staging::Fixed => args
+            .iter()
+            .zip(g.params)
+            .enumerate()
+            .try_for_each(|(index, (&value, &want))| check(index, &value, want)),
+        Staging::Leading => {
+            let named = g.params.len();
+            args[args.len() - named..]
+                .iter()
+                .zip(g.params)
+                .enumerate()
+                .try_for_each(|(index, (&value, &want))| check(index, &value, want))
+        },
+        Staging::Interior => {
+            let lead = g.params.len() - 1;
+            (0..lead).try_for_each(|index| check(index, &args[index], g.params[index]))?;
+            check(
+                lead,
+                args.last().expect("the arity check ran"),
+                g.params[lead],
+            )
+        },
+    }
+}
+
 /// Places a native's result on the caller's outgoing-argument overlay:
-/// one word on argument slot 0, or a fallible native's two-word
-/// tag+payload span [BL-2] on argument slots 0 and 1. Like a RET's write,
-/// this bypasses slot typing: the overlay words belong to the call ABI,
-/// and reading them as typed slots is the lowering's discipline (mixed
-/// shapes declare the slots `Raw`). The call site pre-checks the width,
-/// so both writes stay in range by construction.
-fn overlay_native(result: NativeResult, stack: &mut Segment, caller: &FrameLayout, fp: usize) {
-    let body_len = caller.slots().len() - caller.arg_area_len();
+/// one word on argument slot 0, a fallible native's two-word
+/// tag+payload span [BL-2] on argument slots 0 and 1, or a span
+/// channel's discriminant plus multi-word payload on slots
+/// `0 ..= payload.len()`. Like a RET's write, this bypasses slot typing:
+/// the overlay words belong to the call ABI, and reading them as typed
+/// slots is the lowering's discipline (mixed shapes declare the slots
+/// `Raw`). The fixed widths are pre-checked at the call site; a span
+/// channel answer's width is runtime data, so its write bounds-checks
+/// against the overlay area here (the lowering sizes the area, RETSPAN's
+/// discipline — a violation names hand-assembled code).
+fn overlay_native(
+    result: NativeResult,
+    stack: &mut Segment,
+    caller: &FrameLayout,
+    fp: usize,
+) -> Result<(), Trap> {
+    let body_len = caller.body_len();
     let start = caller.arg_area().start;
     match result {
         NativeResult::Word(value) => {
@@ -954,7 +1838,44 @@ fn overlay_native(result: NativeResult, stack: &mut Segment, caller: &FrameLayou
             stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
             stack[word_of(fp, start + 1, body_len)] = Word::Slot(payload);
         },
+        NativeResult::Span { tag, payload } => {
+            let span = 1 + payload.len();
+            if span > caller.arg_area_len() {
+                return Err(Trap::RetSpanTooWide {
+                    span: u16::try_from(span).expect("span widths fit u16"),
+                    caller_area: u16::try_from(caller.arg_area_len())
+                        .expect("argument areas fit u16"),
+                });
+            }
+            stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
+            for (index, value) in payload.into_iter().enumerate() {
+                let slot = start + 1 + index;
+                stack[word_of(fp, slot, body_len)] = Word::Slot(value);
+            }
+        },
+        // the tag-less total rides the same bounds-checked write with no
+        // discriminant: the words are the answer, slots `0 .. n`
+        NativeResult::Total { words } => {
+            if words.len() > caller.arg_area_len() {
+                return Err(Trap::RetSpanTooWide {
+                    span: u16::try_from(words.len()).expect("span widths fit u16"),
+                    caller_area: u16::try_from(caller.arg_area_len())
+                        .expect("argument areas fit u16"),
+                });
+            }
+            for (index, value) in words.into_iter().enumerate() {
+                let slot = start + index;
+                stack[word_of(fp, slot, body_len)] = Word::Slot(value);
+            }
+        },
+        // a park request never reaches an overlay: the CALLG path parks
+        // (or refuses and releases) before it, and the CALLTG site
+        // refuses the fork before its spawn phase runs
+        NativeResult::Fork { .. } => {
+            unreachable!("the dispatcher parks or refuses a fork request first")
+        },
     }
+    Ok(())
 }
 
 /// Reads the i64 the caller staged on overlay word `index` for a control
@@ -966,7 +1887,7 @@ fn control_i64(
     caller: &FrameLayout,
     index: usize,
 ) -> Result<i64, Trap> {
-    let body_len = caller.slots().len() - caller.arg_area_len();
+    let body_len = caller.body_len();
     let slot = u8::try_from(caller.arg_area().start + index).expect("slot index fits u8");
     match read_value(stack, fp, slot, caller.slots(), body_len)? {
         Value::I64(v) => Ok(v),
@@ -987,9 +1908,40 @@ fn control_word(
     caller: &FrameLayout,
     index: usize,
 ) -> Result<Value, Trap> {
-    let body_len = caller.slots().len() - caller.arg_area_len();
+    let body_len = caller.body_len();
     let slot = u8::try_from(caller.arg_area().start + index).expect("slot index fits u8");
     read_value(stack, fp, slot, caller.slots(), body_len)
+}
+
+/// The control paths' infallible one-word overlay: a `Word` write has no
+/// width check to fail (only the span channel's dynamic width can), so
+/// the switch and delivery sites keep the unchecked shape.
+fn overlay_word(value: Value, stack: &mut Segment, caller: &FrameLayout, fp: usize) {
+    let body_len = caller.body_len();
+    let start = caller.arg_area().start;
+    stack[word_of(fp, start, body_len)] = Word::Slot(value);
+}
+
+/// The boundary seam's infallible tag-plus-flat-span overlay: the area
+/// is checked against `1 + payload.len()` by the caller
+/// ([`overlay_boundary`]), so like [`overlay_word`] the write cannot
+/// fail.
+fn overlay_tag(tag: u8, payload: &[Value], stack: &mut Segment, caller: &FrameLayout, fp: usize) {
+    debug_assert!(
+        caller.arg_area_len() >= 2,
+        "the static floor is pre-checked"
+    );
+    let body_len = caller.body_len();
+    let start = caller.arg_area().start;
+    stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
+    for (index, value) in payload.iter().enumerate() {
+        let slot = start + 1 + index;
+        debug_assert!(
+            slot < caller.arg_area().start + caller.arg_area_len(),
+            "width pre-checked"
+        );
+        stack[word_of(fp, slot, body_len)] = Word::Slot(*value);
+    }
 }
 
 /// The pre-invocation width check for a native call: the callee's result
@@ -998,7 +1950,9 @@ fn control_word(
 /// caller's overlay words (the tail frame's slots alias them), so the
 /// frame below supplies the area. Checked before the native runs — a
 /// world-effect side effect must not happen only for the call to trap
-/// on the result width.
+/// on the result width. The checked width is the static `result_words`
+/// floor; a span channel answer's extra words bounds-check at the
+/// overlay write.
 fn check_native_overlay(area: usize, nf: &NativeFunction) -> Result<(), Trap> {
     if usize::from(nf.result_words) > area {
         return Err(Trap::RetSpanTooWide {
@@ -1043,8 +1997,8 @@ pub struct BacktraceFrame {
 /// the single-threaded fiber pool [E2] (slot 0 is the root a `run` entry
 /// drives), and installs the builtin core native module
 /// ([`crate::native::BUILTIN_MODULE`]) into the registry at construction;
-/// the std platform native module ([`crate::native::STD_PLATFORM_MODULE`])
-/// is the host's to install — a bare VM carries no world surface.
+/// the world surface is an installed platform handler's to serve
+/// ([`crate::platform`]) — a bare VM carries no world surface.
 #[derive(Debug)]
 pub struct Vm {
     registry: ModuleRegistry,
@@ -1080,23 +2034,99 @@ pub struct Vm {
     /// (caller function identity, pc), entries stamped with the registry
     /// generation they resolved against. Fibers share the bank safely —
     /// the key is per-function code, never per-fiber stack state, and
-    /// validity rides the global install generation.
+    /// validity rides the global install generation, which each install
+    /// also sweeps the bank against so swapped-out versions' handles do
+    /// not linger until eviction.
     call_cache: Vec<Option<CallSite>>,
     /// The KSTR pool-const intern cache: per-(pool, fiber) object-id
-    /// tables, keyed by the pool's address (stable for its version's
-    /// lifetime) and the loading fiber — each heap interns its own copy
-    /// of a constant, so the cached id is only ever served against the
-    /// fiber whose store minted it. No claim is held — a hit
-    /// re-validates the id against the constant's content and falls
-    /// back to the full intern when the object died, so object
-    /// lifetimes read exactly as without the cache.
-    kstr_cache: HashMap<(usize, u32), Vec<Option<u32>>>,
+    /// rows, keyed by the pool's address (stable for its version's
+    /// lifetime) and the loading fiber. No claim is held — a hit
+    /// re-validates the row against its key and the id against the
+    /// constant's content and falls back to the full intern when either
+    /// disagrees, so object lifetimes read exactly as without the cache.
+    /// Rows are reclaimed at the doors that orphan them: the swap retiring
+    /// a version (its pools die with it) and the pool-slot reuse (the
+    /// slot's next fiber re-keys its rows on demand).
+    kstr_cache: KstrRows,
+    /// The derived deinit-hook directories (E5): one per (module version,
+    /// function), keyed by the version's address — stable for its lifetime
+    /// — and swept wholesale when the registry generation moves, exactly
+    /// the kstr cache's discipline. A directory row is decoded from the
+    /// function's own words once, so the teardown pass never scans on a
+    /// death path more than once per function per install generation.
+    hook_dirs: HookDirIndex,
+    hook_dirs_stamp: u64,
+    /// Inside a teardown hook drive: a cancel flag observed at a backward
+    /// branch refuses the drive instead of cutting its fiber (a teardown
+    /// hook must not re-enter the nursery — the cut would kill the very
+    /// fiber whose death walk is driving the hook).
+    teardown_drive: bool,
     /// The reused capture staging buffer for CALLS copy-ins (per-call
     /// `to_vec` copies are gone; a borrow of this buffer lives only
     /// within one dispatch arm or hosted call, never across a reentry).
     calls_staging: CaptureStaging,
 }
 
+/// The opcode byte each canonical uop occupies in the hot dispatch table:
+/// one byte per arm, in the uop format's `major << 4 | minor` spelling.
+/// The decoder (ds-abi) stays the canonicity authority — module load
+/// validates every word — so these constants exist for the interpreter's
+/// one dispatch table: adding a uop adds one byte constant, one arm, and
+/// never re-lowers its neighbors.
+const OP_KIMM: u8 = 0x00;
+const OP_KCONST: u8 = 0x01;
+const OP_KSTR: u8 = 0x02;
+const OP_KSTR_BORROW: u8 = 0x03;
+const OP_ADD_I64: u8 = 0x10;
+const OP_SUB_I64: u8 = 0x11;
+const OP_MUL_I64: u8 = 0x12;
+const OP_DIV_I64: u8 = 0x13;
+const OP_MOD_I64: u8 = 0x14;
+const OP_ADD_F64: u8 = 0x20;
+const OP_SUB_F64: u8 = 0x21;
+const OP_MUL_F64: u8 = 0x22;
+const OP_DIV_F64: u8 = 0x23;
+const OP_EQ_I64: u8 = 0x30;
+const OP_NEQ_I64: u8 = 0x31;
+const OP_LT_I64: u8 = 0x32;
+const OP_GE_I64: u8 = 0x33;
+const OP_LE_I64: u8 = 0x34;
+const OP_GT_I64: u8 = 0x35;
+const OP_EQ_F64: u8 = 0x40;
+const OP_NEQ_F64: u8 = 0x41;
+const OP_LT_F64: u8 = 0x42;
+const OP_GE_F64: u8 = 0x43;
+const OP_LE_F64: u8 = 0x44;
+const OP_GT_F64: u8 = 0x45;
+const OP_EQ_BOOL: u8 = 0x50;
+const OP_NEQ_BOOL: u8 = 0x51;
+const OP_TAG_TEST: u8 = 0x60;
+const OP_TAG_TEST_NOT: u8 = 0x61;
+const OP_TAG_NEW: u8 = 0x62;
+const OP_CLOSURE_NEW: u8 = 0xd3;
+const OP_CVT_I2F: u8 = 0x70;
+const OP_CVT_F2I: u8 = 0x71;
+const OP_MOV: u8 = 0x80;
+const OP_JMPIF: u8 = 0x90;
+const OP_JMPIF_NOT: u8 = 0x91;
+const OP_JMP: u8 = 0x92;
+const OP_ARENA_MARK: u8 = 0x93;
+const OP_ARENA_RESTORE: u8 = 0x94;
+const OP_CALL: u8 = 0xa0;
+const OP_CALLT: u8 = 0xa1;
+const OP_RET: u8 = 0xa2;
+const OP_RET_SPAN: u8 = 0xa3;
+const OP_CALLG: u8 = 0xa4;
+const OP_CALLTG: u8 = 0xa5;
+const OP_CALLS: u8 = 0xa6;
+const OP_FUNCF: u8 = 0xb0;
+const OP_HALT: u8 = 0xc0;
+const OP_EQ_STR: u8 = 0xd0;
+const OP_NEQ_STR: u8 = 0xd1;
+const OP_STRCAT: u8 = 0xd2;
+const OP_STRCAT_ARENA: u8 = 0xd4;
+const OP_RC_INC: u8 = 0xe0;
+const OP_RC_DEC: u8 = 0xe1;
 impl Vm {
     /// A VM with the default stack limit.
     #[must_use]
@@ -1106,7 +2136,7 @@ impl Vm {
 
     /// A VM with an explicit value-stack word limit. Installs the builtin
     /// core native module only (a same-named prior native table is
-    /// replaced); the std platform natives are the host's explicit choice
+    /// replaced); the platform handler is the host's explicit choice
     /// (a library embedder gets no world surface by default).
     #[must_use]
     pub fn with_limit(mut registry: ModuleRegistry, limit: usize) -> Self {
@@ -1129,7 +2159,10 @@ impl Vm {
             trap_pc: None,
             claims: vec![ClaimTable::default()],
             call_cache: vec![None; CALL_CACHE_SLOTS],
-            kstr_cache: HashMap::new(),
+            kstr_cache: KstrRows::default(),
+            hook_dirs: HookDirIndex::default(),
+            hook_dirs_stamp: u64::MAX,
+            teardown_drive: false,
             calls_staging: CaptureStaging::new(),
         }
     }
@@ -1210,14 +2243,22 @@ impl Vm {
         self.out.set_net_timeout(timeout);
     }
 
-    /// Installs a module version into its two-slot table (hot reload swap).
+    /// Installs a module version into its two-slot table (hot reload swap):
+    /// the swap retires the module's previous retiring version out of the
+    /// registry, so its pools' KSTR rows and the cache entries stamped
+    /// before the swap are reclaimed at the same moment.
     pub fn install_module(&mut self, version: ModuleVersion) -> Arc<ModuleVersion> {
-        self.registry.install(version)
+        let retiring = self.retiring_pool_addrs(version.name());
+        let installed = self.registry.install(version);
+        self.reclaim_retired_kstr_rows(&retiring);
+        self.sweep_call_cache();
+        installed
     }
 
     /// Installs a dsmod module into its two-slot table: the loader maps the
     /// payload, fills the entry-descriptor placeholders, and the slots swap
-    /// [BL-7, H6 item 5].
+    /// [BL-7, H6 item 5]. The module is consumed, so every body's code
+    /// words reach the installed table without a copy.
     ///
     /// # Errors
     ///
@@ -1225,9 +2266,86 @@ impl Vm {
     /// strings and for bodies failing the load checks.
     pub fn install_dsmod(
         &mut self,
-        module: &ds_mod::Module,
+        module: ds_mod::Module,
     ) -> Result<Arc<ModuleVersion>, crate::LoadError> {
-        crate::loader::install(&mut self.registry, module)
+        let retiring = self.retiring_pool_addrs(module.name());
+        let installed = crate::loader::install(&mut self.registry, module)?;
+        self.reclaim_retired_kstr_rows(&retiring);
+        self.sweep_call_cache();
+        Ok(installed)
+    }
+
+    // -- Bounded-memory reclamation over the two hint caches -------------
+    //
+    // Both caches sit beside an authoritative path (the full call-site
+    // lookup, the full intern), so every reclamation below drops hints
+    // only: a dropped row or entry costs its next use one full path and
+    // nothing else. No count and no object moves at any door.
+
+    /// The pool addresses of `module`'s retiring version's functions: the
+    /// version the NEXT install under this name drops out of the registry
+    /// (in-flight frames may hold it longer; its pools' rows are hints, so
+    /// reclaiming them early only costs those frames a re-intern).
+    fn retiring_pool_addrs(&self, module: &str) -> Vec<usize> {
+        self.registry
+            .slots(module)
+            .and_then(ModuleSlots::retiring)
+            .map(|version| {
+                version
+                    .functions()
+                    .iter()
+                    .map(|f| f.pool.as_ptr() as usize)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drops the KSTR intern rows keyed by pools a swap retired: the
+    /// version leaving the two-slot table never serves another load, so
+    /// its rows are pure memory (a reused address re-keys its row at the
+    /// new pool's first load). Rows of the version moving into the
+    /// retiring slot stay — its in-flight frames still load through them.
+    fn reclaim_retired_kstr_rows(&mut self, pools: &[usize]) {
+        self.kstr_cache.reclaim(|row| !pools.contains(&row.pool));
+    }
+
+    /// Drops the KSTR intern rows a dead pool slot leaves behind at its
+    /// reuse door: the slot's store persists (a foreign-held object
+    /// outlives its dead owner), so the rows stay valid hints for the
+    /// next spawn — but the store's own intern map already holds the
+    /// content, so a dropped row costs its next load one intern hit, and
+    /// the VM-global table tracks live loads, not every fiber that ever
+    /// loaded.
+    fn reclaim_fiber_kstr_rows(&mut self, fiber: FiberId) {
+        self.kstr_cache.reclaim(|row| row.fiber != fiber.0);
+    }
+
+    /// Empties the CALL inline-cache entries a swap unstamped: a stale
+    /// entry can never hit again (the stamp check fails), so dropping it
+    /// only releases the swapped-out version's handle early. The full
+    /// lookup stays the fallback and the refill, so dispatch correctness
+    /// never depends on the cache [H3].
+    fn sweep_call_cache(&mut self) {
+        let stamp = self.registry.generation();
+        for entry in &mut self.call_cache {
+            if entry.as_ref().is_some_and(|e| e.stamp != stamp) {
+                *entry = None;
+            }
+        }
+    }
+
+    /// How many (pool, fiber) intern-row keys the KSTR cache holds — the
+    /// bounded-memory reclamation witness for test assertions.
+    #[must_use]
+    pub fn kstr_cache_rows(&self) -> usize {
+        self.kstr_cache.len()
+    }
+
+    /// The running fiber's arena snapshot - the bounded-memory reclamation
+    /// witness for the loop-back-edge restore in test assertions.
+    #[must_use]
+    pub fn arena_stats(&self) -> ds_rt::ArenaStats {
+        self.pool[self.current.index()].arena.stats()
     }
 
     /// The registry, for slot inspection.
@@ -1314,15 +2432,17 @@ impl Vm {
     }
 
     /// Spawns a fiber from a callable word's own function [E2]: the
-    /// in-language `spawn` seam. The FuncRef resolves through the target
-    /// module's current slot; the callable's captures become the entry
-    /// arguments, so the entry checks of [`Vm::run`] apply verbatim.
+    /// in-language `spawn` seam, and the fork-join combinator's per-element
+    /// fork (the element's whole word span as the entry arguments). The
+    /// FuncRef resolves through the target module's current slot; the
+    /// callable's captures become the entry arguments, so the entry checks
+    /// of [`Vm::run`] apply verbatim.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownModule`] when the FuncRef's module id names no
     /// installed module; the entry checks of [`Vm::run`] otherwise.
-    fn spawn_ref_into(
+    pub(crate) fn spawn_ref_into(
         &mut self,
         nursery: Option<NurseryId>,
         fref: FuncRef,
@@ -1342,12 +2462,107 @@ impl Vm {
                     func: fref.func(),
                 })?;
         self.entry_checks(&version, func_id, args)?;
+        self.spawn_checked(nursery, version, func_id, args)
+    }
+
+    /// Spawns a fiber from a closure word's own body [E3]: the fork-join
+    /// combinator's closure callable. The child is entered with `args`
+    /// (the element's whole word span) against the closure's own body
+    /// function, and the closure's capture block is staged into the
+    /// entry frame's leading local slots past the parameters — exactly
+    /// the CALLS copy-in discipline, so a forked lambda is one shape
+    /// with a called one. Each `Ref` capture acquires one count at the
+    /// copy-in, claimed for the child (the count lands on the word's
+    /// own heap); the body's own exit drops balance it, and a child
+    /// that never runs them releases at its drain door. The closure
+    /// object keeps its own counts untouched — the callable word is the
+    /// caller's borrow.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when `word` names no closure object (the
+    /// callable-defaulted `Ref` spelling must hold a closure); the
+    /// resolve and entry checks of [`Vm::spawn_ref_into`] verbatim;
+    /// [`Trap::SlotOutOfRange`] when the capture block does not fit the
+    /// frame's local slots past the parameters.
+    pub(crate) fn spawn_closure_into(
+        &mut self,
+        nursery: Option<NurseryId>,
+        word: RefId,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
+        let (header, captures) = self.closure_parts(word)?;
+        let name = self
+            .registry
+            .module_name(header.module())
+            .ok_or(Trap::UnknownModule {
+                module: header.module(),
+            })?;
+        let (version, func_id) =
+            self.registry
+                .resolve_indexed(name, header.func())
+                .ok_or(Trap::UnknownCallee {
+                    module: name.to_owned(),
+                    func: header.func(),
+                })?;
+        self.entry_checks(&version, func_id, args)?;
+        // the capture block lands in the frame's local slots past the
+        // parameters — the CALLS range check, before the child exists
+        let layout = &version.functions()[func_id as usize].layout;
+        let capture_body_len = layout.body_len();
+        let end = layout.params_len() + captures.len();
+        if end > capture_body_len {
+            return Err(Trap::SlotOutOfRange {
+                slot: u8::try_from(end - 1).unwrap_or(u8::MAX),
+                frame_slots: layout.slots().len(),
+            });
+        }
+        let child = self.spawn_checked(nursery, Arc::clone(&version), func_id, args)?;
+        let handoff_owner = self.current;
+        for (index, &value) in captures.iter().enumerate() {
+            if let Value::Ref(word) = value {
+                Self::inc_ref_split(
+                    &mut self.objects,
+                    &mut self.pool,
+                    &mut self.claims,
+                    handoff_owner,
+                    self.ctx_live,
+                    child,
+                    word,
+                )?;
+            }
+            let slot = u8::try_from(layout.params_len() + index)
+                .expect("capture slot fits u8 after the range check");
+            // the entry frame's fp is 0 and the capture slots sit below
+            // the body boundary, so each write re-checks the word against
+            // the slot's declared type exactly like the CALLS copy-in
+            let fiber = &mut self.pool[child.index()];
+            write_slot(
+                &mut fiber.segment,
+                0,
+                slot,
+                layout.slots(),
+                capture_body_len,
+                value,
+            )?;
+        }
+        Ok(child)
+    }
+
+    /// The shared spawn tail: the entry frame pushed with `args`, each
+    /// `Ref` argument acquiring one count for the child's frame at the
+    /// copy-in — the child's own exit drops balance it, precisely a
+    /// closure call's capture copy-in. The count lands on the word's own
+    /// heap (which the spawner may not be running on) and the claim on
+    /// the child's ledger.
+    fn spawn_checked(
+        &mut self,
+        nursery: Option<NurseryId>,
+        version: Arc<ModuleVersion>,
+        func_id: u32,
+        args: &[Value],
+    ) -> Result<FiberId, Trap> {
         let child = self.push_spawned(nursery, version, func_id, args);
-        // each Ref argument acquires one count for the child's frame at
-        // the copy-in — the child's own exit drops balance it, precisely
-        // a closure call's capture copy-in. The count lands on the word's
-        // own heap (which the spawner may not be running on) and the claim
-        // on the child's ledger.
         let handoff_owner = self.current;
         for &arg in args {
             if let Value::Ref(word) = arg {
@@ -1356,6 +2571,7 @@ impl Vm {
                     &mut self.pool,
                     &mut self.claims,
                     handoff_owner,
+                    self.ctx_live,
                     child,
                     word,
                 )?;
@@ -1390,12 +2606,18 @@ impl Vm {
         if slot == self.pool.len() {
             let id = FiberId(u32::try_from(slot).expect("pool size fits u32 ids"));
             self.pool.push(Fiber::empty(id));
-            self.claims.push(ClaimTable::default());
+            self.claims.push(ClaimTable::new(id));
         } else {
             // the reuse door of the death walk: every death path drains
             // its fiber, so this releases what an un-walked marking or an
-            // exotic death left behind — and nothing on the honest paths
-            self.drain_claims(FiberId(u32::try_from(slot).expect("slot fits u32")));
+            // exotic death left behind — and nothing on the honest paths.
+            // The recycled fiber's kept frames (a resume-interrupted
+            // detached child's) fire their deinits here, at their last
+            // door [E5]
+            let recycled = FiberId(u32::try_from(slot).expect("slot fits u32"));
+            self.fire_teardown_hooks(recycled, &[]);
+            self.drain_claims(recycled);
+            self.reclaim_fiber_kstr_rows(recycled);
         }
         let fiber = &mut self.pool[slot];
         fiber.segment.truncate(0); // reuse keeps the chunks: spawn stays cheap
@@ -1436,7 +2658,7 @@ impl Vm {
         }
         self.pool[fiber.index()].resumer = None; // the host resumes
         let (active, pc) = self.switch_in(fiber, payload);
-        let outcome = self.execute(active, pc, usize::MAX);
+        let outcome = self.execute_host_step(active, pc, usize::MAX);
         self.host_release();
         match outcome {
             Ok(DriveOutcome::Died(v) | DriveOutcome::Yielded(v)) => {
@@ -1449,6 +2671,9 @@ impl Vm {
             // a host-level drive passes no boundary, so no reentry frame
             // exists to return through
             Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
+            Ok(DriveOutcome::Interlock(_)) => {
+                unreachable!("the step drains every interlock before returning")
+            },
             Err((trap, at)) => {
                 self.trap_pc = Some(at);
                 // a nursery child dying trapped under a host drive: ledger
@@ -1535,9 +2760,10 @@ impl Vm {
     }
 
     /// Opens a fresh nursery [E2]: the in-language `nursery` block's own
-    /// (never the root — bare host spawns route there alone). Dead slots
-    /// reuse like fiber slots.
-    fn open_fresh_nursery(&mut self) -> NurseryId {
+    /// (never the root — bare host spawns route there alone), and the
+    /// fork-join combinator's own over the same reuse discipline. Dead
+    /// slots reuse like fiber slots.
+    pub(crate) fn open_fresh_nursery(&mut self) -> NurseryId {
         let slot = match self
             .nurseries
             .iter()
@@ -1589,7 +2815,7 @@ impl Vm {
     /// `nursery` names no open nursery (absent, or already consumed).
     pub fn join_nursery(&mut self, nursery: NurseryId) -> Result<JoinOutcome, Trap> {
         self.nursery_open(nursery)?;
-        let outcomes = self.run_nursery_to_death(nursery, false, None);
+        let outcomes = self.face_drive(nursery, false);
         Ok(
             // only an all-Completed record joins; a synthesized Cancelled
             // with no Trapped sibling (an interrupted drive) is a boundary
@@ -1602,7 +2828,7 @@ impl Vm {
                     outcomes
                         .into_iter()
                         .map(|o| match o {
-                            ChildOutcome::Completed(v) => v,
+                            ChildOutcome::Completed(span) => span,
                             // the all-Completed test took every other shape
                             // to the Failed branch
                             ChildOutcome::Cancelled | ChildOutcome::Trapped(_) => {
@@ -1629,7 +2855,7 @@ impl Vm {
     /// `nursery` names no open nursery.
     pub fn teardown_nursery(&mut self, nursery: NurseryId) -> Result<Vec<ChildOutcome>, Trap> {
         self.nursery_open(nursery)?;
-        Ok(self.run_nursery_to_death(nursery, true, None))
+        Ok(self.face_drive(nursery, true))
     }
 
     /// A nursery's lifecycle state, for debug and test assertions.
@@ -1645,73 +2871,185 @@ impl Vm {
         self.nurseries.get(nursery.index()).map(|n| n.cancelled)
     }
 
-    /// The join/teardown driver: enters each child in spawn order and
-    /// drives it to death before the next (sequential — the deterministic
-    /// choice). Every death path ledgers its outcome into the nursery
-    /// whoever ran it, so this loop only drives and collects. A trap
-    /// escaping a drive is attributed to the fiber the drive ended on (a
-    /// child parked at its own resume call while its resumee traps is
-    /// innocent: it is bounced back in to land); a trapped child ledgers
-    /// `Trapped` and raises the flag, and the walk that marks such an
-    /// interrupted child dead below is the future deinit pass's hook
-    /// point [E5: teardown walks frames].
-    fn run_nursery_to_death(
-        &mut self,
-        nursery: NurseryId,
-        cancel_first: bool,
-        claim_target: Option<FiberId>,
-    ) -> Vec<ChildOutcome> {
+    /// The host face's drive (`join_nursery`/`teardown_nursery`): the
+    /// nursery consumed with no in-language call site to answer. A child's
+    /// own cross-nursery join pushes frames the same way, so the face
+    /// drives through the identical interlock stack.
+    fn face_drive(&mut self, nursery: NurseryId, cancel_first: bool) -> Vec<ChildOutcome> {
         if cancel_first {
             self.nurseries[nursery.index()].cancelled = true;
         }
-        let children = self.nurseries[nursery.index()].children.clone();
-        for child in children {
+        let frame = self.push_drive_frame(nursery, None, DriveSeam::Face);
+        match self.nursery_drive_run(frame) {
+            NurseryDriveEnd::Face(outcomes) => outcomes,
+            _ => unreachable!("a face frame consumes without a delivery"),
+        }
+    }
+
+    /// Tears a fork combinator's nursery down for a refused park or
+    /// spawn ([E5] the cancel discipline): the face drive runs the
+    /// children under the raised flag — a straight-line child's first
+    /// entry still lands — and the calling fiber's context, which the
+    /// first child switch stashed into its pool slot, restores (the
+    /// combinator body continues on its own fiber with the refusal
+    /// about to surface). A completed answer the caller abandons (a
+    /// landed-under-the-flag word) keeps its claim row until the
+    /// receiver's own drain door.
+    pub(crate) fn teardown_fork_nursery(
+        &mut self,
+        nursery: NurseryId,
+    ) -> Result<Vec<ChildOutcome>, Trap> {
+        let host = self.current;
+        let outcomes = self.teardown_nursery(nursery)?;
+        for outcome in &outcomes {
+            if let ChildOutcome::Completed(span) = outcome {
+                for word in span.as_slice() {
+                    if let Value::Ref(word) = word {
+                        self.claims[host.index()].acquire(*word);
+                    }
+                }
+            }
+        }
+        self.restore_context(host);
+        Ok(outcomes)
+    }
+
+    /// Swaps `target`'s context back in after a face drive left no
+    /// context live: the stash half of [`Vm::switch_in`] without the
+    /// resume-point hand-shake (the fiber never parked — it hosts the
+    /// native body that drove).
+    fn restore_context(&mut self, target: FiberId) {
+        self.host_release();
+        let fiber = &mut self.pool[target.index()];
+        std::mem::swap(&mut self.stack, &mut fiber.segment);
+        std::mem::swap(&mut self.callinfo, &mut fiber.callinfo);
+        std::mem::swap(&mut self.objects, &mut fiber.objects);
+        self.current = target;
+        self.ctx_live = true;
+    }
+
+    /// Snapshots a nursery into a drive frame and marks it in flight: the
+    /// spawn-order children, the cursor of the child being driven, and who
+    /// to answer at consumption. The mark refuses a second joiner while the
+    /// drive stands.
+    fn push_drive_frame(
+        &mut self,
+        nursery: NurseryId,
+        joiner: Option<(FiberId, CodePc)>,
+        seam: DriveSeam,
+    ) -> NurseryDrive {
+        debug_assert!(
+            !self.nurseries[nursery.index()].driving,
+            "one drive of a nursery stands at a time"
+        );
+        self.nurseries[nursery.index()].driving = true;
+        NurseryDrive {
+            children: self.nurseries[nursery.index()].children.clone(),
+            nursery,
+            cursor: 0,
+            joiner,
+            seam,
+        }
+    }
+
+    /// Runs one drive segment of the join/teardown driver until it goes
+    /// quiet (the fiber dies, parks at the host, or traps) or parks at a
+    /// cross-nursery join — the request bubbles to the interlock stack. A
+    /// trap escaping the drive is attributed to the fiber the drive ended
+    /// on (a child that resumed another fiber parks at its resume call
+    /// while the resumee traps, and that parked child is innocent); the
+    /// caller's loop then re-validates the driven child: itself trapped →
+    /// interrupted (already ledgered, the guard breaks); parked → bounced
+    /// back in, or cut at that resume when the flag is up.
+    fn drive_step(&mut self, active: Active, pc: CodePc) -> StepFlow {
+        match self.execute(active, pc, usize::MAX) {
+            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => StepFlow::Quiet,
+            Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
+            Ok(DriveOutcome::Interlock(req)) => StepFlow::Interlock(req),
+            Err((trap, _at)) => {
+                self.host_release();
+                self.trap_child(self.current, &trap);
+                StepFlow::Quiet
+            },
+        }
+    }
+
+    /// Drives one frame's remaining children in spawn order, each to death
+    /// before the next (sequential — the deterministic choice). Every
+    /// death path ledgers its outcome into the nursery whoever ran it, so
+    /// this loop only drives and collects. A parked child of a cancelled
+    /// (or discontinuing) nursery is cut at its next resume instead of
+    /// being bounced back in [E2, E5]; a trapped child ledgers `Trapped`
+    /// and raises the flag, and the walk that marks such an interrupted
+    /// child dead below is the future deinit pass's hook point [E5:
+    /// teardown walks frames]. A child parking at a cross-nursery join
+    /// parks and returns the request — the frame pauses on that child
+    /// until the pushed frame's answer re-enters it.
+    fn drive_frame_children(&mut self, frame: &mut NurseryDrive) -> Option<InterlockRequest> {
+        while frame.cursor < frame.children.len() {
+            let child = frame.children[frame.cursor];
             // a reused slot belongs to another nursery: the child died and
             // was ledgered before its slot was recycled
-            if self.pool[child.index()].nursery != Some(nursery) {
+            if self.pool[child.index()].nursery != Some(frame.nursery) {
+                frame.cursor += 1;
                 continue;
             }
             while self.pool[child.index()].state != FiberState::Dead {
                 if !self.pool[child.index()].resumable() {
                     break; // interrupted mid-trap (already ledgered)
                 }
-                let (active, pc) = self.switch_in(child, Value::Tag(PLATFORM_NONE));
-                match self.execute(active, pc, usize::MAX) {
-                    Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => {},
-                    Ok(DriveOutcome::Frame(_)) => {
-                        unreachable!("a host drive answers no reentry frame")
-                    },
-                    Err((trap, _at)) => {
-                        // the trap escaped the drive on whichever fiber was
-                        // running when it struck — a child that resumed
-                        // another fiber parks at its resume call while the
-                        // resumee traps, and that parked child is innocent.
-                        // Blame the fiber the drive ended on (like `run`),
-                        // then let the loop re-validate this child: itself
-                        // trapped → interrupted (already ledgered, the guard
-                        // breaks); parked → bounced back in to land
-                        self.host_release();
-                        self.trap_child(self.current, &trap);
-                    },
+                // The resume is preemption-shaped [E2, E5]: a child parked
+                // at a switch point sits at a suspension it chose, so the
+                // bounce under the nursery's raised cancel flag delivers
+                // the cut instead of resuming — the driver-side twin of the
+                // backward-branch preemption point, and the only bound on a
+                // child that parks with no taken backward jump left between
+                // parks (a yield inside a tail loop would otherwise bounce
+                // forever; the CALLT pc-reset is deliberately not a
+                // preemption point). A Ready child is a first entry, not a
+                // resume: its straight-line work still lands [E5].
+                let step = if self.pool[child.index()].state == FiberState::Suspended
+                    && self.nurseries[frame.nursery.index()].cancelled
+                {
+                    // enter, then die at the resume point: cancel_current
+                    // fires the kept-frame deinits (the cancel-cut door)
+                    // and delivers the sentinel to the child's resumer,
+                    // whose continuation the drive then runs
+                    self.switch_in(child, Value::Tag(PLATFORM_NONE));
+                    self.cancel_current()
+                } else {
+                    Some(self.switch_in(child, Value::Tag(PLATFORM_NONE)))
+                };
+                let Some((active, pc)) = step else {
+                    continue;
+                };
+                if let StepFlow::Interlock(req) = self.drive_step(active, pc) {
+                    return Some(req);
                 }
             }
             // the child's death walk completes here: a trapped child keeps
-            // its frames until now, then its slot is released. A cancel
-            // payload riding the recorded outcome keeps its claim — the
-            // delivery takes it below — while every other claim the kept
-            // frames own is released here, routed to each word's own heap
-            // (the one cross-heap count channel of a death [E5])
+            // its frames until now, then its slot is released. The deinit
+            // pass fires the kept frames' hooks first (E5: teardown walks
+            // frames running deinits), holding the delivery's payload
+            // back; then every other claim the kept frames own is
+            // released, routed to each word's own heap (the one
+            // cross-heap count channel of a death [E5])
             if self.pool[child.index()].state != FiberState::Dead {
-                let held = match self.nurseries[nursery.index()].outcome(child) {
-                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled {
-                        payload: Value::Ref(word),
-                    })) => Some(word),
-                    _ => None,
+                let held: Vec<RefId> = match self.nurseries[frame.nursery.index()].outcome(child) {
+                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => payload
+                        .iter()
+                        .filter_map(|value| match value {
+                            Value::Ref(word) => Some(*word),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
                 };
-                self.drain_claims_except(child, held);
-                if let Some(word) = held {
+                self.fire_teardown_hooks(child, &held);
+                self.drain_claims_except(child, &held);
+                for &word in &held {
                     self.claims[child.index()].release(word);
-                    if let Some(target) = claim_target {
+                    if let Some((target, _)) = frame.joiner {
                         self.claims[target.index()].acquire(word);
                     }
                 }
@@ -1719,17 +3057,508 @@ impl Vm {
                 fiber.state = FiberState::Dead;
                 fiber.resume = None;
             }
+            frame.cursor += 1;
         }
+        None
+    }
+
+    /// Consumes a driven nursery — the in-flight mark down, the slot Dead,
+    /// the ledger drained — and computes the delivery its seam owes the
+    /// parked joiner. A child cut down before any ledgered death (an
+    /// interrupted drive, an exotic switch tangle) reports as a boundary
+    /// cancellation — a structured outcome, never a panic.
+    /// The consumption prologue every seam shares: the drive's live
+    /// context stashed, the in-flight mark down, the slot Dead, the
+    /// ledger drained.
+    fn consume_nursery(&mut self, nursery: NurseryId) -> Vec<ChildOutcome> {
         self.host_release();
         let slot = &mut self.nurseries[nursery.index()];
+        slot.driving = false;
         slot.state = NurseryState::Dead;
         slot.outcomes
             .drain(..)
-            // a child cut down before any ledgered death (an interrupted
-            // drive, an exotic switch tangle) reports as a boundary
-            // cancellation — a structured outcome, never a panic
             .map(|o| o.unwrap_or(ChildOutcome::Cancelled))
             .collect()
+    }
+
+    fn consume_frame(&mut self, frame: &NurseryDrive) -> (Vec<ChildOutcome>, Option<Delivery>) {
+        let outcomes = self.consume_nursery(frame.nursery);
+        // the first failure in spawn-drive order decides: a cancelled child
+        // with no trapped one before it cannot happen (the flag only rises
+        // at a trapped death)
+        let delivery = match &frame.seam {
+            // the fork seam ends through [`Vm::fork_frame_end`] in the
+            // drive loop, which moves the stage out of the frame
+            DriveSeam::Fork(_) => unreachable!("the fork seam ends through fork_frame_end"),
+            DriveSeam::Face => None,
+            DriveSeam::Count => {
+                let failed = outcomes
+                    .iter()
+                    .filter(|o| matches!(o, ChildOutcome::Trapped(_)))
+                    .count();
+                let count = Value::I64(i64::try_from(failed).expect("child count fits i64"));
+                Some(Delivery::Answer {
+                    call: count,
+                    span: None,
+                    gone: count,
+                })
+            },
+            DriveSeam::Boundary { mask } => {
+                match outcomes
+                    .iter()
+                    .find(|o| matches!(o, ChildOutcome::Trapped(_)))
+                {
+                    None => Some(Delivery::Answer {
+                        call: Value::I64(0),
+                        span: Some((NURSERY_BOUNDARY_OK, vec![Value::I64(0)])),
+                        gone: Value::Tag(NURSERY_BOUNDARY_OK),
+                    }),
+                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => {
+                        // the staged mask is the caller's return-union
+                        // member containment set: an error the boundary
+                        // cannot union out refuses instead of corrupting
+                        // the union's tag space. The member's identity is
+                        // the span's word 0 — the tag the cancel site
+                        // staged first
+                        let contained = matches!(
+                            payload.first(),
+                            Some(Value::Tag(tag)) if *tag < 64 && (mask & (1i64 << *tag)) != 0
+                        );
+                        if contained {
+                            // the gone surfacing is the member's tag word:
+                            // a moved-on joiner's host drive sees the
+                            // identity; the payload span's `Ref` words
+                            // ride the trap delivery's host handoff
+                            let gone = payload.first().copied().unwrap_or(Value::I64(0));
+                            Some(Delivery::Answer {
+                                call: Value::I64(0),
+                                span: Some((NURSERY_BOUNDARY_ERR, payload.clone())),
+                                gone,
+                            })
+                        } else {
+                            Some(Delivery::Raise(Trap::NurseryUncontained {
+                                payload: payload.clone(),
+                            }))
+                        }
+                    },
+                    Some(ChildOutcome::Trapped(trap)) => {
+                        // a real trap surfaces at the boundary
+                        Some(Delivery::Raise(trap.clone()))
+                    },
+                    Some(_) => unreachable!("the scan yields only trapped failures"),
+                }
+            },
+        };
+        (outcomes, delivery)
+    }
+
+    /// The interlock stack: drives the initial frame's children (and every
+    /// frame a driven child pushes — its own cross-nursery join parks it
+    /// and pushes the joined nursery, LIFO, the nesting order the
+    /// recursive driver used to carry on the Rust stack), consumes each
+    /// exhausted frame, and delivers its answer onto the parked joiner,
+    /// whose continuation runs inside the same drain. The initial frame's
+    /// delivery returns to its host instead.
+    fn nursery_drive_run(&mut self, initial: NurseryDrive) -> NurseryDriveEnd {
+        let mut stack = vec![initial];
+        loop {
+            while let Some(req) = self.drive_frame_children(
+                stack
+                    .last_mut()
+                    .expect("the initial frame stands until its nursery consumes"),
+            ) {
+                stack.push(self.push_drive_frame(
+                    req.nursery,
+                    Some((req.joiner, req.resume_pc)),
+                    req.seam,
+                ));
+            }
+            let frame = stack
+                .pop()
+                .expect("the initial frame stands until its nursery consumes");
+            let (outcomes, delivery) = match frame.seam {
+                DriveSeam::Fork(stage) => {
+                    let joiner = frame.joiner.expect("the fork seam parks a call site");
+                    match self.fork_frame_end(frame.nursery, joiner, stage) {
+                        ForkEnd::Chain(next) => {
+                            stack.push(next);
+                            continue;
+                        },
+                        ForkEnd::End(outcomes, delivery) => (outcomes, delivery),
+                    }
+                },
+                _ => self.consume_frame(&frame),
+            };
+            let Some((joiner, resume_pc)) = frame.joiner else {
+                return NurseryDriveEnd::Face(outcomes);
+            };
+            let Some(delivery) = delivery else {
+                unreachable!("a join seam frames a delivery");
+            };
+            if stack.is_empty() {
+                // the initial frame: the delivery belongs to the
+                // interrupted host drive's fiber
+                return match delivery {
+                    Delivery::Answer { call, span, gone } => {
+                        match self.reenter_joiner(joiner, resume_pc, call) {
+                            Some((a, at)) => {
+                                if let Some((tag, payload)) = span {
+                                    self.overlay_boundary(&a, tag, &payload);
+                                }
+                                NurseryDriveEnd::Entered(a, at)
+                            },
+                            // no call site stands: the answer surfaces to
+                            // the host
+                            None => NurseryDriveEnd::Gone(gone),
+                        }
+                    },
+                    Delivery::Words { head, tail, gone } => {
+                        match self.reenter_joiner(joiner, resume_pc, head) {
+                            Some((a, at)) => {
+                                self.overlay_span_tail(&a, &tail);
+                                NurseryDriveEnd::Entered(a, at)
+                            },
+                            None => NurseryDriveEnd::Gone(gone),
+                        }
+                    },
+                    Delivery::Raise(trap) => {
+                        // re-enter the joiner so the drive ends on it and
+                        // the trap attributes at the boundary; the call
+                        // site never reads the answer
+                        let _ = self.reenter_joiner(joiner, resume_pc, Value::I64(0));
+                        NurseryDriveEnd::Raised(trap, CodePc(resume_pc.0 - 1))
+                    },
+                };
+            }
+            // a nested frame: deliver onto the parked joiner and run its
+            // continuation here (the recursive driver ran it inside the
+            // same drive step); a further join pushes the next frame, a
+            // gone joiner's answer surfaces to no one (its drive already
+            // ended elsewhere)
+            match delivery {
+                Delivery::Answer { call, span, .. } => {
+                    if let Some((a, at)) = self.reenter_joiner(joiner, resume_pc, call) {
+                        if let Some((tag, payload)) = span {
+                            self.overlay_boundary(&a, tag, &payload);
+                        }
+                        if let StepFlow::Interlock(req) = self.drive_step(a, at) {
+                            stack.push(self.push_drive_frame(
+                                req.nursery,
+                                Some((req.joiner, req.resume_pc)),
+                                req.seam,
+                            ));
+                        }
+                    }
+                },
+                Delivery::Words { head, tail, .. } => {
+                    if let Some((a, at)) = self.reenter_joiner(joiner, resume_pc, head) {
+                        self.overlay_span_tail(&a, &tail);
+                        if let StepFlow::Interlock(req) = self.drive_step(a, at) {
+                            stack.push(self.push_drive_frame(
+                                req.nursery,
+                                Some((req.joiner, req.resume_pc)),
+                                req.seam,
+                            ));
+                        }
+                    }
+                },
+                Delivery::Raise(trap) => {
+                    // re-enter the joiner so the drive ends on it, then
+                    // the trap attributes there — the joiner's own nursery
+                    // ledgers it and raises its flag
+                    let _ = self.reenter_joiner(joiner, resume_pc, Value::I64(0));
+                    self.host_release();
+                    self.trap_child(self.current, &trap);
+                },
+            }
+        }
+    }
+
+    /// The fork seam's router at consumption: the joiner's store and
+    /// ledger reached through the pool — the drive's live context
+    /// belongs to a dead child (the consumption prologue stashed it),
+    /// while the parked joiner's real store sits in its own pool slot.
+    fn fork_heaps(&mut self, joiner: FiberId) -> Heaps<'_> {
+        Heaps::new(
+            joiner,
+            &mut self.objects,
+            &mut self.pool,
+            &mut self.claims,
+            false,
+        )
+    }
+
+    /// The fork seam's frame end: the consumed nursery's outcomes run
+    /// through the assembly or fold stage exactly the synchronous
+    /// body's post-join work did — the claims crossing first (the
+    /// joiner's rows, one per `Ref` word of each completed answer: the
+    /// release-side exact-ownership gate's row), the heap operations
+    /// routed through the joiner's own store and ledger.
+    /// `par_reduce`'s chain continues while elements remain — the next
+    /// step's child spawns into its fresh nursery and the frame rides
+    /// [`ForkEnd::Chain`] — the fold's left data dependency, one drive
+    /// frame per step, nesting depth still heap. Any trap the stage
+    /// raises (a stride refusal, a bogus word, a delivered width the
+    /// checker never proved) releases the staged state and surfaces at
+    /// the parked call site like a child failure.
+    fn fork_frame_end(
+        &mut self,
+        nursery: NurseryId,
+        joiner: (FiberId, CodePc),
+        stage: crate::native::ForkStage,
+    ) -> ForkEnd {
+        let outcomes = self.consume_nursery(nursery);
+        let (joiner_id, resume_pc) = joiner;
+        match stage {
+            crate::native::ForkStage::Map { result } => {
+                for outcome in &outcomes {
+                    if let ChildOutcome::Completed(answer) = outcome {
+                        for word in answer.as_slice() {
+                            if let Value::Ref(word) = word {
+                                self.claims[joiner_id.index()].acquire(*word);
+                            }
+                        }
+                    }
+                }
+                for outcome in outcomes {
+                    match outcome {
+                        ChildOutcome::Completed(answer) => {
+                            let mut heaps = self.fork_heaps(joiner_id);
+                            // the answer's whole span lands as one
+                            // element: the first push fixes the result
+                            // list's stride (a width mismatch traps at
+                            // the stride check before any count moves,
+                            // so the releases balance)
+                            if let Err(trap) = heaps.push_list(result, answer.as_slice()) {
+                                let _ = heaps.dec(result);
+                                return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                            }
+                            for word in answer.as_slice() {
+                                if let Value::Ref(word) = word {
+                                    if let Err(trap) = heaps.dec(*word) {
+                                        let _ = heaps.dec(result);
+                                        return ForkEnd::End(
+                                            Vec::new(),
+                                            Some(Delivery::Raise(trap)),
+                                        );
+                                    }
+                                }
+                            }
+                        },
+                        ChildOutcome::Trapped(trap) => {
+                            let mut heaps = self.fork_heaps(joiner_id);
+                            let _ = heaps.dec(result);
+                            return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                        },
+                        // the cancel flag only rises at a trapped death,
+                        // so a cancelled outcome with no trapped one is
+                        // an interrupted drive — the cut sentinel is its
+                        // honest cause
+                        ChildOutcome::Cancelled => {
+                            let mut heaps = self.fork_heaps(joiner_id);
+                            let _ = heaps.dec(result);
+                            return ForkEnd::End(
+                                Vec::new(),
+                                Some(Delivery::Raise(Trap::NurseryCancelled {
+                                    payload: vec![Value::Tag(PLATFORM_CANCELLED)],
+                                })),
+                            );
+                        },
+                    }
+                }
+                ForkEnd::End(
+                    Vec::new(),
+                    Some(Delivery::Answer {
+                        call: Value::Ref(result),
+                        span: None,
+                        gone: Value::Ref(result),
+                    }),
+                )
+            },
+            crate::native::ForkStage::Reduce {
+                elements,
+                stride,
+                callable,
+                mut acc,
+                mut owned,
+                mut at,
+            } => match outcomes.as_slice() {
+                [ChildOutcome::Completed(answer)] => {
+                    // the crossing's claim rows: the joiner owns the
+                    // delivered words
+                    for word in answer.as_slice() {
+                        if let Value::Ref(word) = word {
+                            self.claims[joiner_id.index()].acquire(*word);
+                        }
+                    }
+                    let words = answer.as_slice();
+                    if words.len() != acc.len() {
+                        // the delivered span disagrees with the staged
+                        // init's width — the callable the checker never
+                        // proved: release the owned accumulator and the
+                        // delivered words' own counts, then refuse
+                        let mut heaps = self.fork_heaps(joiner_id);
+                        if let Err(trap) =
+                            crate::native::release_owned_span(&mut heaps, &acc, owned)
+                        {
+                            return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                        }
+                        for word in words {
+                            if let Value::Ref(id) = *word {
+                                if let Err(trap) = heaps.dec(id) {
+                                    return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                                }
+                            }
+                        }
+                        return ForkEnd::End(
+                            Vec::new(),
+                            Some(Delivery::Raise(Trap::ArityMismatch {
+                                expected: acc.len(),
+                                given: words.len(),
+                            })),
+                        );
+                    }
+                    let mut heaps = self.fork_heaps(joiner_id);
+                    if let Err(trap) = crate::native::release_owned_span(&mut heaps, &acc, owned) {
+                        return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                    }
+                    acc.clear();
+                    acc.extend_from_slice(words);
+                    owned = true;
+                    at += stride;
+                    if at >= elements.len() {
+                        // the chain's last answer: the whole span
+                        // delivers onto the parked call site, the head
+                        // through the switch payload, the tail past it
+                        let head = acc[0];
+                        let tail = acc[1..].to_vec();
+                        return ForkEnd::End(
+                            Vec::new(),
+                            Some(Delivery::Words {
+                                head,
+                                tail,
+                                gone: head,
+                            }),
+                        );
+                    }
+                    // the fold chain continues: the next element's child
+                    // spawns with the running accumulator and rides the
+                    // next frame — the left data dependency, one drive
+                    // frame per step
+                    let mut child_args = Vec::with_capacity(acc.len() + stride);
+                    child_args.extend_from_slice(&acc);
+                    child_args.extend_from_slice(&elements[at..at + stride]);
+                    let nursery = self.open_fresh_nursery();
+                    if let Err(trap) =
+                        crate::native::fork_spawn(self, nursery, callable, &child_args)
+                    {
+                        // a refused spawn's child may be half-built: tear
+                        // the step's nursery down under the cancel
+                        // discipline, then release the owned accumulator
+                        // before the trap surfaces
+                        let _ = self.teardown_fork_nursery(nursery);
+                        let mut heaps = self.fork_heaps(joiner_id);
+                        if let Err(release) =
+                            crate::native::release_owned_span(&mut heaps, &acc, true)
+                        {
+                            return ForkEnd::End(Vec::new(), Some(Delivery::Raise(release)));
+                        }
+                        return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
+                    }
+                    ForkEnd::Chain(self.push_drive_frame(
+                        nursery,
+                        Some((joiner_id, resume_pc)),
+                        DriveSeam::Fork(crate::native::ForkStage::Reduce {
+                            elements,
+                            stride,
+                            callable,
+                            acc,
+                            owned,
+                            at,
+                        }),
+                    ))
+                },
+                [ChildOutcome::Trapped(trap)] => {
+                    // the chain holds no live sibling at the failure —
+                    // the join consumed the step's nursery — so the
+                    // trap re-raises with the owned accumulator released
+                    let mut heaps = self.fork_heaps(joiner_id);
+                    let _ = crate::native::release_owned_span(&mut heaps, &acc, owned);
+                    ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap.clone())))
+                },
+                [ChildOutcome::Cancelled] => {
+                    // the cancel flag only rises at a trapped death, so
+                    // a cancelled outcome with no trap is an interrupted
+                    // drive — the cut sentinel is its honest cause
+                    let mut heaps = self.fork_heaps(joiner_id);
+                    let _ = crate::native::release_owned_span(&mut heaps, &acc, owned);
+                    ForkEnd::End(
+                        Vec::new(),
+                        Some(Delivery::Raise(Trap::NurseryCancelled {
+                            payload: vec![Value::Tag(PLATFORM_CANCELLED)],
+                        })),
+                    )
+                },
+                _ => unreachable!("the chain joins exactly the one spawned child"),
+            },
+        }
+    }
+
+    /// Drives a parked joiner's request to its answer and continues the
+    /// joiner's drive under `boundary` (the interrupted host drive's
+    /// reentry boundary): the nursery's frame plus every frame a driven
+    /// child pushes, then the answer delivered onto the parked call site
+    /// and the joiner re-entered — program nesting depth costs heap, not
+    /// Rust stack. A gone joiner's answer surfaces to the host drive as
+    /// its death value; a boundary raise propagates at the join call's pc.
+    fn drive_interlock(
+        &mut self,
+        req: InterlockRequest,
+        boundary: usize,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
+        let frame = self.push_drive_frame(req.nursery, Some((req.joiner, req.resume_pc)), req.seam);
+        let (mut active, mut pc) = match self.nursery_drive_run(frame) {
+            NurseryDriveEnd::Face(_) => unreachable!("a join seam frames a delivery"),
+            NurseryDriveEnd::Gone(value) => return Ok(DriveOutcome::Died(value)),
+            NurseryDriveEnd::Raised(trap, at) => return Err((trap, at)),
+            NurseryDriveEnd::Entered(a, at) => (a, at),
+        };
+        loop {
+            match self.execute(active, pc, boundary) {
+                Ok(DriveOutcome::Interlock(req)) => {
+                    let frame = self.push_drive_frame(
+                        req.nursery,
+                        Some((req.joiner, req.resume_pc)),
+                        req.seam,
+                    );
+                    match self.nursery_drive_run(frame) {
+                        NurseryDriveEnd::Face(_) => unreachable!("a join seam frames a delivery"),
+                        NurseryDriveEnd::Gone(value) => return Ok(DriveOutcome::Died(value)),
+                        NurseryDriveEnd::Raised(trap, at) => return Err((trap, at)),
+                        NurseryDriveEnd::Entered(a, at) => {
+                            active = a;
+                            pc = at;
+                        },
+                    }
+                },
+                outcome => return outcome,
+            }
+        }
+    }
+
+    /// Runs one host-drive step, draining any interlock the step raises
+    /// before the interrupted fiber continues (its join answer delivered
+    /// onto the parked call site).
+    fn execute_host_step(
+        &mut self,
+        active: Active,
+        pc: CodePc,
+        boundary: usize,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
+        match self.execute(active, pc, boundary) {
+            Ok(DriveOutcome::Interlock(req)) => self.drive_interlock(req, boundary),
+            outcome => outcome,
+        }
     }
 
     /// Ledgers a fiber's death into its nursery, if it has one.
@@ -1797,17 +3626,20 @@ impl Vm {
             });
         }
         for (i, (&arg, &ty)) in args.iter().zip(target.layout.params()).enumerate() {
-            // a Ref word against a Fn parameter is the callable-defaulted
-            // slot (F2): the host stages a closure word into a fn-typed
-            // entry parameter exactly like a module call
-            if arg.slot_type() != ty
+            // one classification of the staged word serves the compare, the
+            // exemptions, and the report; a Raw parameter is the wildcard
+            // and a Ref word against a Fn parameter is the
+            // callable-defaulted slot (F2): the host stages a closure word
+            // into a fn-typed entry parameter exactly like a module call
+            let actual = arg.slot_type();
+            if actual != ty
                 && ty != SlotType::Raw
-                && !(arg.slot_type() == SlotType::Ref && ty == SlotType::Fn)
+                && !(actual == SlotType::Ref && ty == SlotType::Fn)
             {
                 return Err(Trap::SlotTypeMismatch {
                     slot: u8::try_from(i).expect("argument index exceeds u8"),
                     expected: ty,
-                    actual: arg.slot_type(),
+                    actual,
                 });
             }
         }
@@ -1879,6 +3711,48 @@ impl Vm {
         fiber.state = FiberState::Suspended;
     }
 
+    /// Parks the running fiber at a fork-join CALLG site: the
+    /// combinator's spawn phase ran (the children stand in `nursery`),
+    /// and the join runs on the interlock stack — the request's frame
+    /// drives the children, runs the assembly/fold stage, and delivers
+    /// the answer onto this call site, nesting depth costing the
+    /// interlock's heap frames, never the Rust stack. The whole-span
+    /// answer's width check runs here (the total overlay's write
+    /// check): the parked overlay must hold the answer (the lowerer
+    /// pre-widens; hand-assembled code refuses instead of losing the
+    /// tail words at the delivery).
+    fn fork_park(
+        &mut self,
+        active: &Active,
+        pc: CodePc,
+        area: usize,
+        nursery: NurseryId,
+        stage: crate::native::ForkStage,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
+        let resume_pc = CodePc(pc.0 + 1);
+        let answer_words = stage.answer_words();
+        if answer_words > area {
+            // the staged children and state must not outlive the
+            // refused park: tear the nursery down, release the staged
+            // words, then refuse
+            crate::native::fork_abandon(self, nursery, stage).map_err(|e| (e, pc))?;
+            return Err((
+                Trap::RetSpanTooWide {
+                    span: u16::try_from(answer_words).expect("answer widths fit u16"),
+                    caller_area: u16::try_from(area).expect("argument areas fit u16"),
+                },
+                pc,
+            ));
+        }
+        self.park_current(active, resume_pc);
+        Ok(DriveOutcome::Interlock(InterlockRequest {
+            nursery,
+            joiner: self.current,
+            resume_pc,
+            seam: DriveSeam::Fork(stage),
+        }))
+    }
+
     /// Enters `target` with `payload` [E2: switch is O(1)]: stash the
     /// outgoing fiber's context, swap the target's in (buffer ownership
     /// moves, no word is copied), and deliver `payload` onto the call the
@@ -1908,7 +3782,7 @@ impl Vm {
         if parked {
             let f = &resume.version.functions()[resume.func as usize];
             let fp = self.callinfo[self.callinfo.len() - 1].fp;
-            overlay_native(NativeResult::Word(payload), &mut self.stack, &f.layout, fp);
+            overlay_word(payload, &mut self.stack, &f.layout, fp);
         }
         (
             Active {
@@ -1924,17 +3798,52 @@ impl Vm {
     /// call the resumer parked at. `None` = the host takes the delivery —
     /// it was the resumer, or the resumer died while this fiber was parked
     /// (the leftover pattern; the join/teardown drivers must survive it).
-    fn die_current(&mut self, value: Value, outcome: ChildOutcome) -> Option<(Active, CodePc)> {
-        self.record_child_outcome(self.current, outcome);
-        let resumer = self.pool[self.current.index()].resumer;
-        // the delivered value's claim crosses with it — the receiver is
-        // resolved below. A completed fiber's exit decs have released its
-        // other claims already, so no walk runs here: a raised leftover is
-        // observable state (the rc_diag witness), released only by the
-        // cancel-cut and interrupt doors
-        if let Value::Ref(word) = value {
-            self.claims[self.current.index()].release(word);
+    /// Closes the frame at `fp` for the arena: a frame that allocated
+    /// arena temporaries pops its entry mark (the frame-pop restore
+    /// reclaims its bytes), and the flag clears for the frame a tail
+    /// transfer reuses.
+    fn arena_frame_close(&mut self, fp: usize) {
+        if let Word::Meta(meta) = &mut self.stack[fp] {
+            if meta.arena_active() {
+                self.pool[self.current.index()].arena.pop_frame_mark();
+                meta.clear_arena_active();
+            }
         }
+    }
+
+    fn die_current(&mut self, value: Value, outcome: ChildOutcome) -> Option<(Active, CodePc)> {
+        // the delivered words' claims cross with them — one release per
+        // `Ref` word of the completed span (the channel is whole-span), a
+        // single word for every other death. The receiver of the head word
+        // is resolved below; each delivered count stays exact through the
+        // joiner's own single dec. A completed fiber's exit decs have
+        // released its other claims already, so no walk runs here: a
+        // raised leftover is observable state (the rc_diag witness),
+        // released only by the cancel-cut and interrupt doors
+        match &outcome {
+            ChildOutcome::Completed(span) => {
+                for word in span.as_slice().iter().filter_map(|v| match v {
+                    Value::Ref(word) => Some(*word),
+                    _ => None,
+                }) {
+                    self.claims[self.current.index()].release(word);
+                }
+            },
+            _ => {
+                if let Value::Ref(word) = value {
+                    self.claims[self.current.index()].release(word);
+                }
+            },
+        }
+        self.record_child_outcome(self.current, outcome);
+        // the dying fiber's frames never run again, so its store's intern
+        // pins release with the death: every completed, cancelled, and
+        // halted exit funnels here (a cancelled fiber's claims already
+        // drained below, and the release is idempotent). Interrupted and
+        // marking deaths release at their own drain doors.
+        self.objects.release_pins();
+        self.pool[self.current.index()].arena.release_all();
+        let resumer = self.pool[self.current.index()].resumer;
         let fiber = &mut self.pool[self.current.index()];
         fiber.state = FiberState::Dead;
         fiber.resume = None;
@@ -1947,7 +3856,17 @@ impl Vm {
 
     /// The running fiber completed at its entry frame with `value`.
     fn complete_current(&mut self, value: Value) -> Option<(Active, CodePc)> {
-        self.die_current(value, ChildOutcome::Completed(value))
+        self.die_current(value, ChildOutcome::Completed(FrameAnswer::one(value)))
+    }
+
+    /// The running fiber completed at its entry frame answering the
+    /// whole span `answer` (a RETSPAN or a tail native's span/total):
+    /// the span rides the nursery ledger whole, the head word alone
+    /// reaching a live resumer (the resume channel stays one word) and
+    /// the drive's death value.
+    fn complete_current_span(&mut self, answer: FrameAnswer) -> Option<(Active, CodePc)> {
+        let head = answer.as_slice().first().copied().unwrap_or(Value::I64(0));
+        self.die_current(head, ChildOutcome::Completed(answer))
     }
 
     /// The running fiber observed its nursery's cancel flag at a taken
@@ -1955,8 +3874,11 @@ impl Vm {
     /// body it was re-entering runs — and its resumer receives the
     /// `PLATFORM_CANCELLED` sentinel.
     fn cancel_current(&mut self) -> Option<(Active, CodePc)> {
-        // the cut fiber's exit decs never run: the death walk releases
-        // its kept frames' claims here — the cancel-cut door
+        // the cut fiber's exit decs never run: the deinit pass fires its
+        // kept frames' hooks first (E5: teardown walks frames running
+        // deinits), then the death walk releases the claims — the
+        // cancel-cut door
+        self.fire_teardown_hooks(self.current, &[]);
         self.drain_claims(self.current);
         self.die_current(Value::Tag(PLATFORM_CANCELLED), ChildOutcome::Cancelled)
     }
@@ -1971,7 +3893,29 @@ impl Vm {
         pc: u32,
         fp: usize,
         caller: &FrameLayout,
+        nargs: u8,
     ) -> Result<SwitchOutcome, Trap> {
+        // Teardown never re-enters the nursery: under the teardown-drive
+        // flag every nursery control seam refuses like the drive rule's own
+        // refusals — a join or boundary would drive another nursery's
+        // children to death inside the pass (their death-walk doors meeting
+        // the pass's own walk from below), and a spawn would strand its
+        // child outside every standing drive's child snapshot. The refusal
+        // precedes every read and park, so the dying fiber's takeover is
+        // never parked mid-pass; the own-nursery and standing-drive refusals
+        // below keep their scope outside drives.
+        if self.teardown_drive
+            && matches!(
+                control,
+                ControlNative::NurseryJoin
+                    | ControlNative::NurseryOpen
+                    | ControlNative::NurserySpawn
+                    | ControlNative::NurseryBoundary
+                    | ControlNative::NurseryCancel
+            )
+        {
+            return Err(Trap::ReentrancyRefused);
+        }
         match control {
             ControlNative::Yield => {
                 let payload = control_i64(&self.stack, fp, caller, 0)?;
@@ -1999,12 +3943,7 @@ impl Vm {
                 });
                 let Some(target) = target else {
                     // no switch: the checked-read bounce answer [E2 debug surface]
-                    overlay_native(
-                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
-                        &mut self.stack,
-                        caller,
-                        fp,
-                    );
+                    overlay_word(Value::Tag(PLATFORM_NONE), &mut self.stack, caller, fp);
                     return Ok(SwitchOutcome::Bounced);
                 };
                 self.park_current(active, CodePc(pc + 1));
@@ -2021,12 +3960,7 @@ impl Vm {
                 });
                 let Some(nursery) = nursery else {
                     // absent or consumed: the checked-read bounce answer
-                    overlay_native(
-                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
-                        &mut self.stack,
-                        caller,
-                        fp,
-                    );
+                    overlay_word(Value::Tag(PLATFORM_NONE), &mut self.stack, caller, fp);
                     return Ok(SwitchOutcome::Bounced);
                 };
                 if self.pool[self.current.index()].nursery == Some(nursery) {
@@ -2037,19 +3971,24 @@ impl Vm {
                         func: nursery.0,
                     });
                 }
-                self.park_current(active, CodePc(pc + 1));
-                let joiner = self.current;
-                let outcomes = self.run_nursery_to_death(nursery, false, Some(joiner));
-                let failed = outcomes
-                    .iter()
-                    .filter(|o| matches!(o, ChildOutcome::Trapped(_)))
-                    .count();
-                let count = i64::try_from(failed).expect("child count fits i64");
-                match self.reenter_joiner(joiner, CodePc(pc + 1), Value::I64(count)) {
-                    Some((a, at)) => Ok(SwitchOutcome::Entered(a, at)),
-                    // no call site stands: the count surfaces to the host
-                    None => Ok(SwitchOutcome::Host(DriveOutcome::Died(Value::I64(count)))),
+                if self.nurseries[nursery.index()].driving {
+                    // a drive of this nursery already stands: the second
+                    // joiner would interlock the two drives on each other
+                    // (its answer needs the standing drive's completion,
+                    // the standing drive needs the joiner's death) — the
+                    // cycle the own-nursery rule refuses for one level [E2]
+                    return Err(Trap::UnknownCallee {
+                        module: "nursery".into(),
+                        func: nursery.0,
+                    });
                 }
+                self.park_current(active, CodePc(pc + 1));
+                Ok(SwitchOutcome::Interlock(InterlockRequest {
+                    nursery,
+                    joiner: self.current,
+                    resume_pc: CodePc(pc + 1),
+                    seam: DriveSeam::Count,
+                }))
             },
             // the in-language seams [E2]: open, spawn, the boundary join,
             // and cancel. The lowerer synthesizes every call site, so a
@@ -2058,12 +3997,7 @@ impl Vm {
             // convention) for hand-assembled corruption.
             ControlNative::NurseryOpen => {
                 let id = self.open_fresh_nursery();
-                overlay_native(
-                    NativeResult::Word(Value::I64(i64::from(id.0))),
-                    &mut self.stack,
-                    caller,
-                    fp,
-                );
+                overlay_word(Value::I64(i64::from(id.0)), &mut self.stack, caller, fp);
                 Ok(SwitchOutcome::Bounced)
             },
             ControlNative::NurserySpawn => {
@@ -2075,12 +4009,7 @@ impl Vm {
                         .is_some_and(|nr| nr.state == NurseryState::Open)
                 });
                 let Some(nursery) = nursery else {
-                    overlay_native(
-                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
-                        &mut self.stack,
-                        caller,
-                        fp,
-                    );
+                    overlay_word(Value::Tag(PLATFORM_NONE), &mut self.stack, caller, fp);
                     return Ok(SwitchOutcome::Bounced);
                 };
                 // the callable word: a scalar `Fn` names the child with no
@@ -2101,12 +4030,7 @@ impl Vm {
                     },
                 };
                 self.spawn_ref_into(Some(nursery), fref, &args)?;
-                overlay_native(
-                    NativeResult::Word(Value::I64(0)),
-                    &mut self.stack,
-                    caller,
-                    fp,
-                );
+                overlay_word(Value::I64(0), &mut self.stack, caller, fp);
                 Ok(SwitchOutcome::Bounced)
             },
             ControlNative::NurseryBoundary => {
@@ -2118,12 +4042,7 @@ impl Vm {
                         .is_some_and(|nr| nr.state == NurseryState::Open)
                 });
                 let Some(nursery) = nursery else {
-                    overlay_native(
-                        NativeResult::Word(Value::Tag(PLATFORM_NONE)),
-                        &mut self.stack,
-                        caller,
-                        fp,
-                    );
+                    overlay_word(Value::Tag(PLATFORM_NONE), &mut self.stack, caller, fp);
                     return Ok(SwitchOutcome::Bounced);
                 };
                 if self.pool[self.current.index()].nursery == Some(nursery) {
@@ -2132,83 +4051,87 @@ impl Vm {
                         func: nursery.0,
                     });
                 }
-                self.park_current(active, CodePc(pc + 1));
-                let joiner = self.current;
-                let outcomes = self.run_nursery_to_death(nursery, false, Some(joiner));
-                // the first failure in spawn-drive order decides: a
-                // cancelled child with no trapped one before it cannot
-                // happen (the flag only rises at a trapped death)
-                match outcomes
-                    .iter()
-                    .find(|o| matches!(o, ChildOutcome::Trapped(_)))
-                {
-                    None => match self.reenter_joiner(joiner, CodePc(pc + 1), Value::I64(0)) {
-                        Some((a, at)) => {
-                            self.overlay_boundary(&a, NURSERY_BOUNDARY_OK, Value::I64(0));
-                            Ok(SwitchOutcome::Entered(a, at))
-                        },
-                        // no call site stands: the discriminant surfaces to the host
-                        None => Ok(SwitchOutcome::Host(DriveOutcome::Died(Value::Tag(
-                            NURSERY_BOUNDARY_OK,
-                        )))),
-                    },
-                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => {
-                        // the staged mask is the caller's return-union
-                        // member containment set: an error the boundary
-                        // cannot union out refuses instead of corrupting
-                        // the union's tag space
-                        let contained = match payload {
-                            Value::Tag(tag) => *tag < 64 && (mask & (1i64 << *tag)) != 0,
-                            _ => false,
-                        };
-                        if !contained {
-                            // re-enter the joiner so the drive ends on it
-                            // and the trap attributes at the boundary; the
-                            // call site never reads the answer
-                            let _ = self.reenter_joiner(joiner, CodePc(pc + 1), Value::I64(0));
-                            return Err(Trap::NurseryUncontained { payload: *payload });
-                        }
-                        match self.reenter_joiner(joiner, CodePc(pc + 1), Value::I64(0)) {
-                            Some((a, at)) => {
-                                self.overlay_boundary(&a, NURSERY_BOUNDARY_ERR, *payload);
-                                Ok(SwitchOutcome::Entered(a, at))
-                            },
-                            // no call site stands: the payload surfaces to the host
-                            None => Ok(SwitchOutcome::Host(DriveOutcome::Died(*payload))),
-                        }
-                    },
-                    Some(ChildOutcome::Trapped(trap)) => {
-                        // a real trap surfaces at the boundary: re-enter
-                        // the joiner first, so the drive ends on it and
-                        // the trap attributes there
-                        let _ = self.reenter_joiner(joiner, CodePc(pc + 1), Value::I64(0));
-                        Err(trap.clone())
-                    },
-                    Some(_) => unreachable!("the scan yields only trapped failures"),
+                if self.nurseries[nursery.index()].driving {
+                    // the interlock cycle of the join seam, one level up
+                    return Err(Trap::UnknownCallee {
+                        module: "nursery".into(),
+                        func: nursery.0,
+                    });
                 }
+                self.park_current(active, CodePc(pc + 1));
+                Ok(SwitchOutcome::Interlock(InterlockRequest {
+                    nursery,
+                    joiner: self.current,
+                    resume_pc: CodePc(pc + 1),
+                    seam: DriveSeam::Boundary { mask },
+                }))
             },
             ControlNative::NurseryCancel => {
                 // the fiber's deliberate failure: the trap path ledgers
                 // the outcome and raises the cancel flag; the call never
-                // answers
-                let payload = control_word(&self.stack, fp, caller, 0)?;
+                // answers. The staged words are the failing value's flat
+                // span — word 0 the member's tag, the rest its payload
+                // words (the native channel's staging shape); the staged
+                // count is the call site's fact, bounded by the frame's
+                // own area
+                if usize::from(nargs) > caller.arg_area_len() {
+                    return Err(Trap::CallLayout(SlideError::StagingTooSmall {
+                        available: caller.arg_area_len(),
+                        needed: usize::from(nargs),
+                    }));
+                }
+                let mut payload = Vec::with_capacity(usize::from(nargs));
+                for index in 0..usize::from(nargs) {
+                    payload.push(control_word(&self.stack, fp, caller, index)?);
+                }
                 Err(Trap::NurseryCancelled { payload })
             },
         }
     }
 
-    /// Writes the boundary seam's two-word answer span onto the joiner's
-    /// call site: word 0 the discriminant, word 1 the payload. Runs
-    /// after the joiner's re-entry, so the current context is its frame.
-    fn overlay_boundary(&mut self, active: &Active, tag: u8, payload: Value) {
+    /// Writes the boundary seam's answer span onto the joiner's call
+    /// site: word 0 the discriminant, the tail the failing member's flat
+    /// word span. Runs after the joiner's re-entry, so the current
+    /// context is its frame.
+    fn overlay_boundary(&mut self, active: &Active, tag: u8, payload: &[Value]) {
         let fp = self.callinfo[self.callinfo.len() - 1].fp;
         let f = &active.version.functions()[active.func as usize];
-        overlay_native(
-            NativeResult::Tag { tag, payload },
-            &mut self.stack,
-            &f.layout,
-            fp,
-        );
+        let area = f.layout.arg_area_len();
+        // the span channel's bounds check: the boundary's static floor is
+        // the two-word answer, and the payload words check at the write
+        // exactly like a span answer's (a too-narrow caller is a
+        // hand-assembled module — the lowerer widens the area to the
+        // widest contained member)
+        if 1 + payload.len() > area {
+            // a hand-assembled module only: the lowerer widens the area to
+            // the widest contained member. The write cannot happen, and
+            // the payload's rows are already this fiber's from the death
+            // handoff — its own drain settles them, so no ledger action
+            return;
+        }
+        overlay_tag(tag, payload, &mut self.stack, &f.layout, fp);
+    }
+
+    /// Writes the fork seam's whole-span answer tail onto the re-entered
+    /// joiner's call site: the head word already landed through the
+    /// switch payload, the tail words following on the overlay slots the
+    /// CALLG site's answer occupies — the tag-less total's delivery
+    /// twin. The park-time width check refused an overlay too narrow
+    /// for the whole span, so a missed write is hand-assembled-only
+    /// (the boundary seam's same defensive skip; the delivered words'
+    /// rows settle at the joiner's drain door).
+    fn overlay_span_tail(&mut self, active: &Active, tail: &[Value]) {
+        let fp = self.callinfo[self.callinfo.len() - 1].fp;
+        let f = &active.version.functions()[active.func as usize];
+        let area = f.layout.arg_area_len();
+        if 1 + tail.len() > area {
+            return;
+        }
+        let body_len = f.layout.body_len();
+        let start = f.layout.arg_area().start;
+        for (index, value) in tail.iter().enumerate() {
+            self.stack[word_of(fp, start + 1 + index, body_len)] = Word::Slot(*value);
+        }
     }
 
     /// Re-enters the joiner a join/boundary drive parked at `resume_pc`,
@@ -2243,9 +4166,11 @@ impl Vm {
         let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
         self.host_release(); // stash any interrupted drive's context
         // the reset door of the death walk: a halted or trapped root
-        // drive's kept frames release their claims before the reset
-        // discards them (the tail-native abandon's count dies here now,
-        // at the next run, instead of leaking to the VM's drop)
+        // drive's kept frames fire their deinits here (E5), then release
+        // their claims before the reset discards them (the tail-native
+        // abandon's count dies here now, at the next run, instead of
+        // leaking to the VM's drop)
+        self.fire_teardown_hooks(FIBER_ROOT, &[]);
         self.drain_claims(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();
@@ -2265,7 +4190,7 @@ impl Vm {
         };
         let mut pc = CodePc(0);
         loop {
-            match self.execute(active, pc, usize::MAX) {
+            match self.execute_host_step(active, pc, usize::MAX) {
                 Ok(DriveOutcome::Died(value)) => {
                     self.host_release();
                     // the completed root's answer crosses to the host
@@ -2279,6 +4204,9 @@ impl Vm {
                 },
                 Ok(DriveOutcome::Frame(_)) => {
                     unreachable!("a host drive answers no reentry frame")
+                },
+                Ok(DriveOutcome::Interlock(_)) => {
+                    unreachable!("the step drains every interlock before returning")
                 },
                 Err((trap, at)) => {
                     self.trap_pc = Some(at);
@@ -2311,6 +4239,19 @@ impl Vm {
         )
     }
 
+    /// The outgoing-argument area of the frame below the executing one,
+    /// when the chain has one: a tail site's answer overlays that caller's
+    /// area, never the reusing frame's own.
+    fn caller_arg_area(&self) -> Option<usize> {
+        let at = self.callinfo.len().checked_sub(2)?;
+        let caller = &self.callinfo[at];
+        Some(
+            caller.module.functions()[caller.func as usize]
+                .layout
+                .arg_area_len(),
+        )
+    }
+
     /// Drives one reentrant call of a planned function from native code
     /// — the lambda-taking container combinators' per-element
     /// invocation: a synthetic reentry frame (the entry-frame sentinel
@@ -2323,8 +4264,11 @@ impl Vm {
     /// count per `Ref` capture, balanced by the callee body's own
     /// placement). Each Ref argument carries one count into
     /// the frame (the local-call hand-off: the callee's placement owns
-    /// its params), and the returned word transfers its count to the
-    /// caller. A drive that ends any other way —
+    /// its params), and the returned words transfer their counts to the
+    /// caller — one word for a scalar body, the whole span for a
+    /// multi-word return (the element span each way: the arguments are
+    /// the callee's flattened parameter words, the answer its whole
+    /// return span). A drive that ends any other way —
     /// the lambda HALTs under nesting, a fiber switch's resumer chain
     /// never returns, a nursery cancel kills the fiber, a yield parks
     /// at the host — refuses with [`Trap::ReentrancyRefused`]: a
@@ -2334,7 +4278,11 @@ impl Vm {
     /// resume would run its lambda into the sentinel return pc). A
     /// trapped lambda propagates its trap with the frames kept for
     /// [`Vm::backtrace`].
-    pub(crate) fn call_hosted(&mut self, callee: Value, args: &[Value]) -> Result<Value, Trap> {
+    pub(crate) fn call_hosted(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+    ) -> Result<FrameAnswer, Trap> {
         let nargs = u8::try_from(args.len()).expect("hosted-call arities are tiny");
         let (funcref, captures) = match callee {
             Value::Fn(funcref) => (funcref, None),
@@ -2385,6 +4333,7 @@ impl Vm {
                     &mut self.pool,
                     &mut self.claims,
                     handoff_owner,
+                    self.ctx_live,
                     handoff_owner,
                     word,
                 )?;
@@ -2398,7 +4347,7 @@ impl Vm {
         // slots — the CALLS copy-in discipline: one acquired count per
         // Ref capture, the body's own placement balancing it, while the
         // closure object keeps its own count untouched
-        let capture_body_len = target.layout.slots().len() - target.layout.arg_area_len();
+        let capture_body_len = target.layout.body_len();
         if let Some(block) = &captures {
             let end = target.layout.params_len() + block.len();
             if end > capture_body_len {
@@ -2415,6 +4364,7 @@ impl Vm {
                         &mut self.pool,
                         &mut self.claims,
                         owner,
+                        self.ctx_live,
                         owner,
                         word,
                     )?;
@@ -2440,13 +4390,19 @@ impl Vm {
         fiber.max_len = fiber.max_len.max(needed);
         let boundary = self.callinfo.len();
         let host = self.current;
+        // the entry holds the resolve's clone; the resolve's own handle
+        // becomes the reentry drive's Active (two mints per hosted call:
+        // the entry and the resolution itself, no third)
         let active = Active {
-            version: Arc::clone(&version),
+            version,
             func: func_id,
         };
-        let driven = match self.execute(active, CodePc(0), boundary) {
+        let driven = match self.execute_host_step(active, CodePc(0), boundary) {
             Ok(DriveOutcome::Frame(value)) => Ok(value),
             Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => Err(Trap::ReentrancyRefused),
+            Ok(DriveOutcome::Interlock(_)) => {
+                unreachable!("the step drains every interlock before returning")
+            },
             Err((trap, _at)) => Err(trap),
         };
         if driven.is_err() {
@@ -2520,10 +4476,11 @@ impl Vm {
         pool: &mut [Fiber],
         claims: &mut [ClaimTable],
         running: FiberId,
+        live: bool,
         claimant: FiberId,
         word: RefId,
     ) -> Result<(), Trap> {
-        Heaps::new(running, objects, pool, claims, true).inc_for(claimant, word)
+        Heaps::new(running, objects, pool, claims, live).inc_for(claimant, word)
     }
 
     /// An object-graph edge's count (a closure's capture adoption): routed
@@ -2539,22 +4496,297 @@ impl Vm {
     /// hand-assembled release without an acquire) errors and is ignored:
     /// the walk releases what the store knows.
     fn drain_claims(&mut self, fiber: FiberId) {
-        self.drain_claims_except(fiber, None);
+        self.drain_claims_except(fiber, &[]);
     }
 
     /// [`Self::drain_claims`] holding `held` back — a word about to ride
-    /// its recorded outcome to a delivery keeps its claim. A fiber running
-    /// under the live context decs through `objects`; every other case
-    /// (and every fiber while the drive is parked) routes through the
-    /// pool, the scratch never receiving a walk's dec.
-    fn drain_claims_except(&mut self, fiber: FiberId, held: Option<RefId>) {
+    /// its recorded outcome to a delivery keeps its claim. The claims are
+    /// taken before any dec runs, so both doors ride the walk's no-ledger
+    /// dec: a fiber running under the live context through its context
+    /// store, every other case (and every fiber while the drive is parked)
+    /// through the pool, the scratch never receiving a walk's dec.
+    fn drain_claims_except(&mut self, fiber: FiberId, held: &[RefId]) {
         let live_here = self.ctx_live && fiber == self.current;
         for (word, n) in self.claims[fiber.index()].take_all_except(held) {
             for _ in 0..n {
-                let _ =
-                    if live_here { self.dec_ref(word) } else { self.heaps_walk().dec_walk(word) };
+                let _ = if live_here {
+                    self.heaps().dec_walk(word)
+                } else {
+                    self.heaps_walk().dec_walk(word)
+                };
             }
         }
+        // the door's frames never run again, so the fiber's intern pins
+        // release with the walk (interrupted, marking, reuse, and reset
+        // deaths; a live-here death releases again in `die_current`,
+        // idempotently)
+        if live_here {
+            self.objects.release_pins();
+        } else {
+            self.pool[fiber.index()].objects.release_pins();
+        }
+        // the door's frames never run again, so the fiber's arena
+        // temporaries die with them: a wholesale rewind to the base, the
+        // frame marks dropping with it (a recycled slot starts empty)
+        self.pool[fiber.index()].arena.release_all();
+    }
+
+    /// The teardown deinit pass (E5: teardown walks frames running
+    /// deinits): every deinit claim of the dying fiber's kept frames
+    /// whose liveness the claim ledger certifies fires its hook, exactly
+    /// once, deterministically — frames innermost-first (an unwind's
+    /// order), each frame's claims in directory (drop-site) order. The
+    /// drive rides [`Vm::call_hosted`] on a live context: the dying
+    /// fiber's own when it is current (the cancel-cut door), a takeover
+    /// of its parked context otherwise (interrupted and dead fibers carry
+    /// no resume point, so the three ownership swaps run directly). A
+    /// takeover over a live third fiber parks that fiber's context first
+    /// and re-adopts it after the pass: the door's caller continues on
+    /// its own frames.
+    ///
+    /// The drive rule: a teardown hook must return to its driver. A hook
+    /// that parks (a yield, a resume switch), dies (a `HALT`), traps,
+    /// observes a raised cancel flag at a backward branch, or calls a
+    /// nursery control seam (the natives refuse at the dispatch under the
+    /// drive flag) refuses with [`Trap::ReentrancyRefused`]; its
+    /// already-run effects stand, the pass ends at that hook, and the
+    /// remaining hooks' claims drain unfired — teardown never re-enters
+    /// the nursery and never surfaces a user-hook failure, exactly the
+    /// death walk's bogus-word honesty.
+    fn fire_teardown_hooks(&mut self, fiber: FiberId, held: &[RefId]) {
+        if self.teardown_drive {
+            // a door inside a teardown drive never starts a second pass.
+            // The nursery seams refuse under the drive flag, so no path
+            // reaches a door in-drive; this stays as the safety net for an
+            // exotic switch tangle — the outer pass remains the only walker
+            return;
+        }
+        let drives = self.collect_teardown_drives(fiber, held);
+        if drives.is_empty() {
+            return;
+        }
+        let takeover = !(self.ctx_live && self.current == fiber);
+        let interrupted = takeover.then_some(self.current).filter(|_| self.ctx_live);
+        if takeover {
+            self.host_release();
+            let slot = &mut self.pool[fiber.index()];
+            std::mem::swap(&mut self.stack, &mut slot.segment);
+            std::mem::swap(&mut self.callinfo, &mut slot.callinfo);
+            std::mem::swap(&mut self.objects, &mut slot.objects);
+            self.current = fiber;
+            self.ctx_live = true;
+        }
+        self.teardown_drive = true;
+        for (callee, words) in drives {
+            if self.call_hosted(Value::Fn(callee), &words).is_err() {
+                break;
+            }
+        }
+        self.teardown_drive = false;
+        if takeover {
+            self.host_release();
+        }
+        if let Some(resume) = interrupted {
+            // the door fired mid-flight of a live fiber (a spawner's
+            // recycle door over a dead slot): the drive's caller
+            // continues on its own frames, so the parked context swaps
+            // back in — otherwise it stays stranded in its slot while
+            // the caller runs on the dying fiber's stale scratch buffer
+            let slot = &mut self.pool[resume.index()];
+            std::mem::swap(&mut self.stack, &mut slot.segment);
+            std::mem::swap(&mut self.callinfo, &mut slot.callinfo);
+            std::mem::swap(&mut self.objects, &mut slot.objects);
+            self.current = resume;
+            self.ctx_live = true;
+        }
+    }
+
+    /// The pass's drive list: for each kept frame (innermost-first) and
+    /// each directory site (drop-site order), the hook target plus the
+    /// span words read from the frame, gated on the site's establishment
+    /// band when it carries one — the frame word the claim's
+    /// registration set and every death path cleared, so the doors fire
+    /// exactly the claims that live at their slots: Ref-free spans
+    /// included, dead claims whose counts survive on outstanding borrows
+    /// excluded. A bandless site (a hand-assembled shape) falls back to
+    /// the claim ledger: every `Ref` word of the span must still hold
+    /// its kind (the frame word is a live reference, not zero init or a
+    /// clobbered slot) and a count (the claim's own drop releases its
+    /// counts, so a dead claim answers zero), so a span with no `Ref`
+    /// word stays unfired there. The held-back cancel payload skips, a
+    /// word consumed by an earlier drive never fires twice, and each
+    /// fired band clears in its frame word so a later door on the same
+    /// kept frames cannot fire the claim again.
+    fn collect_teardown_drives(
+        &mut self,
+        fiber: FiberId,
+        held: &[RefId],
+    ) -> Vec<(FuncRef, Vec<Value>)> {
+        let live = self.ctx_live && self.current == fiber;
+        // the frames are read by index, innermost first: the walk clones one
+        // version handle per frame and allocates no frame list of its own
+        let depth =
+            if live { self.callinfo.len() } else { self.pool[fiber.index()].callinfo.len() };
+        let mut drives = Vec::new();
+        let mut driven_words: Vec<RefId> = Vec::new();
+        let mut driven_bases: Vec<u8> = Vec::new();
+        for index in (0..depth).rev() {
+            let (fp, version, func) = if live {
+                let frame = &self.callinfo[index];
+                (frame.fp, Arc::clone(&frame.module), frame.func)
+            } else {
+                let frame = &self.pool[fiber.index()].callinfo[index];
+                (frame.fp, Arc::clone(&frame.module), frame.func)
+            };
+            let Some(module_id) = self.registry.module_id(version.name()) else {
+                continue;
+            };
+            let sites = self.hook_sites_for(&version, func);
+            if sites.is_empty() {
+                continue;
+            }
+            driven_bases.clear();
+            for site in sites.iter().copied() {
+                if driven_bases.contains(&site.base) {
+                    continue; // one value lives in one slot per frame
+                }
+                let Some(drive) = self.gate_teardown_site(
+                    fiber,
+                    fp,
+                    &version,
+                    site,
+                    module_id,
+                    held,
+                    &driven_words,
+                ) else {
+                    continue;
+                };
+                driven_bases.push(site.base);
+                driven_words.extend(drive.1.iter().filter_map(|w| match w {
+                    Value::Ref(word) => Some(*word),
+                    _ => None,
+                }));
+                if let Some(band) = site.band {
+                    // the fired claim's band clears in the frame word
+                    // itself: the drive runs the hook, not the body's own
+                    // clear op, and a later door over the same kept frames
+                    // (the recycle safety net) must never fire it twice
+                    let at = fp + 1 + usize::from(band);
+                    let cleared = Word::Slot(Value::Tag(CLAIM_BAND_CLEAR));
+                    if live {
+                        self.stack[at] = cleared;
+                    } else {
+                        self.pool[fiber.index()].segment[at] = cleared;
+                    }
+                }
+                drives.push(drive);
+            }
+        }
+        drives
+    }
+
+    /// One site's gate: reads the span words out of the frame (the live
+    /// stack under the dying fiber's context, its pool segment otherwise)
+    /// and checks every span word against the hook's parameter kinds. A
+    /// site carrying an establishment band (the marker the body's own
+    /// drop clears right after the hook call) reads the band word: set
+    /// means the claim lives at this slot — the exact once-per-value
+    /// witness, firing Ref-free spans and refusing dead claims whose
+    /// counts survive on outstanding borrows. A bandless site (a
+    /// hand-assembled shape) falls back to the claim ledger: every `Ref`
+    /// word of the span must still hold a count. `None` = skip.
+    #[allow(clippy::too_many_arguments)]
+    fn gate_teardown_site(
+        &self,
+        fiber: FiberId,
+        fp: usize,
+        version: &Arc<ModuleVersion>,
+        site: HookSite,
+        module_id: u32,
+        held: &[RefId],
+        driven_words: &[RefId],
+    ) -> Option<(FuncRef, Vec<Value>)> {
+        let hook = &version.functions()[site.hook as usize];
+        let params = hook.layout.params();
+        let width = usize::from(site.width);
+        if params.len() != width {
+            return None; // not this body's drop shape (a stale directory)
+        }
+        let read = |at: usize| -> Option<Value> {
+            let word = if self.ctx_live && self.current == fiber {
+                self.stack.get(fp + 1 + at)
+            } else {
+                self.pool[fiber.index()].segment.get(fp + 1 + at)
+            }?;
+            match word {
+                Word::Slot(v) => Some(*v),
+                Word::Meta(_) => None,
+            }
+        };
+        let mut words = Vec::with_capacity(width);
+        for at in usize::from(site.base)..usize::from(site.base) + width {
+            words.push(read(at)?);
+        }
+        if !held.is_empty() {
+            // the outcome's payload rides to a delivery: its values are
+            // alive
+            if words
+                .iter()
+                .any(|w| matches!(w, Value::Ref(word) if held.contains(word)))
+            {
+                return None;
+            }
+        }
+        // the establishment band is the witness; span kinds still check
+        // (a clobbered slot refuses) and a word an earlier drive consumed
+        // never fires twice, but the ledger's counts no longer gate
+        if site.band.is_some_and(|band| {
+            !matches!(read(usize::from(band)), Some(Value::Tag(CLAIM_BAND_SET)))
+        }) {
+            return None;
+        }
+        let ledger_witness = site.band.is_none();
+        let mut witness = false;
+        // one match classifies each span word against the hook's parameter
+        // kind: the layout's own Ref arm names its object (an arena word
+        // refuses there — it classifies Ref but names no object), a Raw
+        // parameter stages any word, every other kind checks once
+        for (word, ty) in words.iter().zip(params.iter()) {
+            match (word, ty) {
+                (Value::Ref(id), SlotType::Ref) => {
+                    if driven_words.contains(id)
+                        || (ledger_witness && self.claims[fiber.index()].count_of(*id) == 0)
+                    {
+                        return None;
+                    }
+                    witness = true;
+                },
+                (_, SlotType::Raw) => {},
+                (_, SlotType::Ref) => return None,
+                (word, ty) if word.slot_type() == *ty => {},
+                _ => return None,
+            }
+        }
+        // a band carries its own witness; the ledger path needs a Ref word
+        (witness || site.band.is_some()).then(|| (FuncRef::new(module_id, site.hook), words))
+    }
+
+    /// The derived deinit-claim directory of one function (crates/ds-vm/
+    /// src/claims.rs), cached per (version, function) and swept wholesale
+    /// when the registry generation moves — the kstr cache's discipline.
+    fn hook_sites_for(&mut self, version: &Arc<ModuleVersion>, func: u32) -> Arc<Vec<HookSite>> {
+        let generation = self.registry.generation();
+        if self.hook_dirs_stamp != generation {
+            self.hook_dirs.clear();
+            self.hook_dirs_stamp = generation;
+        }
+        let key = (Arc::as_ptr(version) as usize, func);
+        if let Some(sites) = self.hook_dirs.get(&key) {
+            return Arc::clone(sites);
+        }
+        let sites = hook_sites(version, func);
+        self.hook_dirs.insert(key, Arc::clone(&sites));
+        sites
     }
 
     /// A value crossing to the host from the drive-ended fiber: its
@@ -2566,22 +4798,17 @@ impl Vm {
         }
     }
 
-    /// The payload word a nursery trap carries: delivered to the host
-    /// like any drive-ending value.
+    /// The payload span a nursery trap carries: delivered to the host
+    /// like any drive-ending value, one `Ref` word at a time.
     fn trap_delivery(&mut self, trap: &Trap) {
         match trap {
             Trap::NurseryCancelled { payload } | Trap::NurseryUncontained { payload } => {
-                self.host_delivery(payload);
+                for value in payload {
+                    self.host_delivery(value);
+                }
             },
             _ => {},
         }
-    }
-
-    /// Whether two reference words name content-equal strings, routed
-    /// (string equality is content equality whatever heap each side
-    /// lives on).
-    fn str_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
-        self.heaps().str_eq(x, y)
     }
 
     /// A closure word's header and capture block copied out of its own
@@ -2618,11 +4845,16 @@ impl Vm {
     /// tables (a uop module installed under a native table's name shadows
     /// the natives); a stamp mismatch after a swap lands here, so callee
     /// resolution always follows the current slot [H6 item 5]. Traps are
-    /// never cached — every failure comes from the full path.
+    /// never cached — every failure comes from the full path (a refused
+    /// layout pair rides the entry as its cached refusal, re-raised at the
+    /// call seam, never answered as a resolution failure). A uop fill also
+    /// derives the site's layout facts against `caller_layout`, so the
+    /// plan is re-derived exactly when the callee is.
     fn resolve_site(
         &mut self,
         pool: &[Const],
         caller: usize,
+        caller_layout: &FrameLayout,
         pc: u32,
         kidx: ConstIdx,
         nargs: u8,
@@ -2633,7 +4865,8 @@ impl Vm {
             .as_ref()
             .is_some_and(|e| e.caller == caller && e.pc == pc && e.stamp == stamp);
         if !hit {
-            let entry = self.resolve_site_full(pool, caller, pc, kidx, nargs, stamp)?;
+            let entry =
+                self.resolve_site_full(pool, caller, caller_layout, pc, kidx, nargs, stamp)?;
             self.call_cache[at] = Some(entry);
         }
         Ok(
@@ -2642,9 +4875,14 @@ impl Vm {
                 .expect("the slot was just filled")
                 .callee
             {
-                CachedCallee::Uop { version, func } => Resolved::Uop {
+                CachedCallee::Uop {
+                    version,
+                    func,
+                    facts,
+                } => Resolved::Uop {
                     version: Arc::clone(version),
                     func: *func,
+                    facts: facts.clone(),
                 },
                 CachedCallee::Native { table, index } => Resolved::Native {
                     table: Arc::clone(table),
@@ -2658,19 +4896,21 @@ impl Vm {
     /// pool kind check, the target module's current slot, the entry-word
     /// and arity checks. The pool belongs to the CALLER's module version:
     /// instruction stream and pool are version-stable, callee resolution
-    /// follows the target's current slot [H6 item 5].
+    /// follows the target's current slot [H6 item 5]. The pool operand's
+    /// index and FuncRef kind were proved at install (module.rs's body
+    /// validation), so the fetch indexes directly and the kind arm is the
+    /// corrupted-pool tripwire.
     fn resolve_site_full(
         &self,
         pool: &[Const],
         caller: usize,
+        caller_layout: &FrameLayout,
         pc: u32,
         kidx: ConstIdx,
         nargs: u8,
         stamp: u64,
     ) -> Result<CallSite, Trap> {
-        let found = pool
-            .get(usize::from(kidx.0))
-            .ok_or(Trap::PoolIndex { kidx: kidx.0 })?;
+        let found = &pool[usize::from(kidx.0)];
         let Const::FuncRef { module, func } = found else {
             return Err(Trap::PoolKind {
                 kidx: kidx.0,
@@ -2680,19 +4920,14 @@ impl Vm {
         };
         if let Some((version, func_id)) = self.registry.resolve_indexed(module, *func) {
             let target = &version.functions()[func_id as usize];
-            let entry = target.entry.resolve();
-            if entry != func_id as usize {
-                return Err(Trap::EntryWordMismatch {
-                    resolved: entry,
-                    expected: func_id as usize,
-                });
-            }
+            debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
             if usize::from(nargs) != target.layout.params_len() {
                 return Err(Trap::ArityMismatch {
                     expected: target.layout.params_len(),
                     given: usize::from(nargs),
                 });
             }
+            let facts = SiteFacts::derive(caller_layout, &target.layout);
             return Ok(CallSite {
                 caller,
                 pc,
@@ -2700,6 +4935,7 @@ impl Vm {
                 callee: CachedCallee::Uop {
                     version,
                     func: func_id,
+                    facts,
                 },
             });
         }
@@ -2712,7 +4948,15 @@ impl Vm {
                 func: *func,
             })?;
         let native = &table[*func as usize];
-        if usize::from(nargs) != native.params.len() {
+        // a variadic native takes at least its named parameters (the
+        // staged tail is one element's whole word span, its width the
+        // call site's static fact); every other native takes exactly them
+        let arity_ok = if native.variadic {
+            usize::from(nargs) >= native.params.len()
+        } else {
+            usize::from(nargs) == native.params.len()
+        };
+        if !arity_ok {
             return Err(Trap::ArityMismatch {
                 expected: native.params.len(),
                 given: usize::from(nargs),
@@ -2729,7 +4973,8 @@ impl Vm {
         })
     }
 
-    /// Resolves a dispatch site's (CALLG/CALLTG) pool FuncRef against the
+    /// Resolves a dispatch site's (CALLG/CALLTG) pool FuncRef — fetched and
+    /// matched by the calling arm — against the
     /// uop module tables: the same CALL-site inline cache bank CALL/CALLT
     /// key — the caller function's identity and pc, validated against the
     /// registry's install generation — so a dispatch tail site keys its
@@ -2743,13 +4988,19 @@ impl Vm {
     /// (its target is runtime data, never cacheable), and a generic
     /// builtin's FuncRef answers [`DispatchResolved::NotUop`] uncached —
     /// the static generic table needs no cache. Traps are never cached:
-    /// every failure comes from the full path.
+    /// every failure comes from the full path. The caller hands in the
+    /// pool entry it already fetched and matched (the arm's own refusal
+    /// path raised the pool traps), so the resolver never re-classifies
+    /// the word, and a uop fill derives the site's layout facts against
+    /// `caller_layout` — the plan is re-derived exactly when the callee
+    /// is.
     fn resolve_dispatch_site(
         &mut self,
-        pool: &[Const],
+        module: &str,
+        func: u32,
         caller: usize,
+        caller_layout: &FrameLayout,
         pc: u32,
-        kidx: ConstIdx,
         nargs: u8,
     ) -> Result<DispatchResolved, Trap> {
         let at = pc as usize & (CALL_CACHE_SLOTS - 1);
@@ -2761,33 +5012,18 @@ impl Vm {
                 && matches!(e.callee, CachedCallee::Uop { .. })
         });
         if !hit {
-            let found = pool
-                .get(usize::from(kidx.0))
-                .ok_or(Trap::PoolIndex { kidx: kidx.0 })?;
-            let Const::FuncRef { module, func } = found else {
-                return Err(Trap::PoolKind {
-                    kidx: kidx.0,
-                    expected: ConstKind::FuncRef,
-                    found: found.kind(),
-                });
-            };
-            let Some((version, func_id)) = self.registry.resolve_indexed(module, *func) else {
+            let Some((version, func_id)) = self.registry.resolve_indexed(module, func) else {
                 return Ok(DispatchResolved::NotUop);
             };
             let target = &version.functions()[func_id as usize];
-            let entry = target.entry.resolve();
-            if entry != func_id as usize {
-                return Err(Trap::EntryWordMismatch {
-                    resolved: entry,
-                    expected: func_id as usize,
-                });
-            }
+            debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
             if usize::from(nargs) > target.layout.params_len() {
                 return Err(Trap::ArityMismatch {
                     expected: target.layout.params_len(),
                     given: usize::from(nargs),
                 });
             }
+            let facts = SiteFacts::derive(caller_layout, &target.layout);
             self.call_cache[at] = Some(CallSite {
                 caller,
                 pc,
@@ -2795,11 +5031,13 @@ impl Vm {
                 callee: CachedCallee::Uop {
                     version: Arc::clone(&version),
                     func: func_id,
+                    facts: facts.clone(),
                 },
             });
             return Ok(DispatchResolved::Uop {
                 version,
                 func: func_id,
+                facts,
             });
         }
         match &self.call_cache[at]
@@ -2807,9 +5045,14 @@ impl Vm {
             .expect("the slot was just validated")
             .callee
         {
-            CachedCallee::Uop { version, func } => Ok(DispatchResolved::Uop {
+            CachedCallee::Uop {
+                version,
+                func,
+                facts,
+            } => Ok(DispatchResolved::Uop {
                 version: Arc::clone(version),
                 func: *func,
+                facts: facts.clone(),
             }),
             // unreachable by the hit predicate; answered defensively so a
             // corrupted bank degrades to the generic path's honest trap
@@ -2825,50 +5068,58 @@ impl Vm {
     /// with the pool constant's exact content — no claim is held, so a
     /// program dropping its last reference still frees the object at the
     /// same moment as without the cache (a dead or recycled id simply
-    /// falls back to the full intern). Every load, first or cached,
-    /// claims one count for the destination slot, exactly the discipline
-    /// a fresh intern follows. The pool-address key is a hint, never an
-    /// authority: a dead pool's row can meet a DIFFERENT pool at the
-    /// reused address (wrong length, wrong kinds), so the hit path
-    /// validates kind as well as content and any mismatch degrades to
-    /// the miss path — the kind and index traps stay exactly where an
-    /// uncached load raises them.
-    fn kstr_load(&mut self, pool: &[Const], kidx: ConstIdx) -> Result<u32, Trap> {
-        let pool_id = (pool.as_ptr() as usize, self.current.0);
-        if let Some(&Some(id)) = self
-            .kstr_cache
-            .get(&pool_id)
-            .and_then(|ids| ids.get(usize::from(kidx.0)))
-        {
-            if let Some(Const::Str(text)) = pool.get(usize::from(kidx.0)) {
-                if self.objects.is_live_str_with(id, text.as_str()) {
-                    self.objects.inc(id)?;
-                    return Ok(id);
-                }
-            }
-        }
-        let text = match pool.get(usize::from(kidx.0)) {
-            Some(Const::Str(text)) => text.as_str(),
-            Some(found) => {
+    /// falls back to the full intern). Every claiming load, first or
+    /// cached, acquires one count for the destination slot, exactly the
+    /// discipline a fresh intern follows; a borrow load (KSTR_BORROW,
+    /// the placement pass's proof that the word's count never moves)
+    /// claims nothing and the intern map pins the canonical copy. The
+    /// row key is a hint, never an authority: a dead pool's row can meet
+    /// a DIFFERENT pool at the reused address (wrong length, wrong kinds),
+    /// so the hit path validates kind as well as content and any mismatch
+    /// degrades to the miss path — the kind trap stays exactly where an
+    /// uncached load raises it. `slot` is the executing frame's
+    /// resolved row: the first load of a frame resolves it, every later
+    /// load in that frame reads it, and a row reclaimed or shifted under
+    /// the frame re-resolves through the key index once.
+    fn kstr_load(
+        &mut self,
+        pool: &[Const],
+        kidx: ConstIdx,
+        claim: bool,
+        slot: &mut Option<KstrRowSlot>,
+    ) -> Result<u32, Trap> {
+        let idx = usize::from(kidx.0);
+        // install proved the operand's pool index in range and its kind Str
+        // (module.rs's body validation); the fetch indexes directly and the
+        // kind arm is the corrupted-pool tripwire
+        let text = match &pool[idx] {
+            Const::Str(text) => text.as_str(),
+            found => {
                 return Err(Trap::PoolKind {
                     kidx: kidx.0,
                     expected: ConstKind::Str,
                     found: found.kind(),
-                })
+                });
             },
-            None => return Err(Trap::PoolIndex { kidx: kidx.0 }),
         };
-        let id = self.objects.intern(text);
-        let row = self
-            .kstr_cache
-            .entry(pool_id)
-            .or_insert_with(|| vec![None; pool.len()]);
-        // a reused address can leave a shorter row from a dead pool:
-        // widen before the index (the old row names nothing live)
-        if row.len() < pool.len() {
-            row.resize(pool.len(), None);
+        let key: KstrRowKey = (pool.as_ptr() as usize, self.current.0);
+        let cached = (*slot)
+            .and_then(|at| self.kstr_cache.row(at, key))
+            .and_then(|row| row.ids.get(idx))
+            .copied()
+            .flatten();
+        if let Some(id) = cached {
+            if self.objects.is_live_str_with(id, text) {
+                if claim {
+                    self.objects.inc(id)?;
+                }
+                return Ok(id);
+            }
         }
-        row[usize::from(kidx.0)] = Some(id);
+        let id = if claim { self.objects.intern(text) } else { self.objects.intern_borrow(text) };
+        let (at, row) = self.kstr_cache.open(key, pool.len());
+        *slot = Some(at);
+        row.ids[idx] = Some(id);
         Ok(id)
     }
 
@@ -2883,8 +5134,12 @@ impl Vm {
     /// nested drive answers it when its reentry frame returns.
     // One flat match over the whole uop set is the point of a dispatch loop
     // [BL-3]; splitting arms into helpers would fragment it and add a call
-    // per op in debug builds.
+    // per op in debug builds. The bias word re-reads u16 as i16 (the
+    // format's documented flip-is-subtract), and the call arms bind the
+    // caller/callee pair the site vocabulary names.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::similar_names)]
     fn execute(
         &mut self,
         mut active: Active,
@@ -2904,9 +5159,13 @@ impl Vm {
             let code = &f.code;
             let slots = f.layout.slots();
             let frame_slots = slots.len();
-            let body_len = frame_slots - f.layout.arg_area_len();
+            let body_len = f.layout.body_len();
             let pool = &f.pool;
             let fp = self.callinfo[self.callinfo.len() - 1].fp;
+            // The frame's KSTR intern row: resolved by the frame's first
+            // literal load, read directly by every later one. A row that
+            // reclaim drops or shifts revalidates against its own key.
+            let mut kstr_slot: Option<KstrRowSlot> = None;
             loop {
                 let idx = pc.0 as usize;
                 if idx >= code.len() {
@@ -2930,7 +5189,14 @@ impl Vm {
                         // (a loop back-edge, self or below) is where the running
                         // fiber observes its nursery's cancel flag. Never
                         // mid-instruction: a linear consume in flight is done.
+                        // Inside a teardown hook drive the observation refuses
+                        // instead of cutting: the cut would kill the fiber whose
+                        // death walk is driving the hook (a teardown hook must
+                        // not re-enter the nursery)
                         if t <= pc.0 && self.cancel_requested() {
+                            if self.teardown_drive {
+                                return Err((Trap::ReentrancyRefused, pc));
+                            }
                             match self.cancel_current() {
                                 Some((a, at)) => {
                                     active = a;
@@ -2955,47 +5221,89 @@ impl Vm {
                         }
                     };
                 }
-                let op = match Uop::decode(pc.0, code[idx]) {
-                    Ok(op) => op,
-                    // Major 0xE: the placed RC pair (C4). Load decode-checks
-                    // every word once, so a decode failure here is a
-                    // canonicity violation like any other; the arm moves one
-                    // counted heap block's count per word.
-                    Err(DecodeError::UnknownOpcode {
-                        major: RC_MAJOR, ..
-                    }) => match RcOp::decode(code[idx]) {
-                        Ok(RcOp::Inc { src }) => {
-                            if let Some(word) = read_counted(&self.stack, fp, src, slots, body_len)
-                                .map_err(|e| (e, pc))?
-                            {
-                                self.inc_ref(word).map_err(|e| (e, pc))?;
-                            }
+                // the inline canonicity doors every fast arm shares: each
+                // names the same error the decoder would, without the
+                // cross-crate call per instruction
+                macro_rules! bad_encoding {
+                    ($cause:expr) => {
+                        return Err((
+                            Trap::BadEncoding {
+                                pc: pc.0,
+                                cause: $cause,
+                            },
+                            pc,
+                        ))
+                    };
+                }
+                macro_rules! reserved {
+                    () => {
+                        bad_encoding!(DecodeError::ReservedField)
+                    };
+                }
+                // the biased jump offset of the uop format, branch-free
+                let word = code[idx];
+                let [byte, fa, fb, fc] = word.to_be_bytes();
+                let fd = u16::from_be_bytes([fb, fc]);
+                // the raw jump target: a fast arm's bias math; a target
+                // outside the u32 index range is the same JumpOutOfRange
+                // the decoder reports
+                macro_rules! jump_target {
+                    () => {
+                        match u32::try_from(i64::from(pc.0) + 1 + i64::from((fd ^ BIAS_J) as i16)) {
+                            Ok(target) => target,
+                            Err(_) => {
+                                bad_encoding!(DecodeError::JumpOutOfRange {
+                                    pc: pc.0,
+                                    field: fd
+                                })
+                            },
+                        }
+                    };
+                }
+                // the fused compare-branch tail: pc first bumped onto the
+                // branch's own word, then the JMPIF_NOT arm's exact body —
+                // the biased target from the peeked word's field (the same
+                // math and JumpOutOfRange attribution `jump_target!` gives
+                // the decoded word at that pc), the decision on the
+                // computed bool (the branch reads the dst the compare just
+                // wrote, so the read cannot fail and the value is in
+                // hand), the taken branch through the `jump!` macro body
+                // verbatim, and the not-taken fallthrough at the branch's
+                // next word — the pair consumed two words
+                macro_rules! fused_jmpif_not {
+                    ($field:expr, $cond:expr) => {{
+                        pc.0 += 1;
+                        let Ok(target) = u32::try_from(
+                            i64::from(pc.0) + 1 + i64::from(($field ^ BIAS_J) as i16),
+                        ) else {
+                            bad_encoding!(DecodeError::JumpOutOfRange {
+                                pc: pc.0,
+                                field: $field
+                            })
+                        };
+                        if $cond {
                             pc.0 += 1;
-                            continue;
-                        },
-                        Ok(RcOp::Dec { src }) => {
-                            if let Some(word) = read_counted(&self.stack, fp, src, slots, body_len)
-                                .map_err(|e| (e, pc))?
-                            {
-                                self.dec_ref(word).map_err(|e| (e, pc))?;
-                            }
-                            pc.0 += 1;
-                            continue;
-                        },
-                        Err(cause) => {
-                            let cause = match cause {
-                                RcDecodeError::UnknownOpcode { major, minor } => {
-                                    DecodeError::UnknownOpcode { major, minor }
-                                },
-                                RcDecodeError::ReservedField => DecodeError::ReservedField,
-                            };
-                            return Err((Trap::BadEncoding { pc: pc.0, cause }, pc));
-                        },
-                    },
-                    Err(cause) => return Err((Trap::BadEncoding { pc: pc.0, cause }, pc)),
-                };
-                match op {
-                    Uop::Funcf { frame_slots: n } => {
+                        } else {
+                            jump!(target);
+                        }
+                    }};
+                }
+                // one dispatch table over the raw opcode byte: the loader
+                // validated every word, and decode stays the canonicity
+                // authority for whatever the fast arms refuse, so the hot
+                // loop extracts each arm's operand fields inline and jumps
+                // through the byte table — adding a uop adds one arm and
+                // never re-lowers its neighbors. Field names follow the uop
+                // format: fa/fb/fc the register bytes, fd the wide field.
+                match byte {
+                    OP_FUNCF => {
+                        if fa != 0 {
+                            reserved!();
+                        }
+                        if fd > MAX_FRAME_SLOTS {
+                            bad_encoding!(DecodeError::FrameSlotsExceedCap { frame_slots: fd });
+                        }
+                        let n = fd;
                         if usize::from(n) != frame_slots {
                             let e = Trap::FrameSlotsMismatch {
                                 funcef: n,
@@ -3005,10 +5313,16 @@ impl Vm {
                         }
                         pc.0 += 1;
                     },
-                    Uop::Kimm { dst, kidx } => {
-                        let v = match pool.get(usize::from(kidx.0)) {
-                            Some(Const::I64(v)) => *v,
-                            Some(found) => {
+                    OP_KIMM => {
+                        let dst = fa;
+                        let kidx = ConstIdx(fd);
+                        // install proved the operand's pool index in range and
+                        // its kind I64 (module.rs's body validation); the fetch
+                        // indexes directly and the kind arm is the
+                        // corrupted-pool tripwire
+                        let v = match &pool[usize::from(kidx.0)] {
+                            Const::I64(v) => *v,
+                            found => {
                                 let e = Trap::PoolKind {
                                     kidx: kidx.0,
                                     expected: ConstKind::I64,
@@ -3016,16 +5330,54 @@ impl Vm {
                                 };
                                 return Err((e, pc));
                             },
-                            None => return Err((Trap::PoolIndex { kidx: kidx.0 }, pc)),
                         };
-                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::I64(v))
-                            .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        if let Some((op, adst, lhs, rhs)) = fused_i64_arith(code, idx, dst) {
+                            // the load's own errors are spent; the fused
+                            // arith's errors attribute to its own pc
+                            write_slot(&mut self.stack, fp, dst, slots, body_len, Value::I64(v))
+                                .map_err(|e| (e, pc))?;
+                            let at = CodePc(pc.0 + 1);
+                            let (x, y) = (
+                                read_i64(&self.stack, fp, lhs, slots, body_len)
+                                    .map_err(|e| (e, at))?,
+                                read_i64(&self.stack, fp, rhs, slots, body_len)
+                                    .map_err(|e| (e, at))?,
+                            );
+                            let result = match op {
+                                OP_ADD_I64 => x.checked_add(y).ok_or(Trap::IntegerOverflow),
+                                OP_SUB_I64 => x.checked_sub(y).ok_or(Trap::IntegerOverflow),
+                                OP_MUL_I64 => x.checked_mul(y).ok_or(Trap::IntegerOverflow),
+                                // the fourth fused arith, MODI64: the same
+                                // zero-divide / overflow split as DIVI64
+                                _ => int_mod(x, y),
+                            }
+                            .map_err(|e| (e, at))?;
+                            write_slot(
+                                &mut self.stack,
+                                fp,
+                                adst,
+                                slots,
+                                body_len,
+                                Value::I64(result),
+                            )
+                            .map_err(|e| (e, at))?;
+                            pc.0 += 2;
+                        } else {
+                            write_slot(&mut self.stack, fp, dst, slots, body_len, Value::I64(v))
+                                .map_err(|e| (e, pc))?;
+                            pc.0 += 1;
+                        }
                     },
-                    Uop::Kconst { dst, kidx } => {
-                        let v = match pool.get(usize::from(kidx.0)) {
-                            Some(Const::F64(v)) => Value::F64(*v),
-                            Some(Const::Bool(v)) => Value::Bool(*v),
+                    OP_KCONST => {
+                        let dst = fa;
+                        let kidx = ConstIdx(fd);
+                        // install proved the operand's pool index in range and
+                        // its kind among F64/Bool/FuncRef (module.rs's body
+                        // validation); the fetch indexes directly and the kind
+                        // arm is the corrupted-pool tripwire
+                        let v = match &pool[usize::from(kidx.0)] {
+                            Const::F64(v) => Value::F64(*v),
+                            Const::Bool(v) => Value::Bool(*v),
                             // A fn word (F2): the FuncRef's module name resolves
                             // through the registry id space at issue time — ids
                             // are stable across swaps, and CALLS re-resolves the
@@ -3034,7 +5386,7 @@ impl Vm {
                             // like a staged one. The loader validated the
                             // reference at install, so an unresolved name is a
                             // corrupted pool, never a program fact.
-                            Some(Const::FuncRef { module, func }) => {
+                            Const::FuncRef { module, func } => {
                                 let module_id = self.registry.module_id(module).ok_or((
                                     Trap::UnknownCallee {
                                         module: module.clone(),
@@ -3044,7 +5396,7 @@ impl Vm {
                                 ))?;
                                 Value::Fn(FuncRef::new(module_id, *func))
                             },
-                            Some(found) => {
+                            found => {
                                 let e = Trap::PoolKind {
                                     kidx: kidx.0,
                                     expected: ConstKind::F64,
@@ -3052,14 +5404,42 @@ impl Vm {
                                 };
                                 return Err((e, pc));
                             },
-                            None => return Err((Trap::PoolIndex { kidx: kidx.0 }, pc)),
                         };
-                        write_slot(&mut self.stack, fp, dst, slots, body_len, v)
-                            .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        if let Some((op, adst, lhs, rhs)) = fused_f64_arith(code, idx, dst) {
+                            // the load's own errors are spent; the fused
+                            // arith's errors attribute to its own pc
+                            write_slot(&mut self.stack, fp, dst, slots, body_len, v)
+                                .map_err(|e| (e, pc))?;
+                            let at = CodePc(pc.0 + 1);
+                            let (x, y) = (
+                                read_f64(&self.stack, fp, lhs, slots, body_len)
+                                    .map_err(|e| (e, at))?,
+                                read_f64(&self.stack, fp, rhs, slots, body_len)
+                                    .map_err(|e| (e, at))?,
+                            );
+                            let result = if op == OP_ADD_F64 { x + y } else { x * y };
+                            write_slot(
+                                &mut self.stack,
+                                fp,
+                                adst,
+                                slots,
+                                body_len,
+                                Value::F64(result),
+                            )
+                            .map_err(|e| (e, at))?;
+                            pc.0 += 2;
+                        } else {
+                            write_slot(&mut self.stack, fp, dst, slots, body_len, v)
+                                .map_err(|e| (e, pc))?;
+                            pc.0 += 1;
+                        }
                     },
-                    Uop::Kstr { dst, kidx } => {
-                        let obj = self.kstr_load(pool, kidx).map_err(|e| (e, pc))?;
+                    OP_KSTR => {
+                        let dst = fa;
+                        let kidx = ConstIdx(fd);
+                        let obj = self
+                            .kstr_load(pool, kidx, true, &mut kstr_slot)
+                            .map_err(|e| (e, pc))?;
                         let word = RefId::new(self.current, obj);
                         // the load's acquire is the loading frame's claim
                         self.claims[self.current.index()].acquire(word);
@@ -3067,7 +5447,25 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::AddI64 { dst, lhs, rhs } => {
+                    OP_KSTR_BORROW => {
+                        let dst = fa;
+                        let kidx = ConstIdx(fd);
+                        // the placement pass proved this word's count never
+                        // moves inside its frame, so the load borrows the
+                        // intern map's pinned canonical copy: no store
+                        // count, no claim ledger row, no terminal dec
+                        let obj = self
+                            .kstr_load(pool, kidx, false, &mut kstr_slot)
+                            .map_err(|e| (e, pc))?;
+                        let word = RefId::new(self.current, obj);
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Ref(word))
+                            .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_ADD_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3079,7 +5477,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::SubI64 { dst, lhs, rhs } => {
+                    OP_SUB_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3091,7 +5492,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::MulI64 { dst, lhs, rhs } => {
+                    OP_MUL_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3103,7 +5507,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::DivI64 { dst, lhs, rhs } => {
+                    OP_DIV_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3113,7 +5520,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::ModI64 { dst, lhs, rhs } => {
+                    OP_MOD_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3123,7 +5533,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::AddF64 { dst, lhs, rhs } => {
+                    OP_ADD_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3132,7 +5545,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::SubF64 { dst, lhs, rhs } => {
+                    OP_SUB_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3141,7 +5557,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::MulF64 { dst, lhs, rhs } => {
+                    OP_MUL_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3150,7 +5569,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::DivF64 { dst, lhs, rhs } => {
+                    OP_DIV_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3160,23 +5582,27 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::EqI64 { dst, lhs, rhs } => {
+                    OP_EQ_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
                         );
-                        write_slot(
-                            &mut self.stack,
-                            fp,
-                            dst,
-                            slots,
-                            body_len,
-                            Value::Bool(x == y),
-                        )
-                        .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        let v = x == y;
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(v))
+                            .map_err(|e| (e, pc))?;
+                        if let Some(field) = fused_jmpif_not(code, idx, dst) {
+                            fused_jmpif_not!(field, v);
+                        } else {
+                            pc.0 += 1;
+                        }
                     },
-                    Uop::NeqI64 { dst, lhs, rhs } => {
+                    OP_NEQ_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3192,23 +5618,27 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::LtI64 { dst, lhs, rhs } => {
+                    OP_LT_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
                         );
-                        write_slot(
-                            &mut self.stack,
-                            fp,
-                            dst,
-                            slots,
-                            body_len,
-                            Value::Bool(x < y),
-                        )
-                        .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        let v = x < y;
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(v))
+                            .map_err(|e| (e, pc))?;
+                        if let Some(field) = fused_jmpif_not(code, idx, dst) {
+                            fused_jmpif_not!(field, v);
+                        } else {
+                            pc.0 += 1;
+                        }
                     },
-                    Uop::GeI64 { dst, lhs, rhs } => {
+                    OP_GE_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3224,7 +5654,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::LeI64 { dst, lhs, rhs } => {
+                    OP_LE_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3240,7 +5673,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::GtI64 { dst, lhs, rhs } => {
+                    OP_GT_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3256,7 +5692,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::EqF64 { dst, lhs, rhs } => {
+                    OP_EQ_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3268,7 +5707,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::NeqF64 { dst, lhs, rhs } => {
+                    OP_NEQ_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3278,7 +5720,10 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::LtF64 { dst, lhs, rhs } => {
+                    OP_LT_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3295,7 +5740,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::GeF64 { dst, lhs, rhs } => {
+                    OP_GE_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3311,7 +5759,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::LeF64 { dst, lhs, rhs } => {
+                    OP_LE_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
@@ -3327,23 +5778,27 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::GtF64 { dst, lhs, rhs } => {
+                    OP_GT_F64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_f64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
                         );
-                        write_slot(
-                            &mut self.stack,
-                            fp,
-                            dst,
-                            slots,
-                            body_len,
-                            Value::Bool(x > y),
-                        )
-                        .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        let v = x > y;
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(v))
+                            .map_err(|e| (e, pc))?;
+                        if let Some(field) = fused_jmpif_not(code, idx, dst) {
+                            fused_jmpif_not!(field, v);
+                        } else {
+                            pc.0 += 1;
+                        }
                     },
-                    Uop::EqBool { dst, lhs, rhs } => {
+                    OP_EQ_BOOL => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_bool(&self.stack, fp, lhs, slots, body_len)
                                 .map_err(|e| (e, pc))?,
@@ -3361,7 +5816,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::NeqBool { dst, lhs, rhs } => {
+                    OP_NEQ_BOOL => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
                             read_bool(&self.stack, fp, lhs, slots, body_len)
                                 .map_err(|e| (e, pc))?,
@@ -3379,32 +5837,67 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::EqStr { dst, lhs, rhs } => {
-                        let (x, y) = (
-                            read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
-                            read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
-                        );
-                        let eq = self.str_eq(x, y).map_err(|e| (e, pc))?;
+                    // the string data ops take operands of both string
+                    // domains: a heap string word or an arena temporary
+                    OP_EQ_STR => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let eq = str_eq_content(self, fp, lhs, rhs, slots, body_len, pc)?;
                         write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(eq))
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::NeqStr { dst, lhs, rhs } => {
-                        let (x, y) = (
-                            read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
-                            read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
-                        );
-                        let neq = self.str_eq(x, y).map_err(|e| (e, pc))?;
-                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(!neq))
+                    OP_NEQ_STR => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let eq = str_eq_content(self, fp, lhs, rhs, slots, body_len, pc)?;
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(!eq))
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::StrCat { dst, lhs, rhs } => {
+                    OP_STRCAT => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
                         let (x, y) = (
-                            read_ref(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
-                            read_ref(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                            read_typed(&self.stack, fp, lhs, slots, body_len, SlotType::Ref)
+                                .map_err(|e| (e, pc))?,
+                            read_typed(&self.stack, fp, rhs, slots, body_len, SlotType::Ref)
+                                .map_err(|e| (e, pc))?,
                         );
-                        let obj = self.heaps().concat(x, y).map_err(|e| (e, pc))?;
+                        // a heap-to-heap pair keeps the store's own
+                        // fast path; any arena operand is a mixed-domain
+                        // concat whose contents build the counted result
+                        // directly on the live context store (the content
+                        // borrows read pool and objects immutably, the
+                        // alloc and the claim touch objects and claims
+                        // alone, and the fields are disjoint)
+                        let obj = if let (Value::Ref(xw), Value::Ref(yw)) = (x, y) {
+                            self.heaps().concat(xw, yw).map_err(|e| (e, pc))?
+                        } else {
+                            let xb = str_content(
+                                &self.pool,
+                                &self.objects,
+                                self.ctx_live,
+                                self.current,
+                                x,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            let yb = str_content(
+                                &self.pool,
+                                &self.objects,
+                                self.ctx_live,
+                                self.current,
+                                y,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            let text = concat_text(xb, yb).map_err(|e| (e, pc))?;
+                            let id = self.objects.alloc_str(text);
+                            self.claims[self.current.index()].acquire(RefId::new(self.current, id));
+                            id
+                        };
                         write_slot(
                             &mut self.stack,
                             fp,
@@ -3416,7 +5909,70 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::ClosureNew { dst, func, n } => {
+                    // the placement pass proved this result a designated
+                    // temporary: its bytes serve from the running fiber's
+                    // frame arena and its word carries no count, so no
+                    // acquire and no claim row exist; the first
+                    // allocation in a frame also serves that frame's
+                    // entry mark (the return-side close restores it)
+                    OP_STRCAT_ARENA => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let (x, y) = (
+                            read_typed(&self.stack, fp, lhs, slots, body_len, SlotType::Ref)
+                                .map_err(|e| (e, pc))?,
+                            read_typed(&self.stack, fp, rhs, slots, body_len, SlotType::Ref)
+                                .map_err(|e| (e, pc))?,
+                        );
+                        let xb =
+                            str_content(&self.pool, &self.objects, self.ctx_live, self.current, x)
+                                .map_err(|e| (e, pc))?;
+                        let yb =
+                            str_content(&self.pool, &self.objects, self.ctx_live, self.current, y)
+                                .map_err(|e| (e, pc))?;
+                        let total = xb.len().checked_add(yb.len()).ok_or((
+                            Trap::ArenaExhausted {
+                                field: ArenaPackError::Length,
+                            },
+                            pc,
+                        ))?;
+                        if total >= ARENA_LEN_LIMIT {
+                            return Err((
+                                Trap::ArenaExhausted {
+                                    field: ArenaPackError::Length,
+                                },
+                                pc,
+                            ));
+                        }
+                        let Word::Meta(meta) = &mut self.stack[fp] else {
+                            return Err((Trap::MetaWordCorrupt { fp }, pc));
+                        };
+                        if !meta.arena_active() {
+                            meta.mark_arena_active();
+                            // the mark precedes this frame's first
+                            // allocation, so it is the frame's exact
+                            // entry position
+                            self.pool[self.current.index()].arena.push_frame_mark();
+                        }
+                        let at = self.pool[self.current.index()].arena.alloc_concat(xb, yb);
+                        let handle = ArenaStr::pack(at.chunk(), at.offset(), total)
+                            .map_err(|field| (Trap::ArenaExhausted { field }, pc))?;
+                        write_slot(
+                            &mut self.stack,
+                            fp,
+                            dst,
+                            slots,
+                            body_len,
+                            Value::Arena(handle),
+                        )
+                        .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_CLOSURE_NEW => {
+                        let dst = fa;
+                        let func = fb;
+                        let n = fc;
                         // CLOSURE_NEW (F2): the header is the scalar FuncRef
                         // word at `func` (KCONST-minted), the capture block the
                         // n words staged at overlay positions 0..n. The object
@@ -3471,7 +6027,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::TagTest { dst, src, tag } => {
+                    OP_TAG_TEST => {
+                        let dst = fa;
+                        let src = fb;
+                        let tag = fc;
                         let v =
                             read_tag(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                         write_slot(
@@ -3485,7 +6044,10 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::TagTestNot { dst, src, tag } => {
+                    OP_TAG_TEST_NOT => {
+                        let dst = fa;
+                        let src = fb;
+                        let tag = fc;
                         let v =
                             read_tag(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                         write_slot(
@@ -3499,12 +6061,22 @@ impl Vm {
                         .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::TagNew { dst, tag } => {
+                    OP_TAG_NEW => {
+                        if fc != 0 {
+                            reserved!();
+                        }
+                        let dst = fa;
+                        let tag = fb;
                         write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Tag(tag))
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::CvtI2F { dst, src } => {
+                    OP_CVT_I2F => {
+                        if fc != 0 {
+                            reserved!();
+                        }
+                        let dst = fa;
+                        let src = fb;
                         let x =
                             read_i64(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                         // precision loss beyond 2^53 is the semantics of the
@@ -3515,7 +6087,12 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::CvtF2I { dst, src } => {
+                    OP_CVT_F2I => {
+                        if fc != 0 {
+                            reserved!();
+                        }
+                        let dst = fa;
+                        let src = fb;
                         let x =
                             read_f64(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                         // trap on NaN and on magnitudes at or past 2^63; -2^63
@@ -3530,38 +6107,103 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::Mov { dst, src } => {
+                    OP_MOV => {
+                        if fc != 0 {
+                            reserved!();
+                        }
+                        let dst = fa;
+                        let src = fb;
                         let v = read_value(&self.stack, fp, src, slots, body_len)
                             .map_err(|e| (e, pc))?;
                         write_slot(&mut self.stack, fp, dst, slots, body_len, v)
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::Jmpif { cond, target } => {
+                    OP_JMPIF => {
+                        let cond = fa;
+                        let target = jump_target!();
                         if read_bool(&self.stack, fp, cond, slots, body_len).map_err(|e| (e, pc))? {
                             jump!(target);
                         } else {
                             pc.0 += 1;
                         }
                     },
-                    Uop::JmpifNot { cond, target } => {
+                    OP_JMPIF_NOT => {
+                        let cond = fa;
+                        let target = jump_target!();
                         if read_bool(&self.stack, fp, cond, slots, body_len).map_err(|e| (e, pc))? {
                             pc.0 += 1;
                         } else {
                             jump!(target);
                         }
                     },
-                    Uop::Jmp { target } => jump!(target),
-                    Uop::Call { callee, nargs } => {
+                    OP_JMP => {
+                        if fa != 0 {
+                            reserved!();
+                        }
+                        let target = jump_target!();
+                        jump!(target);
+                    },
+                    // the loop-head mark: the paired restore at the back
+                    // edge rewinds here, so each iteration re-marks before
+                    // the cond and body allocate
+                    OP_ARENA_MARK => {
+                        if fb != 0 || fc != 0 {
+                            reserved!();
+                        }
+                        let dst = fa;
+                        let at = self.pool[self.current.index()].arena.mark();
+                        let packed = ArenaStr::pack(at.chunk(), at.offset(), 0)
+                            .map_err(|field| (Trap::ArenaExhausted { field }, pc))?;
+                        write_slot(
+                            &mut self.stack,
+                            fp,
+                            dst,
+                            slots,
+                            body_len,
+                            Value::I64(packed.raw() as i64),
+                        )
+                        .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_ARENA_RESTORE => {
+                        if fb != 0 || fc != 0 {
+                            reserved!();
+                        }
+                        let src = fa;
+                        let cursor =
+                            read_i64(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
+                        let raw = u64::try_from(cursor).map_err(|_| {
+                            (
+                                Trap::ArenaHandle {
+                                    class: ds_rt::ArenaMisuse::Range,
+                                },
+                                pc,
+                            )
+                        })?;
+                        let (chunk, offset, _) = ArenaStr::unpack_raw(raw);
+                        self.pool[self.current.index()]
+                            .arena
+                            .try_restore(ds_rt::Mark::at(chunk, offset))
+                            .map_err(|class| (Trap::ArenaHandle { class }, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_CALL => {
+                        let callee = ConstIdx(fd);
+                        let nargs = fa;
                         let caller = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_site(pool, caller, pc.0, callee, nargs)
+                            .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
                             .map_err(|e| (e, pc))?;
                         match resolved {
-                            Resolved::Uop { version, func } => {
+                            Resolved::Uop {
+                                version,
+                                func,
+                                facts,
+                            } => {
                                 let mut st = stack_state!();
                                 let t = st
-                                    .call(version, func, &f.layout, fp, pc.0 + 1)
+                                    .call(version, func, &facts, &f.layout, fp, pc.0 + 1)
                                     .map_err(|e| (e, pc))?;
                                 active = Active {
                                     version: t.version,
@@ -3582,7 +6224,9 @@ impl Vm {
                                 check_native_call_site(&f.layout, nf).map_err(|e| (e, pc))?;
                                 if let Some(control) = nf.control {
                                     match self
-                                        .control_switch(control, &active, pc.0, fp, &f.layout)
+                                        .control_switch(
+                                            control, &active, pc.0, fp, &f.layout, nargs,
+                                        )
                                         .map_err(|e| (e, pc))?
                                     {
                                         SwitchOutcome::Entered(a, at) => {
@@ -3594,6 +6238,9 @@ impl Vm {
                                             pc.0 += 1;
                                         },
                                         SwitchOutcome::Host(event) => return Ok(event),
+                                        SwitchOutcome::Interlock(req) => {
+                                            return Ok(DriveOutcome::Interlock(req))
+                                        },
                                     }
                                 } else {
                                     let mut heaps = Heaps::new(
@@ -3605,6 +6252,7 @@ impl Vm {
                                     );
                                     let result = invoke_native(
                                         nf,
+                                        usize::from(nargs),
                                         &mut self.stack,
                                         &mut heaps,
                                         &mut self.out,
@@ -3612,22 +6260,30 @@ impl Vm {
                                         fp,
                                     )
                                     .map_err(|e| (e, pc))?;
-                                    overlay_native(result, &mut self.stack, &f.layout, fp);
+                                    overlay_native(result, &mut self.stack, &f.layout, fp)
+                                        .map_err(|e| (e, pc))?;
                                     pc.0 += 1;
                                 }
                             },
                         }
                     },
-                    Uop::Callt { callee, nargs } => {
+                    OP_CALLT => {
+                        let callee = ConstIdx(fd);
+                        let nargs = fa;
                         let caller = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_site(pool, caller, pc.0, callee, nargs)
+                            .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
                             .map_err(|e| (e, pc))?;
                         match resolved {
-                            Resolved::Uop { version, func } => {
+                            Resolved::Uop {
+                                version,
+                                func,
+                                facts,
+                            } => {
+                                self.arena_frame_close(fp);
                                 let mut st = stack_state!();
                                 let t = st
-                                    .tail_call(version, func, &f.layout, fp)
+                                    .tail_call(version, func, &facts, &f.layout, fp)
                                     .map_err(|e| (e, pc))?;
                                 active = Active {
                                     version: t.version,
@@ -3648,12 +6304,8 @@ impl Vm {
                             // the same root rule RETSPAN returns by.
                             Resolved::Native { table, index } => {
                                 let nf = &table[index as usize];
-                                if self.callinfo.len() > 1 {
-                                    let caller = self.callinfo[self.callinfo.len() - 2].clone();
-                                    let caller_fn =
-                                        &caller.module.functions()[caller.func as usize];
-                                    check_native_overlay(caller_fn.layout.arg_area_len(), nf)
-                                        .map_err(|e| (e, pc))?;
+                                if let Some(caller_area) = self.caller_arg_area() {
+                                    check_native_overlay(caller_area, nf).map_err(|e| (e, pc))?;
                                 }
                                 let mut heaps = Heaps::new(
                                     self.current,
@@ -3664,6 +6316,7 @@ impl Vm {
                                 );
                                 let result = invoke_native(
                                     nf,
+                                    usize::from(nargs),
                                     &mut self.stack,
                                     &mut heaps,
                                     &mut self.out,
@@ -3671,26 +6324,108 @@ impl Vm {
                                     fp,
                                 )
                                 .map_err(|e| (e, pc))?;
-                                let value = match result {
-                                    NativeResult::Word(value) => value,
+                                // the answer's whole word span rides a
+                                // boundary return (the hosted seam's result
+                                // channel); every other outcome keeps its
+                                // prior words
+                                let (value, answer) = match result {
+                                    NativeResult::Word(value) => (value, FrameAnswer::one(value)),
+                                    // a plain table native never parks (the
+                                    // generic fork bodies live behind the
+                                    // CALLG dispatch, and this arm never
+                                    // reaches them)
+                                    NativeResult::Fork { .. } => {
+                                        unreachable!("a plain native never parks")
+                                    },
                                     NativeResult::Tag { tag, payload } => {
                                         if self.callinfo.len() > 1 {
                                             self.stack[fp + 2] = Word::Slot(payload);
                                         }
-                                        Value::Tag(tag)
+                                        (Value::Tag(tag), FrameAnswer::tagged(tag, &[payload]))
+                                    },
+                                    // a span channel's tail ride: the payload
+                                    // words land on the original caller's
+                                    // overlay past the head (physical words
+                                    // fp+2..), bounds-checked against that
+                                    // caller's area; at the root only the
+                                    // head word survives, the root rule
+                                    // RETSPAN returns by
+                                    NativeResult::Span { tag, payload } => {
+                                        if self.callinfo.len() > 1 {
+                                            let caller = &self.callinfo[self.callinfo.len() - 2];
+                                            let caller_fn =
+                                                &caller.module.functions()[caller.func as usize];
+                                            let area = caller_fn.layout.arg_area_len();
+                                            if 1 + payload.len() > area {
+                                                return Err((
+                                                    Trap::RetSpanTooWide {
+                                                        span: u16::try_from(1 + payload.len())
+                                                            .expect("span widths fit u16"),
+                                                        caller_area: u16::try_from(area)
+                                                            .expect("argument areas fit u16"),
+                                                    },
+                                                    pc,
+                                                ));
+                                            }
+                                            for (index, word) in payload.iter().enumerate() {
+                                                self.stack[fp + 2 + index] = Word::Slot(*word);
+                                            }
+                                        }
+                                        (Value::Tag(tag), FrameAnswer::tagged(tag, &payload))
+                                    },
+                                    // the tag-less total's tail ride: no
+                                    // discriminant, so word 0 rides the RET
+                                    // and the rest land on the original
+                                    // caller's overlay words 1.. (physical
+                                    // words fp+2..), bounds-checked against
+                                    // that caller's area; at the root only
+                                    // word 0 survives
+                                    NativeResult::Total { words } => {
+                                        if self.callinfo.len() > 1 {
+                                            let caller = &self.callinfo[self.callinfo.len() - 2];
+                                            let caller_fn =
+                                                &caller.module.functions()[caller.func as usize];
+                                            let area = caller_fn.layout.arg_area_len();
+                                            if words.len() > area {
+                                                return Err((
+                                                    Trap::RetSpanTooWide {
+                                                        span: u16::try_from(words.len())
+                                                            .expect("span widths fit u16"),
+                                                        caller_area: u16::try_from(area)
+                                                            .expect("argument areas fit u16"),
+                                                    },
+                                                    pc,
+                                                ));
+                                            }
+                                            for (index, word) in words.iter().enumerate().skip(1) {
+                                                self.stack[fp + 1 + index] = Word::Slot(*word);
+                                            }
+                                        }
+                                        let lead = words
+                                            .first()
+                                            .copied()
+                                            .expect("a tag-less total carries a word");
+                                        (lead, FrameAnswer::many(words))
                                     },
                                 };
+                                self.arena_frame_close(fp);
                                 let mut st = stack_state!();
                                 match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                                    RetOutcome::Root(v) => match self.complete_current(v) {
-                                        Some((a, at)) => {
-                                            active = a;
-                                            pc = at;
-                                            continue 'transfer;
-                                        },
-                                        None => return Ok(DriveOutcome::Died(v)),
+                                    RetOutcome::Root(v) => {
+                                        // the native's whole span answer rides the
+                                        // completion channel; `v` is its head word
+                                        match self.complete_current_span(answer) {
+                                            Some((a, at)) => {
+                                                active = a;
+                                                pc = at;
+                                                continue 'transfer;
+                                            },
+                                            None => return Ok(DriveOutcome::Died(v)),
+                                        }
                                     },
-                                    RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
+                                    RetOutcome::Boundary(_) => {
+                                        return Ok(DriveOutcome::Frame(answer))
+                                    },
                                     RetOutcome::Resume {
                                         version,
                                         func,
@@ -3704,7 +6439,12 @@ impl Vm {
                             },
                         }
                     },
-                    Uop::Calls { callee_slot, nargs } => {
+                    OP_CALLS => {
+                        if fc != 0 {
+                            reserved!();
+                        }
+                        let callee_slot = fb;
+                        let nargs = fa;
                         // CALLS, the callable-word call form (F2): the callee
                         // operand is a frame slot, the ISA's one dynamic-dispatch
                         // point — the callee word's identity is runtime data by
@@ -3769,8 +6509,7 @@ impl Vm {
                         // count untouched. The range check runs before the
                         // frame is pushed; each write re-checks the word
                         // against the slot's declared type.
-                        let capture_body_len =
-                            target.layout.slots().len() - target.layout.arg_area_len();
+                        let capture_body_len = target.layout.body_len();
                         if let Some(block) = captures {
                             let end = target.layout.params_len() + block.len();
                             if end > capture_body_len {
@@ -3786,14 +6525,24 @@ impl Vm {
                         // the frame setup mirrors CALL: slide-plan validation,
                         // the raw-staged check, the callee's metadata word in
                         // the caller's call word, the args overlaid. No tail
-                        // variant exists, so this is an ordinary push.
-                        {
+                        // variant exists, so this is an ordinary push. The
+                        // callee is runtime data (the staged word named it), so
+                        // the facts derive here, once per call. The resolved
+                        // handle moves through the call into the transfer
+                        // (one mint per call, CALL's own discipline), and the
+                        // capture copy-in re-derives its layout borrow from
+                        // the transfer's handle.
+                        let facts = SiteFacts::derive(&f.layout, &target.layout);
+                        let t = {
                             let mut st = stack_state!();
-                            st.call(Arc::clone(&version), func_id, &f.layout, fp, pc.0 + 1)
-                                .map_err(|e| (e, pc))?;
-                        }
+                            st.call(version, func_id, &facts, &f.layout, fp, pc.0 + 1)
+                                .map_err(|e| (e, pc))?
+                        };
                         if let Some(block) = captures {
-                            let callee_fp = fp + 1 + f.layout.arg_area().start;
+                            // the callee's frame base: fp + 1 + the caller's
+                            // body span (the pinned physical mapping)
+                            let callee_fp = fp + 1 + f.layout.body_len();
+                            let target = &t.version.functions()[t.func as usize];
                             let capture_owner = self.current;
                             for (index, &value) in block.iter().enumerate() {
                                 if let Value::Ref(word) = value {
@@ -3802,6 +6551,7 @@ impl Vm {
                                         &mut self.pool,
                                         &mut self.claims,
                                         capture_owner,
+                                        self.ctx_live,
                                         capture_owner,
                                         word,
                                     )
@@ -3821,13 +6571,15 @@ impl Vm {
                             }
                         }
                         active = Active {
-                            version,
-                            func: func_id,
+                            version: t.version,
+                            func: t.func,
                         };
                         pc = CodePc(0);
                         continue 'transfer;
                     },
-                    Uop::Callg { callee, nargs } => {
+                    OP_CALLG => {
+                        let callee = ConstIdx(fd);
+                        let nargs = fa;
                         // A generic call site [H3]: the callee is a generic
                         // builtin's ONE body, and the call's evidence words sit
                         // in the overlay after the staged arguments — their
@@ -3835,9 +6587,11 @@ impl Vm {
                         // CALL's operand layout. The dispatch reads the
                         // evidence words and selects the body's behavior on the
                         // resolved types; monomorphic instances do not exist.
-                        let found = pool
-                            .get(usize::from(callee.0))
-                            .ok_or((Trap::PoolIndex { kidx: callee.0 }, pc))?;
+                        // Install proved the operand's pool index in range and
+                        // its kind FuncRef (module.rs's body validation); the
+                        // fetch indexes directly and the kind arm is the
+                        // corrupted-pool tripwire.
+                        let found = &pool[usize::from(callee.0)];
                         let Const::FuncRef { module, func } = found else {
                             return Err((
                                 Trap::PoolKind {
@@ -3892,17 +6646,8 @@ impl Vm {
                             };
                             let func_id = u32::try_from(index).expect("guarded above");
                             let target = &version.functions()[func_id as usize];
-                            let entry = target.entry.resolve();
-                            if entry != func_id as usize {
-                                return Err((
-                                    Trap::EntryWordMismatch {
-                                        resolved: entry,
-                                        expected: func_id as usize,
-                                    },
-                                    pc,
-                                ));
-                            }
-                            if usize::from(nargs) != target.layout.params_len() {
+                            debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
+                            if !sentinel_arity_exact(target.layout.params_len(), nargs) {
                                 return Err((
                                     Trap::ArityMismatch {
                                         expected: target.layout.params_len(),
@@ -3911,9 +6656,26 @@ impl Vm {
                                     pc,
                                 ));
                             }
+                            // the follow riders a generic serving body
+                            // claims as its trailing evidence parameters:
+                            // validated I64 exactly like the static trait
+                            // path's staged words, before the slide reads
+                            // them (a concrete target ignores them)
+                            check_evidence_riders(
+                                &self.stack,
+                                target.layout.params_len(),
+                                nargs,
+                                &f.layout,
+                                fp,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            // the serving body is runtime data (the frame's
+                            // evidence word named it), so the facts derive
+                            // here, once per call
+                            let facts = SiteFacts::derive(&f.layout, &target.layout);
                             let mut st = stack_state!();
                             let t = st
-                                .call(version, func_id, &f.layout, fp, pc.0 + 1)
+                                .call(version, func_id, &facts, &f.layout, fp, pc.0 + 1)
                                 .map_err(|e| (e, pc))?;
                             active = Active {
                                 version: t.version,
@@ -3928,7 +6690,7 @@ impl Vm {
                         // resolution runs through the per-site inline cache
                         // (the same bank and key CALL/CALLT use, full
                         // lookup as the fallback), so a hot dispatch site
-                        // skips the pool fetch and module lookup. The
+                        // skips the module lookup. The
                         // staged words past `nargs` carry the runtime
                         // evidence a generic impl body claims as its
                         // trailing parameters (one per the body's nested
@@ -3942,11 +6704,19 @@ impl Vm {
                         // callee's frame never claims it.
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(pool, caller_site, pc.0, callee, nargs)
+                            .resolve_dispatch_site(
+                                module,
+                                *func,
+                                caller_site,
+                                &f.layout,
+                                pc.0,
+                                nargs,
+                            )
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
                             func: func_id,
+                            facts,
                         } = resolved
                         {
                             let target = &version.functions()[func_id as usize];
@@ -3963,7 +6733,7 @@ impl Vm {
                             // the staged evidence parameters the body
                             // claims, then the solved instance word
                             let ev_count = params_len - usize::from(nargs);
-                            let ev_body_len = f.layout.slots().len() - f.layout.arg_area_len();
+                            let ev_body_len = f.layout.body_len();
                             for i in 0..=ev_count {
                                 let ev_slot = u8::try_from(
                                     f.layout.arg_area().start + usize::from(nargs) + i,
@@ -3984,7 +6754,7 @@ impl Vm {
                             }
                             let mut st = stack_state!();
                             let t = st
-                                .call(version, func_id, &f.layout, fp, pc.0 + 1)
+                                .call(version, func_id, &facts, &f.layout, fp, pc.0 + 1)
                                 .map_err(|e| (e, pc))?;
                             active = Active {
                                 version: t.version,
@@ -4000,19 +6770,17 @@ impl Vm {
                             },
                             pc,
                         ))?;
-                        if usize::from(nargs) != g.params.len() {
-                            return Err((
-                                Trap::ArityMismatch {
-                                    expected: g.params.len(),
-                                    given: usize::from(nargs),
-                                },
-                                pc,
-                            ));
+                        // a fork-join combinator parks its call site; a
+                        // teardown-hook drive must return to its driver,
+                        // so the fork refuses before its spawn phase runs
+                        // (a parked hook would strand the pass)
+                        if self.teardown_drive && crate::native::is_fork_join(module, *func) {
+                            return Err((Trap::ReentrancyRefused, pc));
                         }
+                        let needed = generic_staged_check(g, nargs).map_err(|e| (e, pc))?;
                         // the evidence words share the overlay with the staged
                         // arguments, so the area must hold both plus the result
                         let area = f.layout.arg_area_len();
-                        let needed = g.params.len() + usize::from(g.evidence);
                         if needed > area {
                             return Err((
                                 Trap::CallLayout(SlideError::StagingTooSmall {
@@ -4032,7 +6800,7 @@ impl Vm {
                                 pc,
                             ));
                         }
-                        let body_len = f.layout.slots().len() - f.layout.arg_area_len();
+                        let body_len = f.layout.body_len();
                         let start = f.layout.arg_area().start;
                         // the staged arguments and evidence words copy inline
                         // (generic call sites sit well under the inline width),
@@ -4058,27 +6826,7 @@ impl Vm {
                             }
                             &heap
                         };
-                        for (index, (&value, &want)) in args.iter().zip(g.params).enumerate() {
-                            // a `Raw` parameter is the wildcard: the staged
-                            // value words carry the call site's concrete kinds;
-                            // a `Ref` word against a `Fn` parameter is the
-                            // callable-defaulted slot (F2) — the combinators'
-                            // staged lambda may be a closure object
-                            let staged = value.slot_type();
-                            if staged != want
-                                && want != SlotType::Raw
-                                && !(staged == SlotType::Ref && want == SlotType::Fn)
-                            {
-                                return Err((
-                                    Trap::CallLayout(SlideError::TypeMismatch {
-                                        index,
-                                        staged,
-                                        expected: want,
-                                    }),
-                                    pc,
-                                ));
-                            }
-                        }
+                        generic_kind_check(g, args).map_err(|e| (e, pc))?;
                         let mut ev_inline = [Value::I64(0); INLINE_WORDS];
                         let mut ev_heap = Vec::new();
                         let evidence: &[Value] = if usize::from(g.evidence) <= INLINE_WORDS {
@@ -4105,15 +6853,25 @@ impl Vm {
                             }
                             &ev_heap
                         };
-                        // the body takes the whole VM: the pure bodies split
-                        // off the heap and sink themselves, and the
-                        // lambda-taking combinators reenter the dispatcher
-                        // through `call_hosted`
+                        // the body takes the whole VM: the pure bodies
+                        // split off the heap and sink themselves, the
+                        // lambda-taking combinators reenter the
+                        // dispatcher through `call_hosted`, and the
+                        // fork-join combinators park — the spawn phase
+                        // ran inside the body, and the join runs on
+                        // the interlock stack, the drive delivering the
+                        // answer onto this call site
                         let result = (g.func)(self, evidence, args).map_err(|e| (e, pc))?;
-                        overlay_native(result, &mut self.stack, &f.layout, fp);
+                        if let NativeResult::Fork { nursery, stage } = result {
+                            return self.fork_park(&active, pc, area, nursery, stage);
+                        }
+                        overlay_native(result, &mut self.stack, &f.layout, fp)
+                            .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    Uop::Calltg { callee, nargs } => {
+                    OP_CALLTG => {
+                        let callee = ConstIdx(fd);
+                        let nargs = fa;
                         // CALLTG, the dispatch tail call [H2's guarantee
                         // closure]: the dispatch resolution is CALLG's own
                         // — the sentinel evidence FuncRef, a trait site's
@@ -4125,10 +6883,12 @@ impl Vm {
                         // evidence/instance words past the callee's
                         // parameters ride the transfer as count-free dead
                         // words the callee never claims, so the slide moves
-                        // exactly the parameter count.
-                        let found = pool
-                            .get(usize::from(callee.0))
-                            .ok_or((Trap::PoolIndex { kidx: callee.0 }, pc))?;
+                        // exactly the parameter count. Install proved the
+                        // operand's pool index in range and its kind FuncRef
+                        // (module.rs's body validation); the fetch indexes
+                        // directly and the kind arm is the corrupted-pool
+                        // tripwire.
+                        let found = &pool[usize::from(callee.0)];
                         let Const::FuncRef { module, func } = found else {
                             return Err((
                                 Trap::PoolKind {
@@ -4180,17 +6940,8 @@ impl Vm {
                             };
                             let func_id = u32::try_from(index).expect("guarded above");
                             let target = &version.functions()[func_id as usize];
-                            let entry = target.entry.resolve();
-                            if entry != func_id as usize {
-                                return Err((
-                                    Trap::EntryWordMismatch {
-                                        resolved: entry,
-                                        expected: func_id as usize,
-                                    },
-                                    pc,
-                                ));
-                            }
-                            if usize::from(nargs) != target.layout.params_len() {
+                            debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
+                            if !sentinel_arity_exact(target.layout.params_len(), nargs) {
                                 return Err((
                                     Trap::ArityMismatch {
                                         expected: target.layout.params_len(),
@@ -4199,9 +6950,24 @@ impl Vm {
                                     pc,
                                 ));
                             }
+                            // the follow riders, as the CALLG sentinel path
+                            // above validates them
+                            check_evidence_riders(
+                                &self.stack,
+                                target.layout.params_len(),
+                                nargs,
+                                &f.layout,
+                                fp,
+                            )
+                            .map_err(|e| (e, pc))?;
+                            // the serving body is runtime data (the frame's
+                            // evidence word named it), so the facts derive
+                            // here, once per call
+                            let facts = SiteFacts::derive(&f.layout, &target.layout);
+                            self.arena_frame_close(fp);
                             let mut st = stack_state!();
                             let t = st
-                                .tail_call(version, func_id, &f.layout, fp)
+                                .tail_call(version, func_id, &facts, &f.layout, fp)
                                 .map_err(|e| (e, pc))?;
                             active = Active {
                                 version: t.version,
@@ -4217,11 +6983,19 @@ impl Vm {
                         // reuses this frame
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(pool, caller_site, pc.0, callee, nargs)
+                            .resolve_dispatch_site(
+                                module,
+                                *func,
+                                caller_site,
+                                &f.layout,
+                                pc.0,
+                                nargs,
+                            )
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
                             func: func_id,
+                            facts,
                         } = resolved
                         {
                             let params_len =
@@ -4231,7 +7005,7 @@ impl Vm {
                             // count-free I64 constants riding past the
                             // slide's width
                             let ev_count = params_len - usize::from(nargs);
-                            let ev_body_len = f.layout.slots().len() - f.layout.arg_area_len();
+                            let ev_body_len = f.layout.body_len();
                             for i in 0..=ev_count {
                                 let ev_slot = u8::try_from(
                                     f.layout.arg_area().start + usize::from(nargs) + i,
@@ -4250,9 +7024,10 @@ impl Vm {
                                     ));
                                 }
                             }
+                            self.arena_frame_close(fp);
                             let mut st = stack_state!();
                             let t = st
-                                .tail_call(version, func_id, &f.layout, fp)
+                                .tail_call(version, func_id, &facts, &f.layout, fp)
                                 .map_err(|e| (e, pc))?;
                             active = Active {
                                 version: t.version,
@@ -4265,7 +7040,11 @@ impl Vm {
                         // instruction and the frame returns its result —
                         // the CALLT-to-native discipline: the span result
                         // lands on the ORIGINAL caller's overlay words, and
-                        // at the root frame only the head word survives
+                        // at the root frame only the head word survives.
+                        // A fork-join combinator cannot run here: the
+                        // join parks its site through the drive, and the
+                        // tail call would return this frame at the call —
+                        // the fork needs the CALLG site
                         let g = crate::native::resolve_generic(module, *func).ok_or((
                             Trap::UnknownCallee {
                                 module: module.clone(),
@@ -4273,17 +7052,11 @@ impl Vm {
                             },
                             pc,
                         ))?;
-                        if usize::from(nargs) != g.params.len() {
-                            return Err((
-                                Trap::ArityMismatch {
-                                    expected: g.params.len(),
-                                    given: usize::from(nargs),
-                                },
-                                pc,
-                            ));
+                        if crate::native::is_fork_join(module, *func) {
+                            return Err((Trap::TailForkJoin, pc));
                         }
+                        let needed = generic_staged_check(g, nargs).map_err(|e| (e, pc))?;
                         let area = f.layout.arg_area_len();
-                        let needed = g.params.len() + usize::from(g.evidence);
                         if needed > area {
                             return Err((
                                 Trap::CallLayout(SlideError::StagingTooSmall {
@@ -4293,10 +7066,7 @@ impl Vm {
                                 pc,
                             ));
                         }
-                        if self.callinfo.len() > 1 {
-                            let caller = self.callinfo[self.callinfo.len() - 2].clone();
-                            let caller_fn = &caller.module.functions()[caller.func as usize];
-                            let caller_area = caller_fn.layout.arg_area_len();
+                        if let Some(caller_area) = self.caller_arg_area() {
                             if usize::from(g.result_words) > caller_area {
                                 return Err((
                                     Trap::RetSpanTooWide {
@@ -4330,22 +7100,7 @@ impl Vm {
                             }
                             &heap
                         };
-                        for (index, (&value, &want)) in args.iter().zip(g.params).enumerate() {
-                            let staged = value.slot_type();
-                            if staged != want
-                                && want != SlotType::Raw
-                                && !(staged == SlotType::Ref && want == SlotType::Fn)
-                            {
-                                return Err((
-                                    Trap::CallLayout(SlideError::TypeMismatch {
-                                        index,
-                                        staged,
-                                        expected: want,
-                                    }),
-                                    pc,
-                                ));
-                            }
-                        }
+                        generic_kind_check(g, args).map_err(|e| (e, pc))?;
                         let mut ev_inline = [Value::I64(0); INLINE_WORDS];
                         let mut ev_heap = Vec::new();
                         let evidence: &[Value] = if usize::from(g.evidence) <= INLINE_WORDS {
@@ -4373,26 +7128,102 @@ impl Vm {
                             &ev_heap
                         };
                         let result = (g.func)(self, evidence, args).map_err(|e| (e, pc))?;
-                        let value = match result {
-                            NativeResult::Word(value) => value,
+                        // the answer's whole word span rides a boundary
+                        // return (the hosted seam's result channel); every
+                        // other outcome keeps its prior words
+                        let (value, answer) = match result {
+                            NativeResult::Word(value) => (value, FrameAnswer::one(value)),
+                            // the tail site refuses the fork before its
+                            // body runs (the is_fork_join check above)
+                            NativeResult::Fork { .. } => {
+                                unreachable!("the tail site refuses a fork request first")
+                            },
                             NativeResult::Tag { tag, payload } => {
                                 if self.callinfo.len() > 1 {
                                     self.stack[fp + 2] = Word::Slot(payload);
                                 }
-                                Value::Tag(tag)
+                                (Value::Tag(tag), FrameAnswer::tagged(tag, &[payload]))
+                            },
+                            // the span channel's tail ride, the CALLT
+                            // native shape's: the payload words land on the
+                            // original caller's overlay past the head,
+                            // bounds-checked against that caller's area
+                            // (the root keeps only the head word)
+                            NativeResult::Span { tag, payload } => {
+                                if self.callinfo.len() > 1 {
+                                    let caller = &self.callinfo[self.callinfo.len() - 2];
+                                    let caller_fn =
+                                        &caller.module.functions()[caller.func as usize];
+                                    let area = caller_fn.layout.arg_area_len();
+                                    if 1 + payload.len() > area {
+                                        return Err((
+                                            Trap::RetSpanTooWide {
+                                                span: u16::try_from(1 + payload.len())
+                                                    .expect("span widths fit u16"),
+                                                caller_area: u16::try_from(area)
+                                                    .expect("argument areas fit u16"),
+                                            },
+                                            pc,
+                                        ));
+                                    }
+                                    for (index, word) in payload.iter().enumerate() {
+                                        self.stack[fp + 2 + index] = Word::Slot(*word);
+                                    }
+                                }
+                                (Value::Tag(tag), FrameAnswer::tagged(tag, &payload))
+                            },
+                            // the tag-less total's tail ride, the CALLT
+                            // native shape's with no discriminant: word 0
+                            // rides the RET, the rest land on the original
+                            // caller's overlay words 1.., bounds-checked
+                            // against that caller's area
+                            NativeResult::Total { words } => {
+                                if self.callinfo.len() > 1 {
+                                    let caller = &self.callinfo[self.callinfo.len() - 2];
+                                    let caller_fn =
+                                        &caller.module.functions()[caller.func as usize];
+                                    let area = caller_fn.layout.arg_area_len();
+                                    if words.len() > area {
+                                        return Err((
+                                            Trap::RetSpanTooWide {
+                                                span: u16::try_from(words.len())
+                                                    .expect("span widths fit u16"),
+                                                caller_area: u16::try_from(area)
+                                                    .expect("argument areas fit u16"),
+                                            },
+                                            pc,
+                                        ));
+                                    }
+                                    for (index, word) in words.iter().enumerate().skip(1) {
+                                        self.stack[fp + 1 + index] = Word::Slot(*word);
+                                    }
+                                }
+                                let lead = words
+                                    .first()
+                                    .copied()
+                                    .expect("a tag-less total carries a word");
+                                (lead, FrameAnswer::many(words))
                             },
                         };
+                        self.arena_frame_close(fp);
                         let mut st = stack_state!();
                         match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                            RetOutcome::Root(v) => match self.complete_current(v) {
-                                Some((a, at)) => {
-                                    active = a;
-                                    pc = at;
-                                    continue 'transfer;
-                                },
-                                None => return Ok(DriveOutcome::Died(v)),
+                            RetOutcome::Root(v) => {
+                                // the entry frame answers with its whole span:
+                                // it rides the completion channel (a RETSPAN
+                                // at the root, or a tail native's span/total),
+                                // `v` the head word reaching a live resumer
+                                // and the drive's death value
+                                match self.complete_current_span(answer) {
+                                    Some((a, at)) => {
+                                        active = a;
+                                        pc = at;
+                                        continue 'transfer;
+                                    },
+                                    None => return Ok(DriveOutcome::Died(v)),
+                                }
                             },
-                            RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
+                            RetOutcome::Boundary(_) => return Ok(DriveOutcome::Frame(answer)),
                             RetOutcome::Resume {
                                 version,
                                 func,
@@ -4404,9 +7235,14 @@ impl Vm {
                             },
                         }
                     },
-                    Uop::Ret { src } => {
+                    OP_RET => {
+                        if fd != 0 {
+                            reserved!();
+                        }
+                        let src = fa;
                         let value = read_value(&self.stack, fp, src, slots, body_len)
                             .map_err(|e| (e, pc))?;
+                        self.arena_frame_close(fp);
                         let mut st = stack_state!();
                         match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
                             RetOutcome::Root(v) => match self.complete_current(v) {
@@ -4417,7 +7253,9 @@ impl Vm {
                                 },
                                 None => return Ok(DriveOutcome::Died(v)),
                             },
-                            RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
+                            RetOutcome::Boundary(v) => {
+                                return Ok(DriveOutcome::Frame(FrameAnswer::one(v)))
+                            },
                             RetOutcome::Resume {
                                 version,
                                 func,
@@ -4429,7 +7267,12 @@ impl Vm {
                             },
                         }
                     },
-                    Uop::RetSpan { src, n } => {
+                    OP_RET_SPAN => {
+                        if fb != 0 || fc == 0 {
+                            reserved!();
+                        }
+                        let src = fa;
+                        let n = fc;
                         // the span must fit inside this frame's own slots (a
                         // load-time fact, re-checked defensively)
                         if usize::from(src) + usize::from(n) > frame_slots {
@@ -4443,7 +7286,13 @@ impl Vm {
                         }
                         // the caller's overlay area must be wide enough to
                         // receive the whole span (cross-function, so runtime)
-                        if self.callinfo.len() > 1 {
+                        // — except at the hosted seam's reentry frame, where
+                        // the span rides the drive's outcome instead of any
+                        // caller's overlay (the sentinel return pc marks it)
+                        let at_reentry = boundary != usize::MAX
+                            && self.callinfo.len() == boundary
+                            && matches!(self.stack[fp], Word::Meta(m) if m.return_pc.0 == u32::MAX);
+                        if self.callinfo.len() > 1 && !at_reentry {
                             let caller = &self.callinfo[self.callinfo.len() - 2];
                             let caller_fn = &caller.module.functions()[caller.func as usize];
                             let area = caller_fn.layout.arg_area_len();
@@ -4458,21 +7307,21 @@ impl Vm {
                                 ));
                             }
                         }
-                        // place the span at overlay words 0..n. The
-                        // destination `fp+1+i` is the caller's
-                        // outgoing-argument word i for every i below the
-                        // caller's area (the callee's own slots alias those
-                        // words); words at or past the callee's call word are
-                        // dead at this point, so writing over them is safe.
-                        // Ascending is overlap-safe: the destination sits
-                        // below the source for src > 0, and src == 0 is an
-                        // identity copy.
-                        for i in 0..usize::from(n) {
+                        // the span's answer rides the boundary return whole
+                        // and lands at overlay words 0..n — the caller's
+                        // outgoing-argument words, since the callee's own slots
+                        // alias them. The words are read whole before any is
+                        // placed, so the callee's slots and the caller's
+                        // overlay words never overlap, and a narrow span
+                        // (every lowered lambda's answer) allocates nothing.
+                        let answer = FrameAnswer::staged(usize::from(n), |i| {
                             let slot = u8::try_from(usize::from(src) + i)
                                 .expect("span stays inside the u8 slot range");
-                            let value = read_value(&self.stack, fp, slot, slots, body_len)
-                                .map_err(|e| (e, pc))?;
-                            self.stack[fp + 1 + i] = Word::Slot(value);
+                            read_value(&self.stack, fp, slot, slots, body_len)
+                        })
+                        .map_err(|e| (e, pc))?;
+                        for i in 0..usize::from(n) {
+                            self.stack[fp + 1 + i] = Word::Slot(answer.as_slice()[i]);
                         }
                         let value = match self.stack[fp + 1] {
                             Word::Slot(v) => v,
@@ -4480,17 +7329,25 @@ impl Vm {
                                 return Err((Trap::MetaWordCorrupt { fp }, pc));
                             },
                         };
+                        self.arena_frame_close(fp);
                         let mut st = stack_state!();
                         match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                            RetOutcome::Root(v) => match self.complete_current(v) {
-                                Some((a, at)) => {
-                                    active = a;
-                                    pc = at;
-                                    continue 'transfer;
-                                },
-                                None => return Ok(DriveOutcome::Died(v)),
+                            RetOutcome::Root(v) => {
+                                // the entry frame answers with its whole span:
+                                // it rides the completion channel (a RETSPAN
+                                // at the root, or a tail native's span/total),
+                                // `v` the head word reaching a live resumer
+                                // and the drive's death value
+                                match self.complete_current_span(answer) {
+                                    Some((a, at)) => {
+                                        active = a;
+                                        pc = at;
+                                        continue 'transfer;
+                                    },
+                                    None => return Ok(DriveOutcome::Died(v)),
+                                }
                             },
-                            RetOutcome::Boundary(v) => return Ok(DriveOutcome::Frame(v)),
+                            RetOutcome::Boundary(_) => return Ok(DriveOutcome::Frame(answer)),
                             RetOutcome::Resume {
                                 version,
                                 func,
@@ -4502,7 +7359,11 @@ impl Vm {
                             },
                         }
                     },
-                    Uop::Halt { slot } => {
+                    OP_HALT => {
+                        if fd != 0 {
+                            reserved!();
+                        }
+                        let slot = fa;
                         let value = read_value(&self.stack, fp, slot, slots, body_len)
                             .map_err(|e| (e, pc))?;
                         // HALT ends the fiber; under a nested reentrant drive
@@ -4520,6 +7381,53 @@ impl Vm {
                             },
                             None => return Ok(DriveOutcome::Died(value)),
                         }
+                    },
+                    // Major 0xE: the placed RC pair (C4). Load decode-checks
+                    // every word once, so a canonicity violation here is like
+                    // any other; each arm moves one counted heap block's
+                    // count per word.
+                    OP_RC_INC => {
+                        if fb != 0 || fc != 0 {
+                            reserved!();
+                        }
+                        if let Some(word) = read_counted(&self.stack, fp, fa, slots, body_len)
+                            .map_err(|e| (e, pc))?
+                        {
+                            self.inc_ref(word).map_err(|e| (e, pc))?;
+                        }
+                        pc.0 += 1;
+                    },
+                    OP_RC_DEC => {
+                        if fb != 0 || fc != 0 {
+                            reserved!();
+                        }
+                        if let Some(word) = read_counted(&self.stack, fp, fa, slots, body_len)
+                            .map_err(|e| (e, pc))?
+                        {
+                            self.dec_ref(word).map_err(|e| (e, pc))?;
+                        }
+                        pc.0 += 1;
+                    },
+                    _ => {
+                        // every canonical byte is served by an arm above,
+                        // so anything here is a canonicity violation and the
+                        // decoders remain the error authority for its exact
+                        // cause
+                        let cause = if byte >> 4 == RC_MAJOR {
+                            match RcOp::decode(word) {
+                                Err(RcDecodeError::UnknownOpcode { major, minor }) => {
+                                    DecodeError::UnknownOpcode { major, minor }
+                                },
+                                Err(RcDecodeError::ReservedField) => DecodeError::ReservedField,
+                                Ok(_) => unreachable!("every canonical RC byte is a fast arm"),
+                            }
+                        } else {
+                            DecodeError::UnknownOpcode {
+                                major: byte >> 4,
+                                minor: byte & 0x0f,
+                            }
+                        };
+                        return Err((Trap::BadEncoding { pc: pc.0, cause }, pc));
                     },
                 }
             }
@@ -4559,5 +7467,316 @@ impl Vm {
             });
         }
         frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_abi::uop::{Inst, Uop};
+
+    use super::*;
+
+    /// The peek-next fusion's opcode bytes are ds-abi encoding facts, never
+    /// hex copied into the interpreter: every byte the fused arms match
+    /// must equal the uop's own `opcode()` derivation from the encoding
+    /// table.
+    #[test]
+    fn fused_pair_opcode_bytes_match_the_abi_encoding() {
+        let byte = |op: Uop| op.opcode();
+        assert_eq!(
+            OP_KIMM,
+            byte(Uop::Kimm {
+                dst: 0,
+                kidx: ConstIdx(0)
+            })
+        );
+        assert_eq!(
+            OP_KCONST,
+            byte(Uop::Kconst {
+                dst: 0,
+                kidx: ConstIdx(0)
+            })
+        );
+        assert_eq!(
+            OP_ADD_I64,
+            byte(Uop::AddI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_SUB_I64,
+            byte(Uop::SubI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_MUL_I64,
+            byte(Uop::MulI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_MOD_I64,
+            byte(Uop::ModI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_ADD_F64,
+            byte(Uop::AddF64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_MUL_F64,
+            byte(Uop::MulF64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        // DIVI64 is deliberately outside the fused set: the census never
+        // measured the pair
+        assert_eq!(
+            OP_DIV_I64,
+            byte(Uop::DivI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+    }
+
+    /// The fused compare-branch predicate peeks raw opcode bytes: the fused
+    /// compare arms and the JMPIF/JMPIF_NOT dispatch constants must equal
+    /// ds-abi's `Uop::opcode()` derivation, so a uop renumbering fails here
+    /// instead of silently unfusing (or mis-fusing) at runtime.
+    #[test]
+    fn fused_branch_opcode_bytes_match_the_abi_encoding() {
+        let byte = |op: Uop| op.opcode();
+        assert_eq!(
+            OP_LT_I64,
+            byte(Uop::LtI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_EQ_I64,
+            byte(Uop::EqI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(
+            OP_GT_F64,
+            byte(Uop::GtF64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0
+            })
+        );
+        assert_eq!(OP_JMPIF, byte(Uop::Jmpif { cond: 0, target: 0 }));
+        assert_eq!(OP_JMPIF_NOT, byte(Uop::JmpifNot { cond: 0, target: 0 }));
+    }
+
+    /// The peek-next predicate fires exactly on the measured census pairs
+    /// — a fused arith whose lhs or rhs reads the load's dst — and on
+    /// nothing else: DIVI64 stays unfused, a non-consuming arith stays
+    /// unfused, an intervening RC word breaks the adjacency, and a load
+    /// at the code end peeks nothing.
+    #[test]
+    fn the_peek_next_predicate_fires_only_on_the_measured_pairs() {
+        // the r3 arith operand fields, per ds-abi's own effect tables
+        let fields = |op: Uop| {
+            let &[dst] = op.writes().as_slice() else {
+                unreachable!("an r3 arith writes one dst")
+            };
+            let &[lhs, rhs] = op.reads().as_slice() else {
+                unreachable!("an r3 arith reads lhs and rhs")
+            };
+            (op.opcode(), dst, lhs, rhs)
+        };
+        let load = Uop::Kimm {
+            dst: 2,
+            kidx: ConstIdx(0),
+        };
+        for arith in [
+            Uop::AddI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::SubI64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 2,
+            },
+            Uop::MulI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 2,
+            },
+            Uop::ModI64 {
+                dst: 3,
+                lhs: 0,
+                rhs: 2,
+            },
+        ] {
+            let code = crate::program::assemble(&[load, arith]).expect("pair encodes");
+            assert_eq!(
+                fused_i64_arith(&code, 0, 2),
+                Some(fields(arith)),
+                "{arith:?} consumes the loaded dst and fuses"
+            );
+        }
+        let fload = Uop::Kconst {
+            dst: 2,
+            kidx: ConstIdx(0),
+        };
+        for arith in [
+            Uop::AddF64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::MulF64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 2,
+            },
+        ] {
+            let code = crate::program::assemble(&[fload, arith]).expect("pair encodes");
+            assert_eq!(
+                fused_f64_arith(&code, 0, 2),
+                Some(fields(arith)),
+                "{arith:?} consumes the loaded dst and fuses"
+            );
+        }
+        // the negatives: DIVI64 (unmeasured), the wrong-kind follower, a
+        // non-consuming arith, an RC word between, and the code end
+        let negatives = [
+            Uop::DivI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::AddF64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::AddI64 {
+                dst: 0,
+                lhs: 1,
+                rhs: 3,
+            },
+        ];
+        for arith in negatives {
+            let code = crate::program::assemble(&[load, arith]).expect("pair encodes");
+            assert_eq!(
+                fused_i64_arith(&code, 0, 2),
+                None,
+                "{arith:?} is not a fused pair"
+            );
+        }
+        let rc = RcOp::Inc { src: 2 };
+        let consuming = Uop::AddI64 {
+            dst: 0,
+            lhs: 2,
+            rhs: 3,
+        };
+        let body = [Inst::from(load), Inst::from(rc), Inst::from(consuming)];
+        let code = crate::program::assemble(&body).expect("body encodes");
+        assert_eq!(
+            fused_i64_arith(&code, 0, 2),
+            None,
+            "an intervening RC word breaks the adjacency"
+        );
+        let code = crate::program::assemble(&[load]).expect("body encodes");
+        assert_eq!(
+            fused_i64_arith(&code, 0, 2),
+            None,
+            "a load at the code end peeks nothing"
+        );
+    }
+
+    /// A span answer up to the inline width stages on the stack — the
+    /// per-element combinator loop must not allocate — and a wider span
+    /// keeps its heap buffer whole.
+    #[test]
+    fn a_narrow_span_answer_stages_without_the_heap() {
+        let narrow = FrameAnswer::many(vec![Value::I64(1), Value::I64(2)]);
+        assert!(matches!(narrow, FrameAnswer::Words { n: 2, .. }));
+        assert_eq!(narrow.as_slice(), &[Value::I64(1), Value::I64(2)]);
+        let widest = FrameAnswer::many(vec![Value::I64(0); FRAME_ANSWER_INLINE]);
+        assert!(matches!(widest, FrameAnswer::Words { .. }));
+        let wide = FrameAnswer::many(vec![Value::I64(0); FRAME_ANSWER_INLINE + 1]);
+        assert!(matches!(wide, FrameAnswer::Wide(_)));
+        assert_eq!(wide.as_slice().len(), FRAME_ANSWER_INLINE + 1);
+        let tagged = FrameAnswer::tagged(7, &[Value::I64(9)]);
+        assert!(matches!(tagged, FrameAnswer::Words { n: 2, .. }));
+        assert_eq!(tagged.as_slice(), &[Value::Tag(7), Value::I64(9)]);
+        let staged = FrameAnswer::staged::<()>(3, |i| {
+            Ok(Value::I64(i64::try_from(i).expect("a span index fits i64")))
+        })
+        .expect("the source is infallible");
+        assert!(matches!(staged, FrameAnswer::Words { n: 3, .. }));
+        assert_eq!(staged.as_slice(), &[
+            Value::I64(0),
+            Value::I64(1),
+            Value::I64(2)
+        ]);
+    }
+
+    /// A reclaim compacts the row list, so a frame's slot can name another
+    /// row afterwards: the key check refuses it and the key index
+    /// re-resolves to the survivor, whose ids came along.
+    #[test]
+    fn a_reclaim_shift_revalidates_row_slots() {
+        let mut rows = KstrRows::default();
+        let dropped: KstrRowKey = (0x1000, 1);
+        let kept: KstrRowKey = (0x2000, 2);
+        let (gone, row) = rows.open(dropped, 2);
+        row.ids[1] = Some(7);
+        let (survives, row) = rows.open(kept, 2);
+        row.ids[1] = Some(9);
+
+        rows.reclaim(|row| row.key() != dropped);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows.row(survives, kept).is_none(),
+            "the surviving row moved down a slot"
+        );
+        assert!(rows.row(gone, dropped).is_none());
+        let (moved, row) = rows.open(kept, 2);
+        assert_ne!(moved.0, survives.0);
+        assert_eq!(row.ids[1], Some(9), "the moved row kept its ids");
+        assert_eq!(rows.row(moved, kept).map(|row| row.ids[1]), Some(Some(9)));
+    }
+
+    /// A reused pool address meets its dead predecessor's row, which is
+    /// widened before the new pool's const index.
+    #[test]
+    fn a_reopened_row_widens_to_the_new_pools_width() {
+        let mut rows = KstrRows::default();
+        let key: KstrRowKey = (0x1000, 0);
+        let (_, row) = rows.open(key, 2);
+        row.ids[1] = Some(3);
+        let (_, row) = rows.open(key, 4);
+        assert_eq!(row.ids.len(), 4);
+        assert_eq!(row.ids[1], Some(3));
     }
 }

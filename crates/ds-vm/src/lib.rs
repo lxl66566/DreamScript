@@ -23,10 +23,10 @@
 //!   against the layout, and validates every pool access; the dispatcher decodes on dispatch (see
 //!   `vm`'s module docs for why no pre-decoded cache).
 //! - Callee addressing. The contract's FuncRef is "module index + function index"; this registry is
-//!   name-keyed until the ds-mod link table assigns module indices, so a pool FuncRef carries the
-//!   target module's name plus the function-table index (entry word 0), resolved through the
-//!   target's current slot [H6 item 5]. The dsmod loader maps the payload's `FuncRef` constant kind
-//!   onto these at install (see `loader`'s module docs).
+//!   name-keyed until the M7 loading round's link table assigns module indices, so a pool FuncRef
+//!   carries the target module's name plus the function-table index (entry word 0), resolved
+//!   through the target's current slot [H6 item 5]. The dsmod loader maps the payload's `FuncRef`
+//!   constant kind onto these at install (see `loader`'s module docs).
 //! - Non-tail `CALL` pushes a frame through the call word: the callee's metadata word is written
 //!   into the caller's call word, so the callee's parameter slots overlay the caller's
 //!   outgoing-argument area with zero argument copying, and the stack grows by exactly the callee's
@@ -59,19 +59,19 @@
 //!   never interned), EQSTR/NEQSTR compare contents, not identity. No reclamation happens in M3 —
 //!   objects live for the VM's lifetime; M4's Perceus placement pass inserts dup/drop uops and
 //!   precise RC over this same table.
-//! - Builtins. Native (Rust) functions live in two reserved modules: the `builtin` core
-//!   ([`crate::native::BUILTIN_MODULE`], the pure `str` conversions and string ops) that every VM
-//!   installs into its registry, and the `std` platform module
-//!   ([`crate::native::STD_PLATFORM_MODULE`], the `world`-effect surface — console, file IO, net
-//!   IO) that the host providing a platform installs explicitly. A pool `FuncRef { module, func: i
-//!   }` resolves through the same path as any uop callee, so `CALL` is the only call mechanism. A
-//!   native call never pushes a frame: it reads the caller's staged overlay words and overlays its
-//!   result on argument slot 0 where a RET would. Chosen over a dedicated uop per builtin because
-//!   CALL already is the ISA's function-call mechanism — a uop per builtin grows the locked opcode
-//!   set for every stdlib addition, while the native-module route adds builtins as table entries
-//!   with arity and typing checks in one place. The fallible natives answer with a two-word
-//!   tag+payload span over the caller's overlay slots, with the result-span and platform tag-id
-//!   conventions documented in `native`'s module docs.
+//! - Builtins. Native (Rust) functions live in the reserved `builtin` module
+//!   ([`crate::native::BUILTIN_MODULE`], the pure `str` conversions, string ops, and containers)
+//!   that every VM installs into its registry, plus the world surface (`world`-effect — console,
+//!   file IO, net IO) served by the platform handler a host installs behind the source's platform
+//!   declaration ([`crate::platform`], H5.5/E1): the world calls' pool `FuncRef { module, func: i
+//!   }` addresses the platform's name and resolves through the same path as any uop callee, so
+//!   `CALL` is the only call mechanism. A native call never pushes a frame: it reads the caller's
+//!   staged overlay words and overlays its result on argument slot 0 where a RET would. Chosen over
+//!   a dedicated uop per builtin because CALL already is the ISA's function-call mechanism — a uop
+//!   per builtin grows the locked opcode set for every stdlib addition, while the native-module
+//!   route adds builtins as table entries with arity and typing checks in one place. The fallible
+//!   world ops answer with a two-word tag+payload span over the caller's overlay slots, with the
+//!   result-span and platform tag-id conventions documented in `native`'s module docs.
 //! - Multi-word values. BL-2 values (payloaded unions, structs) span consecutive slots. RETSPAN
 //!   returns such a span: the words land on the caller's outgoing-argument slots `0..n`, whose
 //!   width the lowering must size for the widest callee result it calls (the VM re-checks). Frames
@@ -113,17 +113,22 @@ pub mod native;
 mod net;
 pub mod nursery;
 pub mod object;
+pub mod platform;
 pub mod program;
 pub mod value;
 pub mod vm;
 
 /// The locked contracts this VM implements, re-exported for callers.
 pub use ds_abi as abi;
+pub use ds_rt::{ArenaMisuse, ArenaStats};
 pub use fiber::{FIBER_ROOT, FiberId, FiberState};
 pub use loader::{LoadError, install as install_dsmod};
 pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion};
 pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
 pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
+pub use platform::{Capability, Platform};
 pub use program::{Const, ConstKind, FunctionDef, assemble};
-pub use value::{FuncRef, RefId, Value, Word};
-pub use vm::{BacktraceFrame, Trap, Vm};
+pub use value::{
+    ARENA_CHUNK_LIMIT, ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word,
+};
+pub use vm::{BacktraceFrame, FrameAnswer, Trap, Vm};

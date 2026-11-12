@@ -4,7 +4,16 @@
 //! statements, expressions over the checked surface, well-typed-biased
 //! with occasional wrong splices), and the full pipeline (parse, effects
 //! walk over the generator's declared rows, bidirectional check with the
-//! affine pass, both diag renderers) never panics. Coverage is asserted,
+//! affine pass, both diag renderers) never panics. The census asserts
+//! the pattern rounds' landed vocabulary stays in the draw set:
+//! value-level or-patterns, struct patterns over struct-typed
+//! scrutinees, case constructor payload tests, guards over dispatch,
+//! nested struct sub-patterns, whole-span union equality, and unions
+//! over heap-ref applications, plus the CALL_GENERIC round's
+//! vocabulary: free generic call sites over declared bounds, serving
+//! impl bodies, nested runtime forms, the honest doors, inert
+//! uncalled declarations, the impl-completeness shapes, and
+//! two-level instantiations. Coverage is asserted,
 //! not assumed: both parse outcomes occur across the sweep, most
 //! generated programs parse (a generator drift fails loudly), and the
 //! coverage is asserted, not assumed: both parse outcomes occur across
@@ -57,6 +66,24 @@ fn generated_programs_never_panic() {
     let mut moved = 0u64;
     let mut rowed = 0u64;
     let mut runs = 0u64;
+    let mut record_lists = 0u32;
+    let mut wide_unions = 0u32;
+    let mut span_fields = 0u32;
+    let mut heap_ref_unions = 0u32;
+    let mut or_patterns = 0u32;
+    let mut struct_patterns = 0u32;
+    let mut payload_tests = 0u32;
+    let mut union_guards = 0u32;
+    let mut nested_sub_patterns = 0u32;
+    let mut union_equality = 0u32;
+    let mut generic_calls = 0u32;
+    let mut generic_impls = 0u32;
+    let mut generic_runtime_forms = 0u32;
+    let mut generic_doors = 0u32;
+    let mut inert_generics = 0u32;
+    let mut incomplete_impls = 0u32;
+    let mut omitted_defaults = 0u32;
+    let mut two_level_calls = 0u32;
     for seed in 0..240u64 {
         let len = 16 + usize::try_from(seed % 24).expect("len fits") * 11;
         let outcome = check_gen::exercise(&rng_bytes(seed, len));
@@ -64,6 +91,24 @@ fn generated_programs_never_panic() {
         parsed += u64::from(outcome.parsed);
         moved += u64::from(outcome.parsed && outcome.moves > 0);
         rowed += u64::from(outcome.parsed && outcome.effects > 0);
+        record_lists += outcome.drawn.record_lists;
+        wide_unions += outcome.drawn.wide_unions;
+        span_fields += outcome.drawn.span_fields;
+        heap_ref_unions += outcome.drawn.heap_ref_unions;
+        or_patterns += outcome.drawn.or_patterns;
+        struct_patterns += outcome.drawn.struct_patterns;
+        payload_tests += outcome.drawn.payload_tests;
+        union_guards += outcome.drawn.union_guards;
+        nested_sub_patterns += outcome.drawn.nested_sub_patterns;
+        union_equality += outcome.drawn.union_equality;
+        generic_calls += outcome.drawn.generic_calls;
+        generic_impls += outcome.drawn.generic_impls;
+        generic_runtime_forms += outcome.drawn.generic_runtime_forms;
+        generic_doors += outcome.drawn.generic_doors;
+        inert_generics += outcome.drawn.inert_generics;
+        incomplete_impls += outcome.drawn.incomplete_impls;
+        omitted_defaults += outcome.drawn.omitted_defaults;
+        two_level_calls += outcome.drawn.two_level_calls;
     }
     // structural generation: the near-totality of programs must parse
     assert!(
@@ -77,6 +122,84 @@ fn generated_programs_never_panic() {
     assert!(
         rowed > 0,
         "the effects walk must see declared rows somewhere in the sweep"
+    );
+    // the span-surface draw census: the span rework's landed shapes must
+    // stay in the vocabulary (a weighting regression fails loudly)
+    assert!(
+        record_lists > 0,
+        "record-typed list elements are drawn somewhere in the sweep"
+    );
+    assert!(
+        wide_unions > 0,
+        "unions over wider members are drawn somewhere in the sweep"
+    );
+    assert!(
+        span_fields > 0,
+        "struct-typed fields are drawn somewhere in the sweep"
+    );
+    // the pattern rounds' landed vocabulary stays in the generator's
+    // draw set (a weighting regression fails loudly)
+    assert!(
+        heap_ref_unions > 0,
+        "unions over heap-ref applications are drawn somewhere in the sweep"
+    );
+    assert!(
+        or_patterns > 0,
+        "value-level or-patterns are drawn somewhere in the sweep"
+    );
+    assert!(
+        struct_patterns > 0,
+        "struct patterns over struct-typed scrutinees are drawn somewhere in the sweep"
+    );
+    assert!(
+        payload_tests > 0,
+        "case constructor payload tests are drawn somewhere in the sweep"
+    );
+    assert!(
+        union_guards > 0,
+        "guards over union and enum dispatch are drawn somewhere in the sweep"
+    );
+    assert!(
+        nested_sub_patterns > 0,
+        "nested struct sub-patterns are drawn somewhere in the sweep"
+    );
+    assert!(
+        union_equality > 0,
+        "whole-span equality over union operands is drawn somewhere in the sweep"
+    );
+    // the CALL_GENERIC round's landed vocabulary stays in the
+    // generator's draw set (a weighting regression fails loudly)
+    assert!(
+        generic_calls > 0,
+        "free generic call sites are drawn somewhere in the sweep"
+    );
+    assert!(
+        generic_impls > 0,
+        "serving impl bodies are drawn somewhere in the sweep"
+    );
+    assert!(
+        generic_runtime_forms > 0,
+        "nested generic runtime forms are drawn somewhere in the sweep"
+    );
+    assert!(
+        generic_doors > 0,
+        "the generic surface's honest doors are drawn somewhere in the sweep"
+    );
+    assert!(
+        inert_generics > 0,
+        "inert uncalled generic declarations are drawn somewhere in the sweep"
+    );
+    assert!(
+        incomplete_impls > 0,
+        "incomplete impls reporting DS2023 are drawn somewhere in the sweep"
+    );
+    assert!(
+        omitted_defaults > 0,
+        "omitted defaulted members are drawn somewhere in the sweep"
+    );
+    assert!(
+        two_level_calls > 0,
+        "two-level instantiations are drawn somewhere in the sweep"
     );
     // the degenerate inputs: empty and single-byte streams cycle into a
     // full deterministic program too

@@ -1,6 +1,6 @@
-// The stdlib ambient: the checked-declaration layer of the M3 stdlib (the
-// runtime half is two native modules — the ds-vm builtin core, and the
-// std platform natives the host installs). Registered as a package member
+// The stdlib ambient: the checked-declaration layer of the stdlib (the
+// runtime half is the ds-vm builtin core plus the platform handler the
+// host installs behind the platform declaration below). Registered as a package member
 // before the user's sources; the package namespace is two [G3, F9] —
 // types and values — so `struct map` and `fn map` coexist, and a name may
 // be redeclared by a corpus file only in the other namespace. The
@@ -9,6 +9,11 @@
 // the five fallible reads return real success unions. Still file-owned:
 // file, url, raw_fd, ord, json, and the stack API — `open`/`read_exact`
 // stay absent because their signatures cannot name the caller's `file`.
+
+// The default platform (H5, E1): the `ds` CLI is this platform's
+// provider, and the checker verifies the package's world usage stays
+// inside what it provides.
+platform "std" provides <console, fsys, net, time>
 
 trait Copyable { }
 

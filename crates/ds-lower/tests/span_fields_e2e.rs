@@ -8,7 +8,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Parse -> check -> lower -> round-trip -> run, returning the captured
 /// stdout of `main`. Panics with the checker's renderings when the
@@ -35,8 +35,8 @@ fn runs(name: &str, source: &str) -> String {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     assert_eq!(
@@ -146,6 +146,45 @@ fn ref_words_inside_a_multi_word_field_balance() {
     assert_eq!(out, "6\n");
 }
 
+/// A tuple member of a union region: the elements claim one word each
+/// (possibly scattered among other members' fields), and every read
+/// gathers positionally — the member binder's destructuring, the
+/// widening call, and the pass-through return.
+#[test]
+fn a_tuple_member_binds_positionally_over_the_region() {
+    let out = runs(
+        "tuple_member",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag miss\n",
+            "extern fn println (msg: string) -> ()\n",
+            "fn sum(v: (int, int) | miss) -> int {\n",
+            "  match v {\n",
+            "    miss => 0,\n",
+            "    other => {\n",
+            "      const (a, b) = other\n",
+            "      a + b\n",
+            "    },\n",
+            "  }\n",
+            "}\n",
+            "fn passthru(v: (int, string) | miss) -> (int, string) | miss { v }\n",
+            "fn main() -> () {\n",
+            "  println(\"${sum((3, 4))}\")\n",
+            "  println(\"${sum(miss)}\")\n",
+            "  match passthru((7, \"z\")) {\n",
+            "    miss => println(\"m\"),\n",
+            "    other => {\n",
+            "      const (n, s) = other\n",
+            "      println(\"${n} ${s}\")\n",
+            "    },\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(out, "7\n0\n7 z\n");
+}
+
 /// The widened surfaces refuse honestly: the field vocabulary beyond
 /// struct-typed fields, tuple spans over wider elements, and the
 /// one-word native seams.
@@ -182,60 +221,6 @@ fn the_refusal_openings_keep_their_honest_names() {
         ),
         "a multi-word tuple element",
         "tuple elements lower as one plain frame word",
-    );
-    // a tuple member of a union
-    refuses(
-        "refuse_tuple_member",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "tag miss\n",
-            "extern fn println (msg: string) -> ()\n",
-            "fn f(v: (int, int) | miss) -> int {\n",
-            "  match v { miss => 0, other => 1 }\n",
-            "}\n",
-            "fn main() -> () { println(\"unreachable\") }\n",
-        ),
-        "a tuple member of a union",
-        "the region takes struct member fields only",
-    );
-    // a one-word list element over a struct value
-    refuses(
-        "refuse_list_element",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct list[t]\n",
-            "extern fn list_len[t] (xs: list[t]) -> int\n",
-            "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-            "struct point { x: int, y: int }\n",
-            "fn main() -> int {\n",
-            "  var xs = list[point]()\n",
-            "  list_push(xs, point { x: 1, y: 2 })\n",
-            "  list_len(xs)\n",
-            "}\n",
-        ),
-        "a list_push element",
-        "native channel",
-    );
-    // a hosted combinator whose callable answers several words
-    refuses(
-        "refuse_hosted_return",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct list[t]\n",
-            "struct point { x: int, y: int }\n",
-            "extern fn println (msg: string) -> ()\n",
-            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
-            "fn main() -> () {\n",
-            "  const xs = list[point]()\n",
-            "  const ys = map(xs, (p: point) => point { x: p.x, y: p.y })\n",
-            "  println(\"unreachable\")\n",
-            "}\n",
-        ),
-        "a container-combinator callable",
-        "the hosted per-element call answers one word",
     );
     // a wider map value under map_set's positional contract
     refuses(

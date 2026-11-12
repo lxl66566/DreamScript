@@ -1,15 +1,17 @@
 //! The lambda-taking container combinators end to end [the reentrant
-//! CALLG phase]: `map`, `filter`, `reduce` lower every call site to
-//! CALLG addressing the native's ONE body, the lambda argument staging
-//! its word into the callable-defaulted `Fn` parameter (the synthesized
-//! function's scalar FuncRef, a named function's minted word, or a
-//! closure object's Ref word — the hosted per-element call resolves
-//! either kind), and the evidence words recording the receiver's list
-//! instance behind the real arguments (`map`'s constraint list `[t, r]`
-//! carries two, the `map_len` precedent). The VM reenters the dispatcher
-//! per element over a synthetic reentry frame, so the block-body side
-//! effects interleave in element order and map-in-lambda stacks frames
-//! on the one chain.
+//! CALLG phase]: `map`, `filter`, `reduce`, `partition` lower every call
+//! site to CALLG addressing the native's ONE body, the lambda argument
+//! staging its word into the callable-defaulted `Fn` parameter (the
+//! synthesized function's scalar FuncRef, a named function's minted
+//! word, or a closure object's Ref word — the hosted per-element call
+//! resolves either kind), and the evidence words recording the
+//! receiver's list instance behind the real arguments (`map`'s
+//! constraint list `[t, r]` carries two, the `map_len` precedent).
+//! `partition`'s two-list tuple answers as the native channel's
+//! tag-less multi-word total — no discriminant, the two `Ref` words are
+//! the tuple itself. The VM reenters the dispatcher per element over a
+//! synthetic reentry frame, so the block-body side effects interleave in
+//! element order and map-in-lambda stacks frames on the one chain.
 
 use ds_abi::{BuiltinInstance, Inst};
 use ds_check::analyze;
@@ -17,7 +19,20 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+
+/// The record's body decoded to instructions, one per pc.
+fn insts(function: &ds_mod::Function) -> Vec<Inst> {
+    function
+        .code()
+        .iter()
+        .enumerate()
+        .map(|(pc, word)| {
+            Inst::decode(u32::try_from(pc).expect("pc fits u32"), *word)
+                .expect("ds-mod validated every word")
+        })
+        .collect()
+}
 
 /// The combinators' reserved slots: the FuncRef index, the real
 /// arguments a site stages, the evidence words behind them, and the
@@ -58,8 +73,8 @@ fn build_vm() -> (Vm, Lowered) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
 
@@ -133,7 +148,7 @@ fn every_combinator_site_is_one_callg_with_list_evidence() {
     let (_, lowered) = build_vm();
     let mut sites = [0usize; ROUTED.len()];
     for f in lowered.module().functions() {
-        let code = f.code();
+        let code = insts(f);
         for (i, uop) in code.iter().enumerate() {
             let Inst::Uop(uop) = uop else {
                 continue;
@@ -258,8 +273,8 @@ fn main() -> int {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     assert_eq!(
@@ -305,8 +320,8 @@ fn run_inline(name: &str, source: &str) -> (Vm, Lowered) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     (vm, lowered)
@@ -467,8 +482,8 @@ fn main() -> int {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     assert_eq!(
@@ -490,40 +505,398 @@ fn main() -> int {
     );
 }
 
-/// A struct-returning callable refuses: the hosted per-element call
-/// answers one word, and a wider return would silently keep its first
-/// word only. Both the lambda and the named-fn spellings name the
-/// argument by its actual shape.
+/// A struct-returning callable runs: the hosted per-element call's
+/// result channel carries whole word spans, so the answer's width
+/// pushes as one element and fixes the result list's stride (the
+/// heap-list slice's combinator close). Both the lambda and the
+/// named-fn spellings lower, and the run drains.
 #[test]
-fn a_multi_word_callable_result_refuses_at_lowering() {
-    refused(
-        "
+fn a_multi_word_callable_result_maps_at_the_answer_stride() {
+    let source = "
 tag int
+tag none
 struct list[t]
 struct point { x: int, y: int }
 extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
-
-fn main() -> int {
-  const out = map([1, 2], (x: int) => point { x: x, y: x })
-  0
-}",
-        "container-combinator callable",
-    );
-    refused(
-        "
-tag int
-struct list[t]
-struct point { x: int, y: int }
-extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
 
 fn widen(x: int) -> point {
-  point { x: x, y: x }
+  point { x: x, y: x * 10 }
 }
 
 fn main() -> int {
-  const out = map([1, 2], widen)
-  0
-}",
-        "container-combinator callable",
+  const out = map([1, 2], (x: int) => point { x: x, y: x })
+  const named = map([1, 2], widen)
+  const a = match list_get(out, 1) { none => 0, p => p.x + p.y }
+  const b = match list_get(named, 1) { none => 0, p => p.x * 100 + p.y }
+  a + b
+}";
+    let (mut vm, _) = run_inline("wider_answer", source);
+    assert_eq!(vm.run("wider_answer", "main", &[]), Ok(Value::I64(4 + 220)));
+    // the wider answers' counts and both lists died with the frame
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// `partition` answers the two lists of the tag-less total: the free and
+/// UFCS spellings agree over one-word elements, an empty input answers
+/// two empty lists, the predicate sees each element once in order (the
+/// println interleaving pins it), and each push takes the destination
+/// list's own edge count — no element-side count moves, so the heap
+/// drains.
+#[test]
+fn partition_answers_both_sides_over_one_word_elements() {
+    let source = "
+tag int
+tag string
+tag bool
+struct list[t]
+extern fn println (msg: string) -> ()
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn len[t] (xs: t) -> int
+
+fn main() -> int {
+  const (yes, no) = partition([1, 2, 3, 4], (x: int) => {
+    println(\"visit ${x}\")
+    x > 2
+  })
+  const words = [\"alpha\", \"beta\", \"gamma\", \"delta\"]
+  const (long, short) = words.partition((w: string) => len(w) > 4)
+  const (a, b) = partition(list[int](), (x: int) => x > 0)
+  println(\"split ${len(yes)} ${len(no)}\")
+  len(yes) * 1000 + len(no) * 100 + len(long) * 10 + len(short) + len(a) + len(b)
+}";
+    let (mut vm, _) = run_inline("partition_one_word", source);
+    assert_eq!(
+        vm.run("partition_one_word", "main", &[]),
+        // yes=2, no=2, long=3, short=1, both empty sides 0
+        Ok(Value::I64(2231)),
+        "both sides answer at their lengths"
     );
+    assert_eq!(
+        vm.captured_output(),
+        b"visit 1\nvisit 2\nvisit 3\nvisit 4\nsplit 2 2\n",
+        "the hosted predicate runs once per element in order, before either side is read"
+    );
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// `partition` runs at the element stride over struct-typed elements —
+/// the wider side is the point: the hosted predicate takes the element's
+/// whole span, each side pushes at the source's stride, and a non-root
+/// frame's partition tail returns the tuple in place (the native-tail
+/// shape over a two-word result). The heap drains.
+#[test]
+fn partition_runs_at_the_element_stride_over_structs() {
+    let source = "
+tag int
+tag bool
+struct list[t]
+struct point { x: int, y: int }
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn len[t] (xs: t) -> int
+
+fn split_pts(pts: list[point]) -> (list[point], list[point]) {
+  partition(pts, (p: point) => p.x > 1)
+}
+
+fn main() -> int {
+  const src = [point { x: 1, y: 10 }, point { x: 2, y: 20 }, point { x: 3, y: 30 }]
+  const (hot, cold) = split_pts(src)
+  var total = 0
+  for p in hot {
+    total += p.y
+  }
+  total * 100 + len(cold)
+}";
+    let (mut vm, _) = run_inline("partition_stride", source);
+    // hot holds the x>1 points (y 20+30), cold the one x=1 point
+    assert_eq!(
+        vm.run("partition_stride", "main", &[]),
+        Ok(Value::I64(5001))
+    );
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// `Ref`-carrying elements balance through both sides: each pushed word
+/// takes its destination list's edge count and the source list keeps
+/// its own, over string elements with a capturing predicate riding the
+/// closure branch (the callable-defaulted `Fn` word).
+#[test]
+fn partition_balances_ref_words_with_a_capturing_predicate() {
+    let source = "
+tag int
+tag string
+tag bool
+struct list[t]
+extern fn concat (a: string, b: string) -> string
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn len[t] (xs: t) -> int
+
+fn main() -> int {
+  const mark = \"!\"
+  const words = [\"alpha\", \"be\", \"gamma\", \"do\"]
+  const (shouted, short) = partition(words, (w: string) => len(w) > 3)
+  const glued = reduce(shouted, \"\", (a: string, w: string) => concat(a, concat(w, mark)))
+  len(glued) * 10 + len(short)
+}";
+    let (mut vm, _) = run_inline("partition_refs", source);
+    // shouted = alpha+gamma both glued with "!": 12 chars, short = 2
+    assert_eq!(vm.run("partition_refs", "main", &[]), Ok(Value::I64(122)));
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// A partition call site's staging is filter's own, byte-stable: over
+/// probes identical but for the callee, the placed sequence through the
+/// one Callg (list borrow, fn word, evidence, the dispatch) matches the
+/// equivalent filter site's up to frame slot numbering (the wider
+/// result temp shifts the frame's slots, never the discipline), the
+/// Callg operands agree byte for byte, and the whole function lowers
+/// to the filter module plus exactly one extra Mov — the tuple's second
+/// result-gather word.
+#[test]
+fn a_partition_site_lowers_the_filter_staging_plus_the_two_word_result() {
+    let staged = |combinator: &str, bind: &str| {
+        let source = format!(
+            "
+tag int
+tag bool
+struct list[t]
+extern fn {combinator}[t] (xs: list[t], f: fn(t) -> bool) -> {ret}
+extern fn len[t] (xs: t) -> int
+
+fn main() -> int {{
+  const {bind} = {combinator}([1, 2, 3], (x: int) => x > 1)
+  0
+}}",
+            ret = if combinator == "partition" { "(list[t], list[t])" } else { "list[t]" },
+        );
+        let (_, lowered) = run_inline("partition_staging", &source);
+        let placed = lowered
+            .placed("main")
+            .expect("main is planned")
+            .iter()
+            .map(|op| format!("{op:?}"))
+            .collect::<Vec<_>>();
+        let at = placed
+            .iter()
+            .position(|op| op.starts_with("Uop(Callg"))
+            .expect("one Callg names the dispatch");
+        (placed, at)
+    };
+    // digit runs collapse to one mark: frame slot numbers shift with the
+    // wider result temp, and the discipline must not
+    let normalize = |ops: &[String]| {
+        ops.iter()
+            .map(|op| {
+                let mut out = String::new();
+                let mut mark = false;
+                for c in op.chars() {
+                    if c.is_ascii_digit() {
+                        if !mark {
+                            out.push('#');
+                            mark = true;
+                        }
+                    } else {
+                        out.push(c);
+                        mark = false;
+                    }
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+    };
+    let (filter_ops, filter_at) = staged("filter", "kept");
+    let (partition_ops, partition_at) = staged("partition", "(yes, no)");
+    assert_eq!(
+        normalize(&filter_ops[..=filter_at]),
+        normalize(&partition_ops[..=partition_at]),
+        "the staging through the dispatch is the filter discipline, unchanged"
+    );
+    // the Callg itself is byte-identical: same pool slot, same nargs
+    assert_eq!(filter_ops[filter_at], partition_ops[partition_at]);
+    assert!(filter_ops[filter_at].contains("nargs: 2"));
+    // and the whole function is the filter module plus one Mov — the
+    // tuple's second gather word — and one Rc dec — the second list's
+    // death at scope end (the flush dec follows the dispatch, then the
+    // gather Movs)
+    let mut with_second_word = normalize(&filter_ops);
+    with_second_word.insert(filter_at + 2, "Uop(Mov { dst: #, src: # })".to_owned());
+    let ret_at = with_second_word
+        .iter()
+        .rposition(|op| op.starts_with("Uop(Ret"))
+        .expect("main returns");
+    with_second_word.insert(ret_at, "Rc(Dec { src: # })".to_owned());
+    assert_eq!(
+        normalize(&partition_ops),
+        with_second_word,
+        "partition lowers to the filter emission plus the tuple's second gather word and death"
+    );
+}
+
+/// The wider fold: `reduce` over struct-typed elements at the interior
+/// span — the init's whole word span stages between the list and the
+/// callable, the callable receives the accumulator span plus the
+/// element span per step and answers a whole span, and each step's
+/// answer replaces the owned accumulator (the first step's borrowed
+/// init never drops). The println interleaving pins the visit order and
+/// the running accumulator's leading position, the capturing lambda
+/// rides the callable-defaulted closure word past the interior span,
+/// and the empty list answers the staged init. The heap drains.
+#[test]
+fn reduce_folds_struct_elements_at_the_interior_span() {
+    let source = "
+tag int
+tag string
+tag bool
+struct list[t]
+struct point { x: int, y: int }
+extern fn println (msg: string) -> ()
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn len[t] (xs: t) -> int
+
+fn add_pts(a: point, p: point) -> point {
+  point { x: a.x + p.x, y: a.y + p.y }
+}
+
+fn main() -> int {
+  const bias = 100
+  const xs = [point { x: 1, y: 10 }, point { x: 2, y: 20 }, point { x: 3, y: 30 }]
+  const total = reduce(xs, point { x: 0, y: 0 }, (a: point, p: point) => {
+    println(\"visit ${a.x} ${p.x}\")
+    point { x: a.x + p.x + bias, y: a.y + p.y }
+  })
+  const named = xs.reduce(point { x: 10, y: 0 }, add_pts)
+  const empty = reduce(list[point](), point { x: 7, y: 5 }, add_pts)
+  println(\"total ${total.x} ${total.y}\")
+  len(xs) * 100000 + total.x * 100 + total.y * 10 + named.x + empty.x
+}";
+    let (mut vm, _) = run_inline("reduce_span", source);
+    assert_eq!(
+        vm.run("reduce_span", "main", &[]),
+        Ok(Value::I64(300_000 + 30_600 + 600 + 16 + 7)),
+        "the folded record answers through its fields, the named-fn UFCS fold agrees, and the \\
+         empty list answers its init"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"visit 0 1\nvisit 101 2\nvisit 203 3\ntotal 306 60\n",
+        "the callable visits each element once in order with the accumulator leading"
+    );
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// The fold's `Ref`-word balance across steps (C4): the accumulator
+/// span carries a `Ref` word (a string field), so each step's answer
+/// replaces the owned one per `Ref` word while the callable's copy-ins
+/// are claimed for the callee, and the empty fold hands the borrowed
+/// init out under its own count — driven in a loop, the heap drains.
+#[test]
+fn reduce_balances_ref_words_across_the_fold_steps() {
+    const SOURCE: &str = "
+tag int
+tag string
+tag bool
+struct list[t]
+struct tagline { text: string, hits: int }
+extern fn concat (a: string, b: string) -> string
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn len[t] (xs: t) -> int
+
+fn merge(a: tagline, t: tagline) -> tagline {
+  tagline { text: concat(a.text, t.text), hits: a.hits + t.hits }
+}
+
+fn main() -> int {
+  const seed = tagline { text: \"go:\", hits: 0 }
+  const parts = [tagline { text: \"one\", hits: 1 }, tagline { text: \"two\", hits: 2 }]
+  var seen = 0
+  var i = 0
+  while i < 25 {
+    const merged = reduce(parts, seed, merge)
+    const empty = reduce(list[tagline](), seed, merge)
+    seen += len(merged.text) + merged.hits + len(empty.text)
+    i += 1
+  }
+  seen
+}";
+    let mut files = Files::new();
+    let id = files.add_source("reduce_ref_balance.ds", SOURCE);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the source checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "reduce_ref_balance",
+        Hash128::compute(SOURCE.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the source lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    // 25 folds each replaced the owned string-field accumulator twice and
+    // handed the empty fold's borrowed init out under its own count
+    assert_eq!(
+        vm.run("reduce_ref_balance", "main", &[]),
+        Ok(Value::I64(25 * (9 + 3 + 3))),
+        "every fold answered its merged text, hits, and the empty handout"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// `partition` over tuple elements: the element's positional span rides
+/// the predicate each step, the two-answer total destructures at the
+/// call site, and the sides read back through destructuring (the
+/// record-stride sibling over the tuple vocabulary).
+#[test]
+fn partition_runs_over_tuple_elements() {
+    let source = "
+tag int
+tag bool
+struct list[t]
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn len[t] (xs: t) -> int
+
+fn split_pairs(pairs: list[(int, int)]) -> (list[(int, int)], list[(int, int)]) {
+  partition(pairs, (t: (int, int)) => {
+    const (a, b) = t
+    a > 1
+  })
+}
+
+fn main() -> int {
+  const src = [(1, 10), (2, 20), (3, 30)]
+  const (hot, cold) = split_pairs(src)
+  var total = 0
+  for p in hot {
+    const (a, b) = p
+    total += b
+  }
+  total * 100 + len(cold)
+}";
+    let (mut vm, _) = run_inline("partition_tuples", source);
+    // hot holds the a>1 pairs (b 20+30), cold the one a=1 pair
+    assert_eq!(
+        vm.run("partition_tuples", "main", &[]),
+        Ok(Value::I64(5001))
+    );
+    assert!(vm.objects().is_empty(), "the heap drains");
 }

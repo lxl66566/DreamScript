@@ -287,55 +287,23 @@ impl Ctx {
                 }
                 Pattern::Literal { span, lit }
             },
-            Rule::pat_call => {
+            Rule::pat_head => {
                 let mut path = None;
-                let mut args = Vec::new();
+                let mut tail = None;
                 for c in inner(&p) {
                     match c.as_rule() {
                         Rule::path => path = Some(self.conv_path(c)),
-                        Rule::pattern => args.push(self.pattern(c)),
-                        _ => {},
+                        _ => tail = Some(c),
                     }
                 }
-                Pattern::Call {
+                let path = path.unwrap_or(Path {
                     span,
-                    path: path.unwrap_or(Path {
-                        span,
-                        segments: Vec::new(),
-                    }),
-                    args,
-                }
-            },
-            Rule::pat_struct => {
-                let mut path = None;
-                let mut fields = Vec::new();
-                for c in inner(&p) {
-                    match c.as_rule() {
-                        Rule::path => path = Some(self.conv_path(c)),
-                        Rule::pat_field => {
-                            let mut name = None;
-                            let mut pat = None;
-                            for fc in inner(&c) {
-                                match fc.as_rule() {
-                                    Rule::ident => name = Some(self.ident(fc)),
-                                    Rule::pattern => pat = Some(self.pattern(fc)),
-                                    _ => {},
-                                }
-                            }
-                            if let Some(name) = name {
-                                fields.push((name, pat));
-                            }
-                        },
-                        _ => {},
-                    }
-                }
-                Pattern::Struct {
-                    span,
-                    path: path.unwrap_or(Path {
-                        span,
-                        segments: Vec::new(),
-                    }),
-                    fields,
+                    segments: Vec::new(),
+                });
+                match tail {
+                    Some(c) if c.as_rule() == Rule::pat_call => self.pat_call(c, span, path),
+                    Some(c) => self.pat_struct(c, span, path),
+                    None => Pattern::Wildcard(span),
                 }
             },
             Rule::tuple_pattern => {
@@ -356,5 +324,34 @@ impl Ctx {
             },
             _ => Pattern::Wildcard(span),
         }
+    }
+
+    /// A call pattern's arguments; the head pair carries the span and path.
+    fn pat_call(&mut self, p: Pair<'_, Rule>, span: Span, path: Path) -> Pattern {
+        let args = inner(&p)
+            .filter(|c| c.as_rule() == Rule::pattern)
+            .map(|c| self.pattern(c))
+            .collect();
+        Pattern::Call { span, path, args }
+    }
+
+    /// A struct pattern's fields; the head pair carries the span and path.
+    fn pat_struct(&mut self, p: Pair<'_, Rule>, span: Span, path: Path) -> Pattern {
+        let mut fields = Vec::new();
+        for c in inner(&p).filter(|c| c.as_rule() == Rule::pat_field) {
+            let mut name = None;
+            let mut pat = None;
+            for fc in inner(&c) {
+                match fc.as_rule() {
+                    Rule::ident => name = Some(self.ident(fc)),
+                    Rule::pattern => pat = Some(self.pattern(fc)),
+                    _ => {},
+                }
+            }
+            if let Some(name) = name {
+                fields.push((name, pat));
+            }
+        }
+        Pattern::Struct { span, path, fields }
     }
 }

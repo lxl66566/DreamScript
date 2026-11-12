@@ -1,7 +1,7 @@
 // source: frozen archive catalog 06-modules-tooling (seed corpus)
 // purpose: ds.pkg manifest as the lock, selective and conditional imports, linear sqlite handle binding
 // items:
-// ds-pkg-manifest: stage: m7
+// ds-pkg-manifest: stage: unresolved: ds.pkg is manifest syntax parsed by ds-pkg (M7), never ds-parse [H6]
 // import-std-csv: stage: m7
 // import-schema: stage: m7
 // import-fs-conditional: stage: m7

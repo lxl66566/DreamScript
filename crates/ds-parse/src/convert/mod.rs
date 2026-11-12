@@ -78,8 +78,131 @@ pub(crate) fn convert(
             "parser produced no tree",
         )]);
     };
-    let ast = ctx.conv_file(file_pair);
+    let mut ast = ctx.conv_file(file_pair);
+    attach_docs(src, &ctx.line_starts, &mut ast.blocks);
     if ctx.diags.is_empty() { Ok(ast) } else { Err(ctx.diags) }
+}
+
+/// Attaches `///` doc runs (G3): every item's [`Item::doc`] becomes the
+/// maximal `///` run immediately preceding the item, and the same rule
+/// fills the member and field slots inside it (trait/impl member `fn`s,
+/// struct fields, enum-case payload fields). A post-pass over the finished
+/// blocks, because the file-head splice (comments before the first block
+/// lead its first item) lands after the per-block trivia attachment.
+fn attach_docs(src: &str, line_starts: &[u32], blocks: &mut [Block]) {
+    for block in blocks {
+        for item in &mut block.items {
+            item.doc = doc_run(src, line_starts, &item.leading_trivia, item.span.start);
+            member_docs(src, line_starts, &item.trailing_trivia, &mut item.kind);
+        }
+    }
+}
+
+/// The maximal run of consecutive doc lines immediately above `def_start`'s
+/// line (the definition's first token), drawn from `pool` in source order.
+/// Anything else between the run and the definition — a blank line, an
+/// ordinary `//` or a block comment — leaves the run loose; only the
+/// contiguous `///` lines directly above the definition attach.
+fn walk_run(
+    line_starts: &[u32],
+    pool: &[Trivia],
+    def_start: u32,
+    is_doc: impl Fn(&Trivia) -> bool,
+) -> Vec<Trivia> {
+    // 1-based line of an offset, like `Ctx::line`.
+    let line = |off: u32| line_starts.partition_point(|&s| s <= off) as u32;
+    let mut run: Vec<Trivia> = Vec::new();
+    let mut below = line(def_start);
+    for t in pool.iter().rev() {
+        if !is_doc(t) || line(t.span.end) + 1 != below {
+            break;
+        }
+        run.push(*t);
+        below = line(t.span.end);
+    }
+    run.reverse();
+    run
+}
+
+/// Whether a trivia is a doc line: `///` followed by the line's end or a
+/// non-slash (Rust's convention). `////` and longer are the ordinary-
+/// comment separator form, never a doc.
+fn is_doc_line(src: &str, t: &Trivia) -> bool {
+    t.kind == TriviaKind::Line && {
+        let text = &src[t.span.start as usize..];
+        text.starts_with("///") && !text[3..].starts_with('/')
+    }
+}
+
+/// The doc run of one definition: the maximal suffix of `leading` made of
+/// `///` line comments on consecutive source lines, the last sitting
+/// immediately above `def_start` (the item's first token, attributes
+/// included). The leading channel routes same-line comments to the previous
+/// item's trailing slot already, so no own-line guard is needed here.
+fn doc_run(src: &str, line_starts: &[u32], leading: &[Trivia], def_start: u32) -> Vec<Trivia> {
+    walk_run(line_starts, leading, def_start, |t| is_doc_line(src, t))
+}
+
+/// Fills the member and field doc slots from the item's deep trivia: the
+/// same maximal-run rule as [`doc_run`], over the comments inside the
+/// declaration. Trait/impl member `fn`s, struct fields, and enum-case
+/// payload fields attach; associated types, `deinit` members, and enum
+/// case names carry no slot, so their docs stay plain deep trivia.
+fn member_docs(src: &str, line_starts: &[u32], deep: &[Trivia], kind: &mut ItemKind) {
+    let fill = |fd: &mut FnDecl| {
+        fd.doc = member_doc_run(src, line_starts, deep, fd.span.start);
+    };
+    match kind {
+        ItemKind::Trait(t) => {
+            for m in &mut t.members {
+                if let TraitMember::Fn(fd) = m {
+                    fill(fd);
+                }
+            }
+        },
+        ItemKind::Impl(i) => {
+            for fd in &mut i.fns {
+                fill(fd);
+            }
+        },
+        ItemKind::Struct(s) => {
+            for m in &mut s.members {
+                if let StructMember::Field(f) = m {
+                    f.doc = member_doc_run(src, line_starts, deep, f.span.start);
+                }
+            }
+        },
+        ItemKind::Enum(e) => {
+            for c in &mut e.cases {
+                if let EnumPayload::Struct(fields) = &mut c.payload {
+                    for f in fields {
+                        f.doc = member_doc_run(src, line_starts, deep, f.span.start);
+                    }
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+/// The doc run of one member or field: [`doc_run`]'s rule over the item's
+/// deep trivia, plus the own-line requirement — deep trivia has no same-
+/// line routing, so a comment sharing its line with other code trails that
+/// code and never leads the member below. The pool also holds comments
+/// below the member; only the prefix ending at the member can lead it.
+fn member_doc_run(src: &str, line_starts: &[u32], deep: &[Trivia], def_start: u32) -> Vec<Trivia> {
+    let above = deep.partition_point(|t| t.span.end <= def_start);
+    walk_run(line_starts, &deep[..above], def_start, |t| {
+        is_doc_line(src, t) && starts_own_line(src, line_starts, t)
+    })
+}
+
+/// Whether the trivia is the first non-whitespace text of its source line.
+fn starts_own_line(src: &str, line_starts: &[u32], t: &Trivia) -> bool {
+    let line_start = line_starts[line_starts.partition_point(|&s| s <= t.span.start) - 1];
+    src[line_start as usize..t.span.start as usize]
+        .trim()
+        .is_empty()
 }
 
 /// Non-trivia children of a pair.
@@ -349,6 +472,7 @@ impl Ctx {
                 },
             }),
             leading_trivia: Vec::new(),
+            doc: Vec::new(),
             trailing_trivia: Vec::new(),
         };
         blocks
@@ -496,6 +620,7 @@ impl Ctx {
                 Rule::type_item => kind = Some(ItemKind::TypeAlias(self.conv_type_alias(c))),
                 Rule::trait_item => kind = Some(ItemKind::Trait(self.conv_trait(c))),
                 Rule::impl_item => kind = Some(ItemKind::Impl(self.conv_impl(c))),
+                Rule::platform_item => kind = Some(ItemKind::Platform(self.conv_platform(c))),
                 _ => {},
             }
         }
@@ -513,6 +638,7 @@ impl Ctx {
                 },
             })),
             leading_trivia: Vec::new(),
+            doc: Vec::new(),
             trailing_trivia: trailing,
         }
     }
@@ -549,6 +675,61 @@ impl Ctx {
     fn conv_vis(&mut self, p: Pair<'_, Rule>) -> Vis {
         let span = self.span(&p);
         if p.as_str().contains('(') { Vis::PubPkg(span) } else { Vis::Pub(span) }
+    }
+
+    /// One platform declaration (H5): a plain string literal's text names
+    /// the platform, and the optional provides list names its world
+    /// capabilities. The name carries no escapes or interpolation holes —
+    /// an interpolating or escaped literal is a parse error (DS1003).
+    fn conv_platform(&mut self, p: Pair<'_, Rule>) -> PlatformDecl {
+        let span = self.span(&p);
+        let mut name = None;
+        let mut provides = Vec::new();
+        for c in inner(&p) {
+            match c.as_rule() {
+                Rule::string_lit => {
+                    let nspan = self.span(&c);
+                    let mut text = String::new();
+                    let mut plain = true;
+                    for chunk in c.clone().into_inner() {
+                        match chunk.as_rule() {
+                            Rule::str_text => text.push_str(chunk.as_str()),
+                            _ => {
+                                plain = false;
+                            },
+                        }
+                    }
+                    if !plain || text.is_empty() {
+                        self.err(
+                            nspan,
+                            ErrorCode::InvalidLiteral,
+                            "a platform name is one plain string literal",
+                        );
+                    }
+                    name = Some(PlatformName {
+                        span: nspan,
+                        name: text,
+                    });
+                },
+                Rule::provides_list => {
+                    for cap in inner(&c) {
+                        if cap.as_rule() == Rule::provides_cap {
+                            let ident = inner(&cap).next().unwrap_or_else(|| cap.clone());
+                            provides.push(self.ident(ident));
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        PlatformDecl {
+            span,
+            name: name.unwrap_or(PlatformName {
+                span,
+                name: String::new(),
+            }),
+            provides,
+        }
     }
 
     fn conv_import(&mut self, p: Pair<'_, Rule>) -> ImportDecl {
@@ -741,6 +922,7 @@ impl Ctx {
             params,
             ret,
             body,
+            doc: Vec::new(),
         }
     }
 
@@ -904,6 +1086,7 @@ impl Ctx {
             span,
             name: name.unwrap_or_else(|| self.bad_ident(span)),
             ty,
+            doc: Vec::new(),
         }
     }
 
@@ -1026,7 +1209,9 @@ impl Ctx {
                                     name: aname.unwrap_or_else(|| self.bad_ident(mspan)),
                                 });
                             },
-                            Rule::fn_item => members.push(TraitMember::Fn(self.conv_fn(m, false))),
+                            Rule::fn_item => {
+                                members.push(TraitMember::Fn(Box::new(self.conv_fn(m, false))));
+                            },
                             Rule::member_const => {
                                 // Const-arrow members retire with fn-only
                                 // declarations [F2]: members are `fn`
@@ -1037,7 +1222,7 @@ impl Ctx {
                                     "trait members are `fn` declarations; spell the signature `fn \
                                      name(params) -> ret`",
                                 );
-                                members.push(TraitMember::Fn(self.member_const_fn(m)));
+                                members.push(TraitMember::Fn(Box::new(self.member_const_fn(m))));
                             },
                             _ => {},
                         }
@@ -1071,6 +1256,7 @@ impl Ctx {
             params: Vec::new(),
             ret: None,
             body: None,
+            doc: Vec::new(),
         };
         for c in inner(&p) {
             match c.as_rule() {

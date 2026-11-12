@@ -1,0 +1,14 @@
+// Startup fixture: the small-real cold script — one list literal, a map
+// built through the interim constructor + map_set, and one reduce with
+// a non-capturing lambda, closed by a single report line. The stage
+// adds the first-allocations cost (list/map words, the reduction's
+// CALLG reentry) on top of the trivial pipeline: startup.sh bench runs
+// it as the `small-real` metric.
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5, 6]
+  var m = map[string, int]()
+  map_set(m, "answer", 42)
+  const sum = reduce(xs, 0, (a: int, b: int) => a + b)
+  println("result: ${sum} ${map_len(m)}")
+}

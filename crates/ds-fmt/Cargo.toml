@@ -16,3 +16,4 @@ workspace = true
 [dependencies]
 ds-diag  = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
+memchr.workspace = true

@@ -8,15 +8,27 @@
 //! one count per `Ref` capture that the callee body's placement
 //! balances), while the call readers resolve the callee word by its
 //! runtime kind. The unproven-callable boundaries refuse at lowering:
-//! a closure or a callable parameter as a collection element, a lambda
-//! capturing a callable binding, and a native or generic callee's value.
+//! a closure or a callable parameter as a collection element (a list
+//! element or a tuple element), a lambda capturing a callable binding,
+//! an unproven callable in a var span (the binding and the
+//! re-assignment), a fn-typed struct field (whose type the core's span
+//! vocabulary drops, so the literal refuses at the field's own span),
+//! a native or generic callee's value, and a callable word widened into
+//! a union region's fn-typed payload slot (the binding, the
+//! re-assignment, the call argument, the join arm, the return — every
+//! construction site funnels through the widening write, ok_or's err
+//! arm staging directly). The fn-typed word answers carry the same
+//! rule where the answer stages: unwrap_or's and unwrap_or_else's
+//! fallbacks, the .ok/.err handler bodies, the same-type join arms, and
+//! the fn-typed return (the unproven callable words only — a closure
+//! word's own return keeps the factory boundary).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the result, the golden stdout, and
@@ -43,8 +55,8 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     let result = vm.run(name, "main", &[]);
@@ -484,4 +496,742 @@ fn main() -> int { relay(20) }
     let (vm, got) = run_source("capturing_lambda_tail", SOURCE);
     assert_eq!(got, Ok(Value::I64(40)));
     assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// An unproven callable in a var binding refuses: the callable-defaulted
+/// parameter's word may hold a closure's Ref at runtime, and the var's
+/// re-storable fn-typed slot traps at the store (the same provenance the
+/// collection elements demand).
+#[test]
+fn an_unproven_callable_in_a_var_binding_refuses() {
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> int {{
+  var g = f
+  g(1)
+}}
+
+fn main() -> int {{ 0 }}
+"
+        ),
+        "an unproven callable in a var binding",
+    );
+    // the re-assignment path shares the guard
+    refused(
+        &format!(
+            "{PRELUDE}
+fn one(x: int) -> int {{ x + 1 }}
+fn take(f: fn(int) -> int) -> int {{
+  var g: fn(int) -> int = one
+  g = f
+  g(1)
+}}
+
+fn main() -> int {{ 0 }}
+"
+        ),
+        "an unproven callable in a var binding",
+    );
+}
+
+/// The just-inside sides run: a named fn and a non-capturing lambda (the
+/// proven scalar words) inhabit and re-assign a re-storable fn-typed var
+/// slot, and a named fn element destructures out of a tuple into one.
+#[test]
+fn proven_scalars_inhabit_re_storable_var_slots() {
+    acceptance(
+        "var_scalar_words",
+        &format!(
+            "{PRELUDE}
+fn one(x: int) -> int {{ x + 1 }}
+fn two(x: int) -> int {{ x * 3 }}
+
+fn main() -> int {{
+  var v = one
+  println(\"first ${{v(7)}}\")
+  v = two
+  println(\"second ${{v(7)}}\")
+  var l = (x: int) => x - 1
+  println(\"lambda ${{l(7)}}\")
+  var (g, n) = (two, 4)
+  println(\"destructured ${{g(n)}}\")
+  l(0)
+}}
+"
+        ),
+        Value::I64(-1),
+        b"first 8\nsecond 21\nlambda 6\ndestructured 12\n",
+    );
+}
+
+/// A callable tuple element proves a non-capturing scalar word: the
+/// span's count traffic copies only Ref-classified fields, so a closure
+/// or an unproven callable binding cannot ride one (the element staging
+/// would lose its count and the read-back hands a Ref word to a
+/// Fn-classified slot) — the tuple joins the lists' provenance guard.
+#[test]
+fn unproven_callable_tuple_elements_refuse() {
+    refused(
+        &format!(
+            "{PRELUDE}
+fn main() -> int {{
+  const k = 1
+  const t = ((x: int) => x + k, 1)
+  0
+}}
+"
+        ),
+        "a callable tuple element",
+    );
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> int {{
+  const t = (f, 1)
+  0
+}}
+
+fn main() -> int {{ 0 }}
+"
+        ),
+        "a callable tuple element",
+    );
+}
+
+/// A fn-typed struct field carries no planned shape: the field's type
+/// stays outside the core's span vocabulary, so the literal's field
+/// lookup misses and the refusal names the seam at the field's own
+/// span — no callable ever reaches a struct field slot (the literal
+/// guard for provenance stays unreachable behind this earlier one).
+#[test]
+fn a_fn_typed_struct_field_refuses_at_its_own_span() {
+    refused(
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn one(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const a = box {{ f: one }}
+  const b = box {{ f: (x: int) => x + 1 }}
+  0
+}}
+"
+        ),
+        "the planned shape carries no such field",
+    );
+}
+
+/// A generic fn's bare name has no callable word: the generic exemption
+/// skips its body, so the value use refuses naming the minting seam —
+/// the same message the native callee's name keeps. Passing it where a
+/// callable word stages refuses earlier, at checking (the fn type
+/// escapes containment).
+#[test]
+fn a_generic_fn_value_refuses() {
+    refused(
+        &format!(
+            "{PRELUDE}
+fn id[t] (x: t) -> t {{ x }}
+
+fn main() -> int {{
+  const p = id
+  0
+}}
+"
+        ),
+        "the word carries no instantiation",
+    );
+    let mut files = Files::new();
+    let id = files.add_source(
+        "generic_arg.ds",
+        &format!(
+            "{PRELUDE}
+fn id[t] (x: t) -> t {{ x }}
+
+fn main() -> int {{
+  const ys = map([1, 2], id)
+  0
+}}
+"
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        !analyzed.checked.diags.is_empty(),
+        "a generic fn argument refuses at checking"
+    );
+}
+
+/// A callable word widened into a union region's fn-typed payload slot
+/// keeps the var slot's provenance rule: the payload word is
+/// Fn-classified and every extraction re-reads it, so an unproven
+/// callable word (a callable-defaulted binding's, an alias of one) or a
+/// capturing closure lands a Ref word there and traps — every
+/// construction site (the annotated binding, the re-assignment, the
+/// call argument, the join arm, the return) refuses at its own span.
+#[test]
+fn unproven_callables_in_union_payload_slots_refuse() {
+    // the annotated const binding, and the read-back that would call it
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> int {{
+  const g: (fn(int) -> int) | none = f
+  0
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+    // a var over the union type: the binding and the re-assignment share
+    // the seam
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> int {{
+  var g: (fn(int) -> int) | none = none
+  g = f
+  0
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+    // the call argument into a union-typed parameter
+    refused(
+        &format!(
+            "{PRELUDE}
+fn eat(u: (fn(int) -> int) | none) -> int {{ 0 }}
+fn take(f: fn(int) -> int) -> int {{ eat(f) }}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+    // the if-join arm
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int, c: bool) -> int {{
+  const g = if c {{ f }} else {{ none }}
+  0
+}}
+
+fn main() -> int {{ take((x: int) => x, true) }}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+    // the return into a union-typed return
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> (fn(int) -> int) | none {{
+  f
+}}
+
+fn main() -> int {{
+  const h = take((x: int) => x)
+  0
+}}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+}
+
+/// The closure family of the same slot: a capturing closure (a
+/// Ref-classified word) refuses at the join, the return, and a var
+/// binding over the union type — the annotated const binding keeps its
+/// own earlier refusal message.
+#[test]
+fn closures_in_union_payload_slots_refuse() {
+    refused(
+        &format!(
+            "{PRELUDE}
+fn make(k: int, c: bool) -> int {{
+  const g = if c {{ (x: int) => x + k }} else {{ none }}
+  0
+}}
+
+fn main() -> int {{ make(1, true) }}
+"
+        ),
+        "a capturing closure in a union payload slot",
+    );
+    refused(
+        &format!(
+            "{PRELUDE}
+fn make(k: int) -> (fn(int) -> int) | none {{
+  (x: int) => x + k
+}}
+
+fn main() -> int {{
+  const h = make(1)
+  0
+}}
+"
+        ),
+        "a capturing closure in a union payload slot",
+    );
+    refused(
+        &format!(
+            "{PRELUDE}
+fn make(k: int) -> int {{
+  var g: (fn(int) -> int) | none = (x: int) => x + k
+  0
+}}
+
+fn main() -> int {{ make(1) }}
+"
+        ),
+        "a capturing closure in a union payload slot",
+    );
+    refused(
+        &format!(
+            "{PRELUDE}
+fn make(k: int) -> int {{
+  const g: (fn(int) -> int) | none = (x: int) => x + k
+  0
+}}
+
+fn main() -> int {{ make(1) }}
+"
+        ),
+        "a capturing closure in a union binding",
+    );
+}
+
+/// The just-inside runs: a proven scalar word (a named fn, a
+/// non-capturing lambda) inhabits the union's fn-typed payload slot and
+/// reads back end to end — the annotated binding, the join, the return,
+/// the call result, and the extraction families (the handler chain and
+/// unwrap_or), the heap draining through every read-back chain.
+#[test]
+fn proven_scalars_inhabit_union_payload_slots() {
+    // a named fn widened at the binding, read back through unwrap_or
+    // with a proven fallback (a callable-defaulted parameter's word
+    // refuses as the fallback — the payload slot's provenance rule)
+    acceptance(
+        "payload_named_unwrap_or",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+fn take() -> int {{
+  const g: (fn(int) -> int) | none = inc
+  const h = g.unwrap_or(inc)
+  h(5)
+}}
+
+fn main() -> int {{ println(\"${{take()}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"6\n",
+    );
+    // a non-capturing lambda in the payload slot
+    acceptance(
+        "payload_lambda",
+        &format!(
+            "{PRELUDE}
+fn main() -> int {{
+  const g: (fn(int) -> int) | none = (x: int) => x * 3
+  const h = g.ok((x: fn(int) -> int) => x).err((_: none) => (x: int) => 0)
+  h(8)
+}}
+"
+        ),
+        Value::I64(24),
+        b"",
+    );
+    // the join, the union return, and the chained read-backs
+    acceptance(
+        "payload_join_return_chain",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+fn pick(c: bool) -> (fn(int) -> int) | none {{
+  if c {{ inc }} else {{ none }}
+}}
+
+fn main() -> int {{
+  const g = pick(true)
+  const h = g.ok((x: fn(int) -> int) => x).err((_: none) => inc)
+  const r = h(7)
+  const u = pick(false)
+  const v = u.ok((x: fn(int) -> int) => x).err((_: none) => inc)
+  println(\"r ${{r}} v ${{v(2)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"r 8 v 3\n",
+    );
+    // a named fn returned from a fn-typed callee joins the provenance
+    // oracle: the result word widens into the payload slot and into a
+    // re-storable var slot like a named fn value
+    acceptance(
+        "payload_call_result",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+fn choose() -> fn(int) -> int {{ inc }}
+
+fn main() -> int {{
+  const g: (fn(int) -> int) | none = choose()
+  const h = g.ok((x: fn(int) -> int) => x).err((_: none) => (x: int) => 0)
+  const a = h(10)
+  var v = choose()
+  const b = v(3)
+  println(\"a ${{a}} b ${{b}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"a 11 b 4\n",
+    );
+}
+
+/// The enum vocabulary keeps no reachable fn-payload slot: an enum case
+/// with a fn-typed payload refuses at its own seam, so the union-payload
+/// guard's surface stays the spelled union.
+#[test]
+fn an_enum_fn_payload_refuses_at_its_own_seam() {
+    refused(
+        &format!(
+            "{PRELUDE}
+enum handler {{
+  boxed(fn(int) -> int)
+  nada
+}}
+
+fn inc(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const g: handler = boxed(inc)
+  0
+}}
+"
+        ),
+        "an enum or application value",
+    );
+}
+
+/// The fn-typed word answers carry the union payload slot's provenance
+/// rule where the answer stages: the word is Fn-classified and every
+/// later re-read trusts it scalar, so an unproven callable word (a
+/// callable-defaulted binding's, an alias of one) or a capturing closure
+/// lands a Ref word there, traps, and strands the count. Each seam
+/// refuses at its own span: unwrap_or's fallback, unwrap_or_else's
+/// inlined body, the handler answer, the join arms (the if and the
+/// match), the fn-typed return, and ok_or's err member (the one
+/// construction site staging its words outside the widening write).
+#[test]
+fn unproven_callables_refuse_at_fn_typed_word_answers() {
+    // unwrap_or's fallback: the callable-defaulted parameter's word
+    refused(
+        &format!(
+            "{PRELUDE}
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+fn take(f: fn(int) -> int) -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.unwrap_or(f)
+  h(5)
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in unwrap_or's fallback",
+    );
+    // the fallback spelled as the closure expression itself
+    refused(
+        &format!(
+            "{PRELUDE}
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+fn make(k: int) -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.unwrap_or((x: int) => x + k)
+  h(5)
+}}
+
+fn main() -> int {{ make(1) }}
+"
+        ),
+        "a capturing closure in unwrap_or's fallback",
+    );
+    // unwrap_or_else's inlined fallback body answering the parameter
+    refused(
+        &format!(
+            "{PRELUDE}
+extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
+fn take(f: fn(int) -> int) -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.unwrap_or_else(() => f)
+  h(5)
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in unwrap_or_else's fallback",
+    );
+    // the .err handler's answer over a fn-word remainder
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int) -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.err((_: none) => f)
+  h(5)
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in a handler's answer",
+    );
+    // the if-join arm, both arms callable-defaulted parameters
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int, g: fn(int) -> int, c: bool) -> int {{
+  const h = if c {{ f }} else {{ g }}
+  h(5)
+}}
+
+fn main() -> int {{
+  const k = 1
+  take((x: int) => x, (x: int) => x + k, true)
+}}
+"
+        ),
+        "an unproven callable in a fn-typed join arm",
+    );
+    // the if-join arm spelled as the closure expression itself
+    refused(
+        &format!(
+            "{PRELUDE}
+fn make(k: int, c: bool) -> int {{
+  const h = if c {{ (x: int) => x + k }} else {{ (x: int) => x }}
+  h(5)
+}}
+
+fn main() -> int {{ make(1, true) }}
+"
+        ),
+        "a capturing closure in a fn-typed join arm",
+    );
+    // the match-join arm rides the same guard (the literal-arm chain
+    // over a non-union scrutinee)
+    refused(
+        &format!(
+            "{PRELUDE}
+fn take(f: fn(int) -> int, g: fn(int) -> int, n: int) -> int {{
+  const h = match n {{ 1 => f, 2 => g, _ => f }}
+  h(5)
+}}
+
+fn main() -> int {{
+  const k = 1
+  take((x: int) => x, (x: int) => x + k, 2)
+}}
+"
+        ),
+        "an unproven callable in a fn-typed join arm",
+    );
+    // the param-through fn-typed return: the caller classifies the
+    // result word Fn, so the callable-defaulted word refuses here
+    refused(
+        &format!(
+            "{PRELUDE}
+fn idf(f: fn(int) -> int) -> fn(int) -> int {{ f }}
+
+fn main() -> int {{
+  const h = idf((x: int) => x)
+  h(5)
+}}
+"
+        ),
+        "an unproven callable in a fn-typed return",
+    );
+    // ok_or's err member stages its words directly, so the union
+    // payload guard runs at the arm instead of the widening write
+    refused(
+        &format!(
+            "{PRELUDE}
+extern fn ok_or[t, e] (x: t?, err: e) -> t | e
+fn take(f: fn(int) -> int) -> int {{
+  const cell: int | none = none
+  const u = cell.ok_or(f)
+  const r = u.ok((x: int) => 0).err((g: fn(int) -> int) => g(5))
+  r
+}}
+
+fn main() -> int {{ take((x: int) => x) }}
+"
+        ),
+        "an unproven callable in a union payload slot",
+    );
+}
+
+/// The proven scalar words answer at every guarded seam and run end to
+/// end — the named fn fallback, the join arms, the fn-typed return (the
+/// named value, a proven call result, a non-capturing lambda), the
+/// inlined fallbacks, the handler answer, and ok_or's err member — the
+/// heap draining through every leg. The factory return keeps its
+/// boundary: a closure word's own return lowers and runs, so the return
+/// guard refuses only the unproven callable words.
+#[test]
+fn proven_scalars_answer_fn_typed_words_end_to_end() {
+    // unwrap_or picks the named fallback on the none side and the named
+    // payload on the ok side
+    acceptance(
+        "word_unwrapor_named",
+        &format!(
+            "{PRELUDE}
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+fn inc(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const none_cell: (fn(int) -> int) | none = none
+  const h = none_cell.unwrap_or(inc)
+  const some_cell: (fn(int) -> int) | none = inc
+  const h2 = some_cell.unwrap_or(inc)
+  println(\"h ${{h(5)}} h2 ${{h2(5)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"h 6 h2 6\n",
+    );
+    // unwrap_or_else's inlined body answering the named fn
+    acceptance(
+        "word_unwraporelse_named",
+        &format!(
+            "{PRELUDE}
+extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
+fn inc(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.unwrap_or_else(() => inc)
+  h(5)
+}}
+"
+        ),
+        Value::I64(6),
+        b"",
+    );
+    // the .err handler answering the named fn over the none side
+    acceptance(
+        "word_err_handler_named",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const cell: (fn(int) -> int) | none = none
+  const h = cell.err((_: none) => inc)
+  h(5)
+}}
+"
+        ),
+        Value::I64(6),
+        b"",
+    );
+    // the join arms answering named fns, the if and the match alike
+    acceptance(
+        "word_join_named",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+fn dec(x: int) -> int {{ x - 1 }}
+
+fn main() -> int {{
+  const a = if true {{ inc }} else {{ dec }}
+  const n = 1
+  const b = match n {{ 1 => inc, _ => dec }}
+  println(\"a ${{a(2)}} b ${{b(3)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"a 3 b 4\n",
+    );
+    // the fn-typed return: a named fn, a proven call result, and a
+    // non-capturing lambda value
+    acceptance(
+        "word_return_named",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+fn choose() -> fn(int) -> int {{ inc }}
+fn pick() -> fn(int) -> int {{ choose() }}
+fn lambda_pick() -> fn(int) -> int {{ (x: int) => x * 3 }}
+
+fn main() -> int {{
+  const f = pick()
+  const g = lambda_pick()
+  println(\"f ${{f(5)}} g ${{g(2)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"f 6 g 6\n",
+    );
+    // the factory return keeps its boundary: the closure word's own
+    // return lowers, runs, and drains
+    acceptance(
+        "word_factory_return",
+        &format!(
+            "{PRELUDE}
+fn make(k: int) -> fn(int) -> int {{ (x: int) => x + k }}
+
+fn main() -> int {{
+  const h = make(2)
+  h(5)
+}}
+"
+        ),
+        Value::I64(7),
+        b"",
+    );
+    // ok_or's err member carries the named fn, read back through the
+    // handler chain
+    acceptance(
+        "word_okor_named",
+        &format!(
+            "{PRELUDE}
+extern fn ok_or[t, e] (x: t?, err: e) -> t | e
+fn inc(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const cell: int | none = none
+  const u = cell.ok_or(inc)
+  const r = u.ok((x: int) => 0).err((g: fn(int) -> int) => g(5))
+  r
+}}
+"
+        ),
+        Value::I64(6),
+        b"",
+    );
 }

@@ -32,6 +32,40 @@ pub struct Mark {
     pub(crate) offset: usize,
 }
 
+/// How an arena position failed to name live memory. The VM maps each
+/// class to one structured trap; the panicking [`Arena::restore`] keeps
+/// its own misuse contract for internal callers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArenaMisuse {
+    /// The position names a chunk index the arena never grew to (or one
+    /// a restore freed below it).
+    Chunk,
+    /// The position's range runs past its chunk's bump cursor (freed by
+    /// a restore, or never allocated).
+    Range,
+}
+
+impl Mark {
+    /// The position at `chunk`'s `offset` - the packed-handle reader's
+    /// reconstruction from the fields a VM word carries.
+    #[must_use]
+    pub const fn at(chunk: usize, offset: usize) -> Self {
+        Self { chunk, offset }
+    }
+
+    /// The chunk index.
+    #[must_use]
+    pub const fn chunk(self) -> usize {
+        self.chunk
+    }
+
+    /// The byte offset within the chunk.
+    #[must_use]
+    pub const fn offset(self) -> usize {
+        self.offset
+    }
+}
+
 /// A bump arena for non-escaping temporaries (C4/H4).
 ///
 /// Allocation is pointer addition in the current chunk. Growth appends a new
@@ -64,6 +98,11 @@ struct Inner {
     /// Capacity hint for the next grown chunk; clamped to
     /// `[FIRST_CHUNK, MAX_CHUNK]` and snapped to a ladder value at acquisition.
     next_size: usize,
+    /// One entry per arena-allocating frame, pushed at its first allocation
+    /// and popped at its return: the frame-pop restore of the contract's
+    /// reclamation clause, staged here so the VM drives it through `&self`
+    /// beside the bytes themselves.
+    frame_marks: Vec<Mark>,
 }
 
 struct Chunk {
@@ -78,6 +117,13 @@ struct Chunk {
 }
 
 impl Chunk {
+    /// This chunk's live bytes: `[ptr, ptr + len)`.
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the chunk owns `[ptr, ptr + cap)` valid for reads and
+        // `len <= cap` holds by construction.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
     fn release(self) {
         // SAFETY: the chunk was created in `acquire_chunk` from exactly this
         // `(cap, align)` layout, is uniquely owned, and is released exactly once.
@@ -130,6 +176,7 @@ impl Arena {
                 chunks: Vec::new(),
                 free: Vec::new(),
                 next_size: FIRST_CHUNK,
+                frame_marks: Vec::new(),
             }),
         }
     }
@@ -165,18 +212,30 @@ impl Arena {
     /// If the rounded-up size overflows `usize` or the global allocator returns
     /// null.
     pub fn alloc_layout(&self, layout: Layout) -> NonNull<u8> {
+        self.alloc_located(layout).1
+    }
+
+    /// [`Arena::alloc_layout`] plus the allocation's position: a fast-path
+    /// bump keeps its chunk index and start offset, an appended chunk starts
+    /// at its own index and offset zero. Zero-sized allocations report the
+    /// current position and the canonical dangling pointer.
+    fn alloc_located(&self, layout: Layout) -> (Mark, NonNull<u8>) {
         let size = layout.size();
         let align = layout.align();
         if size == 0 {
             // Zero-sized allocations never dereference; `align` as an address is
             // the canonical aligned dangling pointer (miri-clean: it carries no
             // provenance and never touches arena memory).
-            return NonNull::new(ptr::without_provenance_mut(align)).expect("align is nonzero");
+            return (
+                self.mark(),
+                NonNull::new(ptr::without_provenance_mut(align)).expect("align is nonzero"),
+            );
         }
         let fit = size.next_multiple_of(MIN_ALIGN);
         let dedicated = align > MIN_ALIGN;
         let inner = self.inner();
         if !dedicated {
+            let chunk_index = inner.chunks.len().wrapping_sub(1);
             if let Some(last) = inner.chunks.last_mut() {
                 let end = last
                     .len
@@ -185,11 +244,17 @@ impl Arena {
                 if end <= last.cap {
                     let start = last.len;
                     last.len = end;
+                    let at = Mark {
+                        chunk: chunk_index,
+                        offset: start,
+                    };
                     // SAFETY: `start + fit <= cap` keeps the pointer inside this
                     // chunk's allocation; `start` is MIN_ALIGN-aligned in a
                     // MIN_ALIGN-aligned chunk, so any request align <= MIN_ALIGN
                     // is satisfied.
-                    return unsafe { NonNull::new_unchecked(last.ptr.as_ptr().add(start)) };
+                    return (at, unsafe {
+                        NonNull::new_unchecked(last.ptr.as_ptr().add(start))
+                    });
                 }
             }
         }
@@ -206,9 +271,13 @@ impl Arena {
         let mut chunk = inner.acquire_chunk(cap, chunk_align);
         let ptr = chunk.ptr;
         chunk.len = fit;
+        let at = Mark {
+            chunk: inner.chunks.len(),
+            offset: 0,
+        };
         inner.chunks.push(chunk);
         inner.next_size = cap.saturating_mul(2).clamp(FIRST_CHUNK, MAX_CHUNK);
-        ptr
+        (at, ptr)
     }
 
     /// Places `value` in the arena and returns an exclusive reference to it.
@@ -264,6 +333,25 @@ impl Arena {
         slice
     }
 
+    /// The checked face of [`Arena::restore`]: the same LIFO discipline
+    /// surfaced as a class the VM traps on for hand-assembled code.
+    pub fn try_restore(&self, mark: Mark) -> Result<(), ArenaMisuse> {
+        let inner = self.inner();
+        if inner.chunks.is_empty() {
+            if mark.chunk == 0 && mark.offset == 0 {
+                inner.next_size = FIRST_CHUNK;
+                return Ok(());
+            }
+            return Err(ArenaMisuse::Chunk);
+        }
+        let last = inner.chunks.get(mark.chunk).ok_or(ArenaMisuse::Chunk)?;
+        if mark.offset > last.len {
+            return Err(ArenaMisuse::Range);
+        }
+        self.restore(mark);
+        Ok(())
+    }
+
     /// Frees everything allocated after `mark` by resetting the bump cursor
     /// (C4: "reclamation a restore on frame pop").
     ///
@@ -309,6 +397,83 @@ impl Arena {
         inner.next_size = last.cap.saturating_mul(2).clamp(FIRST_CHUNK, MAX_CHUNK);
     }
 
+    /// Bump-allocates `a` followed by `b` as one contiguous byte range and
+    /// returns its position - the chunk-and-offset form the VM packs into its
+    /// arena word beside the length. Byte payloads only, so alignment stays
+    /// [`MIN_ALIGN`].
+    ///
+    /// # Panics
+    /// See [`Arena::alloc_layout`].
+    pub fn alloc_concat(&self, a: &[u8], b: &[u8]) -> Mark {
+        let total = a
+            .len()
+            .checked_add(b.len())
+            .expect("arena: allocation size overflow");
+        let (at, ptr) =
+            self.alloc_located(Layout::from_size_align(total, 1).expect("arena: layout overflow"));
+        // SAFETY: the destination was just carved out of the arena and no
+        // alias of it exists; the arena never borrows from the sources'
+        // owners.
+        unsafe {
+            ptr.as_ptr().copy_from_nonoverlapping(a.as_ptr(), a.len());
+            ptr.as_ptr()
+                .add(a.len())
+                .copy_from_nonoverlapping(b.as_ptr(), b.len());
+        }
+        at
+    }
+
+    /// The `len` bytes at `at`: the reader side of the packed handle. The
+    /// range must be live - allocated after the last restore past it -
+    /// which the placement proof guarantees for every handle lowered code
+    /// serves; a hand-packed handle that fails the bounds names its class
+    /// instead of reading.
+    pub fn bytes_at(&self, at: Mark, len: usize) -> Result<&[u8], ArenaMisuse> {
+        let end = at.offset.checked_add(len).ok_or(ArenaMisuse::Range)?;
+        let chunk = self
+            .inner()
+            .chunks
+            .get(at.chunk)
+            .ok_or(ArenaMisuse::Chunk)?;
+        chunk
+            .as_bytes()
+            .get(at.offset..end)
+            .ok_or(ArenaMisuse::Range)
+    }
+
+    /// Pushes the current position as one arena-allocating frame's entry
+    /// mark. Called at the frame's first allocation, so the mark equals the
+    /// frame's entry position by construction (no allocation intervened).
+    pub fn push_frame_mark(&self) {
+        let at = self.mark();
+        self.inner().frame_marks.push(at);
+    }
+
+    /// Pops the returning frame's entry mark and restores the arena to it,
+    /// reclaiming every temporary the frame allocated.
+    ///
+    /// # Panics
+    /// If the stack is empty (the frame never allocated).
+    pub fn pop_frame_mark(&self) {
+        let at = self
+            .inner()
+            .frame_marks
+            .pop()
+            .expect("arena: frame mark underflow");
+        self.restore(at);
+    }
+
+    /// Wholesale reset at the fiber death doors: every frame mark drops and
+    /// the arena returns to its base position, so a recycled slot starts
+    /// empty whatever its death left mid-flight.
+    pub fn release_all(&self) {
+        self.inner().frame_marks.clear();
+        self.restore(Mark {
+            chunk: 0,
+            offset: 0,
+        });
+    }
+
     /// Snapshot of chunk counts and byte usage.
     #[must_use]
     pub fn stats(&self) -> ArenaStats {
@@ -341,6 +506,17 @@ impl Arena {
         // every borrow here is transient (no method calls user code or reenters
         // the arena while it is live), so no two `&mut Inner` coexist.
         unsafe { &mut *self.inner.get() }
+    }
+}
+
+impl core::fmt::Debug for Arena {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let stats = self.stats();
+        f.debug_struct("Arena")
+            .field("chunks", &stats.chunks)
+            .field("used_bytes", &stats.used_bytes)
+            .field("capacity_bytes", &stats.capacity_bytes)
+            .finish()
     }
 }
 

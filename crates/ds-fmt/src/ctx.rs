@@ -15,14 +15,9 @@ pub(crate) struct Ctx<'s> {
 impl<'s> Ctx<'s> {
     pub(crate) fn new(src: &'s str) -> Self {
         let mut line_starts = vec![0u32];
-        for (i, b) in src.bytes().enumerate() {
-            if b == b'\n' {
-                // Offsets are u32 by the Files contract.
-                #[allow(clippy::cast_possible_truncation)]
-                let start = i as u32 + 1;
-                line_starts.push(start);
-            }
-        }
+        // Offsets are u32 by the Files contract.
+        #[allow(clippy::cast_possible_truncation)]
+        line_starts.extend(memchr::memchr_iter(b'\n', src.as_bytes()).map(|i| i as u32 + 1));
         Self { src, line_starts }
     }
 
@@ -53,7 +48,14 @@ impl<'s> Ctx<'s> {
     /// from the start of the next (`next_start`). Runs of blanks collapse to
     /// one; same-line and adjacent-line elements get no blank.
     pub(crate) fn blank_between(&self, prev_end: u32, next_start: u32) -> bool {
-        self.line(next_start) > self.line(prev_end) + 1
+        if prev_end >= next_start {
+            return false;
+        }
+        // A line index is a newline count, so the gap holds two line breaks
+        // exactly when it holds two newlines. Scanning the gap itself costs
+        // less than two line-table probes per element boundary.
+        let gap = &self.src.as_bytes()[prev_end as usize..next_start as usize];
+        memchr::memchr(b'\n', gap).is_some_and(|i| memchr::memchr(b'\n', &gap[i + 1..]).is_some())
     }
 
     /// Whether the source between two offsets contains a newline — used to

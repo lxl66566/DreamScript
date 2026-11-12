@@ -1,6 +1,7 @@
 //! The source pipeline behind `ds run <file.ds>` and `ds build`: one .ds
 //! file through parse, the static story ([`ds_check::analyze`], the stdlib
-//! ambient registered first), and lowering ([`ds_lower::lower`]) to a
+//! ambient registered first), the platform check ([`ds_check::check_platform`]),
+//! and lowering ([`ds_lower::lower`]) to a
 //! ds-mod module — stopping where each subcommand needs it. The module
 //! carries the source's blake3 hash, so [`ds_mod::read_checked`] verifies
 //! what this pipeline records.
@@ -25,9 +26,9 @@ use ds_vm::abi::{
     SlotType::{Bool, F64, I64},
 };
 
-/// The reserved native module stems: a source file with either stem would
-/// shadow pool FuncRefs the lowered bodies emit (the VM's `builtin` core
-/// and the `std` platform module).
+/// The reserved native module stems: a source file with either stem
+/// would shadow pool FuncRefs the lowered bodies emit (the VM's `builtin`
+/// core and the default `std` platform handler's module name).
 const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 
 /// How one `--args` value stages onto the entry's parameter words.
@@ -85,6 +86,34 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
             &files,
             &analyzed.checked.diags,
             "the source does not check clean",
+        ));
+    }
+    // The platform check [H5]: the package's world usage verified inside
+    // what its platform declaration provides. Without the ambient there
+    // are no declared rows to attribute, but the declaration itself is
+    // still validated.
+    let empty_rows = ds_check::DeclaredRows::new();
+    let empty_caps = ds_check::WorldCaps::new();
+    let (rows, caps): (&ds_check::DeclaredRows, &ds_check::WorldCaps) = if no_ambient {
+        (&empty_rows, &empty_caps)
+    } else {
+        (ds_stdlib::declared_rows(), ds_stdlib::world_caps())
+    };
+    // The rows come from the analyzer's own collect-and-resolve result,
+    // never a second pass over the same trees.
+    let effects = ds_check::effects::effects_of_resolved(
+        &asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        rows,
+        caps,
+    );
+    let platform = ds_check::check_platform(&asts, &effects);
+    if !platform.is_empty() {
+        return Err(reject(
+            &files,
+            &platform,
+            "the source fails the platform check",
         ));
     }
     let name = module_name(path)?;

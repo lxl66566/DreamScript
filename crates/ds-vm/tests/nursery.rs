@@ -7,24 +7,26 @@
 //!   consumed nursery refuses a second join.
 //! - first failure: a child dying trapped raises the cancel flag; a sibling looping on a backward
 //!   jump stops at its next back-edge (`Cancelled`), and the boundary reports per-child outcomes.
-//! - preemption points: the flag is observed only at taken backward branches — a straight-line
-//!   child finishes its in-flight work and lands (`Completed`) under the flag.
+//! - preemption points: the flag is observed at taken backward branches (a straight-line child
+//!   finishes its in-flight work and lands `Completed` under the flag) and at the driver's re-entry
+//!   of a parked child (the resume-shaped point: the parked child is cut there).
 //! - the ledger: a child that trapped under an earlier host drive is unioned out at the join and
 //!   cancels the rest.
 //! - trap attribution: a trap escaping a child's drive (the child resumed a fiber that trapped)
-//!   ledgers the fiber the drive ended on; the parked resumer is bounced back in and lands — under
-//!   the join driver and under a host `resume_fiber` alike.
+//!   ledgers the fiber the drive ended on; the parked resumer is innocent of the trap — it is cut
+//!   at its resume under the flag its resumee raised — under the join driver and under a host
+//!   `resume_fiber` alike.
 //! - bare detach: a bare host spawn routes into the live root nursery; with none live the host is
 //!   the supervisor and the spawn detaches.
 //! - the debug join native: parks the joiner, drives the nursery, answers the failed-children
 //!   count; a child joining its own nursery traps; a bogus id bounces the none tag.
-//! - teardown: a nursery with a suspended child drives it to death under the cancel flag,
+//! - teardown: a nursery with a parked child cuts it at its resume under the cancel flag,
 //!   deterministically, before releasing slots.
 //! - per-fiber TCO: a tail-looping nursery child runs unbounded iterations at a constant segment.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberId, FiberState, FunctionDef, JoinOutcome, ModuleRegistry,
-    ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
+    ChildOutcome, Const, FiberId, FiberState, FrameAnswer, FunctionDef, JoinOutcome,
+    ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{I64, Raw},
@@ -297,9 +299,9 @@ fn join_returns_final_values_in_spawn_order() {
     assert_eq!(
         vm.join_nursery(n),
         Ok(JoinOutcome::Joined(vec![
-            Value::I64(11),
-            Value::I64(22),
-            Value::I64(33)
+            FrameAnswer::one(Value::I64(11)),
+            FrameAnswer::one(Value::I64(22)),
+            FrameAnswer::one(Value::I64(33))
         ]))
     );
     for c in [c1, c2, c3] {
@@ -335,7 +337,7 @@ fn first_failure_cancels_a_looping_sibling() {
         Ok(JoinOutcome::Failed(vec![
             ChildOutcome::Trapped(Trap::DivideByZero),
             ChildOutcome::Cancelled,
-            ChildOutcome::Completed(Value::I64(7)),
+            ChildOutcome::Completed(FrameAnswer::one(Value::I64(7))),
         ]))
     );
     assert_eq!(vm.fiber_state(failing), Some(FiberState::Dead));
@@ -359,7 +361,7 @@ fn cancellation_is_observed_only_at_backward_branches() {
         vm.join_nursery(n),
         Ok(JoinOutcome::Failed(vec![
             ChildOutcome::Trapped(Trap::DivideByZero),
-            ChildOutcome::Completed(expect),
+            ChildOutcome::Completed(FrameAnswer::one(expect)),
         ]))
     );
     assert_eq!(vm.fiber_state(linear), Some(FiberState::Dead));
@@ -421,7 +423,7 @@ fn bare_host_spawns_route_into_the_live_root_nursery() {
     assert_eq!(vm.fiber_nursery(routed), Some(n));
     assert_eq!(
         vm.join_nursery(n),
-        Ok(JoinOutcome::Joined(vec![Value::I64(9)]))
+        Ok(JoinOutcome::Joined(vec![FrameAnswer::one(Value::I64(9))]))
     );
     // consumed: bare spawns detach again
     let after = vm
@@ -509,7 +511,7 @@ fn a_bogus_nursery_id_bounces_the_none_tag() {
 }
 
 #[test]
-fn teardown_drives_suspended_children_under_the_cancel_flag() {
+fn teardown_cuts_a_parked_child_at_its_resume_under_the_flag() {
     let mut vm = Vm::new(nb_registry());
     let n = vm.open_root_nursery();
     let half = vm
@@ -522,14 +524,12 @@ fn teardown_drives_suspended_children_under_the_cancel_flag() {
     assert_eq!(vm.resume_fiber(half, Value::I64(0)), Ok(Value::I64(5)));
     assert_eq!(vm.fiber_state(half), Some(FiberState::Suspended));
     // teardown: the flag goes up first, then each child in spawn order —
-    // the suspended one is bounced back in (none tag) and lands, the
-    // looper stops at its first back-edge
+    // the parked one is cut at its next resume (never resuming: its
+    // straight-line tail no longer lands), the looper stops at its first
+    // back-edge
     assert_eq!(
         vm.teardown_nursery(n),
-        Ok(vec![
-            ChildOutcome::Completed(Value::I64(6)),
-            ChildOutcome::Cancelled,
-        ])
+        Ok(vec![ChildOutcome::Cancelled, ChildOutcome::Cancelled])
     );
     assert_eq!(vm.fiber_state(half), Some(FiberState::Dead));
     assert_eq!(vm.fiber_state(looper), Some(FiberState::Dead));
@@ -552,7 +552,9 @@ fn per_child_tco_stays_intact_inside_a_nursery() {
         .expect("spawn spin");
     assert_eq!(
         vm.join_nursery(n),
-        Ok(JoinOutcome::Joined(vec![Value::I64(1_000_000)]))
+        Ok(JoinOutcome::Joined(vec![FrameAnswer::one(Value::I64(
+            1_000_000
+        ))]))
     );
     // the tail loop never grew the segment: high-water == entry frame, one
     // chunk — and the join observed no cancel (there was no back-edge)
@@ -580,7 +582,10 @@ fn join_survives_a_child_left_parked_on_a_dead_resumer() {
     // deliver to the driver (the resumer is gone), never into a corpse
     assert_eq!(
         vm.join_nursery(n),
-        Ok(JoinOutcome::Joined(vec![Value::I64(5), Value::I64(6)]))
+        Ok(JoinOutcome::Joined(vec![
+            FrameAnswer::one(Value::I64(5)),
+            FrameAnswer::one(Value::I64(6))
+        ]))
     );
 }
 
@@ -598,13 +603,14 @@ fn a_trap_under_a_child_resume_blames_the_trapped_fiber() {
         .spawn_fiber_in(n, "nb", "trap_child", &[])
         .expect("spawn victim");
     assert_eq!((resumer, victim), (FiberId(1), FiberId(2)));
-    // the victim ledgers Trapped (flag up); the innocent resumer is
-    // bounced back in and lands on the none tag — no misattributed kill,
-    // no never-ledgered Running zombie, no drain panic
+    // the victim ledgers Trapped (flag up); the innocent resumer is not
+    // blamed with the trap — parked at its resume call under the flag its
+    // resumee raised, it is cut at its next resume — no misattributed
+    // kill, no never-ledgered Running zombie, no drain panic
     assert_eq!(
         vm.join_nursery(n),
         Ok(JoinOutcome::Failed(vec![
-            ChildOutcome::Completed(Value::Tag(PLATFORM_NONE)),
+            ChildOutcome::Cancelled,
             ChildOutcome::Trapped(Trap::DivideByZero),
         ]))
     );
@@ -632,12 +638,12 @@ fn a_trap_under_a_host_resume_blames_the_trapped_fiber() {
     );
     assert_eq!(vm.fiber_state(resumer), Some(FiberState::Suspended));
     assert_eq!(vm.fiber_state(victim), Some(FiberState::Running));
-    // the boundary still completes: the parked resumer is bounced in and
-    // lands, the interrupted victim reports trapped
+    // the boundary still completes: the parked resumer is cut at its
+    // resume under the flag, the interrupted victim reports trapped
     assert_eq!(
         vm.join_nursery(n),
         Ok(JoinOutcome::Failed(vec![
-            ChildOutcome::Completed(Value::Tag(PLATFORM_NONE)),
+            ChildOutcome::Cancelled,
             ChildOutcome::Trapped(Trap::DivideByZero),
         ]))
     );
@@ -771,6 +777,92 @@ fn seam_parent_def(child: u32, mask: i64) -> FunctionDef {
     )
 }
 
+/// `() -> ()`: stage the member's tag word plus one payload word — the
+/// payloaded `cancel(e)` spelling's hand-assembled form. The call never
+/// answers; the RET is unreachable.
+fn seam_payload_cancel_def() -> FunctionDef {
+    def(
+        "seam_payload_cancel",
+        &[Tag, Tag, Raw, Raw],
+        0,
+        2,
+        vec![builtin(BUILTIN_NURSERY_CANCEL), Const::I64(42)],
+        &[
+            Uop::Funcf { frame_slots: 4 },
+            Uop::TagNew {
+                dst: 0,
+                tag: SEAM_TAG,
+            },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Kimm { dst: 3, kidx: k(1) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// `() -> word`: the payloaded seam parent — the boundary's answer span
+/// rides four overlay words (the discriminant, the member's tag, the
+/// payload word), so the arg area widens and the parent returns the
+/// payload word the delivery wrote.
+fn seam_payload_parent_def(mask: i64) -> FunctionDef {
+    def(
+        "seam_parent",
+        &[Raw, I64, Raw, Raw, Raw],
+        0,
+        4,
+        vec![
+            builtin(BUILTIN_NURSERY_OPEN),
+            builtin(BUILTIN_NURSERY_SPAWN),
+            builtin(BUILTIN_NURSERY_BOUNDARY),
+            Const::FuncRef {
+                module: "sb".into(),
+                func: 1,
+            },
+            Const::I64(mask),
+        ],
+        &[
+            Uop::Funcf { frame_slots: 5 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            },
+            Uop::Mov { dst: 0, src: 1 },
+            Uop::Kconst { dst: 2, kidx: k(3) },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Kimm { dst: 2, kidx: k(4) },
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 0, src: 3 },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// One seam module over the payloaded variants: [0] = the parent, [1] =
+/// the payloaded cancel child.
+fn seam_payload_vm(mask: i64) -> Vm {
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("sb", vec![
+            seam_payload_parent_def(mask),
+            seam_payload_cancel_def(),
+        ])
+        .expect("valid seam module"),
+    );
+    Vm::new(reg)
+}
+
 /// One seam module over the given parent variant: [0] = the parent, [1]
 /// = the plain child, [2] = the cancel child.
 fn seam_vm(child: u32, mask: i64) -> Vm {
@@ -803,6 +895,30 @@ fn the_boundary_seam_unions_a_cancelled_payload_out() {
     assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::Tag(SEAM_TAG)));
 }
 
+/// A payloaded cancel span unions out whole: the mask admits the member
+/// by its tag word, the delivery writes the flat span (the discriminant,
+/// the member's tag, the payload words), and the parent reads the payload
+/// word the child staged.
+#[test]
+fn a_payloaded_cancel_span_unions_out_whole() {
+    let mut vm = seam_payload_vm(1 << SEAM_TAG);
+    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::I64(42)));
+}
+
+/// A payloaded span outside the staged mask refuses whole: the trap
+/// carries the flat span, so a hand-assembled caller cannot lose the
+/// payload's rows by a partial write.
+#[test]
+fn an_uncontained_payloaded_span_refuses_whole() {
+    let mut vm = seam_payload_vm(0);
+    assert_eq!(
+        vm.run("sb", "seam_parent", &[]),
+        Err(Trap::NurseryUncontained {
+            payload: vec![Value::Tag(SEAM_TAG), Value::I64(42)]
+        })
+    );
+}
+
 /// A payload outside the staged containment mask refuses: the boundary
 /// traps instead of writing a foreign tag into the caller's union.
 #[test]
@@ -811,7 +927,7 @@ fn an_uncontained_boundary_payload_refuses() {
     assert_eq!(
         vm.run("sb", "seam_parent", &[]),
         Err(Trap::NurseryUncontained {
-            payload: Value::Tag(SEAM_TAG)
+            payload: vec![Value::Tag(SEAM_TAG)]
         })
     );
 }

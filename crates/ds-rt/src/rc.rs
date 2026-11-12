@@ -39,6 +39,13 @@ pub fn drop_deinit<T>() -> DeinitFn {
 /// the committed format: `flags` is the two-hook collector word (cycle-candidate
 /// registration bit, weak-ref head) that H4 commits to carrying dormant - always
 /// zero in v0, reserved for the growth path.
+///
+/// The field order follows the access pattern: every clone and every non-unique
+/// drop touches `rc` alone, the unique death reads `deinit` next, and only the
+/// death tail reads `size` and `align`. The two hot words sit in the header's
+/// first sixteen bytes - the span a MIN_ALIGN-aligned block base cannot split
+/// across a cache line - while the layout stays at the size the field set asks
+/// for on either pointer width.
 #[repr(C)]
 pub struct RcHeader {
     /// Count of live references; 1 means the instance is unique. Non-atomic;
@@ -47,6 +54,10 @@ pub struct RcHeader {
     /// Dormant collector word. Zero now; bits are reserved for the H4 two-hook
     /// interface so the header format never migrates.
     pub(crate) flags: u32,
+    /// Static `deinit` dispatch (C5); `None` for types without one. When the
+    /// block is a pooled reuse candidate this slot holds the freelist `next`
+    /// pointer instead (see `heap::Heap::thread_block`).
+    pub(crate) deinit: Option<DeinitFn>,
     /// Exact capacity of the whole block in bytes (header + payload).
     pub(crate) size: u32,
     /// Alignment the block was allocated with.
@@ -55,10 +66,6 @@ pub struct RcHeader {
     /// borrows. Only present under `diag`; zero-cost otherwise.
     #[cfg(feature = "diag")]
     pub(crate) borrows: i32,
-    /// Static `deinit` dispatch (C5); `None` for types without one. When the
-    /// block is a pooled reuse candidate this slot holds the freelist `next`
-    /// pointer instead (see `heap::Heap::thread_block`).
-    pub(crate) deinit: Option<DeinitFn>,
 }
 
 impl RcHeader {
@@ -350,5 +357,43 @@ impl RcHeader {
             self.borrows == 0,
             "ds-rt diag: deinit of a value with an outstanding borrow"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::mem::{offset_of, size_of};
+
+    use super::{DeinitFn, RcHeader};
+    use crate::arena::MIN_ALIGN;
+
+    /// The count and the death hook are the death path's hot words and share the
+    /// header's first MIN_ALIGN bytes, whatever pointer width the target has:
+    /// the header never grows past what its field set asks for, and the pair
+    /// never straddles a cache line at a MIN_ALIGN-aligned block base.
+    #[test]
+    fn the_hot_header_words_fit_the_base_alignment() {
+        assert_eq!(offset_of!(RcHeader, rc), 0);
+        assert!(
+            offset_of!(RcHeader, deinit) + size_of::<Option<DeinitFn>>() <= MIN_ALIGN,
+            "the count and the hook must not straddle a cache line"
+        );
+    }
+
+    /// The diag layer is free when it is off: a borrow guard then carries the
+    /// payload pointer alone - no header pointer and no counter word - so
+    /// opening and closing a window is pointer bookkeeping on the release path.
+    #[cfg(not(feature = "diag"))]
+    #[test]
+    fn borrow_guards_carry_no_diag_state() {
+        use core::ptr::NonNull;
+
+        use super::{ExclusiveBorrow, SharedBorrow};
+
+        assert_eq!(
+            size_of::<ExclusiveBorrow<'_, u8>>(),
+            size_of::<NonNull<u8>>()
+        );
+        assert_eq!(size_of::<SharedBorrow<'_, u8>>(), size_of::<NonNull<u8>>());
     }
 }

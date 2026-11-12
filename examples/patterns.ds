@@ -1,0 +1,73 @@
+// The match-pattern surfaces: a struct pattern tests its literal fields
+// in place and binds the rest, an enum case arm tests and binds its
+// payload, a nested struct sub-pattern over a struct-typed payload
+// tests and binds its fields the same way, a guard on a union arm
+// slides its failure to the next arm's dispatch entry, and a tuple
+// member of a union destructures positionally inside its arm's body.
+
+struct point {
+  x: int
+  y: int
+}
+
+enum grade {
+  plain
+  scored(int)
+}
+
+enum mark {
+  placed(point)
+  empty
+}
+
+tag miss
+type pair = (int, int) | miss
+
+fn locate(p: point) -> string {
+  match p {
+    point { x: 0, y } => "axis ${y}"
+    point { x: 1, y: 1 } => "unit"
+    point { x, y } => "at ${x} ${y}"
+  }
+}
+
+fn show(g: grade) -> string {
+  match g {
+    scored(1) => "one"
+    scored(n) if n > 3 => "big ${n}"
+    scored(n) => "n ${n}"
+    plain => "plain"
+  }
+}
+
+fn place(m: mark) -> string {
+  match m {
+    placed(point { x: 0, y }) => "axis ${y}"
+    placed(p) => "at ${p.x} ${p.y}"
+    empty => "none"
+  }
+}
+
+fn sum_pair(v: pair) -> int {
+  match v {
+    miss => 0
+    other => {
+      const (a, b) = other
+      a + b
+    }
+  }
+}
+
+fn main() -> () {
+  println(locate(point { x: 2, y: 7 }))
+  println(locate(point { x: 0, y: 4 }))
+  println(locate(point { x: 1, y: 1 }))
+  println(show(scored(1)))
+  println(show(scored(9)))
+  println(show(scored(2)))
+  println(show(plain))
+  println("pair ${sum_pair((3, 4))} ${sum_pair(miss)}")
+  println(place(placed(point { x: 0, y: 5 })))
+  println(place(placed(point { x: 2, y: 3 })))
+  println(place(empty))
+}

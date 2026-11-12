@@ -173,15 +173,25 @@ pub const POSITIVE: &[&str] = &[
     // pattern shape regression corpus (parse_suite tail)
     "const one = 1\nconst (a, b) = pair\nfn f(x) -> () {\n  match x {\n    p | q => p,\n    (c, \
      d) => c,\n    _ => x,\n  }\n}\n",
+    // G3 doc runs, attached and loose
+    "/// parses one row\nfn parse(s: string) -> int { 0 }\n/// loose\n\nfn other() -> int { 1 }\n",
+    // G3 doc runs in declaration bodies (member/field slots) and the `////`
+    // separator-comment form
+    "//// helpers\n/// the trait\ntrait animal {\n/// speaks\nfn speak(self) -> string\n}\nenum \
+     shape {\npoint {\n/// radius\nr: int\n}\n}\nstruct spot {\n/// x\nx: int\n}\nimpl animal for \
+     spot {\n/// the impl\nfn speak(self) -> string { \"\" }\n}\n",
 ];
 
 // ===== AST shape (the AST-preservation comparison) =====
 //
 // What is compared: the whole `Ast` after normalization, dumped with `{:?}`.
 // Normalization zeroes every span (offsets are formatting, not structure) and
-// drops every trivia vector (comment placement is the trivia suite's subject;
-// the formatter may legitimately move deep trivia to an item's trailing
-// position), and flattens the `trailing_comma` flag of tuples/patterns with
+// drops every trivia vector — leading, trailing, and the doc slots (item,
+// member, field), which are the same comments a second time (comment
+// placement is the trivia suite's subject; the formatter prints attached
+// member/field doc runs at their members and may legitimately move the
+// remaining deep trivia to an item's trailing position), and flattens the
+// `trailing_comma` flag of tuples/patterns with
 // more than one element (the canonical form drops those commas; the flag is
 // shape-relevant only for one-element tuples). Everything else — node
 // variants, names, cooked strings, operators, punning, nesting — must match
@@ -206,6 +216,7 @@ fn norm_ast(a: &mut Ast) {
 fn norm_item(it: &mut Item) {
     z(&mut it.span);
     it.leading_trivia.clear();
+    it.doc.clear();
     it.trailing_trivia.clear();
     for a in &mut it.attrs {
         z(&mut a.span);
@@ -260,6 +271,7 @@ fn norm_kind(k: &mut ItemKind) {
                 match m {
                     StructMember::Field(f) => {
                         z(&mut f.span);
+                        f.doc.clear();
                         norm_ident(&mut f.name);
                         norm_ty(&mut f.ty);
                     },
@@ -292,6 +304,7 @@ fn norm_kind(k: &mut ItemKind) {
                     EnumPayload::Struct(fs) => {
                         for f in fs {
                             z(&mut f.span);
+                            f.doc.clear();
                             norm_ident(&mut f.name);
                             norm_ty(&mut f.ty);
                         }
@@ -347,6 +360,13 @@ fn norm_kind(k: &mut ItemKind) {
                 norm_fn(f);
             }
         },
+        ItemKind::Platform(p) => {
+            z(&mut p.span);
+            z(&mut p.name.span);
+            for cap in &mut p.provides {
+                norm_ident(cap);
+            }
+        },
     }
 }
 
@@ -361,6 +381,7 @@ fn norm_local(l: &mut LocalDecl) {
 
 fn norm_fn(f: &mut FnDecl) {
     z(&mut f.span);
+    f.doc.clear();
     norm_ident(&mut f.name);
     for g in &mut f.generics {
         norm_tparam(g);

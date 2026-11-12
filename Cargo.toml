@@ -15,17 +15,24 @@ readme      = "../../README.md"
 
 [workspace.dependencies]
 thiserror  = "2"
+rustc-hash = "2"
 blake3     = "1"
 memmap2    = "0.9"
-log        = "0.4"
+memchr     = "2"
 arbitrary  = "1"
 pest       = "2"
 pest_derive = "2"
 serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
+# fast JSON serialization; ds-diag's `json` feature is its only consumer
+sonic-rs   = "0.5"
 # default-features off: rayon/plotters only serve report generation
 criterion  = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# deterministic Valgrind instruction-count pinning (the arc's stage-three gate)
+gungraun   = "0.19.4"
 anyhow     = "1"
+# the fork-join scheduler backend measurement's candidate (M5's decided-by-measurement seam);
+# the tokio runtime serves async stages only, the bench uses `youpipe::scope`
+youpipe    = { version = "0.8", default-features = false }
 tempfile   = "3"
 clap       = { version = "4", features = ["derive"] }
 # in-workspace crates, so consumers write `name.workspace = true`
@@ -51,8 +58,14 @@ unsafe_code           = "allow"
 unused_qualifications = "warn"
 
 [workspace.lints.cargo]
-# remove once every workspace dependency is consumed by a landed crate
+# allow while rustc-hash and memchr wait for their consumers
 unused_workspace_dependencies = "allow"
 
 [profile.release]
 codegen-units = 1
+# hot paths cross ds-vm -> ds-abi/ds-rt, so cross-crate inlining needs LTO
+lto           = "thin"
+
+[profile.bench]
+# gungraun's Callgrind pass needs symbols to attribute counts
+debug = true

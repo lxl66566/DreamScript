@@ -34,12 +34,19 @@ impl Hash128 {
     }
 }
 
+/// The lowercase hex digits, indexed by nibble value.
+const HEX: [u8; 16] = *b"0123456789abcdef";
+
 impl fmt::Display for Hash128 {
+    /// Lowercase hex, written once: the formatter sees a single string
+    /// rather than one `fmt::Arguments` per byte.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for &b in &self.0 {
-            write!(f, "{b:02x}")?;
+        let mut out = [0u8; 32];
+        for (index, &byte) in self.0.iter().enumerate() {
+            out[index * 2] = HEX[usize::from(byte >> 4)];
+            out[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
         }
-        Ok(())
+        f.write_str(core::str::from_utf8(&out).expect("hex digits are ASCII"))
     }
 }
 
@@ -52,6 +59,16 @@ mod tests {
         assert_eq!(Hash128::ZERO.to_string(), "0".repeat(32));
         let hash = Hash128::new([0x0f; 16]);
         assert_eq!(hash.to_string(), "0f".repeat(16));
+        // every nibble value, high and low, renders through the table
+        let mut bytes = [0u8; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let nibble = u8::try_from(index).expect("index fits u8");
+            *byte = (nibble << 4) | nibble;
+        }
+        assert_eq!(
+            Hash128::new(bytes).to_string(),
+            "00112233445566778899aabbccddeeff"
+        );
     }
 
     #[test]

@@ -1,0 +1,76 @@
+// purpose: the omitted-defaulted dispatch end to end — a trait member
+// declaring a body is omittable by the impl exactly because the
+// declaration carries the dispatch target: a call whose solving impl
+// spells no member dispatches into the trait's declared default body
+// through the same staged shape an impl body enters (the evidence words
+// the body's nested calls demand trail the true arguments, the solved
+// instance word trailing them). The default body's sibling call on
+// `self` rides the runtime-evidence machinery (the checker satisfies
+// it through the trait-scoped `Self` assumption), so a monomorphic impl
+// stages its spelled sibling body, a generic impl's spelled sibling
+// stages with its follow chain, and the generic shape over the trait's
+// own variable (`move self` returning `Self`) guards the one-word
+// instantiation boundary.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// resets: stage: run
+// resets-int: stage: run
+// label: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println(s: string) -> ()
+extern fn concat(a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string { concat("<", concat(self.name(), ">")) }
+  fn name(self) -> string
+}
+
+impl shows for int {
+  fn name(self) -> string { "int" }
+}
+
+impl shows for string {
+  fn name(self) -> string { "str" }
+}
+
+impl[u: shows] shows for list[u] {
+  fn name(self) -> string {
+    var acc = ""
+    for x in self {
+      acc = concat(acc, x.name())
+    }
+    concat("[", concat(acc, "]"))
+  }
+}
+
+trait resets {
+  fn reset(move self) -> Self { self }
+}
+
+impl resets for int {
+}
+
+fn label(n: int) -> string {
+  n.show()
+}
+
+fn main() -> int {
+  println(3.show())
+  println("a".show())
+  println([3].show())
+  println([[3]].show())
+  println("${3.reset()}")
+  println(label(4))
+  0
+}

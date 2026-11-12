@@ -1,0 +1,47 @@
+[package]
+name         = "ds-pins"
+description  = "Instruction-count pin host: the gungraun kernels over ds-vm plus the nextest-runnable bake that asserts their committed counts"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+# The crate's payload is `benches/` (the gungraun kernels) and
+# `tests/pin_bake.rs` (their committed-count bake); the lib target is empty.
+# Keeping both outside ds-vm keeps the harness's dependency graph out of
+# ds-vm's test binaries.
+
+[dev-dependencies]
+gungraun            = "0.19.4"
+ds-vm               = { path = "../ds-vm" }
+# the examples/opcode_census tool lowers the benchmark kernels through the compiler chain
+ds-abi              = { path = "../ds-abi" }
+ds-check            = { path = "../ds-check" }
+ds-diag             = { path = "../ds-diag" }
+ds-lower            = { path = "../ds-lower" }
+ds-mod.workspace    = true
+ds-parse            = { path = "../ds-parse" }
+ds-stdlib.workspace = true
+
+[[bench]]
+name    = "loop_claims"
+harness = false
+
+[[bench]]
+name    = "scalar_loop"
+harness = false
+
+[[bench]]
+name    = "strcat_temp"
+harness = false
+
+[[bench]]
+name    = "string_temp"
+harness = false

@@ -165,7 +165,7 @@ impl Bodies<'_> {
                 };
                 // Substitute the constructor's parameters from the
                 // scrutinee application, like field access.
-                let mut subst = HashMap::new();
+                let mut subst = FxHashMap::default();
                 if let Some((ctor, args)) = members.first().and_then(|m| self.single_apply_of(*m)) {
                     if ctor == atom {
                         for (param, arg) in shape.params.iter().zip(args.iter()) {
@@ -350,7 +350,7 @@ impl Bodies<'_> {
                     // it covers only its intersection, the way the
                     // record's `.err` handler arms split the union
                     // [E4, F4].
-                    covered.extend(self.decls.universe.members(refined).to_vec());
+                    covered.extend_from_slice(self.decls.universe.members(refined));
                     refined
                 },
                 None => scrut,
@@ -440,6 +440,25 @@ impl Bodies<'_> {
                 self.decls.atoms.get(&case_def).copied()
             },
             _ => None,
+        }
+    }
+
+    /// Whether one arm's pattern carries value-level tests — a literal
+    /// or string anywhere in the pattern, at any depth through tuples,
+    /// struct fields, case payloads, and or-alternatives. Such an arm
+    /// can fail at run, so the remainder walk keeps the full scrutinee
+    /// for later arms.
+    pub(crate) fn carries_value_tests(pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => true,
+            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
+                pats.iter().any(Self::carries_value_tests)
+            },
+            Pattern::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, sub)| sub.as_ref().is_some_and(Self::carries_value_tests)),
+            Pattern::Call { args, .. } => args.iter().any(Self::carries_value_tests),
+            Pattern::Wildcard(_) | Pattern::Binding { .. } | Pattern::Path { .. } => false,
         }
     }
 

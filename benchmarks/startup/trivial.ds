@@ -1,0 +1,10 @@
+// Startup fixture: the trivial cold script — three statements of pure
+// arithmetic and one print, no natives beyond console. The stage
+// measures front-end + check + lower + VM entry on an empty program
+// graph: startup.sh bench runs it as the `trivial` metric.
+
+fn main() -> () {
+  const a = 6 * 7
+  const b = a + 58
+  println("result: ${b}")
+}

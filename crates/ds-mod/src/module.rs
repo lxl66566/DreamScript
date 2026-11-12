@@ -35,6 +35,45 @@ pub enum Constant {
     },
 }
 
+/// A constants-pool dedupe key: the variant tag plus the value, with an f64
+/// keyed by its bit pattern so a NaN payload survives as its own key.
+///
+/// `Eq` is the marker [`std::collections::HashMap`] needs; the derived
+/// `PartialEq` still compares f64 by value, so `0.0` and `-0.0` are equal yet
+/// hash apart and a repeated NaN never matches itself. Both only cost a
+/// missed dedupe: no two distinct bit patterns are ever merged onto one pool
+/// entry.
+impl Eq for Constant {}
+
+impl core::hash::Hash for Constant {
+    /// Bit-exact for every variant.
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::I64(value) => {
+                0u8.hash(state);
+                value.hash(state);
+            },
+            Self::F64(value) => {
+                1u8.hash(state);
+                value.to_bits().hash(state);
+            },
+            Self::Bool(value) => {
+                2u8.hash(state);
+                value.hash(state);
+            },
+            Self::Str(text) => {
+                3u8.hash(state);
+                text.hash(state);
+            },
+            Self::FuncRef { module, func } => {
+                4u8.hash(state);
+                module.hash(state);
+                func.hash(state);
+            },
+        }
+    }
+}
+
 /// A half-open byte-offset span `[start, end)` into the module source,
 /// used for strippable debug information.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,19 +116,20 @@ pub enum FunctionError {
 }
 
 /// One per-function record of the blocks payload (BL-7): local name, frame
-/// layout, its constant pool, and the validated instruction body — uops
-/// interleaved with the 0xE RC pair (C4).
+/// layout, its constant pool, and the validated body as canonical 32-bit
+/// words — uops interleaved with the 0xE RC pair (C4).
 ///
 /// Construction validates the body once: every word encodes canonically at
-/// its pc, and every jump lands inside the function's own code. The writer
-/// serializes the stored words back out; the reader rebuilds through the
-/// same constructor, so both directions share one validation path.
+/// its pc, and every jump lands inside the function's own code. The record
+/// keeps the encoded words, so the writer copies them out verbatim and the
+/// loader takes them as-is: one encode and one decode per word on each
+/// direction, no re-encoding.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Function {
     name: String,
     layout: FrameLayout,
     constants: Vec<Constant>,
-    code: Vec<Inst>,
+    code: Vec<u32>,
 }
 
 impl Function {
@@ -107,11 +147,12 @@ impl Function {
         constants: Vec<Constant>,
         code: impl IntoIterator<Item = impl Into<Inst>>,
     ) -> Result<Self, FunctionError> {
-        let code: Vec<Inst> = code.into_iter().map(Into::into).collect();
-        let len = u32::try_from(code.len()).expect("code length fits u32");
-        for (pc, inst) in code.iter().enumerate() {
+        let body: Vec<Inst> = code.into_iter().map(Into::into).collect();
+        let len = u32::try_from(body.len()).expect("code length fits u32");
+        let mut words = Vec::with_capacity(body.len());
+        for (pc, inst) in body.iter().enumerate() {
             let pc = u32::try_from(pc).expect("pc fits u32");
-            inst.encode(pc).map_err(FunctionError::Encode)?;
+            words.push(inst.encode(pc).map_err(FunctionError::Encode)?);
             if let Inst::Uop(uop) = inst {
                 if let Some(target) = jump_target_of(*uop) {
                     if target >= len {
@@ -124,8 +165,24 @@ impl Function {
             name: name.into(),
             layout,
             constants,
-            code,
+            code: words,
         })
+    }
+
+    /// Builds a record from words the caller has already validated (the
+    /// reader decodes and bounds-checks each word exactly once).
+    pub(crate) fn from_words(
+        name: String,
+        layout: FrameLayout,
+        constants: Vec<Constant>,
+        code: Vec<u32>,
+    ) -> Self {
+        Self {
+            name,
+            layout,
+            constants,
+            code,
+        }
     }
 
     /// The local function name; the qualified module path lives in the
@@ -147,10 +204,20 @@ impl Function {
         &self.constants
     }
 
-    /// The validated instruction body; serializes to canonical 32-bit words.
+    /// The validated instruction body: one canonical 32-bit word per
+    /// instruction, in pc order. This is the on-disk form.
     #[must_use]
-    pub fn code(&self) -> &[Inst] {
+    pub fn code(&self) -> &[u32] {
         &self.code
+    }
+
+    /// Consumes the record into its parts: local name, frame layout,
+    /// constant pool, and the validated body words. The owning install
+    /// path takes each record over this seam, so the words reach the
+    /// installed table without a copy.
+    #[must_use]
+    pub fn into_parts(self) -> (String, FrameLayout, Vec<Constant>, Vec<u32>) {
+        (self.name, self.layout, self.constants, self.code)
     }
 }
 
@@ -341,6 +408,13 @@ impl Module {
         &self.functions
     }
 
+    /// The function records of the blocks payload, consumed: the owning
+    /// install path takes every body over without copying it.
+    #[must_use]
+    pub fn into_functions(self) -> Vec<Function> {
+        self.functions
+    }
+
     /// Appends a validated function record to the blocks payload.
     #[must_use]
     pub fn with_function(mut self, function: Function) -> Self {
@@ -369,5 +443,64 @@ impl Module {
     #[must_use]
     pub fn matches_source(&self, source: &[u8]) -> bool {
         self.source_hash == Hash128::compute(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        hash::{DefaultHasher, Hash, Hasher},
+    };
+
+    use super::Constant;
+
+    fn hash_of(constant: &Constant) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        constant.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn constant_hash_keys_the_value_and_variant() {
+        assert_eq!(hash_of(&Constant::I64(-42)), hash_of(&Constant::I64(-42)));
+        assert_ne!(hash_of(&Constant::I64(1)), hash_of(&Constant::Bool(true)));
+        assert_ne!(hash_of(&Constant::I64(1)), hash_of(&Constant::I64(0)));
+        assert_eq!(
+            hash_of(&Constant::Str("pool".to_owned())),
+            hash_of(&Constant::Str("pool".to_owned()))
+        );
+        assert_eq!(
+            hash_of(&Constant::FuncRef {
+                module: "m".to_owned(),
+                func: 3
+            }),
+            hash_of(&Constant::FuncRef {
+                module: "m".to_owned(),
+                func: 3
+            })
+        );
+    }
+
+    #[test]
+    fn constant_hash_keys_the_f64_bit_pattern() {
+        assert_eq!(hash_of(&Constant::F64(3.25)), hash_of(&Constant::F64(3.25)));
+        // distinct bit patterns stay distinct keys, so no dedupe merges a
+        // signed zero or a NaN payload onto another entry
+        assert_ne!(hash_of(&Constant::F64(0.0)), hash_of(&Constant::F64(-0.0)));
+        assert_ne!(
+            hash_of(&Constant::F64(f64::from_bits(0x7ff8_0000_dead_beef))),
+            hash_of(&Constant::F64(f64::from_bits(0x7ff8_0000_beef_dead)))
+        );
+    }
+
+    #[test]
+    fn constant_is_a_pool_index_key() {
+        let mut index = HashMap::new();
+        index.insert(Constant::Str("pool".to_owned()), 0u16);
+        index.insert(Constant::I64(7), 1u16);
+        assert_eq!(index.get(&Constant::Str("pool".to_owned())), Some(&0));
+        assert_eq!(index.get(&Constant::I64(7)), Some(&1));
+        assert_eq!(index.get(&Constant::I64(8)), None);
     }
 }

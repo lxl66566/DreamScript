@@ -19,23 +19,28 @@
 //!   resolution diagnostics. The dependency is the whole set of parses plus the file-set input
 //!   ([`Ctx::file_count`]), so the query invalidates at file grain and on registration — collection
 //!   is package-wide, so any parse edit can change any resolution.
-//! * `type_of` reads the resolve query (resolution computes once per package) and every parse, runs
-//!   the ds-check bidirectional pass (B2) over the package, and slices one definition's story out
-//!   of it: the declaration and body diagnostics whose primary labels address the definition's
-//!   block, plus the solved type of each binding it holds, rendered through the package universe.
-//!   Like `linearity_check` the dependency is the whole parse set, so the query invalidates at file
-//!   grain — and on registration, through the file-set input `package_asts` also reads — the check
-//!   is package-wide, so block-grain renewal would under-approximate it.
-//! * `linearity_check` reads the parse result and the block index of the definition's file and runs
-//!   the M2 affine pass (C1, C5) over that file as a single-file package, then slices out the
-//!   definition's facts. The dependency is the whole parse, so this query invalidates at file
-//!   grain: the pass is a package fixpoint (cross-item moves are legal inside a file), so
-//!   block-grain renewal would under-approximate it. The block-grain seam stays what the M3
-//!   lowering reads.
-//! * `effects_of` reads every registered file's parse and runs the ds-check effects pass (E1): the
-//!   M2 package is all registered files (G3), a file whose parse failed contributes no tree (its
-//!   definitions are absent), and one definition's row is returned by its package index. The
-//!   file-set input rides along with the parses, so registration invalidates every row too.
+//! * `checked_package` reads the resolve value and every parse, runs the ds-check bidirectional
+//!   pass (B2) over the package once, and carries the package's diagnostics plus every top-level
+//!   binding's rendered type. Package grain: its dependency is the whole parse set like `resolve`.
+//! * `file_linearity` reads one file's parse and runs the M2 affine pass (C1, C5) over that file as
+//!   a single-file package. File grain: the pass is a package fixpoint (cross-item moves are legal
+//!   inside a file), so block-grain renewal would under-approximate it; the block-grain seam stays
+//!   what the M3 lowering reads.
+//! * `package_effects` reads the resolve value and every registered file's parse and runs the
+//!   ds-check effects pass (E1) over the already collected and resolved package: the M2 package is
+//!   all registered files (G3), a file whose parse failed contributes no tree (its definitions are
+//!   absent). The file-set input rides along with the parses, so registration invalidates every row
+//!   too.
+//! * `type_of` reads the checked package and slices one definition's story out of it: the
+//!   declaration and body diagnostics whose primary labels address the definition's block, plus the
+//!   solved type of each binding it holds. The slice's dependencies are the checked package and the
+//!   definition file's block index, so deep verification walks three keys however many files or
+//!   definitions the package has.
+//! * `linearity_check` reads the definition file's `file_linearity` value and the block index, and
+//!   slices out the definition's facts. Same per-definition dependency shape as `type_of`.
+//! * `effects_of` reads `package_effects` and answers one definition's row by its package index.
+//! * `platform_check` reads the parses and `package_effects`, and runs `ds_check::check_platform`
+//!   over the same trees against the package's platform declaration.
 //!
 //! [`Ctx::file_content`]: crate::Ctx::file_content
 //! [`Ctx::file_count`]: crate::Ctx::file_count
@@ -43,17 +48,19 @@
 
 use std::sync::Arc;
 
-use ds_diag::{FileId, LabelStyle, Span};
+use ds_diag::{Diagnostic, FileId, LabelStyle, Span};
 use ds_parse::Ast;
 
 use crate::{
     db::Ctx,
     error::QueryError,
-    key::{BlockId, QueryKey},
+    facts::BlockFacts,
+    key::{BlockId, DefId, PackageId, QueryKey},
     query::{BlockIndex, ParseFile},
     value::{
-        BlockIndexOutput, BlockInfo, LinearityOutput, ParseOutput, QueryValue, ResolveOutput,
-        TypeOfOutput,
+        BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
+        FileLinearityOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput, ParseOutput,
+        PlatformCheckOutput, QueryValue, ResolveOutput, TypeOfOutput,
     },
 };
 
@@ -87,92 +94,222 @@ pub(crate) fn resolve(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Qu
     }))
 }
 
-/// The type story of one definition (B2): the ds-check bidirectional pass
-/// over the package, sliced to the definition's block. `DefId` packs
-/// `(file << 8) | block` like [`queries::linearity_check`](crate), so the
-/// definition is its block until real definition identity arrives.
-///
-/// Reads the resolve query — resolution computes once per package — and
-/// every parse. A file that fails to parse yields the empty story for
-/// every definition in it: syntax diagnostics are the parse query's data
-/// and flow through it.
-pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
-    let QueryKey::TypeOf(def) = key else {
-        return Err(QueryError::KindMismatch(key));
-    };
+/// The block span of one definition: `DefId` packs `(file << 8) | block`
+/// until real definition identity arrives, and a file's block indices are
+/// dense in source order, so the block index is a direct lookup.
+fn def_block(ctx: &mut Ctx<'_>, def: DefId) -> Result<(BlockId, Span), QueryError> {
     let file = FileId::new(def.as_u32() >> 8);
     let block = BlockId {
         file,
         index: def.as_u32() & 0xff,
     };
-    let parse = ctx.get::<ParseFile>(file)?;
     let index = ctx.get::<BlockIndex>(file)?;
-    let Some(info) = index.blocks.iter().find(|info| info.id == block) else {
-        return Err(QueryError::UnknownBlock(block));
-    };
-    let span = info.span;
-    let empty = TypeOfOutput {
-        types: Vec::new().into(),
-        diags: Vec::new().into(),
-    };
-    if parse.ast.as_deref().is_none() {
-        return Ok(QueryValue::TypeOf(empty));
+    let span = index
+        .blocks
+        .get(block.index as usize)
+        .map(|info| info.span)
+        .ok_or(QueryError::UnknownBlock(block))?;
+    Ok((block, span))
+}
+
+/// The `(fact index, span)` pairs of a diagnostic list's primary labels:
+/// the spans the per-definition slices attribute a diagnostic by.
+fn primary_label_spans(diags: &[Diagnostic]) -> Vec<(u32, Span)> {
+    let mut out = Vec::new();
+    for (index, diag) in diags.iter().enumerate() {
+        let index = u32::try_from(index).expect("diagnostic count fits u32");
+        out.extend(
+            diag.labels
+                .iter()
+                .filter(|label| label.style == LabelStyle::Primary)
+                .map(|label| (index, label.span)),
+        );
     }
-    // The package check runs over every parseable file, resolution first.
-    let resolved = ctx.get::<crate::query::Resolve>(crate::key::PackageId::new(0))?;
+    out
+}
+
+/// The `(fact index, span)` pairs of a placement list, for bucketing.
+fn placement_spans(facts: impl Iterator<Item = Span>) -> Vec<(u32, Span)> {
+    facts
+        .enumerate()
+        .map(|(index, span)| (u32::try_from(index).expect("fact count fits u32"), span))
+        .collect()
+}
+
+/// The whole-package bidirectional check (B2): the ds-check declaration
+/// and body pass over every parseable file, after the package's collection
+/// and resolution. The substrate every definition's typed story slices, so
+/// the pass runs once per package; its fact index buckets every definition
+/// and every diagnostic's primary label by the block it addresses, so a
+/// story is one lookup instead of a scan of the package.
+pub(crate) fn checked_package(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::CheckedPackage(package) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let resolved = ctx.get::<crate::query::Resolve>(package)?;
     let asts = package_asts(ctx)?;
     let checked =
         ds_check::check_resolved(ctx.files(), &asts, &resolved.package, &resolved.resolutions);
-    let in_block = |at: Span| at.file == span.file && at.start >= span.start && at.end <= span.end;
-    let diags = checked
-        .checked
-        .diags
+    let blocks: Vec<(u32, Span)> = asts
         .iter()
-        .filter(|diag| {
-            diag.labels
+        .flat_map(|ast| {
+            ast.blocks
                 .iter()
-                .any(|label| label.style == LabelStyle::Primary && in_block(label.span))
+                .map(|block| (ast.file.as_u32(), block.span))
         })
-        .cloned()
+        .collect();
+    let defs = (0..resolved.package.len()).map(|raw| {
+        let raw = u32::try_from(raw).expect("def count fits u32");
+        let def = resolved.package.def(ds_check::DefId::from_raw(raw));
+        (raw, def.span)
+    });
+    let facts = Arc::new(CheckedPackageFacts {
+        defs: BlockFacts::build(blocks.iter().copied(), defs),
+        diags: BlockFacts::build(blocks, primary_label_spans(&checked.checked.diags)),
+    });
+    Ok(QueryValue::CheckedPackage(CheckedPackageOutput {
+        package: resolved.package,
+        diags: checked.checked.diags.into(),
+        type_names: Arc::new(checked.type_names),
+        facts,
+    }))
+}
+
+/// The type story of one definition (B2): a slice of the checked package
+/// into the definition's block. `DefId` packs `(file << 8) | block` like
+/// [`queries::linearity_check`](crate), so the definition is its block
+/// until real definition identity arrives.
+///
+/// A file that fails to parse contributes no tree to the package, so no
+/// diagnostic or binding address its blocks and every one of its stories
+/// is empty: syntax diagnostics are the parse query's data and flow
+/// through it.
+pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::TypeOf(def) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let (block, _) = def_block(ctx, def)?;
+    let checked = ctx.get::<crate::query::CheckedPackage>(PackageId::new(0))?;
+    let types = checked
+        .facts
+        .defs
+        .slice(block)
+        .into_iter()
+        .filter_map(|raw| {
+            let id = ds_check::DefId::from_raw(raw);
+            let def = checked.package.def(id);
+            checked
+                .type_names
+                .get(&id)
+                .map(|ty| (def.name.clone(), ty.clone()))
+        })
         .collect::<Vec<_>>()
         .into();
-    let types = (0..resolved.package.len())
-        .filter_map(|raw| {
-            let id = ds_check::DefId::from_raw(u32::try_from(raw).expect("def count fits u32"));
-            let def = resolved.package.def(id);
-            in_block(def.span)
-                .then(|| {
-                    checked
-                        .type_names
-                        .get(&id)
-                        .map(|ty| (def.name.clone(), ty.clone()))
-                })
-                .flatten()
-        })
+    let diags = checked
+        .facts
+        .diags
+        .slice(block)
+        .into_iter()
+        .map(|at| checked.diags[at as usize].clone())
         .collect::<Vec<_>>()
         .into();
     Ok(QueryValue::TypeOf(TypeOfOutput { types, diags }))
 }
 
-/// One definition's effect row (E1): the ds-check effects pass over the
-/// registered files, keyed by the definition's package index.
+/// The M2 affine pass (C1, C5) over one file, run as a single-file
+/// package: the substrate every definition's linearity facts slice. The
+/// pass is a package fixpoint (cross-item moves are legal inside a file),
+/// so it runs at file grain, not per definition; its fact index buckets
+/// every placement and every diagnostic's primary label by the block it
+/// addresses, so a definition's facts are one lookup.
+pub(crate) fn file_linearity(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::FileLinearity(file) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let parse = ctx.get::<ParseFile>(file)?;
+    let empty = FileLinearityOutput {
+        diags: Vec::new().into(),
+        moves: Vec::new().into(),
+        drops: Vec::new().into(),
+        last_uses: Vec::new().into(),
+        facts: Arc::default(),
+    };
+    let Some(ast) = parse.ast.as_deref() else {
+        return Ok(QueryValue::FileLinearity(empty));
+    };
+    let (_, lin) = ds_check::linearity::check(ctx.files(), std::slice::from_ref(ast));
+    let blocks: Vec<(u32, Span)> = ast
+        .blocks
+        .iter()
+        .map(|block| (file.as_u32(), block.span))
+        .collect();
+    let facts = Arc::new(LinearityFacts {
+        diags: BlockFacts::build(blocks.iter().copied(), primary_label_spans(&lin.diags)),
+        moves: BlockFacts::build(
+            blocks.iter().copied(),
+            placement_spans(lin.moves.iter().map(|fact| fact.at)),
+        ),
+        drops: BlockFacts::build(
+            blocks.iter().copied(),
+            placement_spans(lin.drops.iter().map(|fact| fact.at)),
+        ),
+        last_uses: BlockFacts::build(
+            blocks,
+            placement_spans(lin.last_uses.iter().map(|fact| fact.at)),
+        ),
+    });
+    Ok(QueryValue::FileLinearity(FileLinearityOutput {
+        diags: lin.diags.into(),
+        moves: lin.moves.into(),
+        drops: lin.drops.into(),
+        last_uses: lin.last_uses.into(),
+        facts,
+    }))
+}
+
+/// One definition's effect row (E1): a slice of the package's computed
+/// rows by the definition's package index.
 ///
-/// Package grain at M2 (G3): every registered file is the package, and
-/// the compute reads each file's parse plus the file-set input, so an
-/// edit anywhere — or a file registered mid-session — invalidates every
-/// row. One limit stays for the M7 `PackageConfig` seam: the ambient row
-/// table (`ds_check::DeclaredRows`) is fixed when the database is built,
-/// so world rows flow only once the platform declaration supplies it.
+/// Package grain at M2 (G3): every registered file is the package, so an
+/// edit anywhere — or a file registered mid-session — moves the row
+/// memo's value and every reader re-derives. One limit stays for the M7
+/// `PackageConfig` seam: the ambient row table (`ds_check::DeclaredRows`)
+/// is fixed when the database is built, so world rows flow only once the
+/// platform declaration supplies it.
 pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::EffectsOf(def) = key else {
         return Err(QueryError::KindMismatch(key));
     };
-    let asts = package_asts(ctx)?;
-    let effects = ds_check::effects_of(&asts, ctx.declared_rows());
+    let effects = ctx.get::<crate::query::PackageEffects>(PackageId::new(0))?;
     effects
+        .effects
         .of(ds_check::DefId::from_raw(def.as_u32()))
         .map(QueryValue::EffectRow)
         .ok_or(QueryError::NoEffectRow(def))
+}
+
+/// The package's effect rows (E1): the ds-check effects pass over the
+/// registered files' parses, reusing the `resolve` value's collected
+/// package and per-file resolutions instead of re-running collection and
+/// resolution per file. Package grain like `resolve` — the dependency is
+/// the whole parse set plus the file-set input, and the declared-row and
+/// capability tables are fixed database inputs.
+pub(crate) fn package_effects(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::PackageEffects(package) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let resolved = ctx.get::<crate::query::Resolve>(package)?;
+    let asts = package_asts(ctx)?;
+    let effects = ds_check::effects::effects_of_resolved(
+        &asts,
+        &resolved.package,
+        &resolved.resolutions,
+        ctx.declared_rows(),
+        ctx.world_caps(),
+    );
+    Ok(QueryValue::PackageEffects(PackageEffectsOutput {
+        effects: Arc::new(effects),
+    }))
 }
 
 /// Parses one file with `ds-parse`: tree plus diagnostics as one value.
@@ -195,6 +332,23 @@ pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Quer
         ast,
         diagnostics: Arc::from(diagnostics),
         source,
+    }))
+}
+
+/// The package's platform check (H5, E1): the package's computed rows
+/// (rows plus world-capability attribution) verified inside what its
+/// platform declaration provides. Package grain like `resolve` — the
+/// dependency is the whole parse set plus the file-set input, read through
+/// the `package_effects` memo so the effects pass runs once.
+pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::PlatformCheck(_) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let effects = ctx.get::<crate::query::PackageEffects>(PackageId::new(0))?;
+    let asts = package_asts(ctx)?;
+    let diags = ds_check::check_platform(&asts, &effects.effects);
+    Ok(QueryValue::PlatformCheck(PlatformCheckOutput {
+        diags: diags.into(),
     }))
 }
 
@@ -221,7 +375,7 @@ pub(crate) fn block_index(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue
         None => split_blocks(file, &parse.source),
     };
     Ok(QueryValue::BlockIndex(BlockIndexOutput {
-        blocks: blocks.into_boxed_slice(),
+        blocks: blocks.into(),
     }))
 }
 
@@ -235,7 +389,7 @@ pub(crate) fn block_source(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValu
     };
     let parse = ctx.get::<ParseFile>(block.file)?;
     let index = ctx.get::<BlockIndex>(block.file)?;
-    let Some(info) = index.blocks.iter().find(|info| info.id == block) else {
+    let Some(info) = index.blocks.get(block.index as usize) else {
         return Err(QueryError::UnknownBlock(block));
     };
     let range = info.span.start as usize..info.span.end as usize;
@@ -246,10 +400,10 @@ pub(crate) fn block_source(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValu
     Ok(QueryValue::BlockSource(Arc::from(text)))
 }
 
-/// Runs the M2 affine pass (C1, C5) over one definition's file and slices
-/// the definition's facts out of it. `DefId` packs `(file, block)` until
-/// the real definition table lands, so the definition is its block and its
-/// facts are those addressing the block's span.
+/// Slices one definition's facts out of its file's linearity pass.
+/// `DefId` packs `(file, block)` until the real definition table lands, so
+/// the definition is its block and its facts are those the block's bucket
+/// holds.
 ///
 /// A file that fails to parse yields empty facts for every definition:
 /// syntax diagnostics are the parse query's data and flow through it.
@@ -257,58 +411,38 @@ pub(crate) fn linearity_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryV
     let QueryKey::LinearityCheck(def) = key else {
         return Err(QueryError::KindMismatch(key));
     };
-    let file = FileId::new(def.as_u32() >> 8);
-    let block = BlockId {
-        file,
-        index: def.as_u32() & 0xff,
-    };
-    let parse = ctx.get::<ParseFile>(file)?;
-    let index = ctx.get::<BlockIndex>(file)?;
-    let Some(info) = index.blocks.iter().find(|info| info.id == block) else {
-        return Err(QueryError::UnknownBlock(block));
-    };
-    let span = info.span;
-    let empty = LinearityOutput {
-        diags: Vec::new().into(),
-        moves: Vec::new().into(),
-        drops: Vec::new().into(),
-        last_uses: Vec::new().into(),
-    };
-    let Some(ast) = parse.ast.as_deref() else {
-        return Ok(QueryValue::LinearityCheck(empty));
-    };
-    let (_, lin) = ds_check::linearity::check(ctx.files(), std::slice::from_ref(ast));
-    let in_block = |at: Span| at.file == span.file && at.start >= span.start && at.end <= span.end;
+    let (block, _) = def_block(ctx, def)?;
+    let lin = ctx.get::<crate::query::FileLinearity>(block.file)?;
     let diags = lin
+        .facts
         .diags
-        .iter()
-        .filter(|diag| {
-            diag.labels
-                .iter()
-                .any(|label| label.style == LabelStyle::Primary && in_block(label.span))
-        })
-        .cloned()
+        .slice(block)
+        .into_iter()
+        .map(|at| lin.diags[at as usize].clone())
         .collect::<Vec<_>>()
         .into();
     let moves = lin
+        .facts
         .moves
-        .iter()
-        .filter(|fact| in_block(fact.at))
-        .copied()
+        .slice(block)
+        .into_iter()
+        .map(|at| lin.moves[at as usize])
         .collect::<Vec<_>>()
         .into();
     let drops = lin
+        .facts
         .drops
-        .iter()
-        .filter(|fact| in_block(fact.at))
-        .copied()
+        .slice(block)
+        .into_iter()
+        .map(|at| lin.drops[at as usize])
         .collect::<Vec<_>>()
         .into();
     let last_uses = lin
+        .facts
         .last_uses
-        .iter()
-        .filter(|fact| in_block(fact.at))
-        .copied()
+        .slice(block)
+        .into_iter()
+        .map(|at| lin.last_uses[at as usize])
         .collect::<Vec<_>>()
         .into();
     Ok(QueryValue::LinearityCheck(LinearityOutput {

@@ -13,7 +13,20 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::{parse, parse_script};
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+
+/// The record's body decoded to instructions, one per pc.
+fn insts(function: &ds_mod::Function) -> Vec<Inst> {
+    function
+        .code()
+        .iter()
+        .enumerate()
+        .map(|(pc, word)| {
+            Inst::decode(u32::try_from(pc).expect("pc fits u32"), *word)
+                .expect("ds-mod validated every word")
+        })
+        .collect()
+}
 
 const AMBIENT: &str = concat!(
     "tag int\n",
@@ -71,8 +84,8 @@ fn build_vm(source: &str, script: bool) -> (Vm, Lowered) {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
 
@@ -365,11 +378,12 @@ fn main() -> () {
     );
 }
 
-/// A scalar `cancel` payload refuses: the boundary unions one bare enum
-/// member word this round.
+/// A scalar `cancel` payload unions out through the boundary: the child
+/// mints its member's tag ahead of the int word, the boundary delivers
+/// the two-word span, and the caller's variable arm extracts the int.
 #[test]
-fn a_scalar_cancel_payload_refuses() {
-    refused(
+fn a_scalar_cancel_payload_unions_out() {
+    let (_, out) = run_main(
         r#"
 fn f(n: int) -> int | net_err {
   nursery {
@@ -381,14 +395,133 @@ fn f(n: int) -> int | net_err {
 }
 
 fn main() -> () {
-  match f(1) {
+  match f(7) {
     timeout => println("t"),
     refused => println("r"),
     v => println("kept ${v}")
   }
 }
 "#,
-        "the error value must be a bare enum member this round",
+        false,
+    );
+    assert_eq!(out, "kept 7\n");
+}
+
+/// A payloaded member cancels end to end: the child stages the struct
+/// member's whole flat span behind its tag, the boundary delivers it,
+/// the fail path gathers the payload words into the return union's
+/// claimed offsets, and both the caller's catch arm and the `.err`
+/// handler read the fields. The carried string's count crosses the
+/// death handoff and the RETSPAN, so the run drains.
+#[test]
+fn a_payloaded_member_cancels_and_extracts_end_to_end() {
+    let (vm, out) = run_main(
+        r#"
+struct fail { code: int, reason: string }
+
+fn f() -> fail | none {
+  nursery {
+    spawn {
+      cancel(fail { code: 3, reason: "gateway" })
+    }
+  }
+  none
+}
+
+fn g() -> int | fail {
+  nursery {
+    spawn {
+      cancel(fail { code: 9, reason: "handoff" })
+    }
+  }
+  1
+}
+
+fn main() -> () {
+  match f() {
+    none => println("clean")
+    e => println("code ${e.code} reason ${e.reason}")
+  }
+  const r = g().err((e: fail) => e.code)
+  println("err ${r}")
+  println("done")
+}
+"#,
+        false,
+    );
+    assert_eq!(out, "code 3 reason gateway\nerr 9\ndone\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the payloaded cancel's counts balance ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The generic-application clause: a union member over `list[int]`
+/// cancels end to end. The member claims one Ref word (the heap
+/// application's shape), the child stages the captured list behind its
+/// minted tag, and the caller's catch arm reads the list through its
+/// natives — the captured list's count rides the death handoff whole.
+#[test]
+fn a_list_member_cancels_end_to_end() {
+    let (vm, out) = run_main(
+        r#"
+fn f(n: int) -> list[int] | none {
+  const xs = [1, 2, n]
+  nursery {
+    spawn {
+      cancel(xs)
+    }
+  }
+  none
+}
+
+fn main() -> () {
+  match f(3) {
+    none => println("clean")
+    xs => println("list ${xs.list_len()}")
+  }
+  println("done")
+}
+"#,
+        false,
+    );
+    assert_eq!(out, "list 3\ndone\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the captured list's count balances ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// A member whose payload is itself a union still refuses: the flat
+/// staging has no static span for a union word, so the site names the
+/// value shape whose seam it waits on.
+#[test]
+fn a_union_payloaded_member_refuses() {
+    refused(
+        r#"
+enum wrap {
+  carrier(int | none)
+}
+
+fn f(x: int | none) -> int | wrap {
+  nursery {
+    spawn {
+      cancel(carrier(x))
+    }
+  }
+  1
+}
+
+fn main() -> () {
+  match f(1) {
+    carrier => println("c"),
+    v => println("kept ${v}")
+  }
+}
+"#,
+        "anything else waits on the seam its own value shape names",
     );
 }
 
@@ -484,16 +617,16 @@ fn main() -> () {
     let mut spawns = 0;
     let mut boundaries = 0;
     for f in lowered.module().functions() {
-        let code = f.code();
+        let code = insts(f);
         for inst in code {
             let Inst::Uop(uop) = inst else {
                 continue;
             };
-            let (callee, nargs) = match uop {
-                ds_abi::Uop::Call { callee, nargs }
-                | ds_abi::Uop::Callt { callee, nargs }
-                | ds_abi::Uop::Callg { callee, nargs } => (callee, *nargs),
-                _ => continue,
+            let (ds_abi::Uop::Call { callee, nargs }
+            | ds_abi::Uop::Callt { callee, nargs }
+            | ds_abi::Uop::Callg { callee, nargs }) = uop
+            else {
+                continue;
             };
             let ds_mod::Constant::FuncRef { module, func } = &f.constants()[usize::from(callee.0)]
             else {

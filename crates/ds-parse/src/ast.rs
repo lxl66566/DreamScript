@@ -2,10 +2,12 @@
 //!
 //! Every node carries a [`Span`]. Comments are attached as [`Trivia`] payload
 //! (leading on the following item, trailing at container end) so the M1
-//! formatter is lossless over comments. A file is a `Vec<Block>` of
-//! `##`-separated blocks (G3); a file without separators is one block.
-//! Top-level definitions are order-independent data — no ordering validation
-//! happens at parse time.
+//! formatter is lossless over comments; the `///` doc run a definition owns
+//! is carried a second time in [`Item::doc`] — and a member's or field's in
+//! its own `doc` slot — as attachment data (G3). A file
+//! is a `Vec<Block>` of `##`-separated blocks (G3); a file without separators
+//! is one block. Top-level definitions are order-independent data — no
+//! ordering validation happens at parse time.
 
 use ds_diag::{FileId, Span};
 
@@ -62,6 +64,14 @@ pub struct Item {
     pub kind: ItemKind,
     /// Comments before the item's first token.
     pub leading_trivia: Vec<Trivia>,
+    /// The `///` run attached to this definition (G3): the maximal suffix
+    /// of `leading_trivia` made of `///` line comments on consecutive
+    /// source lines, the last immediately above the item's first token.
+    /// The same trivia also stay in `leading_trivia` — the formatter's
+    /// lossless channel — so this slot is pure attachment data for
+    /// consumers; a run cut off by a blank line or another comment stays
+    /// loose (absent here, present in `leading_trivia`).
+    pub doc: Vec<Trivia>,
     /// Comments inside the item but outside any deeper attachment point.
     pub trailing_trivia: Vec<Trivia>,
 }
@@ -122,6 +132,8 @@ pub enum ItemKind {
     Trait(TraitDecl),
     /// `impl[g]? Trait? for? type { fn }` (B6).
     Impl(ImplDecl),
+    /// `platform "std" provides <console, fsys, net, time>` (H5).
+    Platform(PlatformDecl),
 }
 
 /// An import declaration (G4).
@@ -193,6 +205,12 @@ pub struct FnDecl {
     pub ret: Option<Type>,
     /// Body block; absent for signatures (traits, externs).
     pub body: Option<BlockExpr>,
+    /// The `///` run attached to this member declaration (G3): filled for
+    /// trait/impl member `fn`s, where the run immediately precedes the `fn`.
+    /// Top-level declarations carry their doc in [`Item::doc`], so this slot
+    /// stays empty there. The same trivia also stay in the enclosing item's
+    /// deep trivia — pure attachment data, not a move.
+    pub doc: Vec<Trivia>,
 }
 
 /// One declared generic parameter.
@@ -276,6 +294,11 @@ pub struct FieldDecl {
     pub name: Ident,
     /// Field type.
     pub ty: Type,
+    /// The `///` run attached to this field (G3): filled for struct-body
+    /// fields and enum-case payload fields, where the run immediately
+    /// precedes the field. The same trivia also stay in the enclosing
+    /// item's deep trivia — pure attachment data, not a move.
+    pub doc: Vec<Trivia>,
 }
 
 /// An enum declaration.
@@ -313,6 +336,30 @@ pub enum EnumPayload {
     Tuple(Vec<Type>),
     /// `Case { f: t }` struct payload.
     Struct(Vec<FieldDecl>),
+}
+
+/// A platform declaration (H5): the platform a package is checked
+/// against. The checker verifies the package's effect usage is a subset
+/// of the platform's declared row — the provides list names the world
+/// capabilities the platform serves, an absent list providing nothing
+/// (the embed target).
+#[derive(Clone, Debug)]
+pub struct PlatformDecl {
+    /// Span of the whole declaration.
+    pub span: Span,
+    /// The platform's name, from its plain string literal (e.g. `std`).
+    pub name: PlatformName,
+    /// The provided world capabilities, in declaration order.
+    pub provides: Vec<Ident>,
+}
+
+/// The platform's name: one plain string literal's text.
+#[derive(Clone, Debug)]
+pub struct PlatformName {
+    /// Span of the string literal.
+    pub span: Span,
+    /// The name's text.
+    pub name: String,
 }
 
 /// A unit tag declaration (B1).
@@ -362,8 +409,11 @@ pub enum TraitMember {
         /// Associated type name.
         name: Ident,
     },
-    /// Function signature, with optional default body.
-    Fn(FnDecl),
+    /// Function signature, with optional default body. Boxed: [`FnDecl`] is
+    /// far past the member enum's other variant, and every consumer binds
+    /// it by reference (deref coercion), so the indirection costs one
+    /// pointer per member slot.
+    Fn(Box<FnDecl>),
 }
 
 /// An impl block (B6): inherent (`impl list<t> { ... }`) or

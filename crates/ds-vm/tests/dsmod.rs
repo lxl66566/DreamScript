@@ -138,7 +138,7 @@ fn dsmod_round_trip_installs_and_runs_at_constant_stack() {
     read_checked(&bytes, source).expect("checked source hash matches");
 
     let mut vm = Vm::new(ModuleRegistry::new());
-    vm.install_dsmod(&module).expect("module installs");
+    vm.install_dsmod(module).expect("module installs");
     // the loader filled the entry-descriptor word-0 placeholders at install
     for (position, f) in vm
         .registry()
@@ -184,7 +184,7 @@ fn loader_reports_unresolved_funcrefs() {
     .expect("valid function");
     let module = Module::new("m", TargetClass::Bytecode, Hash128::compute(b"m")).with_function(bad);
     assert_eq!(
-        vm.install_dsmod(&module).unwrap_err(),
+        vm.install_dsmod(module).unwrap_err(),
         ds_vm::LoadError::UnresolvedCallee {
             func: "bad".into(),
             module: String::new(),
@@ -205,7 +205,7 @@ fn loader_reports_unresolved_funcrefs() {
     let module =
         Module::new("m2", TargetClass::Bytecode, Hash128::compute(b"m2")).with_function(foreign);
     assert_eq!(
-        vm.install_dsmod(&module).unwrap_err(),
+        vm.install_dsmod(module).unwrap_err(),
         ds_vm::LoadError::UnresolvedCallee {
             func: "foreign".into(),
             module: "other".into(),
@@ -273,11 +273,11 @@ fn cross_module_funcref_resolves_through_the_current_slot() {
     let app = read(&bytes).expect("parses");
 
     let mut vm = Vm::new(ModuleRegistry::new());
-    vm.install_dsmod(&std_version(1)).expect("std v1 installs");
-    vm.install_dsmod(&app).expect("app installs");
+    vm.install_dsmod(std_version(1)).expect("std v1 installs");
+    vm.install_dsmod(app).expect("app installs");
     assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(10)));
     // swapping std's slot redirects the SAME FuncRef to the new version
-    vm.install_dsmod(&std_version(2)).expect("std v2 swaps in");
+    vm.install_dsmod(std_version(2)).expect("std v2 swaps in");
     assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(15)));
 }
 
@@ -294,7 +294,7 @@ fn loader_rejects_funcf_disagreeing_with_the_frame_layout() {
     let module = read(&bytes).expect("parses");
     let mut vm = Vm::new(ModuleRegistry::new());
     assert_eq!(
-        vm.install_dsmod(&module).unwrap_err(),
+        vm.install_dsmod(module).unwrap_err(),
         ds_vm::LoadError::Build(ds_vm::ModuleBuildError::FuncfMismatch {
             func: "bad".into(),
             funcef: 4,

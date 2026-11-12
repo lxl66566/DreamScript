@@ -35,6 +35,21 @@
 //! dependency's value — the block text — recomputes to an equal value and
 //! renews. See the `queries` module docs for the exact dependency shape.
 //!
+//! # Package grain and the per-definition slices
+//!
+//! A checker pass is memoized at its own grain, and the per-definition
+//! queries slice its value instead of re-running it: `CheckedPackage` runs
+//! the bidirectional check (B2) once per package, `FileLinearity` the
+//! affine pass (C1, C5) once per file, and `PackageEffects` the effects
+//! pass (E1) once per package. `TypeOf`, `LinearityCheck`, and `EffectsOf`
+//! therefore depend on one package- or file-grain key each (plus the block
+//! index for the definition's block), so a definition's cost is one bucket
+//! lookup in the pass's block-grain fact index plus that block's facts, and
+//! deep verification walks a handful of keys however many definitions the
+//! package holds. The memoed payloads are shared arcs, so answering a read
+//! from a memo clones pointers. `PlatformCheck` reads the same effects
+//! memo, so the effects pass runs once for both.
+//!
 //! # Cycle policy
 //!
 //! Two distinct concepts:
@@ -87,6 +102,7 @@
 
 mod db;
 mod error;
+mod facts;
 mod key;
 mod queries;
 mod query;
@@ -97,9 +113,11 @@ pub use ds_check::{Effect, EffectRow};
 pub use error::QueryError;
 pub use key::{BlockId, DefId, Dependency, InputKey, PackageId, QueryKey, QueryKind};
 pub use query::{
-    BlockIndex, BlockSource, EffectsOf, LinearityCheck, ParseFile, Query, Resolve, TypeOf,
+    BlockIndex, BlockSource, CheckedPackage, EffectsOf, FileLinearity, LinearityCheck,
+    PackageEffects, ParseFile, PlatformCheck, Query, Resolve, TypeOf,
 };
 pub use value::{
-    BlockIndexOutput, BlockInfo, LinearityOutput, ParseOutput, QueryValue, ResolveOutput,
+    BlockIndexOutput, BlockInfo, CheckedPackageOutput, FileLinearityOutput, LinearityOutput,
+    PackageEffectsOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
     TypeOfOutput,
 };

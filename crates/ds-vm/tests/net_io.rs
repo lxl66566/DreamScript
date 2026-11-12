@@ -29,9 +29,9 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{
-        PLATFORM_IO_OK, PLATFORM_NET_ERR, STD_HTTP_GET, STD_NET_CLOSE, STD_NET_CONNECT,
-        STD_NET_RECV, STD_NET_SEND, STD_PLATFORM_MODULE, std_platform_module,
+    native::{PLATFORM_IO_OK, PLATFORM_NET_ERR},
+    platform::{
+        OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform, STD_NAME,
     },
 };
 
@@ -41,7 +41,7 @@ fn k(idx: u16) -> ConstIdx {
 
 fn platform(index: u32) -> Const {
     Const::FuncRef {
-        module: STD_PLATFORM_MODULE.into(),
+        module: STD_NAME.into(),
         func: index,
     }
 }
@@ -50,12 +50,12 @@ fn platform(index: u32) -> Const {
 /// recv cap immediate.
 fn pool() -> Vec<Const> {
     vec![
-        platform(STD_NET_CONNECT), // k0
-        platform(STD_NET_SEND),    // k1
-        platform(STD_NET_RECV),    // k2
-        platform(STD_NET_CLOSE),   // k3
-        platform(STD_HTTP_GET),    // k4
-        Const::I64(4096),          // k5: net_recv max_bytes in `echo`
+        platform(OP_NET_CONNECT), // k0
+        platform(OP_NET_SEND),    // k1
+        platform(OP_NET_RECV),    // k2
+        platform(OP_NET_CLOSE),   // k3
+        platform(OP_HTTP_GET),    // k4
+        Const::I64(4096),         // k5: net_recv max_bytes in `echo`
     ]
 }
 
@@ -72,7 +72,7 @@ fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     // the whole surface here is the platform's: the std platform table is
     // the host's to install (`Vm::new` only adds the builtin core)
-    reg.install_native(STD_PLATFORM_MODULE, std_platform_module());
+    reg.install_platform(Platform::std());
     reg.install(ModuleVersion::new("net", defs).expect("valid fixture module"));
     reg
 }

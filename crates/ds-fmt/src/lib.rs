@@ -32,13 +32,17 @@
 //! Line comments attach to the following item (or statement); a comment on
 //! the same line as the previous item's end trails that item; comments after
 //! the last item of a block (including EOF comments) are kept as the block's
-//! trailing lines — nothing is dropped. `///` doc-comments are ordinary
-//! leading trivia and travel with their item. Blank-line runs between
+//! trailing lines — nothing is dropped. `///` doc-comments on items are
+//! ordinary leading trivia and travel with their item; a member's or field's
+//! attached doc run (the parse layer's `doc` slot) prints immediately above
+//! its member at the member's indent. Blank-line
+//! runs between
 //! elements collapse to at most one blank line. `##` separators are
 //! recovered verbatim from the source (text and column preserved) and a
 //! blank line around a separator is preserved. Comments interior to a
-//! declaration (deep trivia) migrate to the item's trailing position — a v1
-//! limit: position moves, content never disappears.
+//! declaration that no member or field doc slot owns (deep trivia) migrate
+//! to the item's trailing position — a v1 limit: position moves, content
+//! never disappears.
 //!
 //! ```
 //! use ds_diag::{FileId, Files};
@@ -63,7 +67,7 @@ mod ty;
 use ctx::Ctx;
 use ds_diag::{FileId, Files};
 use ds_parse::{Ast, Block};
-use expr::{Elem, push_elems, trivia_elem};
+use expr::{ElemStream, push_comment};
 
 /// Formats one parsed file. Zero options: layout follows the canonical form
 /// and the source's own line structure (inline vs multiline containers,
@@ -82,34 +86,37 @@ pub fn format_source(files: &Files, file: FileId, ast: &Ast) -> String {
 /// block-grain unit the LSP on-type path will call; it never reads another
 /// block's nodes.
 pub(crate) fn render_block(ctx: &Ctx, block: &Block) -> String {
-    let mut elems: Vec<Elem> = Vec::new();
+    let mut out = String::new();
+    let mut stream = ElemStream::new(false);
     for item in &block.items {
         for t in &item.leading_trivia {
-            elems.push(trivia_elem(ctx, 0, t));
+            push_comment(ctx, &mut out, &mut stream, 0, t);
         }
-        let mut text = String::new();
-        decl::write_item(ctx, &mut text, 0, item);
+        stream.begin(ctx, &mut out, item.span.start);
+        decl::write_item(ctx, &mut out, 0, item);
+        // An attached member/field doc run prints at its member inside the
+        // rendered body, so the trailing migration skips those trivia —
+        // only the remaining interior comments (and a same-line trailing
+        // comment) land behind the item. The element's end is the furthest
+        // of the item's own extent and the comments it rendered: a
+        // same-line tail comment sits past the item, while a migrated deep
+        // comment sits before the closing brace in the source, so its end
+        // alone would manufacture a phantom blank line before the next
+        // element.
+        let mut end = item.span.end;
         for t in &item.trailing_trivia {
-            text.push(' ');
-            text.push_str(ctx.comment_text(t));
+            if decl::is_member_doc(&item.kind, t.span) {
+                continue;
+            }
+            out.push(' ');
+            out.push_str(ctx.comment_text(t));
+            end = end.max(t.span.end);
         }
-        elems.push(Elem {
-            // The item element starts at the item itself; its leading
-            // comments are separate elements, so the gap between the last
-            // comment and the item is measured comment-end -> item start.
-            start: item.span.start,
-            end: item
-                .trailing_trivia
-                .last()
-                .map_or(item.span.end, |t| t.span.end),
-            text,
-        });
+        stream.end(end);
     }
     for t in &block.trailing_trivia {
-        elems.push(trivia_elem(ctx, 0, t));
+        push_comment(ctx, &mut out, &mut stream, 0, t);
     }
-    let mut out = String::new();
-    push_elems(ctx, &mut out, &elems, false);
     out
 }
 
@@ -174,9 +181,10 @@ fn content_end(block: &Block) -> u32 {
 /// A recovered `##` separator line, verbatim from the source (the marker
 /// is line-initial, so the line starts at it; its text is preserved).
 struct Separator {
-    text: String,
     /// Offset of the separator line's first byte.
     line_start: u32,
+    /// Offset just past the separator line's text, its padding trimmed.
+    text_end: u32,
     /// Offset of the newline (or EOF) ending the separator line.
     line_end: u32,
 }
@@ -194,15 +202,17 @@ fn find_separator(ctx: &Ctx, from: u32, to: u32) -> Option<Separator> {
         return None;
     }
     let src = ctx.src();
-    let tok = src[from as usize..to as usize].find("##")? + from as usize;
-    let line_start = src[..tok]
-        .rfind('\n')
-        .map_or(from as usize, |i| i + 1)
-        .max(from as usize);
-    let line_end = src[tok..].find('\n').map_or(src.len(), |i| tok + i);
+    let bytes = src.as_bytes();
+    let tok = from as usize + memchr::memmem::find(&bytes[from as usize..to as usize], b"##")?;
+    // The reverse scan stays inside the window: a newline before it would
+    // clamp to the window start.
+    let line_start = memchr::memrchr(b'\n', &bytes[from as usize..tok])
+        .map_or(from as usize, |i| from as usize + i + 1);
+    let line_end = memchr::memchr(b'\n', &bytes[tok..]).map_or(src.len(), |i| tok + i);
+    let text_end = line_start + src[line_start..line_end].trim_end().len();
     Some(Separator {
-        text: src[line_start..line_end].trim_end().to_owned(),
         line_start: line_start as u32,
+        text_end: text_end as u32,
         line_end: line_end as u32,
     })
 }
@@ -214,34 +224,44 @@ fn assemble(ctx: &Ctx, blocks: &[Block], rendered: &[String]) -> String {
     // Offsets are u32 by the Files contract.
     #[allow(clippy::cast_possible_truncation)]
     let src_len = ctx.src().len() as u32;
-    let mut parts: Vec<String> = Vec::new();
+    let src = ctx.src();
+    let mut out = String::new();
     for (i, text) in rendered.iter().enumerate() {
-        if !text.is_empty() {
-            parts.push(text.clone());
-        }
         let last = i + 1 == blocks.len();
-        let window_end = if last { src_len } else { content_start(&blocks[i + 1]) };
-        let Some(sep) = find_separator(ctx, content_end(&blocks[i]), window_end) else {
+        // Both content offsets are read more than once below, and each read
+        // walks the block's items.
+        let end = content_end(&blocks[i]);
+        let next_start = if last { src_len } else { content_start(&blocks[i + 1]) };
+        let sep = find_separator(ctx, end, next_start);
+        if !text.is_empty() {
+            push_part(&mut out, text);
+        }
+        let Some(sep) = sep else {
             continue;
         };
-        if !text.is_empty() && ctx.blank_between(content_end(&blocks[i]), sep.line_start) {
-            parts.push(String::new());
+        if !text.is_empty() && ctx.blank_between(end, sep.line_start) {
+            push_part(&mut out, "");
         }
-        parts.push(sep.text);
-        if !last
-            && !rendered[i + 1].is_empty()
-            && ctx.blank_between(sep.line_end, content_start(&blocks[i + 1]))
-        {
-            parts.push(String::new());
+        push_part(
+            &mut out,
+            &src[sep.line_start as usize..sep.text_end as usize],
+        );
+        if !last && !rendered[i + 1].is_empty() && ctx.blank_between(sep.line_end, next_start) {
+            push_part(&mut out, "");
         }
     }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        let mut out = parts.join("\n");
+    if !out.is_empty() {
         out.push('\n');
-        out
     }
+    out
+}
+
+/// Appends one output part on its own line.
+fn push_part(out: &mut String, part: &str) {
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(part);
 }
 
 #[cfg(test)]

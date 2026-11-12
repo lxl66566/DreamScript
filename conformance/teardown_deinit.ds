@@ -1,0 +1,53 @@
+// source: E5 teardown firing — the drain-doors round 2026-11-12
+// purpose: a nursery where the children hold deinit-carrying values: the completing child's hook fires at its own frame exit, and the cancel-cut child's kept frame fires its hook at the teardown drain (observable prints, deterministic order)
+// items:
+// resource: stage: run
+// clean_pass: stage: run
+// cut_pass: stage: run
+// main: stage: run
+
+struct resource: ~Copyable {
+  name: string
+  deinit { println("freed ${self.name}") }
+}
+
+fn clean_pass() -> int | net_err {
+  nursery {
+    spawn {
+      const held = resource { name: "clean" }
+      println("ran ${held.name}")
+    }
+  }
+  0
+}
+
+fn cut_pass() -> int | net_err {
+  nursery {
+    spawn {
+      cancel(timeout)
+    }
+    spawn {
+      const held = resource { name: "cut" }
+      println("start ${held.name}")
+      var i = 0
+      while i < 1000000 {
+        i += 1
+      }
+      println("never ${held.name}")
+    }
+  }
+  1
+}
+
+fn main() -> () {
+  match clean_pass() {
+    timeout => println("t")
+    refused => println("r")
+    n => println("clean kept ${n}")
+  }
+  match cut_pass() {
+    timeout => println("t")
+    refused => println("r")
+    n => println("cut kept ${n}")
+  }
+}

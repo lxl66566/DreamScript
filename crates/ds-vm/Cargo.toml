@@ -14,8 +14,6 @@ readme.workspace       = true
 workspace = true
 
 [features]
-# The RC balance tripwires: hard asserts on rc underflow/overflow, the
-# ds-rt diag discipline (debug assertions otherwise).
 # The RC balance tripwires: ds-rt's hard asserts on rc underflow/overflow
 # (the ds-rt diag layer) arm through this feature.
 diag = ["ds-rt/diag"]
@@ -28,7 +26,12 @@ ds-rt = { path = "../ds-rt" }
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+youpipe.workspace = true
 
 [[bench]]
 name    = "vm"
+harness = false
+
+[[bench]]
+name    = "fork_join"
 harness = false

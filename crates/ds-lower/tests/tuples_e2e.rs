@@ -8,15 +8,16 @@
 //! while the const convention aliases the tuple's words). The multi-word
 //! corners reject at the lowering boundary with their own notes: a union-typed
 //! element distributed the product into several tuple atoms, a struct or
-//! nested-tuple element spans several words, and a tuple member of a union is
-//! a multi-word payload.
+//! nested-tuple element spans several words, and a tuple arm in a member-test
+//! position resolves no member (the arm binds the member and destructures it
+//! in the body).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the probe module once per test VM: parse -> check -> lower ->
 /// write -> read back -> install, with both native tables in place before
@@ -48,8 +49,8 @@ fn build_vm() -> Vm {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     Vm::new(registry)
 }
 
@@ -118,10 +119,11 @@ fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
             "tuple elements lower as one plain frame word",
         ),
         (
-            // a tuple member of a union is a multi-word payload
+            // a tuple arm in a member-test position resolves no member:
+            // the arm binds the member and destructures in the body
             "fn pick() -> (int, int) | none { (1, 2) }\nfn main() -> int { match pick() { (a, b) \
              => a, none => 0 } }",
-            "a tuple member of a union",
+            "bind the member and destructure it in the arm body",
         ),
         (
             // a var destructuring element binds: literals test at match

@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use ds_abi::CodePc;
+use ds_rt::Arena;
 
 use crate::{
     module::ModuleVersion, nursery::NurseryId, object::Objects, value::Word, vm::CallInfo,
@@ -40,7 +41,7 @@ use crate::{
 /// Log2 of [`CHUNK_WORDS`]: chunk lookup is a shift and a mask.
 const CHUNK_SHIFT: usize = 8;
 
-/// Words per segment chunk: 256 words (2 KiB on 64-bit targets), small
+/// Words per segment chunk: 256 words (4 KiB on 64-bit targets), small
 /// enough that fixture-scale recursion crosses chunk boundaries.
 pub const CHUNK_WORDS: usize = 1 << CHUNK_SHIFT;
 
@@ -96,6 +97,12 @@ pub(crate) struct ResumePoint {
 pub(crate) struct Fiber {
     /// The fiber's value-stack segment [H2: chunk-append growth].
     pub(crate) segment: Segment,
+    /// The fiber's frame arena: the bytes behind its designated
+    /// concatenation temporaries. It lives in the pool slot and never
+    /// swaps into the drive context (only the running fiber's own ops
+    /// touch it; a death door is the only cross-fiber access), so a
+    /// fiber switch performs no arena action.
+    pub(crate) arena: Arena,
     /// The fiber's heap object store: the id table, the free list, the
     /// intern map, and ds-rt's block pools — one store per fiber, so a
     /// block and its count are only ever touched by the thread driving
@@ -126,6 +133,7 @@ impl Fiber {
     pub(crate) fn empty(id: FiberId) -> Self {
         Self {
             segment: Segment::new(),
+            arena: Arena::new(),
             callinfo: Vec::new(),
             objects: Objects::new(id),
             max_len: 0,
@@ -148,10 +156,13 @@ impl Fiber {
 /// A per-fiber value-stack segment: fixed-capacity chunks appended on
 /// growth, never reallocated, so existing words keep their addresses across
 /// any later growth [H2]. Frames may straddle chunk boundaries — indexing
-/// maps each word to its own chunk.
+/// maps each word to its own chunk. Each chunk is one fixed-length array
+/// behind its own box, so a slot access is one chunk-base load and the
+/// offset add: the shift-and-mask split proves the in-chunk index in
+/// range, which leaves one bounds check on the chunk list.
 #[derive(Debug)]
 pub(crate) struct Segment {
-    chunks: Vec<Box<[Word]>>,
+    chunks: Vec<Box<[Word; CHUNK_WORDS]>>,
     len: usize,
 }
 
@@ -177,9 +188,9 @@ impl Segment {
         }
         let needed = new_len.div_ceil(CHUNK_WORDS);
         while self.chunks.len() < needed {
-            self.chunks.push(
-                vec![Word::Slot(crate::value::Value::I64(0)); CHUNK_WORDS].into_boxed_slice(),
-            );
+            self.chunks.push(Box::new(
+                [Word::Slot(crate::value::Value::I64(0)); CHUNK_WORDS],
+            ));
         }
         self.len = new_len;
     }
@@ -220,6 +231,14 @@ impl Segment {
     /// switch round-trips.
     pub(crate) fn word_addr(&self, i: usize) -> usize {
         (&raw const self[i]) as usize
+    }
+
+    /// The word at `i` when the logical segment covers it: the teardown
+    /// pass reads dying frames' words this way, and a frame region past
+    /// the current length (never written, or truncated away) answers
+    /// `None` instead of indexing stale chunks.
+    pub(crate) fn get(&self, i: usize) -> Option<&Word> {
+        (i < self.len()).then(|| &self[i])
     }
 }
 

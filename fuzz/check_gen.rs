@@ -11,7 +11,31 @@
 //! the checker's error paths stay exercised too. The scalar tags, the
 //! list/map generic structs, and every callee are declared by the program
 //! itself, so well-typed mode reaches inference over unions, refinement,
-//! and linearity instead of drowning in unknown-name noise. Every program
+//! and linearity instead of drowning in unknown-name noise. The span
+//! rework's landed surfaces are drawn vocabulary: record-typed list
+//! elements (the per-list element stride), unions over wider members (a
+//! multi-word struct member, or a heap-ref generic application's one Ref
+//! word), and struct-typed fields, each counted in the draw census the
+//! mirror asserts. The pattern rounds' landed vocabulary is drawn the
+//! same way: value-level or-patterns (literal ladders, struct-pattern
+//! alternatives), struct patterns over struct-typed scrutinees, case
+//! constructor arms with payload tests, guarded arms over union and
+//! enum dispatch, nested struct sub-patterns over struct-typed payloads
+//! and fields, and whole-span equality over union operands, each counted
+//! in the census. The CALL_GENERIC round's landed surface is drawn the
+//! same way: free generic fn calls over declared bounds (the int,
+//! string, and list instantiation chains, the two-level
+//! list[list[int]] instantiation, the nested runtime form whose
+//! callee demand rides the calling frame's own staged slot), the
+//! honest doors (the lone nested demand the frame never staged,
+//! the mut-over-variable planning parameter, the generic fn value,
+//! the generic fn name staged where a callable word must go, the
+//! local generic lambda, the multi-word argument into a variable
+//! parameter, the inert uncalled declaration), and the
+//! impl-completeness shapes (an impl omitting a bodiless
+//! non-defaulted member or spelling it bodiless reports DS2023
+//! at the impl's own door, while an omitted defaulted member
+//! stays clean), each counted in the census. Every program
 //! runs through parse, the effects walk over rows the generator picked,
 //! the bidirectional check with the affine pass, and both diag renderers;
 //! the property is that none of this panics. Included by the cargo-fuzz
@@ -26,7 +50,7 @@
 
 use std::hint::black_box;
 
-use ds_check::{DeclaredRows, Effect, EffectRow, check, effects_of};
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, check, effects_of};
 use ds_diag::{Files, render};
 use ds_parse::parse;
 
@@ -60,12 +84,73 @@ pub struct Outcome {
     pub parsed: bool,
     pub moves: usize,
     pub effects: usize,
+    pub drawn: Drawn,
+}
+
+/// The span-surface draw census: the shapes the generator drew over the
+/// span rework's landed surfaces, counted wherever the vocabulary picks
+/// them (generation runs regardless of parse, so the census is the
+/// generator's own fact).
+#[derive(Default)]
+pub struct Drawn {
+    /// List types over record elements (a declared struct or enum at the
+    /// per-list element stride).
+    pub record_lists: u32,
+    /// Unions carrying a wider member (a declared struct).
+    pub wide_unions: u32,
+    /// Struct-typed or list-typed struct fields (the field-span shape).
+    pub span_fields: u32,
+    /// Unions carrying a heap-ref generic application member (a
+    /// `list[int]` member riding one Ref word).
+    pub heap_ref_unions: u32,
+    /// Value-level or-patterns: literal ladders over scalar scrutinees
+    /// and struct-pattern alternative arms.
+    pub or_patterns: u32,
+    /// Struct-pattern arms over struct-typed scrutinees (literal field
+    /// tests in place, punning binders).
+    pub struct_patterns: u32,
+    /// Case constructor arms with literal payload tests (a case's tuple
+    /// argument or struct field tested).
+    pub payload_tests: u32,
+    /// Value-comparison guards over union and enum dispatch arms.
+    pub union_guards: u32,
+    /// Nested struct sub-patterns over struct-typed payloads and fields.
+    pub nested_sub_patterns: u32,
+    /// Whole-span equality conditions over union operands (a member
+    /// value against the union).
+    pub union_equality: u32,
+    /// Free generic fn call sites over declared bounds (the
+    /// instantiation chains).
+    pub generic_calls: u32,
+    /// Serving impl bodies the story's evidence chains resolve
+    /// through.
+    pub generic_impls: u32,
+    /// Nested generic callee bodies riding the calling frame's own
+    /// staged slot (the coinciding runtime form).
+    pub generic_runtime_forms: u32,
+    /// The honest door shapes drawn: the lone nested demand, the
+    /// mut-over-variable planning parameter, the generic fn
+    /// value, the generic fn name staged where a callable word
+    /// must go, the local generic lambda, the multi-word
+    /// argument into a variable parameter.
+    pub generic_doors: u32,
+    /// Declared-but-uncalled free generic fns (the inert ONE
+    /// body).
+    pub inert_generics: u32,
+    /// Incomplete impls reporting DS2023 at the impl's own door
+    /// (the member omitted or spelled bodiless).
+    pub incomplete_impls: u32,
+    /// Defaulted members omitted by an impl (the clean shape).
+    pub omitted_defaults: u32,
+    /// Two-level instantiations (list[list[int]]).
+    pub two_level_calls: u32,
 }
 
 /// One generated program plus the effect rows declared around it.
 pub struct Generated {
     pub source: String,
     pub rows: Vec<(String, EffectRow)>,
+    pub drawn: Drawn,
 }
 
 /// Generates the program for one input and runs the whole checker
@@ -84,6 +169,7 @@ pub fn exercise(data: &[u8]) -> Outcome {
                 parsed: false,
                 moves: 0,
                 effects: 0,
+                drawn: program.drawn,
             };
         },
     };
@@ -91,7 +177,7 @@ pub fn exercise(data: &[u8]) -> Outcome {
     for (name, row) in &program.rows {
         declared = declared.with(name, *row);
     }
-    let effects = effects_of(&[&ast], &declared);
+    let effects = effects_of(&[&ast], &declared, &WorldCaps::new());
     let (checked, linearity) = check(&files, &[ast]);
     // both renderers run over real pipeline output; the per-program cap
     // keeps heavily diagnostic programs bounded in the debug profile
@@ -108,6 +194,7 @@ pub fn exercise(data: &[u8]) -> Outcome {
         parsed: true,
         moves: linearity.moves.len(),
         effects: effects.def_count(),
+        drawn: program.drawn,
     }
 }
 
@@ -211,6 +298,17 @@ struct FnDecl {
     ret: Option<Ty>,
 }
 
+/// One declared free generic fn call sites may name.
+#[derive(Clone)]
+struct GenericFn {
+    name: String,
+    arity: usize,
+    /// True when the fn declares a bound the argument's
+    /// instantiation must satisfy; a boundless fn accepts any
+    /// instantiation.
+    bounded: bool,
+}
+
 /// Builds one program from one input.
 struct Gen<'a> {
     s: Stream<'a>,
@@ -224,12 +322,18 @@ struct Gen<'a> {
     consts: Vec<(String, Ty)>,
     /// Trait and inherent-impl methods: (name, receiver type, return).
     methods: Vec<(String, Ty, Ty)>,
+    /// The declared free generic fns call sites may name.
+    generics: Vec<GenericFn>,
+    /// The declared fn taking a fn-typed parameter (the generic
+    /// fn argument door's driver).
+    applier: String,
     locals: Vec<Local>,
     loop_depth: u32,
     nest: u32,
     n: usize,
     ret: Option<Ty>,
     rows: Vec<(String, EffectRow)>,
+    drawn: Drawn,
 }
 
 pub fn generate(data: &[u8]) -> Generated {
@@ -244,17 +348,21 @@ pub fn generate(data: &[u8]) -> Generated {
         fns: Vec::new(),
         consts: Vec::new(),
         methods: Vec::new(),
+        generics: Vec::new(),
+        applier: String::new(),
         locals: Vec::new(),
         loop_depth: 0,
         nest: 0,
         n: 0,
         ret: None,
         rows: Vec::new(),
+        drawn: Drawn::default(),
     };
     g.module();
     Generated {
         source: g.out,
         rows: g.rows,
+        drawn: g.drawn,
     }
 }
 
@@ -328,22 +436,32 @@ impl Gen<'_> {
         !sub_keys.is_empty() && sub_keys.iter().all(|k| self.atom_keys(sup).contains(k))
     }
 
-    /// A union of 2-3 distinct atoms drawn from scalars, members, and
-    /// tags; falls back to the optional shape when picks collide.
+    /// A union of 2-3 distinct atoms drawn from scalars, members, wider
+    /// members (a declared struct — the span rework's multi-word member),
+    /// and tags; falls back to the optional shape when picks collide.
     fn pick_union(&mut self) -> Ty {
         let mut members: Vec<Ty> = Vec::new();
+        let mut heap_ref = false;
         for _ in 0..2 + self.s.below(2) {
-            let pick = match self.s.below(6) {
-                0 => Ty::Int,
+            let pick = match self.s.below(9) {
+                0 => Ty::Float,
                 1 => Ty::Str,
                 2 => Ty::Bool,
                 3 => Ty::None,
-                4 if !self.enums.is_empty() => {
+                // two member slots: unions carrying enum cases are the
+                // dispatch-arm vocabulary's carrier shape
+                4 | 8 if !self.enums.is_empty() => {
                     let e = self.s.below(self.enums.len());
                     let c = self.s.below(self.enums[e].cases.len());
                     Ty::Member(e, c)
                 },
-                _ if !self.tags.is_empty() => Ty::Tag(self.s.below(self.tags.len())),
+                5 => self.pickable_struct().map_or(Ty::Int, Ty::Struct),
+                6 if !self.tags.is_empty() => Ty::Tag(self.s.below(self.tags.len())),
+                // the heap-ref generic application member: one Ref word
+                7 => {
+                    heap_ref = true;
+                    Ty::List(Box::new(Ty::Int))
+                },
                 _ => Ty::Int,
             };
             let key = self.render_ty(&pick);
@@ -354,7 +472,40 @@ impl Gen<'_> {
         if members.len() < 2 {
             members = vec![Ty::Int, Ty::None];
         }
+        if members.iter().any(|m| matches!(m, Ty::Struct(_))) {
+            self.drawn.wide_unions += 1;
+        }
+        if heap_ref && members.iter().any(|m| matches!(m, Ty::List(_))) {
+            self.drawn.heap_ref_unions += 1;
+        }
         Ty::Union(members)
+    }
+
+    /// A random already-declared non-generic struct index, when one
+    /// exists.
+    fn pickable_struct(&mut self) -> Option<usize> {
+        let pickable: Vec<usize> = self
+            .structs
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !d.generic)
+            .map(|(i, _)| i)
+            .collect();
+        if pickable.is_empty() { None } else { Some(pickable[self.s.below(pickable.len())]) }
+    }
+
+    /// A list element type: scalars mostly, records (a declared struct
+    /// or enum — the record-typed element stride) sometimes.
+    fn pick_element(&mut self) -> Ty {
+        match self.s.below(6) {
+            3 => Ty::Str,
+            4 | 5 => match self.pickable_struct() {
+                Some(i) => Ty::Struct(i),
+                None if !self.enums.is_empty() => Ty::Enum(self.s.below(self.enums.len())),
+                None => Ty::Int,
+            },
+            _ => Ty::Int,
+        }
     }
 
     /// A scalar-ish type for fields, payloads, and small elements.
@@ -375,6 +526,28 @@ impl Gen<'_> {
         }
     }
 
+    /// A struct field's type: scalars mostly, a struct-typed or
+    /// list-typed field sometimes (the span rework's field-span shape).
+    /// A field names an already-declared struct only, so a struct
+    /// literal's field recursion strictly descends and stays finite.
+    fn pick_field_ty(&mut self) -> Ty {
+        match self.s.below(12) {
+            0..=8 => self.pick_base(),
+            9 | 10 => match self.pickable_struct() {
+                Some(i) => {
+                    self.drawn.span_fields += 1;
+                    Ty::Struct(i)
+                },
+                None => self.pick_base(),
+            },
+            _ => {
+                let el = self.pick_element();
+                self.drawn.span_fields += 1;
+                Ty::List(Box::new(el))
+            },
+        }
+    }
+
     /// A full type for parameters, bindings, and returns.
     fn pick_ty(&mut self) -> Ty {
         match self.s.below(24) {
@@ -385,9 +558,15 @@ impl Gen<'_> {
             13 => Ty::Char,
             14 => Ty::Byte,
             15 | 16 => self.pick_union(),
-            17 => Ty::List(Box::new(if self.s.roll(2) { Ty::Int } else { Ty::Str })),
+            17 => {
+                let el = self.pick_element();
+                if matches!(el, Ty::Struct(_) | Ty::Enum(_)) {
+                    self.drawn.record_lists += 1;
+                }
+                Ty::List(Box::new(el))
+            },
             18 => Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int)),
-            19 | 20 => {
+            19 => {
                 let pickable: Vec<usize> = self
                     .structs
                     .iter()
@@ -401,7 +580,7 @@ impl Gen<'_> {
                     Ty::Struct(pickable[self.s.below(pickable.len())])
                 }
             },
-            21 => {
+            20 | 21 => {
                 if self.enums.is_empty() {
                     Ty::Int
                 } else {
@@ -424,6 +603,7 @@ impl Gen<'_> {
         self.gen_tags();
         self.gen_aliases();
         self.gen_traits();
+        self.gen_generic_calls();
         if self.s.roll(3) {
             self.gen_extern();
         }
@@ -450,7 +630,7 @@ impl Gen<'_> {
     }
 
     fn gen_structs(&mut self) {
-        let count = self.s.below(3);
+        let count = 1 + self.s.below(2);
         for _ in 0..count {
             let name = self.fresh("s");
             let generic = self.s.roll(4);
@@ -462,7 +642,7 @@ impl Gen<'_> {
                 fields.push(("items".to_owned(), Ty::List(Box::new(Ty::Int))));
             } else {
                 for _ in 0..=self.s.below(3) {
-                    fields.push((self.fresh("f"), self.pick_base()));
+                    fields.push((self.fresh("f"), self.pick_field_ty()));
                 }
             }
             let supers = if copyable { ": ~Copyable" } else { "" };
@@ -490,6 +670,31 @@ impl Gen<'_> {
                 copyable,
             });
         }
+        // the nested-carrier struct: one field over the first declared
+        // plain struct, so the nested sub-pattern vocabulary has a
+        // guaranteed carrier shape in every program
+        if let Some(i) = self.structs.iter().position(|d| !d.generic) {
+            let name = self.fresh("s");
+            let target = self.structs[i].name.clone();
+            let mut fields = vec![(self.fresh("f"), Ty::Struct(i))];
+            for _ in 0..self.s.below(2) {
+                fields.push((self.fresh("f"), self.pick_base()));
+            }
+            self.line(&format!("struct {name} {{"));
+            self.indent += 1;
+            for (fname, ty) in &fields {
+                self.line(&format!("{fname}: {}", self.render_ty(ty)));
+            }
+            self.indent -= 1;
+            self.line("}");
+            self.structs.push(StructDecl {
+                name,
+                fields,
+                generic: false,
+                copyable: false,
+            });
+            let _ = target;
+        }
     }
 
     fn gen_enums(&mut self) {
@@ -503,18 +708,27 @@ impl Gen<'_> {
                     payload: None,
                 });
             }
-            for _ in 0..self.s.below(3) {
-                let payload = match self.s.below(3) {
-                    0 => Payload::Tuple(vec![self.pick_base()]),
-                    1 if !self.structs.is_empty() => {
-                        let s = self.s.below(self.structs.len());
-                        if self.structs[s].generic {
-                            Payload::Tuple(vec![self.pick_base()])
-                        } else {
+            for k in 0..=self.s.below(2) {
+                let payload = if k == 0 {
+                    // the guaranteed Int tuple payload: the dispatch
+                    // arm vocabulary's primary carrier
+                    Payload::Tuple(vec![Ty::Int])
+                } else {
+                    match self.s.below(4) {
+                        0 => Payload::Tuple(vec![self.pick_base()]),
+                        2 if self.structs.iter().any(|d| !d.generic) => {
+                            let pickable: Vec<usize> = self
+                                .structs
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, d)| !d.generic)
+                                .map(|(k, _)| k)
+                                .collect();
+                            let s = pickable[self.s.below(pickable.len())];
                             Payload::Tuple(vec![Ty::Struct(s)])
-                        }
-                    },
-                    _ => Payload::Fields(vec![(self.fresh("f"), self.pick_base())]),
+                        },
+                        _ => Payload::Fields(vec![(self.fresh("f"), self.pick_base())]),
+                    }
                 };
                 cases.push(CaseDecl {
                     name: self.fresh("c"),
@@ -617,6 +831,109 @@ impl Gen<'_> {
                     self.methods.push((m.clone(), Ty::Int, Ty::Int));
                 }
             }
+        }
+    }
+
+    /// The free-generic story: a bound trait with full impls over int,
+    /// string, and the generic list head; the free generic fns over it
+    /// (the bounded call, the coinciding nested runtime form whose
+    /// callee demand rides the calling frame's own staged slot, the lone
+    /// nested demand the frame never staged, the boundless echo, the
+    /// mut-over-variable planning door, the inert uncalled
+    /// declaration); and the impl-completeness shapes (an impl omitting
+    /// a bodiless non-defaulted member, or spelling it bodiless,
+    /// reports DS2023 at the impl's own door, while an impl omitting a
+    /// defaulted member stays clean). Call sites over the story's fns
+    /// live in generic_call_stmt.
+    fn gen_generic_calls(&mut self) {
+        let tr = self.fresh("tr");
+        let m = self.fresh("mf");
+        self.line(&format!("trait {tr} {{"));
+        self.line(&format!("  fn {m}(self) -> int"));
+        self.line("}");
+        self.line(&format!("impl {tr} for int {{"));
+        self.line(&format!("  fn {m}(self) -> int {{ 1 }}"));
+        self.line("}");
+        self.line(&format!("impl {tr} for string {{"));
+        self.line(&format!("  fn {m}(self) -> int {{ 2 }}"));
+        self.line("}");
+        self.line(&format!("impl [t: {tr}] {tr} for list[t] {{"));
+        self.line(&format!("  fn {m}(self) -> int {{ 3 }}"));
+        self.line("}");
+        self.drawn.generic_impls += 3;
+        let call = self.fresh("gf");
+        self.line(&format!("fn {call}[t: {tr}] (x: t) -> int {{ x.{m}() }}"));
+        // the coinciding runtime form: the nested callee's demand rides
+        // the calling frame's own staged slot (the frame's own dot-call)
+        let nested = self.fresh("gf");
+        self.line(&format!(
+            "fn {nested}[t: {tr}] (a: t, b: t) -> int {{ a.{m}() + {call}(b) }}"
+        ));
+        self.drawn.generic_runtime_forms += 1;
+        // the lone nested demand: the body stages no slot of its own
+        let lone = self.fresh("gf");
+        self.line(&format!("fn {lone}[t: {tr}] (x: t) -> int {{ {call}(x) }}"));
+        self.drawn.generic_doors += 1;
+        let echo = self.fresh("gf");
+        self.line(&format!("fn {echo}[t] (x: t) -> t {{ x }}"));
+        // the mut-over-variable planning door
+        let mutable = self.fresh("gf");
+        self.line(&format!("fn {mutable}[t: {tr}] (mut x: t) -> int {{ 1 }}"));
+        self.drawn.generic_doors += 1;
+        // the inert uncalled declaration
+        let inert = self.fresh("gf");
+        self.line(&format!("fn {inert}[t: {tr}] (x: t) -> int {{ x.{m}() }}"));
+        self.drawn.inert_generics += 1;
+        for (name, arity, bounded) in [
+            (call, 1, true),
+            (nested, 2, true),
+            (lone, 1, true),
+            (echo, 1, false),
+        ] {
+            self.generics.push(GenericFn {
+                name,
+                arity,
+                bounded,
+            });
+        }
+        // the fn-typed-parameter door's driver: a generic fn name staged
+        // where a callable word must go refuses at checking
+        let applier = self.fresh("g");
+        self.line(&format!(
+            "fn {applier}(f: fn(int) -> int) -> int {{ f(1) }}"
+        ));
+        self.applier.clone_from(&applier);
+        self.fns.push(FnDecl {
+            name: applier,
+            params: vec![Param {
+                name: "f".to_owned(),
+                ty: Ty::Fn(vec![Ty::Int], Box::new(Ty::Int)),
+                default: None,
+            }],
+            ret: Some(Ty::Int),
+        });
+        // the impl-completeness shapes: a defaulted member stays
+        // omittable, a bodiless non-defaulted one reports DS2023 (the
+        // member omitted entirely or spelled bodiless)
+        let t2 = self.fresh("tr");
+        let m2 = self.fresh("mf");
+        let defaulted = !self.s.roll(2);
+        self.line(&format!("trait {t2} {{"));
+        if defaulted {
+            self.line(&format!("  fn {m2}(self) -> int {{ 7 }}"));
+        } else {
+            self.line(&format!("  fn {m2}(self) -> int"));
+        }
+        self.line("}");
+        if defaulted {
+            self.line(&format!("impl {t2} for int {{\n}}"));
+            self.drawn.omitted_defaults += 1;
+        } else if self.s.roll(2) {
+            self.line(&format!("impl {t2} for int {{\n}}"));
+            self.drawn.incomplete_impls += 1;
+        } else {
+            self.line(&format!("impl {t2} for int {{\n  fn {m2}(self) -> int\n}}"));
+            self.drawn.incomplete_impls += 1;
         }
     }
 
@@ -857,7 +1174,7 @@ impl Gen<'_> {
             }
             return;
         }
-        match self.s.below(26) {
+        match self.s.below(29) {
             0..=7 => self.binding_stmt(),
             8..=10 => self.if_stmt(),
             11 => self.while_stmt(),
@@ -867,6 +1184,7 @@ impl Gen<'_> {
             19 | 20 => self.assign_stmt(),
             21 | 22 => self.extraction_stmt(),
             23 => self.chaos_stmt(),
+            26..=28 => self.generic_call_stmt(),
             _ => self.call_stmt(),
         }
     }
@@ -954,7 +1272,23 @@ impl Gen<'_> {
                 let n = self.int_lit();
                 format!("{x} in {n}..{n}")
             },
-            _ => "true".to_owned(),
+            _ => {
+                if let Some(l) = self
+                    .locals
+                    .iter()
+                    .rev()
+                    .find(|l| matches!(l.ty, Ty::Union(_)))
+                    .cloned()
+                {
+                    // whole-span equality over a union operand: a member
+                    // value against the union (the multi-atom vocabulary)
+                    let rhs = self.leaf(&l.ty);
+                    self.drawn.union_equality += 1;
+                    format!("{} == {}", l.name, rhs)
+                } else {
+                    "true".to_owned()
+                }
+            },
         }
     }
 
@@ -1182,6 +1516,99 @@ impl Gen<'_> {
         }
     }
 
+    /// One call into the story's free generic fns: one drawn
+    /// instantiation for the whole site (every parameter over the fn's
+    /// type variable takes the same type — int, string, list[int], or
+    /// the two-level list[list[int]]), with the value doors drawn
+    /// occasionally — the multi-word struct argument into a boundless
+    /// variable parameter, the generic fn value, the generic fn name
+    /// staged where a callable word must go (a checking refusal), and
+    /// the local generic lambda.
+    fn generic_call_stmt(&mut self) {
+        let callee = self.generics[self.s.below(self.generics.len())].clone();
+        let (args, multiword) = if !callee.bounded && self.s.roll(5) {
+            match self.multiword_struct() {
+                Some(lit) => (vec![lit], true),
+                None => (self.args_of_kind(callee.arity), false),
+            }
+        } else {
+            (self.args_of_kind(callee.arity), false)
+        };
+        let call = format!("{}({})", callee.name, args.join(", "));
+        if self.s.roll(3) {
+            let name = self.fresh("q");
+            self.line(&format!("const {name} = {call}"));
+        } else {
+            self.line(&call);
+        }
+        self.drawn.generic_calls += 1;
+        if multiword {
+            self.drawn.generic_doors += 1;
+        }
+        if self.s.roll(6) {
+            // the generic fn value: the bare name checks clean and
+            // refuses at lowering (the word carries no instantiation)
+            let name = self.fresh("q");
+            self.line(&format!("const {name} = {}", callee.name));
+            self.drawn.generic_doors += 1;
+        }
+        if self.s.roll(6) {
+            // the local generic lambda: a generic lambda value refuses
+            // at its binding (at lowering)
+            let name = self.fresh("q");
+            self.line(&format!("const {name} = [t] (x: mut t) => {{ x = x }}"));
+            self.drawn.generic_doors += 1;
+        }
+        if self.s.roll(6) {
+            // a generic fn name staged where a callable word must go
+            // refuses at checking (the fn type escapes containment)
+            let applier = self.applier.clone();
+            self.line(&format!("{applier}({})", callee.name));
+            self.drawn.generic_doors += 1;
+        }
+    }
+
+    /// The site's arguments over one drawn instantiation kind: each
+    /// parameter gets its own value of the same kind.
+    fn args_of_kind(&mut self, arity: usize) -> Vec<String> {
+        let kind = self.s.below(7);
+        if kind == 4 {
+            self.drawn.two_level_calls += 1;
+        }
+        (0..arity).map(|_| self.arg_of_kind(kind)).collect()
+    }
+
+    /// One argument of a drawn kind: the int, string, list[int], and
+    /// list[list[int]] instantiation chains.
+    fn arg_of_kind(&mut self, kind: usize) -> String {
+        match kind {
+            2 => self.str_lit(),
+            3 => format!("[{}]", self.int_lit()),
+            4 => {
+                let e = self.int_lit();
+                format!("[[{e}]]")
+            },
+            _ => self.int_lit(),
+        }
+    }
+
+    /// A struct literal over a declared multi-field struct, for the
+    /// multi-word argument door.
+    fn multiword_struct(&mut self) -> Option<String> {
+        let pickable: Vec<usize> = self
+            .structs
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !d.generic && d.fields.len() >= 2)
+            .map(|(i, _)| i)
+            .collect();
+        if pickable.is_empty() {
+            return None;
+        }
+        let i = pickable[self.s.below(pickable.len())];
+        Some(self.struct_lit(i, 2))
+    }
+
     /// A bare expression statement: a call, a UFCS dot-call, a lambda
     /// call through a fn-typed local, or an ambient call.
     fn call_stmt(&mut self) {
@@ -1214,12 +1641,57 @@ impl Gen<'_> {
     /// destructuring, guards, binders, and the optional catchall), an
     /// int local, or an optional.
     fn match_stmt(&mut self) {
-        let found = self
+        // the struct-pattern leg: a struct-typed scrutinee draws the
+        // struct pattern vocabulary (literal field tests in place,
+        // punning binders, the or-alternative arm, nested levels)
+        let struct_found = self.s.roll(3).then(|| {
+            self.locals
+                .iter()
+                .rev()
+                .find(|l| matches!(l.ty, Ty::Struct(_)))
+                .map(|l| match &l.ty {
+                    Ty::Struct(i) => (l.name.clone(), *i),
+                    _ => unreachable!("the scrutinee filter admits structs only"),
+                })
+        });
+        if let Some(Some((name, i))) = struct_found {
+            self.line(&format!("match {name} {{"));
+            self.indent += 1;
+            self.drawn.struct_patterns += 1;
+            let pat = self.struct_sub_pattern(i);
+            let body = self.typed(&Ty::Int, 2);
+            if self.s.roll(2) {
+                // the or-vocabulary: two struct alternatives, one arm
+                let alt = self.struct_sub_pattern(i);
+                self.drawn.or_patterns += 1;
+                self.line(&format!("{pat} | {alt} => {body}"));
+            } else {
+                self.line(&format!("{pat} => {body}"));
+            }
+            if self.s.roll(2) {
+                let n = self.fresh("m");
+                let body = self.typed(&Ty::Int, 2);
+                self.line(&format!("{n} => {body}"));
+            }
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        // dispatch scrutinees (unions, enums) carry the arm vocabulary,
+        // so they win the pick over the scalar fallback half the time
+        let dispatch = self
             .locals
             .iter()
             .rev()
-            .find(|l| matches!(l.ty, Ty::Union(_) | Ty::Int | Ty::Enum(_)))
+            .find(|l| matches!(l.ty, Ty::Union(_) | Ty::Enum(_)))
             .map(|l| (l.name.clone(), l.ty.clone()));
+        let scalar = self
+            .locals
+            .iter()
+            .rev()
+            .find(|l| matches!(l.ty, Ty::Int))
+            .map(|l| (l.name.clone(), l.ty.clone()));
+        let found = if dispatch.is_some() && self.s.roll(2) { dispatch } else { scalar };
         let Some((name, ty)) = found else {
             self.binding_stmt();
             return;
@@ -1257,6 +1729,14 @@ impl Gen<'_> {
                 }
             },
             Ty::Int => {
+                if self.s.roll(3) {
+                    // the value-level or-pattern: a literal ladder
+                    let a = self.int_lit();
+                    let b = self.int_lit();
+                    let body = self.typed(&Ty::Int, 2);
+                    self.line(&format!("{a} | {b} => {body}"));
+                    self.drawn.or_patterns += 1;
+                }
                 let n = self.int_lit();
                 let body = self.typed(&Ty::Int, 2);
                 self.line(&format!("{n} => {body}"));
@@ -1274,7 +1754,7 @@ impl Gen<'_> {
             _ => {
                 let e = match &ty {
                     Ty::Enum(i) => *i,
-                    _ => unreachable!("the scrutinee filter admits unions and ints only"),
+                    _ => unreachable!("the scrutinee filter admits unions, ints, and enums"),
                 };
                 let cases = self.enums[e].cases.clone();
                 let mut catchall = true;
@@ -1283,6 +1763,13 @@ impl Gen<'_> {
                     self.line(&format!("{} => {body}", case.name));
                     catchall = false;
                 }
+                // the dispatch vocabulary over enum scrutinees: payload
+                // tests, guarded payload binders, and nested struct
+                // sub-patterns, as dead-but-typed duplicate arms over
+                // the already-covered cases
+                for case in &cases {
+                    self.dispatch_extra_arm(&case.name, case.payload.as_ref());
+                }
                 if catchall || self.s.roll(2) {
                     self.line("_ => ()");
                 }
@@ -1290,6 +1777,100 @@ impl Gen<'_> {
         }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// One dead-but-typed duplicate arm over an already-covered case or
+    /// member: the dispatch vocabulary's tested shapes — a literal
+    /// payload test, a value-comparison guard over the payload binder,
+    /// a struct field test, or a nested struct sub-pattern — drawn for
+    /// their checker walks (the arm is dead, never wrong).
+    fn dispatch_extra_arm(&mut self, case: &str, payload: Option<&Payload>) {
+        let Some(payload) = payload else { return };
+        match payload {
+            Payload::Tuple(ts) if ts.len() == 1 => match ts[0].clone() {
+                Ty::Int if self.s.roll(2) => {
+                    let lit = self.int_lit();
+                    let body = self.typed(&Ty::Int, 2);
+                    self.line(&format!("{case}({lit}) => {body}"));
+                    self.drawn.payload_tests += 1;
+                },
+                Ty::Int if self.s.roll(2) => {
+                    let n = self.fresh("n");
+                    let lit = self.int_lit();
+                    let body = self.typed(&Ty::Int, 2);
+                    self.line(&format!("{case}({n}) if {n} > {lit} => {body}"));
+                    self.drawn.union_guards += 1;
+                },
+                Ty::Str if self.s.roll(2) => {
+                    let lit = self.str_lit();
+                    let body = self.typed(&Ty::Int, 2);
+                    self.line(&format!("{case}({lit}) => {body}"));
+                    self.drawn.payload_tests += 1;
+                },
+                Ty::Struct(j) if !self.structs[j].generic && self.s.roll(2) => {
+                    let sub = self.struct_sub_pattern(j);
+                    let body = self.typed(&Ty::Int, 2);
+                    self.line(&format!("{case}({sub}) => {body}"));
+                },
+                _ => {},
+            },
+            Payload::Fields(fs) if self.s.roll(2) => {
+                let Some((f, _)) = fs.iter().find(|(_, t)| matches!(t, Ty::Int)).cloned() else {
+                    return;
+                };
+                let lit = self.int_lit();
+                let body = self.typed(&Ty::Int, 2);
+                self.line(&format!("{case} {{ {f}: {lit} }} => {body}"));
+                self.drawn.payload_tests += 1;
+            },
+            _ => {},
+        }
+    }
+
+    /// A struct sub-pattern over struct `i`: the int-typed fields test
+    /// literals, one struct-typed field carries a nested sub-pattern
+    /// one level deeper (counted), and the remaining fields pun (bind
+    /// their own names).
+    fn struct_sub_pattern(&mut self, i: usize) -> String {
+        let decl = self.structs[i].clone();
+        let mut parts: Vec<String> = Vec::new();
+        let mut nested = false;
+        for (f, t) in &decl.fields {
+            if !nested
+                && let Ty::Struct(j) = t
+                && !self.structs[*j].generic
+                && !self.s.roll(3)
+            {
+                nested = true;
+                let inner = self.structs[*j].clone();
+                let mut inner_parts: Vec<String> = Vec::new();
+                for (g, gt) in &inner.fields {
+                    if matches!(gt, Ty::Int) && self.s.roll(2) {
+                        inner_parts.push(format!("{g}: {}", self.int_lit()));
+                    } else {
+                        inner_parts.push(g.clone());
+                    }
+                }
+                if inner_parts.is_empty() {
+                    parts.push(f.clone());
+                    nested = false;
+                } else {
+                    parts.push(format!(
+                        "{f}: {} {{ {} }}",
+                        inner.name,
+                        inner_parts.join(", ")
+                    ));
+                }
+            } else if matches!(t, Ty::Int) && self.s.roll(3) {
+                parts.push(format!("{f}: {}", self.int_lit()));
+            } else {
+                parts.push(f.clone());
+            }
+        }
+        if nested {
+            self.drawn.nested_sub_patterns += 1;
+        }
+        format!("{} {{ {} }}", decl.name, parts.join(", "))
     }
 
     /// One member arm: bare member test, payload destructuring, or a
@@ -1325,6 +1906,13 @@ impl Gen<'_> {
         } else {
             let body = self.typed(&Ty::Int, 2);
             self.line(&format!("{pattern} => {body}"));
+        }
+        // the dispatch vocabulary's dead-but-typed duplicate over this
+        // member: a payload test, a value guard, or a nested
+        // sub-pattern, walked by the checker beside the covering arm
+        if let Ty::Member(e, c) = member {
+            let payload = self.enums[*e].cases[*c].payload.clone();
+            self.dispatch_extra_arm(&pattern, payload.as_ref());
         }
         *catchall = false;
     }
@@ -1917,8 +2505,12 @@ impl Gen<'_> {
                 return Some(format!("{recv}.{}({rest})", callee.name));
             }
             // the trailing-lambda block over a fn-typed last parameter
+            // (zero-parameter fn types only: the block is a zero-param
+            // lambda literal, and the literal's arity must match the
+            // expected fn type's exactly)
             if let Some(last) = callee.params.last()
-                && let Ty::Fn(_, fret) = &last.ty
+                && let Ty::Fn(ps, fret) = &last.ty
+                && ps.is_empty()
                 && self.s.roll(4)
             {
                 let head = self.args_for(&callee.params[..callee.params.len() - 1], depth);

@@ -5,11 +5,11 @@
 use super::{
     Uop,
     Uop::{
-        AddF64, AddI64, Call, Callg, Calls, Callt, Calltg, ClosureNew, CvtF2I, CvtI2F, DivF64,
-        DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif,
-        JmpifNot, Kconst, Kimm, Kstr, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64,
-        NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, SubF64, SubI64, TagNew, TagTest,
-        TagTestNot,
+        AddF64, AddI64, ArenaMark, ArenaRestore, Call, Callg, Calls, Callt, Calltg, ClosureNew,
+        CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64,
+        GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64,
+        LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat,
+        StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot,
     },
 };
 
@@ -35,7 +35,8 @@ pub enum Major {
     /// 0x5 — bool comparisons: EQBOOL, NEQBOOL (XOR-negated pair).
     BoolCmp = 0x5,
     /// 0xD — heap-reference data ops: EQSTR, NEQSTR (XOR-negated pair),
-    /// STRCAT over string contents, CLOSURE_NEW building a closure object.
+    /// STRCAT over string contents, CLOSURE_NEW building a closure object,
+    /// STRCAT_ARENA building an arena temporary.
     Ref = 0xd,
     /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
@@ -44,7 +45,9 @@ pub enum Major {
     /// 0x8 — slot moves: MOV.
     Mov = 0x8,
     /// 0x9 — control: JMPIF, JMPIF_NOT, JMP (biased offsets; the two
-    /// conditional jumps are the XOR-adjacent minor pair 0/1).
+    /// conditional jumps are the XOR-adjacent minor pair 0/1), ARENA_MARK
+    /// and ARENA_RESTORE (the loop-head/back-edge pair the placement pass
+    /// emits for frames with designated arena temporaries).
     Ctl = 0x9,
     /// 0xA — calls: CALL, CALLT, RET, RETSPAN, CALLG, CALLTG (minor 5, the
     /// dispatch tail call), CALLS (minor 6, the frame-slot callee form).
@@ -138,7 +141,7 @@ impl Uop {
     #[must_use]
     pub fn major(&self) -> Major {
         match self {
-            Kimm { .. } | Kconst { .. } | Kstr { .. } => Major::Const,
+            Kimm { .. } | Kconst { .. } | Kstr { .. } | KstrBorrow { .. } => Major::Const,
             AddI64 { .. } | SubI64 { .. } | MulI64 { .. } | DivI64 { .. } | ModI64 { .. } => {
                 Major::IntArith
             },
@@ -156,11 +159,19 @@ impl Uop {
             | LeF64 { .. }
             | GtF64 { .. } => Major::FloatCmp,
             EqBool { .. } | NeqBool { .. } => Major::BoolCmp,
-            EqStr { .. } | NeqStr { .. } | StrCat { .. } | ClosureNew { .. } => Major::Ref,
+            EqStr { .. }
+            | NeqStr { .. }
+            | StrCat { .. }
+            | StrCatArena { .. }
+            | ClosureNew { .. } => Major::Ref,
             TagTest { .. } | TagTestNot { .. } | TagNew { .. } => Major::Tag,
             CvtI2F { .. } | CvtF2I { .. } => Major::Cvt,
             Mov { .. } => Major::Mov,
-            Jmp { .. } | Jmpif { .. } | JmpifNot { .. } => Major::Ctl,
+            Jmp { .. }
+            | Jmpif { .. }
+            | JmpifNot { .. }
+            | ArenaMark { .. }
+            | ArenaRestore { .. } => Major::Ctl,
             Call { .. }
             | Callg { .. }
             | Calls { .. }
@@ -181,8 +192,10 @@ impl Uop {
             Kimm { .. }
             | Kconst { .. }
             | Kstr { .. }
+            | KstrBorrow { .. }
             | TagNew { .. }
             | Jmp { .. }
+            | ArenaMark { .. }
             | Funcf { .. }
             | Call { .. }
             | Callg { .. }
@@ -196,6 +209,7 @@ impl Uop {
             ClosureNew { func, .. } => SlotList::new(*func, &[]),
             CvtI2F { src, .. }
             | CvtF2I { src, .. }
+            | ArenaRestore { src }
             | Mov { src, .. }
             | TagTest { src, .. }
             | TagTestNot { src, .. }
@@ -226,7 +240,8 @@ impl Uop {
             | NeqBool { lhs, rhs, .. }
             | EqStr { lhs, rhs, .. }
             | NeqStr { lhs, rhs, .. }
-            | StrCat { lhs, rhs, .. } => SlotList::new(*lhs, &[*rhs]),
+            | StrCat { lhs, rhs, .. }
+            | StrCatArena { lhs, rhs, .. } => SlotList::new(*lhs, &[*rhs]),
         }
     }
 
@@ -263,7 +278,10 @@ impl Uop {
             | EqStr { dst, .. }
             | NeqStr { dst, .. }
             | StrCat { dst, .. }
+            | StrCatArena { dst, .. }
+            | ArenaMark { dst }
             | Kstr { dst, .. }
+            | KstrBorrow { dst, .. }
             | TagTest { dst, .. }
             | TagTestNot { dst, .. }
             | TagNew { dst, .. }
@@ -274,6 +292,7 @@ impl Uop {
             Jmp { .. }
             | Jmpif { .. }
             | JmpifNot { .. }
+            | ArenaRestore { .. }
             | Call { .. }
             | Callg { .. }
             | Calls { .. }
@@ -310,7 +329,11 @@ impl Uop {
                 | Ret { .. }
                 | RetSpan { .. }
                 | Kstr { .. }
+                | KstrBorrow { .. }
                 | StrCat { .. }
+                | StrCatArena { .. }
+                | ArenaMark { .. }
+                | ArenaRestore { .. }
                 | ClosureNew { .. }
                 | Funcf { .. }
                 | Halt { .. }

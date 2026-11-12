@@ -68,6 +68,112 @@ fn doc_comments_travel_with_their_item() {
 }
 
 #[test]
+fn doc_comments_stay_byte_stable_attached_or_loose() {
+    // The doc slot is attachment data only: attached runs and runs a blank
+    // line cut loose both print exactly where they stood.
+    let src = "/// parses one row\nfn parse(s: string) -> int { 0 }\n/// loose\n\nfn other() -> \
+               int { 1 }\n";
+    assert_eq!(fmt_once("t.ds", src), src);
+}
+
+#[test]
+fn member_and_field_docs_print_where_they_stood() {
+    // The member and field doc slots are the placement input at member
+    // grain: an attached `///` run prints immediately above its member at
+    // the member's indent, never migrating to the item's trailing line.
+    assert_eq!(
+        fmt_once(
+            "t.ds",
+            "trait animal {\n/// speaks\nfn speak(self) -> string\n}\n"
+        ),
+        "trait animal {\n  /// speaks\n  fn speak(self) -> string\n}\n"
+    );
+    assert_eq!(
+        fmt_once(
+            "t.ds",
+            "struct point {\n/// x coord\nx: int\n/// y\ny: int\n}\n"
+        ),
+        "struct point {\n  /// x coord\n  x: int\n  /// y\n  y: int\n}\n"
+    );
+    // An impl member fn carries the same slot.
+    assert_eq!(
+        fmt_once(
+            "t.ds",
+            "impl animal for spot {\n/// the impl\nfn speak(self) -> string { \"\" }\n}\n"
+        ),
+        "impl animal for spot {\n  /// the impl\n  fn speak(self) -> string { \"\" }\n}\n"
+    );
+    // An enum-case payload field is the nested case: the doc sits at the
+    // field's own indent inside the case's body.
+    assert_eq!(
+        fmt_once("t.ds", "enum shape {\npoint {\n/// radius\nr: int\n}\n}\n"),
+        "enum shape {\n  point {\n    /// radius\n    r: int\n  }\n}\n"
+    );
+    // A multi-line doc block keeps its whole run above the member.
+    assert_eq!(
+        fmt_once(
+            "t.ds",
+            "trait t {\n/// one\n/// two\nfn f(self) -> int\n}\n"
+        ),
+        "trait t {\n  /// one\n  /// two\n  fn f(self) -> int\n}\n"
+    );
+    // `////` is an ordinary comment: a separator line above a definition
+    // survives formatting like any leading trivia.
+    assert_eq!(
+        fmt_once("t.ds", "//// section\ntag a\n"),
+        "//// section\ntag a\n"
+    );
+}
+
+#[test]
+fn only_attached_member_docs_print_in_place() {
+    // The placement input is the attached run alone: a plain interior
+    // comment, a doc a blank line cut loose, and the comments no slot
+    // owns (associated types, deinit members, case names) keep the v1
+    // interior-comment migration to the item's trailing line.
+    assert_eq!(
+        fmt_once(
+            "t.ds",
+            "struct point {\n/// x\nx: int\n// note\ny: int\n}\n"
+        ),
+        "struct point {\n  /// x\n  x: int\n  y: int\n} // note\n"
+    );
+    assert_eq!(
+        fmt_once("t.ds", "struct point {\n/// loose\n\nx: int\n}\n"),
+        "struct point {\n  x: int\n} /// loose\n"
+    );
+    // A same-line comment after the closing brace still trails the item,
+    // past the member docs that printed inside.
+    assert_eq!(
+        fmt_once("t.ds", "struct point {\n/// x\nx: int\n} // tail\n"),
+        "struct point {\n  /// x\n  x: int\n} // tail\n"
+    );
+    // Members without a slot keep the migration for their docs.
+    assert_eq!(
+        fmt_once("t.ds", "struct s {\n/// no slot\ndeinit { 0\n}\n}\n"),
+        "struct s {\n  deinit {\n    0\n  }\n} /// no slot\n"
+    );
+}
+
+#[test]
+fn member_doc_placement_round_trips_idempotently() {
+    // The in-place placement is stable: formatting the formatted output
+    // re-attaches each doc run to the member it now precedes and prints
+    // it back at the same spot, migrated comments included.
+    let src = "//// helpers\ntrait animal {\n/// speaks\n/// loudly\nfn speak(self) -> string\n// \
+               stray\n}\nstruct point {\n/// x\nx: int\n}\nenum shape {\npoint {\n/// radius\nr: \
+               int\n}\n}\n";
+    let once = fmt_once("t.ds", src);
+    assert_eq!(fmt_once("t.ds", &once), once);
+    assert_eq!(
+        once,
+        "//// helpers\ntrait animal {\n  /// speaks\n  /// loudly\n  fn speak(self) -> string\n} \
+         // stray\nstruct point {\n  /// x\n  x: int\n}\nenum shape {\n  point {\n    /// \
+         radius\n    r: int\n  }\n}\n"
+    );
+}
+
+#[test]
 fn eof_comments_survive() {
     assert_eq!(
         fmt_once("t.ds", "tag a\n// the end\n"),

@@ -1,0 +1,33 @@
+// E3's fork-join fold, end to end on one thread: par_reduce chains one
+// spawned child per element — the callable's own function entered with
+// the running accumulator and the element, each joined before the next
+// spawns — so the reduction applies strictly in input order (the left
+// fold's data dependency, deterministic replay by construction); the
+// fold type is the call's own fact, the init's whole word span staging
+// between the list and the callable, so a struct-typed fold chains its
+// whole span through the spawn seam; the single-thread slice's
+// spawn-and-join overhead against the sequential reduce is the baseline
+// the later scheduler round measures from.
+
+struct pair { left: int, right: int }
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5]
+  const sum = xs.par_reduce(0, (a: int, b: int) => a + b)
+  println("sum ${sum}")
+  const words = ["alpha", "beta", "gamma"]
+  const joined = words.par_reduce("", (a: string, b: string) => a + b)
+  println("joined ${joined}")
+  const empty = xs.par_reduce(100, (a: int, b: int) => a * b)
+  println("empty ${empty}")
+  const pairs: list[pair] = [
+    pair { left: 1, right: 1 },
+    pair { left: 2, right: 2 },
+    pair { left: 3, right: 3 },
+  ]
+  const folded = pairs.par_reduce(
+    pair { left: 0, right: 0 },
+    (a: pair, b: pair) => pair { left: a.left * 10 + b.left, right: a.right + b.right },
+  )
+  println("pair ${folded.left} ${folded.right}")
+}

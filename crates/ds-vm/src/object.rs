@@ -24,7 +24,10 @@
 //! birth count is the list's. String interning acquires too: a `KSTR`
 //! load claims a count of the interned object, and a dying interned
 //! string removes its intern entry so the next load of the same content
-//! reborns a fresh object.
+//! reborns a fresh object. A `KSTR_BORROW` load claims no count: the
+//! intern map pins its canonical copy for the store's life (see
+//! [`Objects::intern_borrow`]), so the borrowed word outlives every
+//! count churn around it.
 //!
 //! The store drives each block's count lifecycle through ds-rt's split
 //! dec: a unique death observed at `rc_dec_count` runs the store's death
@@ -50,8 +53,10 @@
 //! a firing tripwire is a balance bug.
 
 use std::{
+    cell::Cell,
     collections::{HashMap, VecDeque},
     fmt,
+    hash::{BuildHasherDefault, Hasher},
     ptr::NonNull,
 };
 
@@ -83,69 +88,131 @@ struct Closure {
 
 /// A string object's live payload: the text plus the char-boundary map
 /// the char-indexed queries (`substring`, `char_at`, the string `len`)
-/// build on their first access. Re-deriving char boundaries per call
-/// costs O(string length) per call, so one map per object serves every
-/// later access; interned strings share one object, hence one map.
+/// build on their first access, and the content hash a map probe filters
+/// on. Re-deriving char boundaries costs O(string length) per call, so one
+/// map per object serves every later access; interned strings share one
+/// object, hence one map and one hash.
 #[derive(Debug)]
 struct Str {
     text: Box<str>,
-    /// `None` until the first char-indexed query builds it.
+    /// `None` until the first char-indexed query, which records the char
+    /// count and (a range query) the boundary offsets.
     chars: Option<CharIndex>,
+    /// `None` until the first map probe or store hashes the content, which
+    /// then answers every later one: the text never changes after
+    /// allocation, so the cache cannot go stale. A cell because a probe
+    /// holds the store shared.
+    hash: Cell<Option<u32>>,
 }
 
 impl Str {
     fn new(text: Box<str>) -> Self {
-        Self { text, chars: None }
+        Self {
+            text,
+            chars: None,
+            hash: Cell::new(None),
+        }
+    }
+
+    /// The content's filter hash, computed on the first ask.
+    fn content_hash(&self) -> u32 {
+        self.hash.get().unwrap_or_else(|| {
+            let hash = text_hash(&self.text);
+            self.hash.set(Some(hash));
+            hash
+        })
     }
 }
 
-/// Char-boundary metadata: maps a char position to its byte offset in
-/// O(1), and answers the char count.
+/// Char-boundary metadata: answers the char count, and maps a char
+/// position to its byte offset in O(1) once a range query built the
+/// boundary table.
 #[derive(Debug)]
 enum CharIndex {
     /// Pure ASCII: char index == byte index and the char count is the
     /// byte length, so nothing is stored.
     Ascii,
-    /// The byte offset of every char boundary through the end: char
-    /// count + 1 entries, the last at the byte length. Stored only for
-    /// multi-byte text, where byte offsets diverge from char indexes.
-    Offsets(Box<[u32]>),
+    /// Multi-byte text, where byte offsets diverge from char indexes:
+    /// the char count, plus the byte offset of every char boundary
+    /// through the end (count + 1 entries, the last at the byte length)
+    /// once a range query built it. A count query allocates nothing.
+    Utf8 {
+        count: usize,
+        offsets: Option<Box<[u32]>>,
+    },
 }
 
 impl CharIndex {
-    /// One scan of `text`: pure-ASCII text answers from its length,
-    /// multi-byte text records the boundary table.
-    fn build(text: &str) -> Self {
+    /// One ASCII scan, then (multi-byte text only) one byte scan for the
+    /// char count: a UTF-8 start byte is exactly a byte that is not a
+    /// continuation (`b & 0xC0 != 0x80`), so no code point is decoded.
+    fn new(text: &str) -> Self {
         if text.is_ascii() {
             return Self::Ascii;
         }
-        // byte offsets are u32 words: the length check bounds every entry
-        let len = u32::try_from(text.len()).expect("string byte length fits u32");
-        let mut offsets = Vec::with_capacity(text.len() + 1);
-        for (o, _) in text.char_indices() {
-            offsets.push(u32::try_from(o).expect("char offset below the byte length"));
+        let count = text
+            .as_bytes()
+            .iter()
+            .filter(|byte| **byte & 0xc0 != 0x80)
+            .count();
+        Self::Utf8 {
+            count,
+            offsets: None,
         }
-        // the final entry is the end-of-text boundary a range end reaches
-        offsets.push(len);
-        Self::Offsets(offsets.into())
     }
 
     /// The char count.
     fn count(&self, text: &str) -> usize {
         match self {
             Self::Ascii => text.len(),
-            Self::Offsets(offsets) => offsets.len() - 1,
+            Self::Utf8 { count, .. } => *count,
+        }
+    }
+
+    /// Whether the boundary offsets are present (pure ASCII needs none).
+    fn has_offsets(&self) -> bool {
+        match self {
+            Self::Ascii => true,
+            Self::Utf8 { offsets, .. } => offsets.is_some(),
+        }
+    }
+
+    /// Records the boundary offsets a range query built.
+    fn set_offsets(&mut self, built: Box<[u32]>) {
+        match self {
+            Self::Ascii => unreachable!("ASCII text indexes chars by byte"),
+            Self::Utf8 { offsets, .. } => *offsets = Some(built),
         }
     }
 
     /// The byte offset of char boundary `index`, a valid char position
-    /// (`index <= count`).
+    /// (`index <= count`); a range query built the table.
     fn byte_at(&self, index: usize) -> usize {
         match self {
             Self::Ascii => index,
-            Self::Offsets(offsets) => offsets[index] as usize,
+            Self::Utf8 { offsets, .. } => offsets
+                .as_ref()
+                .expect("a range query built the boundary offsets")[index]
+                as usize,
         }
     }
+}
+
+/// The byte offsets of every char boundary of multi-byte `text` through
+/// the end. A start byte is exactly a byte that is not a continuation,
+/// so the table is one byte scan.
+fn char_offsets(text: &str) -> Box<[u32]> {
+    // byte offsets are u32 words: the length check bounds every entry
+    let len = u32::try_from(text.len()).expect("string byte length fits u32");
+    let mut offsets = Vec::with_capacity(text.len() / 2 + 1);
+    for (at, &byte) in text.as_bytes().iter().enumerate() {
+        if byte & 0xc0 != 0x80 {
+            offsets.push(u32::try_from(at).expect("char offset below the byte length"));
+        }
+    }
+    // the final entry is the end-of-text boundary a range end reaches
+    offsets.push(len);
+    offsets.into()
 }
 
 /// One heap object payload: the block body behind a live table id. One
@@ -160,12 +227,14 @@ enum Object {
     /// the value a capturing lambda's slot holds.
     Closure(Closure),
     /// A list: one heap object — len, capacity, and the element words
-    /// inline in a single block payload. The one in-place mutation is the
-    /// append behind list literals ([`Objects::push_list`], the
+    /// inline in a single block payload, at a per-list element stride
+    /// (one `Value` word per element word, a multi-word element stored as
+    /// its whole inline span). The one in-place mutation is the append
+    /// behind list literals ([`Objects::push_list`], the
     /// compiler-disciplined construction append over a freshly built
     /// list); every other mutation stays reserved for the exclusive
     /// windows, and growth is the backing buffer's amortized doubling.
-    List(Vec<Value>),
+    List(ListData),
     /// A map: one heap object behind one `Ref` word, the list object's
     /// conventions over key-value pairs. The internal shape is an
     /// association vector scanned front to back — the interim the
@@ -174,24 +243,83 @@ enum Object {
     /// string keys compare by content (two equal-content string objects
     /// are one key), every other word by identity — so scalar and
     /// reference keys never collide across kinds. Each row carries a
-    /// filter hash ([`MapData`]) so a probe's reject scan walks dense
-    /// u32 words and never loads a candidate key's payload.
+    /// filter hash behind a row index ([`MapData`]) so a probe reads a few
+    /// dense index words and loads a candidate key's payload only on a
+    /// filter hit.
     Map(MapData),
 }
 
-/// A map's payload: the association rows plus one filter hash per row.
-/// The hash is a reject filter, never the answer — every hash hit runs
-/// the exact key check, so a collision costs one compare and nothing
-/// else, while a miss answers from the dense u32 scan alone.
+/// A list's payload: the element words inline plus the per-list element
+/// stride — how many consecutive words one element spans. The stride is
+/// a per-list constant taken from `list[t]`'s compile-time shape: the
+/// first append onto an empty list fixes it, later appends must repeat
+/// it, and every reader (len, the checked read) divides or slices by it.
+/// An empty list carries stride 0 (the invariant: stride 0 iff empty),
+/// so an empty list is stride-polymorphic until its first element.
+#[derive(Debug)]
+struct ListData {
+    elems: Vec<Value>,
+    stride: usize,
+}
+
+/// A map's payload: the association rows in entry order, one filter hash
+/// per row, and the row index over those hashes. The hash is a reject
+/// filter, never the answer — every hash hit runs the exact key check, so
+/// a collision costs one compare and nothing else, while a miss answers
+/// from the index walk alone.
 #[derive(Debug, Default)]
 struct MapData {
+    /// The filter hash of each row, parallel to `pairs`.
     hashes: Vec<u32>,
+    /// The row index: one row number per slot, [`ROW_NONE`] when free,
+    /// probed linearly from the hash. Its length is a power of two and at
+    /// least twice the row count, so a probe always meets a free slot; it
+    /// is empty until the map holds a row.
+    slots: Vec<u32>,
+    /// The association rows, in entry order (the order `map_pairs` walks).
     pairs: Vec<(Value, Value)>,
 }
 
-/// FNV-1a over `bytes`, continuing `state` (one round per byte; the
-/// strings hashed here are short, and the map scan amortizes the hash
-/// over thousands of compares).
+/// The free-slot marker of a map's row index: `u32::MAX` is past every
+/// index's capacity, so it names no row.
+const ROW_NONE: u32 = u32::MAX;
+
+impl MapData {
+    /// Records the row just pushed into `pairs`, extending the index to the
+    /// next power of two when the load factor would pass one half.
+    fn index_push(&mut self) {
+        let rows = self.pairs.len();
+        let capacity = if self.slots.len() >= rows * 2 {
+            self.slots.len()
+        } else {
+            (rows * 2).next_power_of_two().max(8)
+        };
+        if capacity != self.slots.len() {
+            self.slots.clear();
+            self.slots.resize(capacity, ROW_NONE);
+            // a rebuilt index re-places every row, the new one included
+            for row in 0..self.hashes.len() {
+                let hash = self.hashes[row];
+                self.place(row, hash);
+            }
+            return;
+        }
+        self.place(rows - 1, self.hashes[rows - 1]);
+    }
+
+    /// Claims the first free slot at or past the hash of row `row`.
+    fn place(&mut self, row: usize, hash: u32) {
+        let row = u32::try_from(row).expect("a map row fits the index word");
+        let mask = self.slots.len() - 1;
+        let mut at = hash as usize & mask;
+        while self.slots[at] != ROW_NONE {
+            at = (at + 1) & mask;
+        }
+        self.slots[at] = row;
+    }
+}
+
+/// FNV-1a over `bytes`, continuing `state` (one round per byte).
 #[inline]
 const fn fnv_step(mut state: u32, bytes: &[u8]) -> u32 {
     let mut at = 0;
@@ -203,21 +331,33 @@ const fn fnv_step(mut state: u32, bytes: &[u8]) -> u32 {
     state
 }
 
-/// Key equality classes, folded into each hash's first round so a text
-/// hash and an identity hash over the same bytes stay distinguishable.
-const KEY_CLASS_TEXT: u32 = b't' as u32;
-const KEY_CLASS_REF: u32 = b'r' as u32;
-const KEY_CLASS_SCALAR: u32 = b's' as u32;
+/// A key class's FNV seed: the offset basis folded once with the class
+/// byte, so the classes stay apart without a round over that byte.
+const fn class_seed(class: u8) -> u32 {
+    (0x811c_9dc5 ^ class as u32).wrapping_mul(0x0100_0193)
+}
+
+/// Key equality classes, one seed each: a text hash, an identity hash, and
+/// a scalar hash over the same bytes stay distinguishable.
+const SEED_TEXT: u32 = class_seed(b't');
+const SEED_REF: u32 = class_seed(b'r');
+const SEED_SCALAR: u32 = class_seed(b's');
+/// The float scalar class: a float key never equals an int key, so the two
+/// kinds never share a hash.
+const SEED_SCALAR_F64: u32 = class_seed(b'd');
 
 /// The hash of a string key: its content, the text equality class.
 fn text_hash(text: &str) -> u32 {
-    fnv_step(KEY_CLASS_TEXT, text.as_bytes())
+    fnv_step(SEED_TEXT, text.as_bytes())
 }
 
-/// The hash of an identity key: the reference word's own bits.
+/// The hash of an identity key: the reference word's own bits, one word.
 fn ref_hash(word: RefId) -> u32 {
-    let state = fnv_step(KEY_CLASS_REF, &word.fiber().0.to_le_bytes());
-    fnv_step(state, &word.id().to_le_bytes())
+    let (fiber, id) = (word.fiber().0.to_le_bytes(), word.id().to_le_bytes());
+    let mut bytes = [0; 8];
+    bytes[..4].copy_from_slice(&fiber);
+    bytes[4..].copy_from_slice(&id);
+    fnv_step(SEED_REF, &bytes)
 }
 
 /// The hash of a scalar key: bits that respect word equality — `+0.0`
@@ -226,20 +366,23 @@ fn ref_hash(word: RefId) -> u32 {
 /// bits-equal exactly when word-equal; a NaN probe never matches, so its
 /// hash is free).
 fn scalar_hash(word: Value) -> u32 {
-    let (payload, is_f64) = match word {
-        Value::I64(n) => (n.to_le_bytes(), false),
+    // every scalar word is one 8-byte payload, so the class seed alone
+    // carries the kind distinction
+    let (payload, seed) = match word {
+        Value::I64(n) => (n.to_le_bytes(), SEED_SCALAR),
         Value::F64(x) => (
             (if x == 0.0 { 0.0 } else { x }).to_bits().to_le_bytes(),
-            true,
+            SEED_SCALAR_F64,
         ),
-        Value::Bool(b) => ([u8::from(b), 0, 0, 0, 0, 0, 0, 0], false),
-        Value::Tag(t) => ([t, 0, 0, 0, 0, 0, 0, 0], false),
+        Value::Bool(b) => (i64::from(b).to_le_bytes(), SEED_SCALAR),
+        Value::Tag(t) => (u64::from(t).to_le_bytes(), SEED_SCALAR),
+        Value::Arena(h) => (h.raw().to_le_bytes(), SEED_SCALAR),
         Value::Fn(f) => {
             let (module, func) = (f.module().to_le_bytes(), f.func().to_le_bytes());
             let mut bytes = [0; 8];
             bytes[..4].copy_from_slice(&module);
             bytes[4..].copy_from_slice(&func);
-            (bytes, false)
+            (bytes, SEED_SCALAR)
         },
         // the probe resolution routes a Ref to the text or identity class
         // first; hashing its bits keeps this total for the dead case
@@ -248,11 +391,10 @@ fn scalar_hash(word: Value) -> u32 {
             let mut bytes = [0; 8];
             bytes[..4].copy_from_slice(&fiber);
             bytes[4..].copy_from_slice(&id);
-            (bytes, false)
+            (bytes, SEED_SCALAR)
         },
     };
-    let state = fnv_step(KEY_CLASS_SCALAR, &payload);
-    fnv_step(state, &[u8::from(is_f64)])
+    fnv_step(seed, &payload)
 }
 
 /// A map probe resolved once per lookup or store — the payload-local
@@ -304,6 +446,74 @@ pub(crate) enum ForeignOp {
     Dec(RefId),
 }
 
+/// The death cascade's working buffers, reused across deaths so a
+/// steady-state death allocates nothing: `dying` is the depth-first work
+/// stack, `zeros` one level's children, and `words` the spill buffer a
+/// map's interleaved pairs drain into. A list's or a closure's element
+/// vector needs no spill — it moves out of the payload whole.
+#[derive(Debug, Default)]
+struct DeathScratch {
+    dying: Vec<(u32, NonNull<RcHeader>)>,
+    zeros: Vec<(u32, NonNull<RcHeader>)>,
+    words: Vec<Value>,
+}
+
+/// One intern row: the canonical object holding the content plus whether
+/// the map's own pin holds a count on it. A pinned entry never decs to
+/// zero, so its object never frees and its row never unbinds — the exact
+/// lifetime a `KSTR_BORROW` word borrows.
+#[derive(Clone, Copy, Debug)]
+struct Interned {
+    id: u32,
+    pinned: bool,
+}
+
+/// The intern map: content → its canonical object. Hashed by content
+/// through a fixed-seed word hasher, so a load never pays the default
+/// SipHash.
+type InternMap = HashMap<Box<str>, Interned, BuildHasherDefault<InternHasher>>;
+
+/// The intern map's content hasher: the same multiply-rotate round the
+/// claim ledger uses, one per 64-bit word of key bytes. The seed is
+/// fixed, never per-process random, so a fuzz run replays exactly.
+#[derive(Default)]
+struct InternHasher(u64);
+
+impl InternHasher {
+    fn mix(&mut self, word: u64) {
+        self.0 = self.0.rotate_left(13) ^ word;
+        self.0 = self.0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+impl Hasher for InternHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // the length rides its own round, so zero padding a short tail
+        // never aliases a shorter key
+        self.mix(bytes.len() as u64);
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            self.mix(u64::from_le_bytes(
+                word.try_into().expect("a full 8-byte chunk"),
+            ));
+        }
+        let tail = words.remainder();
+        if !tail.is_empty() {
+            let mut padded = [0u8; 8];
+            padded[..tail.len()].copy_from_slice(tail);
+            self.mix(u64::from_le_bytes(padded));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.mix(n);
+    }
+}
+
 /// The heap: the id table over ds-rt's counted blocks, the table's free
 /// list threading freed ids, and the string intern map.
 pub struct Objects {
@@ -311,12 +521,13 @@ pub struct Objects {
     /// a stored word runs against (the pool index is the word's owner
     /// axis, stable across slot reuse).
     owner: FiberId,
-    interned: HashMap<Box<str>, u32>,
+    interned: InternMap,
     table: Vec<Slot>,
     heap: Heap,
     free_head: Option<u32>,
     live: usize,
     pending: VecDeque<ForeignOp>,
+    scratch: DeathScratch,
 }
 
 impl fmt::Debug for Objects {
@@ -348,12 +559,13 @@ impl Objects {
     pub fn new(owner: FiberId) -> Self {
         Self {
             owner,
-            interned: HashMap::new(),
+            interned: InternMap::default(),
             table: Vec::new(),
             heap: Heap::default(),
             free_head: None,
             live: 0,
             pending: VecDeque::new(),
+            scratch: DeathScratch::default(),
         }
     }
 
@@ -367,6 +579,13 @@ impl Objects {
     /// face's drain loop.
     pub(crate) fn pending_pop(&mut self) -> Option<ForeignOp> {
         self.pending.pop_front()
+    }
+
+    /// How many cross-heap operations wait on this store for the router.
+    /// The length is the queue's own, so it cannot drift from it.
+    #[must_use]
+    pub(crate) fn queued(&self) -> usize {
+        self.pending.len()
     }
 
     /// Acquires one count for a stored `Ref` word, routing by the word's
@@ -458,13 +677,62 @@ impl Objects {
     /// results are transient by construction and content equality is
     /// what EQSTR answers.
     pub fn intern(&mut self, text: &str) -> u32 {
-        if let Some(&id) = self.interned.get(text) {
+        if let Some(&Interned { id, .. }) = self.interned.get(text) {
             self.inc(id).expect("an interned object is live");
             return id;
         }
         let id = self.alloc_str(text.to_owned());
-        self.interned.insert(text.into(), id);
+        self.interned
+            .insert(text.into(), Interned { id, pinned: false });
         id
+    }
+
+    /// Interns `text` for a borrow load (KSTR_BORROW): the caller claims
+    /// no count, so the map owns the canonical one. A first intern of
+    /// unpinned content allocates with the birth count staying the
+    /// map's (the pin); already-interned content just gains the pin if
+    /// it lacks one — an unpinned entry's remaining count belongs to
+    /// its claimants and could dec away mid-borrow, so the pin inc keeps
+    /// the object live whatever they do. A pinned object never decs to
+    /// zero, so its row never unbinds and the id serves every later
+    /// borrow load; the store's teardown frees it with the heap.
+    pub fn intern_borrow(&mut self, text: &str) -> u32 {
+        if let Some(&Interned { id, pinned }) = self.interned.get(text) {
+            if !pinned {
+                self.interned
+                    .get_mut(text)
+                    .expect("the row just read")
+                    .pinned = true;
+                self.inc(id).expect("an interned object is live");
+            }
+            return id;
+        }
+        let id = self.alloc_str(text.to_owned());
+        self.interned
+            .insert(text.into(), Interned { id, pinned: true });
+        id
+    }
+
+    /// Releases the intern map's canonical pin counts: the owner's
+    /// frames never run again (a death door or a completed drive), so
+    /// no borrow word survives to need them. A pin whose object holds
+    /// other claimants' counts survives their deaths; a last pin decs to
+    /// zero, frees, and unbinds the row, so the next intern of the same
+    /// content starts fresh. Idempotent — the pin bits clear as they
+    /// collect, so the door and `die_current` may both fire.
+    pub fn release_pins(&mut self) {
+        let mut pinned = Vec::new();
+        for row in self.interned.values_mut() {
+            if row.pinned {
+                row.pinned = false;
+                pinned.push(row.id);
+            }
+        }
+        for id in pinned {
+            // a Str object carries no Ref payload, so the death cascade
+            // never queues cross-heap work
+            let _ = self.dec(id);
+        }
     }
 
     /// Allocates a fresh string object (no interning), owned by the caller.
@@ -499,9 +767,21 @@ impl Objects {
     /// Allocates a fresh list object over `elems`, owned by the caller.
     /// The element words are adopted as-is: a caller handing `Ref`
     /// elements must have acquired their counts itself (the producer
-    /// natives over fresh objects).
+    /// natives over fresh objects). The stride follows the payload: 0 for
+    /// the empty list (stride-polymorphic until the first push), 1 for
+    /// every non-empty one-word-element list; a stride-carrying copy
+    /// names its stride through [`Objects::alloc_list_strided`].
     pub fn alloc_list(&mut self, elems: Vec<Value>) -> u32 {
-        self.alloc(Object::List(elems))
+        let stride = usize::from(!elems.is_empty());
+        self.alloc_list_strided(elems, stride)
+    }
+
+    /// Allocates a fresh list over `elems` at an explicit element stride
+    /// (the copy natives carrying a source list's stride; `elems` empty
+    /// keeps stride 0 whatever the caller passes).
+    pub fn alloc_list_strided(&mut self, elems: Vec<Value>, stride: usize) -> u32 {
+        let stride = if elems.is_empty() { 0 } else { stride };
+        self.alloc(Object::List(ListData { elems, stride }))
     }
 
     /// `rc_inc` (C4): the reference in the slot naming `obj` gains one
@@ -542,14 +822,18 @@ impl Objects {
     /// recursion, so a deeply nested structure dies in bounded stack
     /// (the heap bounds the stack, and the free order stays the
     /// recursive depth-first one: each owner's children fully before
-    /// the next sibling).
+    /// the next sibling). The stack and the child set ride the store's
+    /// scratch buffers.
     fn free(&mut self, obj: u32, header: NonNull<RcHeader>) {
-        let mut dying: Vec<(u32, NonNull<RcHeader>)> = vec![(obj, header)];
+        let mut dying = std::mem::take(&mut self.scratch.dying);
+        let mut zeros = std::mem::take(&mut self.scratch.zeros);
+        let mut spill = std::mem::take(&mut self.scratch.words);
+        dying.push((obj, header));
         while let Some((id, header)) = dying.pop() {
             // an interned entry pointing here must not outlive the object:
             // the next intern of the same content allocates a fresh one
             if let Object::Str(s) = self.heap.payload::<Object>(header) {
-                if self.interned.get(&*s.text) == Some(&id) {
+                if self.interned.get(&*s.text).is_some_and(|row| row.id == id) {
                     self.interned.remove(&*s.text);
                 }
             }
@@ -558,17 +842,23 @@ impl Objects {
             self.table[id as usize] = Slot::Free(next);
             self.live -= 1;
             // the owned words leave the payload before it dies, so the
-            // block's death hook drops only empty containers
-            let words: Vec<Value> = match self.heap.payload_mut::<Object>(header) {
-                Object::List(elems) => std::mem::take(elems),
-                Object::Map(data) => data
-                    .pairs
-                    .drain(..)
-                    .flat_map(|(key, value)| [key, value])
-                    .collect(),
+            // block's death hook drops only empty containers; a list's or
+            // a closure's element vector moves out whole, a map's
+            // interleaved pairs drain into the spill buffer
+            spill.clear();
+            let owned = match self.heap.payload_mut::<Object>(header) {
+                Object::List(data) => std::mem::take(&mut data.elems),
                 Object::Closure(closure) => std::mem::take(&mut closure.captures),
+                Object::Map(data) => {
+                    for (key, value) in data.pairs.drain(..) {
+                        spill.push(key);
+                        spill.push(value);
+                    }
+                    Vec::new()
+                },
                 Object::Str(_) => Vec::new(),
             };
+            let words: &[Value] = if owned.is_empty() { &spill } else { &owned };
             // the block's death hook (the payload's own drop glue) runs,
             // then the memory pools for the next compatible allocation
             self.heap.rc_dispose::<Object>(header);
@@ -577,8 +867,7 @@ impl Objects {
             // The dec is split so a zero queues the object instead of
             // recursing; a stored reference is live by construction, and
             // the id check keeps the double-drop tripwire
-            let mut zeros: Vec<(u32, NonNull<RcHeader>)> = Vec::new();
-            for word in words {
+            for word in words.iter().copied() {
                 let Value::Ref(child) = word else {
                     continue;
                 };
@@ -598,38 +887,64 @@ impl Objects {
             }
             // reverse push pops in owned order: the first child's whole
             // subtree frees before the next sibling
-            dying.extend(zeros.into_iter().rev());
+            dying.extend(zeros.drain(..).rev());
         }
+        self.scratch.dying = dying;
+        self.scratch.zeros = zeros;
+        self.scratch.words = spill;
     }
 
-    /// Appends one element word onto a list object in place: the
-    /// construction append behind list literals, where the list is
-    /// freshly created and uniquely owned by the constructing frame.
-    /// Storing a `Ref` element acquires a count for the list — the
-    /// staged word stays owned by its own frame too (the placement pass's
-    /// native-borrow discipline). Every other in-place mutation stays the
+    /// Appends one element — its whole inline word span — onto a list
+    /// object in place: the construction append behind list literals,
+    /// where the list is freshly created and uniquely owned by the
+    /// constructing frame. The first append onto an empty list fixes the
+    /// list's element stride (`words.len()`); a later append must repeat
+    /// it exactly, so a hand-assembled mismatch traps instead of
+    /// misaligning the payload. Storing a `Ref` word acquires a count for
+    /// the list, one per `Ref` word of the span — the staged words stay
+    /// owned by their own frame too (the placement pass's native-borrow
+    /// discipline). Every other in-place mutation stays the
     /// exclusive-window story.
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownObject`] when the reference names no list object.
-    pub fn push_list(&mut self, obj: u32, value: Value) -> Result<(), Trap> {
+    /// [`Trap::UnknownObject`] when the reference names no list object;
+    /// [`Trap::ElementStride`] when the staged span's width disagrees
+    /// with the non-empty list's stride.
+    pub fn push_list(&mut self, obj: u32, words: &[Value]) -> Result<(), Trap> {
         let header = self.header_of(obj)?;
-        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) {
+        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) || words.is_empty() {
             return Err(Trap::UnknownObject { obj });
+        }
+        if let Object::List(data) = self.heap.payload::<Object>(header)
+            && !data.elems.is_empty()
+            && data.stride != words.len()
+        {
+            return Err(Trap::ElementStride {
+                obj,
+                stride: data.stride,
+                given: words.len(),
+            });
         }
         // the acquire happens before the store: a bogus element reference
         // leaves the list untouched (a foreign element word queues, so
         // the owning heap takes the list's count)
-        if let Value::Ref(word) = value {
-            if word.fiber() == self.owner {
-                self.inc(word.id())?;
-            } else {
-                self.pending.push_back(ForeignOp::Inc(word));
+        for value in words {
+            if let Value::Ref(word) = value {
+                if word.fiber() == self.owner {
+                    self.inc(word.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Inc(*word));
+                }
             }
         }
         match self.heap.payload_mut::<Object>(header) {
-            Object::List(elems) => elems.push(value),
+            Object::List(data) => {
+                if data.elems.is_empty() {
+                    data.stride = words.len();
+                }
+                data.elems.extend_from_slice(words);
+            },
             _ => return Err(Trap::UnknownObject { obj }),
         }
         Ok(())
@@ -637,15 +952,29 @@ impl Objects {
 
     /// Concatenates two lists into a fresh object: `lhs`'s elements then
     /// `rhs`'s, the joined length reserved up front (growth is amortized
-    /// doubling; a join never re-grows mid-copy). The joined list owns
-    /// one count per `Ref` element word it copies; the operand lists keep
-    /// theirs.
+    /// doubling; a join never re-grows mid-copy). The two strides must
+    /// agree (an empty operand is stride-polymorphic and adopts the
+    /// other side's); the joined list owns one count per `Ref` element
+    /// word it copies; the operand lists keep theirs.
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownObject`] when either reference names no list.
+    /// [`Trap::UnknownObject`] when either reference names no list;
+    /// [`Trap::ElementStride`] when two non-empty operands' strides
+    /// disagree.
     pub fn concat_lists(&mut self, lhs: u32, rhs: u32) -> Result<u32, Trap> {
-        let (front, back) = (self.list_at(lhs)?, self.list_at(rhs)?);
+        let ((front, front_s), (back, back_s)) = (self.list_parts(lhs)?, self.list_parts(rhs)?);
+        let stride = match (front_s, back_s) {
+            (0, s) | (s, 0) => s,
+            (s, t) if s == t => s,
+            (s, t) => {
+                return Err(Trap::ElementStride {
+                    obj: rhs,
+                    stride: s,
+                    given: t,
+                })
+            },
+        };
         let mut elems = Vec::with_capacity(front.len() + back.len());
         let words: Vec<Value> = front.iter().chain(back.iter()).copied().collect();
         for value in words {
@@ -654,7 +983,7 @@ impl Objects {
             }
             elems.push(value);
         }
-        Ok(self.alloc_list(elems))
+        Ok(self.alloc_list_strided(elems, stride))
     }
 
     /// Concatenates two strings into a fresh object, owned by the caller.
@@ -663,9 +992,10 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when either reference names no string.
     pub fn concat(&mut self, lhs: u32, rhs: u32) -> Result<u32, Trap> {
-        let mut text = String::with_capacity(self.str_at(lhs)?.len() + self.str_at(rhs)?.len());
-        text.push_str(self.str_at(lhs)?);
-        text.push_str(self.str_at(rhs)?);
+        let (left, right) = (self.str_at(lhs)?, self.str_at(rhs)?);
+        let mut text = String::with_capacity(left.len() + right.len());
+        text.push_str(left);
+        text.push_str(right);
         Ok(self.alloc_str(text))
     }
 
@@ -691,7 +1021,7 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no live string
     /// object.
     pub fn char_count(&mut self, obj: u32) -> Result<usize, Trap> {
-        self.ensure_char_index(obj)?;
+        self.ensure_char_count(obj)?;
         let (text, chars) = self.str_with_chars(obj)?;
         Ok(chars.count(text))
     }
@@ -713,21 +1043,44 @@ impl Objects {
         start: usize,
         end: usize,
     ) -> Result<(usize, usize), Trap> {
-        self.ensure_char_index(obj)?;
+        self.ensure_char_offsets(obj)?;
         let (_, chars) = self.str_with_chars(obj)?;
         Ok((chars.byte_at(start), chars.byte_at(end)))
     }
 
-    /// Builds the char-boundary map of string object `obj` unless it
-    /// already exists.
-    fn ensure_char_index(&mut self, obj: u32) -> Result<(), Trap> {
+    /// Builds the char count of string object `obj` unless it is already
+    /// known: a count query leaves the boundary offsets unbuilt.
+    fn ensure_char_count(&mut self, obj: u32) -> Result<(), Trap> {
         let header = self.header_of(obj)?;
         if matches!(self.heap.payload::<Object>(header), Object::Str(s) if s.chars.is_some()) {
             return Ok(());
         }
-        let built = CharIndex::build(self.str_at(obj)?);
+        let built = CharIndex::new(self.str_at(obj)?);
         match self.heap.payload_mut::<Object>(header) {
             Object::Str(s) => s.chars = Some(built),
+            _ => return Err(Trap::UnknownObject { obj }),
+        }
+        Ok(())
+    }
+
+    /// Builds the char-boundary offsets of string object `obj` unless they
+    /// are already known: one table serves every later range query.
+    fn ensure_char_offsets(&mut self, obj: u32) -> Result<(), Trap> {
+        self.ensure_char_count(obj)?;
+        let header = self.header_of(obj)?;
+        if matches!(
+            self.heap.payload::<Object>(header),
+            Object::Str(s) if s.chars.as_ref().is_some_and(CharIndex::has_offsets)
+        ) {
+            return Ok(());
+        }
+        let built = char_offsets(self.str_at(obj)?);
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Str(s) => s
+                .chars
+                .as_mut()
+                .expect("the char count was just built")
+                .set_offsets(built),
             _ => return Err(Trap::UnknownObject { obj }),
         }
         Ok(())
@@ -748,16 +1101,36 @@ impl Objects {
         }
     }
 
+    /// The element words of list object `obj` and its per-element stride:
+    /// the payload holds `len * stride` words, element `i` at
+    /// `i * stride .. (i + 1) * stride`.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live list object.
+    pub fn list_parts(&self, obj: u32) -> Result<(&[Value], usize), Trap> {
+        match self.payload_of(obj) {
+            Some(Object::List(data)) => Ok((&data.elems, data.stride)),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// The element words of list object `obj`.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no live list object.
     pub fn list_at(&self, obj: u32) -> Result<&[Value], Trap> {
-        match self.payload_of(obj) {
-            Some(Object::List(elems)) => Ok(elems),
-            _ => Err(Trap::UnknownObject { obj }),
-        }
+        Ok(self.list_parts(obj)?.0)
+    }
+
+    /// The list's per-element stride (0 for the empty list).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live list object.
+    pub fn list_stride(&self, obj: u32) -> Result<usize, Trap> {
+        Ok(self.list_parts(obj)?.1)
     }
 
     /// Allocates a fresh empty map object, owned by the caller.
@@ -794,26 +1167,24 @@ impl Objects {
         matches!(self.payload_of(obj), Some(Object::Str(s)) if &*s.text == text)
     }
 
-    /// The string content of object `obj`, when it names a live string —
-    /// the map probe's foreign-resolution read.
-    pub(crate) fn str_if(&self, obj: u32) -> Option<&str> {
+    /// The string content of object `obj` with its cached filter hash, when
+    /// `obj` names a live string — the map probe's foreign-resolution read,
+    /// so the probe's own heap hashes and copies the text once.
+    pub(crate) fn str_with_hash(&self, obj: u32) -> Option<(&str, u32)> {
         match self.payload_of(obj) {
-            Some(Object::Str(s)) => Some(&s.text),
+            Some(Object::Str(s)) => Some((&s.text, s.content_hash())),
             _ => None,
         }
     }
 
     /// Resolves a probe word once per lookup or store, payload-locally:
     /// a local word resolves through this store, a foreign word through
-    /// the router's pre-resolution, a scalar word needs no payload at
-    /// all. The scan then never re-reads the probe's payload per
-    /// candidate.
+    /// the router's pre-resolution (content and hash carried off the
+    /// probe's own heap), a scalar word needs no payload at all. The scan
+    /// then never re-reads the probe's payload per candidate.
     fn resolve_probe<'a>(&'a self, key: Value, res: &'a ResolvedKey) -> ProbeKey<'a> {
         match res {
-            ResolvedKey::Text(text) => ProbeKey::Text {
-                hash: text_hash(text),
-                text,
-            },
+            ResolvedKey::Text { text, hash } => ProbeKey::Text { hash: *hash, text },
             ResolvedKey::Opaque => match key {
                 // the router builds Opaque only from a reference word
                 Value::Ref(word) => ProbeKey::Identity {
@@ -828,7 +1199,7 @@ impl Objects {
             ResolvedKey::Word => match key {
                 Value::Ref(word) => match self.payload_of(word.id()) {
                     Some(Object::Str(s)) => ProbeKey::Text {
-                        hash: text_hash(&s.text),
+                        hash: s.content_hash(),
                         text: &s.text,
                     },
                     _ => ProbeKey::Identity {
@@ -859,31 +1230,33 @@ impl Objects {
                 _ => false,
             },
             ProbeKey::Identity { word, .. } => match stored {
-                // the probe names no string: a local stored string key
-                // is a different object by construction (same id would
-                // have resolved the probe to text), so identity answers
-                Value::Ref(a) => match self.payload_of(a.id()) {
-                    Some(Object::Str(_)) => false,
-                    _ => a == *word,
-                },
+                // the probe names no string, and a stored string key is a
+                // different object by construction, so the word compare
+                // answers without reading the candidate's payload
+                Value::Ref(a) => a == *word,
                 _ => false,
             },
             ProbeKey::Scalar { word, .. } => stored == *word,
         }
     }
 
-    /// The first row whose key equals the probe, if present: the dense
-    /// hash scan rejects most candidates without any payload load, and
-    /// every hash hit runs the exact check.
+    /// The row whose key equals the probe, if present: the index narrows
+    /// the candidates to the rows sharing the probe's filter hash, so a miss
+    /// reads a few dense index words and the exact check runs on the hash
+    /// hits alone.
     fn map_row_at(&self, data: &MapData, probe: &ProbeKey<'_>) -> Option<usize> {
+        if data.slots.is_empty() {
+            return None;
+        }
         let hash = probe.hash();
-        for (at, &row_hash) in data.hashes.iter().enumerate() {
-            if row_hash == hash {
-                let (stored, _) = data.pairs[at];
-                if self.stored_key_matches(stored, probe) {
-                    return Some(at);
-                }
+        let mask = data.slots.len() - 1;
+        let mut at = hash as usize & mask;
+        while data.slots[at] != ROW_NONE {
+            let row = data.slots[at] as usize;
+            if data.hashes[row] == hash && self.stored_key_matches(data.pairs[row].0, probe) {
+                return Some(row);
             }
+            at = (at + 1) & mask;
         }
         None
     }
@@ -895,7 +1268,7 @@ impl Objects {
     /// later death drops exactly what was stored. A content-equal key
     /// overwrites: the old value's count drops, and the entry keeps its
     /// original key word (the map already owns that count; the caller
-    /// keeps its own probe word).
+    /// keeps its own probe word), so the row index keeps its entry too.
     ///
     /// # Errors
     ///
@@ -952,6 +1325,7 @@ impl Objects {
             Object::Map(data) => {
                 data.hashes.push(hash);
                 data.pairs.push((key, value));
+                data.index_push();
             },
             _ => return Err(Trap::UnknownObject { obj }),
         }
@@ -966,11 +1340,15 @@ impl Objects {
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
     pub fn map_at(&self, obj: u32, key: Value, res: &ResolvedKey) -> Result<Option<Value>, Trap> {
-        let probe = self.resolve_probe(key, res);
-        match self.payload_of(obj) {
-            Some(Object::Map(data)) => Ok(self.map_row_at(data, &probe).map(|at| data.pairs[at].1)),
-            _ => Err(Trap::UnknownObject { obj }),
+        let Some(Object::Map(data)) = self.payload_of(obj) else {
+            return Err(Trap::UnknownObject { obj });
+        };
+        // a rowless map has no candidate, so the probe needs no resolution
+        if data.slots.is_empty() {
+            return Ok(None);
         }
+        let probe = self.resolve_probe(key, res);
+        Ok(self.map_row_at(data, &probe).map(|at| data.pairs[at].1))
     }
 
     /// The pairs of map object `obj`, in entry order.
@@ -1059,12 +1437,41 @@ impl<'a> Heaps<'a> {
         }
     }
 
-    /// Drains every store's queued cross-heap operations until none
-    /// remain: a routed dec can free an object whose cascade queues
-    /// more, on any store, so the loop runs to quiescence. Order within
-    /// one queue is FIFO — a cascade's cross-heap decs fire in the
-    /// traversal order the queueing store saw.
-    fn settle(&mut self) -> Result<(), Trap> {
+    /// How many cross-heap operations wait on the store owning `fiber`.
+    fn queued(&self, fiber: FiberId) -> usize {
+        if self.live && fiber == self.owner {
+            self.current.queued()
+        } else {
+            self.pool
+                .get(fiber.index())
+                .map_or(0, |fiber| fiber.objects.queued())
+        }
+    }
+
+    /// Drains the cross-heap operations a routed mutation queued until none
+    /// remain: a routed dec can free an object whose cascade queues more, on
+    /// any store, so the loop runs to quiescence. Order within one queue is
+    /// FIFO — a cascade's cross-heap decs fire in the traversal order the
+    /// queueing store saw.
+    ///
+    /// `from` is the store the mutation routed to. Every queued operation
+    /// lands on the store whose own mutation observed the foreign word, and
+    /// every routed mutation ends in this drain, so the pool is quiet
+    /// between mutations: `from`'s queue length is the whole pending count,
+    /// and a zero answers before the pool is touched.
+    fn settle(&mut self, from: FiberId) -> Result<(), Trap> {
+        if self.queued(from) == 0 {
+            #[cfg(feature = "diag")]
+            // the invariant the fast path rests on, re-walked under the
+            // tripwire layer: an operation queued anywhere else would
+            // strand here
+            assert!(
+                self.current.queued() == 0
+                    && self.pool.iter().all(|fiber| fiber.objects.queued() == 0),
+                "ds-vm diag: a cross-heap op queued outside the mutated store"
+            );
+            return Ok(());
+        }
         loop {
             let op = if let Some(op) = self.current.pending_pop() {
                 op
@@ -1113,6 +1520,15 @@ impl<'a> Heaps<'a> {
     /// cascade owns those counts and no element claim stays on a ledger.
     pub(crate) fn new_list(&mut self, elems: Vec<Value>) -> Value {
         let id = self.current.alloc_list(elems);
+        self.claimed_alloc(id)
+    }
+
+    /// A fresh list over `elems` at an explicit element stride (the copy
+    /// natives carrying a source list's stride), as its word — the
+    /// caller's frame claim, the edge-count contract of
+    /// [`Heaps::new_list`].
+    pub(crate) fn new_list_strided(&mut self, elems: Vec<Value>, stride: usize) -> Value {
+        let id = self.current.alloc_list_strided(elems, stride);
         self.claimed_alloc(id)
     }
 
@@ -1167,7 +1583,7 @@ impl<'a> Heaps<'a> {
     pub(crate) fn inc_for(&mut self, claimant: FiberId, word: RefId) -> Result<(), Trap> {
         self.store(word)?.inc(word.id())?;
         self.ledger(claimant).acquire(word);
-        self.settle()
+        self.settle(word.fiber())
     }
 
     /// `rc_inc` routed by the word's owner for an object-graph edge (a
@@ -1175,24 +1591,40 @@ impl<'a> Heaps<'a> {
     /// holding object, released by its free cascade — no frame claim.
     pub(crate) fn inc_edge(&mut self, word: RefId) -> Result<(), Trap> {
         self.store(word)?.inc(word.id())?;
-        self.settle()
+        self.settle(word.fiber())
     }
 
     /// `rc_dec` routed by the word's owner, the claim the running
-    /// fiber's, queues drained.
+    /// fiber's, queues drained. Cross-heap exact ownership: a foreign
+    /// word's count releases only through this fiber's own claim (every
+    /// honest crossing — a call or spawn copy-in, a delivery — acquires
+    /// the row), so a never-claimed dec of a foreign word releases
+    /// nothing while still refusing a freed id: the count it would drop
+    /// is subscribed by its own heap's rows and edges, and stealing it
+    /// freed a live object under a stored reference (the fuzz_vm
+    /// spawn-drain crash). A same-heap dec keeps the one-store
+    /// discipline: the host-borrowed gift counts (an entry body's owned
+    /// parameters over root-staged words) ride no row by design, and the
+    /// frame's own dec is their release.
     pub(crate) fn dec(&mut self, word: RefId) -> Result<(), Trap> {
+        if word.fiber() != self.owner && self.claims[self.owner.index()].count_of(word) == 0 {
+            return self.store(word)?.rc_at(word.id()).map(|_| ());
+        }
         self.store(word)?.dec(word.id())?;
         self.ledger(self.owner).release(word);
-        self.settle()
+        self.settle(word.fiber())
     }
 
-    /// `rc_dec` routed for a death walk: no ledger (the claims were
-    /// taken before the walk began) and no live-context assumption (a
-    /// parked drive's context store is the scratch) — the word's own
-    /// heap takes the dec through the pool, queues drained.
+    /// `rc_dec` routed for a death walk: no ledger traffic (the claims
+    /// were taken before the walk began, so the gated [`Heaps::dec`] must
+    /// not mediate). Routing follows the construction — the live door's
+    /// router serves the current fiber's own words through its context
+    /// store, the parked door's through the pool (a parked drive's
+    /// context store is the scratch, never a walk's target) — and the
+    /// word's own heap takes the dec either way, queues drained.
     pub(crate) fn dec_walk(&mut self, word: RefId) -> Result<(), Trap> {
         self.store(word)?.dec(word.id())?;
-        self.settle()
+        self.settle(word.fiber())
     }
 
     /// The string content of `word`, routed.
@@ -1202,28 +1634,15 @@ impl<'a> Heaps<'a> {
         Ok(text)
     }
 
-    /// Whether two reference words name content-equal strings: a
-    /// same-store pair compares in place, a cross-store pair copies one
-    /// side (string equality is content equality whatever heap each
-    /// side lives on).
-    pub(crate) fn str_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
-        if x.fiber() == y.fiber() {
-            let store = self.store(x)?;
-            let a = store.str_at(x.id())?;
-            let b = store.str_at(y.id())?;
-            return Ok(a == b);
-        }
-        let a = self.store(x)?.str_at(x.id())?.to_owned();
-        let b = self.store(y)?.str_at(y.id())?;
-        Ok(a == b)
-    }
-
     /// Concatenates two strings into a fresh object on the running
-    /// fiber's store, reading each operand from its own heap.
+    /// fiber's store, reading each operand from its own heap. The birth
+    /// count is the calling frame's, both paths — the claim is what the
+    /// frame's later dec rides, so a fast path without it strands the
+    /// count on a word no ledger owns.
     pub(crate) fn concat(&mut self, x: RefId, y: RefId) -> Result<u32, Trap> {
         if x.fiber() == y.fiber() && x.fiber() == self.owner {
             let id = self.current.concat(x.id(), y.id())?;
-            return Ok(id);
+            return Ok(self.claim_result(id));
         }
         let a = self.store(x)?.str_at(x.id())?.to_owned();
         let b = self.store(y)?.str_at(y.id())?.to_owned();
@@ -1275,26 +1694,44 @@ impl<'a> Heaps<'a> {
         Ok(self.claim_result(id))
     }
 
-    /// The element words of list object `word`, routed: a borrowed slice
-    /// of the owning store — copy a word out before another routed call.
-    pub(crate) fn list_at(&mut self, word: RefId) -> Result<&[Value], Trap> {
+    /// The element words of list object `word` and its per-element
+    /// stride, routed: a borrowed slice of the owning store — copy a word
+    /// out before another routed call.
+    pub(crate) fn list_at(&mut self, word: RefId) -> Result<(&[Value], usize), Trap> {
         let store = self.store(word)?;
-        let elems = store.list_at(word.id())?;
-        Ok(elems)
+        store.list_parts(word.id())
     }
 
     /// Concatenates two lists into a fresh object on the running fiber's
     /// store: a same-store pair runs in place, a cross-store pair copies
     /// the element words out and acquires one count per `Ref` element on
-    /// the element's own heap.
+    /// the element's own heap. The strides must agree (an empty operand
+    /// adopts the other side's).
     pub(crate) fn concat_lists(&mut self, x: RefId, y: RefId) -> Result<u32, Trap> {
         if x.fiber() == y.fiber() && x.fiber() == self.owner {
             let id = self.current.concat_lists(x.id(), y.id())?;
-            self.settle()?;
+            self.settle(x.fiber())?;
             return Ok(self.claim_result(id));
         }
-        let front: Vec<Value> = self.list_at(x)?.to_vec();
-        let back: Vec<Value> = self.list_at(y)?.to_vec();
+        let (front, front_s) = {
+            let (elems, stride) = self.list_at(x)?;
+            (elems.to_vec(), stride)
+        };
+        let (back, back_s) = {
+            let (elems, stride) = self.list_at(y)?;
+            (elems.to_vec(), stride)
+        };
+        let stride = match (front_s, back_s) {
+            (0, s) | (s, 0) => s,
+            (s, t) if s == t => s,
+            (s, t) => {
+                return Err(Trap::ElementStride {
+                    obj: y.id(),
+                    stride: s,
+                    given: t,
+                })
+            },
+        };
         let mut elems = Vec::with_capacity(front.len() + back.len());
         for value in front.into_iter().chain(back) {
             if let Value::Ref(word) = value {
@@ -1302,22 +1739,23 @@ impl<'a> Heaps<'a> {
             }
             elems.push(value);
         }
-        let id = self.current.alloc_list(elems);
+        let id = self.current.alloc_list_strided(elems, stride);
         Ok(self.claim_result(id))
     }
 
-    /// Appends one element word onto list object `list`, routed: the
-    /// payload mutation lands on the list's store and a `Ref` element's
-    /// acquired count on the element's own heap.
-    pub(crate) fn push_list(&mut self, list: RefId, value: Value) -> Result<(), Trap> {
-        self.store(list)?.push_list(list.id(), value)?;
-        self.settle()
+    /// Appends one element's whole word span onto list object `list`,
+    /// routed: the payload mutation lands on the list's store and each
+    /// `Ref` word's acquired count on the element's own heap.
+    pub(crate) fn push_list(&mut self, list: RefId, words: &[Value]) -> Result<(), Trap> {
+        self.store(list)?.push_list(list.id(), words)?;
+        self.settle(list.fiber())
     }
 
     /// Resolves a map probe word for the map's store: a local (or
     /// scalar) word compares through the store itself; a foreign word's
-    /// string content resolves here, on the probe's own heap, so the
-    /// content compare never reads the wrong store's payload.
+    /// string content and hash resolve here, on the probe's own heap, so
+    /// the content compare never reads the wrong store's payload and the
+    /// map's store never re-hashes the probe.
     fn resolve_key(&mut self, map: FiberId, key: Value) -> Result<ResolvedKey, Trap> {
         let Value::Ref(word) = key else {
             return Ok(ResolvedKey::Word);
@@ -1325,9 +1763,12 @@ impl<'a> Heaps<'a> {
         if word.fiber() == map {
             return Ok(ResolvedKey::Word);
         }
-        let text = self.store(word)?.str_if(word.id()).map(str::to_owned);
-        Ok(match text {
-            Some(text) => ResolvedKey::Text(text.into()),
+        let probe = self.store(word)?.str_with_hash(word.id());
+        Ok(match probe {
+            Some((text, hash)) => ResolvedKey::Text {
+                text: text.into(),
+                hash,
+            },
             None => ResolvedKey::Opaque,
         })
     }
@@ -1343,7 +1784,7 @@ impl<'a> Heaps<'a> {
     pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: Value) -> Result<(), Trap> {
         let res = self.resolve_key(map.fiber(), key)?;
         self.store(map)?.set_map(map.id(), key, &res, value)?;
-        self.settle()
+        self.settle(map.fiber())
     }
 
     /// A closure word's header and capture block, routed and copied out:
@@ -1373,8 +1814,10 @@ pub enum ResolvedKey {
     /// The word is local to the map's store or carries no reference:
     /// the store resolves it itself.
     Word,
-    /// A foreign string probe's content, resolved on the probe's heap.
-    Text(Box<str>),
+    /// A foreign string probe: its content copied off the probe's heap,
+    /// plus that object's cached content hash, so the map's store compares
+    /// without re-walking the probe.
+    Text { text: Box<str>, hash: u32 },
     /// A foreign reference probe naming no string.
     Opaque,
 }
@@ -1382,7 +1825,35 @@ pub enum ResolvedKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fiber::FIBER_ROOT;
+    use crate::fiber::{FIBER_ROOT, Fiber};
+
+    /// The cross-heap queue: a dying list whose element lives on another
+    /// fiber's heap queues its release on the dying store, and the router's
+    /// drain lands it on the element's own heap. Both queues end empty, so
+    /// every later routed call answers on the zero-length fast path.
+    #[test]
+    fn a_cross_heaps_death_drains_the_queued_release() {
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        // the element's birth count is the adopting list's edge
+        let elem = pool[other.index()].objects.alloc_str("elem".to_owned());
+        let word = RefId::new(other, elem);
+        let list = current.alloc_list(vec![Value::Ref(word)]);
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        heaps
+            .dec(RefId::new(FIBER_ROOT, list))
+            .expect("the list's owner drops");
+        assert!(
+            current.is_empty() && current.queued() == 0,
+            "the dying store queued the release and drained it"
+        );
+        assert!(
+            pool[other.index()].objects.is_empty() && pool[other.index()].objects.queued() == 0,
+            "the element's own heap took the release"
+        );
+    }
 
     #[test]
     fn intern_shares_by_content_and_alloc_does_not() {
@@ -1423,6 +1894,44 @@ mod tests {
         );
     }
 
+    /// A count query records the char count alone; a range query then builds
+    /// the boundary table the char indexes read through, and the table
+    /// answers the multi-byte offsets.
+    #[test]
+    fn a_char_count_leaves_the_boundary_table_unbuilt() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let word = objects.alloc_str("héllo".to_owned());
+        assert_eq!(objects.char_count(word), Ok(5));
+        match objects.payload_of(word) {
+            Some(Object::Str(s)) => match &s.chars {
+                Some(CharIndex::Utf8 { count, offsets }) => {
+                    assert_eq!(*count, 5);
+                    assert!(offsets.is_none(), "the count query allocated no table");
+                },
+                other => panic!("a multi-byte index, got {other:?}"),
+            },
+            other => panic!("a string object, got {other:?}"),
+        }
+        assert_eq!(objects.char_byte_range(word, 1, 3), Ok((1, 4)));
+        match objects.payload_of(word) {
+            Some(Object::Str(s)) => match &s.chars {
+                Some(CharIndex::Utf8 { offsets, .. }) => {
+                    assert_eq!(offsets.as_deref(), Some([0, 1, 3, 4, 5, 6].as_slice()));
+                },
+                other => panic!("a multi-byte index, got {other:?}"),
+            },
+            other => panic!("a string object, got {other:?}"),
+        }
+        // pure ASCII needs no table at all, and both answers follow the bytes
+        let ascii = objects.alloc_str("hello".to_owned());
+        assert_eq!(objects.char_count(ascii), Ok(5));
+        assert_eq!(objects.char_byte_range(ascii, 1, 3), Ok((1, 3)));
+        match objects.payload_of(ascii) {
+            Some(Object::Str(s)) => assert!(matches!(s.chars, Some(CharIndex::Ascii))),
+            other => panic!("a string object, got {other:?}"),
+        }
+    }
+
     #[test]
     fn lists_hold_any_value_words_and_concat_shares_elements() {
         let mut objects = Objects::new(FIBER_ROOT);
@@ -1454,6 +1963,106 @@ mod tests {
         assert_eq!(
             objects.concat_lists(scalars, a),
             Err(Trap::UnknownObject { obj: a })
+        );
+    }
+
+    /// The borrow intern's pin: KSTR_BORROW claims no count, so the map
+    /// owns the canonical one — an acquiring claimant's dec-to-zero churn
+    /// never frees the object, the intern row never unbinds, and both
+    /// load spellings serve the one id.
+    #[test]
+    fn a_borrow_intern_pins_the_canonical_copy_through_claimant_churn() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let borrowed = objects.intern_borrow("held");
+        assert_eq!(objects.rc_at(borrowed), Ok(1), "the map owns the pin alone");
+        // an acquiring load of the same content serves the pinned object
+        let acquired = objects.intern("held");
+        assert_eq!(acquired, borrowed, "one object per distinct content");
+        assert_eq!(objects.rc_at(borrowed), Ok(2), "the pin plus the claimant");
+        // the claimant's death leaves the pin holding the object
+        objects.dec(acquired).expect("the claimant drops");
+        assert_eq!(
+            objects.str_at(borrowed),
+            Ok("held"),
+            "the pin kept the object live"
+        );
+        assert_eq!(objects.len(), 1, "nothing else was born");
+        // a second borrow load serves the same pinned id, claim-free
+        let again = objects.intern_borrow("held");
+        assert_eq!(again, borrowed);
+        assert_eq!(
+            objects.rc_at(borrowed),
+            Ok(1),
+            "a borrow load claims nothing"
+        );
+    }
+
+    /// The pin over already-interned content: the first borrow of an
+    /// unpinned entry incs once to become the map's canonical count, so
+    /// the surviving claimants' decs can never strand a borrow word.
+    #[test]
+    fn a_first_borrow_pins_an_already_interned_entry() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let claimed = objects.intern("shared");
+        assert_eq!(objects.rc_at(claimed), Ok(1), "the claimant alone");
+        let borrowed = objects.intern_borrow("shared");
+        assert_eq!(borrowed, claimed, "the borrow serves the live entry");
+        assert_eq!(
+            objects.rc_at(claimed),
+            Ok(2),
+            "the pin incs past the claimant's count"
+        );
+        // the claimant's dec leaves the pin: the object stays serving
+        objects.dec(claimed).expect("the claimant drops");
+        assert_eq!(objects.str_at(borrowed), Ok("shared"));
+        assert_eq!(objects.rc_at(borrowed), Ok(1));
+    }
+
+    /// The death doors release the pins: a last pin decs to zero, frees,
+    /// and unbinds the row (the next intern starts fresh), and a pin
+    /// with a live claimant survives the release by exactly the
+    /// claimant's count.
+    #[test]
+    fn release_pins_frees_last_pins_and_respects_claimants() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let a = objects.intern_borrow("solo");
+        let b = objects.intern_borrow("kept");
+        let claimant = objects.intern("kept");
+        assert_eq!(objects.rc_at(b), Ok(2));
+        objects.release_pins();
+        assert_eq!(
+            objects.str_at(a),
+            Err(Trap::UnknownObject { obj: a }),
+            "the last pin freed"
+        );
+        assert_eq!(
+            objects.rc_at(b),
+            Ok(1),
+            "the claimant's count survives the release"
+        );
+        // the freed row unbound: a fresh borrow of the same content
+        // allocates a new object — the freed id reuses for it (the
+        // dec-to-alloc pairing), and the new pin holds the new block
+        let fresh = objects.intern_borrow("solo");
+        assert_eq!(fresh, a, "the freed slot is claimed by the next allocation");
+        assert_eq!(objects.str_at(fresh), Ok("solo"));
+        assert_eq!(
+            objects.rc_at(fresh),
+            Ok(1),
+            "the fresh object carries the new pin"
+        );
+        // the claimant's death now frees the object and unbinds the row;
+        // the re-interned pin needs its own door, and the drained store
+        // proves the ledger of pins closed exactly
+        objects.dec(claimant).expect("the claimant drops");
+        assert!(
+            !objects.is_empty(),
+            "the re-interned pin still holds one object"
+        );
+        objects.release_pins();
+        assert!(
+            objects.is_empty(),
+            "the store drains once every door released"
         );
     }
 
@@ -1493,6 +2102,41 @@ mod tests {
         }
         objects.dec(node).expect("the outermost drops");
         assert!(objects.is_empty(), "the whole cascade died");
+    }
+
+    /// The cascade hands its working buffers back empty, so the next death
+    /// reuses their capacity instead of allocating.
+    #[test]
+    fn the_death_cascade_hands_its_buffers_back_empty() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let map = objects.alloc_map();
+        for i in 0..4 {
+            let key = objects.alloc_str(format!("key{i}"));
+            let value = objects.alloc_str(format!("value{i}"));
+            objects
+                .set_map(
+                    map,
+                    Value::Ref(RefId::new(FIBER_ROOT, key)),
+                    &ResolvedKey::Word,
+                    Value::Ref(RefId::new(FIBER_ROOT, value)),
+                )
+                .expect("the map accepts the pair");
+            objects.dec(key).expect("the caller drops the key");
+            objects.dec(value).expect("the caller drops the value");
+        }
+        let pairs = objects.map_pairs(map).expect("the map is live").len();
+        objects.dec(map).expect("the map's owner drops");
+        assert!(objects.is_empty(), "the pairs died with the map");
+        assert!(
+            objects.scratch.dying.is_empty()
+                && objects.scratch.zeros.is_empty()
+                && objects.scratch.words.is_empty(),
+            "the cascade hands its buffers back empty"
+        );
+        assert!(
+            objects.scratch.words.capacity() >= pairs * 2,
+            "the spill buffer kept the drained pairs' capacity"
+        );
     }
 
     /// A map stores and looks up by content keys: two equal-content
@@ -1583,21 +2227,29 @@ mod tests {
             )
             .expect("the local key stores");
         let foreign_text: Box<str> = "host".into();
+        let hash = text_hash(&foreign_text);
         assert_eq!(
             objects.map_at(
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
-                &ResolvedKey::Text(foreign_text.clone())
+                &ResolvedKey::Text {
+                    text: foreign_text.clone(),
+                    hash
+                }
             ),
             Ok(Some(Value::I64(80))),
             "a foreign string probe matches a local key by content"
         );
         let other_text: Box<str> = "port".into();
+        let other_hash = text_hash(&other_text);
         assert_eq!(
             objects.map_at(
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
-                &ResolvedKey::Text(other_text)
+                &ResolvedKey::Text {
+                    text: other_text,
+                    hash: other_hash
+                }
             ),
             Ok(None),
             "different content never matches"
@@ -1630,6 +2282,210 @@ mod tests {
             objects.map_at(map, Value::I64(0), &ResolvedKey::Word),
             Ok(None),
             "an int key never matches a float key"
+        );
+    }
+
+    /// A string object hashes its content once for its whole life: the
+    /// first probe builds the cache the later ones (and a store) answer
+    /// from, and the cached value is the content's own hash, so a fresh
+    /// equal-content object still finds the row.
+    #[test]
+    fn a_string_object_caches_its_content_hash() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let key = objects.alloc_str("cached".to_owned());
+        let cached = |objects: &Objects| match objects.payload_of(key) {
+            Some(Object::Str(s)) => s.hash.get(),
+            other => panic!("a string object, got {other:?}"),
+        };
+        assert_eq!(cached(&objects), None, "nothing hashed the text yet");
+        let map = objects.alloc_map();
+        objects
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Word,
+                Value::I64(1),
+            )
+            .expect("the map accepts the string key");
+        assert_eq!(
+            cached(&objects),
+            Some(text_hash("cached")),
+            "the first probe cached the content hash"
+        );
+        // a second map answers from the same cache, and the fresh
+        // equal-content object finds the row it stored
+        let other = objects.alloc_map();
+        let fresh = objects.alloc_str("cached".to_owned());
+        objects
+            .set_map(
+                other,
+                Value::Ref(RefId::new(FIBER_ROOT, fresh)),
+                &ResolvedKey::Word,
+                Value::I64(2),
+            )
+            .expect("the second map accepts the same content");
+        assert_eq!(
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, fresh)),
+                &ResolvedKey::Word
+            ),
+            Ok(Some(Value::I64(1)))
+        );
+        assert_eq!(
+            objects.map_at(
+                other,
+                Value::Ref(RefId::new(FIBER_ROOT, key)),
+                &ResolvedKey::Word
+            ),
+            Ok(Some(Value::I64(2)))
+        );
+        assert_eq!(cached(&objects), Some(text_hash("cached")));
+    }
+
+    /// A non-string reference key matches by identity, and the kinds never
+    /// mix: the same word finds its row, another reference object misses,
+    /// and neither class matches a key of the other.
+    #[test]
+    fn a_reference_key_matches_by_identity_alone() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let map = objects.alloc_map();
+        let identity = objects.alloc_list(Vec::new());
+        let text = objects.alloc_str("5".to_owned());
+        objects
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, identity)),
+                &ResolvedKey::Word,
+                Value::I64(9),
+            )
+            .expect("the map accepts a reference key");
+        objects
+            .set_map(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, text)),
+                &ResolvedKey::Word,
+                Value::I64(5),
+            )
+            .expect("the map accepts a string key");
+        assert_eq!(
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, identity)),
+                &ResolvedKey::Word
+            ),
+            Ok(Some(Value::I64(9))),
+            "the same reference word names its row"
+        );
+        let other_identity = objects.alloc_list(Vec::new());
+        assert_eq!(
+            objects.map_at(
+                map,
+                Value::Ref(RefId::new(FIBER_ROOT, other_identity)),
+                &ResolvedKey::Word
+            ),
+            Ok(None),
+            "another object of the same kind is a different key"
+        );
+        assert_eq!(
+            objects.map_at(map, Value::I64(5), &ResolvedKey::Word),
+            Ok(None),
+            "a scalar key never matches a reference key"
+        );
+        // the identity probe over the string key misses: the classes never
+        // mix, whatever the filter says
+        let opaque = ResolvedKey::Opaque;
+        assert_eq!(
+            objects.map_at(map, Value::Ref(RefId::new(FIBER_ROOT, text)), &opaque),
+            Ok(None),
+            "an identity probe never matches a stored string key"
+        );
+    }
+
+    /// The row index keeps every row reachable as the map grows: 80 rows
+    /// pass the rebuilds, each answers through the index (a fresh
+    /// equal-content string object included), the neighbouring keys miss,
+    /// and a repeated key overwrites in place without a second row.
+    #[test]
+    fn the_row_index_holds_every_row_across_growth_and_overwrites() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let map = objects.alloc_map();
+        for i in 0..40i64 {
+            objects
+                .set_map(map, Value::I64(i), &ResolvedKey::Word, Value::I64(i * 2))
+                .expect("the map accepts a scalar key");
+            let key = objects.alloc_str(format!("key{i}"));
+            objects
+                .set_map(
+                    map,
+                    Value::Ref(RefId::new(FIBER_ROOT, key)),
+                    &ResolvedKey::Word,
+                    Value::I64(i),
+                )
+                .expect("the map accepts a string key");
+            objects.dec(key).expect("the caller drops its key count");
+        }
+        let shape = match objects.payload_of(map) {
+            Some(Object::Map(data)) => {
+                assert_eq!(data.pairs.len(), 80);
+                assert!(data.slots.len().is_power_of_two());
+                assert!(
+                    data.slots.len() >= data.pairs.len() * 2,
+                    "the load factor stays at most one half"
+                );
+                assert_eq!(
+                    data.slots.iter().filter(|slot| **slot != ROW_NONE).count(),
+                    data.pairs.len(),
+                    "every row claims exactly one index slot"
+                );
+                data.slots.len()
+            },
+            _ => panic!("the map is live"),
+        };
+        assert!(shape >= 160, "the index grew with the rows");
+        for i in 0..40i64 {
+            assert_eq!(
+                objects.map_at(map, Value::I64(i), &ResolvedKey::Word),
+                Ok(Some(Value::I64(i * 2)))
+            );
+            assert_eq!(
+                objects.map_at(map, Value::I64(i + 1000), &ResolvedKey::Word),
+                Ok(None),
+                "a key absent from the map misses"
+            );
+            // a fresh object of the same content names the stored row
+            let hit = objects.alloc_str(format!("key{i}"));
+            assert_eq!(
+                objects.map_at(
+                    map,
+                    Value::Ref(RefId::new(FIBER_ROOT, hit)),
+                    &ResolvedKey::Word
+                ),
+                Ok(Some(Value::I64(i)))
+            );
+            objects.dec(hit).expect("the caller drops its probe count");
+            let miss = objects.alloc_str(format!("missing{i}"));
+            assert_eq!(
+                objects.map_at(
+                    map,
+                    Value::Ref(RefId::new(FIBER_ROOT, miss)),
+                    &ResolvedKey::Word
+                ),
+                Ok(None)
+            );
+            objects.dec(miss).expect("the caller drops its probe count");
+        }
+        // the repeated keys overwrite: the row count and the index hold
+        for i in 0..40i64 {
+            objects
+                .set_map(map, Value::I64(i), &ResolvedKey::Word, Value::I64(-i))
+                .expect("the content-equal key overwrites");
+        }
+        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(80));
+        assert_eq!(
+            objects.map_at(map, Value::I64(9), &ResolvedKey::Word),
+            Ok(Some(Value::I64(-9))),
+            "the overwrite answers under the original key"
         );
     }
 

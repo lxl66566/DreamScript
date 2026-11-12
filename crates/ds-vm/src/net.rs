@@ -1,7 +1,7 @@
 //! The TCP net natives: the network half of the platform surface.
 //!
-//! Five natives in the std platform table (indices 20-24, the table
-//! contract in `native`'s module docs): `net_connect`, `net_send`,
+//! The net ops of the platform ABI's fixed table (the table contract in
+//! `platform`'s module docs): `net_connect`, `net_send`,
 //! `net_recv`, `net_close`, and `http_get`. They answer with the uniform
 //! two-word tag+payload span [BL-2] — the shared success marker on word 0,
 //! the payload on word 1 — and failures carry the [`PLATFORM_NET_ERR`]

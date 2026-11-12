@@ -32,17 +32,19 @@
 //! the parameter and otherwise unchecked here; the affine pass owns it at
 //! M4.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
     Ast, EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, LocalDecl,
     ParamMode, Pattern, StructMember, TraitMember, Type, TypeParam,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     TypeExpr,
     atom::{Case, Field, TraitId, TypeId},
+    id_table::IdTable,
     instance::{Condition, InherentBounds, InstanceDecl, InstanceEnv, InstanceId},
     resolve::{DefId, MethodId, MethodOwner, Package},
     universe::{Ty, Universe},
@@ -186,59 +188,63 @@ pub struct Decls {
     /// one written head all name their shared impl item). This is the tie a
     /// trait-method call site's solved instance needs to reach the impl's
     /// bodies; the environment itself stores only heads and conditions.
-    pub instance_impls: HashMap<InstanceId, Span>,
+    pub instance_impls: IdTable<InstanceId, Span>,
     /// DefId to atom identity for tags, structs, and enums.
-    pub atoms: HashMap<DefId, TypeId>,
+    pub atoms: IdTable<DefId, TypeId>,
     /// Atom identity back to the declaring DefId (field access on
     /// applications decomposes through this).
-    pub defs_of_atoms: HashMap<TypeId, DefId>,
+    pub defs_of_atoms: IdTable<TypeId, DefId>,
     /// DefId to trait identity.
-    pub traits: HashMap<DefId, TraitId>,
+    pub traits: IdTable<DefId, TraitId>,
     /// Alias bodies: DefId to generic parameters and the written type.
-    pub aliases: HashMap<DefId, (Vec<GenericParam>, Type)>,
+    pub aliases: IdTable<DefId, (Vec<GenericParam>, Type)>,
     /// Struct shapes for every struct def (generic and not).
-    pub structs: HashMap<DefId, StructShape>,
+    pub structs: IdTable<DefId, StructShape>,
     /// Enum shapes for every enum def.
-    pub enums: HashMap<DefId, EnumShape>,
+    pub enums: IdTable<DefId, EnumShape>,
     /// Minted cases of non-generic enums, keyed by the case's def.
-    pub cases: HashMap<DefId, CaseDecl>,
+    pub cases: IdTable<DefId, CaseDecl>,
     /// Signatures of named functions, extern functions, and const-arrow
     /// function bindings. Shared behind [`Arc`] because call sites clone
     /// the handle per lookup and `ParamSig::default` carries an AST
     /// subtree — a per-call deep clone dominated the checker's hot path.
-    pub fns: HashMap<DefId, Arc<FnSig>>,
+    pub fns: IdTable<DefId, Arc<FnSig>>,
     /// Trait member signatures keyed by their registered method id (F3).
-    pub members: HashMap<MethodId, Arc<FnSig>>,
+    pub members: IdTable<MethodId, Arc<FnSig>>,
     /// Member names of each trait, for impl signature matching (B6).
-    pub trait_members: HashMap<DefId, Vec<String>>,
+    pub trait_members: IdTable<DefId, Vec<String>>,
+    /// The member names of each trait carrying a default body: the
+    /// members an impl may omit (the default body serves their calls).
+    /// Every other member must arrive with a bodied impl member.
+    pub trait_member_defaults: IdTable<DefId, Vec<String>>,
     /// Generic parameter names of each trait, in declaration order: an
     /// impl's trait reference substitutes them positionally when it
     /// spells its arguments (B6).
-    pub trait_generics: HashMap<DefId, Vec<String>>,
+    pub trait_generics: IdTable<DefId, Vec<String>>,
     /// Inherent impl-function signatures keyed by method id (F3).
-    pub inherent: HashMap<MethodId, Arc<FnSig>>,
+    pub inherent: IdTable<MethodId, Arc<FnSig>>,
     /// The impl item each inherent impl function lives in, keyed by its
     /// registered method id: the mirror of [`Decls::instance_impls`] for
     /// inherent dispatch — a solved inherent call site reaches its impl's
     /// bodies through this tie, never through a package def.
-    pub inherent_impls: HashMap<MethodId, Span>,
+    pub inherent_impls: IdTable<MethodId, Span>,
     /// The declared generic bounds of every generic inherent impl, keyed by
     /// the impl item's span: the inherent mirror of [`Decls::instance_impls`]
     /// plus its instances' conditions — an inherent impl declares no
     /// instance, so this record is the only place its bounds live. Call
     /// sites verify the bounds and stage their runtime evidence from it;
     /// the lowering pass reads it for the evidence-demand walk.
-    pub inherent_impl_bounds: HashMap<Span, InherentBounds>,
+    pub inherent_impl_bounds: FxHashMap<Span, InherentBounds>,
     /// Top-level `const`/`var` initializers keyed by every name the
     /// binding pattern declares (lazy memoized typing (G3)).
-    pub consts: HashMap<DefId, LocalDecl>,
+    pub consts: IdTable<DefId, LocalDecl>,
     /// The solved return type of every impl-member function body (trait
     /// and inherent alike), keyed by the declaring `FnDecl`'s span: the
     /// written return solved against `Self`, or the body's own checked
     /// type when the declaration infers it. The lowering pass reads this
     /// when it plans impl bodies — a member function has no package
     /// `DefId`, so no other solved-signature table names it.
-    pub impl_fn_rets: HashMap<Span, Ty>,
+    pub impl_fn_rets: FxHashMap<Span, Ty>,
     /// Shared counter for minted type-variable tags (`$t#3`): instance
     /// declaration and body checking draw from it so the package universe
     /// never sees one name twice.
@@ -353,6 +359,7 @@ fn item_def(package: &Package, item: &Item) -> Option<DefId> {
             | ItemKind::Tag(_)
             | ItemKind::TypeAlias(_)
             | ItemKind::Trait(_)
+            | ItemKind::Platform(_)
     ) {
         package.lookup_type(name)
     } else {
@@ -484,6 +491,18 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     }
                 }
                 decls.trait_members.insert(def, names);
+                decls.trait_member_defaults.insert(
+                    def,
+                    t.members
+                        .iter()
+                        .filter_map(|member| {
+                            let TraitMember::Fn(f) = member else {
+                                return None;
+                            };
+                            f.body.is_some().then(|| f.name.name.clone())
+                        })
+                        .collect(),
+                );
                 decls.trait_generics.insert(
                     def,
                     t.generics.iter().map(|p| p.name.name.clone()).collect(),
@@ -493,7 +512,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
             decls.fns.insert(def, Arc::new(FnSig::of(f)));
         },
-        ItemKind::Import(_) | ItemKind::Local(_) | ItemKind::Impl(_) => {},
+        ItemKind::Import(_) | ItemKind::Local(_) | ItemKind::Impl(_) | ItemKind::Platform(_) => {},
     }
 }
 
@@ -648,7 +667,8 @@ fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec
         | ItemKind::Fn(_)
         | ItemKind::ExternFn(_)
         | ItemKind::Local(_)
-        | ItemKind::Import(_) => {},
+        | ItemKind::Import(_)
+        | ItemKind::Platform(_) => {},
     }
 }
 
@@ -712,7 +732,7 @@ fn conv_expr(package: &Package, ty: &Type, decls: &mut Decls) -> Option<TypeExpr
                 path_expr(package, only, decls)?
             } else {
                 let ctor = atom_of_path(package, only, decls)?;
-                let args = conv_args(package, args, &HashMap::new(), decls)?;
+                let args = conv_args(package, args, &FxHashMap::default(), decls)?;
                 TypeExpr::Atom(decls.universe.apply_atom(ctor, &args).ok()?)
             }
         },
@@ -746,7 +766,7 @@ fn conv_expr(package: &Package, ty: &Type, decls: &mut Decls) -> Option<TypeExpr
 fn conv_args(
     package: &Package,
     args: &[Type],
-    vars: &HashMap<String, TypeId>,
+    vars: &FxHashMap<String, TypeId>,
     decls: &mut Decls,
 ) -> Option<Vec<Ty>> {
     let _ = vars;
@@ -833,7 +853,7 @@ fn declare_unit_name(decls: &mut Decls, name: &str) -> Option<TypeId> {
 fn conv_node(
     package: &Package,
     ty: &Type,
-    vars: &HashMap<String, TypeId>,
+    vars: &FxHashMap<String, TypeId>,
     decls: &mut Decls,
 ) -> Option<TypeExpr> {
     Some(match ty {
@@ -862,7 +882,7 @@ fn conv_node(
 fn solve_written(
     package: &Package,
     ty: &Type,
-    vars: &HashMap<String, TypeId>,
+    vars: &FxHashMap<String, TypeId>,
     decls: &mut Decls,
 ) -> Option<Ty> {
     Some(match ty {
@@ -932,7 +952,7 @@ fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls
     if imp.generics.is_empty() {
         return;
     }
-    let mut vars = HashMap::new();
+    let mut vars = FxHashMap::default();
     for param in &imp.generics {
         // the same minting rule as the trait arm: a bare `$name` would
         // collide across impls (the universe is package-wide), so minted
@@ -996,7 +1016,7 @@ fn declare_instance(
         return
     };
 
-    let mut vars = HashMap::new();
+    let mut vars = FxHashMap::default();
     for param in &imp.generics {
         // A bare `$name` would collide with every other impl naming its
         // parameter the same (the universe is package-wide), so minted
@@ -1124,7 +1144,7 @@ fn pattern_names(pat: &Pattern) -> Vec<String> {
 /// here: they register one entry per pattern binder (see `reserve_local`).
 fn item_name(item: &Item) -> &str {
     match &item.kind {
-        ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Local(_) => "",
+        ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Local(_) | ItemKind::Platform(_) => "",
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => f.name.name.as_str(),
         ItemKind::Struct(s) => s.name.name.as_str(),
         ItemKind::Enum(e) => e.name.name.as_str(),

@@ -435,8 +435,11 @@ impl InstanceEnv {
         if conditions.is_empty() {
             for &id in &ids {
                 let head = self.instances[id.index() as usize].head;
-                let atoms: Vec<_> = universe.members(head).to_vec();
-                for atom in atoms {
+                // Recording membership mints no set, so the head's member set
+                // is read by index.
+                let len = universe.members(head).len();
+                for index in 0..len {
+                    let atom = universe.members(head)[index];
                     universe.impl_trait(decl.trait_id, atom)?;
                 }
             }

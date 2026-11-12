@@ -1,11 +1,12 @@
-//! Timing harness for the checking passes: the conformance corpus through
-//! `linearity::check` (which runs the full analyze pipeline plus the
-//! affine pass) N times under `std::time::Instant`, printing per-file and
-//! total medians. Not a libtest bench: run with
-//! `cargo bench -p ds-check --bench check_perf`; the round count defaults
-//! to 30 and is overridable via `DS_CHECK_BENCH_ROUNDS`. The corpus set
-//! and ambients mirror the conformance gate so the measured work is the
-//! gate's work.
+//! Timing harness for the front end of the checking path: the conformance
+//! corpus files are parsed (ambient plus corpus) and then run through
+//! `linearity::check` (the full analyze pipeline plus the affine pass) N times
+//! under `std::time::Instant`, printing per-file parse and check medians
+//! separately so neither half hides the other. Not a libtest bench: run with
+//! `cargo bench -p ds-check --bench check_perf`; the round count defaults to
+//! 30 and is overridable via `DS_CHECK_BENCH_ROUNDS`. The corpus set and
+//! ambients mirror the conformance gate so the measured work is the gate's
+//! work.
 
 use std::{path::PathBuf, time::Instant};
 
@@ -136,14 +137,37 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
 );
 
-/// One parsed corpus file plus its ambient, ready for repeated checks.
+/// One corpus file plus its ambient source, re-parsed every round so both
+/// halves are timed over the same work.
 struct Input {
     name: &'static str,
-    files: Files,
-    asts: Vec<ds_parse::Ast>,
+    ambient: &'static str,
+    source: String,
     /// The diagnostic count of the first round: every later round must
     /// reproduce it or the timing is comparing different work.
     diags: usize,
+}
+
+/// One round's front-end work: the two sources parsed, then the trees checked.
+struct Round {
+    files: Files,
+    asts: Vec<ds_parse::Ast>,
+}
+
+/// Parses one file's ambient and source into a fresh registry: the parse half
+/// of a round.
+fn parse_round(name: &str, ambient: &str, source: &str) -> Round {
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", ambient);
+    let cor = files.add_source("corpus.ds", source);
+    let asts = [
+        parse(&files, amb).unwrap_or_else(|d| panic!("{name} ambient: {d:?}")),
+        parse(&files, cor).unwrap_or_else(|d| panic!("{name} corpus: {d:?}")),
+    ];
+    Round {
+        files,
+        asts: asts.into(),
+    }
 }
 
 fn median(values: &mut [f64]) -> f64 {
@@ -171,18 +195,12 @@ fn main() {
     let mut inputs = Vec::new();
     for (name, ambient) in corpus {
         let source = std::fs::read_to_string(root.join(name)).unwrap();
-        let mut files = Files::new();
-        let amb = files.add_source("ambient.ds", ambient);
-        let cor = files.add_source("corpus.ds", &source);
-        let asts = [
-            parse(&files, amb).unwrap_or_else(|d| panic!("{name} ambient: {d:?}")),
-            parse(&files, cor).unwrap_or_else(|d| panic!("{name} corpus: {d:?}")),
-        ];
-        let (checked, _) = check(&files, &asts);
+        let round = parse_round(name, ambient, &source);
+        let (checked, _) = check(&round.files, &round.asts);
         inputs.push(Input {
             name,
-            files,
-            asts: asts.into(),
+            ambient,
+            source,
             diags: checked.diags.len(),
         });
     }
@@ -194,17 +212,22 @@ fn main() {
     // Warmup rounds stabilize the allocator and caches before timing.
     for _ in 0..3 {
         for input in &inputs {
-            let _ = check(&input.files, &input.asts);
+            let round = parse_round(input.name, input.ambient, &input.source);
+            let _ = check(&round.files, &round.asts);
         }
     }
-    let mut per_file: Vec<Vec<f64>> = inputs.iter().map(|_| Vec::new()).collect();
-    let mut totals: Vec<f64> = Vec::new();
+    let mut parse_ms: Vec<Vec<f64>> = inputs.iter().map(|_| Vec::new()).collect();
+    let mut check_ms: Vec<Vec<f64>> = inputs.iter().map(|_| Vec::new()).collect();
+    let mut round_totals: Vec<f64> = Vec::new();
     for _ in 0..rounds {
         let round_start = Instant::now();
         for (index, input) in inputs.iter().enumerate() {
             let start = Instant::now();
-            let (checked, _) = check(&input.files, &input.asts);
-            per_file[index].push(start.elapsed().as_secs_f64() * 1e3);
+            let round = parse_round(input.name, input.ambient, &input.source);
+            parse_ms[index].push(start.elapsed().as_secs_f64() * 1e3);
+            let start = Instant::now();
+            let (checked, _) = check(&round.files, &round.asts);
+            check_ms[index].push(start.elapsed().as_secs_f64() * 1e3);
             assert_eq!(
                 checked.diags.len(),
                 input.diags,
@@ -212,15 +235,27 @@ fn main() {
                 input.name
             );
         }
-        totals.push(round_start.elapsed().as_secs_f64() * 1e3);
+        round_totals.push(round_start.elapsed().as_secs_f64() * 1e3);
     }
     for (index, input) in inputs.iter().enumerate() {
-        let values = &mut per_file[index];
-        println!("{:>32}  median {:9.3} ms", input.name, median(values));
+        println!(
+            "{:>32}  parse {:9.3} ms  check {:9.3} ms",
+            input.name,
+            median(&mut parse_ms[index]),
+            median(&mut check_ms[index])
+        );
     }
+    let mut parse_all: Vec<f64> = parse_ms.iter().flatten().copied().collect();
+    let mut check_all: Vec<f64> = check_ms.iter().flatten().copied().collect();
     println!(
-        "{:>32}  median {:9.3} ms  ({rounds} rounds)",
+        "{:>32}  parse {:9.3} ms  check {:9.3} ms  ({rounds} rounds, per-file medians)",
         "TOTAL",
-        median(&mut totals)
+        median(&mut parse_all),
+        median(&mut check_all)
+    );
+    println!(
+        "{:>32}  median {:9.3} ms  ({rounds} rounds, whole round)",
+        "TOTAL",
+        median(&mut round_totals)
     );
 }

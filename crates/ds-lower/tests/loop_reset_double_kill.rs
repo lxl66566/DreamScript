@@ -18,7 +18,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PRELUDE: &str = "
 tag int
@@ -136,8 +136,8 @@ fn run_lowered(lowered: &Lowered, source: &str) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm

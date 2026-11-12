@@ -1,0 +1,149 @@
+//! Randomized end-to-end execution property over source-generated
+//! programs, the nextest-runnable stand-in for the cargo-fuzz target
+//! `fuzz_vm`'s source leg (the shared generator in fuzz/exec_gen.rs,
+//! included by path so target and mirror can never drift): fuzz bytes
+//! become one well-typed DS program over the landed match and fork-join
+//! vocabulary, and the whole chain — parse, check, lower, module round
+//! trip, loader install, VM run — never panics, the captured answers
+//! equal the generator's oracle, and the heap drains at run end. The
+//! census asserts the vocabulary stays in the draw set: or-patterns,
+//! struct patterns, case payload tests, guards over union dispatch,
+//! nested struct sub-patterns, whole-span union equality, par_map and
+//! par_reduce sites, closure callables, multi-word answers, and
+//! the free generic call vocabulary (call sites into the ONE
+//! bodies, serving impl bodies, the nested runtime form, tail
+//! transfers, two-level instantiations, and inert uncalled
+//! declarations).
+
+#[path = "../../../fuzz/exec_gen.rs"]
+mod exec_gen;
+
+/// xorshift64* PRNG: deterministic, no dependency, good enough for byte noise.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn byte(&mut self) -> u8 {
+        u8::try_from(self.next_u64() >> 56).expect("top 8 bits fit u8")
+    }
+}
+
+fn rng_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut rng = Rng(seed | 1);
+    (0..len).map(|_| rng.byte()).collect()
+}
+
+/// Case count for `repeated_generated_programs`; a CI fuzz job can crank
+/// it with `FUZZ_RUNS=<n> cargo nextest run`. One run compiles and
+/// executes a whole generated program, so the knob is capped like the
+/// checker leg's. Invalid or unset values keep the default.
+fn fuzz_runs() -> u64 {
+    std::env::var("FUZZ_RUNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300)
+        .min(1500)
+}
+
+/// The sweep: every seed's program answers its oracle and drains, and
+/// the vocabulary census stays nonzero across the sweep (a weighting
+/// regression fails loudly).
+#[test]
+fn generated_programs_answer_their_oracle() {
+    let mut total = exec_gen::Drawn::default();
+    for seed in 0..240u64 {
+        let len = 16 + usize::try_from(seed % 24).expect("len fits") * 11;
+        let drawn = exec_gen::exercise(&rng_bytes(seed, len));
+        total.or_patterns += drawn.or_patterns;
+        total.struct_patterns += drawn.struct_patterns;
+        total.payload_tests += drawn.payload_tests;
+        total.union_guards += drawn.union_guards;
+        total.nested_sub_patterns += drawn.nested_sub_patterns;
+        total.union_equality += drawn.union_equality;
+        total.par_map += drawn.par_map;
+        total.par_reduce += drawn.par_reduce;
+        total.closures += drawn.closures;
+        total.multiword += drawn.multiword;
+        total.generic_calls += drawn.generic_calls;
+        total.generic_impls += drawn.generic_impls;
+        total.generic_runtime_forms += drawn.generic_runtime_forms;
+        total.generic_tails += drawn.generic_tails;
+        total.two_level_calls += drawn.two_level_calls;
+        total.inert_generics += drawn.inert_generics;
+    }
+    assert!(total.or_patterns > 0, "value-level or-patterns are drawn");
+    assert!(total.struct_patterns > 0, "struct patterns are drawn");
+    assert!(total.payload_tests > 0, "case payload tests are drawn");
+    assert!(
+        total.union_guards > 0,
+        "guards over union dispatch are drawn"
+    );
+    assert!(
+        total.nested_sub_patterns > 0,
+        "nested struct sub-patterns are drawn"
+    );
+    assert!(
+        total.union_equality > 0,
+        "whole-span union equality is drawn"
+    );
+    assert!(total.par_map > 0, "par_map sites are drawn");
+    assert!(total.par_reduce > 0, "par_reduce folds are drawn");
+    assert!(total.closures > 0, "closure callables are drawn");
+    assert!(total.multiword > 0, "multi-word answers are drawn");
+    assert!(total.generic_calls > 0, "free generic call sites are drawn");
+    assert!(total.generic_impls > 0, "serving impl bodies are drawn");
+    assert!(
+        total.generic_runtime_forms > 0,
+        "nested generic runtime forms are drawn"
+    );
+    assert!(
+        total.generic_tails > 0,
+        "tail-position generic calls are drawn"
+    );
+    assert!(
+        total.two_level_calls > 0,
+        "two-level instantiations are drawn"
+    );
+    assert!(
+        total.inert_generics > 0,
+        "inert uncalled declarations are drawn"
+    );
+    // the degenerate inputs: empty and single-byte streams cycle into a
+    // full deterministic program too
+    exec_gen::exercise(&[]);
+    exec_gen::exercise(&[0]);
+    exec_gen::exercise(&[0xff]);
+}
+
+/// The repetition arm: the campaign's mirror companion.
+#[test]
+fn repeated_generated_programs_answer_their_oracle() {
+    for run in 0..fuzz_runs() {
+        let seed = run.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5eed_feed_c0de_d00d;
+        let len = 8 + usize::try_from(seed % 64).expect("len fits") * 7;
+        exec_gen::exercise(&rng_bytes(seed, len));
+    }
+}
+
+/// Generation is deterministic per input: the same bytes always produce
+/// the same program, oracle, and census, so any campaign finding
+/// reproduces from the raw input alone.
+#[test]
+fn generation_is_deterministic() {
+    for seed in [1u64, 42, 97531] {
+        let data = rng_bytes(seed, 33);
+        let a = exec_gen::generate(&data);
+        let b = exec_gen::generate(&data);
+        assert_eq!(a.source, b.source, "same input, same program");
+        assert_eq!(a.expected, b.expected, "same input, same oracle");
+        assert_eq!(a.drawn.or_patterns, b.drawn.or_patterns, "same census");
+    }
+}

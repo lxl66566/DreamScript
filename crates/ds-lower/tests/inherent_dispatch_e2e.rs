@@ -5,10 +5,10 @@
 //! so no instance word and no dispatch uop exist. A member tail lowers
 //! through that same local-callee identity as a CALLT transfer, and an
 //! omitted defaulted member parameter stages the literal at the call
-//! site like the free-fn spelling. Refusals stay honest: a `mut self`
-//! receiver refuses through the non-borrow parameter mode (the generic
-//! inherent evidence surface runs in inherent_impl_evidence_e2e, and its
-//! transitive shapes refuse in generic_impl_refusals).
+//! site like the free-fn spelling. A `mut self` receiver re-seats its
+//! window body-internally (the generic inherent evidence surface runs in
+//! inherent_impl_evidence_e2e, and its transitive shapes refuse in
+//! generic_impl_refusals).
 
 use ds_abi::Uop;
 use ds_check::analyze;
@@ -16,7 +16,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/inherent_impl_probe.ds");
 
@@ -53,8 +53,8 @@ fn run_lowered(source: &str, lowered: &Lowered) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm
@@ -172,32 +172,41 @@ fn inherent_call_sites_emit_plain_call_and_tail_transfers() {
     );
 }
 
-/// A `mut self` receiver refuses through the existing non-borrow
-/// parameter mode: the impl item plans, and the body's own parameter
-/// binding refuses before anything runs.
+/// A `mut self` receiver lowers as a re-storable window: the body's
+/// re-seat stays body-internal (the caller's var binding never observes
+/// it), and the dispatch stays a plain local call with no dispatch uop.
 #[test]
-fn a_mut_self_receiver_refuses_through_the_non_borrow_mode() {
+fn a_mut_self_receiver_reseats_its_window() {
     let source = concat!(
         "tag int\n",
         "struct counter { ticks: int }\n",
         "impl counter {\n",
-        "  fn set(mut self) -> int { self.ticks }\n",
+        "  fn set(mut self) -> int {\n",
+        "    self = counter { ticks: self.ticks + 10 }\n",
+        "    self.ticks\n",
+        "  }\n",
         "}\n",
         "fn main() -> int {\n",
-        "  const c = counter { ticks: 1 }\n",
-        "  c.set()\n",
+        "  var c = counter { ticks: 1 }\n",
+        "  const got = c.set()\n",
+        "  got + c.ticks\n",
         "}\n",
     );
-    let Err(err) = lower_inline("mut_self.ds", source) else {
-        panic!("a mut self receiver must refuse this round")
-    };
+    let lowered = lower_inline("mut_self", source).expect("a mut self receiver lowers");
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("mut_self", "main", &[]),
+        Ok(Value::I64(12)),
+        "the window re-seats inside the body; the caller's copy keeps 1"
+    );
+    let main = shape(&lowered, "main");
     assert!(
-        matches!(err, LowerError::Unsupported { .. }),
-        "an unsupported boundary: {err}"
+        main.iter().any(|k| k == "Call"),
+        "the re-seated receiver still dispatches as a plain local call: {main:?}"
     );
     assert!(
-        err.to_string().contains("a non-borrow parameter mode"),
-        "the refusal names the parameter-mode boundary: {err}"
+        !main.iter().any(|k| k == "Callg"),
+        "no dispatch uop at the inherent site: {main:?}"
     );
 }
 

@@ -12,7 +12,9 @@
 //! the CALLG carries names the frame's evidence slot). Inherent
 //! dot-calls no longer refuse here: the inherent dispatch surface has
 //! its own end-to-end suite, and the out-of-scope generic shapes still
-//! refuse naming their seams.
+//! refuse naming their seams. A defaulted member parameter stages the
+//! trait's declared literal at every dispatch spelling [F7] — the
+//! declaration is the default's single authority.
 
 use ds_abi::{ConstIdx, Uop};
 use ds_check::analyze;
@@ -20,7 +22,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/trait_dispatch_probe.ds");
 
@@ -85,8 +87,8 @@ fn run_lowered(source: &str, lowered: &Lowered) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm
@@ -398,8 +400,184 @@ fn generic_dispatch_stages_evidence_and_dispatches_from_the_slot() {
     let instance = i64::from(2); // shows int, shows string, shows list[t]
     assert_eq!(
         evidence,
-        vec![vec![int_body, instance], vec![string_body, instance],],
-        "each site stages its serving body's index then the declared instance; the generic body \
-         is {list_body}"
+        vec![vec![int_body, int_body, int_body, instance], vec![
+            string_body,
+            string_body,
+            string_body,
+            instance
+        ],],
+        "each site stages its serving body's area (follow words padded at the concrete end) then \
+         the declared instance; the generic body is {list_body}"
+    );
+}
+
+const DEFAULT_SOURCE: &str = include_str!("fixtures/trait_default_probe.ds");
+
+/// Parse -> check -> lower for the defaulted-dispatch probe.
+fn lower_default_probe() -> (String, Lowered) {
+    let mut files = Files::new();
+    let id = files.add_source("trait_default_probe.ds", DEFAULT_SOURCE);
+    let asts = [parse(&files, id).expect("the fixture parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the fixture checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "trait_default_probe",
+        Hash128::compute(DEFAULT_SOURCE.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the fixture lowers");
+    (DEFAULT_SOURCE.to_owned(), lowered)
+}
+
+/// The trait-member default authority end to end [F7]: every dispatch
+/// spelling stages the trait's declared default at the call site — the
+/// dot form and the qualified form answer identically for the omitted
+/// default and for the written argument, the string default's Ref word
+/// stages with its count balancing (the heap drains), and the generic
+/// body's nested sites on the bound variable stage the same declared
+/// default through the sentinel dispatch (formerly a staged-width
+/// trap: the site staged no default and the VM's slide validation
+/// refused the transfer).
+#[test]
+fn every_dispatch_spelling_stages_the_trait_declared_default() {
+    let (source, lowered) = lower_default_probe();
+    let mut vm = run_lowered(&source, &lowered);
+    assert_eq!(
+        vm.run("trait_default_probe", "main", &[]),
+        Ok(Value::I64(0)),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        concat!("4\n", "4\n", "8\n", "8\n", "3!\n", "3?\n", "15\n", "4\n").as_bytes(),
+        "both spellings answer identically, the string default stages, and the nested sites sum \
+         (3+1) + (10+1)"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The dispatch tail keeps its transfer with the staged default aboard:
+/// `go` ends in a tail trait-site whose omitted default stages before
+/// the CALLTG, so the frame transfers instead of growing the stack and
+/// the uop's real-argument count names the staged default too.
+#[test]
+fn the_dispatch_tail_transfers_with_the_staged_default() {
+    let (_, lowered) = lower_default_probe();
+    let go = shape(&lowered, "go");
+    assert!(
+        go.contains(&"Calltg".to_owned()),
+        "the tail dispatch transfers with its staged default: {go:?}"
+    );
+}
+
+/// A full impl — every trait member bodied — checks and runs end to
+/// end: both members plan under their mangled identities, both call
+/// spellings answer, and the heap drains.
+#[test]
+fn a_full_impl_checks_and_runs_end_to_end() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn twice(self) -> int\n",
+        "  fn thrice(self) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "  fn twice(self) -> int { self + self }\n",
+        "  fn thrice(self) -> int { self.twice() + self }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const n = 4\n",
+        "  n.twice() + n.thrice()\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("full_impl.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the full impl checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "full_impl",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the full impl lowers");
+    let mut vm = run_lowered(source, &lowered);
+    assert_eq!(
+        vm.run("full_impl", "main", &[]),
+        Ok(Value::I64(20)),
+        "main answers 8 + 12 through both members"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The partial-impl refusal fires at checking, ahead of lowering: an
+/// impl missing a bodiless, non-defaulted trait member reports DS2023
+/// at the impl's own span, so a package carrying the shape never
+/// reaches the dispatch seam's defensive diagnostic.
+#[test]
+fn a_partial_impl_refuses_at_checking_before_lowering() {
+    let source = concat!(
+        "tag int\n",
+        "trait sized {\n",
+        "  fn twice(self) -> int\n",
+        "}\n",
+        "impl sized for int {\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  4.twice()\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("partial_impl.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    let diag = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2023")
+        .unwrap_or_else(|| {
+            panic!(
+                "the incomplete impl refuses at checking: {}",
+                analyzed
+                    .checked
+                    .diags
+                    .iter()
+                    .map(|diag| human(diag, &files))
+                    .collect::<String>()
+            )
+        });
+    assert!(
+        diag.message.contains("implements no `twice` member"),
+        "the refusal names the missing member: {}",
+        diag.message
     );
 }

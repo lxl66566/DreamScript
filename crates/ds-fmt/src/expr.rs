@@ -19,7 +19,7 @@ use ds_parse::{
 
 use crate::{
     ctx::Ctx,
-    ty::{write_generics, write_params, write_ty},
+    ty::{write_generics, write_params, write_path, write_ty},
 };
 
 /// Two spaces per indent level.
@@ -29,23 +29,57 @@ pub(crate) fn push_indent(out: &mut String, level: usize) {
     }
 }
 
-/// One renderable line (or multi-line run): its source extent drives
-/// blank-line preservation between consecutive elements.
-pub(crate) struct Elem {
-    pub start: u32,
-    pub end: u32,
-    pub text: String,
+/// Element separator state for one element run: every element writes straight
+/// into the output, and the run's source extents drive the blank-line
+/// preservation between consecutive elements.
+pub(crate) struct ElemStream {
+    /// Source end of the last element written, `None` before the first.
+    prev_end: Option<u32>,
+    /// Whether the first element starts on a fresh line (block bodies after
+    /// `{`); file-level content joins without a leading newline.
+    leading: bool,
 }
 
-pub(crate) fn trivia_elem(ctx: &Ctx, indent: usize, t: &ds_parse::Trivia) -> Elem {
-    let mut text = String::new();
-    push_indent(&mut text, indent);
-    text.push_str(ctx.comment_text(t));
-    Elem {
-        start: t.span.start,
-        end: t.span.end,
-        text,
+impl ElemStream {
+    pub(crate) fn new(leading: bool) -> Self {
+        Self {
+            prev_end: None,
+            leading,
+        }
     }
+
+    /// Opens the element starting at `start`, writing the separator before it.
+    pub(crate) fn begin(&mut self, ctx: &Ctx, out: &mut String, start: u32) {
+        match self.prev_end {
+            Some(p) => out.push_str(if ctx.blank_between(p, start) { "\n\n" } else { "\n" }),
+            None if self.leading => out.push('\n'),
+            None => {},
+        }
+    }
+
+    /// Closes the element written since [`Self::begin`], which ends at `end`.
+    pub(crate) fn end(&mut self, end: u32) {
+        self.prev_end = Some(end);
+    }
+
+    /// Whether any element was written.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.prev_end.is_none()
+    }
+}
+
+/// One comment line at `indent`: its separator plus the verbatim comment text.
+pub(crate) fn push_comment(
+    ctx: &Ctx,
+    out: &mut String,
+    stream: &mut ElemStream,
+    indent: usize,
+    t: &ds_parse::Trivia,
+) {
+    stream.begin(ctx, out, t.span.start);
+    push_indent(out, indent);
+    out.push_str(ctx.comment_text(t));
+    stream.end(t.span.end);
 }
 
 fn stmt_span_end(stmt: &Stmt) -> u32 {
@@ -60,64 +94,45 @@ fn stmt_span_start(stmt: &Stmt) -> u32 {
         .map_or(stmt.span.start, |t| t.span.start.min(stmt.span.start))
 }
 
-/// The elements of a block body: statements (with their leading comments as
-/// separate lines, trailing same-line comments appended inline) plus the
-/// comments before the closing brace. A trailing comment that sits on a later
-/// line than the statement's end (deep trivia the parser attached to the
-/// statement) becomes its own line after the statement — content never
-/// disappears.
-pub(crate) fn block_elems(
+/// Writes a block body: statements (with their leading comments as separate
+/// lines, trailing same-line comments appended inline) plus the comments
+/// before the closing brace. A trailing comment that sits on a later line than
+/// the statement's end (deep trivia the parser attached to the statement)
+/// becomes its own line after the statement — content never disappears.
+/// Answers whether the body wrote any element.
+fn write_block_elems(
     ctx: &Ctx,
+    out: &mut String,
     indent: usize,
     stmts: &[Stmt],
     trailing: &[ds_parse::Trivia],
-) -> Vec<Elem> {
-    let mut elems = Vec::new();
+) -> bool {
+    let mut stream = ElemStream::new(true);
     for stmt in stmts {
         for t in &stmt.leading_trivia {
-            elems.push(trivia_elem(ctx, indent, t));
+            push_comment(ctx, out, &mut stream, indent, t);
         }
-        let mut text = String::new();
-        push_indent(&mut text, indent);
-        write_stmt(ctx, &mut text, indent, stmt);
+        stream.begin(ctx, out, stmt_span_start(stmt));
+        push_indent(out, indent);
+        write_stmt(ctx, out, indent, stmt);
         let end_line = ctx.line(stmt.span.end);
-        let mut own_lines = Vec::new();
         for t in &stmt.trailing_trivia {
             if ctx.line(t.span.start) == end_line {
-                text.push(' ');
-                text.push_str(ctx.comment_text(t));
-            } else {
-                own_lines.push(trivia_elem(ctx, indent, t));
+                out.push(' ');
+                out.push_str(ctx.comment_text(t));
             }
         }
-        elems.push(Elem {
-            start: stmt_span_start(stmt),
-            end: stmt_span_end(stmt),
-            text,
-        });
-        elems.append(&mut own_lines);
+        stream.end(stmt_span_end(stmt));
+        for t in &stmt.trailing_trivia {
+            if ctx.line(t.span.start) != end_line {
+                push_comment(ctx, out, &mut stream, indent, t);
+            }
+        }
     }
     for t in trailing {
-        elems.push(trivia_elem(ctx, indent, t));
+        push_comment(ctx, out, &mut stream, indent, t);
     }
-    elems
-}
-
-/// Joins elements with one newline, or two when the source had a blank run
-/// between them (runs collapse to a single blank line). With `leading`,
-/// every element starts on a fresh line (block bodies after `{`); without
-/// it, elements join without a leading newline (file-level block content).
-pub(crate) fn push_elems(ctx: &Ctx, out: &mut String, elems: &[Elem], leading: bool) {
-    let mut prev_end: Option<u32> = None;
-    for e in elems {
-        if let Some(p) = prev_end {
-            out.push_str(if ctx.blank_between(p, e.start) { "\n\n" } else { "\n" });
-        } else if leading {
-            out.push('\n');
-        }
-        out.push_str(&e.text);
-        prev_end = Some(e.end);
-    }
+    !stream.is_empty()
 }
 
 // ===== blocks =====
@@ -174,9 +189,7 @@ fn write_block_inline(ctx: &Ctx, out: &mut String, b: &BlockExpr) {
 
 fn write_block_multi(ctx: &Ctx, out: &mut String, base: usize, b: &BlockExpr) {
     out.push('{');
-    let elems = block_elems(ctx, base + 1, &b.stmts, &b.trailing_trivia);
-    push_elems(ctx, out, &elems, true);
-    if !elems.is_empty() {
+    if write_block_elems(ctx, out, base + 1, &b.stmts, &b.trailing_trivia) {
         out.push('\n');
         push_indent(out, base);
     }
@@ -331,9 +344,9 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             body,
             ..
         } => write_lambda(ctx, out, base, generics, params, ret.as_ref(), *arrow, body),
-        Expr::Path { path, .. } => out.push_str(&path.text()),
+        Expr::Path { path, .. } => write_path(out, path),
         Expr::Struct { path, fields, .. } => {
-            out.push_str(&path.text());
+            write_path(out, path);
             write_struct_fields(ctx, out, fields);
         },
         Expr::List { items, .. } => {
@@ -719,9 +732,9 @@ pub(crate) fn write_pattern(ctx: &Ctx, out: &mut String, p: &Pattern) {
         Pattern::Str { span, .. } | Pattern::RawStr { span, .. } => {
             out.push_str(ctx.text(*span));
         },
-        Pattern::Path { path, .. } => out.push_str(&path.text()),
+        Pattern::Path { path, .. } => write_path(out, path),
         Pattern::Call { path, args, .. } => {
-            out.push_str(&path.text());
+            write_path(out, path);
             out.push('(');
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
@@ -732,7 +745,7 @@ pub(crate) fn write_pattern(ctx: &Ctx, out: &mut String, p: &Pattern) {
             out.push(')');
         },
         Pattern::Struct { path, fields, .. } => {
-            out.push_str(&path.text());
+            write_path(out, path);
             if fields.is_empty() {
                 out.push_str(" {}");
             } else {

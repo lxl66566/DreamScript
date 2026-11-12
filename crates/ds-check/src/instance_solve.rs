@@ -104,7 +104,25 @@ pub fn resolve(
     trait_id: TraitId,
     target: Ty,
 ) -> Resolution {
-    let members = universe.members(target);
+    resolve_members(
+        universe,
+        env,
+        assumptions,
+        trait_id,
+        universe.members(target),
+    )
+}
+
+/// The member-set form of [`resolve`]: the immutable core the lowering
+/// side's transitive chain walks also reads (a solved member set names no
+/// interned `Ty` handle there).
+fn resolve_members(
+    universe: &Universe,
+    env: &InstanceEnv,
+    assumptions: &[(TraitId, Ty)],
+    trait_id: TraitId,
+    members: &[TypeId],
+) -> Resolution {
     if members.is_empty() {
         return Resolution::None;
     }
@@ -280,6 +298,97 @@ pub fn evidence_bounds(
         out.push((var, cond.trait_id, served));
     }
     out
+}
+
+/// One step of a call site's transitive evidence chain (H3), over a
+/// declared trait instance: for the instance serving one of a generic
+/// body's demands, the substituted member set its matching declared bound
+/// demands at this receiver, plus the unique instance serving that bound
+/// there. The entering site iterates this to stage the follow words a
+/// runtime dispatch into a generic serving body slides; a `None` answer
+/// (a head that does not unify, no bound of the trait on that variable)
+/// and a `None` server are the lowering side's honest refusals.
+#[must_use]
+pub fn evidence_step(
+    universe: &Universe,
+    env: &InstanceEnv,
+    instance: InstanceId,
+    recv: &[TypeId],
+    var: Option<&str>,
+    trait_id: TraitId,
+) -> Option<(Vec<TypeId>, Option<InstanceId>)> {
+    let (Ok(head), Ok(conditions)) = (env.head(instance), env.conditions(instance)) else {
+        return None;
+    };
+    bound_evidence_step(universe, env, head, conditions, recv, var, trait_id)
+}
+
+/// The same step over an inherent impl's declared head and bounds (F3):
+/// the inherent mirror never names an instance of its own, so the chain
+/// starts from the impl's record directly.
+#[must_use]
+pub fn inherent_evidence_step(
+    universe: &Universe,
+    env: &InstanceEnv,
+    head: Ty,
+    conditions: &[Condition<Ty>],
+    recv: &[TypeId],
+    var: Option<&str>,
+    trait_id: TraitId,
+) -> Option<(Vec<TypeId>, Option<InstanceId>)> {
+    bound_evidence_step(universe, env, head, conditions, recv, var, trait_id)
+}
+
+/// The shared step: unify the head pattern with the receiver members,
+/// then answer the bound the named variable carries for the trait.
+fn bound_evidence_step(
+    universe: &Universe,
+    env: &InstanceEnv,
+    head: Ty,
+    conditions: &[Condition<Ty>],
+    recv: &[TypeId],
+    var: Option<&str>,
+    trait_id: TraitId,
+) -> Option<(Vec<TypeId>, Option<InstanceId>)> {
+    let [pattern] = universe.members(head) else {
+        return None;
+    };
+    let mut subst = Vec::new();
+    if !recv
+        .iter()
+        .all(|&member| unify_atom(universe, &mut subst, *pattern, member))
+    {
+        return None;
+    }
+    for cond in conditions {
+        if cond.trait_id != trait_id {
+            continue;
+        }
+        if let Some(want) = var
+            && !carries_var(universe, cond.ty, want)
+        {
+            continue;
+        }
+        let solved = substitute(&subst, universe.members(cond.ty));
+        let served = resolve_members(universe, env, &[], cond.trait_id, &solved).solved();
+        return Some((solved, served));
+    }
+    None
+}
+
+/// Whether a condition's type is one minted variable with the written
+/// base name: instance declaration and body checking mint their own
+/// atoms, so demands key by the name they share.
+fn carries_var(universe: &Universe, ty: Ty, want: &str) -> bool {
+    let [only] = universe.members(ty) else {
+        return false;
+    };
+    universe
+        .atom_decl(*only)
+        .ok()
+        .and_then(|decl| decl.name.strip_prefix('$'))
+        .and_then(|base| base.rsplit_once('#'))
+        .is_some_and(|(name, _)| name == want)
 }
 
 /// The first failing bound of an instance whose head covers the target
@@ -523,15 +632,15 @@ pub(crate) fn instantiation_overlap(
                 continue;
             }
             probed.push(target);
-            let members: Vec<TypeId> = universe.members(target).to_vec();
-            if serves_head(universe, env, &[], head, conds_head, &members, MAX_DEPTH)
+            let members: &[TypeId] = universe.members(target);
+            if serves_head(universe, env, &[], head, conds_head, members, MAX_DEPTH)
                 && serves_head(
                     universe,
                     env,
                     &[],
                     other_head,
                     conds_other,
-                    &members,
+                    members,
                     MAX_DEPTH,
                 )
             {
@@ -578,10 +687,12 @@ fn carries_vars(universe: &Universe, atom: TypeId) -> bool {
 /// stays. A shape the grounding does not reach (a tuple with variable
 /// elements) grounds nothing.
 fn ground(universe: &mut Universe, head: Ty, x: TypeId) -> Option<Ty> {
-    let head_members = universe.members(head).to_vec();
-    let mut members = Vec::with_capacity(head_members.len());
-    for atom in head_members {
-        members.push(ground_atom(universe, atom, x)?);
+    // Grounding mints through the universe, so the head's member set is read
+    // by index; minting appends and never moves an existing handle's set.
+    let len = universe.members(head).len();
+    let mut members = Vec::with_capacity(len);
+    for index in 0..len {
+        members.push(ground_atom(universe, universe.members(head)[index], x)?);
     }
     Some(universe.set_ty(&members))
 }
@@ -590,15 +701,15 @@ fn ground_atom(universe: &mut Universe, atom: TypeId, x: TypeId) -> Option<TypeI
     if is_var(universe, atom) {
         return Some(x);
     }
-    let kind = universe.atom_decl(atom).ok()?.kind.clone();
-    match kind {
-        AtomKind::Apply(ctor, args) => {
-            let mut grounded = Vec::with_capacity(args.len());
-            for arg in args {
-                grounded.push(ground(universe, arg, x)?);
-            }
-            universe.apply_atom(ctor, &grounded).ok()
-        },
-        _ => Some(atom),
+    // The application's own atoms are copied out of the declaration so the
+    // grounding can mint through the universe.
+    let (ctor, args) = match &universe.atom_decl(atom).ok()?.kind {
+        AtomKind::Apply(ctor, args) => (*ctor, args.to_vec()),
+        _ => return Some(atom),
+    };
+    let mut grounded = Vec::with_capacity(args.len());
+    for arg in args {
+        grounded.push(ground(universe, arg, x)?);
     }
+    universe.apply_atom(ctor, &grounded).ok()
 }

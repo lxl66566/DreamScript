@@ -5,8 +5,9 @@
 //! frame the callable enters (the hosted per-element call) copies them
 //! into the trailing capture slots where the sentinel CALLG
 //! dispatches from. Nested lambdas stage transitively, one word
-//! crossing two capture boundaries; a spawned child keeps its honest
-//! refusal (no evidence channel rides a spawn).
+//! crossing two capture boundaries; the spawned-child crossing (the
+//! same words riding a child's entry argument area) runs in
+//! `spawn_evidence_e2e.rs`.
 
 use ds_abi::{SlotType, Uop};
 use ds_check::analyze;
@@ -14,7 +15,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const MAP_PROBE: &str = include_str!("fixtures/generic_lambda_map_probe.ds");
 const FILTER_PROBE: &str = include_str!("fixtures/generic_lambda_filter_probe.ds");
@@ -52,8 +53,8 @@ fn run_lowered(source: &str, lowered: &Lowered) -> Vm {
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     vm
@@ -130,18 +131,19 @@ fn two_instantiations_run_the_lambda_evidence_shape() {
 }
 
 /// The lowered evidence flow, pinned: the member body's closure
-/// construction carries exactly the lambda's evidence word (no real
-/// captures), the entering site stages the serving member body's index
-/// plus the declared instance ahead of its CALLG, and the lambda body's
-/// own dispatch reads the trailing capture slot its frame bound (the
-/// `x` parameter at word 0, the evidence word at word 1).
+/// construction carries exactly the lambda's evidence area (the pair's
+/// slot plus its follow words, no real captures), the entering site
+/// stages the serving member body's area plus the declared instance
+/// ahead of its CALLG, and the lambda body's own dispatch reads the
+/// trailing capture slot its frame bound (the `x` parameter at word 0,
+/// the evidence slot at word 1).
 #[test]
 fn the_capture_block_carries_the_lambda_evidence_word() {
     let lowered = lower_probe("generic_lambda_map_probe.ds", MAP_PROBE);
     let body = "shows#list[t]#show";
     let placed = lowered.placed(body).expect("the member body lowers");
-    // the closure construction stages the lambda's one evidence word:
-    // n names the capture block's words, and there are no real captures
+    // the closure construction stages the lambda's evidence area: n
+    // names the capture block's words, and there are no real captures
     let closures: Vec<u8> = placed
         .iter()
         .filter_map(|op| match op {
@@ -149,7 +151,11 @@ fn the_capture_block_carries_the_lambda_evidence_word() {
             _ => None,
         })
         .collect();
-    assert_eq!(closures, vec![1], "one closure over one evidence word");
+    assert_eq!(
+        closures,
+        vec![3],
+        "one closure over the pair's slot and two follow words"
+    );
     // the entering sites in main stage the serving member body's index
     // then the declared instance, in Kimm words right before each CALLG
     let main = lowered.function_index("main").expect("main is planned");
@@ -183,8 +189,14 @@ fn the_capture_block_carries_the_lambda_evidence_word() {
     let instance = i64::from(2); // shows int, shows string, shows list[t]
     assert_eq!(
         evidence,
-        vec![vec![int_body, instance], vec![string_body, instance],],
-        "each entering site stages the serving body the lambda will call, then the instance"
+        vec![vec![int_body, int_body, int_body, instance], vec![
+            string_body,
+            string_body,
+            string_body,
+            instance
+        ],],
+        "each entering site stages the serving body's area (follow words padded at the concrete \
+         end), then the instance"
     );
     // the lambda body dispatches from its trailing capture slot: the
     // parameter at word 0, the evidence word at word 1

@@ -17,10 +17,12 @@
 //!   = help: replace with `h2`
 //! ```
 
+#[cfg(feature = "json")]
 pub mod json;
 
 use std::fmt::Write as _;
 
+#[cfg(feature = "json")]
 pub use json::{JsonDiagnostic, JsonLoc, JsonSpan, JsonSuggestion, to_json};
 
 use crate::{
@@ -278,6 +280,7 @@ error[DS3001]: value `h` is no longer usable
   |      ^ used again here after move
 ";
         assert_eq!(human(&diag, &files), expected);
+        #[cfg(feature = "json")]
         assert_eq!(
             to_json(&diag, &files),
             r#"{"code":"DS3001","severity":"error","message":"value `h` is no longer usable","spans":[{"file":"main.ds","start_line":1,"start_col":6,"end_line":1,"end_col":6,"label":"moved here","primary":false},{"file":"main.ds","start_line":1,"start_col":6,"end_line":1,"end_col":6,"label":"used again here after move","primary":true}],"notes":[],"suggestions":[]}"#

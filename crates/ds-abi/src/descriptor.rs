@@ -68,6 +68,7 @@ impl EntryDescriptor {
     /// Word 0. Loaded `Relaxed` because the value is immutable after the
     /// loader publishes it (see the flip protocol above).
     #[must_use]
+    #[inline]
     pub fn tier1_prologue(&self) -> usize {
         self.tier1_prologue.load(Ordering::Relaxed)
     }
@@ -87,12 +88,14 @@ impl EntryDescriptor {
 
     /// Word 1: the tier-2 code pointer, or 0 while interpreted.
     #[must_use]
+    #[inline]
     pub fn tier2_code(&self) -> usize {
         self.tier2_code.load(Ordering::Acquire)
     }
 
     /// The current tier of this entry.
     #[must_use]
+    #[inline]
     pub fn tier(&self) -> Tier {
         if self.tier2_code() == 0 { Tier::Interpreted } else { Tier::Compiled }
     }
@@ -100,6 +103,7 @@ impl EntryDescriptor {
     /// The call-site fast path: the tier-2 code pointer once compiled,
     /// otherwise the tier-1 prologue.
     #[must_use]
+    #[inline]
     pub fn resolve(&self) -> usize {
         let tier2 = self.tier2_code();
         if tier2 != 0 { tier2 } else { self.tier1_prologue() }

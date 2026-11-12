@@ -51,6 +51,7 @@ use ds_parse::{
     Ast, BinaryOp, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal, LocalDecl,
     MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam, UnaryOp,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     TypeExpr,
@@ -114,6 +115,16 @@ struct Narrow {
 /// substituted type at the site (`None` when none serves it uniquely).
 pub type InherentCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>)>;
 
+/// The per-call-site runtime-evidence record of a call into a free
+/// generic fn's body: one entry per trait-bound generic parameter whose
+/// substitution solved — the parameter's minted variable atom, its
+/// trait, the unique instance serving the solved type at the site
+/// (`None` when none serves it uniquely: the runtime-resolved form whose
+/// words read the calling frame's own evidence slots), and the solved
+/// type itself (the follow chain's substitution start and the runtime
+/// form's receiver fact).
+pub type GenericCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>, Ty)>;
+
 /// The result of one package check: diagnostics in walk order plus the
 /// memoized type of every top-level binding (G3).
 #[derive(Default)]
@@ -121,7 +132,7 @@ pub struct Checked {
     /// All diagnostics of collection, resolution, declaration, and bodies.
     pub diags: Vec<Diagnostic>,
     /// The solved type of every top-level const/var binding.
-    pub def_types: HashMap<DefId, Ty>,
+    pub def_types: FxHashMap<DefId, Ty>,
     /// Affine facts of every local binder, keyed by binder span: the
     /// copyability its type had at the binding site (C1). The linearity
     /// pass consumes this; top-level bindings derive theirs from
@@ -132,23 +143,23 @@ pub struct Checked {
     /// (B2)) plus the early-exit flag. The lowering pass (M3) consumes this
     /// side table instead of re-deriving types; entries are recorded in
     /// walk order and a re-walk overwrites them.
-    pub expr_types: HashMap<Span, Val>,
+    pub expr_types: FxHashMap<Span, Val>,
     /// The instantiation of every generic call, keyed by the call's span:
     /// the solved type of each generic parameter, in declaration order
     /// (H3). Recorded only when every parameter solves (no `any` fallback
     /// (B1)); the lowering pass (M3) mints the CALLG evidence words from
     /// it.
-    pub generic_calls: HashMap<Span, Vec<Ty>>,
+    pub generic_calls: FxHashMap<Span, Vec<Ty>>,
     /// The solved dispatch of every trait-method call whose instance the
     /// environment statically resolved, keyed by the call's span (B6).
     /// The lowering pass mints the CALLG evidence word from it.
-    pub trait_calls: HashMap<Span, TraitCall>,
+    pub trait_calls: FxHashMap<Span, TraitCall>,
     /// The selected inherent method of every inherent-impl dot-call whose
     /// owner covers the receiver, keyed by the call's own span (F3). The
     /// lowering pass resolves the impl item through the declaration
     /// tables' method-to-impl-item map; no instance exists for an
     /// inherent impl, so nothing else records at the site.
-    pub inherent_calls: HashMap<Span, MethodId>,
+    pub inherent_calls: FxHashMap<Span, MethodId>,
     /// The runtime evidence a call into a generic inherent impl's body
     /// needs (H3): one entry per declared bound — the bound's variable
     /// atom, its trait, and the unique instance serving the substituted
@@ -157,12 +168,19 @@ pub struct Checked {
     /// span, mirroring [`TraitCall::bounds`] minus the instance word an
     /// inherent impl never has. Recorded only at sites entering a generic
     /// body; monomorphic inherent calls need no evidence.
-    pub inherent_call_bounds: HashMap<Span, InherentCallBounds>,
+    pub inherent_call_bounds: FxHashMap<Span, InherentCallBounds>,
+    /// The runtime evidence a call into a free generic fn's body needs
+    /// (H3): one entry per trait-bound generic parameter whose
+    /// substitution solved, mirroring [`InherentCallBounds`] plus the
+    /// solved type the substitution names. Keyed by the call's own span;
+    /// recorded only when the fn declares trait bounds, and read by the
+    /// lowering pass to stage the body's evidence demands.
+    pub generic_call_bounds: FxHashMap<Span, GenericCallBounds>,
     /// The solved tested type of every `is` expression that type-solves,
     /// keyed by the expression's span. The lowering pass reads the tested
     /// atom from it when the written type is not a nominal single-segment
     /// path (a written fn type is the read-back call-through spelling).
-    pub is_tests: HashMap<Span, Ty>,
+    pub is_tests: FxHashMap<Span, Ty>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -219,7 +237,7 @@ pub struct TypedPackage {
     pub checked: Checked,
     /// The solved type of every top-level const/var binding, keyed by its
     /// package definition id.
-    pub type_names: HashMap<DefId, String>,
+    pub type_names: FxHashMap<DefId, String>,
 }
 
 /// The full bidirectional check bundled with the tables later passes read:
@@ -241,6 +259,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         trait_calls: checked.trait_calls,
         inherent_calls: checked.inherent_calls,
         inherent_call_bounds: checked.inherent_call_bounds,
+        generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
     };
     Analyzed {
@@ -297,19 +316,16 @@ where
 {
     let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
     let (mut decls, mut diags) = decls::build(package, &trees, resolutions);
-    let res_by_file: HashMap<ds_diag::FileId, usize> = trees
-        .iter()
-        .zip(resolutions.iter().enumerate())
-        .map(|(ast, (index, _))| (ast.file, index))
-        .collect();
-    let mut def_types = HashMap::new();
-    let mut binders = HashMap::new();
-    let mut expr_types = HashMap::new();
-    let mut generic_calls = HashMap::new();
-    let mut trait_calls = HashMap::new();
-    let mut inherent_calls = HashMap::new();
-    let mut inherent_call_bounds: HashMap<Span, InherentCallBounds> = HashMap::new();
-    let mut is_tests = HashMap::new();
+    let res_by_file = FilePositions::new(&trees);
+    let mut def_types = FxHashMap::default();
+    let mut binders = HashMap::default();
+    let mut expr_types = FxHashMap::default();
+    let mut generic_calls = FxHashMap::default();
+    let mut trait_calls = FxHashMap::default();
+    let mut inherent_calls = FxHashMap::default();
+    let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
+    let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
+    let mut is_tests = FxHashMap::default();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
             files,
@@ -325,9 +341,10 @@ where
             trait_calls: &mut trait_calls,
             inherent_calls: &mut inherent_calls,
             inherent_call_bounds: &mut inherent_call_bounds,
+            generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
             diags: Vec::new(),
-            linear_vars: HashMap::new(),
+            linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
             refined: ScopedMap::default(),
             type_vars: Vec::new(),
@@ -339,6 +356,7 @@ where
             cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
+            expected_ty_span: None,
         };
         bodies.file(ast);
         diags.append(&mut bodies.diags);
@@ -352,6 +370,7 @@ where
         trait_calls,
         inherent_calls,
         inherent_call_bounds,
+        generic_call_bounds,
         is_tests,
     })
 }
@@ -370,6 +389,28 @@ pub struct Analyzed {
     pub checked: Checked,
 }
 
+/// The tree position of each file id: file ids index a `Files` registry
+/// densely, and a file that contributed no tree holds no position.
+struct FilePositions(Vec<Option<usize>>);
+
+impl FilePositions {
+    fn new(trees: &[&Ast]) -> Self {
+        let mut positions: Vec<Option<usize>> = Vec::new();
+        for (index, ast) in trees.iter().enumerate() {
+            let file = ast.file.as_u32() as usize;
+            if positions.len() <= file {
+                positions.resize(file + 1, None);
+            }
+            positions[file] = Some(index);
+        }
+        Self(positions)
+    }
+
+    fn get(&self, file: ds_diag::FileId) -> Option<usize> {
+        self.0.get(file.as_u32() as usize).copied().flatten()
+    }
+}
+
 /// The body checker over one file.
 struct Bodies<'a> {
     files: &'a Files,
@@ -379,28 +420,29 @@ struct Bodies<'a> {
     /// lazily typed top-level binding walks under its OWN file's table
     /// (G3), no matter which file's body triggered the memo fill.
     resolutions: &'a [Resolutions],
-    res_by_file: &'a HashMap<ds_diag::FileId, usize>,
+    res_by_file: &'a FilePositions,
     decls: &'a mut Decls,
-    def_types: &'a mut HashMap<DefId, Ty>,
+    def_types: &'a mut FxHashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
-    expr_types: &'a mut HashMap<Span, Val>,
-    generic_calls: &'a mut HashMap<Span, Vec<Ty>>,
-    trait_calls: &'a mut HashMap<Span, TraitCall>,
-    inherent_calls: &'a mut HashMap<Span, MethodId>,
-    inherent_call_bounds: &'a mut HashMap<Span, InherentCallBounds>,
-    is_tests: &'a mut HashMap<Span, Ty>,
+    expr_types: &'a mut FxHashMap<Span, Val>,
+    generic_calls: &'a mut FxHashMap<Span, Vec<Ty>>,
+    trait_calls: &'a mut FxHashMap<Span, TraitCall>,
+    inherent_calls: &'a mut FxHashMap<Span, MethodId>,
+    inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
+    generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
+    is_tests: &'a mut FxHashMap<Span, Ty>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
     /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
     /// consult them while recording.
-    linear_vars: HashMap<TypeId, bool>,
+    linear_vars: FxHashMap<TypeId, bool>,
     /// Declared types of locals, keyed by binder span; snapshot/restore
     /// at scope boundaries runs through its undo log, never a clone.
     locals: ScopedMap<Binding>,
     /// The refinement overlay, keyed by binder span (B2).
     refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
-    type_vars: Vec<HashMap<String, Ty>>,
+    type_vars: Vec<FxHashMap<String, Ty>>,
     /// In-scope trait assumptions from generic bounds (`[t: json]`), with
     /// per-scope truncation marks.
     assumptions: Vec<(TraitId, Ty)>,
@@ -423,6 +465,12 @@ struct Bodies<'a> {
     /// distribution cap precisely; the generic fallbacks around
     /// `solve_here` consume it so DS2012 never layers under another code.
     solve_reported: bool,
+    /// Where the expectation currently fed to an expression was written,
+    /// when the feeding site knows it (a callee's declared fn-typed
+    /// parameter). A lambda-literal arity refusal cites it as the
+    /// expected fn type's site; set immediately around the one `expr`
+    /// call that carries the expectation, cleared after.
+    expected_ty_span: Option<Span>,
 }
 
 impl Bodies<'_> {
@@ -489,7 +537,8 @@ impl Bodies<'_> {
             | ItemKind::Enum(_)
             | ItemKind::Tag(_)
             | ItemKind::TypeAlias(_)
-            | ItemKind::Import(_) => {},
+            | ItemKind::Import(_)
+            | ItemKind::Platform(_) => {},
         }
     }
 
@@ -566,7 +615,7 @@ impl Bodies<'_> {
         // `Self` resolves to the impl's target while the written member
         // signatures compare (B6).
         self.type_vars
-            .push(HashMap::from([("Self".to_owned(), target)]));
+            .push(FxHashMap::from_iter([("Self".to_owned(), target)]));
         let subst = self.trait_arg_subst(imp, trait_def);
         for f in &imp.fns {
             if let Some(members) = &member_names {
@@ -602,6 +651,12 @@ impl Bodies<'_> {
                 }
             }
         }
+        // Every trait member without a default body needs a bodied impl
+        // member: the registered signature checks call sites alone, so
+        // the missing body would surface only at the dispatch seam.
+        if let (Some(def), Some(members)) = (trait_def, &member_names) {
+            impl_sig::agree_impl_completeness(self, imp, def, members);
+        }
         self.type_vars.pop();
         self.pop_generics();
     }
@@ -615,7 +670,7 @@ impl Bodies<'_> {
         &mut self,
         imp: &ds_parse::ImplDecl,
         trait_def: Option<DefId>,
-    ) -> Option<HashMap<String, Type>> {
+    ) -> Option<FxHashMap<String, Type>> {
         let reference = imp.trait_ref.as_ref()?;
         let def = trait_def?;
         let names = self.decls.trait_generics.get(&def)?.clone();
@@ -674,7 +729,7 @@ impl Bodies<'_> {
         // initializer's spans resolve under the binding's OWN file table,
         // never the triggering file's [G3].
         let home_res = self.res;
-        if let Some(&index) = self.res_by_file.get(&self.package.def(defs[0]).span.file) {
+        if let Some(index) = self.res_by_file.get(self.package.def(defs[0]).span.file) {
             if let Some(res) = self.resolutions.get(index) {
                 self.res = res;
             }
@@ -721,7 +776,23 @@ impl Bodies<'_> {
         self.push_generics(&generics);
         if let Some(target) = self_ty {
             self.type_vars
-                .push(HashMap::from([("Self".to_owned(), target)]));
+                .push(FxHashMap::from_iter([("Self".to_owned(), target)]));
+        }
+        // A member's signature declares its receiver as its first
+        // parameter [F3]: both call forms feed the receiver first and
+        // the trait dispatch keys on its type, so a signature with no
+        // `self` has no reachable call form.
+        if self_ty.is_some() && f.params.first().is_none_or(|p| p.name.name != "self") {
+            self.error(
+                ErrorCode::MemberWithoutReceiver,
+                format!(
+                    "member `{}` declares its receiver as its first parameter (`self` or `mut \
+                     self`, typed `Self`)",
+                    f.name.name
+                ),
+                f.name.span,
+                "member without a receiver",
+            );
         }
         let saved = self.snapshot();
         self.locals.clear();
@@ -1630,6 +1701,45 @@ impl Bodies<'_> {
         // boundary label names the script entry, not a lambda.
         let body_label = if span.start == span.end { "script main body" } else { "lambda body" };
         let expected_sig = expected.and_then(|ty| self.decompose_fn(ty));
+        // A lambda literal's own arity matches the expected fn type's
+        // exactly: the call ABI stages the declared parameter count, so a
+        // lambda taking fewer parameters would trap at the arity
+        // validation the moment it is called — the mismatch refuses at
+        // the literal's own check, never at the call.
+        let arity_reported = expected_sig
+            .as_ref()
+            .is_some_and(|(expected_params, _)| expected_params.len() != params.len());
+        if arity_reported {
+            let list_span = match (params.first(), params.last()) {
+                (Some(first), Some(last)) => {
+                    Span::new(first.span.file, first.span.start, last.span.end)
+                },
+                _ => *span,
+            };
+            let expected_len = expected_sig
+                .as_ref()
+                .map_or(0, |(expected_params, _)| expected_params.len());
+            let mut diagnostic = Diagnostic::error(
+                ErrorCode::ArityMismatch,
+                format!(
+                    "the lambda takes {} parameters, the expected fn type takes {}",
+                    params.len(),
+                    expected_len
+                ),
+            )
+            .with_primary(list_span, "lambda parameter list");
+            // The feeding call site knows where its expectation was
+            // written (the callee's declared fn type); an expectation
+            // arriving by propagation (an arm, a tuple element) has no
+            // written site and the message alone carries the fact.
+            if let Some(ty_span) = self.expected_ty_span.take() {
+                diagnostic = diagnostic.with_secondary(ty_span, "expected fn type");
+            }
+            self.diags.push(diagnostic);
+        }
+        // The body is a fresh expression world: a stale citation from
+        // this lambda's own feeding site must not reach a nested lambda.
+        self.expected_ty_span = None;
         self.push_generics(&generics.iter().map(generic_of).collect::<Vec<_>>());
         let saved = self.snapshot();
         let mut param_tys = Vec::with_capacity(params.len());
@@ -1644,7 +1754,10 @@ impl Bodies<'_> {
                         .and_then(|(ps, _)| ps.get(index).copied())
                 });
             let Some(solved) = solved else {
-                if !self.take_solve_reported() {
+                // A parameter past a mismatched expectation's length
+                // already has its root cause (the arity refusal); an
+                // uninferable-parameter report would be a follow-on.
+                if !arity_reported && !self.take_solve_reported() {
                     self.error(
                         ErrorCode::InferenceFailed,
                         format!(
@@ -1710,7 +1823,9 @@ impl Bodies<'_> {
         Val {
             ty,
             diverges: false,
-            poisoned: false,
+            // The arity refusal is the root cause; enclosing containment
+            // checks consume the poisoned value without re-reporting.
+            poisoned: arity_reported,
         }
     }
 
@@ -1782,7 +1897,7 @@ impl Bodies<'_> {
         // application of the same constructor, else from in-scope variables
         // named like the parameters (generic construction inside its own
         // scope) [B2].
-        let mut subst = HashMap::new();
+        let mut subst = FxHashMap::default();
         if !shape.params.is_empty() {
             if let Some(expected) = expected {
                 if let Some((ctor, args)) = self.single_apply(expected) {
@@ -2330,7 +2445,7 @@ impl Bodies<'_> {
                         }
                         // A minted case constructs by call form [B3]; a
                         // bare case falls through to the tag error below.
-                        if let Some(case) = self.decls.cases.get(&def).cloned() {
+                        if let Some(case) = self.decls.cases.get(&def) {
                             if !matches!(case.payload, EnumPayload::None) {
                                 return self.case_call(def, only, args, trailing.as_deref(), *span);
                             }
@@ -2511,12 +2626,29 @@ impl Bodies<'_> {
                 }
             }
         }
-        let ty = self
+        // A minted case constructs into its own atom [B3]. `none` is the
+        // predeclared unit atom [B4], so a payloaded case named `none`
+        // claims no atom of its own and the construction refuses at this
+        // seam instead of typing the binding empty.
+        let Some(ty) = self
             .decls
             .atoms
             .get(&def)
             .and_then(|&a| self.decls.universe.atom_ty(a).ok())
-            .unwrap_or_else(|| self.empty());
+        else {
+            self.error(
+                ErrorCode::NonePayloadCase,
+                "`none` is the predeclared unit atom; a case named `none` cannot carry a payload"
+                    .to_owned(),
+                name.span,
+                "payload on the unit atom",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        };
         Val {
             ty,
             diverges: false,
@@ -2670,7 +2802,7 @@ impl Bodies<'_> {
             .iter()
             .map(|p| self.mint_var(&p.name))
             .collect();
-        let mut subst: HashMap<String, Ty> = HashMap::new();
+        let mut subst: FxHashMap<String, Ty> = FxHashMap::default();
         let assumption_mark = self.assumptions.len();
         for (index, param) in sig.generics.iter().enumerate() {
             if let Ok(ty) = self.decls.universe.atom_ty(var_atoms[index]) {
@@ -2735,7 +2867,11 @@ impl Bodies<'_> {
                 .ok()
                 .and_then(|a| self.decls.universe.atom_ty(a).ok())
                 .unwrap_or_else(|| self.empty());
+            // The lambda's expectation cites the callee's written fn-typed
+            // parameter when the lambda's own arity refuses.
+            self.expected_ty_span = param.ty.as_ref().map(Type::span);
             let val = self.expr(arg, Some(expected_ty));
+            self.expected_ty_span = None;
             if let Some(fn_ret) = fn_ret {
                 // The lambda's own result type binds the parameter's
                 // return variables, not the lambda's function type.
@@ -2767,23 +2903,39 @@ impl Bodies<'_> {
         // every bound must hold for the solved type, through the
         // instance environment or an in-scope assumption (a caller
         // bound propagates that way). An empty solved type rides a
-        // cascading argument error and skips the check.
-        for (param, ty) in sig.generics.iter().zip(solved.iter()) {
+        // cascading argument error and skips the check. Each answered
+        // bound records beside the call: the unique instance serving the
+        // solved type (`None` when only an in-scope assumption covers
+        // it — the runtime-resolved evidence form) plus the solved type
+        // itself, the record the lowering pass stages the body's
+        // evidence demands from (H3).
+        let mut call_bounds: GenericCallBounds = Vec::new();
+        for ((index, param), &ty) in sig.generics.iter().enumerate().zip(solved.iter()) {
             let Some(trait_id) = param.bound.as_ref().and_then(|b| self.trait_of_type(b)) else {
                 continue;
             };
-            if self.decls.universe.is_empty(*ty) {
+            if self.decls.universe.is_empty(ty) {
                 continue;
             }
-            self.trait_satisfied(trait_id, *ty, span);
+            let served = if self.trait_satisfied(trait_id, ty, span) {
+                self.instance_resolution(trait_id, ty).solved()
+            } else {
+                None
+            };
+            call_bounds.push((var_atoms[index], trait_id, served, ty));
+        }
+        if !call_bounds.is_empty() {
+            self.generic_call_bounds.insert(span, call_bounds);
         }
         if !solved.is_empty() {
             self.generic_calls.insert(span, solved);
         }
         // Unbound variables leaking into the result are inference
-        // failures: no any fallback [B1].
-        let ret_members = self.decls.universe.members(ret).to_vec();
-        for atom in ret_members {
+        // failures: no any fallback [B1]. The member set is read by index:
+        // reporting mutates the checker, so no borrow of it stays open.
+        let ret_len = self.decls.universe.members(ret).len();
+        for index in 0..ret_len {
+            let atom = self.decls.universe.members(ret)[index];
             if let Some(pos) = var_atoms.iter().position(|v| *v == atom) {
                 self.error(
                     ErrorCode::InferenceFailed,
@@ -2932,7 +3084,15 @@ impl Bodies<'_> {
         for ((slot, param), param_ty) in slots.iter().zip(params.iter()).zip(param_tys.iter()) {
             match (slot, param_ty) {
                 (Some(arg), Some(param_ty)) => {
+                    // A lambda argument's expectation can cite the
+                    // callee's written parameter type when the lambda's
+                    // arity refuses; any other argument clears it.
+                    self.expected_ty_span = match peel_paren(arg) {
+                        Expr::Lambda { .. } => param.ty.as_ref().map(Type::span),
+                        _ => None,
+                    };
                     let val = self.expr(arg, Some(*param_ty));
+                    self.expected_ty_span = None;
                     self.expect_contains(val, *param_ty, arg.span(), "argument");
                 },
                 (Some(arg), None) => {
@@ -3371,15 +3531,18 @@ impl Bodies<'_> {
         span: Span,
     ) -> Val {
         self.type_vars
-            .push(HashMap::from([("Self".to_owned(), recv_ty)]));
+            .push(FxHashMap::from_iter([("Self".to_owned(), recv_ty)]));
         let mut param_tys = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
             param_tys.push(param.ty.as_ref().and_then(|t| self.solve_here(t)));
         }
         // The receiver already filled the `self` parameter [record 6.1];
-        // the remaining arguments feed the rest.
-        if let Some(slots) = self.arg_slots(None, 1, args, trailing, &sig.params, span) {
-            self.check_slots(&slots[1..], &sig.params[1..], &param_tys[1..]);
+        // the remaining arguments feed the rest. A signature without a
+        // receiver was refused at its declaration, so the call checks
+        // through over the whole signature.
+        let skip = usize::from(!sig.params.is_empty());
+        if let Some(slots) = self.arg_slots(None, skip, args, trailing, &sig.params, span) {
+            self.check_slots(&slots[skip..], &sig.params[skip..], &param_tys[skip..]);
         }
         let ret = sig
             .ret
@@ -3757,8 +3920,11 @@ impl Bodies<'_> {
                 poisoned: true,
             };
         }
-        let members = self.decls.universe.members(recv_val.ty).to_vec();
-        let Some(single) = members.first().filter(|_| members.len() == 1) else {
+        let single = {
+            let members = self.decls.universe.members(recv_val.ty);
+            members.first().filter(|_| members.len() == 1).copied()
+        };
+        let Some(single) = single else {
             self.error(
                 ErrorCode::TypeMismatch,
                 format!(
@@ -3774,16 +3940,11 @@ impl Bodies<'_> {
                 poisoned: false,
             };
         };
-        let kind = self
-            .decls
-            .universe
-            .atom_decl(*single)
-            .ok()
-            .map(|d| d.kind.clone());
-        let (def, subst): (DefId, HashMap<String, Ty>) = match kind {
+        let kind = self.decls.universe.atom_decl(single).ok().map(|d| &d.kind);
+        let (def, subst): (DefId, FxHashMap<String, Ty>) = match kind {
             Some(AtomKind::Apply(ctor, args)) => {
-                if let Some(def) = self.decls.defs_of_atoms.get(&ctor).copied() {
-                    let mut subst = HashMap::new();
+                if let Some(def) = self.decls.defs_of_atoms.get(ctor).copied() {
+                    let mut subst = FxHashMap::default();
                     if let Some(shape) = self.decls.structs.get(&def) {
                         for (param, arg) in shape.params.iter().zip(args.iter()) {
                             subst.insert(param.name.clone(), *arg);
@@ -3799,8 +3960,8 @@ impl Bodies<'_> {
                     };
                 }
             },
-            _ => match self.decls.defs_of_atoms.get(single).copied() {
-                Some(def) if self.decls.structs.contains_key(&def) => (def, HashMap::new()),
+            _ => match self.decls.defs_of_atoms.get(&single).copied() {
+                Some(def) if self.decls.structs.contains_key(&def) => (def, FxHashMap::default()),
                 _ => {
                     self.no_field(recv_val.ty, name);
                     return Val {
@@ -3811,15 +3972,18 @@ impl Bodies<'_> {
                 },
             },
         };
-        let Some(shape) = self.decls.structs.get(&def).cloned() else {
-            self.no_field(recv_val.ty, name);
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
-        };
-        let Some(field) = shape.fields.iter().find(|f| f.name.name == name.name) else {
+        let field_ty = self
+            .decls
+            .structs
+            .get(&def)
+            .and_then(|shape| {
+                shape
+                    .fields
+                    .iter()
+                    .find(|field| field.name.name == name.name)
+            })
+            .map(|field| field.ty.clone());
+        let Some(field_ty) = field_ty else {
             self.no_field(recv_val.ty, name);
             return Val {
                 ty: self.empty(),
@@ -3828,7 +3992,7 @@ impl Bodies<'_> {
             };
         };
         self.type_vars.push(subst);
-        let field_ty = self.solve_here(&field.ty);
+        let field_ty = self.solve_here(&field_ty);
         self.type_vars.pop();
         if let Some(ty) = field_ty {
             Val {
@@ -4125,17 +4289,25 @@ impl Bodies<'_> {
             self.restore(saved);
             arm_vals.push(body_val);
             if arm.guard.is_none() {
-                let cover_ty = self.cover_ty(&arm_cover);
-                covered.extend(arm_cover);
-                remaining = self.decls.universe.diff(remaining, cover_ty);
+                covered.extend(arm_cover.iter().copied());
+                // a value-level arm (any literal test at any depth)
+                // subtracts nothing from the remainder: the test may
+                // fail, so later arms check over the full scrutinee
+                // type — a branch checked on a superset may be dead,
+                // never wrong. The exhaustiveness accounting above
+                // keeps the arm's own cover regardless.
+                if !Self::carries_value_tests(&arm.pat) {
+                    let cover_ty = self.cover_ty(&arm_cover);
+                    remaining = self.decls.universe.diff(remaining, cover_ty);
+                }
             }
         }
         // Exhaustiveness by set difference [F4]; guards prove nothing,
         // conservatively, and neither do literal patterns.
-        let missing = self.missing_members(scrut_ty, &covered);
-        if !missing.is_empty() {
+        let missing = self.missing_ty(scrut_ty, &covered);
+        if !self.decls.universe.members(missing).is_empty() {
             let scrut_text = self.decls.universe.render(scrut_ty);
-            let missing_text = self.render_members(&missing);
+            let missing_text = format!("`{}`", self.decls.universe.render(missing));
             self.diags.push(
                 Diagnostic::error(
                     ErrorCode::NonExhaustiveMatch,
@@ -4186,12 +4358,14 @@ impl Bodies<'_> {
             };
         }
         let iter_val = self.expr(iter, None);
-        let members = self.decls.universe.members(iter_val.ty).to_vec();
-        let element_ty = (|| {
-            let single = members.first().filter(|_| members.len() == 1)?;
-            let (_, args) = self.single_apply_of(*single)?;
+        let single = {
+            let members = self.decls.universe.members(iter_val.ty);
+            members.first().filter(|_| members.len() == 1).copied()
+        };
+        let element_ty = single.and_then(|single| {
+            let (_, args) = self.single_apply_of(single)?;
             args.first().copied()
-        })();
+        });
         let Some(element_ty) = element_ty else {
             // A poisoned iterable already reported; the collection-shape
             // complaint on top of it would be a cascade.
@@ -4480,7 +4654,7 @@ impl Bodies<'_> {
     /// innermost-first, then package atoms, aliases, and traits.
     fn solve_here(&mut self, ty: &Type) -> Option<Ty> {
         self.solve_reported = false;
-        self.solve_with(ty, &HashMap::new(), &[])
+        self.solve_with(ty, &FxHashMap::default(), &[])
     }
 
     /// Whether the solve that just failed already reported its precise
@@ -4493,7 +4667,7 @@ impl Bodies<'_> {
     fn solve_with(
         &mut self,
         ty: &Type,
-        subst: &HashMap<String, Ty>,
+        subst: &FxHashMap<String, Ty>,
         generics: &[GenericParam],
     ) -> Option<Ty> {
         match ty {
@@ -4530,7 +4704,7 @@ impl Bodies<'_> {
                 }
                 let def = self.package.lookup_type(&only.name)?;
                 if !args.is_empty() {
-                    let mut arg_tys = Vec::new();
+                    let mut arg_tys = Vec::with_capacity(args.len());
                     for arg in args {
                         arg_tys.push(self.solve_with(arg, subst, generics)?);
                     }
@@ -4672,7 +4846,7 @@ impl Bodies<'_> {
         param: &Type,
         arg: Ty,
         generics: &[GenericParam],
-        subst: &mut HashMap<String, Ty>,
+        subst: &mut FxHashMap<String, Ty>,
     ) {
         match param {
             Type::Paren { inner, .. } => self.match_param(inner, arg, generics, subst),
@@ -4686,7 +4860,7 @@ impl Bodies<'_> {
                     }
                     return;
                 }
-                let members = self.decls.universe.members(arg).to_vec();
+                let members = self.decls.universe.members(arg);
                 let Some(single) = members.first().filter(|_| members.len() == 1) else {
                     return;
                 };
@@ -4710,8 +4884,11 @@ impl Bodies<'_> {
                 self.match_param(inner, without_none, generics, subst);
             },
             Type::Tuple { items, .. } => {
-                let members = self.decls.universe.members(arg).to_vec();
-                for member in members {
+                // Tuple elements solve and mint through the universe, so the
+                // member set is read by index across the walk.
+                let len = self.decls.universe.members(arg).len();
+                for index in 0..len {
+                    let member = self.decls.universe.members(arg)[index];
                     if let Some(elements) = self.tuple_elements(member) {
                         if elements.len() != items.len() {
                             continue;
@@ -4725,7 +4902,7 @@ impl Bodies<'_> {
                 }
             },
             Type::Fn { params, ret, .. } => {
-                let members = self.decls.universe.members(arg).to_vec();
+                let members = self.decls.universe.members(arg);
                 let Some(single) = members.first().filter(|_| members.len() == 1) else {
                     return
                 };
@@ -4932,7 +5109,7 @@ impl Bodies<'_> {
     }
 
     fn push_generics(&mut self, generics: &[GenericParam]) {
-        let mut scope = HashMap::new();
+        let mut scope = FxHashMap::default();
         self.assumption_marks.push(self.assumptions.len());
         for param in generics {
             let var = self.mint_var(&param.name);
@@ -5059,10 +5236,10 @@ impl Bodies<'_> {
         ty
     }
 
-    fn missing_members(&mut self, scrut: Ty, covered: &[TypeId]) -> Vec<TypeId> {
+    /// The scrutinee members no arm covers.
+    fn missing_ty(&mut self, scrut: Ty, covered: &[TypeId]) -> Ty {
         let covered_ty = self.cover_ty(covered);
-        let missing = self.decls.universe.diff(scrut, covered_ty);
-        self.decls.universe.members(missing).to_vec()
+        self.decls.universe.diff(scrut, covered_ty)
     }
 
     fn render_members(&mut self, members: &[TypeId]) -> String {
@@ -5120,16 +5297,14 @@ impl Bodies<'_> {
 
     /// The application shape of a whole type, when it is one application.
     fn single_apply(&mut self, ty: Ty) -> Option<(TypeId, Vec<Ty>)> {
-        let members = self.decls.universe.members(ty).to_vec();
-        let [only] = members.as_slice() else {
+        let [only] = self.decls.universe.members(ty) else {
             return None
         };
         self.single_apply_of(*only)
     }
 
     fn decompose_fn(&mut self, ty: Ty) -> Option<(Vec<Ty>, Ty)> {
-        let members = self.decls.universe.members(ty).to_vec();
-        let [only] = members.as_slice() else {
+        let [only] = self.decls.universe.members(ty) else {
             return None
         };
         self.decompose_fn_atom(*only)
@@ -5153,8 +5328,7 @@ impl Bodies<'_> {
     /// arity (a union of tuples or a wider member set carries no
     /// element-wise expectation).
     fn expected_tuple_elems(&mut self, expected: Ty, arity: usize) -> Option<Vec<Ty>> {
-        let members = self.decls.universe.members(expected).to_vec();
-        let [only] = members.as_slice() else {
+        let [only] = self.decls.universe.members(expected) else {
             return None;
         };
         let elements = self.tuple_elements(*only)?;

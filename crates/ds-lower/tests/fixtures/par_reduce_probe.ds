@@ -1,0 +1,21 @@
+// purpose: the par_reduce lowering seam end to end — the fold call site
+// lowers to CALLG staging (list, init, callable) plus the one List
+// evidence word, the module round-trips and folds on the VM, and the
+// negative probes in the test file pin the fork guards' refusals.
+
+tag int
+tag string
+
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+
+fn shift(a: int, b: int) -> int {
+  a * 10 + b
+}
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5]
+  println("fold ${xs.par_reduce(0, shift)}")
+}

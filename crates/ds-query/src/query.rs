@@ -14,7 +14,9 @@ use ds_diag::FileId;
 use crate::{
     key::{BlockId, DefId, PackageId, QueryKey},
     value::{
-        BlockIndexOutput, LinearityOutput, ParseOutput, QueryValue, ResolveOutput, TypeOfOutput,
+        BlockIndexOutput, CheckedPackageOutput, FileLinearityOutput, LinearityOutput,
+        PackageEffectsOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
+        TypeOfOutput,
     },
 };
 
@@ -148,6 +150,90 @@ impl Query for EffectsOf {
     fn extract(value: QueryValue) -> Option<Self::Value> {
         match value {
             QueryValue::EffectRow(row) => Some(row),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the platform-check query: [`QueryKey::PlatformCheck`]. The
+/// key is the package id; the value is the package's platform-check
+/// diagnostics (H5, E1).
+pub struct PlatformCheck;
+
+impl Query for PlatformCheck {
+    type Key = PackageId;
+    type Value = PlatformCheckOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::PlatformCheck(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::PlatformCheck(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the checked-package query: [`QueryKey::CheckedPackage`]. The
+/// key is the package id; the value is the whole-package bidirectional
+/// check (B2) the per-definition stories slice.
+pub struct CheckedPackage;
+
+impl Query for CheckedPackage {
+    type Key = PackageId;
+    type Value = CheckedPackageOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::CheckedPackage(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::CheckedPackage(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the file-linearity query: [`QueryKey::FileLinearity`]. The
+/// key is the file id; the value is the M2 affine pass (C1, C5) over that
+/// file, the substrate the per-definition facts slice.
+pub struct FileLinearity;
+
+impl Query for FileLinearity {
+    type Key = FileId;
+    type Value = FileLinearityOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::FileLinearity(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::FileLinearity(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the package-effects query: [`QueryKey::PackageEffects`]. The
+/// key is the package id; the value is the whole package's effect rows
+/// (E1), the substrate the per-definition rows slice.
+pub struct PackageEffects;
+
+impl Query for PackageEffects {
+    type Key = PackageId;
+    type Value = PackageEffectsOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::PackageEffects(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::PackageEffects(out) => Some(out),
             _ => None,
         }
     }

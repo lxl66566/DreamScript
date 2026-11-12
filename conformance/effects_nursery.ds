@@ -19,8 +19,8 @@ fn fetch_body(url: url) -> page | net_err {
   page { url: url, body: resp.consume() }
 }
 
-// the return union's list member is a generic application word the M3
-// union region does not cover yet, on top of the fetch seam
+// the union shapes lower (the list member is a heap-ref application
+// word); the fetch extern seam keeps the item at typecheck
 fn fetch_all(urls: list[url]) -> list[page] | net_err {
   var pages = list[page]()
   nursery {

@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crate::{
     module::{ModuleBuildError, ModuleRegistry, ModuleVersion},
-    program::{Const, FunctionDef, assemble},
+    program::{Const, FunctionDef},
 };
 
 /// Why a dsmod module cannot be installed.
@@ -44,6 +44,20 @@ pub enum LoadError {
         /// The callee's module name.
         module: String,
         /// The callee's function index.
+        index: u32,
+    },
+    /// A world call site addresses an op the installed platform does not
+    /// serve: the platform declaration the call sites were lowered
+    /// against names a platform whose provides list does not cover the
+    /// op's capability.
+    UnprovidedPlatformOp {
+        /// The function whose pool holds the reference.
+        func: String,
+        /// The installed platform's name.
+        platform: String,
+        /// The op's world capability.
+        capability: String,
+        /// The op's index in the platform's fixed table.
         index: u32,
     },
     /// The mapped version failed this VM's load checks (decode canonicity,
@@ -77,40 +91,60 @@ fn resolve_funcref(
         return Err(());
     }
     // the registry's native tables answer too: the builtin core is
-    // installed in every VM and the std platform module by its host, so
-    // natives resolve like any installed dependency
-    let resolved = registry.resolve_native(module, index).is_some()
-        || registry.resolve_indexed(module, index).is_some();
+    // installed in every VM and the platform handler by its host, so
+    // natives resolve like any installed dependency — except a world op
+    // the installed platform does not serve, which is the capability
+    // refusal, never a resolution
+    // bounds only: install needs to know a callee exists, never a version
+    // handle
+    let resolved =
+        registry.resolve_native(module, index).is_some() || registry.has_uop(module, index);
+    if registry.platform_serves(module, index) == Some(false) {
+        return Err(());
+    }
     if resolved { Ok((module.to_owned(), index)) } else { Err(()) }
 }
 
 /// Maps one dsmod function record to a [`FunctionDef`]: its pool constants
 /// (FuncRefs validated and normalized to their target module) and its body
-/// re-encoded to the canonical word stream.
+/// words taken over from the consumed record, which already holds the
+/// canonical stream.
 fn map_function(
     registry: &ModuleRegistry,
     own_module: &str,
     local_len: usize,
-    function: &ds_mod::Function,
+    function: ds_mod::Function,
 ) -> Result<FunctionDef, LoadError> {
-    let unresolved = |module: &str, index: u32| LoadError::UnresolvedCallee {
-        func: function.name().to_owned(),
-        module: module.to_owned(),
-        index,
+    let (name, layout, constants, code) = function.into_parts();
+    let unresolved = |module: &str, index: u32| match registry.platform_serves(module, index) {
+        // an installed platform that does not serve the op's capability
+        // is the capability refusal, not an unresolved module
+        Some(false) => LoadError::UnprovidedPlatformOp {
+            func: name.clone(),
+            platform: module.to_owned(),
+            capability: crate::platform::Platform::op_capability(index)
+                .map_or_else(|| "unknown".to_owned(), |cap| cap.name().to_owned()),
+            index,
+        },
+        _ => LoadError::UnresolvedCallee {
+            func: name.clone(),
+            module: module.to_owned(),
+            index,
+        },
     };
-    let mut pool = Vec::with_capacity(function.constants().len());
-    for entry in function.constants() {
+    let mut pool = Vec::with_capacity(constants.len());
+    for entry in constants {
         let mapped = match entry {
-            ds_mod::Constant::I64(v) => Const::I64(*v),
-            ds_mod::Constant::F64(v) => Const::F64(*v),
-            ds_mod::Constant::Bool(v) => Const::Bool(*v),
+            ds_mod::Constant::I64(v) => Const::I64(v),
+            ds_mod::Constant::F64(v) => Const::F64(v),
+            ds_mod::Constant::Bool(v) => Const::Bool(v),
             // inert in this VM until strings become values (pool-kind
             // checked at load if any uop tries to load it)
-            ds_mod::Constant::Str(raw) => Const::Str(raw.clone()),
+            ds_mod::Constant::Str(raw) => Const::Str(raw),
             ds_mod::Constant::FuncRef { module, func } => {
                 let (module, index) =
-                    resolve_funcref(registry, own_module, local_len, module, *func)
-                        .map_err(|()| unresolved(module, *func))?;
+                    resolve_funcref(registry, own_module, local_len, &module, func)
+                        .map_err(|()| unresolved(&module, func))?;
                 Const::FuncRef {
                     module,
                     func: index,
@@ -120,13 +154,10 @@ fn map_function(
         pool.push(mapped);
     }
     Ok(FunctionDef {
-        name: function.name().to_owned(),
-        layout: function.layout().clone(),
+        name,
+        layout,
         pool,
-        // ds-mod validated every body word's encodability when the record
-        // was built, so re-encoding cannot fail
-        code: assemble(function.code())
-            .expect("ds-mod validated every word at build and parse time"),
+        code,
     })
 }
 
@@ -135,21 +166,28 @@ fn map_function(
 /// install, and returns the shared handle to the installed version. A
 /// re-install of the same module name swaps the slots [H6 item 5].
 ///
+/// The module is consumed: each record's body words reach the installed
+/// table without a copy, and a failed install drops the record (rebuild
+/// the module before retrying).
+///
 /// # Errors
 ///
 /// Returns [`LoadError`] for FuncRefs naming no function and for bodies
 /// failing this VM's load checks.
 pub fn install(
     registry: &mut ModuleRegistry,
-    module: &ds_mod::Module,
+    module: ds_mod::Module,
 ) -> Result<Arc<ModuleVersion>, LoadError> {
-    let local_len = module.functions().len();
-    let defs = module
-        .functions()
-        .iter()
-        .map(|f| map_function(registry, module.name(), local_len, f))
-        .collect::<Result<Vec<_>, _>>()?;
-    let version = ModuleVersion::new(module.name(), defs).map_err(LoadError::Build)?;
+    let name = module.name().to_owned();
+    let functions = module.into_functions();
+    let local_len = functions.len();
+    // the function table's length is known and a `Result` collect gets no
+    // size hint from its iterator, so the table reserves its exact length
+    let mut defs = Vec::with_capacity(local_len);
+    for function in functions {
+        defs.push(map_function(registry, &name, local_len, function)?);
+    }
+    let version = ModuleVersion::new(name, defs).map_err(LoadError::Build)?;
     Ok(registry.install(version))
 }
 

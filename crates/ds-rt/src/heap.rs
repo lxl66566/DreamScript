@@ -59,30 +59,34 @@ pub const POOL_DEPTH: u8 = 4;
 const CLASS_COUNT: usize =
     (MAX_REUSE_CLASS.trailing_zeros() - MIN_CLASS.trailing_zeros()) as usize + 1;
 
-/// Smallest power-of-two class at least `size`.
+/// Smallest power-of-two class at least `size`; the ladder's smallest rung
+/// [`MIN_CLASS`] covers every size below it, so the ladder never steps.
 fn ladder_class(size: usize) -> usize {
-    let mut class = MIN_CLASS;
-    while class < size {
-        class *= 2;
-    }
-    class
+    size.max(MIN_CLASS).next_power_of_two()
 }
 
-/// Freelist bucket index of a power-of-two class in
-/// `[MIN_CLASS, MAX_REUSE_CLASS]`.
-fn class_index(class: usize) -> usize {
-    (class.trailing_zeros() - MIN_CLASS.trailing_zeros()) as usize
+/// The freelist row a block of `size` reuses from, when it is a ladder rung the
+/// pool keeps: a power-of-two size in `[MIN_CLASS, MAX_REUSE_CLASS]`.
+fn pool_row(size: usize) -> Option<usize> {
+    (size.is_power_of_two() && (MIN_CLASS..=MAX_REUSE_CLASS).contains(&size))
+        .then(|| (size.trailing_zeros() - MIN_CLASS.trailing_zeros()) as usize)
 }
 
-/// The class `layout` should be allocated at, if it is reuse-eligible: block
+/// The freelist row `layout` is allocated at, if it is reuse-eligible: block
 /// alignment at most MIN_ALIGN (so payload offsets stay valid at any class
-/// base) and a ladder size within the pool range.
-fn reusable_class(layout: Layout) -> Option<usize> {
+/// base) and a ladder size within the pool range. The row is the class index
+/// itself, so the caller indexes the freelist once instead of re-deriving it
+/// from the class size at each step.
+fn reusable_row(layout: Layout) -> Option<usize> {
     if layout.align() > MIN_ALIGN {
         return None;
     }
-    let class = ladder_class(layout.size());
-    (class <= MAX_REUSE_CLASS).then_some(class)
+    pool_row(ladder_class(layout.size()))
+}
+
+/// The canonical block size of a freelist row: its rung on the ladder.
+fn class_size(row: usize) -> usize {
+    MIN_CLASS << row
 }
 
 /// The payload offset within a block carrying a `T`: the `repr(C)` header
@@ -132,13 +136,28 @@ pub struct Heap {
     inner: UnsafeCell<Inner>,
 }
 
+/// One size class's freelist row. The head and the depth share the row, so a
+/// pool decision and the link it then writes touch one cache line.
+struct ClassPool {
+    /// The freelist head; nodes are the pooled blocks themselves, linked
+    /// through the header's `deinit` slot.
+    head: Option<NonNull<u8>>,
+    /// Current freelist depth, capped at [`POOL_DEPTH`].
+    depth: u8,
+}
+
+impl ClassPool {
+    /// The empty row, for the heap's const constructor.
+    const EMPTY: Self = Self {
+        head: None,
+        depth: 0,
+    };
+}
+
 struct Inner {
     arena: Arena,
-    /// Freelist heads per size class; nodes are the pooled blocks themselves,
-    /// linked through the header's `deinit` slot.
-    free: [Option<NonNull<u8>>; CLASS_COUNT],
-    /// Current freelist depth per class, capped at [`POOL_DEPTH`].
-    depth: [u8; CLASS_COUNT],
+    /// One freelist row per size class.
+    pools: [ClassPool; CLASS_COUNT],
 }
 
 // SAFETY: the heap uniquely owns its arena, pool, and blocks; moving it to
@@ -154,8 +173,7 @@ impl Heap {
         Self {
             inner: UnsafeCell::new(Inner {
                 arena: Arena::new(),
-                free: [const { None }; CLASS_COUNT],
-                depth: [0; CLASS_COUNT],
+                pools: [const { ClassPool::EMPTY }; CLASS_COUNT],
             }),
         }
     }
@@ -346,7 +364,7 @@ impl Heap {
         let inner = self.inner();
         HeapStats {
             arena: inner.arena.stats(),
-            pooled_blocks: inner.depth.iter().sum::<u8>() as usize,
+            pooled_blocks: inner.pools.iter().map(|pool| pool.depth).sum::<u8>() as usize,
         }
     }
 
@@ -355,13 +373,14 @@ impl Heap {
     /// system allocator with a class-canonical size, else a dedicated exact
     /// allocation for over-aligned or oversized requests.
     fn alloc_block(&self, layout: Layout, deinit: Option<DeinitFn>) -> NonNull<RcHeader> {
-        if let Some(class) = reusable_class(layout) {
+        if let Some(row) = reusable_row(layout) {
             let inner = self.inner();
-            if inner.free[class_index(class)].is_some() {
-                return inner.alloc_at(class, deinit);
+            if inner.pools[row].head.is_some() {
+                return inner.alloc_at(row, deinit);
             }
             // Fallback: fresh system-allocator block at the canonical class
             // size, so the block stays class-shaped for its next reuse.
+            let class = class_size(row);
             let layout = Layout::from_size_align(class, MIN_ALIGN)
                 .expect("ds-rt: class layout is always valid");
             let block = system_alloc(layout).cast::<RcHeader>();
@@ -384,11 +403,10 @@ impl Heap {
         // committed header offsets, untouched by pool bookkeeping.
         let size = unsafe { ptr::read(ptr::addr_of!((*header.as_ptr()).size)) } as usize;
         let align = unsafe { ptr::read(ptr::addr_of!((*header.as_ptr()).align)) } as usize;
-        let poolable = align == MIN_ALIGN
-            && size.is_power_of_two()
-            && (MIN_CLASS..=MAX_REUSE_CLASS).contains(&size)
-            && inner.depth[class_index(size)] < POOL_DEPTH;
-        if !poolable {
+        // One row probe answers both the shape gate and the depth cap.
+        let row =
+            pool_row(size).filter(|row| align == MIN_ALIGN && inner.pools[*row].depth < POOL_DEPTH);
+        let Some(row) = row else {
             // SAFETY: the header records the exact allocation layout
             // (class-canonical or dedicated exact); released exactly once at
             // the unique death.
@@ -399,8 +417,8 @@ impl Heap {
                 );
             }
             return;
-        }
-        let idx = class_index(size);
+        };
+        let pool = &mut inner.pools[row];
         // SAFETY: the block is dead and exclusively ours. The deinit slot is
         // pointer-sized and the block stays allocated while pooled, so the
         // intrusive next pointer is always readable; the rc tombstone (zero)
@@ -408,11 +426,11 @@ impl Heap {
         // check instead of silently corrupting the count.
         unsafe {
             let slot = ptr::addr_of_mut!((*header.as_ptr()).deinit).cast::<Option<NonNull<u8>>>();
-            ptr::write(slot, inner.free[idx]);
+            ptr::write(slot, pool.head);
             ptr::addr_of_mut!((*header.as_ptr()).rc).write(0);
         }
-        inner.free[idx] = Some(header.cast());
-        inner.depth[idx] += 1;
+        pool.head = Some(header.cast());
+        pool.depth += 1;
     }
 
     #[inline]
@@ -436,11 +454,13 @@ impl Default for Heap {
 
 impl Inner {
     /// The `alloc_at` pattern (C4): places a fresh block at the pooled
-    /// candidate heading `class`'s freelist, unlinking the node first.
-    fn alloc_at(&mut self, class: usize, deinit: Option<DeinitFn>) -> NonNull<RcHeader> {
-        let head = self.free[class_index(class)]
+    /// candidate heading `row`'s freelist, unlinking the node first.
+    fn alloc_at(&mut self, row: usize, deinit: Option<DeinitFn>) -> NonNull<RcHeader> {
+        let pool = &mut self.pools[row];
+        let head = pool
+            .head
             .take()
-            .expect("ds-rt: caller checked the bucket is non-empty");
+            .expect("ds-rt: caller checked the row is non-empty");
         // SAFETY: the pooled node links through its deinit slot, which
         // `thread_block` wrote when pooling; the block stays allocated while
         // pooled, and the read happens before the slot is overwritten.
@@ -450,10 +470,10 @@ impl Inner {
                     .cast::<Option<NonNull<u8>>>(),
             )
         };
-        self.free[class_index(class)] = next;
-        self.depth[class_index(class)] -= 1;
+        pool.head = next;
+        pool.depth -= 1;
         let block = head.cast::<RcHeader>();
-        write_header(block, class, MIN_ALIGN, deinit);
+        write_header(block, class_size(row), MIN_ALIGN, deinit);
         block
     }
 }
@@ -461,14 +481,14 @@ impl Inner {
 impl Drop for Heap {
     fn drop(&mut self) {
         let inner = self.inner();
-        for (idx, head) in inner.free.iter_mut().enumerate() {
-            if let Some(block) = head.take() {
+        for (row, pool) in inner.pools.iter_mut().enumerate() {
+            if let Some(block) = pool.head.take() {
                 // SAFETY: pooled blocks were allocated exactly at
-                // (class size of idx, MIN_ALIGN) and are released once here.
+                // (row's class size, MIN_ALIGN) and are released once here.
                 unsafe {
                     dealloc(
                         block.as_ptr(),
-                        Layout::from_size_align_unchecked(MIN_CLASS << idx, MIN_ALIGN),
+                        Layout::from_size_align_unchecked(class_size(row), MIN_ALIGN),
                     );
                 }
             }
@@ -504,7 +524,44 @@ fn write_header(block: NonNull<RcHeader>, size: usize, align: usize, deinit: Opt
 mod tests {
     use core::alloc::Layout;
 
-    use super::{RcHeader, block_layout, payload_offset};
+    use super::{
+        CLASS_COUNT, MAX_REUSE_CLASS, MIN_CLASS, RcHeader, block_layout, class_size, ladder_class,
+        payload_offset, pool_row,
+    };
+
+    /// The class ladder is the smallest power of two at least the size, with
+    /// [`MIN_CLASS`] as its floor: the closed form and the doubling ladder
+    /// agree on every rung and between two rungs.
+    #[test]
+    fn the_class_ladder_rounds_up_to_the_next_rung() {
+        let reference = |size: usize| {
+            let mut class = MIN_CLASS;
+            while class < size {
+                class *= 2;
+            }
+            class
+        };
+        for size in 0..=MAX_REUSE_CLASS + MIN_CLASS {
+            assert_eq!(ladder_class(size), reference(size), "size {size}");
+        }
+    }
+
+    /// Every ladder rung is one freelist row, and that row's canonical size is
+    /// the rung itself: the pool index and the block size it allocates at
+    /// derive from one table, so they cannot drift apart.
+    #[test]
+    fn pool_rows_are_the_ladder_rungs() {
+        for row in 0..CLASS_COUNT {
+            let class = MIN_CLASS << row;
+            assert_eq!(pool_row(class), Some(row), "class {class}");
+            assert_eq!(class_size(row), class, "row {row}");
+            assert_eq!(ladder_class(class), class, "class {class} is its own rung");
+        }
+        // off the ladder: below its floor, between two rungs, above the pool
+        assert_eq!(pool_row(MIN_CLASS - 1), None);
+        assert_eq!(pool_row(MIN_CLASS + 1), None);
+        assert_eq!(pool_row(MAX_REUSE_CLASS * 2), None);
+    }
 
     /// The const payload offset is the same arithmetic `Layout::extend` runs
     /// over the padded `repr(C)` header, for every alignment shape a payload

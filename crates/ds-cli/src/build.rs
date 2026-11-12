@@ -23,16 +23,30 @@ pub struct BuildArgs {
     no_ambient: bool,
 }
 
-/// Compiles one source and writes its module, verifying the written
-/// bytes (a checked read against the very source they claim) before the
-/// file lands on disk.
+/// Compiles one source and writes its module.
+///
+/// The compiled module's header hash comes from the one read of the source the
+/// pipeline performed, so a checked read here would re-read the file and re-run
+/// blake3 over bytes the module already commits to. The written bytes are
+/// verified against the module value in debug builds instead.
 pub fn build(args: &BuildArgs) -> Result<()> {
     let compiled = source::compile(&args.file, "main", args.no_ambient)?;
-    let bytes = ds_mod::write(compiled.lowered.module());
-    let source_bytes =
-        std::fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
-    ds_mod::read_checked(&bytes, &source_bytes)
-        .with_context(|| "the written module fails its own checked read")?;
+    let module = compiled.lowered.module();
+    let bytes = ds_mod::write(module);
+    verify_written(&bytes, module);
     std::fs::write(&args.out, &bytes).with_context(|| format!("writing {}", args.out.display()))?;
     Ok(())
+}
+
+/// Debug-build check that the writer emitted bytes its own reader returns as
+/// the same module: a writer/reader drift fails every debug build and test
+/// run rather than landing a corrupt artifact.
+fn verify_written(bytes: &[u8], module: &ds_mod::Module) {
+    if cfg!(debug_assertions) {
+        let read_back = ds_mod::read(bytes).expect("the written module must read back");
+        assert_eq!(
+            &read_back, module,
+            "the written module must read back unchanged"
+        );
+    }
 }

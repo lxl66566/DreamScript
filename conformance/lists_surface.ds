@@ -10,6 +10,8 @@
 // for_sum: stage: run
 // member_scan: stage: run
 // csv_line: stage: run
+// cons_records: stage: run (the stride-aware copy closes, heap-list slice 2026-11-12)
+// record_iteration: stage: run (for-in and membership over wider elements, heap-list slice 2026-11-12)
 // reject-mixed: stage: reject the mixed-element literal names the offending item's type (DS2001) [B3]
 
 struct page { url: string }
@@ -69,6 +71,32 @@ fn csv_line() -> string {
   const csv = words.join(",")
   const blank = list[string]().join(",")
   csv + "|" + blank
+}
+
+// the copy closes carry whole record spans at the per-list stride: the
+// cons head stages its span, the first prepend fixes the empty list's
+// stride, and tail/collect/list_concat keep the source's
+fn cons_records() -> int {
+  const empty = list[page]()
+  const one = cons(page { url: "a" }, empty)
+  const two = cons(page { url: "b" }, one)
+  const joined = list_concat(two, collect(two))
+  const rest = tail(two)
+  list_len(joined) * 10 + list_len(rest)
+}
+
+// iteration and membership bind the whole element span per step
+fn record_iteration() -> int {
+  var total = 0
+  const pages = [page { url: "a" }, page { url: "b" }]
+  for p in pages {
+    if p.url == "b" { total += 1 }
+  }
+  const hit = page { url: "a" } in pages
+  const miss = page { url: "z" } in pages
+  if hit { total += 10 }
+  if miss { total += 100 }
+  total
 }
 
 fn reject_mixed() -> int {

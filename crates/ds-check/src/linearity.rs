@@ -87,6 +87,7 @@ use ds_parse::{
     Ast, BinaryOp, BlockExpr, CallArg, Expr, FnDecl, Ident, Item, ItemKind, LocalDecl, MatchArm,
     Param, ParamMode, Path, Pattern, Stmt, StructDecl, StructMember, TraitMember,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     atom::{AtomKind, Field, TypeId},
@@ -190,12 +191,13 @@ pub fn linearity_check(
         def_types: &checked.def_types,
         res: resolutions.first(),
         out: Linearity::default(),
-        state: HashMap::new(),
-        info: HashMap::new(),
+        state: FxHashMap::default(),
+        undo: Vec::new(),
+        info: FxHashMap::default(),
         scopes: vec![Vec::new()],
         audit: false,
         reported: HashSet::new(),
-        last_use: HashMap::new(),
+        last_use: FxHashMap::default(),
         epoch: 0,
     };
     // Two package-wide passes [G3]: every file's top-level binder
@@ -229,14 +231,14 @@ pub fn linearity_check(
 // ---- copyability [C1] -------------------------------------------------------
 
 /// Whether a solved type copies freely: every member atom does.
-pub(crate) fn ty_copyable(decls: &Decls, ty: Ty, linear_vars: &HashMap<TypeId, bool>) -> bool {
+pub(crate) fn ty_copyable(decls: &Decls, ty: Ty, linear_vars: &FxHashMap<TypeId, bool>) -> bool {
     ty_copyable_seen(decls, ty, linear_vars, &mut Vec::new())
 }
 
 fn ty_copyable_seen(
     decls: &Decls,
     ty: Ty,
-    linear_vars: &HashMap<TypeId, bool>,
+    linear_vars: &FxHashMap<TypeId, bool>,
     seen: &mut Vec<TypeId>,
 ) -> bool {
     decls
@@ -249,7 +251,7 @@ fn ty_copyable_seen(
 fn atom_copyable(
     decls: &Decls,
     atom: TypeId,
-    linear_vars: &HashMap<TypeId, bool>,
+    linear_vars: &FxHashMap<TypeId, bool>,
     seen: &mut Vec<TypeId>,
 ) -> bool {
     // A cyclic type is illegal in v0 [C4]; stopping as copyable on a
@@ -301,16 +303,16 @@ fn atom_copyable(
 /// The shared empty bound table for copyability probes outside generic
 /// scopes (field projections): one static map, never a fresh table per
 /// call.
-fn no_linear_vars() -> &'static HashMap<TypeId, bool> {
-    static NONE: std::sync::LazyLock<HashMap<TypeId, bool>> =
-        std::sync::LazyLock::new(HashMap::new);
+fn no_linear_vars() -> &'static FxHashMap<TypeId, bool> {
+    static NONE: std::sync::LazyLock<FxHashMap<TypeId, bool>> =
+        std::sync::LazyLock::new(FxHashMap::default);
     &NONE
 }
 
 fn field_copyable(
     decls: &Decls,
     field: &Field,
-    linear_vars: &HashMap<TypeId, bool>,
+    linear_vars: &FxHashMap<TypeId, bool>,
     seen: &mut Vec<TypeId>,
 ) -> bool {
     expr_copyable(decls, &field.ty, linear_vars, seen)
@@ -319,7 +321,7 @@ fn field_copyable(
 fn expr_copyable(
     decls: &Decls,
     expr: &TypeExpr,
-    linear_vars: &HashMap<TypeId, bool>,
+    linear_vars: &FxHashMap<TypeId, bool>,
     seen: &mut Vec<TypeId>,
 ) -> bool {
     match expr {
@@ -396,7 +398,21 @@ struct Info<'a> {
     epoch: usize,
 }
 
-type States = HashMap<Place, State>;
+type States = FxHashMap<Place, State>;
+
+/// One branch arm's or loop body's state writes relative to its entry
+/// state: every place it wrote, at its final state.
+type Delta = FxHashMap<Place, State>;
+
+/// One logged state write. Every write a branch, arm, or loop body makes
+/// goes through `Lin::set_state`; `Lin::rewind` replays a region's entries
+/// newest first, which restores that region's entry state exactly.
+#[derive(Clone, Copy)]
+struct StateUndo {
+    place: Place,
+    /// The state before the write; `None` when the place was untracked.
+    prev: Option<State>,
+}
 
 /// The forward walker. One instance covers one package; top-level
 /// bindings' states persist across items so a value consumed in one item
@@ -405,11 +421,14 @@ struct Lin<'a> {
     package: &'a Package,
     decls: &'a Decls,
     facts: &'a HashMap<Span, BinderFact>,
-    def_types: &'a HashMap<DefId, Ty>,
+    def_types: &'a FxHashMap<DefId, Ty>,
     res: Option<&'a Resolutions>,
     out: Linearity,
     state: States,
-    info: HashMap<Place, Info<'a>>,
+    /// State writes made while walking the open branch, arm, or loop body,
+    /// newest last; a rewind restores that region's entry state.
+    undo: Vec<StateUndo>,
+    info: FxHashMap<Place, Info<'a>>,
     /// Binders introduced per scope, in bind order (deinit order at exit).
     scopes: Vec<Vec<Place>>,
     /// Audit mode: reads are checked against the current state but nothing
@@ -418,7 +437,7 @@ struct Lin<'a> {
     /// Use sites already reported, so the loop audit never reports twice.
     reported: HashSet<(Place, Span)>,
     /// The last use per binding: (use span, borrowed).
-    last_use: HashMap<Place, (Span, bool)>,
+    last_use: FxHashMap<Place, (Span, bool)>,
     /// Capture depth: inside a lambda or spawn body, every use of a
     /// binding from an outer epoch is a capture and moves it (C1).
     epoch: usize,
@@ -451,11 +470,17 @@ impl<'a> Lin<'a> {
                     },
                     _ => self.item(item),
                 }
+                // One top-level walk sits outside every snapshot region, so
+                // the writes it leaves logged are never rewound.
+                self.undo.clear();
             }
         }
     }
 
     fn item(&mut self, item: &'a Item) {
+        // A top-level item walk starts outside every snapshot region, and the
+        // local-table clear is a scope-wide reset no rewind may undo.
+        debug_assert!(self.undo.is_empty());
         self.state
             .retain(|place, _| !matches!(place, Place::Local(_)));
         match &item.kind {
@@ -489,7 +514,8 @@ impl<'a> Lin<'a> {
             | ItemKind::Enum(_)
             | ItemKind::Tag(_)
             | ItemKind::TypeAlias(_)
-            | ItemKind::Import(_) => {},
+            | ItemKind::Import(_)
+            | ItemKind::Platform(_) => {},
         }
     }
 
@@ -581,7 +607,7 @@ impl<'a> Lin<'a> {
             owned,
             epoch: self.epoch,
         });
-        self.state.insert(place, State::Live);
+        self.set_state(place, State::Live);
         if let Some(scope) = self.scopes.last_mut() {
             scope.push(place);
         }
@@ -606,13 +632,15 @@ impl<'a> Lin<'a> {
             let copyable = self
                 .def_types
                 .get(&def)
-                .is_some_and(|ty| ty_copyable(self.decls, *ty, &HashMap::new()));
+                .is_some_and(|ty| ty_copyable(self.decls, *ty, &FxHashMap::default()));
             self.info.insert(place, Info {
                 name,
                 copyable,
                 owned: true,
                 epoch: 0,
             });
+            // Package-wide registration precedes every snapshot region, so
+            // this write is not retroactively undoable.
             self.state.insert(place, State::Live);
         }
     }
@@ -666,7 +694,7 @@ impl<'a> Lin<'a> {
                         binder: place.binder_span(self.package),
                         at,
                     });
-                    self.state.insert(place, State::Dead { at });
+                    self.set_state(place, State::Dead { at });
                 }
             },
             Some(State::Dead { at: moved_at }) => {
@@ -686,6 +714,67 @@ impl<'a> Lin<'a> {
         if self.reported.insert((place, at)) {
             self.out.diags.push(diag);
         }
+    }
+
+    // ---- state writes and branch snapshots ----------------------------------
+
+    /// The single funnel for state writes during a body walk: logs the
+    /// previous state for a rewind, and writes nothing in audit mode.
+    fn set_state(&mut self, place: Place, state: State) {
+        if self.audit {
+            return;
+        }
+        let prev = self.state.insert(place, state);
+        self.undo.push(StateUndo { place, prev });
+    }
+
+    /// Undoes every state write logged since `mark`, newest first: the walk
+    /// is back at that region's entry state.
+    fn rewind(&mut self, mark: usize) {
+        for undo in self.undo.drain(mark..).rev() {
+            match undo.prev {
+                Some(prev) => self.state.insert(undo.place, prev),
+                None => self.state.remove(&undo.place),
+            };
+        }
+    }
+
+    /// A region's writes as a delta over its entry state. Each written
+    /// place's final state is the live table's, so this runs before the
+    /// region's rewind.
+    fn delta_since(&self, mark: usize) -> Delta {
+        let mut delta = Delta::default();
+        for undo in &self.undo[mark..] {
+            if let Some(state) = self.state.get(&undo.place) {
+                delta.insert(undo.place, *state);
+            }
+        }
+        delta
+    }
+
+    /// Writes a delta's entries, so an enclosing region's rewind undoes
+    /// them too.
+    fn apply_delta(&mut self, delta: &Delta) {
+        for (place, state) in delta {
+            self.set_state(*place, *state);
+        }
+    }
+
+    /// Merges a loop body's delta into the entry state in place and rewinds:
+    /// a place the body moved stays moved after the loop, since the back edge
+    /// re-executes it (C1).
+    fn merge_loop(&mut self, mark: usize) {
+        let mut body = self.delta_since(mark);
+        self.rewind(mark);
+        body.retain(|place, state| match self.state.get(place) {
+            // The body's move stands over the entry state's live claim; every
+            // other place back at its entry state drops out of the delta.
+            Some(entry_state) => {
+                matches!(entry_state, State::Live) && !matches!(state, State::Live)
+            },
+            None => false,
+        });
+        self.apply_delta(&body);
     }
 
     // ---- statements ------------------------------------------------------------
@@ -922,9 +1011,7 @@ impl<'a> Lin<'a> {
                     at: *span,
                 });
             }
-            if !self.audit {
-                self.state.insert(place, State::Live);
-            }
+            self.set_state(place, State::Live);
         } else {
             // Compound assignment reads the current value, then mutates it.
             self.read(place, left.span(), false);
@@ -1015,43 +1102,51 @@ impl<'a> Lin<'a> {
 
     fn if_expr(&mut self, cond: &'a Expr, then: &'a BlockExpr, else_: Option<&'a Expr>) -> bool {
         self.expr(cond, true);
-        let entry = self.state.clone();
+        // Both sides walk from the condition's state; each side's writes are
+        // logged and rewound, so the join reads one delta per side instead of
+        // one state table per side.
+        let mark = self.undo.len();
         let then_diverges = self.block(then);
-        let then_state = std::mem::take(&mut self.state);
-        self.state = entry;
-        let (else_diverges, else_state) = match else_ {
-            Some(else_expr) => {
-                let diverges = self.expr(else_expr, true);
-                (diverges, std::mem::take(&mut self.state))
-            },
-            None => (false, self.state.clone()),
+        let then_delta = self.delta_since(mark);
+        self.rewind(mark);
+        let else_diverges = match else_ {
+            Some(else_expr) => self.expr(else_expr, true),
+            None => false,
         };
+        // A diverging side leaves the state of the side the walk reports.
+        // The then side's writes are the join's accumulator.
         match (then_diverges, else_diverges) {
-            (true, true) => {
-                self.state = then_state;
-                true
-            },
-            (true, false) => {
-                self.state = else_state;
-                false
-            },
-            (false, true) => {
-                self.state = then_state;
-                false
+            // Only the else side produces; its writes still stand.
+            (true, false) => {},
+            // The else side diverges, so the then side's writes stand.
+            (_, true) => {
+                self.rewind(mark);
+                self.apply_delta(&then_delta);
             },
             (false, false) => {
-                self.state = merge_states(&then_state, &else_state);
-                false
+                let else_delta = self.delta_since(mark);
+                self.rewind(mark);
+                let mut merged = then_delta;
+                merge_branch(&mut merged, &self.state, &else_delta);
+                self.apply_delta(&merged);
             },
         }
+        then_diverges && else_diverges
     }
 
     fn match_expr(&mut self, scrutinee: &'a Expr, arms: &'a [MatchArm]) -> bool {
         self.expr(scrutinee, true);
-        let entry = std::mem::take(&mut self.state);
-        let mut arms_out: Vec<(bool, States)> = Vec::with_capacity(arms.len());
+        // Every arm starts from the scrutinee's state, and each arm's writes
+        // are logged and rewound at its end.
+        let mark = self.undo.len();
+        // The first producing arm's table becomes the join's accumulator and
+        // every later one merges into it, so one arm's table is live at a
+        // time. The last arm's table stands when no arm produces, which is
+        // the entry state when the match has no arms.
+        let mut accumulator: Option<Delta> = None;
+        let mut last: Option<Delta> = None;
+        let mut all_diverge = true;
         for arm in arms {
-            self.state.clone_from(&entry);
             self.scopes.push(Vec::new());
             self.bind_pattern(&arm.pat);
             let mut diverges = arm
@@ -1062,56 +1157,53 @@ impl<'a> Lin<'a> {
                 diverges = self.expr(&arm.body, true);
             }
             self.drop_scope(arm.span);
-            arms_out.push((diverges, std::mem::take(&mut self.state)));
+            let delta = self.delta_since(mark);
+            self.rewind(mark);
+            all_diverge &= diverges;
+            if diverges {
+                last = Some(delta);
+                continue;
+            }
+            match &mut accumulator {
+                Some(accumulator) => merge_branch(accumulator, &self.state, &delta),
+                None => accumulator = Some(delta),
+            }
         }
-        let producing: Vec<States> = arms_out
-            .iter()
-            .filter(|(diverges, _)| !diverges)
-            .map(|(_, state)| state.clone())
-            .collect();
-        self.state = match producing.len() {
-            0 => arms_out.last().map_or(entry, |(_, state)| state.clone()),
-            1 => producing.into_iter().next().unwrap_or_default(),
-            _ => producing
-                .into_iter()
-                .reduce(|acc, state| merge_states(&acc, &state))
-                .unwrap_or_default(),
-        };
-        arms_out.iter().all(|(diverges, _)| *diverges)
+        if let Some(join) = accumulator.or(last) {
+            self.apply_delta(&join);
+        }
+        all_diverge
     }
 
     fn while_expr(&mut self, cond: &'a Expr, body: &'a BlockExpr) -> bool {
         self.expr(cond, true);
-        let entry = self.state.clone();
+        let mark = self.undo.len();
         self.block(body);
-        let merged = merge_states(&entry, &self.state);
+        self.merge_loop(mark);
         // The loop re-executes the condition and body on the back edge:
-        // one audit round against the merged state [C1]. A loop nested
+        // one audit round against the merged state (C1). A loop nested
         // inside an outer audit round skips its own: the audit walk
         // mutates nothing, so the round would re-check the same reads
         // against the same state, and the re-walk compounded per nesting
         // level (exponential in loop depth).
         if !self.audit {
-            let audited = self.audit;
-            self.state = merged.clone();
             self.audit = true;
             self.expr(cond, true);
             self.block(body);
-            self.audit = audited;
+            self.audit = false;
         }
-        self.state = merged;
         false
     }
 
     fn for_expr(&mut self, pat: &'a Pattern, iter: &'a Expr, body: &'a Expr) -> bool {
-        // The iterable feeds a linear cursor: a consuming use [D3].
+        // The iterable feeds a linear cursor: a consuming use (D3).
         self.expr(iter, true);
-        let entry = self.state.clone();
+        let mark = self.undo.len();
         self.scopes.push(Vec::new());
         self.bind_pattern(pat);
         self.expr(body, true);
         self.drop_scope(body.span());
-        let merged = merge_states(&entry, &self.state);
+        self.merge_loop(mark);
         // The body re-executes per iteration; pattern binders are fresh
         // each round, so only outer bindings matter here. A loop nested
         // inside an outer audit round skips its own round: the audit
@@ -1119,13 +1211,10 @@ impl<'a> Lin<'a> {
         // against the same state, and the re-walk compounded per
         // nesting level (exponential in loop depth).
         if !self.audit {
-            let audited = self.audit;
-            self.state = merged.clone();
             self.audit = true;
             self.expr(body, true);
-            self.audit = audited;
+            self.audit = false;
         }
-        self.state = merged;
         false
     }
 
@@ -1333,18 +1422,43 @@ fn moved_diag(name: &str, at: Span, moved_at: Span) -> Diagnostic {
     }
 }
 
-/// Live after a join only when live on every path; the first move wins
-/// the reported span (C1).
-fn merge_states(a: &States, b: &States) -> States {
-    let mut out = a.clone();
-    for (place, state) in b {
-        if matches!(out.get(place), Some(State::Live)) && !matches!(state, State::Live) {
-            out.insert(*place, *state);
+/// Merges one branch's delta into the accumulator over the join's entry
+/// state: a place is live after the join only when live on both sides, and a
+/// move on either side wins the recorded span, the accumulator's side first.
+///
+/// The join reads only places the branches wrote: a place neither wrote keeps
+/// its entry state, so it cannot change and never enters the result.
+fn merge_branch(acc: &mut Delta, entry: &States, branch: &Delta) {
+    // Places the accumulator already holds and this branch never wrote: the
+    // entry state joins in as the branch side.
+    acc.retain(|place, state| match entry.get(place) {
+        Some(entry_state)
+            if matches!(state, State::Live) && !matches!(entry_state, State::Live) =>
+        {
+            false
+        },
+        Some(entry_state) => *entry_state != *state,
+        None => true,
+    });
+    for (place, branch_state) in branch {
+        let state = match acc.get(place).or(entry.get(place)) {
+            Some(acc_state)
+                if matches!(acc_state, State::Live) && !matches!(branch_state, State::Live) =>
+            {
+                *branch_state
+            },
+            Some(acc_state) => *acc_state,
+            None => continue,
+        };
+        if entry.get(place) == Some(&state) {
+            acc.remove(place);
+        } else {
+            acc.insert(*place, state);
         }
     }
-    out
 }
 
+/// Strips parentheses to the expression the walk reads.
 fn peel(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren { inner, .. } => peel(inner),
@@ -1387,8 +1501,9 @@ mod tests {
             def_types: &checked.def_types,
             res: resolutions.first(),
             out: Linearity::default(),
-            state: HashMap::from([(place, State::Uninit)]),
-            info: HashMap::from([(place, Info {
+            state: FxHashMap::from_iter([(place, State::Uninit)]),
+            undo: Vec::new(),
+            info: FxHashMap::from_iter([(place, Info {
                 name: "p",
                 copyable,
                 owned: true,
@@ -1397,7 +1512,7 @@ mod tests {
             scopes: vec![Vec::new()],
             audit: false,
             reported: HashSet::new(),
-            last_use: HashMap::new(),
+            last_use: FxHashMap::default(),
             epoch: 0,
         };
         lin.read(place, binder, false);

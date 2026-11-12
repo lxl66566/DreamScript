@@ -3,7 +3,7 @@
 
 use crate::{
     FORMAT_VERSION, MAGIC,
-    header::{Dep, SectionKind, TargetClass},
+    header::{SectionKind, TargetClass},
     module::{Constant, DebugSpan, Function, Module, slot_tag},
     varint::{put_uleb, uleb_len},
 };
@@ -16,25 +16,32 @@ pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 1;
 /// the identical bytes again.
 #[must_use]
 pub fn write(module: &Module) -> Vec<u8> {
-    // Section payloads in canonical (directory) order.
-    let blocks = blocks_payload(module.functions());
-    let constants = constants_payload(module.constants());
-    let type_metadata = placeholder_payload();
-    let effect_rows = placeholder_payload();
-    let debug_spans = module.debug_spans().map(spans_payload);
-    let mut entries: Vec<(SectionKind, Vec<u8>)> = vec![
-        (SectionKind::Blocks, blocks),
-        (SectionKind::Constants, constants),
-        (SectionKind::TypeMetadata, type_metadata),
-        (SectionKind::EffectRows, effect_rows),
-    ];
-    if let Some(spans) = debug_spans {
-        entries.push((SectionKind::DebugSpans, spans));
+    // Section payload lengths in canonical (directory) order. Measuring runs
+    // the same encoders over a counting sink, so the output buffer is
+    // allocated once at its exact length and every payload lands in it
+    // directly.
+    let placeholder_len = measure(placeholder_into);
+    let mut entries: Vec<(SectionKind, usize)> = Vec::with_capacity(5);
+    entries.push((
+        SectionKind::Blocks,
+        measure(|out| blocks_into(out, module.functions())),
+    ));
+    entries.push((
+        SectionKind::Constants,
+        measure(|out| constants_into(out, module.constants())),
+    ));
+    entries.push((SectionKind::TypeMetadata, placeholder_len));
+    entries.push((SectionKind::EffectRows, placeholder_len));
+    if let Some(spans) = module.debug_spans() {
+        entries.push((
+            SectionKind::DebugSpans,
+            measure(|out| spans_into(out, spans)),
+        ));
     }
 
     // The directory size depends on the offsets it assigns, which depend on
     // its own size; both grow monotonically, so iterate to the fixed point.
-    let base = header_len(module);
+    let base = measure(|out| header_into(out, module));
     let count = u64::try_from(entries.len()).expect("section count fits u64");
     let mut dir_end = base + uleb_len(count) + entries.len() * 3;
     let mut offsets = Vec::with_capacity(entries.len());
@@ -42,17 +49,15 @@ pub fn write(module: &Module) -> Vec<u8> {
     for _ in 0..8 {
         offsets.clear();
         let mut offset = dir_end;
-        for (_, payload) in &entries {
+        for &(_, len) in &entries {
             offsets.push(offset);
-            offset += payload.len();
+            offset += len;
         }
         let size = uleb_len(count)
             + entries
                 .iter()
                 .zip(&offsets)
-                .map(|((_, payload), offset)| {
-                    1 + uleb_len(uleb64(*offset)) + uleb_len(uleb64(payload.len()))
-                })
+                .map(|(&(_, len), &offset)| 1 + uleb_len(uleb64(offset)) + uleb_len(uleb64(len)))
                 .sum::<usize>();
         if base + size == dir_end {
             stable = true;
@@ -62,56 +67,97 @@ pub fn write(module: &Module) -> Vec<u8> {
     }
     assert!(stable, "section directory size did not stabilize");
 
-    let mut out = Vec::with_capacity(
-        offsets.last().copied().unwrap_or(dir_end) + entries.last().map_or(0, |(_, p)| p.len()),
-    );
-    // Fixed header prefix.
-    out.extend_from_slice(&MAGIC);
-    out.push(FORMAT_VERSION);
-    out.push(module.target().tag());
-    out.push(module.flags().bits());
-    let (slot0, slot1, collector_flags) = module.collector().raw();
-    out.push(collector_flags);
-    out.extend_from_slice(&slot0.to_le_bytes());
-    out.extend_from_slice(&slot1.to_le_bytes());
-    out.extend_from_slice(&module.max_call_depth().to_le_bytes());
-    out.extend_from_slice(&module.ir_checksum().to_le_bytes());
-    // Variable header fields.
-    if let TargetClass::Triple(triple) = module.target() {
-        put_str(&mut out, triple);
-    }
-    put_str(&mut out, module.name());
-    put_uleb(
-        &mut out,
-        u64::try_from(module.deps().len()).expect("dep count fits u64"),
-    );
-    for dep in module.deps() {
-        put_str(&mut out, &dep.name);
-        out.extend_from_slice(dep.content_hash.as_bytes());
-    }
-    out.extend_from_slice(module.source_hash().as_bytes());
+    let mut out = Vec::with_capacity(dir_end + entries.iter().map(|&(_, len)| len).sum::<usize>());
+    header_into(&mut out, module);
     // Section directory.
-    put_uleb(&mut out, count);
-    for ((kind, payload), offset) in entries.iter().zip(&offsets) {
+    out.uleb(count);
+    for (&(kind, len), &offset) in entries.iter().zip(&offsets) {
         out.push(kind.tag());
-        put_uleb(&mut out, uleb64(*offset));
-        put_uleb(&mut out, uleb64(payload.len()));
+        out.uleb(uleb64(offset));
+        out.uleb(uleb64(len));
     }
     debug_assert_eq!(
         out.len(),
         dir_end,
         "directory must end where payloads begin"
     );
-    // Payloads.
-    for (kind, payload) in &entries {
+    // Payloads, in directory order.
+    for (position, &(kind, len)) in entries.iter().enumerate() {
         debug_assert_eq!(
             out.len(),
-            offsets[kind.index()],
+            offsets[position],
             "{kind} payload must start at its directory offset"
         );
-        out.extend_from_slice(payload);
+        match kind {
+            SectionKind::Blocks => blocks_into(&mut out, module.functions()),
+            SectionKind::Constants => constants_into(&mut out, module.constants()),
+            SectionKind::TypeMetadata | SectionKind::EffectRows => placeholder_into(&mut out),
+            SectionKind::DebugSpans => {
+                let spans = module
+                    .debug_spans()
+                    .expect("a listed debug-spans section is present");
+                spans_into(&mut out, spans);
+            },
+        }
+        debug_assert_eq!(
+            out.len(),
+            offsets[position] + len,
+            "{kind} payload must fill its directory range"
+        );
     }
     out
+}
+
+/// Counts the bytes one payload encoder produces.
+fn measure(encode: impl FnOnce(&mut Sizing)) -> usize {
+    let mut sizing = Sizing::default();
+    encode(&mut sizing);
+    sizing.0
+}
+
+/// The byte sink the header and payload encoders run over: the output
+/// buffer itself, or a counter that produces no bytes.
+trait Sink {
+    /// Appends one byte.
+    fn push(&mut self, byte: u8);
+
+    /// Appends a byte run.
+    fn put(&mut self, bytes: &[u8]);
+
+    /// Appends the minimal ULEB128 encoding of `value`.
+    fn uleb(&mut self, value: u64);
+}
+
+impl Sink for Vec<u8> {
+    fn push(&mut self, byte: u8) {
+        Vec::push(self, byte);
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+
+    fn uleb(&mut self, value: u64) {
+        put_uleb(self, value);
+    }
+}
+
+/// The length-only sink: counts what [`Vec<u8>`] would store.
+#[derive(Default)]
+struct Sizing(usize);
+
+impl Sink for Sizing {
+    fn push(&mut self, _byte: u8) {
+        self.0 += 1;
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        self.0 += bytes.len();
+    }
+
+    fn uleb(&mut self, value: u64) {
+        self.0 += uleb_len(value);
+    }
 }
 
 /// Converts an in-memory length or offset to its uleb value; lengths come
@@ -120,125 +166,91 @@ fn uleb64(value: usize) -> u64 {
     u64::try_from(value).expect("length or offset fits u64")
 }
 
-/// Byte length of the header (everything before the section directory).
-fn header_len(module: &Module) -> usize {
-    // 8 fixed bytes (magic, version, target tag, flags, collector flags)
-    // + 16 bytes of reserved hook slots + 8 bytes of committed BL-7 scalars
-    // (max call depth, IR checksum) + name + deps + source hash.
-    let mut len = 8 + 16 + 8 + str_len(module.name()) + 16 + deps_len(module.deps());
+/// Encodes the fixed header prefix and the variable header fields
+/// (target triple, name, dependency list, source hash).
+fn header_into<S: Sink>(out: &mut S, module: &Module) {
+    out.put(&MAGIC);
+    out.push(FORMAT_VERSION);
+    out.push(module.target().tag());
+    out.push(module.flags().bits());
+    let (slot0, slot1, collector_flags) = module.collector().raw();
+    out.push(collector_flags);
+    out.put(&slot0.to_le_bytes());
+    out.put(&slot1.to_le_bytes());
+    out.put(&module.max_call_depth().to_le_bytes());
+    out.put(&module.ir_checksum().to_le_bytes());
     if let TargetClass::Triple(triple) = module.target() {
-        len += str_len(triple);
+        put_str(out, triple);
     }
-    len
+    put_str(out, module.name());
+    out.uleb(uleb64(module.deps().len()));
+    for dep in module.deps() {
+        put_str(out, &dep.name);
+        out.put(dep.content_hash.as_bytes());
+    }
+    out.put(module.source_hash().as_bytes());
 }
 
-fn deps_len(deps: &[Dep]) -> usize {
-    let count = u64::try_from(deps.len()).expect("dep count fits u64");
-    uleb_len(count)
-        + deps
-            .iter()
-            .map(|dep| str_len(&dep.name) + 16)
-            .sum::<usize>()
-}
-
-fn str_len(s: &str) -> usize {
-    let len = u64::try_from(s.len()).expect("string length fits u64");
-    uleb_len(len) + s.len()
-}
-
-fn put_str(out: &mut Vec<u8>, s: &str) {
-    put_uleb(out, u64::try_from(s.len()).expect("string length fits u64"));
-    out.extend_from_slice(s.as_bytes());
+fn put_str<S: Sink>(out: &mut S, s: &str) {
+    out.uleb(uleb64(s.len()));
+    out.put(s.as_bytes());
 }
 
 /// Versioned placeholder payload for the type-metadata and effect-rows
 /// sections: payload version 0 plus a reserved zero uleb. Completed at
 /// M2/M3 inside the locked framing.
-fn placeholder_payload() -> Vec<u8> {
-    let mut out = Vec::with_capacity(2);
+fn placeholder_into<S: Sink>(out: &mut S) {
     out.push(0);
-    put_uleb(&mut out, 0);
-    out
+    out.uleb(0);
 }
 
 /// The blocks payload, version 1 (BL-7): per-function records over the
 /// BL-5 uop set and BL-6 frame layouts. See the crate docs for the byte
 /// layout.
-fn blocks_payload(functions: &[Function]) -> Vec<u8> {
-    let mut out = Vec::new();
+fn blocks_into<S: Sink>(out: &mut S, functions: &[Function]) {
     out.push(BLOCKS_PAYLOAD_VERSION);
-    put_uleb(
-        &mut out,
-        u64::try_from(functions.len()).expect("function count fits u64"),
-    );
+    out.uleb(uleb64(functions.len()));
     for function in functions {
-        put_str(&mut out, function.name());
-        put_uleb(
-            &mut out,
-            u64::try_from(function.layout().params_len()).expect("params_len fits u64"),
-        );
-        put_uleb(
-            &mut out,
-            u64::try_from(function.layout().arg_area_len()).expect("arg_area_len fits u64"),
-        );
+        put_str(out, function.name());
+        out.uleb(uleb64(function.layout().params_len()));
+        out.uleb(uleb64(function.layout().arg_area_len()));
         let slots = function.layout().slots();
-        put_uleb(
-            &mut out,
-            u64::try_from(slots.len()).expect("slot count fits u64"),
-        );
+        out.uleb(uleb64(slots.len()));
         for slot in slots {
             out.push(slot_tag(*slot));
         }
-        put_uleb(
-            &mut out,
-            u64::try_from(function.constants().len()).expect("constant count fits u64"),
-        );
+        out.uleb(uleb64(function.constants().len()));
         for constant in function.constants() {
-            put_constant(&mut out, constant);
+            put_constant(out, constant);
         }
-        put_uleb(
-            &mut out,
-            u64::try_from(function.code().len()).expect("code count fits u64"),
-        );
-        for (pc, inst) in function.code().iter().enumerate() {
-            let pc = u32::try_from(pc).expect("pc fits u32");
-            out.extend_from_slice(
-                &inst
-                    .encode(pc)
-                    .expect("Function::new validated encodability")
-                    .to_le_bytes(),
-            );
+        out.uleb(uleb64(function.code().len()));
+        for word in function.code() {
+            out.put(&word.to_le_bytes());
         }
         // Entry-descriptor placeholder word pair [H1]: the loader fills the
         // tier pointers at install time; the bytes are zero on disk.
-        out.extend_from_slice(&[0u8; 8]);
+        out.put(&[0u8; 8]);
     }
-    out
 }
 
-fn constants_payload(constants: &[Constant]) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_uleb(
-        &mut out,
-        u64::try_from(constants.len()).expect("constant count fits u64"),
-    );
+fn constants_into<S: Sink>(out: &mut S, constants: &[Constant]) {
+    out.uleb(uleb64(constants.len()));
     for constant in constants {
-        put_constant(&mut out, constant);
+        put_constant(out, constant);
     }
-    out
 }
 
 /// One constants-pool entry in the locked encoding: a type tag byte then
 /// the value.
-fn put_constant(out: &mut Vec<u8>, constant: &Constant) {
+fn put_constant<S: Sink>(out: &mut S, constant: &Constant) {
     match constant {
         Constant::I64(v) => {
             out.push(0);
-            out.extend_from_slice(&v.to_le_bytes());
+            out.put(&v.to_le_bytes());
         },
         Constant::F64(v) => {
             out.push(1);
-            out.extend_from_slice(&v.to_bits().to_le_bytes());
+            out.put(&v.to_bits().to_le_bytes());
         },
         Constant::Bool(v) => {
             out.push(2);
@@ -251,20 +263,15 @@ fn put_constant(out: &mut Vec<u8>, constant: &Constant) {
         Constant::FuncRef { module, func } => {
             out.push(4);
             put_str(out, module);
-            put_uleb(out, u64::from(*func));
+            out.uleb(u64::from(*func));
         },
     }
 }
 
-fn spans_payload(spans: &[DebugSpan]) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_uleb(
-        &mut out,
-        u64::try_from(spans.len()).expect("span count fits u64"),
-    );
+fn spans_into<S: Sink>(out: &mut S, spans: &[DebugSpan]) {
+    out.uleb(uleb64(spans.len()));
     for span in spans {
-        out.extend_from_slice(&span.start.to_le_bytes());
-        out.extend_from_slice(&span.end.to_le_bytes());
+        out.put(&span.start.to_le_bytes());
+        out.put(&span.end.to_le_bytes());
     }
-    out
 }

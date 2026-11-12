@@ -7,6 +7,6 @@ trait show {
 trait render {
   fn text(self) -> int
 }
-impl show for int { }
-impl render for int { }
+impl show for int { fn text(self) -> int { 1 } }
+impl render for int { fn text(self) -> int { 2 } }
 fn f(x: int) -> int { x.text() }

@@ -1,10 +1,11 @@
-//! Native (Rust-implemented) functions: the two native modules of the
-//! H5.5 layering — the VM core's `builtin` module and the platform's
-//! `std` module.
+//! Native (Rust-implemented) functions: the H5.5 layering after the M7
+//! platform seam — the VM core's `builtin` module (this file) and the
+//! world surface served by the installed platform handler
+//! ([`crate::platform`]).
 //!
-//! Builtins are functions in the source (`println(...)`, `str(x)`), so the
-//! tier-1 mechanism routes them as functions, not uops: a VM installs
-//! reserved native modules into its registry, and a pool
+//! Builtins are functions in the source (`str(x)`), so the tier-1
+//! mechanism routes them as functions, not uops: a VM installs reserved
+//! native modules into its registry, and a pool
 //! `FuncRef { module, func: i }` resolves through the same path as any
 //! uop callee. A `CALL` to a native never pushes a frame: the native reads
 //! the caller's staged overlay words and its result overlays argument
@@ -15,71 +16,77 @@
 //! opcode growth, keeps arity/typing checks in one place, and lets
 //! higher-milestone builtins (list/map/reduce) land as table entries.
 //!
-//! # The two modules
+//! # The core module and the platform handler
 //!
-//! The natives split along the H5.5 layering seam: the pure, irreducible
+//! The H5.5 layering after its M7 migration: the pure, irreducible
 //! primitives every VM carries ([`BUILTIN_MODULE`], installed by
-//! [`crate::Vm`] itself), and the world surface — console, file, net —
-//! which is a platform's to provide ([`STD_PLATFORM_MODULE`], installed
-//! by the host; the `ds` CLI is the default provider). A library embedder
-//! gets no world effects by default. The `@std` ds-source package layer
-//! above both is future work.
+//! [`crate::Vm`] itself), and the world surface — console, fsys, net —
+//! which is an installed platform handler's to serve
+//! ([`crate::platform`]): a host installs a [`crate::platform::Platform`]
+//! under the source's platform declaration name, and the world calls'
+//! pool FuncRefs resolve against its capability-scoped table. A library
+//! embedder gets no world effects by default (no platform installed
+//! means no world call site validates). The `@std` ds-source package
+//! layer above both is future work.
 //!
-//! Function indices are contract: pool entries name them positionally, and
-//! the split keeps every historical index in its module of record, so the
-//! two tables are complementary slices of the one historical 0-24 run. A
-//! gap (an index the other module owns, or a spare slot) keeps its table
-//! position as a reserved entry whose body traps exactly like an
-//! uninstalled index — the lowering never emits these.
+//! Core indices are contract: pool entries name them positionally, and a
+//! gap (a spare slot, or a generic builtin's monomorphic slot) keeps its
+//! table position as a reserved entry whose body traps exactly like an
+//! uninstalled index — the lowering never emits these. The world ops'
+//! indices are the platform ABI's own dense run (0-11,
+//! [`crate::platform`]), no longer interleaved with the core's.
 //!
-//! | index | `builtin` (core) | `std` (platform) |
-//! |-------|------------------|------------------|
-//! | 0     | reserved         | `println (msg: string) -> unit` |
-//! | 1     | reserved         | `print (msg: string) -> unit` |
-//! | 2     | `str_int (x: int) -> string` | reserved |
-//! | 3     | `str_float (x: float) -> string` | reserved |
-//! | 4     | `str_bool (x: bool) -> string` | reserved |
-//! | 5     | reserved         | `read_file (path: string) -> string \| io_err` |
-//! | 6     | reserved         | `write_file (path, contents: string) -> unit \| io_err` |
-//! | 7     | reserved         | `file_exists (path: string) -> bool` |
-//! | 8     | reserved         | `fs_list (dir: string) -> list[string] \| io_err` |
-//! | 9     | reserved         | `file_size (path: string) -> int \| io_err` |
-//! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) | reserved |
-//! | 11    | `substring (s, start, end: int) -> string` | reserved |
-//! | 12    | `concat (a, b: string) -> string` | reserved |
-//! | 13    | `to_upper (s: string) -> string` | reserved |
-//! | 14    | `to_lower (s: string) -> string` | reserved |
-//! | 15    | `trim (s: string) -> string` | reserved |
-//! | 16    | `parse_int (s: string) -> int \| parse_err` | reserved |
-//! | 17    | `split (s, sep: string) -> list[string]` | reserved |
-//! | 18    | `char_at (s: string, i: int) -> string` | reserved |
-//! | 19    | reserved (the string block's spare slot) | reserved |
-//! | 20    | `list_new () -> list` | `net_connect (host: string, port: int) -> int \| net_err` |
-//! | 21    | `list_len[t] (list) -> int` (generic; CALLG) | `net_send (conn: int, data: string) -> unit \| net_err` |
-//! | 22    | `list_get[t] (list, i: int) -> t \| none` (generic; CALLG) | `net_recv (conn, max_bytes: int) -> string \| net_err` |
-//! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) | `net_close (conn: int) -> unit \| net_err` |
-//! | 24    | `fiber_yield (value: int) -> int` | `http_get (url: string) -> string \| net_err` |
-//! | 25    | `fiber_resume (fiber, value: int) -> int` | reserved |
-//! | 26    | `nursery_join (nursery: int) -> int` | reserved |
-//! | 27    | `list_push (xs: list, x: value) -> unit` | reserved |
-//! | 28    | `map_new () -> map` | reserved |
-//! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) | reserved |
-//! | 30    | `map_get[k, v] (map, key: value) -> v \| none` (generic; CALLG) | reserved |
-//! | 31    | `map_set (map, key, value) -> unit` | reserved |
-//! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) | reserved |
-//! | 33    | `head[t] (xs: list) -> t \| none` (generic; CALLG) | reserved |
-//! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) | reserved |
-//! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) | reserved |
-//! | 36    | `first[t] (xs: list) -> t \| none` (generic; CALLG) | reserved |
-//! | 37    | `max[t] (a, b: value) -> value` (generic; CALLG) | reserved |
-//! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) | reserved |
-//! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) | reserved |
-//! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) | reserved |
-//! | 41    | `nursery_open () -> int` (control seam; the `nursery` block) | reserved |
-//! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) | reserved |
-//! | 43    | `nursery_boundary (nursery: int, mask: int) -> tag + payload` (control seam; the block's join) | reserved |
-//! | 44    | `nursery_cancel (e: tag) -> unit` (control seam; `cancel`) | reserved |
-//! | 45    | `join (parts: list[string], sep: string) -> string` | reserved |
+//! | index | `builtin` (core) |
+//! |-------|------------------|
+//! | 0     | reserved (the historical world-surface slots) |
+//! | 1     | reserved |
+//! | 2     | `str_int (x: int) -> string` |
+//! | 3     | `str_float (x: float) -> string` |
+//! | 4     | `str_bool (x: bool) -> string` |
+//! | 5     | reserved |
+//! | 6     | reserved |
+//! | 7     | reserved |
+//! | 8     | reserved |
+//! | 9     | reserved |
+//! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) |
+//! | 11    | `substring (s, start, end: int) -> string` |
+//! | 12    | `concat (a, b: string) -> string` |
+//! | 13    | `to_upper (s: string) -> string` |
+//! | 14    | `to_lower (s: string) -> string` |
+//! | 15    | `trim (s: string) -> string` |
+//! | 16    | `parse_int (s: string) -> int | parse_err` |
+//! | 17    | `split (s, sep: string) -> list[string]` |
+//! | 18    | `char_at (s: string, i: int) -> string` |
+//! | 19    | reserved (the string block's spare slot) |
+//! | 20    | `list_new () -> list` |
+//! | 21    | `list_len[t] (list) -> int` (generic; CALLG) |
+//! | 22    | `list_get[t] (list, i: int) -> t | none` (generic; CALLG) |
+//! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) |
+//! | 24    | `fiber_yield (value: int) -> int` |
+//! | 25    | `fiber_resume (fiber, value: int) -> int` |
+//! | 26    | `nursery_join (nursery: int) -> int` |
+//! | 27    | `list_push (xs: list, x: value) -> unit` |
+//! | 28    | `map_new () -> map` |
+//! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) |
+//! | 30    | `map_get[k, v] (map, key: value) -> v | none` (generic; CALLG) |
+//! | 31    | `map_set (map, key, value) -> unit` |
+//! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) |
+//! | 33    | `head[t] (xs: list) -> t | none` (generic; CALLG) |
+//! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) |
+//! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) |
+//! | 36    | `first[t] (xs: list) -> t | none` (generic; CALLG) |
+//! | 37    | `max[t] (a, b: value) -> value` (generic; CALLG) |
+//! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) |
+//! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) |
+//! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) |
+//! | 41    | `nursery_open () -> int` (control seam; the `nursery` block) |
+//! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) |
+//! | 43    | `nursery_boundary (nursery: int, mask: int) -> discriminant + member span` (control seam; the block's join) |
+//! | 44    | `nursery_cancel (e: tag + payload words) -> unit` (control seam; `cancel`, variadic) |
+//! | 45    | `join (parts: list[string], sep: string) -> string` |
+//! | 46    | `partition[t] (xs: list, f: fn(t) -> bool) -> two list refs` (generic; CALLG, reentrant, the tag-less two-word total) |
+//! | 47    | `par_map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, fork-join) |
+//! | 48    | `par_reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, fork-join) |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -91,7 +98,7 @@
 //!
 //! # Result spans and the platform tag ids
 //!
-//! The fallible platform natives (all of the file and net surface but
+//! The fallible platform ops (all of the file and net surface but
 //! `file_exists`) touch the world: that is a static fact (the ambient's
 //! declared effect rows), so the VM needs no effect machinery — the
 //! natives stay total, OS failures become tag words instead of VM traps.
@@ -103,8 +110,8 @@
 //! native runs (a world side effect must not happen only for the call to
 //! trap afterwards).
 //!
-//! The discriminants are platform tag ids, and both native modules share
-//! the one reservation (native results are cross-module). Tag ids are
+//! The discriminants are platform tag ids, and the core and platform
+//! tables share the one reservation (native results are cross-module). Tag ids are
 //! per-module otherwise: lowering assigns each module's union members ids
 //! counting up from 0, while the platform reservation holds the top of
 //! the `u8` tag-id space, counting down from [`PLATFORM_IO_OK`]; the two
@@ -114,11 +121,10 @@
 //! disambiguates nothing); [`PLATFORM_IO_ERR`] marks IO failure, with the
 //! message `Ref` in the span's payload word.
 //!
-//! The net natives (indices 20-24, `crate::net`) extend the same
-//! convention: success reuses `PLATFORM_IO_OK`, and failure carries the
-//! platform tag [`PLATFORM_NET_ERR`] — the file-owned `net_err` type
-//! needs its own cross-module tag, reserved one step below `io_err` in
-//! the countdown.
+//! The net ops (`crate::net`) extend the same convention: success reuses
+//! `PLATFORM_IO_OK`, and failure carries the platform tag
+//! [`PLATFORM_NET_ERR`] — the file-owned `net_err` type needs its own
+//! cross-module tag, reserved one step below `io_err` in the countdown.
 //!
 //! # The string natives (indices 11-18; `len` is generic at 10)
 //!
@@ -155,14 +161,23 @@
 //! words inline in a single object-table entry (the header's
 //! `{type_id, rc}` words are M4's precise-RC slot over the same table;
 //! see [`crate::object::Objects`]). Elements are plain value words, so
-//! the one kind serves every element type. Construction (`list_new`,
-//! `list_concat`, and the producers `split`/`fs_list`) and reads
-//! (`list_len`, `list_get`) are pure natives. The one in-place mutation
-//! is `list_push` (index 27): the construction append list literals lower
-//! to, over a freshly built list its frame uniquely owns; every other
-//! mutation stays reserved for the compiler-disciplined exclusive
-//! windows, and growth is the backing buffer's amortized doubling
-//! (`list_concat` reserves the joined length up front).
+//! the one kind serves every element type, and a multi-word element (a
+//! struct) is stored as its whole inline word span at a per-list element
+//! stride taken from `list[t]`'s compile-time shape: the first append
+//! fixes the stride, every later append repeats it, and the readers
+//! (`list_len`, the checked `list_get`/`head` span) slice by it — so a
+//! wider checked read answers through [`NativeResult::Span`], the span
+//! channel, one payload word per element word with a count per `Ref`
+//! word. Construction (`list_new`, `list_concat`, and the producers
+//! `split`/`fs_list`) and reads (`list_len`, `list_get`) are pure
+//! natives. The one in-place mutation is `list_push` (index 27): the
+//! construction append list literals lower to, over a freshly built list
+//! its frame uniquely owns — its staged span is variadic (the list word
+//! plus the element's every word), the one native whose argument count
+//! varies by call site; every other mutation stays reserved for the
+//! compiler-disciplined exclusive windows, and growth is the backing
+//! buffer's amortized doubling (`list_concat` reserves the joined
+//! length up front).
 //!
 //! # The map natives (indices 28-31)
 //!
@@ -207,20 +222,75 @@
 //! a comparison against a mismatched slot. Their table slots stay
 //! reserved trap entries like every generic builtin's.
 //!
-//! # The reentrant combinators (indices 38-40)
+//! # The reentrant combinators (indices 38-40, 46)
 //!
 //! The lambda-taking container combinators — `map`, `filter`,
-//! `reduce` — are the first generic bodies that call user code: the
-//! staged lambda parameter is a `Fn` word (the callable-word
+//! `reduce`, `partition` — are the first generic bodies that call user
+//! code: the staged lambda parameter is a `Fn` word (the callable-word
 //! classification, F2) naming a planned function, and the body runs it
 //! per element through the VM's reentrancy seam (a synthetic reentry
 //! frame driven to its return; see `vm::Vm::call_hosted`). `map`
 //! collects each answered word into a fresh list, `filter` keeps the
 //! elements whose lambda answers true (a non-bool answer refuses like
-//! a mismatched slot), and `reduce` left-folds with the borrowed init
-//! as the seed — an empty list answers the init under its own count.
-//! A drive that ends the fiber or parks at the host instead of
+//! a mismatched slot), and `reduce` left-folds with the borrowed init's
+//! whole word span as the seed — an empty list answers the init under
+//! its own count per `Ref` word.
+//! `partition` runs `filter`'s predicate with two destinations — a
+//! true answer pushes onto the first fresh list, a false one onto the
+//! second — and the two list `Ref`s answer as the tag-less multi-word
+//! total: no discriminant, the two words are the tuple itself. A
+//! drive that ends the fiber or parks at the host instead of
 //! returning refuses honestly: a Rust-side loop cannot suspend.
+//!
+//! # The fork-join combinators (indices 47-48)
+//!
+//! `par_map` [E3, the parked-CALLG fork-join]: the combinator body is
+//! spawn-only — fork is one spawned child per element applying the
+//! callable under a fresh nursery, the callable's own function entered
+//! with the element's whole inline span, the spawn copy-in acquiring
+//! one count per `Ref` word for the child's frame — and the join parks
+//! the CALLG site through the interlock: the drive seam
+//! (`vm::DriveSeam::Fork` over `ForkStage`) carries the assembly
+//! stage, the drive runs the children in spawn order so the answers
+//! assemble in input order regardless of completion order
+//! (deterministic replay by construction), and the assembled result
+//! list delivers onto the parked call site. An element may park at a
+//! yield mid-flight where the hosted `map` loop refuses — the worklist
+//! bounces the parked child back in [E2]. The first failure cancels
+//! the siblings at their next preemption point and re-raises at the
+//! call site [E5] — exactly a spawn-body failure at its enclosing
+//! boundary. The completion channel is whole-span (a `FrameAnswer`):
+//! the callable's answer rides it one word or whole (a multi-word
+//! RETSPAN or tail-native answer), its width the callable's
+//! checker-proved signature, and the seam assembles each answer's
+//! words onto the fresh result list, the first push fixing the list's
+//! element stride (an answering width the checker proves). A closure
+//! callable runs the same fork — the capture block staged per spawn
+//! into the child's entry frame (the CALLS copy-in discipline), one
+//! acquired count per `Ref` capture. Nesting (a par_map inside a
+//! par_map element) parks the element's fiber at its own CALLG site,
+//! the drive frames stacking on the interlock's heap stack — depth
+//! costs heap, never the Rust stack.
+//!
+//! `par_reduce` [E3, the same park over the fold]: the fold's left
+//! data dependency chains the children — each element's application is
+//! one spawned child entered with the running accumulator's whole word
+//! span and the element's span, the seam's chain state carrying the
+//! fold between steps (a fresh nursery per step, the consumed slot
+//! recycled) — so the reduction applies strictly in input order, the
+//! deterministic replayable spelling whatever a later scheduler does
+//! (an associative split would reorder float sums, so it waits on an
+//! associativity proof). The fold type is the call's own fact: the
+//! init's whole span stages between the list and the callable (the
+//! interior-span discipline), the callable's checker-proved answer
+//! width matching it, and the final accumulator delivers whole onto
+//! the parked call site. The accumulator's counts follow `reduce`'s
+//! owned discipline (the init borrowed until the first answer adopts,
+//! each delivered answer owned by the joiner, each superseded word
+//! dec'd at adoption); the callable is a scalar `Fn` word or a closure
+//! object's `Ref` (the capture block staged per spawn exactly
+//! par_map's) over any fold width — and the first failure re-raises at
+//! the call site with the owned accumulator released.
 //!
 //! # The fiber control natives (indices 24-26)
 //!
@@ -244,24 +314,20 @@
 
 use std::{io::Write, path::Path, time::Duration};
 
-use ds_abi::SlotType;
+use ds_abi::{SlotType, Staging};
 
 use crate::{
+    fiber::FiberId,
     net::Connections,
+    nursery::NurseryId,
     object::Heaps,
-    value::{RefId, Value},
+    value::{FuncRef, RefId, Value},
     vm::{Trap, Vm},
 };
 
 /// The reserved core native module every VM pre-installs: the pure,
 /// irreducible primitives (the `str_*` conversions and the string ops).
 pub const BUILTIN_MODULE: &str = "builtin";
-
-/// The std platform native module: the world surface (console, file IO,
-/// net IO). The host that provides a platform installs it explicitly —
-/// [`crate::Vm`] never does — so a library embedder gets no world
-/// effects by default.
-pub const STD_PLATFORM_MODULE: &str = "std";
 
 /// `str_int(x: int) -> string`.
 pub const BUILTIN_STR_INT: u32 = 2;
@@ -391,8 +457,9 @@ pub const BUILTIN_MAP: u32 = 38;
 pub const BUILTIN_FILTER: u32 = 39;
 /// `reduce[t](xs: list, init: value, f: fn) -> value` (generic; the
 /// left fold over the same reentrant per-element call, the borrowed
-/// init seeding the accumulator and an empty list answering it; the ONE
-/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+/// init's whole word span seeding the accumulator and an empty list
+/// answering it; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
 pub const BUILTIN_REDUCE: u32 = 40;
 /// `nursery_open() -> int` — the in-language `nursery` block's open seam
 /// [E2]: opens a fresh block-scoped nursery (not the root) and answers
@@ -430,30 +497,34 @@ pub const BUILTIN_NURSERY_CANCEL: u32 = 44;
 /// one fresh string object.
 pub const BUILTIN_JOIN: u32 = 45;
 
-/// `println(msg: string) -> unit`.
-pub const STD_PRINTLN: u32 = 0;
-/// `print(msg: string) -> unit`.
-pub const STD_PRINT: u32 = 1;
-/// `read_file(path: string) -> string | io_err`.
-pub const STD_READ_FILE: u32 = 5;
-/// `write_file(path, contents: string) -> unit | io_err` (create-or-truncate).
-pub const STD_WRITE_FILE: u32 = 6;
-/// `file_exists(path: string) -> bool` (unreachable paths answer false).
-pub const STD_FILE_EXISTS: u32 = 7;
-/// `fs_list(dir: string) -> list[string] | io_err` (names, sorted).
-pub const STD_FS_LIST: u32 = 8;
-/// `file_size(path: string) -> int | io_err` (bytes).
-pub const STD_FILE_SIZE: u32 = 9;
-/// `net_connect(host: string, port: int) -> int | net_err`.
-pub const STD_NET_CONNECT: u32 = 20;
-/// `net_send(conn: int, data: string) -> unit | net_err`.
-pub const STD_NET_SEND: u32 = 21;
-/// `net_recv(conn: int, max_bytes: int) -> string | net_err`.
-pub const STD_NET_RECV: u32 = 22;
-/// `net_close(conn: int) -> unit | net_err`.
-pub const STD_NET_CLOSE: u32 = 23;
-/// `http_get(url: string) -> string | net_err` (HTTP/1.0, no TLS).
-pub const STD_HTTP_GET: u32 = 24;
+/// `par_map[t, r](xs: list, f: fn) -> list` (generic; E3's fork-join
+/// combinator, the parked-CALLG slice: fork is one spawned child per
+/// element through the nursery substrate — the callable's own function
+/// entered with the element's whole inline span — and join parks the
+/// CALLG site through the interlock drive, so the answers assemble in
+/// input order and the first failure cancels the siblings and re-raises
+/// at the call [E5]; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_PAR_MAP: u32 = 47;
+
+/// `par_reduce[t](xs: list, init: t, f: fn(t, t) -> t) -> t` (generic;
+/// E3's fork-join fold, the parked-CALLG slice: the left data
+/// dependency chains one spawned child per element — the callable's
+/// own function entered with the running accumulator and the element,
+/// the seam's chain state carrying the fold between per-step joins —
+/// so the reduction applies strictly in input order [E5's first-failure
+/// re-raise at the call; the ONE body lives in [`GENERIC_FUNCTIONS`],
+/// CALLG-addressed).
+pub const BUILTIN_PAR_REDUCE: u32 = 48;
+
+/// `partition[t](xs: list, f: fn(t) -> bool) -> two list refs` (generic;
+/// `filter`'s per-element predicate with two destinations — a true answer
+/// pushes onto the first fresh list, a false one onto the second, each
+/// push taking the list's own edge count per `Ref` word so no
+/// element-side count moves — and the two list `Ref`s answer as the
+/// tag-less multi-word total, no discriminant; the ONE body lives in
+/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
+pub const BUILTIN_PARTITION: u32 = 46;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -530,19 +601,59 @@ pub enum ControlNative {
     NurseryCancel,
 }
 
-/// A native's result: one word on the caller's overlay slot 0, or a
-/// fallible native's two-word tag+payload span on overlay slots 0 and 1.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A native's result: one word on the caller's overlay slot 0, a
+/// fallible native's two-word tag+payload span on overlay slots 0 and 1,
+/// the span channel — a discriminant plus a multi-word payload on
+/// overlay slots `1 ..= n` (the checked collection reads handing out an
+/// inline element span) — or the tag-less total, N words on overlay
+/// slots `0 .. n` with no discriminant (a multi-word answer that is no
+/// member's payload, `partition`'s two list `Ref`s).
+#[derive(Clone, Debug, PartialEq)]
 pub enum NativeResult {
     /// A single value word: the total natives' only shape.
     Word(Value),
     /// The span: the discriminant word ([`PLATFORM_IO_OK`] or a failure
-    /// tag) plus the payload word.
+    /// tag) plus the one payload word.
     Tag {
         /// The span's discriminant.
         tag: u8,
         /// The success value, or the error message `Ref`.
         payload: Value,
+    },
+    /// The span channel: the discriminant word plus a multi-word payload
+    /// — one element's whole inline word span, overlaid on slots
+    /// `0 ..= payload.len()`. The one-payload-word shape stays
+    /// [`NativeResult::Tag`] (no allocation on the one-word path), so
+    /// this variant exists exactly where the payload spans words.
+    Span {
+        /// The span's discriminant.
+        tag: u8,
+        /// The payload words, in element span order.
+        payload: Vec<Value>,
+    },
+    /// The tag-less total: the answer's whole word span with no
+    /// discriminant, overlaid on slots `0 .. words.len()` — the
+    /// degenerate sibling of [`NativeResult::Span`] (the same payload
+    /// staging without the leading tag word). A multi-word answer that
+    /// is no union member's payload answers here (`partition`'s two
+    /// list `Ref`s; the fold's whole-span accumulator answers the same
+    /// way).
+    Total {
+        /// The answer's words, in tuple order.
+        words: Vec<Value>,
+    },
+    /// A fork-join combinator's park request: the spawn phase ran (the
+    /// children stand in `nursery`) and the join parks — the
+    /// assembly/fold stage rides `stage`, the drive seam's consumption
+    /// running it and the delivery answering the parked call site. Only
+    /// the CALLG generic dispatch produces it; a plain native never
+    /// answers it, and a tail dispatch site refuses the fork before
+    /// its spawn phase runs.
+    Fork {
+        /// The freshly opened nursery holding the spawned children.
+        nursery: NurseryId,
+        /// The assembly or fold stage the join runs.
+        stage: ForkStage,
     },
 }
 
@@ -552,15 +663,32 @@ impl NativeResult {
     pub fn word(self) -> Option<Value> {
         match self {
             Self::Word(v) => Some(v),
-            Self::Tag { .. } => None,
+            Self::Tag { .. } | Self::Span { .. } | Self::Total { .. } | Self::Fork { .. } => None,
+        }
+    }
+
+    /// How many overlay words the result spans, discriminant included.
+    #[must_use]
+    pub fn overlay_words(&self) -> usize {
+        match self {
+            Self::Word(_) => 1,
+            Self::Tag { .. } => 2,
+            Self::Span { payload, .. } => 1 + payload.len(),
+            Self::Total { words } => words.len(),
+            // a park request never overlays: the dispatcher parks the
+            // site instead, and the CALLTG site refuses the fork before
+            // its body runs
+            Self::Fork { .. } => unreachable!("a park request never overlays"),
         }
     }
 }
 
 /// The native calling convention: `args` are the staged word values
-/// (already type-checked against `params` by the call site), the result
-/// overlays the caller's argument slots like a RET (one word, or the
-/// two-word span of a fallible native).
+/// (already type-checked against `params` by the call site — a variadic
+/// native sees the whole staged span, its `params` covering the named
+/// prefix), the result overlays the caller's argument slots like a RET
+/// (one word, a fallible native's two-word span, or a span channel's
+/// discriminant plus multi-word payload).
 pub type NativeFn = fn(&mut Heaps, &mut OutputSink, &[Value]) -> Result<NativeResult, Trap>;
 
 /// One native function: a name, its parameter slot types, the overlay
@@ -574,10 +702,18 @@ pub struct NativeFunction {
     /// parameter accepts every word kind — the wildcard for natives
     /// whose argument type varies by call site (`list_push`'s element).
     pub params: &'static [SlotType],
+    /// Whether the call may stage more words than `params` names: the
+    /// staged span past the named parameters is one element's whole
+    /// inline word span, its width the call site's static fact
+    /// (`list_push`'s element). The dispatcher's arity check relaxes to
+    /// "at least", and the body owns the tail's contract.
+    pub variadic: bool,
     /// How many overlay words the result needs: 1 for a single word, 2 for
-    /// a fallible native's tag+payload span. Pre-checked at the call site
-    /// against the caller's staging width, so the native never runs only
-    /// for its call to trap on the result width.
+    /// a fallible native's tag+payload span or a checked read. The static
+    /// floor, pre-checked at the call site against the caller's staging
+    /// width — a span-channel answer may exceed it by the element's
+    /// width, which the overlay write bounds-checks at runtime (the
+    /// lowering sizes the area, RETSPAN's discipline).
     pub result_words: u8,
     /// Marks the two fiber-control natives the dispatcher intercepts at
     /// `CALL` sites [E2]; `None` for every ordinary native.
@@ -633,8 +769,21 @@ fn to_lower_fn(
 }
 
 fn trim_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
-    let text = heaps.str_at(ref_arg(args, 0)?)?.trim().to_owned();
-    Ok(NativeResult::Word(heaps.new_str(text)))
+    let id = ref_arg(args, 0)?;
+    // the trimmed byte range, measured off the borrowed text: the fresh
+    // object copies that range once and no intermediate string exists
+    let (begin, stop) = {
+        let text = heaps.str_at(id)?;
+        let begin = text.len() - text.trim_start().len();
+        let stop = text.trim_end().len();
+        (begin, stop)
+    };
+    // an all-whitespace subject trims to the empty range
+    if begin >= stop {
+        return Ok(NativeResult::Word(heaps.new_str_part("")));
+    }
+    let part = heaps.alloc_substr(id, begin, stop)?;
+    Ok(NativeResult::Word(heaps.word(part)))
 }
 
 fn parse_int_fn(
@@ -657,24 +806,63 @@ fn parse_int_fn(
     })
 }
 
+/// How `split` cuts the subject. The surface separator is a `char` (one
+/// scalar value), and an empty one splits per character rather than trap.
+enum SplitSep {
+    /// An empty separator: one part per character.
+    PerChar,
+    /// One ASCII character: the split scans the subject's bytes once.
+    Byte(char),
+    /// Any other separator text, owned because the store's routed string
+    /// read borrows the whole store mutably.
+    Text(String),
+}
+
 fn split_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    let sep = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
-    // the surface separator is a `char` (one scalar value); an empty
-    // separator falls back to the per-character split rather than trap
-    let parts: Vec<String> = if sep.is_empty() {
-        text.chars().map(String::from).collect()
-    } else {
-        text.split(sep.as_str()).map(str::to_owned).collect()
+    let text_id = ref_arg(args, 0)?;
+    let sep = match heaps.str_at(ref_arg(args, 1)?)? {
+        "" => SplitSep::PerChar,
+        sep if sep.len() == 1 => SplitSep::Byte(sep.chars().next().expect("one byte is one char")),
+        sep => SplitSep::Text(sep.to_owned()),
     };
-    let elems = parts
-        .into_iter()
-        .map(|part| heaps.new_str(part))
-        .collect::<Vec<_>>();
+    // the part boundaries come off one borrow of the subject; the parts
+    // materialize after it ends
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    {
+        let text = heaps.str_at(text_id)?;
+        let mut begin = 0;
+        match &sep {
+            SplitSep::PerChar => {
+                for part in text.chars() {
+                    bounds.push((begin, begin + part.len_utf8()));
+                    begin += part.len_utf8();
+                }
+            },
+            SplitSep::Byte(sep) => {
+                for part in text.split(*sep) {
+                    bounds.push((begin, begin + part.len()));
+                    begin += part.len() + 1;
+                }
+            },
+            SplitSep::Text(sep) => {
+                for part in text.split(sep.as_str()) {
+                    bounds.push((begin, begin + part.len()));
+                    begin += part.len() + sep.len();
+                }
+            },
+        }
+    }
+    // every boundary sits on a char boundary, so each part copies its own
+    // byte range once
+    let mut elems = Vec::with_capacity(bounds.len());
+    for (begin, stop) in bounds {
+        let id = heaps.alloc_substr(text_id, begin, stop)?;
+        elems.push(heaps.word(id));
+    }
     // each fresh part's birth count becomes the list's edge, so the
     // frame claim its alloc entered leaves with the adoption
     for elem in &elems {
@@ -707,28 +895,48 @@ fn char_at_fn(
 
 fn join_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
     let sep = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
-    let elems: Vec<Value> = heaps.list_at(ref_arg(args, 0)?)?.to_vec();
-    let mut joined = String::new();
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+    // one string Ref per element is the surface's contract (list[string]);
+    // a wider stride reaches here only hand-assembled
+    if stride > 1 {
+        return Err(Trap::ElementStride {
+            obj: ref_arg(args, 0)?.id(),
+            stride,
+            given: 1,
+        });
+    }
+    // the element words copy out of the list's borrow: the routed string
+    // reads below borrow the whole store mutably
+    let elems: Vec<Value> = elems.to_vec();
+    // the joined text's exact byte length first, so its buffer is
+    // allocated once at the final size: growth would copy the text again,
+    // and the fresh object's exact-size conversion would shrink it
+    let mut capacity = sep.len() * elems.len().saturating_sub(1);
     for (at, part) in elems.iter().enumerate() {
-        // a non-string element refuses at its own position: the checked
-        // surface guarantees list[string], so only a hand-assembled
-        // caller reaches here
-        let word = match part {
-            Value::Ref(word) => word,
-            other => {
-                return Err(Trap::SlotTypeMismatch {
-                    slot: u8::try_from(at).expect("element index fits u8"),
-                    expected: SlotType::Ref,
-                    actual: other.slot_type(),
-                })
-            },
-        };
+        capacity += heaps.str_at(join_element(*part, at)?)?.len();
+    }
+    let mut joined = String::with_capacity(capacity);
+    for (at, part) in elems.iter().enumerate() {
         if at > 0 {
             joined.push_str(&sep);
         }
-        joined.push_str(heaps.str_at(*word)?);
+        joined.push_str(heaps.str_at(join_element(*part, at)?)?);
     }
     Ok(NativeResult::Word(heaps.new_str(joined)))
+}
+
+/// A join element's string word, refusing at the element's own position:
+/// the checked surface guarantees `list[string]`, so only a hand-assembled
+/// caller reaches the miss.
+fn join_element(part: Value, at: usize) -> Result<RefId, Trap> {
+    match part {
+        Value::Ref(word) => Ok(word),
+        other => Err(Trap::SlotTypeMismatch {
+            slot: u8::try_from(at).expect("element index fits u8"),
+            expected: SlotType::Ref,
+            actual: other.slot_type(),
+        }),
+    }
 }
 
 // total: the Result is the calling convention every native shares, not
@@ -747,8 +955,10 @@ fn list_len_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = heaps.list_at(ref_arg(args, 0)?)?;
-    let n = i64::try_from(elems.len()).expect("list length fits i64");
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+    // stride 0 iff empty, so the division is exact and the empty list
+    // answers 0 whatever elements it would take
+    let n = i64::try_from(elems.len() / stride.max(1)).expect("list length fits i64");
     Ok(NativeResult::Word(Value::I64(n)))
 }
 
@@ -757,30 +967,65 @@ fn list_get_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = heaps.list_at(ref_arg(args, 0)?)?;
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
     let index = i64_arg(args, 1)?;
     // Bounds follow the crate's checked-API convention (the span shape
     // `parse_int` answers), not the string ops' clamping: a generic
     // element type has no benign total answer, and a trap would deny the
     // caller the `t | none` extraction. A negative index fails the
-    // usize conversion, so both out-of-range sides meet in `None`.
-    let hit = usize::try_from(index).ok().and_then(|at| elems.get(at));
+    // usize conversion, so both out-of-range sides meet in `None`. The
+    // hit is one element's whole inline span — `stride` words — handed
+    // out under one count per `Ref` word (the one-word stride keeps the
+    // allocation-free Tag shape).
+    let hit = usize::try_from(index)
+        .ok()
+        .filter(|&at| at < elems.len() / stride.max(1))
+        .map(|at| &elems[at * stride..(at + 1) * stride]);
     Ok(match hit {
-        Some(&value) => {
-            // the read hands the element word out: a Ref element gains a
-            // count for the reader, the list keeps its own (C4)
-            if let Value::Ref(word) = value {
-                heaps.inc(word)?;
-            }
-            NativeResult::Tag {
-                tag: PLATFORM_IO_OK,
-                payload: value,
-            }
+        Some([only]) => {
+            // the one-word stride reads through the `Tag` shape: no span
+            // buffer, and the slice dies before the count goes on
+            let word = *only;
+            native_result_word(heaps, word)?
+        },
+        Some(words) => {
+            // the slice dies with the list borrow before the retains run
+            let words = words.to_vec();
+            native_result_span(heaps, words)?
         },
         None => NativeResult::Tag {
             tag: PLATFORM_NONE,
             payload: Value::I64(index),
         },
+    })
+}
+
+/// A checked read's one-word hit: the element word handed out under one
+/// count when it is a `Ref` (the list keeps its own, C4) — the
+/// allocation-free `Tag` shape.
+fn native_result_word(heaps: &mut Heaps, word: Value) -> Result<NativeResult, Trap> {
+    if let Value::Ref(id) = word {
+        heaps.inc(id)?;
+    }
+    Ok(NativeResult::Tag {
+        tag: PLATFORM_IO_OK,
+        payload: word,
+    })
+}
+
+/// A checked read's wider hit (two or more words): the element's whole
+/// word span handed out with one count per `Ref` word for the reader (the
+/// list keeps its own, C4). The vec moves into the span payload, so the
+/// span the caller sliced out of the store is the copy's only one.
+fn native_result_span(heaps: &mut Heaps, words: Vec<Value>) -> Result<NativeResult, Trap> {
+    for value in &words {
+        if let Value::Ref(word) = *value {
+            heaps.inc(word)?;
+        }
+    }
+    Ok(NativeResult::Span {
+        tag: PLATFORM_IO_OK,
+        payload: words,
     })
 }
 
@@ -802,7 +1047,9 @@ fn list_push_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let list = ref_arg(args, 0)?;
-    heaps.push_list(list, args[1])?;
+    // the variadic tail is the element's whole inline word span; the
+    // first push fixes the list's stride, a disagreeing later push traps
+    heaps.push_list(list, &args[1..])?;
     // the inert unit word: no caller reads the overlay result
     Ok(NativeResult::Word(Value::I64(0)))
 }
@@ -868,30 +1115,70 @@ fn map_set_fn(
 /// The copy natives' shared finisher: the fresh list's edge owns one
 /// count per `Ref` word of `elems` (taken on the one walk the copy
 /// already pays), the sources keep their own (C4), and the vec moves
-/// into the adopting list with no second pass.
-fn copy_into_fresh_list(heaps: &mut Heaps, elems: Vec<Value>) -> Result<NativeResult, Trap> {
+/// into the adopting list with no second pass. The fresh list carries
+/// the source's stride (an empty copy keeps stride 0).
+fn copy_into_fresh_list(
+    heaps: &mut Heaps,
+    elems: Vec<Value>,
+    stride: usize,
+) -> Result<NativeResult, Trap> {
     for value in &elems {
         if let Value::Ref(word) = *value {
             heaps.inc_edge(word)?;
         }
     }
-    Ok(NativeResult::Word(heaps.new_list(elems)))
+    Ok(NativeResult::Word(heaps.new_list_strided(elems, stride)))
 }
 
 fn cons_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
-    let head = args[0];
-    let rest = heaps.list_at(ref_arg(args, 1)?)?;
-    let mut elems = Vec::with_capacity(rest.len() + 1);
-    elems.push(head);
+    // the staged span is the head element's whole word span riding the
+    // front (`list_push`'s variadic shape at the other end) then the
+    // list `Ref` last — at least one head word plus the list
+    let (list_arg, head) = args.split_last().ok_or(Trap::ArityMismatch {
+        expected: 2,
+        given: args.len(),
+    })?;
+    if head.is_empty() {
+        return Err(Trap::ArityMismatch {
+            expected: 2,
+            given: args.len(),
+        });
+    }
+    let list = match *list_arg {
+        Value::Ref(word) => word,
+        other => {
+            return Err(Trap::SlotTypeMismatch {
+                slot: u8::try_from(args.len() - 1).expect("slot index fits u8"),
+                expected: SlotType::Ref,
+                actual: other.slot_type(),
+            })
+        },
+    };
+    let (rest, stride) = heaps.list_at(list)?;
+    // an empty rest list is stride-polymorphic, so the head's width fixes
+    // the fresh stride; a non-empty one must repeat it exactly
+    let stride = match stride {
+        0 => head.len(),
+        s if s == head.len() => s,
+        s => {
+            return Err(Trap::ElementStride {
+                obj: list.id(),
+                stride: s,
+                given: head.len(),
+            })
+        },
+    };
+    let mut elems = Vec::with_capacity(rest.len() + head.len());
+    elems.extend_from_slice(head);
     elems.extend_from_slice(rest);
-    copy_into_fresh_list(heaps, elems)
+    copy_into_fresh_list(heaps, elems, stride)
 }
 
 fn tail_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
     // an empty list skips nothing and answers the empty list
-    let rest = heaps.list_at(ref_arg(args, 0)?)?;
-    let elems = rest.get(1..).unwrap_or(&[]).to_vec();
-    copy_into_fresh_list(heaps, elems)
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+    let skipped = elems.get(stride..).unwrap_or(&[]).to_vec();
+    copy_into_fresh_list(heaps, skipped, stride)
 }
 
 fn collect_fn(
@@ -899,31 +1186,34 @@ fn collect_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = heaps.list_at(ref_arg(args, 0)?)?.to_vec();
-    copy_into_fresh_list(heaps, elems)
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+    let elems = elems.to_vec();
+    copy_into_fresh_list(heaps, elems, stride)
 }
 
 /// `head`'s and `first`'s one body: the checked first element in
-/// `list_get`'s span shape. The hit hands the element word out — a
-/// `Ref` element gains a count for the reader, the list keeps its own
-/// (C4) — and an empty list answers the `none` span member, never a
-/// trap. The miss payload is the inert unit word: there is no rejected
-/// index to carry, and callers read the payload only on the hit.
+/// `list_get`'s span shape — the hit is the first element's whole
+/// inline span, handed out under one count per `Ref` word (C4), and an
+/// empty list answers the `none` span member, never a trap. The miss
+/// payload is the inert unit word: there is no rejected index to carry,
+/// and callers read the payload only on the hit.
 fn first_element_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let elems = heaps.list_at(ref_arg(args, 0)?)?;
-    Ok(match elems.first() {
-        Some(&value) => {
-            if let Value::Ref(word) = value {
-                heaps.inc(word)?;
-            }
-            NativeResult::Tag {
-                tag: PLATFORM_IO_OK,
-                payload: value,
-            }
+    let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+    let hit = (!elems.is_empty()).then(|| &elems[..stride]);
+    Ok(match hit {
+        Some([only]) => {
+            // the one-word element reads through the `Tag` shape: no span
+            // buffer, and the slice dies before the count goes on
+            let word = *only;
+            native_result_word(heaps, word)?
+        },
+        Some(words) => {
+            let words = words.to_vec();
+            native_result_span(heaps, words)?
         },
         None => NativeResult::Tag {
             tag: PLATFORM_NONE,
@@ -989,8 +1279,20 @@ fn fiber_control_bounce_fn(
 pub struct GenericFunction {
     /// The call name, for diagnostics.
     pub name: &'static str,
-    /// The real arguments' expected word kinds.
+    /// The real arguments' expected word kinds — the named words of the
+    /// entry's [`Staging`] discipline. A `Leading` entry's `params` cover
+    /// the trailing named words (the staged words before them are one
+    /// element's whole inline span, `cons`'s head); an `Interior` entry's
+    /// cover the leading named word plus the final named word (a fold's
+    /// accumulator span sits between them, so the final word's position
+    /// is dynamic per call).
     pub params: &'static [SlotType],
+    /// How the staged words map onto `params`: fixed one-to-one, one
+    /// element span leading the named words, or one span between the
+    /// leading and trailing named words — the arity check relaxes to
+    /// "at least" for the two span forms and the kind check covers the
+    /// named words alone.
+    pub staging: Staging,
     /// How many evidence words follow the staged arguments.
     pub evidence: u8,
     /// Result span width on the caller's overlay.
@@ -1022,14 +1324,18 @@ pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Tra
 /// `max` — join them with element-agnostic bodies, and `head`/`first`
 /// share the one first-element body; `max` dispatches on the numeric
 /// instance its evidence word names. The lambda-taking combinators —
-/// `map`, `filter`, `reduce` — append past the closes with reentrant
-/// bodies that call the staged `Fn` word per element through the VM's
-/// hosted-call seam; their evidence words record the receiver's list
-/// instance like every element-agnostic body's.
+/// `map`, `filter`, `reduce`, `partition` — append past the closes with
+/// reentrant bodies that call the staged `Fn` word per element through
+/// the VM's hosted-call seam; their evidence words record the
+/// receiver's list instance like every element-agnostic body's, and the
+/// fork-join combinator `par_map` joins them with a nursery-spawning
+/// body whose evidence words record the receiver's list instance the
+/// same way.
 pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_LEN, GenericFunction {
         name: "len",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: len_generic_fn,
@@ -1037,6 +1343,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_LIST_LEN, GenericFunction {
         name: "list_len",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: list_len_generic_fn,
@@ -1044,6 +1351,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_LIST_GET, GenericFunction {
         name: "list_get",
         params: &[SlotType::Ref, SlotType::I64],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 2,
         func: list_get_generic_fn,
@@ -1051,6 +1359,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_LIST_CONCAT, GenericFunction {
         name: "list_concat",
         params: &[SlotType::Ref, SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: list_concat_generic_fn,
@@ -1058,6 +1367,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_MAP_LEN, GenericFunction {
         name: "map_len",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 2,
         result_words: 1,
         func: map_len_generic_fn,
@@ -1065,13 +1375,18 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_MAP_GET, GenericFunction {
         name: "map_get",
         params: &[SlotType::Ref, SlotType::Raw],
+        staging: Staging::Fixed,
         evidence: 2,
         result_words: 2,
         func: map_get_generic_fn,
     }),
     (BUILTIN_MODULE, BUILTIN_CONS, GenericFunction {
+        // the staged span is the head element's whole inline span (the
+        // front, however wide) then the list `Ref` as the trailing named
+        // word — the stride-aware prepend
         name: "cons",
-        params: &[SlotType::Raw, SlotType::Ref],
+        params: &[SlotType::Ref],
+        staging: Staging::Leading,
         evidence: 1,
         result_words: 1,
         func: cons_generic_fn,
@@ -1079,6 +1394,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_HEAD, GenericFunction {
         name: "head",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 2,
         func: head_generic_fn,
@@ -1086,6 +1402,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_TAIL, GenericFunction {
         name: "tail",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: tail_generic_fn,
@@ -1093,6 +1410,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_COLLECT, GenericFunction {
         name: "collect",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: collect_generic_fn,
@@ -1100,6 +1418,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_FIRST, GenericFunction {
         name: "first",
         params: &[SlotType::Ref],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 2,
         func: head_generic_fn,
@@ -1107,6 +1426,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_MAX, GenericFunction {
         name: "max",
         params: &[SlotType::Raw, SlotType::Raw],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: max_generic_fn,
@@ -1114,6 +1434,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_MAP, GenericFunction {
         name: "map",
         params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
         evidence: 2,
         result_words: 1,
         func: map_generic_fn,
@@ -1121,16 +1442,54 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
     (BUILTIN_MODULE, BUILTIN_FILTER, GenericFunction {
         name: "filter",
         params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
         evidence: 1,
         result_words: 1,
         func: filter_generic_fn,
     }),
     (BUILTIN_MODULE, BUILTIN_REDUCE, GenericFunction {
+        // the accumulator's whole word span stages between the leading
+        // list `Ref` and the trailing callable word, so its width is
+        // dynamic per call and the callable rides at the staged span's
+        // end; the result floor is the one-word fold, the answer's whole
+        // span riding the tag-less total (bounds-checked against the
+        // caller's area at the write)
         name: "reduce",
-        params: &[SlotType::Ref, SlotType::Raw, SlotType::Fn],
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Interior,
         evidence: 1,
         result_words: 1,
         func: reduce_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_PARTITION, GenericFunction {
+        name: "partition",
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        evidence: 1,
+        // the tag-less two-word total: the static floor is the two list
+        // Refs the one body answers
+        result_words: 2,
+        func: partition_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_PAR_MAP, GenericFunction {
+        name: "par_map",
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        evidence: 2,
+        result_words: 1,
+        func: par_map_generic_fn,
+    }),
+    (BUILTIN_MODULE, BUILTIN_PAR_REDUCE, GenericFunction {
+        // the accumulator's whole word span stages between the leading
+        // list `Ref` and the trailing callable word (reduce's interior
+        // staging); the result floor is the one-word fold, the answer's
+        // whole span riding the tag-less total
+        name: "par_reduce",
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Interior,
+        evidence: 1,
+        result_words: 1,
+        func: par_reduce_generic_fn,
     }),
 ];
 
@@ -1158,8 +1517,8 @@ fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
             Ok(NativeResult::Word(Value::I64(n)))
         },
         Value::I64(id) if id == ds_abi::BuiltinInstance::List as i64 => {
-            let elems = heaps.list_at(ref_arg(args, 0)?)?;
-            let n = i64::try_from(elems.len()).expect("list length fits i64");
+            let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
+            let n = i64::try_from(elems.len() / stride.max(1)).expect("list length fits i64");
             Ok(NativeResult::Word(Value::I64(n)))
         },
         staged => Err(Trap::UnknownInstance {
@@ -1292,35 +1651,67 @@ fn fn_arg(args: &[Value], index: usize) -> Result<Value, Trap> {
     }
 }
 
-/// `map`'s one body: each element runs through the staged lambda, and
-/// the answered word — transfer count and all — pushes onto the fresh
-/// result list (the push acquires the list's own count per `Ref`
-/// word); the body then drops the transferred count it still holds.
+/// `map`'s one body: each element — its whole inline span, one slice at
+/// the list's stride — runs through the staged lambda, and the answered
+/// span — transfer counts and all — pushes onto the fresh result list
+/// (the push acquires the list's own count per `Ref` word, fixing the
+/// result's stride at the answer's width); the body then drops the
+/// transferred counts it still holds.
 fn map_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
     let f = fn_arg(args, 1)?;
-    let elems = {
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
         let (mut heaps, _) = vm.split();
-        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
     };
     let res = {
         let (mut heaps, _) = vm.split();
         heaps.new_list_id(Vec::new())
     };
-    for x in elems {
-        let mapped = vm.call_hosted(f, &[x])?;
+    for at in (0..elems.len()).step_by(stride) {
+        let mapped = vm.call_hosted(f, &elems[at..at + stride])?;
         let (mut heaps, _) = vm.split();
-        heaps.push_list(res, mapped)?;
-        if let Value::Ref(word) = mapped {
-            heaps.dec(word)?;
+        heaps.push_list(res, mapped.as_slice())?;
+        for word in mapped.as_slice() {
+            if let Value::Ref(word) = *word {
+                heaps.dec(word)?;
+            }
         }
     }
     Ok(NativeResult::Word(Value::Ref(res)))
 }
 
-/// `filter`'s one body: each element's predicate answer keeps or drops
-/// it. A non-bool answer refuses like a mismatched slot — the declared
-/// predicate's word is the contract. Keeping pushes the element onto
-/// the fresh result list (the push acquires the list's own count; the
+/// A predicate's one-word bool answer — `filter`'s and `partition`'s
+/// shared contract. A non-bool answer refuses like a mismatched slot
+/// (the declared predicate's word is the contract); a wider answer
+/// names hand-assembled code and refuses at its first word.
+fn predicate_bool(answer: &crate::vm::FrameAnswer) -> Result<bool, Trap> {
+    let word = match answer.as_slice() {
+        [only] => *only,
+        wider => {
+            return Err(Trap::SlotTypeMismatch {
+                slot: 0,
+                expected: SlotType::Bool,
+                actual: wider[0].slot_type(),
+            })
+        },
+    };
+    match word {
+        Value::Bool(keep) => Ok(keep),
+        other => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::Bool,
+            actual: other.slot_type(),
+        }),
+    }
+}
+
+/// `filter`'s one body: each element's whole span runs through the
+/// predicate, whose one-word answer keeps or drops it. A non-bool
+/// answer refuses like a mismatched slot — the declared predicate's
+/// word is the contract. Keeping pushes the span onto the fresh result
+/// list (the push acquires the list's own count per `Ref` word; the
 /// source list keeps its own), so no element-side count moves at all.
 fn filter_generic_fn(
     vm: &mut Vm,
@@ -1328,73 +1719,373 @@ fn filter_generic_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let f = fn_arg(args, 1)?;
-    let elems = {
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
         let (mut heaps, _) = vm.split();
-        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
     };
     let res = {
         let (mut heaps, _) = vm.split();
         heaps.new_list_id(Vec::new())
     };
-    for x in elems {
-        let keep = vm.call_hosted(f, &[x])?;
-        match keep {
-            Value::Bool(true) => {
-                let (mut heaps, _) = vm.split();
-                heaps.push_list(res, x)?;
-            },
-            Value::Bool(false) => {},
-            other => {
-                return Err(Trap::SlotTypeMismatch {
-                    slot: 0,
-                    expected: SlotType::Bool,
-                    actual: other.slot_type(),
-                })
-            },
+    for at in (0..elems.len()).step_by(stride) {
+        if predicate_bool(&vm.call_hosted(f, &elems[at..at + stride])?)? {
+            let (mut heaps, _) = vm.split();
+            heaps.push_list(res, &elems[at..at + stride])?;
         }
     }
     Ok(NativeResult::Word(Value::Ref(res)))
 }
 
-/// `reduce`'s one body: the accumulator starts as the borrowed init
-/// word (native arguments are a transient borrow window), each step
-/// hands the accumulator and element to the staged lambda under the
-/// hosted call's one-count-per-Ref hand-off (the lambda's exit drops
-/// or returns them), and the answer's transfer count replaces the
-/// owned one — the first step's old value is the borrowed init and is
-/// never dropped. An empty list answers the init handed out under its
-/// own count (the `list_get` discipline); otherwise the final owned
-/// count transfers to the caller with the word.
+/// `partition`'s one body: each element's whole span runs through the
+/// predicate exactly as `filter`'s does, a true answer pushing onto the
+/// first fresh list and a false one onto the second (each push taking
+/// the destination list's own edge count per `Ref` word, so no
+/// element-side count moves), and the two list `Ref`s answer as the
+/// tag-less multi-word total — no discriminant, the two words are the
+/// tuple itself, staged on the caller's overlay words 0 and 1.
+fn partition_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let f = fn_arg(args, 1)?;
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
+        let (mut heaps, _) = vm.split();
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
+    };
+    let yes = {
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
+    };
+    let no = {
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
+    };
+    for at in (0..elems.len()).step_by(stride) {
+        let dst =
+            if predicate_bool(&vm.call_hosted(f, &elems[at..at + stride])?)? { yes } else { no };
+        let (mut heaps, _) = vm.split();
+        heaps.push_list(dst, &elems[at..at + stride])?;
+    }
+    Ok(NativeResult::Total {
+        words: vec![Value::Ref(yes), Value::Ref(no)],
+    })
+}
+
+/// `reduce`'s one body: the accumulator starts as the borrowed init's
+/// whole word span (native arguments are a transient borrow window; the
+/// span stages between the list and the callable, its width the call
+/// site's fact), each step hands the accumulator words plus the
+/// element's whole span to the staged lambda under the hosted call's
+/// one-count-per-Ref hand-off (the lambda's exit drops or returns
+/// them), and the answer's whole span replaces the owned one — the old
+/// words' counts drop per `Ref` word, and the first step's old span is
+/// the borrowed init, never dropped. An empty list answers the init
+/// handed out under its own count per `Ref` word (the `list_get`
+/// discipline); otherwise the final owned counts transfer to the
+/// caller with the words through the tag-less total. The callable's
+/// own signature governs the answer's width (the checker proves it the
+/// folded type), so no body-side width check exists.
 fn reduce_generic_fn(
     vm: &mut Vm,
     _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let f = fn_arg(args, 2)?;
-    let elems = {
+    let f = fn_arg(args, args.len() - 1)?;
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
         let (mut heaps, _) = vm.split();
-        heaps.list_at(ref_arg(args, 0)?)?.to_vec()
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
     };
-    let mut acc = args[1];
+    let mut acc: Vec<Value> = args[1..args.len() - 1].to_vec();
     let mut owned = false;
-    for x in elems {
-        let next = vm.call_hosted(f, &[acc, x])?;
+    let mut call_args = Vec::with_capacity(acc.len() + stride);
+    for at in (0..elems.len()).step_by(stride) {
+        call_args.clear();
+        call_args.extend_from_slice(&acc);
+        call_args.extend_from_slice(&elems[at..at + stride]);
+        let answer = vm.call_hosted(f, &call_args)?;
         if owned {
-            if let Value::Ref(word) = acc {
-                let (mut heaps, _) = vm.split();
-                heaps.dec(word)?;
+            for word in &acc {
+                if let Value::Ref(id) = *word {
+                    let (mut heaps, _) = vm.split();
+                    heaps.dec(id)?;
+                }
             }
         }
-        acc = next;
+        acc.clear();
+        acc.extend_from_slice(answer.as_slice());
         owned = true;
     }
     if !owned {
-        if let Value::Ref(word) = acc {
-            let (mut heaps, _) = vm.split();
-            heaps.inc(word)?;
+        for word in &acc {
+            if let Value::Ref(id) = *word {
+                let (mut heaps, _) = vm.split();
+                heaps.inc(id)?;
+            }
         }
     }
-    Ok(NativeResult::Word(acc))
+    Ok(NativeResult::Total { words: acc })
+}
+
+/// The fork-join callable word, forked per element: the scalar `Fn`
+/// names the callable's own function, a closure object's `Ref` its body
+/// (the capture block staged per spawn into the child's entry frame,
+/// exactly the CALLS copy-in).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ForkCallable {
+    Scalar(FuncRef),
+    Closure(RefId),
+}
+
+/// The fork-join drive seam's staged state — the assembly/fold stage
+/// the join runs after the spawn phase parks the CALLG site.
+/// `par_map`'s answers assemble in spawn order onto the fresh result
+/// list at the seam's consumption; `par_reduce`'s chain state carries
+/// the fold between the per-element joins (the element snapshot, the
+/// running accumulator span with its ownership flag, and the next
+/// element's offset).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ForkStage {
+    /// Each completed answer's whole word span pushes onto `result` as
+    /// one element, the first push fixing the list's stride.
+    Map {
+        /// The fresh result list (empty until the seam assembles).
+        result: RefId,
+    },
+    /// The next element's child spawns with the running accumulator
+    /// span then `elements[at..]` as its entry arguments, the adopted
+    /// answer replacing `acc` (`owned` marking the adoption).
+    Reduce {
+        /// The input list's element snapshot, `stride` words per
+        /// element.
+        elements: Vec<Value>,
+        /// The element word width.
+        stride: usize,
+        /// The callable spawned per step.
+        callable: ForkCallable,
+        /// The running accumulator's whole word span.
+        acc: Vec<Value>,
+        /// Whether `acc` is the seam's own (an adopted answer) or the
+        /// caller's borrowed init.
+        owned: bool,
+        /// The next element's word offset.
+        at: usize,
+    },
+}
+
+impl ForkStage {
+    /// The answer's word width the parked call site's overlay must
+    /// hold (the map's one result word, the fold's whole span).
+    pub(crate) fn answer_words(&self) -> usize {
+        match self {
+            Self::Map { .. } => 1,
+            Self::Reduce { acc, .. } => acc.len(),
+        }
+    }
+}
+
+/// Whether the generic builtin a dispatch site addresses is a
+/// fork-join combinator (a spawn-only body that parks the site).
+#[must_use]
+pub fn is_fork_join(module: &str, index: u32) -> bool {
+    module == BUILTIN_MODULE && (index == BUILTIN_PAR_MAP || index == BUILTIN_PAR_REDUCE)
+}
+
+/// Reads the callable word at argument `index` (the callable-defaulted
+/// `Fn` slot admits both spellings, F2).
+fn fork_callable(args: &[Value], index: usize) -> Result<ForkCallable, Trap> {
+    match fn_arg(args, index)? {
+        Value::Fn(fref) => Ok(ForkCallable::Scalar(fref)),
+        Value::Ref(word) => Ok(ForkCallable::Closure(word)),
+        _ => unreachable!("fn_arg admits only the Fn and Ref words"),
+    }
+}
+
+/// Spawns one fork child applying the callable to `element` — the
+/// element's whole word span as the entry arguments either way.
+pub(crate) fn fork_spawn(
+    vm: &mut Vm,
+    nursery: NurseryId,
+    callable: ForkCallable,
+    element: &[Value],
+) -> Result<FiberId, Trap> {
+    match callable {
+        ForkCallable::Scalar(fref) => vm.spawn_ref_into(Some(nursery), fref, element),
+        ForkCallable::Closure(word) => vm.spawn_closure_into(Some(nursery), word, element),
+    }
+}
+
+/// `par_map`'s spawn phase [E3, the parked-CALLG fork-join]: fork is
+/// one spawned child per element applying the callable under a fresh
+/// nursery — the callable's own function entered with the element's
+/// whole inline span, the spawn copy-in acquiring one count per `Ref`
+/// word for the child's frame — and the join parks the CALLG site
+/// through the interlock: the body answers the park request, the drive
+/// seam carries the assembly stage, and the answers assemble in spawn
+/// order onto the fresh result list at the seam's consumption (each
+/// answer's whole word span pushing as one element, the first push
+/// fixing the list's stride, the push taking the list's own edge count
+/// per `Ref` word, the child's delivered count ending at the joiner's
+/// single dec — one per `Ref` word, a ruled cross-heap channel). The
+/// first failure in spawn-drive order cancels the siblings at their
+/// next preemption point [E5] and re-raises at the parked call site,
+/// exactly a spawn-body failure at its enclosing boundary; a failed
+/// spawn tears the already-spawned children down under the cancel
+/// discipline before its trap surfaces. An empty input answers the
+/// empty list without parking (no child stands to join). The callable
+/// is a scalar `Fn` word or a closure object's `Ref` — a closure
+/// callable's capture block is staged per spawn into the child's entry
+/// frame past the element's argument span, one acquired count per
+/// `Ref` capture claimed for the child (the CALLS copy-in discipline),
+/// so a forked lambda is one shape with a called one; a `Ref` word
+/// naming no closure object refuses at the spawn.
+fn par_map_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the callable word: a scalar `Fn` names the callable's own
+    // function; a closure object's `Ref` names its body, the capture
+    // block staged per spawn into the child's entry frame
+    let callable = fork_callable(args, 1)?;
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
+        let (mut heaps, _) = vm.split();
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
+    };
+    let res = {
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
+    };
+    if elems.is_empty() {
+        return Ok(NativeResult::Word(Value::Ref(res)));
+    }
+    let nursery = vm.open_fresh_nursery();
+    for at in (0..elems.len()).step_by(stride) {
+        if let Err(trap) = fork_spawn(vm, nursery, callable, &elems[at..at + stride]) {
+            vm.teardown_fork_nursery(nursery)?;
+            let (mut heaps, _) = vm.split();
+            heaps.dec(res)?;
+            return Err(trap);
+        }
+    }
+    Ok(NativeResult::Fork {
+        nursery,
+        stage: ForkStage::Map { result: res },
+    })
+}
+
+/// `par_reduce`'s spawn phase [E3, the parked-CALLG fork-join]: the
+/// fold's left data dependency chains the children — each element's
+/// application is one spawned child entered with the running
+/// accumulator's whole word span and the element's span (the
+/// callable's own function, the spawn copy-in acquiring one count per
+/// `Ref` word for the child's frame), the seam's chain state carrying
+/// the fold between the per-step joins — so the reduction applies
+/// strictly in input order, the replayable spelling whatever a later
+/// scheduler does. The fold type is the call's own fact: the init's
+/// whole word span stages between the list and the callable (the
+/// interior-span discipline), the callable's checker-proved answer
+/// width matching it, and the final accumulator delivers whole onto
+/// the parked call site. The accumulator's counts follow `reduce`'s
+/// owned discipline: the init stays borrowed until the first delivered
+/// answer adopts (the child's completion count landing on the joiner —
+/// the ruled cross-heap channel), each superseded owned word dec'd at
+/// adoption; an empty input answers the init, inc'd to own it. The
+/// callable is a scalar `Fn` word or a closure object's `Ref` (the
+/// capture block staged per spawn exactly par_map's).
+fn par_reduce_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the callable word rides at the staged init span's end: a scalar
+    // `Fn` or a closure object's `Ref`, the capture block staged per
+    // spawn exactly par_map's
+    let callable = fork_callable(args, args.len() - 1)?;
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
+        let (mut heaps, _) = vm.split();
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
+    };
+    // the fold's whole span: the init's words stage between the list
+    // and the callable, its width the call site's fact
+    let acc: Vec<Value> = args[1..args.len() - 1].to_vec();
+    if elems.is_empty() {
+        // an empty input answers the init, inc'd to own it — no child
+        // stands to join, so no park
+        for word in &acc {
+            if let Value::Ref(id) = *word {
+                let (mut heaps, _) = vm.split();
+                heaps.inc(id)?;
+            }
+        }
+        return Ok(NativeResult::Total { words: acc });
+    }
+    let mut child_args = Vec::with_capacity(acc.len() + stride);
+    child_args.extend_from_slice(&acc);
+    child_args.extend_from_slice(&elems[..stride]);
+    let nursery = vm.open_fresh_nursery();
+    if let Err(trap) = fork_spawn(vm, nursery, callable, &child_args) {
+        // a refused spawn's child may be half-built: tear the step's
+        // nursery down under the cancel discipline; the init stays
+        // borrowed (nothing owned to release)
+        vm.teardown_fork_nursery(nursery)?;
+        return Err(trap);
+    }
+    Ok(NativeResult::Fork {
+        nursery,
+        stage: ForkStage::Reduce {
+            elements: elems,
+            stride,
+            callable,
+            acc,
+            owned: false,
+            at: 0,
+        },
+    })
+}
+
+/// Releases a park request the dispatcher refused after the spawn
+/// phase ran (a whole-span answer wider than the parked site's
+/// overlay): the spawned children torn down under the cancel
+/// discipline, then the staged state's own words released (the result
+/// list's count, the owned accumulator's span).
+pub(crate) fn fork_abandon(vm: &mut Vm, nursery: NurseryId, stage: ForkStage) -> Result<(), Trap> {
+    vm.teardown_fork_nursery(nursery)?;
+    let (mut heaps, _) = vm.split();
+    match stage {
+        ForkStage::Map { result } => heaps.dec(result),
+        ForkStage::Reduce { acc, owned, .. } => release_owned_span(&mut heaps, &acc, owned),
+    }
+}
+
+/// Decs each `Ref` word of an owned span (a fold's superseded
+/// accumulator) through the given router; a borrowed span (`owned`
+/// false, the init before the first adoption) skips every word — its
+/// counts belong to the caller.
+pub(crate) fn release_owned_span(
+    heaps: &mut Heaps<'_>,
+    words: &[Value],
+    owned: bool,
+) -> Result<(), Trap> {
+    if !owned {
+        return Ok(());
+    }
+    for word in words {
+        if let Value::Ref(id) = *word {
+            heaps.dec(id)?;
+        }
+    }
+    Ok(())
 }
 
 macro_rules! reserved {
@@ -1420,6 +2111,7 @@ reserved!(builtin_reserved_7 in BUILTIN_MODULE at 7); // was file_exists
 reserved!(builtin_reserved_8 in BUILTIN_MODULE at 8); // was fs_list
 reserved!(builtin_reserved_9 in BUILTIN_MODULE at 9); // was file_size
 reserved!(builtin_reserved_19 in BUILTIN_MODULE at 19); // the spare slot
+reserved!(builtin_reserved_48 in BUILTIN_MODULE at 48); // par_reduce's generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_21 in BUILTIN_MODULE at 21); // was the monomorphic list_len; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_22 in BUILTIN_MODULE at 22); // was list_get; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_23 in BUILTIN_MODULE at 23); // was list_concat; the generic body lives in GENERIC_FUNCTIONS
@@ -1435,19 +2127,8 @@ reserved!(builtin_reserved_37 in BUILTIN_MODULE at 37); // max; the generic body
 reserved!(builtin_reserved_38 in BUILTIN_MODULE at 38); // map; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_39 in BUILTIN_MODULE at 39); // filter; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_40 in BUILTIN_MODULE at 40); // reduce; the reentrant generic body lives in GENERIC_FUNCTIONS
-reserved!(std_reserved_2 in STD_PLATFORM_MODULE at 2); // was str_int
-reserved!(std_reserved_3 in STD_PLATFORM_MODULE at 3); // was str_float
-reserved!(std_reserved_4 in STD_PLATFORM_MODULE at 4); // was str_bool
-reserved!(std_reserved_10 in STD_PLATFORM_MODULE at 10); // 10-18 were the
-reserved!(std_reserved_11 in STD_PLATFORM_MODULE at 11); // string ops,
-reserved!(std_reserved_12 in STD_PLATFORM_MODULE at 12); // 19 the block's
-reserved!(std_reserved_13 in STD_PLATFORM_MODULE at 13); // spare slot
-reserved!(std_reserved_14 in STD_PLATFORM_MODULE at 14);
-reserved!(std_reserved_15 in STD_PLATFORM_MODULE at 15);
-reserved!(std_reserved_16 in STD_PLATFORM_MODULE at 16);
-reserved!(std_reserved_17 in STD_PLATFORM_MODULE at 17);
-reserved!(std_reserved_18 in STD_PLATFORM_MODULE at 18);
-reserved!(std_reserved_19 in STD_PLATFORM_MODULE at 19);
+reserved!(builtin_reserved_46 in BUILTIN_MODULE at 46); // partition; the reentrant generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_47 in BUILTIN_MODULE at 47); // par_map; the fork-join generic body lives in GENERIC_FUNCTIONS
 
 /// The one reserved gap entry shape: no parameters, a one-word result
 /// contract (the trap fires before any overlay write matters).
@@ -1455,6 +2136,7 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
     NativeFunction {
         name: "reserved",
         params: &[],
+        variadic: false,
         result_words: 1,
         control: None,
         func,
@@ -1475,9 +2157,12 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair, the generic
 /// container closes (`cons`, `head`, `tail`, `collect`, `first`,
 /// `max`) append past the map block, the reentrant combinators
-/// (`map`, `filter`, `reduce`) append past the closes, and the
+/// (`map`, `filter`, `reduce`) append past the closes, the
 /// string-list renderer `join` ([`BUILTIN_JOIN`]) appends past the
-/// nursery controls.
+/// nursery controls, `partition` ([`BUILTIN_PARTITION`], the tag-less
+/// two-word total) appends past `join`, and the fork-join combinator
+/// `par_map` ([`BUILTIN_PAR_MAP`]) appends past `partition`, and the fork-join fold `par_reduce`
+/// ([`BUILTIN_PAR_REDUCE`]) appends past `par_map`.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
     let fns = vec![
@@ -1486,6 +2171,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "str_int",
             params: &[SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: None,
             func: str_int_fn,
@@ -1493,6 +2179,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "str_float",
             params: &[SlotType::F64],
+            variadic: false,
             result_words: 1,
             control: None,
             func: str_float_fn,
@@ -1500,6 +2187,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "str_bool",
             params: &[SlotType::Bool],
+            variadic: false,
             result_words: 1,
             control: None,
             func: str_bool_fn,
@@ -1513,6 +2201,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "substring",
             params: &[SlotType::Ref, SlotType::I64, SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: None,
             func: substring_fn,
@@ -1520,6 +2209,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "concat",
             params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: concat_fn,
@@ -1527,6 +2217,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "to_upper",
             params: &[SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: to_upper_fn,
@@ -1534,6 +2225,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "to_lower",
             params: &[SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: to_lower_fn,
@@ -1541,6 +2233,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "trim",
             params: &[SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: trim_fn,
@@ -1548,6 +2241,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "parse_int",
             params: &[SlotType::Ref],
+            variadic: false,
             result_words: 2,
             control: None,
             func: parse_int_fn,
@@ -1555,6 +2249,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "split",
             params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: split_fn,
@@ -1562,6 +2257,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "char_at",
             params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: None,
             func: char_at_fn,
@@ -1570,6 +2266,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "list_new",
             params: &[],
+            variadic: false,
             result_words: 1,
             control: None,
             func: list_new_fn,
@@ -1580,6 +2277,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "fiber_yield",
             params: &[SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: Some(ControlNative::Yield),
             func: fiber_control_bounce_fn,
@@ -1587,6 +2285,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "fiber_resume",
             params: &[SlotType::I64, SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: Some(ControlNative::Resume),
             func: fiber_control_bounce_fn,
@@ -1594,6 +2293,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "nursery_join",
             params: &[SlotType::I64],
+            variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurseryJoin),
             func: fiber_control_bounce_fn,
@@ -1601,6 +2301,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "list_push",
             params: &[SlotType::Ref, SlotType::Raw],
+            variadic: true,
             result_words: 1,
             control: None,
             func: list_push_fn,
@@ -1608,6 +2309,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "map_new",
             params: &[],
+            variadic: false,
             result_words: 1,
             control: None,
             func: map_new_fn,
@@ -1617,6 +2319,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "map_set",
             params: &[SlotType::Ref, SlotType::Raw, SlotType::Raw],
+            variadic: false,
             result_words: 1,
             control: None,
             func: map_set_fn,
@@ -1633,6 +2336,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "nursery_open",
             params: &[],
+            variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurseryOpen),
             func: fiber_control_bounce_fn,
@@ -1640,6 +2344,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "nursery_spawn",
             params: &[SlotType::I64, SlotType::Fn],
+            variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurserySpawn),
             func: fiber_control_bounce_fn,
@@ -1647,13 +2352,19 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "nursery_boundary",
             params: &[SlotType::I64, SlotType::I64],
+            variadic: false,
             result_words: 2,
             control: Some(ControlNative::NurseryBoundary),
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
             name: "nursery_cancel",
+            // the staged span is the failing value's flat word span: word 0
+            // the member's tag (the named Tag parameter), the tail its
+            // payload words in declaration order — the native channel's
+            // staging shape, so the arity relaxes to "at least"
             params: &[SlotType::Tag],
+            variadic: true,
             result_words: 1,
             control: Some(ControlNative::NurseryCancel),
             func: fiber_control_bounce_fn,
@@ -1661,125 +2372,18 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         NativeFunction {
             name: "join",
             params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
             result_words: 1,
             control: None,
             func: join_fn,
         },
+        reserved_entry(builtin_reserved_46),
+        reserved_entry(builtin_reserved_47),
+        reserved_entry(builtin_reserved_48),
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_JOIN, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_JOIN as usize + 1);
-    fns
-}
-
-/// The std platform native table, the world surface a platform-providing
-/// host installs as [`STD_PLATFORM_MODULE`]: the console pair (0-1), the
-/// file-IO five (5-9), and the net-IO five (20-24). The historical core
-/// indices (2-4, 10-19) stay as reserved trap entries.
-#[must_use]
-pub fn std_platform_module() -> Vec<NativeFunction> {
-    let fns = vec![
-        NativeFunction {
-            name: "println",
-            params: &[SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: println_fn,
-        },
-        NativeFunction {
-            name: "print",
-            params: &[SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: print_fn,
-        },
-        reserved_entry(std_reserved_2),
-        reserved_entry(std_reserved_3),
-        reserved_entry(std_reserved_4),
-        NativeFunction {
-            name: "read_file",
-            params: &[SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: read_file_fn,
-        },
-        NativeFunction {
-            name: "write_file",
-            params: &[SlotType::Ref, SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: write_file_fn,
-        },
-        NativeFunction {
-            name: "file_exists",
-            params: &[SlotType::Ref],
-            result_words: 1,
-            control: None,
-            func: file_exists_fn,
-        },
-        NativeFunction {
-            name: "fs_list",
-            params: &[SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: fs_list_fn,
-        },
-        NativeFunction {
-            name: "file_size",
-            params: &[SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: file_size_fn,
-        },
-        reserved_entry(std_reserved_10),
-        reserved_entry(std_reserved_11),
-        reserved_entry(std_reserved_12),
-        reserved_entry(std_reserved_13),
-        reserved_entry(std_reserved_14),
-        reserved_entry(std_reserved_15),
-        reserved_entry(std_reserved_16),
-        reserved_entry(std_reserved_17),
-        reserved_entry(std_reserved_18),
-        reserved_entry(std_reserved_19),
-        NativeFunction {
-            name: "net_connect",
-            params: &[SlotType::Ref, SlotType::I64],
-            result_words: 2,
-            control: None,
-            func: crate::net::net_connect_fn,
-        },
-        NativeFunction {
-            name: "net_send",
-            params: &[SlotType::I64, SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: crate::net::net_send_fn,
-        },
-        NativeFunction {
-            name: "net_recv",
-            params: &[SlotType::I64, SlotType::I64],
-            result_words: 2,
-            control: None,
-            func: crate::net::net_recv_fn,
-        },
-        NativeFunction {
-            name: "net_close",
-            params: &[SlotType::I64],
-            result_words: 2,
-            control: None,
-            func: crate::net::net_close_fn,
-        },
-        NativeFunction {
-            name: "http_get",
-            params: &[SlotType::Ref],
-            result_words: 2,
-            control: None,
-            func: crate::net::http_get_fn,
-        },
-    ];
-    // install-time guard (debug builds): the pinned index run ends at
-    // STD_HTTP_GET, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), STD_HTTP_GET as usize + 1);
+    // BUILTIN_PAR_REDUCE, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_PAR_REDUCE as usize + 1);
     fns
 }
 
@@ -1882,6 +2486,12 @@ impl OutputSink {
 pub(crate) fn ref_arg(args: &[Value], index: usize) -> Result<RefId, Trap> {
     match args.get(index) {
         Some(Value::Ref(word)) => Ok(*word),
+        // an arena temporary has no count and no object identity; a
+        // native's reference argument is a count-bearing hand-off the
+        // placement proof keeps designated temporaries away from
+        Some(Value::Arena(_)) => Err(Trap::ArenaHandoff {
+            slot: u8::try_from(index).expect("slot index fits u8"),
+        }),
         _ => Err(Trap::SlotTypeMismatch {
             slot: u8::try_from(index).expect("slot index fits u8"),
             expected: SlotType::Ref,
@@ -1903,7 +2513,7 @@ pub(crate) fn i64_arg(args: &[Value], index: usize) -> Result<i64, Trap> {
     }
 }
 
-fn println_fn(
+pub(crate) fn println_fn(
     heaps: &mut Heaps,
     out: &mut OutputSink,
     args: &[Value],
@@ -1913,10 +2523,61 @@ fn println_fn(
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
-fn print_fn(heaps: &mut Heaps, out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
+pub(crate) fn print_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
     let text = heaps.str_at(ref_arg(args, 0)?)?;
     out.write_str(text)?;
     Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// A scalar's rendered text, in a fixed stack buffer: `str_int` and
+/// `str_float` hand the bytes to the fresh object as one exact-size
+/// allocation, where `to_string` grows a `String` whose move into a
+/// `Box<str>` then shrinks that buffer again.
+struct ScalarText {
+    bytes: [u8; ScalarText::CAP],
+    len: usize,
+}
+
+impl ScalarText {
+    /// `f64`'s Display spells every digit out, so the smallest subnormal
+    /// (5e-324, 326 bytes) and its negative form are the widest.
+    const CAP: usize = 384;
+
+    fn new() -> Self {
+        Self {
+            bytes: [0; Self::CAP],
+            len: 0,
+        }
+    }
+
+    /// The rendered text; the sink only ever stores whole `&str` chunks.
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).expect("the sink stores &str chunks")
+    }
+}
+
+impl core::fmt::Write for ScalarText {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len + text.len();
+        let room = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        room.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// One scalar's fresh string object: the stack render, falling back to the
+/// growing path for a rendering past the buffer.
+fn scalar_str(heaps: &mut Heaps, scalar: impl core::fmt::Display) -> Value {
+    let mut text = ScalarText::new();
+    match core::fmt::write(&mut text, format_args!("{scalar}")) {
+        Ok(()) => heaps.new_str_part(text.as_str()),
+        Err(core::fmt::Error) => heaps.new_str(scalar.to_string()),
+    }
 }
 
 fn str_int_fn(
@@ -1925,7 +2586,7 @@ fn str_int_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     match args {
-        [Value::I64(v)] => Ok(NativeResult::Word(heaps.new_str(v.to_string()))),
+        [Value::I64(v)] => Ok(NativeResult::Word(scalar_str(heaps, *v))),
         _ => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::I64,
@@ -1940,7 +2601,7 @@ fn str_float_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     match args {
-        [Value::F64(v)] => Ok(NativeResult::Word(heaps.new_str(v.to_string()))),
+        [Value::F64(v)] => Ok(NativeResult::Word(scalar_str(heaps, *v))),
         _ => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::F64,
@@ -1976,7 +2637,7 @@ fn io_err(heaps: &mut Heaps, op: &str, path: &str, err: &std::io::Error) -> Nati
     }
 }
 
-fn read_file_fn(
+pub(crate) fn read_file_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
@@ -1991,13 +2652,15 @@ fn read_file_fn(
     })
 }
 
-fn write_file_fn(
+pub(crate) fn write_file_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    let contents = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
+    // the contents stay a borrow of the store: the path is owned for the
+    // error arm's message alone, and writing reads the bytes once
+    let contents = heaps.str_at(ref_arg(args, 1)?)?;
     Ok(match std::fs::write(&path, contents.as_bytes()) {
         // create-or-truncate; the payload word is the inert unit word
         Ok(()) => NativeResult::Tag {
@@ -2008,7 +2671,7 @@ fn write_file_fn(
     })
 }
 
-fn file_exists_fn(
+pub(crate) fn file_exists_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
@@ -2018,7 +2681,7 @@ fn file_exists_fn(
     Ok(NativeResult::Word(Value::Bool(Path::new(path).exists())))
 }
 
-fn fs_list_fn(
+pub(crate) fn fs_list_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
@@ -2053,7 +2716,7 @@ fn fs_list_fn(
     })
 }
 
-fn file_size_fn(
+pub(crate) fn file_size_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
@@ -2103,6 +2766,9 @@ mod tests {
             (BUILTIN_MAP, "map", 2, 1),
             (BUILTIN_FILTER, "filter", 1, 1),
             (BUILTIN_REDUCE, "reduce", 1, 1),
+            (BUILTIN_PARTITION, "partition", 1, 2),
+            (BUILTIN_PAR_MAP, "par_map", 2, 1),
+            (BUILTIN_PAR_REDUCE, "par_reduce", 1, 1),
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "{name}'s slot");
             let body = resolve_generic(BUILTIN_MODULE, index)
@@ -2134,11 +2800,12 @@ mod tests {
         );
         assert_eq!(fns[BUILTIN_NURSERY_CANCEL as usize].name, "nursery_cancel");
         assert_eq!(fns[BUILTIN_JOIN as usize].name, "join");
-        assert_eq!(fns.len(), 46);
+        assert_eq!(fns.len(), 49);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
             0u32, 1, 5, 6, 7, 8, 9, 10, 19, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            46, 47,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }
@@ -2207,46 +2874,6 @@ mod tests {
     }
 
     #[test]
-    fn std_platform_table_indices_are_contract() {
-        let fns = std_platform_module();
-        assert_eq!(fns[STD_PRINTLN as usize].name, "println");
-        assert_eq!(fns[STD_PRINT as usize].name, "print");
-        assert_eq!(fns[STD_READ_FILE as usize].name, "read_file");
-        assert_eq!(fns[STD_WRITE_FILE as usize].name, "write_file");
-        assert_eq!(fns[STD_FILE_EXISTS as usize].name, "file_exists");
-        assert_eq!(fns[STD_FS_LIST as usize].name, "fs_list");
-        assert_eq!(fns[STD_FILE_SIZE as usize].name, "file_size");
-        assert_eq!(fns[STD_NET_CONNECT as usize].name, "net_connect");
-        assert_eq!(fns[STD_NET_SEND as usize].name, "net_send");
-        assert_eq!(fns[STD_NET_RECV as usize].name, "net_recv");
-        assert_eq!(fns[STD_NET_CLOSE as usize].name, "net_close");
-        assert_eq!(fns[STD_HTTP_GET as usize].name, "http_get");
-        assert_eq!(fns.len(), 25);
-        // every core index stays a reserved trap: the str_* trio and the
-        // whole string block (10-19)
-        for index in [2u32, 3, 4].into_iter().chain(10..=19) {
-            assert_eq!(fns[index as usize].name, "reserved", "index {index}");
-        }
-        // the fallible ones need a two-word overlay; the rest one word
-        for (index, want) in [
-            (STD_PRINTLN, 1),
-            (STD_PRINT, 1),
-            (STD_READ_FILE, 2),
-            (STD_WRITE_FILE, 2),
-            (STD_FILE_EXISTS, 1),
-            (STD_FS_LIST, 2),
-            (STD_FILE_SIZE, 2),
-            (STD_NET_CONNECT, 2),
-            (STD_NET_SEND, 2),
-            (STD_NET_RECV, 2),
-            (STD_NET_CLOSE, 2),
-            (STD_HTTP_GET, 2),
-        ] {
-            assert_eq!(fns[index as usize].result_words, want);
-        }
-    }
-
-    #[test]
     fn reserved_gap_entries_trap_like_uninstalled_indices() {
         // each module's gaps report the module's own name and their index,
         // the same UnknownCallee an out-of-range index yields at resolution
@@ -2267,9 +2894,6 @@ mod tests {
         traps_like(BUILTIN_MODULE, 0, &core); // the console pair's slots
         traps_like(BUILTIN_MODULE, 5, &core); // the file-IO slots
         traps_like(BUILTIN_MODULE, 19, &core); // the spare slot
-        let platform = std_platform_module();
-        traps_like(STD_PLATFORM_MODULE, 2, &platform); // the str_* slots
-        traps_like(STD_PLATFORM_MODULE, 16, &platform); // the string block
     }
 
     #[test]
@@ -2338,6 +2962,95 @@ mod tests {
         );
     }
 
+    /// The stack render covers every scalar's expansion and paints the
+    /// text `to_string` paints: the widest `i64`, and `f64`'s widest
+    /// Display (the smallest subnormal spells 326 bytes, 327 with the
+    /// sign). Every listed rendering must fit the buffer, so a cap that
+    /// stops covering a scalar fails here instead of silently taking the
+    /// growing fallback.
+    #[test]
+    fn scalar_renderings_match_the_string_form() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let fits = |rendered: &dyn core::fmt::Display| {
+            let mut text = ScalarText::new();
+            assert!(
+                core::fmt::write(&mut text, format_args!("{rendered}")).is_ok(),
+                "{rendered} exceeds the stack buffer"
+            );
+        };
+        for v in [i64::MIN, -1, 0, 42, i64::MAX] {
+            fits(&v);
+            let Value::Ref(word) = str_int_fn(&mut heaps, &mut out, &[Value::I64(v)])
+                .expect("int converts")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a string ref")
+            };
+            let want = v.to_string();
+            assert_eq!(heaps.str_at(word), Ok(want.as_str()));
+        }
+        for v in [
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MIN,
+            f64::MAX,
+            2.5,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            fits(&v);
+            let Value::Ref(word) = str_float_fn(&mut heaps, &mut out, &[Value::F64(v)])
+                .expect("float converts")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a string ref")
+            };
+            let want = v.to_string();
+            assert_eq!(heaps.str_at(word), Ok(want.as_str()));
+        }
+    }
+
+    /// `trim` copies the inner byte range into a fresh object: whitespace
+    /// on either side alone, all-whitespace, the empty subject, and
+    /// multi-byte whitespace around multi-byte text keep the boundaries
+    /// exact and never hand back the source.
+    #[test]
+    fn trim_copies_the_inner_range_into_a_fresh_object() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        for (text, want) in [
+            (" \t héllo \r\n", "héllo"),
+            ("héllo ", "héllo"),
+            (" héllo", "héllo"),
+            ("\u{3000}漢字\u{3000}", "漢字"),
+            ("   ", ""),
+            ("", ""),
+        ] {
+            let word = heaps.new_intern(text);
+            let Value::Ref(src) = word else {
+                panic!("an interned word")
+            };
+            let Value::Ref(part) = trim_fn(&mut heaps, &mut out, &[word])
+                .expect("trim runs")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a string ref")
+            };
+            assert_eq!(heaps.str_at(part), Ok(want), "trimmed {text:?}");
+            assert_ne!(part, src, "a fresh object for {text:?}");
+        }
+    }
+
     #[test]
     fn wrong_typed_arguments_name_their_own_slot() {
         let mut objects = Objects::new(FIBER_ROOT);
@@ -2369,6 +3082,89 @@ mod tests {
                 actual: SlotType::Bool,
             })
         );
+    }
+
+    /// The parts a leading, trailing, or doubled separator leaves empty: the
+    /// boundaries come off the subject alone, so an empty part stays an
+    /// empty string in both separator widths.
+    #[test]
+    fn split_keeps_the_empty_parts_around_doubled_separators() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        for (text, sep, want) in [
+            ("a,,b", ",", &["a", "", "b"] as &[&str]),
+            (",a", ",", &["", "a"]),
+            ("a,", ",", &["a", ""]),
+            (",", ",", &["", ""]),
+            ("a—b—", "—", &["a", "b", ""]),
+            ("—a", "—", &["", "a"]),
+            ("ab", "—", &["ab"]),
+        ] {
+            let text_id = heaps.current().intern(text);
+            let sep_id = heaps.current().intern(sep);
+            let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, text_id)),
+                Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
+            ])
+            .expect("split runs")
+            .word()
+            .expect("a single word") else {
+                panic!("a list ref")
+            };
+            let words = heaps.list_at(list).expect("the list is live").0.to_vec();
+            let parts: Vec<String> = words
+                .iter()
+                .map(|elem| match elem {
+                    Value::Ref(word) => heaps.str_at(*word).expect("a string part").to_owned(),
+                    other => panic!("a string part, got {other:?}"),
+                })
+                .collect();
+            let want: Vec<String> = want.iter().map(|part| (*part).to_owned()).collect();
+            assert_eq!(parts, want, "{text:?} split on {sep:?}");
+        }
+    }
+
+    /// `join` pastes the elements at their exact byte lengths: the buffer
+    /// is sized once, so multi-byte text and separators keep the content
+    /// and the fresh object's conversion never shrinks it.
+    #[test]
+    fn join_sizes_the_buffer_at_the_exact_length() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        for (parts, sep, want) in [
+            (&["a", "bb", "ccc"] as &[&str], ",", "a,bb,ccc"),
+            (&["héllo", "漢字"], "—", "héllo—漢字"),
+            (&["only"], "—", "only"),
+            (&[], ",", ""),
+        ] {
+            let mut words = Vec::with_capacity(parts.len());
+            for part in parts {
+                let Value::Ref(word) = heaps.new_str((*part).to_owned()) else {
+                    panic!("a string ref")
+                };
+                // the birth count becomes the list's edge
+                heaps.release_claim(word);
+                words.push(Value::Ref(word));
+            }
+            let Value::Ref(list) = heaps.new_list(words) else {
+                panic!("a list ref")
+            };
+            let sep_word = heaps.new_str(sep.to_owned());
+            let Value::Ref(joined) = join_fn(&mut heaps, &mut out, &[Value::Ref(list), sep_word])
+                .expect("join runs")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a string ref")
+            };
+            assert_eq!(heaps.str_at(joined), Ok(want), "joined {parts:?}");
+        }
     }
 
     #[test]
@@ -2416,7 +3212,7 @@ mod tests {
         let Value::Ref(empty) = v else {
             panic!("a list ref, got {v:?}");
         };
-        assert_eq!(heaps.list_at(empty), Ok(&[][..]));
+        assert_eq!(heaps.list_at(empty), Ok((&[][..], 0)));
         // reads over any element kinds, both span members
         let list = heaps
             .current()
@@ -2464,7 +3260,7 @@ mod tests {
         assert_ne!(joined.id(), list, "the join is a fresh object");
         assert_eq!(
             heaps.list_at(joined),
-            Ok(&[Value::I64(7), Value::Bool(true)][..])
+            Ok((&[Value::I64(7), Value::Bool(true)][..], 1))
         );
         // a non-list argument names no object
         let str_obj = heaps.current().intern("x");
@@ -2488,11 +3284,14 @@ mod tests {
         }
         assert_eq!(
             heaps.list_at(empty),
-            Ok(&[
-                Value::I64(9),
-                Value::Bool(false),
-                Value::Ref(RefId::new(FIBER_ROOT, str_obj))
-            ][..]),
+            Ok((
+                &[
+                    Value::I64(9),
+                    Value::Bool(false),
+                    Value::Ref(RefId::new(FIBER_ROOT, str_obj))
+                ][..],
+                1
+            )),
             "the pushes appended in order"
         );
         assert_eq!(
@@ -2554,7 +3353,7 @@ mod tests {
         assert_eq!(objects.rc_at(head.id()), Ok(2));
         // the ledger answers the frame's words only: no element claim
         let key = |(word, n): &(RefId, u32)| (word.fiber().index(), word.id(), *n);
-        let mut drained = claims[0].take_all_except(None);
+        let mut drained = claims[0].take_all_except(&[]);
         drained.sort_unstable_by_key(key);
         let mut want = vec![
             (src, 1),
@@ -2572,5 +3371,102 @@ mod tests {
                 .expect("each frame word drops its count");
         }
         assert!(objects.is_empty(), "the edge-owned elements died inside");
+    }
+
+    /// The span channel over a stride-carrying list: pushes of a
+    /// multi-word element store the whole span at the stride the first
+    /// push fixed, `list_len` divides by it, the checked read answers
+    /// `NativeResult::Span` with one count handed out per `Ref` word,
+    /// and a disagreeing later push traps the stride contract.
+    #[test]
+    fn multi_word_elements_round_trip_through_the_span_channel() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let (word, left, stored, len, hit, miss, stride_trap) = {
+            let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+            let mut out = OutputSink::captured();
+            let Value::Ref(list) = list_new_fn(&mut heaps, &mut out, &[])
+                .expect("new runs")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a list ref");
+            };
+            let word = RefId::new(FIBER_ROOT, list.id());
+            let left = {
+                let Value::Ref(word) = heaps.new_str("a".to_owned()) else {
+                    panic!("a fresh string is its reference word");
+                };
+                word
+            };
+            // two two-word elements: (string Ref, int) pairs
+            for rank in [Value::I64(1), Value::I64(2)] {
+                assert_eq!(
+                    list_push_fn(&mut heaps, &mut out, &[
+                        Value::Ref(word),
+                        Value::Ref(left),
+                        rank
+                    ]),
+                    Ok(NativeResult::Word(Value::I64(0)))
+                );
+            }
+            let stored = heaps
+                .list_at(word)
+                .map(|(elems, stride)| (elems.to_vec(), stride));
+            let len = list_len_fn(&mut heaps, &mut out, &[Value::Ref(word)]);
+            // the hit: the span channel answers the element's whole span,
+            // one count per Ref word for the reader
+            let hit = list_get_fn(&mut heaps, &mut out, &[Value::Ref(word), Value::I64(1)]);
+            // out of range answers the none member with the index
+            let miss = list_get_fn(&mut heaps, &mut out, &[Value::Ref(word), Value::I64(2)]);
+            // a disagreeing push width traps the stride contract
+            let stride_trap =
+                list_push_fn(&mut heaps, &mut out, &[Value::Ref(word), Value::I64(9)]);
+            (word, left, stored, len, hit, miss, stride_trap)
+        };
+        assert_eq!(
+            stored,
+            Ok((
+                vec![
+                    Value::Ref(left),
+                    Value::I64(1),
+                    Value::Ref(left),
+                    Value::I64(2),
+                ],
+                2
+            )),
+            "the pushes stored whole element spans at stride 2"
+        );
+        assert_eq!(len, Ok(NativeResult::Word(Value::I64(2))));
+        assert_eq!(
+            hit,
+            Ok(NativeResult::Span {
+                tag: PLATFORM_IO_OK,
+                payload: vec![Value::Ref(left), Value::I64(2)],
+            })
+        );
+        // the element Ref's count: its birth, one edge count per stored
+        // span (two pushes), and the read's handed-out count — four
+        assert_eq!(
+            objects.rc_at(left.id()),
+            Ok(4),
+            "one count per Ref word handed out"
+        );
+        assert_eq!(
+            miss,
+            Ok(NativeResult::Tag {
+                tag: PLATFORM_NONE,
+                payload: Value::I64(2),
+            })
+        );
+        assert_eq!(
+            stride_trap,
+            Err(Trap::ElementStride {
+                obj: word.id(),
+                stride: 2,
+                given: 1,
+            })
+        );
     }
 }

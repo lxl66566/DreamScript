@@ -9,12 +9,12 @@
 //!
 //! Three stages per package:
 //!
-//! 1. **Planning** collects the lowerable top-level functions: monomorphic const-arrow lambdas only
-//!    (plus the synthesized functions lambda values register mid-lowering, F2). Generic functions
-//!    and comptime items are exempt — nothing is emitted for their bodies, and a call into one
-//!    outside the covered generic builtins is a [`LowerError::Unsupported`] naming the M6
-//!    `CALL_GENERIC` seam (the ambient `len` routes through CALLG, carrying its instantiated type
-//!    as the evidence word the one builtin body dispatches on). A `main` entry must exist.
+//! 1. **Planning** collects the lowerable top-level functions: const-arrow lambdas — monomorphic or
+//!    free-generic (plus the synthesized functions lambda values register mid-lowering, F2). A free
+//!    generic fn lowers its ONE body once [H3]: call sites stage the instantiated evidence words
+//!    its body's runtime demands read, in the outgoing-argument area after the true arguments.
+//!    Comptime items stay exempt, and generic lambdas as values and comptime parameters refuse at
+//!    their own doors. A `main` entry must exist.
 //! 2. **Shapes** map every solved type onto its slot representation ([`shape` module docs]):
 //!    scalars are one word, bare structs are field spans, unions are tag+payload spans with
 //!    per-member payload offsets. Tag ids are module-wide, assigned in first-use order.
@@ -66,7 +66,7 @@ use ds_diag::Span;
 use ds_mod::{Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
-use func::{EvidenceEnv, FnLower, Plan};
+use func::{BodyId, EvidenceEnv, FnLower, Plan};
 use shape::Shapes;
 
 /// One op of a function body: a runnable micro-operation or a placed
@@ -96,6 +96,15 @@ impl Lowered {
     #[must_use]
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// The finished module, consumed: the owning install path takes the
+    /// function bodies over without copying them. The name, tag, and
+    /// placement tables drop with this record, so callers read what they
+    /// still need first.
+    #[must_use]
+    pub fn into_module(self) -> Module {
+        self.module
     }
 
     /// The function-table names, in index order (FuncRef indexes).
@@ -150,6 +159,7 @@ pub fn lower(
         });
     }
     let mut plan = Plan::new();
+    plan.set_demands(collect_demands(asts, analyzed));
     plan_deinits(asts, &mut plan, analyzed);
     for ast in asts {
         for block in &ast.blocks {
@@ -171,7 +181,8 @@ pub fn lower(
         &analyzed.decls,
         &analyzed.checked,
     );
-    let (functions, placed, shapes) = lower_all(&mut plan, analyzed, &lin)?;
+    let (functions, placed, shapes) = lower_all(&mut plan, analyzed, &lin, &platform_name(asts))?;
+
     let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
     for function in functions {
         module = module.with_function(function);
@@ -268,11 +279,17 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 }
 
 /// Collects one top-level item into the plan when it is a lowerable
-/// monomorphic const-arrow function. Everything else is skipped; generic
-/// functions and comptime items are the documented M6 exemption.
+/// const-arrow function: a monomorphic one lowers its own body, a free
+/// generic one its single ONE body with the runtime-evidence demands its
+/// bounds collect [H3]. Everything else is skipped; comptime items are
+/// the documented exemption.
 fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     if let ItemKind::Impl(imp) = &item.kind {
         plan_impl(item, imp, plan, analyzed);
+        return;
+    }
+    if let ItemKind::Trait(t) = &item.kind {
+        plan_trait_defaults(t, plan, analyzed);
         return;
     }
     let ItemKind::Local(local) = &item.kind else {
@@ -287,16 +304,53 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     let Expr::Lambda { generics, .. } = &local.init else {
         return; // a non-function const: no module function for it
     };
-    if !generics.is_empty() {
-        return; // the generic exemption: M6's CALL_GENERIC owns these
-    }
     let Some(def) = analyzed.package.lookup(&name.name) else {
         return;
     };
     if !analyzed.checked.def_types.contains_key(&def) {
         return; // the checker has no typed value for it (extern or later stage)
     }
+    if !generics.is_empty() {
+        // The ONE generic body [H3]: a free generic fn lowers once,
+        // never per instantiation; its declared bounds collect the
+        // runtime-evidence demands its body's nested bound calls read,
+        // and the entering call sites stage the words. A bare `[t]`
+        // parameter bounds nothing, so its bodies demand nothing.
+        let bounds = Rc::new(fn_bounds(def, analyzed));
+        let pairs = plan.demand(&BodyId::Free(def));
+        plan.push_free_generic(name.name.clone(), def, local, EvidenceEnv { pairs, bounds });
+        return;
+    }
     plan.push(name.name.clone(), def, local);
+}
+
+/// The declared bounds of one free generic fn's type parameters: the
+/// written name of each `[t: trait]` clause to the traits it names,
+/// resolved through the package's type namespace. Keyed by the written
+/// name (not a minted atom) because the declaration and each call
+/// site's checking mint their own variables; a bound naming no trait
+/// (an affine marker, a non-single-segment path) bounds nothing.
+fn fn_bounds(def: ds_check::DefId, analyzed: &Analyzed) -> HashMap<String, HashSet<TraitId>> {
+    let mut out: HashMap<String, HashSet<TraitId>> = HashMap::new();
+    let Some(sig) = analyzed.decls.fns.get(&def) else {
+        return out;
+    };
+    for param in &sig.generics {
+        let Some(ds_parse::Type::Path { path, .. }) = &param.bound else {
+            continue;
+        };
+        let [only] = path.segments.as_slice() else {
+            continue;
+        };
+        let Some(trait_def) = analyzed.package.lookup_type(&only.name) else {
+            continue;
+        };
+        let Some(&trait_id) = analyzed.decls.traits.get(&trait_def) else {
+            continue;
+        };
+        out.entry(param.name.clone()).or_default().insert(trait_id);
+    }
+    out
 }
 
 /// Collects one trait impl's member bodies into the plan (the trait
@@ -338,12 +392,10 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             continue;
         };
         let body_expr = Rc::new(Expr::Block(body.clone()));
-        let pairs = if bounds.is_empty() {
-            Rc::new(Vec::new())
-        } else {
-            let res = &analyzed.resolutions[f.span.file.as_u32() as usize];
-            Rc::new(func::runtime_pairs(analyzed, res, &bounds, &body_expr))
-        };
+        let pairs = plan.demand(&BodyId::Member {
+            impl_site: item.span,
+            member: f.name.name.clone(),
+        });
         let evidence = EvidenceEnv {
             pairs,
             bounds: bounds.clone(),
@@ -386,12 +438,10 @@ fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &A
             continue;
         };
         let body_expr = Rc::new(Expr::Block(body.clone()));
-        let pairs = if bounds.is_empty() {
-            Rc::new(Vec::new())
-        } else {
-            let res = &analyzed.resolutions[f.span.file.as_u32() as usize];
-            Rc::new(func::runtime_pairs(analyzed, res, &bounds, &body_expr))
-        };
+        let pairs = plan.demand(&BodyId::Member {
+            impl_site: item.span,
+            member: f.name.name.clone(),
+        });
         let name = format!("{}#{}", render_type(&imp.target), f.name.name);
         plan.push_declared(
             name,
@@ -405,6 +455,237 @@ fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &A
                 bounds: bounds.clone(),
             },
         );
+    }
+}
+
+/// Collects one trait's declared default bodies into the plan (the
+/// dispatch seam's omitted-member half): each member fn carrying a
+/// body lowers once under its mangled identity `<trait>#<member>`, the
+/// dispatch target a call site reaches when its solving impl spells no
+/// member — a defaulted member is omittable exactly because this body
+/// exists. The body is the ONE generic shape over the trait's own
+/// variables: `self` types the `Self` variable (one Raw word, the
+/// runtime kind the caller's fact), and the body's nested calls on
+/// `self` ride the runtime-evidence machinery — the checker satisfies
+/// them through the trait-scoped `Self` assumption, so the entering
+/// dispatch sites stage the serving member bodies as the body's
+/// evidence demands, exactly like a free generic fn's entering sites.
+fn plan_trait_defaults(t: &ds_parse::TraitDecl, plan: &mut Plan, analyzed: &Analyzed) {
+    let Some(def) = analyzed.package.lookup_type(&t.name.name) else {
+        return;
+    };
+    let Some(&trait_id) = analyzed.decls.traits.get(&def) else {
+        return;
+    };
+    let bounds = Rc::new(trait_bounds(t, trait_id, analyzed));
+    for member in &t.members {
+        let ds_parse::TraitMember::Fn(f) = member else {
+            continue;
+        };
+        let Some(body) = &f.body else {
+            continue;
+        };
+        let Some(ret) = analyzed.decls.impl_fn_rets.get(&f.span).copied() else {
+            continue;
+        };
+        let body_expr = Rc::new(Expr::Block(body.clone()));
+        let pairs = plan.demand(&BodyId::Default {
+            trait_def: def,
+            member: f.name.name.clone(),
+        });
+        let name = format!("{}#{}", t.name.name, f.name.name);
+        plan.push_default_body(
+            name,
+            def,
+            f.name.name.clone(),
+            Rc::new(f.params.clone()),
+            body_expr,
+            Some(ret),
+            EvidenceEnv {
+                pairs,
+                bounds: bounds.clone(),
+            },
+        );
+    }
+}
+
+/// The runtime-evidence bounds a trait's default bodies demand under:
+/// `Self` satisfies the trait itself (the scoped assumption the
+/// checker activates inside the member bodies, so default bodies call
+/// sibling members on `self` with no instance), plus the trait's own
+/// declared generic bounds.
+fn trait_bounds(
+    t: &ds_parse::TraitDecl,
+    trait_id: TraitId,
+    analyzed: &Analyzed,
+) -> HashMap<String, HashSet<TraitId>> {
+    let mut out: HashMap<String, HashSet<TraitId>> = HashMap::new();
+    out.entry("Self".to_owned()).or_default().insert(trait_id);
+    for param in &t.generics {
+        let Some(ds_parse::Type::Path { path, .. }) = &param.bound else {
+            continue;
+        };
+        let [only] = path.segments.as_slice() else {
+            continue;
+        };
+        let Some(trait_def) = analyzed.package.lookup_type(&only.name) else {
+            continue;
+        };
+        let Some(&bound) = analyzed.decls.traits.get(&trait_def) else {
+            continue;
+        };
+        out.entry(param.name.name.clone())
+            .or_default()
+            .insert(bound);
+    }
+    out
+}
+
+/// Every generic body's runtime-evidence demands, propagated to a
+/// fixpoint before planning: each body's walk collects its own
+/// dot-calls plus, at every call entering another generic body (a free
+/// generic fn or a generic inherent member), the callee's own demands
+/// whose per-call record answers in the runtime form — read through the
+/// table and re-keyed onto the calling frame's variables. A callee's
+/// demands may themselves carry callee demands, so the pass iterates
+/// until no body's list grows; the final table feeds the planning
+/// pushes here and the lambda/spawn walks at lowering time.
+fn collect_demands(asts: &[Ast], analyzed: &Analyzed) -> func::Demands {
+    struct Body<'a> {
+        id: BodyId,
+        bounds: Rc<HashMap<String, HashSet<TraitId>>>,
+        expr: Rc<Expr>,
+        res: &'a ds_check::Resolutions,
+    }
+    let mut bodies: Vec<Body> = Vec::new();
+    for ast in asts {
+        for block in &ast.blocks {
+            for item in &block.items {
+                match &item.kind {
+                    ItemKind::Local(local) => {
+                        let Pattern::Binding { name, .. } = &local.pat else {
+                            continue;
+                        };
+                        let Expr::Lambda {
+                            generics,
+                            span,
+                            body,
+                            ..
+                        } = &local.init
+                        else {
+                            continue;
+                        };
+                        if generics.is_empty() || local.mutable {
+                            continue;
+                        }
+                        let Some(def) = analyzed.package.lookup(&name.name) else {
+                            continue;
+                        };
+                        if !analyzed.checked.def_types.contains_key(&def) {
+                            continue;
+                        }
+                        let bounds = Rc::new(fn_bounds(def, analyzed));
+                        if bounds.is_empty() {
+                            continue;
+                        }
+                        bodies.push(Body {
+                            id: BodyId::Free(def),
+                            bounds,
+                            expr: Rc::new((**body).clone()),
+                            res: &analyzed.resolutions[span.file.as_u32() as usize],
+                        });
+                    },
+                    ItemKind::Impl(imp) => {
+                        if imp.generics.is_empty() {
+                            continue;
+                        }
+                        let bounds = Rc::new(impl_bounds(item.span, analyzed));
+                        if bounds.is_empty() {
+                            continue;
+                        }
+                        for f in &imp.fns {
+                            let Some(body) = &f.body else {
+                                continue;
+                            };
+                            if !analyzed.decls.impl_fn_rets.contains_key(&f.span) {
+                                continue;
+                            }
+                            bodies.push(Body {
+                                id: BodyId::Member {
+                                    impl_site: item.span,
+                                    member: f.name.name.clone(),
+                                },
+                                bounds: bounds.clone(),
+                                expr: Rc::new(Expr::Block(body.clone())),
+                                res: &analyzed.resolutions[f.span.file.as_u32() as usize],
+                            });
+                        }
+                    },
+                    ItemKind::Trait(t) => {
+                        let Some(def) = analyzed.package.lookup_type(&t.name.name) else {
+                            continue;
+                        };
+                        let Some(&trait_id) = analyzed.decls.traits.get(&def) else {
+                            continue;
+                        };
+                        let bounds = Rc::new(trait_bounds(t, trait_id, analyzed));
+                        for member in &t.members {
+                            let ds_parse::TraitMember::Fn(f) = member else {
+                                continue;
+                            };
+                            let Some(body) = &f.body else {
+                                continue;
+                            };
+                            if !analyzed.decls.impl_fn_rets.contains_key(&f.span) {
+                                continue;
+                            }
+                            bodies.push(Body {
+                                id: BodyId::Default {
+                                    trait_def: def,
+                                    member: f.name.name.clone(),
+                                },
+                                bounds: bounds.clone(),
+                                expr: Rc::new(Expr::Block(body.clone())),
+                                res: &analyzed.resolutions[f.span.file.as_u32() as usize],
+                            });
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+    // the direct pass over an empty table, then iterate: each round
+    // reads every callee's complete list from the previous one, and the
+    // collected sets only grow, so the pass reaches the fixpoint
+    let mut table = func::Demands::default();
+    for body in &bodies {
+        let pairs = Rc::new(func::runtime_pairs(
+            analyzed,
+            body.res,
+            &body.bounds,
+            &body.expr,
+            &table,
+        ));
+        table.insert(body.id.clone(), pairs);
+    }
+    loop {
+        let current = table.clone();
+        let mut changed = false;
+        for body in &bodies {
+            let pairs = Rc::new(func::runtime_pairs(
+                analyzed,
+                body.res,
+                &body.bounds,
+                &body.expr,
+                &current,
+            ));
+            changed |= current.get(&body.id) != Some(pairs.as_slice());
+            table.insert(body.id.clone(), pairs);
+        }
+        if !changed {
+            return table;
+        }
     }
 }
 
@@ -460,10 +741,29 @@ type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
 /// synthesized lambda functions as it lowers (F2), and every registered
 /// function lowers in turn. Each one's resolutions come from its own
 /// file (the bundle is keyed by file id).
+/// The platform name the world natives' pool FuncRefs address (H5, E1):
+/// the package's `platform "..."` declaration's name, the default
+/// platform `std` when no declaration names one — the host must install
+/// a platform under this name or the module's install refuses the world
+/// call sites.
+fn platform_name(asts: &[Ast]) -> String {
+    for ast in asts {
+        for block in &ast.blocks {
+            for item in &block.items {
+                if let ItemKind::Platform(decl) = &item.kind {
+                    return decl.name.name.clone();
+                }
+            }
+        }
+    }
+    native::DEFAULT_PLATFORM_NAME.to_owned()
+}
+
 fn lower_all<'b>(
     plan: &mut Plan,
     analyzed: &'b Analyzed,
     lin: &ds_check::Linearity,
+    platform: &str,
 ) -> Result<LowerAll<'b>, LowerError> {
     let mut shapes = Shapes::new(analyzed, plan.declared_deinits());
     let mut functions = Vec::with_capacity(plan.functions().len());
@@ -483,6 +783,7 @@ fn lower_all<'b>(
             lin,
             &planned,
             u32::try_from(index).expect("function index fits u32"),
+            platform.to_owned(),
         )
         .map_err(|err| err.respanned(planned.lambda.span()))?;
         functions.push(function);

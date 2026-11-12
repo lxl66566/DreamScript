@@ -37,7 +37,8 @@
 //!
 //! | class (major)        | variants                | a        | b          | c          | d
 //! |----------------------|-------------------------|----------|------------|------------|----------
-//! | Const (0x0)          | KIMM, KCONST, KSTR     | dst slot | —          | —          | const idx
+//! | Const (0x0)          | KIMM, KCONST, KSTR,   | dst slot | —          | —          | const idx
+//! |                      | KSTR_BORROW           |          |            |            |           |
 //! | IntArith (0x1)       | ADDI64 .. MODI64        | dst slot | lhs slot   | rhs slot   | —
 //! | FloatArith (0x2)     | ADDF64 .. DIVF64        | dst slot | lhs slot   | rhs slot   | —
 //! | IntCmp (0x3)         | EQI64 .. GTI64          | dst slot | lhs slot   | rhs slot   | —
@@ -68,7 +69,8 @@
 //! inline except by compromising the domain. Per BL-1 the constant pool is
 //! the single immediate channel: KIMM loads an i64 pool entry, KCONST loads
 //! any other constant (f64, bool, reference, unit), KSTR materializes a pool
-//! string as a heap string reference, and CALL/CALLT reference
+//! string as a heap string reference (KSTR_BORROW the claim-free form the placement
+//! pass emits for frame temporaries), and CALL/CALLT reference
 //! callees as pool entries (a FuncRef: module index + function index for
 //! fully-qualified cross-module calls (H6 item 5), the entry hot reload
 //! swaps). The uop contract fixes only the index shape: pool indices are u16
@@ -184,6 +186,16 @@ pub enum Uop {
     /// load while string materialization is a heap-interning effect — a
     /// separate opcode keeps KCONST's purity-table entry true.
     Kstr { dst: u8, kidx: ConstIdx },
+    /// `0x0.3` — `slots[dst] =` the same interned heap string as
+    /// [`Uop::Kstr`], materialized with no count claim: the placement
+    /// pass proves the word's count never moves inside its frame (a
+    /// designated temporary), so the load borrows the intern map's
+    /// canonical copy — the map pins the object for the store's life —
+    /// and the frame's terminal dec is deleted with the acquire. The
+    /// strictness is a placement fact, not a runtime check: a borrow
+    /// word escapes only if the lowerer misclassified it, and the
+    /// pass's transition marks are the compile-time escape proof.
+    KstrBorrow { dst: u8, kidx: ConstIdx },
     /// `0x1.0` — `slots[dst] = slots[lhs] + slots[rhs]`, i64, traps on
     /// overflow (B7).
     AddI64 { dst: u8, lhs: u8, rhs: u8 },
@@ -253,6 +265,17 @@ pub enum Uop {
     /// the primitive interpolation lowers onto (F6), and no existing uop
     /// builds a new string.
     StrCat { dst: u8, lhs: u8, rhs: u8 },
+    /// `0xD.4` — `slots[dst] =` the arena temporary
+    /// `concat(slots[lhs], slots[rhs])`: the same byte concatenation as
+    /// [`Uop::StrCat`] over the operands' string contents (each an arena word
+    /// or a heap string), but the bytes land in the running fiber's frame
+    /// arena and the result word carries no count — the placement pass
+    /// proved the result a designated temporary whose count never transits,
+    /// so no acquire and no terminal dec exist, and the word dies inside its
+    /// own loop iteration or frame. Impure for the same reason as STRCAT,
+    /// and the first allocation in a frame also serves its arena entry mark
+    /// (the frame-pop restore).
+    StrCatArena { dst: u8, lhs: u8, rhs: u8 },
     /// `0xD.3` — `slots[dst] =` a fresh heap closure object: the header is
     /// the scalar FuncRef word read at `slots[func]` (KCONST-minted), the
     /// capture block the `n` words staged at overlay positions `0..n`.
@@ -295,6 +318,18 @@ pub enum Uop {
     /// condition (jump when done), not JMPIF_NOT on `cond` (which would
     /// jump straight out whenever `cond` holds).
     JmpifNot { cond: u8, target: u32 },
+    /// `0x9.3` — `slots[dst] =` the packed arena cursor, taken at a loop
+    /// head whose body carries designated arena temporaries: the paired
+    /// `0x9.4` restore at the back edge rewinds the arena to this position,
+    /// so per-iteration temporaries never accumulate inside the frame.
+    /// Impure: the cursor is global arena state, so the op cannot move across
+    /// a dataflow window's allocations.
+    ArenaMark { dst: u8 },
+    /// `0x9.4` — rewinds the arena to the packed cursor at `slots[src]`,
+    /// freeing every arena temporary allocated since the paired `0x9.3`
+    /// mark. Impure for the same reason, and the pair's LIFO order is the
+    /// placement pass's compile-time fact.
+    ArenaRestore { src: u8 },
     /// `0xA.0` — call pool FuncRef `callee` with `nargs` arguments staged in
     /// the caller's outgoing-argument area; the callee frame overlays that
     /// area [BL-6, H2]. The VM re-checks `nargs` against the callee's
@@ -399,6 +434,10 @@ pub enum BuiltinInstance {
     Int = 3,
     /// The `float` instance: the receiver is an unboxed f64 word.
     Float = 4,
+    /// The record instance: the receiver is a struct value's inline word
+    /// span (the native channel's wider list element), recorded by the
+    /// element-taking closes whose one bodies stay element-agnostic.
+    Record = 5,
 }
 
 /// The biased u16 field for a jump from pc to `target` (BL-1):

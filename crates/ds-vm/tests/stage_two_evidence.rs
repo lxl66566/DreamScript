@@ -726,3 +726,60 @@ fn a_completed_child_drains_via_its_own_exit_decs() {
         "the child's borrow never entered the parent's counts"
     );
 }
+
+/// The dead-pool KSTR row reclamation: a hot-reload swap retires the
+/// oldest version out of the two-slot table and its pools' intern rows go
+/// with it, while a recycled pool slot's rows go at the reuse door — so
+/// swap-and-churn cycles keep the VM-global row table bounded by the two
+/// live versions' pools times the loading fibers instead of growing with
+/// every version ever installed. Every load still serves: a reclaimed row
+/// costs its next load one intern hit on the store's own content map (the
+/// per-fiber ruling's duplicate cost, paid once per recycle).
+#[test]
+fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
+    fn loader_module() -> ModuleVersion {
+        let mut load = def("load", &[SlotType::Ref, SlotType::I64], 0, 0, &[
+            Uop::Funcf { frame_slots: 2 }.into(),
+            Uop::Kstr { dst: 0, kidx: k(0) }.into(),
+            Uop::Ret { src: 0 }.into(),
+        ]);
+        load.pool = vec![Const::Str("recycled constant".into())];
+        ModuleVersion::new("rk", vec![load]).expect("valid fixture module")
+    }
+
+    let mut vm = Vm::new(ModuleRegistry::new());
+    for _ in 0..24 {
+        let version = vm.install_module(loader_module());
+        let Value::Ref(root_word) = vm.run("rk", "load", &[]).expect("the root load serves") else {
+            panic!("a string ref");
+        };
+        let child_id = vm.spawn_fiber("rk", "load", &[]).expect("spawn the loader");
+        let Value::Ref(child_word) = vm
+            .resume_fiber(child_id, Value::I64(0))
+            .expect("the child load serves")
+        else {
+            panic!("a string ref");
+        };
+        assert_eq!(root_word.fiber(), FIBER_ROOT);
+        assert_eq!(
+            child_word.fiber(),
+            child_id,
+            "each heap interns its own copy"
+        );
+        assert_eq!(
+            vm.objects_of(child_word).str_at(child_word.id()),
+            Ok("recycled constant")
+        );
+        // each install hands its Arc back; nothing below holds a version
+        drop(version);
+    }
+    // two live versions' pools times the loading fibers, minus what the
+    // slot reuse dropped: without the reclamation doors this count climbs
+    // with every distinct dead-pool address (measured 16 at this cycle
+    // count before the doors landed)
+    assert!(
+        vm.kstr_cache_rows() <= 6,
+        "rows stay bounded across swap and slot cycles, got {}",
+        vm.kstr_cache_rows()
+    );
+}

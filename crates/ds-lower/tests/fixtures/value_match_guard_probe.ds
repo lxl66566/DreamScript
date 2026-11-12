@@ -1,0 +1,63 @@
+// purpose: the value-match guard seams over deinit-carrying and
+// Ref-carrying scrutinees — the refused deinit shape is the binder copy
+// (a guarded arm whose pattern binds the scrutinee would anchor a second
+// deinit claim), so the just-inside shapes read through the scrutinee's
+// own name and bind nothing: a wildcard arm reading its fields and a
+// binder-free guarded arm, both firing the hook once at the owner's scope
+// end; a guard that only reads a Ref-carrying scrutinee by its outer
+// name runs when the count's death sits past the chain (a use after the
+// match), the guard that owns the death refusing.
+// items:
+// int: stage: run
+// string: stage: run
+// bool: stage: run
+// box: stage: run
+// deinit_wild: stage: run
+// deinit_guard: stage: run
+// guard_read: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag bool
+
+trait Copyable { }
+
+struct box: ~Copyable {
+  s: string
+  deinit { println("d") }
+}
+
+extern fn println (s: string) -> ()
+extern fn str[t] (v: t) -> string
+
+fn deinit_wild(b: box) -> string {
+  match b {
+    _ => b.s,
+  }
+}
+
+fn deinit_guard(b: box) -> string {
+  match b {
+    _ if true => "g",
+    _ => "n",
+  }
+}
+
+fn guard_read(s: string) -> int {
+  const r = match s {
+    "a" => 1,
+    _ if s == "b" => 2,
+    _ => 0,
+  }
+  println(s)
+  r
+}
+
+fn main() -> bool {
+  const bu = box { s: "u" }
+  println(deinit_wild(bu))
+  println(deinit_guard(bu))
+  println(str(guard_read("b")))
+  guard_read("z") == 0 && guard_read("a") == 1
+}

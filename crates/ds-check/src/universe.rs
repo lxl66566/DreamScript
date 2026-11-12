@@ -2,10 +2,9 @@
 //! procedures (B1). The normal-form decision and the termination argument are
 //! documented at the crate root.
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeSet, HashMap},
-};
+use std::{cmp::Ordering, collections::BTreeSet, rc::Rc};
+
+use rustc_hash::FxHashMap;
 
 use crate::{
     atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId},
@@ -45,13 +44,18 @@ pub(crate) const MAX_TUPLE_COMBINATIONS: usize = 4096;
 pub struct Universe {
     atoms: Vec<AtomDecl>,
     traits: Vec<TraitDecl>,
-    atom_names: HashMap<String, TypeId>,
-    trait_names: HashMap<String, TraitId>,
-    sets: Vec<Box<[TypeId]>>,
-    index: HashMap<Box<[TypeId]>, u32>,
-    tuple_index: HashMap<Box<[TypeId]>, TypeId>,
-    apply_index: HashMap<(TypeId, Box<[Ty]>), TypeId>,
-    fn_index: HashMap<(Box<[Ty]>, Ty), TypeId>,
+    atom_names: FxHashMap<String, TypeId>,
+    trait_names: FxHashMap<String, TraitId>,
+    sets: Vec<Rc<[TypeId]>>,
+    index: FxHashMap<Rc<[TypeId]>, u32>,
+    tuple_index: FxHashMap<Box<[TypeId]>, TypeId>,
+    apply_index: FxHashMap<(TypeId, Box<[Ty]>), TypeId>,
+    fn_index: FxHashMap<(Box<[Ty]>, Ty), TypeId>,
+    /// Singleton solved type of every atom, filled on demand; a mint clears
+    /// the entry it pushes.
+    atom_tys: Vec<Option<Ty>>,
+    /// The full-universe solved type, cleared by every mint.
+    full_ty: Option<Ty>,
 }
 
 impl Universe {
@@ -62,19 +66,31 @@ impl Universe {
             name: "none".to_owned(),
             kind: AtomKind::Unit,
         };
-        let mut atom_names = HashMap::new();
+        let mut atom_names = FxHashMap::default();
         atom_names.insert(none.name.clone(), TypeId::NONE);
         Self {
             atoms: vec![none],
             traits: Vec::new(),
             atom_names,
-            trait_names: HashMap::new(),
+            trait_names: FxHashMap::default(),
             sets: Vec::new(),
-            index: HashMap::new(),
-            tuple_index: HashMap::new(),
-            apply_index: HashMap::new(),
-            fn_index: HashMap::new(),
+            index: FxHashMap::default(),
+            tuple_index: FxHashMap::default(),
+            apply_index: FxHashMap::default(),
+            fn_index: FxHashMap::default(),
+            atom_tys: vec![None],
+            full_ty: None,
         }
+    }
+
+    /// Appends one atom declaration and clears the solved-type caches a new
+    /// atom invalidates.
+    fn push_atom(&mut self, decl: AtomDecl) -> TypeId {
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atoms.push(decl);
+        self.atom_tys.push(None);
+        self.full_ty = None;
+        id
     }
 
     // ---- declarations ----------------------------------------------------
@@ -101,8 +117,7 @@ impl Universe {
         if self.atom_names.contains_key(name) || self.trait_names.contains_key(name) {
             return Err(Error::DuplicateName(name.to_owned()));
         }
-        let id = TypeId::from_raw(narrow(self.atoms.len()));
-        self.atoms.push(AtomDecl {
+        let id = self.push_atom(AtomDecl {
             name: name.to_owned(),
             kind,
         });
@@ -217,15 +232,16 @@ impl Universe {
             TypeExpr::Atom(id) => self.atom_ty(*id),
             TypeExpr::Trait(id) => {
                 let members: Vec<TypeId> = self.trait_decl(*id)?.members.iter().copied().collect();
-                Ok(self.intern(members))
+                Ok(self.intern_sorted(members))
             },
             TypeExpr::Not(id) => {
-                let members = self.trait_decl(*id)?.members.clone();
-                let complement: Vec<TypeId> = (0..narrow(self.atoms.len()))
+                let members = &self.trait_decl(*id)?.members;
+                let atoms = narrow(self.atoms.len());
+                let complement: Vec<TypeId> = (0..atoms)
                     .map(TypeId::from_raw)
                     .filter(|atom| !members.contains(atom))
                     .collect();
-                Ok(self.intern(complement))
+                Ok(self.intern_sorted(complement))
             },
             TypeExpr::Union(a, b) => {
                 let (x, y) = (self.solve(a)?, self.solve(b)?);
@@ -267,8 +283,7 @@ impl Universe {
             self.atom_decl(element)?;
         }
         let name = self.tuple_name(elements);
-        let id = TypeId::from_raw(narrow(self.atoms.len()));
-        self.atoms.push(AtomDecl {
+        let id = self.push_atom(AtomDecl {
             name,
             kind: AtomKind::Tuple(elements.to_vec()),
         });
@@ -303,8 +318,7 @@ impl Universe {
             let _ = self.members(*arg);
         }
         let name = self.apply_name(ctor, args);
-        let id = TypeId::from_raw(narrow(self.atoms.len()));
-        self.atoms.push(AtomDecl {
+        let id = self.push_atom(AtomDecl {
             name,
             kind: AtomKind::Apply(ctor, args.into()),
         });
@@ -331,8 +345,7 @@ impl Universe {
             return Ok(id);
         }
         let name = self.fn_name(&key.0, key.1);
-        let id = TypeId::from_raw(narrow(self.atoms.len()));
-        self.atoms.push(AtomDecl {
+        let id = self.push_atom(AtomDecl {
             name,
             kind: AtomKind::FnSig(key.0.clone(), key.1),
         });
@@ -374,21 +387,32 @@ impl Universe {
     /// The singleton type of one atom.
     pub fn atom_ty(&mut self, id: TypeId) -> Result<Ty, Error> {
         self.atom_decl(id)?;
-        Ok(self.intern(vec![id]))
+        let index = id.index() as usize;
+        if let Some(ty) = self.atom_tys[index] {
+            return Ok(ty);
+        }
+        let ty = self.intern_sorted(vec![id]);
+        self.atom_tys[index] = Some(ty);
+        Ok(ty)
     }
 
     /// The empty type: the union's identity.
     pub fn empty_ty(&mut self) -> Ty {
-        self.intern(Vec::new())
+        self.intern_sorted(Vec::new())
     }
 
     /// The full universe as a type: every declared atom. The intersection's
     /// identity for the current universe state.
     pub fn universe_ty(&mut self) -> Ty {
+        if let Some(ty) = self.full_ty {
+            return ty;
+        }
         let all: Vec<TypeId> = (0..narrow(self.atoms.len()))
             .map(TypeId::from_raw)
             .collect();
-        self.intern(all)
+        let ty = self.intern_sorted(all);
+        self.full_ty = Some(ty);
+        ty
     }
 
     // ---- the algebra over solved types -------------------------------------
@@ -397,21 +421,21 @@ impl Universe {
     /// set semantics; the empty type is the identity.
     pub fn union(&mut self, a: Ty, b: Ty) -> Ty {
         let merged = union_slices(self.members(a), self.members(b));
-        self.intern(merged)
+        self.intern_sorted(merged)
     }
 
     /// Intersection of two solved types. Idempotent, commutative,
     /// associative by set semantics; the full universe is the identity.
     pub fn inter(&mut self, a: Ty, b: Ty) -> Ty {
         let common = inter_slices(self.members(a), self.members(b));
-        self.intern(common)
+        self.intern_sorted(common)
     }
 
     /// Difference lowers to the solved shape of `a` minus `b`'s members,
     /// exactly `a & ~b`; no difference node survives (B1).
     pub fn diff(&mut self, a: Ty, b: Ty) -> Ty {
         let rest = diff_slices(self.members(a), self.members(b));
-        self.intern(rest)
+        self.intern_sorted(rest)
     }
 
     /// Complement over the universe's current atoms: `~t`. Member slices
@@ -423,14 +447,14 @@ impl Universe {
             .map(TypeId::from_raw)
             .filter(|atom| members.binary_search(atom).is_err())
             .collect();
-        self.intern(rest)
+        self.intern_sorted(rest)
     }
 
     /// `T?` is exactly `T | none` (B4); optionals, error unions, and enums
     /// share one mechanism.
     pub fn optional(&mut self, t: Ty) -> Ty {
         let with_none = union_slices(self.members(t), &[TypeId::NONE]);
-        self.intern(with_none)
+        self.intern_sorted(with_none)
     }
 
     /// The tuple product of solved element types: one minted structural
@@ -448,31 +472,38 @@ impl Universe {
                 cap: MAX_TUPLE_COMBINATIONS,
             });
         }
-        let mut combinations: Vec<Vec<TypeId>> = vec![Vec::new()];
-        for ty in elements {
-            let members: Vec<TypeId> = self.members(*ty).to_vec();
-            let mut next = Vec::new();
-            for prefix in &combinations {
-                for atom in &members {
-                    let mut combo = prefix.clone();
-                    combo.push(*atom);
-                    next.push(combo);
-                }
+        // The combinations are walked by a mixed-radix counter over the
+        // element sets, so one combination mints from one buffer.
+        let combinations = product.expect("the distribution cap is checked above");
+        let mut digits = vec![0_usize; elements.len()];
+        let mut combo: Vec<TypeId> = Vec::with_capacity(elements.len());
+        let mut atoms = Vec::with_capacity(combinations);
+        'combinations: for _ in 0..combinations {
+            combo.clear();
+            for (position, digit) in digits.iter().enumerate() {
+                combo.push(self.members(elements[position])[*digit]);
             }
-            combinations = next;
+            atoms.push(self.tuple_atom(&combo)?);
+            for position in (0..elements.len()).rev() {
+                digits[position] += 1;
+                if digits[position] < self.members(elements[position]).len() {
+                    continue 'combinations;
+                }
+                digits[position] = 0;
+            }
         }
-        let mut atoms = Vec::with_capacity(combinations.len());
-        for combo in &combinations {
-            atoms.push(self.tuple_atom(combo)?);
-        }
-        Ok(self.intern(atoms))
+        // The structural atoms are minted in combination order, so their ids
+        // need sorting into the canonical member order.
+        atoms.sort_unstable();
+        atoms.dedup();
+        Ok(self.intern_sorted(atoms))
     }
 
     /// The unit type `()`: the arity-0 tuple atom, a sibling of `none`
     /// with exactly one inhabitant (B3).
     pub fn unit_ty(&mut self) -> Ty {
         self.product(&[])
-            .unwrap_or_else(|_| self.intern(Vec::new()))
+            .unwrap_or_else(|_| self.intern_sorted(Vec::new()))
     }
 
     // ---- decision procedures ------------------------------------------------
@@ -501,7 +532,7 @@ impl Universe {
     /// The solved members of a type, sorted and deduplicated.
     #[must_use]
     pub fn members(&self, t: Ty) -> &[TypeId] {
-        &self.sets[t.0 as usize]
+        self.sets[t.0 as usize].as_ref()
     }
 
     // ---- rendering -----------------------------------------------------------
@@ -525,12 +556,22 @@ impl Universe {
     fn intern(&mut self, mut set: Vec<TypeId>) -> Ty {
         set.sort_unstable();
         set.dedup();
-        let set: Box<[TypeId]> = set.into();
-        if let Some(&handle) = self.index.get(&set) {
+        self.intern_sorted(set)
+    }
+
+    /// [`Universe::intern`] for a member set the caller already produced
+    /// sorted and deduplicated (the sorted-slice algebra's output).
+    fn intern_sorted(&mut self, set: Vec<TypeId>) -> Ty {
+        debug_assert!(
+            set.windows(2).all(|pair| pair[0] < pair[1]),
+            "intern_sorted input must be sorted and deduplicated"
+        );
+        if let Some(&handle) = self.index.get(set.as_slice()) {
             return Ty(handle);
         }
         let handle = narrow(self.sets.len());
-        self.sets.push(set.clone());
+        let set: Rc<[TypeId]> = set.into();
+        self.sets.push(Rc::clone(&set));
         self.index.insert(set, handle);
         Ty(handle)
     }

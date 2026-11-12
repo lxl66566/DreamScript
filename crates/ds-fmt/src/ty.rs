@@ -5,9 +5,19 @@
 //! grammar level of each slot's sub-rule, so grammar-conformant trees render
 //! flat exactly where they were parsed flat, and re-parse to the same tree.
 
-use ds_parse::{Param, Type, TypeParam, TypeRef};
+use ds_parse::{Param, Path, Type, TypeParam, TypeRef};
 
 use crate::ctx::Ctx;
+
+/// Renders a path's `::`-joined segments straight into the output.
+pub(crate) fn write_path(out: &mut String, path: &Path) {
+    for (i, seg) in path.segments.iter().enumerate() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&seg.name);
+    }
+}
 
 pub(crate) fn write_ty(ctx: &Ctx, out: &mut String, ty: &Type) {
     write_ty_min(ctx, out, ty, 1);
@@ -46,7 +56,7 @@ fn write_ty_inner(ctx: &Ctx, out: &mut String, ty: &Type) {
         Type::Path {
             span, path, args, ..
         } => {
-            out.push_str(&path.text());
+            write_path(out, path);
             if !args.is_empty() {
                 // Case-type refs (`bad_number(string)`) keep their parens;
                 // generic application renders square whatever the source
@@ -184,7 +194,7 @@ fn mode_str(mode: ds_parse::ParamMode) -> &'static str {
 
 /// A trait reference in an impl head: `json`, `ord[k]`.
 pub(crate) fn write_type_ref(ctx: &Ctx, out: &mut String, r: &TypeRef) {
-    out.push_str(&r.path.text());
+    write_path(out, &r.path);
     if !r.args.is_empty() {
         out.push('[');
         for (i, a) in r.args.iter().enumerate() {

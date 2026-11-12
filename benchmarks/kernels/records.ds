@@ -1,0 +1,64 @@
+// Kernel: the record span channel — list[item] elements are whole
+// inline word spans (four words: two ints, a float, a string Ref)
+// staged by list_push at the per-list element stride and read back
+// whole through the checked list_get channel. N pushes build the list
+// (one interpolation and one span stage per element), then R passes
+// walk all N by explicit list_get, each answer re-spanned into
+// item | none and extracted with the .ok/.err chain, the fields
+// projected (two int adds, a float add, the tag length through len),
+// a missing-index probe pins the none side over the same span (the
+// const fallback record rides the err handler's capture), and head
+// pins the checked first read. Scores cycle 0.25/0.75/1.25 over an
+// odd pass count so the printed float total is an odd fourth; every
+// integer intermediate stays non-negative below 2^47.
+
+struct item { id: int, w: int, score: float, name: string }
+
+fn main() -> () {
+  const n: int = 20001
+  var xs: list[item] = list[item]()
+  var i: int = 0
+  while i < n {
+    const m: int = i % 3
+    var score: float = 0.25
+    if m == 1 {
+      score = 0.75
+    }
+    if m == 2 {
+      score = 1.25
+    }
+    const tv: int = (i % 40) + 10
+    list_push(xs, item { id: (i * 37) % 900 + 100, w: i % 7, score: score, name: "t${tv}" })
+    i += 1
+  }
+  const blank = item { id: -1, w: 0, score: 0.25, name: "t00" }
+  var sum_id: int = 0
+  var sum_w: int = 0
+  var lensum: int = 0
+  var total: float = 0.0
+  var r: int = 0
+  while r < 45 {
+    var j: int = 0
+    while j < n {
+      const cell = list_get(xs, j)
+      const p = cell.ok((e: item) => e).err((_: none) => blank)
+      sum_id += p.id
+      sum_w += p.w
+      total += p.score
+      lensum += len(p.name)
+      j += 1
+    }
+    r += 1
+  }
+  var miss: int = 0
+  var q: int = 0
+  while q < 2000 {
+    const cell = list_get(xs, n + q)
+    const p = cell.ok((e: item) => e).err((_: none) => blank)
+    miss += p.id
+    q += 1
+  }
+  const h = head(xs)
+  const hid = h.ok((e: item) => e.id).err((_: none) => -1)
+  println("result: ${sum_id} ${sum_w} ${lensum} ${miss} ${hid} ${total}")
+}

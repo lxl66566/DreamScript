@@ -1,0 +1,45 @@
+// The transitive evidence surface: a generic impl whose member calls
+// another trait's method on the element — `impl[t: shows] tells for
+// list[t]` — lowers once, and the entering concrete site stages the
+// serving body's whole evidence area (its own instance word plus the
+// follow chain, resolved where the substitution is concrete), so the
+// nested dispatch rides the staged words at runtime. Entered at int
+// and string elements and one list-of-list hop — two levels deep,
+// today's ceiling; deeper static chains still refuse.
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { "$self!" }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = "list:"
+    for x in self {
+      acc = "${acc}${x.show()};"
+    }
+    acc
+  }
+}
+
+trait tells {
+  fn tell(self) -> string
+}
+
+impl[t: shows] tells for list[t] {
+  fn tell(self) -> string { "told ${self.show()}" }
+}
+
+fn main() -> () {
+  println("${[1, 2].tell()}")
+  println("${["a", "b"].tell()}")
+  println("${[[3]].tell()}")
+  println("${[4].show()}")
+}

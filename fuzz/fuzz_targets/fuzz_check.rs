@@ -7,7 +7,7 @@
 // for that); a panic, debug-assert trip, or hang is not. Declared ambient
 // rows derived from the input exercise `effects_of`'s union edges, not
 // just the empty-row walk.
-use ds_check::{DeclaredRows, Effect, EffectRow, check, effects_of};
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, check, effects_of};
 use ds_diag::{Files, render};
 use ds_parse::parse;
 use libfuzzer_sys::fuzz_target;
@@ -66,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
             return;
         },
     };
-    let effects = effects_of(&[&ast], &declared_rows(data));
+    let effects = effects_of(&[&ast], &declared_rows(data), &WorldCaps::new());
     let (checked, linearity) = check(&files, &[ast]);
     for diag in &checked.diags {
         std::hint::black_box(render::human(diag, &files));

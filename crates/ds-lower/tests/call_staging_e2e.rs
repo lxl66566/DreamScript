@@ -13,7 +13,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Value, Vm, loader, native};
+use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the
@@ -45,8 +45,8 @@ fn build_vm() -> (Vm, Lowered) {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     (Vm::new(registry), lowered)
 }
 
@@ -121,8 +121,8 @@ fn runs(source: &str) -> String {
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
-    registry.install_native(native::STD_PLATFORM_MODULE, native::std_platform_module());
-    loader::install(&mut registry, &module).expect("the module installs");
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
     assert_eq!(vm.run("run_probe", "main", &[]), Ok(Value::I64(0)));
@@ -288,4 +288,105 @@ fn a_fn_value_call_site_re_spans_a_bare_member_argument() {
         "extern fn println (msg: string) -> ()\n",
     ));
     assert_eq!(out, "1 2\n");
+}
+
+/// The named-argument boundary, legal side: a minted case constructor
+/// fills its struct payload's fields by name (any order among the
+/// named), the checker type-checks each name against the case's fields,
+/// and the construction runs and tag-dispatches its fields out.
+#[test]
+fn named_arguments_fill_case_construction_fields_by_name() {
+    let out = runs(concat!(
+        "tag int\n",
+        "tag string\n",
+        "enum shape { dot { x: int, y: int }, box { w: int, h: int } }\n",
+        "fn main() -> () {\n",
+        "  const p: shape = dot(y: 20, x: 10)\n",
+        "  match p { box { w } => println(\"box ${w}\"), dot { x, y } => println(\"dot ${x} \
+         ${y}\") }\n",
+        "}\n",
+        "extern fn println (msg: string) -> ()\n",
+    ));
+    assert_eq!(out, "dot 10 20\n");
+}
+
+/// The named-argument boundary, refused side: the checker accepts named
+/// arguments at every function-call spelling (it fills parameters by
+/// name), but the M3 uop set stages arguments positionally — so every
+/// spelling refuses at the one lowering seam, the message naming the
+/// contract and the span pinning the offending argument.
+#[test]
+fn named_arguments_refuse_at_every_function_call_spelling() {
+    // free fn
+    refused(
+        concat!(
+            "tag int\n",
+            "fn add(a: int, b: int) -> int { a + b }\n",
+            "fn main() -> int {\n",
+            "  add(a: 1, b: 2)\n",
+            "}\n",
+        ),
+        "a named argument is outside the M3 runtime contract (named arguments are not in the M3 \
+         contract)",
+        "a: 1",
+    );
+    // inherent member (UFCS)
+    refused(
+        concat!(
+            "tag int\n",
+            "struct counter { n: int }\n",
+            "impl counter {\n",
+            "  fn bump(self, by: int) -> int { self.n + by }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "  const c = counter { n: 1 }\n",
+            "  c.bump(by: 2)\n",
+            "}\n",
+        ),
+        "named arguments are not in the M3 contract",
+        "by: 2",
+    );
+    // trait dispatch
+    refused(
+        concat!(
+            "tag int\n",
+            "trait plus { fn p(self, x: int) -> int }\n",
+            "struct box { v: int }\n",
+            "impl plus for box { fn p(self, x: int) -> int { self.v + x } }\n",
+            "fn main() -> int {\n",
+            "  const b = box { v: 1 }\n",
+            "  b.p(x: 2)\n",
+            "}\n",
+        ),
+        "named arguments are not in the M3 contract",
+        "x: 2",
+    );
+    // an indirect call through a lambda-typed binding (CALLS)
+    refused(
+        concat!(
+            "tag int\n",
+            "fn main() -> int {\n",
+            "  const g = (a: int, b: int) => a + b\n",
+            "  g(a: 1, b: 2)\n",
+            "}\n",
+        ),
+        "named arguments are not in the M3 contract",
+        "a: 1",
+    );
+    // a reentrant combinator call site (the callable is the last named
+    // parameter of the generic's table entry)
+    refused(
+        concat!(
+            "tag int\n",
+            "struct list[t]\n",
+            "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+            "fn dbl(x: int) -> int { x * 2 }\n",
+            "fn main() -> () {\n",
+            "  const xs = list[int]()\n",
+            "  const out = xs.map(f: dbl)\n",
+            "}\n",
+        ),
+        "named arguments are not in the M3 contract",
+        "f: dbl",
+    );
 }

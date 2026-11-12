@@ -11,7 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ds-abi = { path = "../crates/ds-abi" }
 ds-check = { path = "../crates/ds-check" }
-ds-diag = { path = "../crates/ds-diag" }
+ds-lower = { path = "../crates/ds-lower" }
+ds-diag = { path = "../crates/ds-diag", features = ["json"] }
 ds-mod = { path = "../crates/ds-mod" }
 ds-parse = { path = "../crates/ds-parse" }
 ds-query = { path = "../crates/ds-query" }

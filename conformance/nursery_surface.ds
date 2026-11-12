@@ -1,12 +1,17 @@
 // source: M5, the nursery/spawn surface round
-// purpose: the in-language nursery surface: spawn-in-scope, join at scope exit in spawn order, first-failure cancellation at safe points, child error unioning out at the boundary, and a completing child's deinit claim
+// purpose: the in-language nursery surface: spawn-in-scope, join at scope exit in spawn order, first-failure cancellation at safe points, child error unioning out at the boundary, a completing child's deinit claim, and the payloaded cancel shapes (a struct member's flat span and a generic application's one Ref word)
 // items:
+// seam_fail: stage: run
+// claimed: stage: run
 // guarded: stage: run
 // guarded_cancel: stage: run
 // mixed: stage: run
-// claimed: stage: run
 // guarded_claim: stage: run
+// payloaded: stage: run
+// captured: stage: run
 // main: stage: run
+
+struct seam_fail { code: int, detail: string }
 
 struct claimed: ~Copyable {
   id: int
@@ -77,6 +82,30 @@ fn guarded_claim() -> int | net_err {
   0
 }
 
+// a struct member cancels: the child stages the member's flat word span
+// behind its tag, the boundary delivers it, and the caller's catch arm
+// reads the fields
+fn payloaded(n: int) -> seam_fail | none {
+  nursery {
+    spawn {
+      cancel(seam_fail { code: n, detail: "payload" })
+    }
+  }
+  none
+}
+
+// a list member cancels: the generic application claims one Ref word, and
+// the caller reads the captured list through its natives
+fn captured(n: int) -> list[int] | net_err {
+  const xs = [1, 2, n]
+  nursery {
+    spawn {
+      cancel(xs)
+    }
+  }
+  list[int]()
+}
+
 fn main() -> () {
   match guarded(3) {
     timeout => println("t")
@@ -97,5 +126,14 @@ fn main() -> () {
     timeout => println("t")
     refused => println("r")
     n => println("claim kept ${n}")
+  }
+  match payloaded(3) {
+    none => println("clean")
+    f => println("code ${f.code} ${f.detail}")
+  }
+  match captured(3) {
+    timeout => println("t")
+    refused => println("r")
+    xs => println("list ${xs.list_len()}")
   }
 }

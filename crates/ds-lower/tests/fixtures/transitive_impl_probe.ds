@@ -1,0 +1,68 @@
+// purpose: the generic-impl transitive evidence seam — a nested dispatch
+// whose serving body is itself a generic impl's member lowers and runs.
+// The entering site stages the pair's whole evidence area: the serving
+// body's table index plus its follow chain (resolved at the site, where
+// the substitution is concrete), so a nested runtime dispatch into the
+// generic serving body slides the chain one level per hop; a nested
+// static site whose record is the runtime form (a generic body calling a
+// trait member on a constructed receiver over its variable) stages the
+// callee's area verbatim from its own frame slots. Shapes: a two-level
+// tells->shows chain over int and string elements, a direct entering
+// chain one and two follow words deep, and a mixed-branch run.
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// tells: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// tells-list: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { "$self!" }
+}
+
+impl[t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = "l:"
+    for x in self {
+      acc = concat(acc, concat(x.show(), ";"))
+    }
+    acc
+  }
+}
+
+trait tells {
+  fn tell(self) -> string
+}
+
+impl[t: shows] tells for list[t] {
+  fn tell(self) -> string { concat("t:", self.show()) }
+}
+
+fn main() -> int {
+  println([1].tell())
+  println(["a"].tell())
+  println([[1]].tell())
+  println([[1]].show())
+  println([[[1]]].show())
+  println([["a"], ["b"]].tell())
+  0
+}

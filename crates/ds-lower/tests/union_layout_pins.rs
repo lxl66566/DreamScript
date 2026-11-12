@@ -2,7 +2,8 @@
 //! claim rework must leave the lowered frame layouts of union-carrying
 //! corpus shapes byte-identical — the region claim, the zero-init
 //! placement, and every payload read live inside these slot vectors.
-//! The asserted layouts were recorded from the pre-rework allocator.
+//! The asserted layouts were re-recorded at the canonical-unit round
+//! (the unit join's result span left the vectors).
 
 use ds_abi::SlotType;
 use ds_check::analyze;
@@ -109,7 +110,8 @@ fn union_carrying_layouts_stay_bit_identical() {
     ]);
 
     // main: the widened var, both struct-literal re-spans, and both
-    // staged call shapes
+    // staged call shapes — the unit join's result span is gone (the
+    // canonical unit word answers it), so the tail runs one word shorter
     let main = layout_of(&module, &lowered, "main");
     assert_eq!(main.params_len(), 0);
     assert_eq!(main.arg_area_len(), 4);
@@ -143,7 +145,6 @@ fn union_carrying_layouts_stay_bit_identical() {
         SlotType::Ref,
         SlotType::I64,
         SlotType::Ref,
-        SlotType::I64,
         SlotType::Raw,
         SlotType::Ref,
         SlotType::I64,

@@ -1,0 +1,74 @@
+// purpose: the free-generic-fn call surface — a free generic fn lowers
+// its ONE body once, and its call sites stage the runtime-evidence
+// words the body's bound demands read, in the outgoing-argument area
+// after the true arguments. Shapes: a bounded fn over int and string
+// instantiations (the evidence word answering a concrete impl body),
+// the runtime form (a free generic fn called from inside another free
+// generic body, its demand riding the calling frame's own staged
+// slot), a boundless fn (no evidence, the plain call), a two-level
+// serving chain (the instantiated type answered by a generic impl,
+// its follow words sliding one level per nested dispatch), and a
+// tail-position call (the CALLT transfer with the evidence words
+// staged after the exit claims).
+// items:
+// int: stage: run
+// string: stage: run
+// shows: stage: run
+// shows-int: stage: run
+// shows-string: stage: run
+// shows-list: stage: run
+// show_pair: stage: run
+// tag_it: stage: run
+// echo: stage: run
+// shout: stage: run
+// drive: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+
+trait shows {
+  fn show(self) -> string
+}
+
+impl shows for int {
+  fn show(self) -> string { "n=$self" }
+}
+
+impl shows for string {
+  fn show(self) -> string { "$self!" }
+}
+
+impl [t: shows] shows for list[t] {
+  fn show(self) -> string {
+    var acc = "l:"
+    for x in self {
+      acc = concat(acc, concat(x.show(), ";"))
+    }
+    acc
+  }
+}
+
+fn tag_it[t: shows] (x: t) -> string { x.show() }
+
+fn show_pair[t: shows] (a: t, b: t) -> string { concat(a.show(), tag_it(b)) }
+
+fn echo[t] (x: t) -> t { x }
+
+fn shout[t: shows] (x: t) -> string { x.show() }
+
+fn drive (n: int) -> string { shout(n) }
+
+fn main() -> int {
+  println(show_pair(1, 2))
+  println(show_pair("a", "b"))
+  println(shout([[1]]))
+  println(echo("z"))
+  println(drive(1))
+  println(show_pair([1], [2]))
+  0
+}
