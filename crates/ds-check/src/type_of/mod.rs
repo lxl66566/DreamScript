@@ -246,9 +246,17 @@ pub struct TypedPackage {
 /// `decls.universe`, so consumers must pass the bundle along unchanged —
 /// a second pass over the same sources mints an unrelated universe. The
 /// affine pass (C1) and the lowering pass (M3) consume exactly these.
+///
+/// The check runs over the derive-expanded trees (G1): consumed derive
+/// attributes became ordinary impl items, and [`Analyzed::asts`] carries
+/// exactly the trees every table was built over, so the lowering pass
+/// consumes those, never the caller's originals (a package with no
+/// derive attribute expands to an identical clone).
 pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
-    let (package, resolutions, mut diags) = crate::resolve_package(asts);
-    let (decls, checked) = check_bodies(files, asts, &package, &resolutions);
+    let (asts, mut diags) = crate::derive::expand(asts);
+    let (package, resolutions, resolve_diags) = crate::resolve_package(&asts);
+    diags.extend(resolve_diags);
+    let (decls, checked) = check_bodies(files, &asts, &package, &resolutions);
     diags.extend(checked.diags);
     let checked = Checked {
         diags,
@@ -263,6 +271,7 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         is_tests: checked.is_tests,
     };
     Analyzed {
+        asts,
         package,
         resolutions,
         decls,
@@ -378,6 +387,10 @@ where
 /// The tables of one analyzed package; see [`analyze`].
 #[must_use]
 pub struct Analyzed {
+    /// The derive-expanded trees the tables were built over (G1):
+    /// consumed derive attributes became ordinary impl items here. The
+    /// lowering pass consumes these trees, never the caller's originals.
+    pub asts: Vec<Ast>,
     /// The package namespace: definitions, name tables, method registry.
     pub package: Package,
     /// Per-file name resolutions, indexed by file id.

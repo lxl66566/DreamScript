@@ -1,0 +1,50 @@
+// purpose: the derive-show slice end to end — `#[derive(show)]` on a
+// struct, an enum, and a tag synthesizes one ordinary impl show item
+// after parse, and every spelling reaches that one impl body: the
+// direct dot call, the qualified show::show escape hatch, and a free
+// generic function's bound dispatch (CALLG over the impl member body,
+// the runtime-evidence form over the one-word tag receiver).
+// items:
+// int: stage: run
+// string: stage: run
+// println: stage: run
+// show: stage: run
+// point: stage: run
+// mark: stage: run
+// flag: stage: run
+// render: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+extern fn println (s: string) -> ()
+
+trait show {
+  fn show(self) -> string
+}
+
+#[derive(show)]
+struct point { x: int, y: int }
+
+#[derive(show)]
+enum mark { miss, hit(int), span { from: int, to: int } }
+
+#[derive(show)]
+tag flag
+
+fn render[t: show](v: t) -> string { v.show() }
+
+fn main() -> int {
+  const p = point { x: 1, y: 2 }
+  println(p.show())
+  println(show::show(p))
+  println(flag.show())
+  println(render(flag))
+  const m = hit(3)
+  println(m.show())
+  println(miss.show())
+  const s = span(from: 2, to: 9)
+  println(s.show())
+  0
+}

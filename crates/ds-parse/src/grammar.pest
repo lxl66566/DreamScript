@@ -371,7 +371,10 @@ item = { (attr ~ sp)* ~ vis? ~ h ~ item_kind }
 
 attr = { "#" ~ "[" ~ sp ~ ident ~ attr_args? ~ sp ~ "]" }
 attr_args = { "(" ~ sp ~ (attr_arg ~ (sp ~ "," ~ sp ~ attr_arg)* ~ sp ~ ","?)? ~ sp ~ ")" }
-attr_arg = { path }
+// `==` is the one non-path derive spelling: the grammar admits it so the
+// B9 refusal (equality is never derived) owns the diagnostic instead of
+// a syntax error; it converts as a one-segment path named `==`.
+attr_arg = { path | "==" }
 
 vis = { kw_pub ~ ("(" ~ h ~ "pkg" ~ !ident_cont ~ h ~ ")")? }
 

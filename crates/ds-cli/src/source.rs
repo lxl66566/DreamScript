@@ -88,6 +88,10 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
             "the source does not check clean",
         ));
     }
+    // Every later pass walks the analyzer's own trees: derive attributes
+    // expanded into impl items there, so the original parse trees would
+    // misalign with the resolutions and tables below.
+    let asts = &analyzed.asts;
     // The platform check [H5]: the package's world usage verified inside
     // what its platform declaration provides. Without the ambient there
     // are no declared rows to attribute, but the declaration itself is
@@ -102,13 +106,13 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
     // The rows come from the analyzer's own collect-and-resolve result,
     // never a second pass over the same trees.
     let effects = ds_check::effects::effects_of_resolved(
-        &asts,
+        asts,
         &analyzed.package,
         &analyzed.resolutions,
         rows,
         caps,
     );
-    let platform = ds_check::check_platform(&asts, &effects);
+    let platform = ds_check::check_platform(asts, &effects);
     if !platform.is_empty() {
         return Err(reject(
             &files,
@@ -117,10 +121,10 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
         ));
     }
     let name = module_name(path)?;
-    let lowered = lower(&name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
+    let lowered = lower(&name, Hash128::compute(source.as_bytes()), asts, &analyzed)
         .map_err(|error| lower_error(&files, &error))?;
     let entry_args =
-        entry_params(&asts, &analyzed, entry).map(|params| arg_plans(&analyzed, &params));
+        entry_params(asts, &analyzed, entry).map(|params| arg_plans(&analyzed, &params));
     Ok(CompiledSource {
         lowered,
         name,

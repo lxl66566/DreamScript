@@ -1,0 +1,64 @@
+// source: G1 the derive engine's first slice, the show family round 2026-11-13
+// purpose: `#[derive(show)]` on a struct, an enum, and a tag expands into the ordinary impl show item after parse (parts derive structurally: fields, every payload shape), every call spelling reaches the one body, and each ruled refusal names its class
+// items:
+// point: stage: run
+// mark: stage: run
+// flag: stage: run
+// render: stage: run
+// main: stage: run
+// eq-cell: stage: reject `==` is universal structural equality and never derived [B9]
+// mystery-cell: stage: reject a name outside the ruled set names the ruled set [G1]
+// hash-cell: stage: reject a ruled family not yet implemented names itself and the ruled set [G1]
+// cb-cell: stage: reject a function-typed part refuses structural derivation, naming the part [G1, B9]
+// res: stage: typecheck
+// holder: stage: reject a ~Copyable-headed part refuses structural derivation, naming the part [G1, B9]
+// not-data: stage: reject a derive applies only to a struct, enum, or tag declaration [G1]
+// gen-cell: stage: reject a generic declaration refuses: the runtime seam lowers one member body per impl [G1]
+
+#[derive(show)]
+struct point { x: int, y: int }
+
+#[derive(show)]
+enum mark { miss, hit(int), span { from: int, to: int } }
+
+#[derive(show)]
+tag flag
+
+fn render[t: show](v: t) -> string { v.show() }
+
+fn main() -> int {
+  const p = point { x: 1, y: 2 }
+  println(p.show())
+  println(show::show(p))
+  println(flag.show())
+  println(render(flag))
+  const m = hit(3)
+  println(m.show())
+  println(miss.show())
+  const s = span(from: 2, to: 9)
+  println(s.show())
+  0
+}
+
+#[derive(==)]
+struct eq_cell { v: int }
+
+#[derive(mystery)]
+struct mystery_cell { v: int }
+
+#[derive(hash)]
+struct hash_cell { v: int }
+
+#[derive(show)]
+struct cb_cell { cb: fn(int) -> int }
+
+struct res: ~Copyable { }
+
+#[derive(show)]
+struct holder { kept: res }
+
+#[derive(show)]
+fn not_data(v: int) -> int { v }
+
+#[derive(show)]
+struct gen_cell[t] { v: t }

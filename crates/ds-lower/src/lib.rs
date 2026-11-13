@@ -261,17 +261,18 @@ fn body_span(lambda: &Expr) -> Span {
     block.span
 }
 
-/// A `#[derive(...)]` attribute refuses at lowering: the derive engine
-/// is M6's (G1) work, so the attribute generates no behavior yet, and
-/// the refusal reports that at the attribute's own span. Parse, check,
-/// and fmt still accept attributed declarations; only lowering stops.
+/// A `#[derive(...)]` attribute refuses at lowering: the checker's
+/// derive expansion consumes the attribute there (G1), so an attribute
+/// reaching this pass means the trees were not the analyzer's own —
+/// `lower` must run over `Analyzed::asts`, where consumed attributes
+/// are stripped and their impls are ordinary items.
 fn refuse_derive(item: &Item) -> Result<(), LowerError> {
     for attr in &item.attrs {
         if attr.name.name == "derive" {
             return Err(LowerError::unsupported(
                 attr.span,
                 "a derive attribute",
-                "the M6 derive engine owns it; until it lands the attribute generates no behavior",
+                "the checker's derive expansion owns it; lower over the analyzer's expanded trees",
             ));
         }
     }

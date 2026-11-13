@@ -141,6 +141,7 @@
 pub mod atom;
 pub mod corpus;
 pub mod decls;
+pub mod derive;
 pub mod effects;
 pub mod error;
 pub mod expr;
@@ -159,6 +160,7 @@ pub mod witness;
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
 pub use decls::{Decls, FnSig, GenericParam, render_type};
+pub use derive::expand as expand_derives;
 pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_of};
 pub use error::Error;
 pub use expr::TypeExpr;

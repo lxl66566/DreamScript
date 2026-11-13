@@ -17,6 +17,32 @@ platform "std" provides <console, fsys, net, time>
 
 trait Copyable { }
 
+// The show derive's target (G1, F6): one member answering the
+// construction spelling; `#[derive(show)]` synthesizes the impl.
+trait show {
+  fn show(self) -> string
+}
+// The primitives carry show themselves, so a generic derive
+// instantiates at them and an explicit `.show()` answers anywhere.
+impl show for int {
+  fn show(self) -> string { str(self) }
+}
+impl show for float {
+  fn show(self) -> string { str(self) }
+}
+impl show for bool {
+  fn show(self) -> string { str(self) }
+}
+impl show for byte {
+  fn show(self) -> string { str(self) }
+}
+impl show for char {
+  fn show(self) -> string { "$self" }
+}
+impl show for string {
+  fn show(self) -> string { "$self" }
+}
+
 tag int
 tag float
 tag bool

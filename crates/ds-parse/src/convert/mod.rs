@@ -655,6 +655,19 @@ impl Ctx {
                         if a.as_rule() == Rule::attr_arg {
                             if let Some(path) = inner(&a).next() {
                                 args.push(self.conv_path(path));
+                            } else if a.as_str() == "==" {
+                                // The one non-path derive spelling: a
+                                // one-segment path named `==`, so the
+                                // derive engine refuses it with B9's
+                                // diagnostic instead of a syntax error.
+                                let span = self.span(&a);
+                                args.push(Path {
+                                    span,
+                                    segments: vec![Ident {
+                                        span,
+                                        name: "==".to_owned(),
+                                    }],
+                                });
                             }
                         }
                     }

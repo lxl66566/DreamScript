@@ -164,12 +164,13 @@ pub struct Linearity {
 #[must_use]
 pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
     let crate::type_of::Analyzed {
+        asts: expanded,
         package,
         resolutions,
         decls,
         checked,
     } = crate::type_of::analyze(files, asts);
-    let lin = linearity_check(asts, &package, &resolutions, &decls, &checked);
+    let lin = linearity_check(&expanded, &package, &resolutions, &decls, &checked);
     (checked, lin)
 }
 
@@ -1487,6 +1488,7 @@ mod tests {
             resolutions,
             decls,
             checked,
+            ..
         } = crate::type_of::analyze(&files, &[ast]);
         let [(&binder, &BinderFact { copyable, .. })] =
             checked.binders.iter().collect::<Vec<_>>()[..]

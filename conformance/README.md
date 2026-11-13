@@ -31,6 +31,7 @@ The DreamScript conformance corpus: the frozen archive's seed programs (`design/
 | records_lists.ds | the native result span channel round 2026-11-12 | M3 | a `list[record]` built with `list_push` over whole element spans, the checked `list_get` read extracted through `.ok`/`.err` (a missing index answered on the none side), field projections summed over the explicit-index walk |
 | transitive_dispatch.ds | the transitive evidence round 2026-11-12 (H3) | M3 | the two-level generic-impl dispatch chain: a generic `tells` impl for `list[t]` dispatching through the list's own generic `shows` impl, entered at int and string plus one nested-list hop, the entering site staging the serving body's whole evidence area |
 | teardown_deinit.ds | E5 teardown firing, the drain-doors round 2026-11-12 | M5 | a nursery whose children hold deinit-carrying values: the completing child's hook fires at its own frame exit, and the cancel-cut child's kept frame fires its hook at the teardown drain — the prints deterministic across runs (the corpus's E5 end-to-end pin) |
+| derives.ds | G1 the derive engine's first slice, the show family round 2026-11-13 | M6 | `#[derive(show)]` on a struct, an enum (every payload shape), and a tag synthesizes the ordinary impl show item after parse; the dot, qualified, and generic call spellings answer through the one body (execution pinned in the ds-lower derive_show_e2e suite), and the seven reject items carry the ruled refusal classes: `==` never derived [B9], unknown names, unimplemented families, function-typed and `~Copyable` parts, non-data declarations, and generic declarations (the runtime seam lowers one member body per impl) |
 
 ## Header format
 
@@ -97,3 +98,4 @@ The stdlib ambient (`crates/ds-stdlib/src/ambient.ds`) declares the vocabulary t
 - records_lists.ds: `list_len`/`list_get`/`list_push` (the ambient list surface) and `println`; the file owns its `part` struct.
 - transitive_dispatch.ds: `println` beside the primitives and the `list` type; the file owns both traits and the four impls.
 - teardown_deinit.ds: the ambient-owned `net_err` taxonomy, the `cancel` seam, and `println`; the file owns its `resource`.
+- derives.ds: the ambient-owned `trait show` and `println` beside the primitives and the `Copyable` marker; the file owns its derives, receiver types, and the linear `res` the holder reject names.

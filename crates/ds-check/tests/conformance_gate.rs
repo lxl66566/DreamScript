@@ -476,6 +476,105 @@ fn generics_diagnostics_stay_in_later_milestone_items() {
     }
 }
 
+/// Ambient for the derive slice: the show trait the derive targets,
+/// beside the primitives and the Copyable marker (the file's `res`
+/// names the marker in its supers).
+const DERIVES_AMBIENT: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "trait show {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "extern fn println (s: string) -> ()\n",
+);
+
+#[test]
+fn derives_rejects_carry_the_ruled_refusal_classes() {
+    let rejects = gate("../../conformance/derives.ds", DERIVES_AMBIENT);
+    let expected: &[(&str, &str, &str)] = &[
+        (
+            "eq-cell",
+            "DS2027",
+            "`==` is universal structural equality and is never derived [B9]",
+        ),
+        (
+            "mystery-cell",
+            "DS2025",
+            "`mystery` is not a derive name [G1]",
+        ),
+        (
+            "hash-cell",
+            "DS2024",
+            "derive `hash` is ruled but not implemented yet [G1]",
+        ),
+        (
+            "cb-cell",
+            "DS2026",
+            "derive `show` refuses the field `cb`: a function-typed part compares and shows as no \
+             structural value [G1, B9]",
+        ),
+        (
+            "holder",
+            "DS2026",
+            "derive `show` refuses the field `kept`: `res` declares the `~Copyable` linear layer \
+             [G1, B9]",
+        ),
+        (
+            "not-data",
+            "DS2028",
+            "a derive applies to a struct, enum, or tag declaration [G1]",
+        ),
+        (
+            "gen-cell",
+            "DS2029",
+            "derive `show` refuses a generic declaration [G1]",
+        ),
+    ];
+    assert_eq!(rejects.len(), expected.len(), "one reject per class");
+    for ((id, _what, diag), (want_id, code, message)) in rejects.iter().zip(expected) {
+        assert_eq!(id, want_id, "the reject items align with the header");
+        assert_eq!(diag.code.as_str(), *code, "{id}");
+        assert_eq!(diag.message, *message, "{id}");
+    }
+}
+
+#[test]
+fn derives_run_items_check_clean_with_synthesized_impls() {
+    // The show derives synthesize their impls and every run item checks
+    // clean beside the ambient's own show trait; `res` (the linear
+    // declaration the holder reject names) typechecks on its own.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/derives.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", DERIVES_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage != "run" && stage.stage != "typecheck" {
+            continue;
+        }
+        let item_diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            item_diags.is_empty(),
+            "item `{}` must check clean, got:\n{}",
+            stage.id,
+            item_diags
+                .iter()
+                .map(|d| format!("{} {}", d.code.as_str(), d.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
+
 /// Runs both passes over one corpus file plus ambient and returns every
 /// item with the diagnostics whose labels fall inside it.
 #[allow(clippy::type_complexity)]

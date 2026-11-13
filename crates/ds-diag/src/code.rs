@@ -163,6 +163,18 @@ error_codes! {
     NonePayloadCase => "DS2022", Type,
     /// A trait impl provides no body for a trait member that declares no default body; dispatch would have no body to plan.
     ImplMemberWithoutBody => "DS2023", Type,
+    /// A ruled derive family this round has not implemented yet; the message names the family and the ruled set (G1).
+    DeriveUnimplemented => "DS2024", Type,
+    /// A derive name outside the ruled set; the message names the ruled set (G1).
+    DeriveUnknown => "DS2025", Type,
+    /// A derive part refuses structural derivation (a function-typed or ~Copyable part); the message names the part (G1, B9).
+    DerivePartRefused => "DS2026", Type,
+    /// `==` in a derive list; equality is B9's universal structural operator and is never derived.
+    DeriveEqRefused => "DS2027", Type,
+    /// A derive attribute on a declaration that is not a struct, enum, or tag (G1).
+    DeriveNonDataItem => "DS2028", Type,
+    /// A derive on a declaration carrying its own type parameters; the synthesized member reads its parts through those variables, which the one-body-per-impl runtime seam cannot carry (per-instantiation frames are the JIT tier's).
+    DeriveGenericRefused => "DS2029", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -255,6 +267,12 @@ mod tests {
             ("MemberWithoutReceiver", "DS2021", ErrorClass::Type),
             ("NonePayloadCase", "DS2022", ErrorClass::Type),
             ("ImplMemberWithoutBody", "DS2023", ErrorClass::Type),
+            ("DeriveUnimplemented", "DS2024", ErrorClass::Type),
+            ("DeriveUnknown", "DS2025", ErrorClass::Type),
+            ("DerivePartRefused", "DS2026", ErrorClass::Type),
+            ("DeriveEqRefused", "DS2027", ErrorClass::Type),
+            ("DeriveNonDataItem", "DS2028", ErrorClass::Type),
+            ("DeriveGenericRefused", "DS2029", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

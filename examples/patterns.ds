@@ -31,7 +31,7 @@ fn locate(p: point) -> string {
   }
 }
 
-fn show(g: grade) -> string {
+fn render(g: grade) -> string {
   match g {
     scored(1) => "one"
     scored(n) if n > 3 => "big ${n}"
@@ -62,10 +62,10 @@ fn main() -> () {
   println(locate(point { x: 2, y: 7 }))
   println(locate(point { x: 0, y: 4 }))
   println(locate(point { x: 1, y: 1 }))
-  println(show(scored(1)))
-  println(show(scored(9)))
-  println(show(scored(2)))
-  println(show(plain))
+  println(render(scored(1)))
+  println(render(scored(9)))
+  println(render(scored(2)))
+  println(render(plain))
   println("pair ${sum_pair((3, 4))} ${sum_pair(miss)}")
   println(place(placed(point { x: 0, y: 5 })))
   println(place(placed(point { x: 2, y: 3 })))

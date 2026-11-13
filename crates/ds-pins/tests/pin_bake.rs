@@ -130,26 +130,26 @@ const KERNELS: &[Kernel] = &[
 /// [`KERNELS`] entry must appear here exactly once — a kernel without
 /// a pin or a pin without a kernel fails the gate.
 const PINS: &[(&str, u64)] = &[
-    ("scalar_loop::scalar_loop::scalar_dispatch", 6_628_337_510),
-    ("strcat_temp::strcat_temp::serving_cats", 8_500_830_874),
-    ("strcat_temp::strcat_temp::claiming_cats", 15_125_830_978),
-    ("string_temp::string_temp::borrowing_loads", 4_475_826_366),
-    ("string_temp::string_temp::claiming_loads", 16_290_824_485),
+    ("scalar_loop::scalar_loop::scalar_dispatch", 6_550_837_727),
+    ("strcat_temp::strcat_temp::serving_cats", 8_570_830_657),
+    ("strcat_temp::strcat_temp::claiming_cats", 15_200_830_761),
+    ("string_temp::string_temp::borrowing_loads", 4_545_826_149),
+    ("string_temp::string_temp::claiming_loads", 16_360_824_268),
     (
         "loop_claims::loop_claims::reset_held_to_overwrite",
-        4_385_825_406,
+        4_455_825_189,
     ),
     (
         "loop_claims::loop_claims::reset_released_at_use",
-        8_810_825_370,
+        8_880_825_158,
     ),
     (
         "loop_claims::loop_claims::rebuild_held_to_overwrite",
-        10_635_831_024,
+        10_705_830_807,
     ),
     (
         "loop_claims::loop_claims::rebuild_released_at_use",
-        10_635_830_220,
+        10_705_830_003,
     ),
 ];
 
