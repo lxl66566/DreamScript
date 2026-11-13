@@ -159,6 +159,72 @@ fn registering_a_file_invalidates_the_package_queries() {
     );
 }
 
+/// One derive attribute with its trait in the package: the expansion
+/// synthesizes an ordinary impl item, so the derived member's call
+/// checks at the resolve and type_of grain like a hand-written one.
+const DERIVED_CALL: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait show {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "##\n",
+    "#[derive(show)] struct point { x: int, y: int }\n",
+    "##\n",
+    "fn render(p: point) -> string { p.show() }\n",
+);
+
+#[test]
+fn a_derived_members_call_checks_at_the_check_grain() {
+    let mut db = Db::new();
+    db.add_file("derived.ds", DERIVED_CALL);
+
+    // The resolve value runs over the expanded trees: the synthesized
+    // impl is an ordinary item, so the member's call carries no
+    // unknown-name or no-instance refusal.
+    let resolved = db.get::<Resolve>(PackageId::new(0)).unwrap();
+    assert!(resolved.diags.is_empty(), "{:?}", resolved.diags);
+
+    // The call's block tells its typed story clean, like a hand-written
+    // trait call would: the fn's solved signature, no diagnostics.
+    let typed = db.get::<TypeOf>(def(0, 2)).unwrap();
+    assert!(typed.diags.is_empty(), "{:?}", typed.diags);
+    assert_eq!(typed.types.len(), 1);
+    assert_eq!(typed.types[0].0, "render");
+    assert_eq!(typed.types[0].1, "fn(point) -> string");
+}
+
+#[test]
+fn a_derive_edit_invalidates_the_expansion_and_its_readers() {
+    let mut db = Db::new();
+    let file = db.add_file("derived.ds", DERIVED_CALL);
+    assert!(
+        db.get::<TypeOf>(def(0, 2)).unwrap().diags.is_empty(),
+        "the derived call checks clean before the edit"
+    );
+    assert_eq!(db.compute_count(&QueryKey::Expanded(PackageId::new(0))), 1);
+
+    // Stripping the derive attribute removes the synthesized impl with
+    // it: the parse edit re-derives the expansion, resolution runs over
+    // the attribute-stripped trees again, and the call's typed story
+    // reports the missing instance.
+    let stripped = DERIVED_CALL.replace("#[derive(show)] ", "");
+    db.set_file_content(file, &stripped).unwrap();
+    assert!(!db.is_fresh(&QueryKey::Expanded(PackageId::new(0))));
+    let typed = db.get::<TypeOf>(def(0, 2)).unwrap();
+    assert_eq!(
+        typed.diags[0].code.as_str(),
+        "DS2013",
+        "the member's call refuses again over the raw trees: {:?}",
+        typed.diags
+    );
+    assert_eq!(
+        db.compute_count(&QueryKey::Expanded(PackageId::new(0))),
+        2,
+        "the derive edit re-derived the expansion exactly once"
+    );
+}
+
 #[test]
 fn blocks_past_the_packing_width_reject_instead_of_aliasing() {
     let mut db = Db::new();

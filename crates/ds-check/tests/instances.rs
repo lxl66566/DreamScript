@@ -80,6 +80,11 @@ fn union_heads_decompose_into_per_branch_instances() {
     assert_eq!(f.universe.render(f.env.head(ids[1]).unwrap()), "bool");
     assert_eq!(f.env.trait_of(ids[0]).unwrap(), f.json);
 
+    // Every branch keeps the declaration's written head, pre-decomposition.
+    for &id in &ids {
+        assert_eq!(f.universe.render(f.env.written(id).unwrap()), "int | bool");
+    }
+
     // Nested unions flatten fully, still one branch per member atom.
     let nested = TypeExpr::atom(f.int)
         .union(f.boolean.into())

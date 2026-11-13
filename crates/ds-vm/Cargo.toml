@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name    = "fork_join"
 harness = false
+
+[[bench]]
+name    = "ledger"
+harness = false

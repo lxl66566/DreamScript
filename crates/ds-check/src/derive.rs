@@ -5,10 +5,19 @@
 //! coherence, signature agreement) and the normal lowering. Nothing in
 //! the emission paths knows a derive exists.
 //!
-//! `show` is the landed family: one member answering the construction
-//! spelling of the data. Every other name in the ruled set (`hash`,
-//! `ord`, `clone`, `to_json`, `from_json`, `default`) parses and
-//! refuses with a checklist diagnostic naming it unimplemented; `==`
+//! `show`, `ord`, `hash`, and `clone` are the landed families: `show`
+//! answers the construction spelling of the data; `ord` answers the
+//! field-order lexicographic comparison (never structural, float parts
+//! sorting through the explicit `total_compare` native the ambient's
+//! float impl carries); `hash` answers the field-order content fold
+//! over the wrap arithmetic (every part through a `hash` dispatch, the
+//! seed and mix the FNV-1a pair the content-hash natives hash under);
+//! `clone` answers the shallow duplicate, the construction over the
+//! borrowed receiver whose Ref parts dup through the placement pass —
+//! the one family whose body adds no runtime work beyond the count
+//! traffic. Every other name in the ruled set (`to_json`, `from_json`,
+//! `default`) parses and refuses with a checklist diagnostic naming it
+//! unimplemented; `==`
 //! refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
@@ -18,16 +27,24 @@
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
-    Ast, Attribute, BlockExpr, EnumCase, EnumDecl, EnumPayload, Expr, FieldDecl, FnDecl, Ident,
-    ImplDecl, Item, ItemKind, MatchArm, Param, ParamMode, Path, Pattern, Stmt, StmtKind, StrPart,
-    StructMember, Type, TypeParam, TypeRef,
+    AssignOp, Ast, Attribute, BinaryOp, BlockExpr, CallArg, EnumCase, EnumDecl, EnumPayload, Expr,
+    FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, Literal, LocalDecl, MatchArm, Param,
+    ParamMode, Path, Pattern, Stmt, StmtKind, StrPart, StructMember, Type, TypeParam, TypeRef,
+    UnaryOp,
 };
 
 /// The ruled derive vocabulary (G1), in ruling order.
 pub const RULED_SET: &str = "hash, show, ord, clone, to_json, from_json, default";
 
 /// The families this round has not implemented yet, in ruling order.
-const UNIMPLEMENTED: &[&str] = &["hash", "ord", "clone", "to_json", "from_json", "default"];
+const UNIMPLEMENTED: &[&str] = &["to_json", "from_json", "default"];
+
+/// The hash family's fold constants: FNV-1a's offset basis and prime,
+/// the same pair the builtin str/float/char hash natives hash under —
+/// the basis exceeds i64's range, so the fold spells its 2^64 wrap as a
+/// negated literal (the fold is mod-2^64 arithmetic either way).
+const HASH_SEED: &str = "3750763034362895579";
+const HASH_MIX: &str = "1099511628211";
 
 /// The written type names the interpolation context prints itself (F6);
 /// every other part derives through a `show` dispatch.
@@ -37,15 +54,28 @@ const PRINTABLE: &[&str] = &["int", "float", "bool", "char", "string"];
 /// are stripped and their impls appended beside the attributed item,
 /// refused names keep the attribute and contribute a diagnostic. Files
 /// without derive attributes come back byte-identical (a plain clone).
+/// `asts` may hold shared trees (`Borrow<Ast>`, like
+/// [`check_resolved`](crate::type_of::check_resolved)): the query layer
+/// expands its parse memos without cloning the trees.
 #[must_use]
-pub fn expand(asts: &[Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
-    if !asts.iter().any(has_derive) {
-        return (asts.to_vec(), Vec::new());
+pub fn expand<T>(asts: &[T]) -> (Vec<Ast>, Vec<Diagnostic>)
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
+    expand_trees(&trees)
+}
+
+/// The expansion over the collected trees; see [`expand`].
+fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
+    if !asts.iter().any(|ast| has_derive(ast)) {
+        let cloned: Vec<Ast> = asts.iter().map(|ast| (*ast).clone()).collect();
+        return (cloned, Vec::new());
     }
     let linear = linear_heads(asts);
     let mut diags = Vec::new();
     let mut out = Vec::with_capacity(asts.len());
-    for ast in asts {
+    for &ast in asts {
         if !has_derive(ast) {
             out.push(ast.clone());
             continue;
@@ -83,7 +113,7 @@ fn has_derive(ast: &Ast) -> bool {
 /// The names of struct/enum declarations whose supers carry a negated
 /// constraint (the `~Copyable` linear layer, C1): a part of such a type
 /// refuses structural derivation.
-fn linear_heads(asts: &[Ast]) -> Vec<String> {
+fn linear_heads(asts: &[&Ast]) -> Vec<String> {
     let mut heads = Vec::new();
     for item in asts
         .iter()
@@ -109,6 +139,12 @@ fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (
     let mut extra = Vec::new();
     let mut consumed = 0;
     let mut derive_attrs = 0;
+    // One mint per attributed item, shared by every family expanding
+    // it: two families minting from scratch would hand the same byte
+    // range's spans to two different name uses, and the member fn
+    // declarations mint here too, so two families' fns never share one
+    // span.
+    let mut mint = Mint::new(item.span);
     for attr in &item.attrs {
         if attr.name.name != "derive" {
             continue;
@@ -126,7 +162,19 @@ fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (
                     diags.push(eq_refused(attr.span));
                     attr_consumed = false;
                 },
-                "show" => match show_impl(item, attr, linear, diags) {
+                "show" => match show_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
+                },
+                "ord" => match ord_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
+                },
+                "hash" => match hash_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
+                },
+                "clone" => match clone_impl(item, attr, &mut mint, linear, diags) {
                     Some(impl_item) => extra.push(impl_item),
                     None => attr_consumed = false,
                 },
@@ -189,10 +237,10 @@ fn eq_refused(span: Span) -> Diagnostic {
 /// runtime seam lowers one member body per impl — a receiver whose
 /// shape spans those variables needs the JIT's per-instantiation
 /// frames, never the interpreter's.
-fn generic_refused(span: Span) -> Diagnostic {
+fn generic_refused(span: Span, family: &str) -> Diagnostic {
     Diagnostic::error(
         ErrorCode::DeriveGenericRefused,
-        "derive `show` refuses a generic declaration [G1]",
+        format!("derive `{family}` refuses a generic declaration [G1]"),
     )
     .with_primary(span, "this declaration carries its own type parameters")
     .with_note(
@@ -203,12 +251,12 @@ fn generic_refused(span: Span) -> Diagnostic {
 }
 
 /// A part (field or payload element) that refuses structural derivation.
-fn part_refused(span: Span, what: &str, part: &str, because: &str) -> Diagnostic {
+fn part_refused(span: Span, family: &str, what: &str, part: &str, because: &str) -> Diagnostic {
     Diagnostic::error(
         ErrorCode::DerivePartRefused,
-        format!("derive `show` refuses the {what} `{part}`: {because} [G1, B9]"),
+        format!("derive `{family}` refuses the {what} `{part}`: {because} [G1, B9]"),
     )
-    .with_primary(span, "this part carries no structural show")
+    .with_primary(span, format!("this part carries no structural {family}"))
 }
 
 /// Synthesizes `impl show for <decl> { fn show(self) -> string { ... } }`.
@@ -217,6 +265,7 @@ fn part_refused(span: Span, what: &str, part: &str, because: &str) -> Diagnostic
 fn show_impl(
     item: &Item,
     attr: &Attribute,
+    mint: &mut Mint,
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
@@ -228,10 +277,9 @@ fn show_impl(
     if let Some(generics) = generics
         && !generics.is_empty()
     {
-        diags.push(generic_refused(attr.span));
+        diags.push(generic_refused(attr.span, "show"));
         return None;
     }
-    let mut mint = Mint::new(item.span);
     match &item.kind {
         ItemKind::Struct(decl) => {
             let fields: Vec<&FieldDecl> = decl
@@ -246,40 +294,81 @@ fn show_impl(
                 check_part(
                     &field.ty,
                     field.span,
+                    "show",
                     &field.name.name,
                     "field",
                     linear,
                     diags,
                 )?;
             }
-            let body = struct_body(&decl.name.name, &fields, &mut mint);
-            Some(impl_item(attr, &decl.name, &decl.generics, body, &mut mint))
+            let body = struct_body(&decl.name.name, &fields, mint);
+            Some(show_impl_item(attr, &decl.name, &decl.generics, body, mint))
         },
         ItemKind::Enum(decl) => {
             for case in &decl.cases {
                 let parts = payload_parts(&case.payload, &case.name.name);
                 for (part_name, part, span) in parts {
-                    check_part(part, span, &part_name, "enum case payload", linear, diags)?;
+                    check_part(
+                        part,
+                        span,
+                        "show",
+                        &part_name,
+                        "enum case payload",
+                        linear,
+                        diags,
+                    )?;
                 }
             }
-            let body = enum_body(decl, &mut mint);
-            Some(impl_item(attr, &decl.name, &decl.generics, body, &mut mint))
+            let body = enum_body(decl, mint);
+            Some(show_impl_item(attr, &decl.name, &decl.generics, body, mint))
         },
         ItemKind::Tag(decl) => {
-            let body = name_body(&decl.name.name, &mut mint);
-            Some(impl_item(attr, &decl.name, &[], body, &mut mint))
+            let body = name_body(&decl.name.name, mint);
+            Some(show_impl_item(attr, &decl.name, &[], body, mint))
         },
         _ => {
-            diags.push(
-                Diagnostic::error(
-                    ErrorCode::DeriveNonDataItem,
-                    "a derive applies to a struct, enum, or tag declaration [G1]",
-                )
-                .with_primary(attr.span, "this declaration derives nothing"),
-            );
+            diags.push(non_data_refused(attr));
             None
         },
     }
+}
+
+/// The non-data refusal every family shares.
+fn non_data_refused(attr: &Attribute) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::DeriveNonDataItem,
+        "a derive applies to a struct, enum, or tag declaration [G1]",
+    )
+    .with_primary(attr.span, "this declaration derives nothing")
+}
+
+/// `show`'s member: the receiver, no other parameter, `string` back.
+fn show_member(span: Span, mint: &mut Mint) -> Member {
+    Member {
+        trait_name: "show",
+        fn_name: "show",
+        params: vec![self_param(span)],
+        ret: name_type(mint, "string"),
+    }
+}
+
+/// The `show` impl over one already-checked body.
+fn show_impl_item(
+    attr: &Attribute,
+    name: &Ident,
+    generics: &[TypeParam],
+    body: Expr,
+    mint: &mut Mint,
+) -> Item {
+    let stmts = vec![expr_stmt(body)];
+    impl_item(
+        attr,
+        name,
+        generics,
+        show_member(attr.span, mint),
+        stmts,
+        mint,
+    )
 }
 
 /// One enum payload's element types with their names and spans. A tuple
@@ -307,6 +396,7 @@ fn payload_parts<'a>(payload: &'a EnumPayload, case: &str) -> Vec<(String, &'a T
 fn check_part(
     ty: &Type,
     span: Span,
+    family: &str,
     part: &str,
     what: &str,
     linear: &[String],
@@ -316,6 +406,7 @@ fn check_part(
         Type::Fn { .. } => {
             diags.push(part_refused(
                 span,
+                family,
                 what,
                 part,
                 "a function-typed part compares and shows as no structural value",
@@ -325,6 +416,7 @@ fn check_part(
         Type::Negation { .. } => {
             diags.push(part_refused(
                 span,
+                family,
                 what,
                 part,
                 "a `~`-typed part is a linear resource",
@@ -336,6 +428,7 @@ fn check_part(
                 if linear.iter().any(|head| head == &only.name) {
                     diags.push(part_refused(
                         span,
+                        family,
                         what,
                         part,
                         &format!("`{}` declares the `~Copyable` linear layer", only.name),
@@ -347,11 +440,11 @@ fn check_part(
         },
         Type::Tuple { items, .. } => {
             for item in items {
-                check_part(item, span, part, what, linear, diags)?;
+                check_part(item, span, family, part, what, linear, diags)?;
             }
             Some(())
         },
-        Type::Optional { inner, .. } => check_part(inner, span, part, what, linear, diags),
+        Type::Optional { inner, .. } => check_part(inner, span, family, part, what, linear, diags),
         _ => Some(()),
     }
 }
@@ -525,17 +618,951 @@ fn printable(ty: &Type) -> bool {
     }
 }
 
-/// The assembled impl item: `impl show for <target> { fn show ... }`.
+/// Synthesizes `impl ord for <decl> { fn compare(self, other: Self) -> int { ... } }`:
+/// the field-order lexicographic comparison, never structural — the one
+/// ordering the data itself never implies, and cases order by
+/// declaration. Every part compares through a `compare` dispatch, so a
+/// part whose type carries no impl fails at the synthesized call with
+/// the standard missing-impl diagnostic over the part's own span: a
+/// float part orders through the ambient's `total_compare`-backed impl,
+/// a string, char, or byte part through its own compare-native-backed
+/// impl. Refuses exactly like `show`: a generic declaration at the
+/// attribute, a non-data declaration, a function-typed or `~Copyable`
+/// part.
+fn ord_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "ord"));
+        return None;
+    }
+    let (name, generics, body) = match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "ord",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            (
+                &decl.name,
+                decl.generics.as_slice(),
+                struct_compare_body(&fields, mint),
+            )
+        },
+        ItemKind::Enum(decl) => {
+            for case in &decl.cases {
+                let parts = payload_parts(&case.payload, &case.name.name);
+                for (part_name, part, span) in parts {
+                    check_part(
+                        part,
+                        span,
+                        "ord",
+                        &part_name,
+                        "enum case payload",
+                        linear,
+                        diags,
+                    )?;
+                }
+            }
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(
+                enum_compare_body(decl, mint),
+            )])
+        },
+        ItemKind::Tag(decl) => {
+            let none: &[TypeParam] = &[];
+            (&decl.name, none, vec![expr_stmt(zero_expr(mint))])
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            return None;
+        },
+    };
+    Some(impl_item(
+        attr,
+        name,
+        generics,
+        ord_member(mint),
+        body,
+        mint,
+    ))
+}
+
+/// `ord`'s member, spelled as its trait member spells it: the receiver,
+/// then `other: Self`, both borrowed.
+fn ord_member(mint: &mut Mint) -> Member {
+    let other = Param {
+        span: mint.span(),
+        mode: ParamMode::Borrow,
+        name: Ident {
+            span: mint.span(),
+            name: "other".to_owned(),
+        },
+        ty: Some(name_type(mint, "Self")),
+        default: None,
+    };
+    Member {
+        trait_name: "ord",
+        fn_name: "compare",
+        params: vec![self_param(mint.span()), other],
+        ret: name_type(mint, "int"),
+    }
+}
+
+/// The compare member's struct body: the fields pair up in declaration
+/// order, the first difference deciding.
+fn struct_compare_body(fields: &[&FieldDecl], mint: &mut Mint) -> Vec<Stmt> {
+    let pairs = fields
+        .iter()
+        .map(|field| {
+            (
+                field_read("self", &field.name, mint),
+                field_read("other", &field.name, mint),
+            )
+        })
+        .collect();
+    compare_fold(pairs, mint)
+}
+
+/// The compare member's enum body: the outer match names the
+/// receiver's case (binding its payload), and each arm matches the
+/// other operand — the same case compares the payload pairs
+/// lexicographically, any other case answers the case order's sign.
+fn enum_compare_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
+    if decl.cases.is_empty() {
+        return zero_expr(mint);
+    }
+    let mut arms = Vec::with_capacity(decl.cases.len());
+    for (index, case) in decl.cases.iter().enumerate() {
+        let (pat, self_parts) = case_pattern(case, "s", mint);
+        let mut inner_arms = Vec::with_capacity(decl.cases.len());
+        for (other_index, other_case) in decl.cases.iter().enumerate() {
+            let (other_pat, other_parts) = case_pattern(other_case, "o", mint);
+            let body = if index == other_index {
+                let pairs = self_parts
+                    .iter()
+                    .zip(other_parts.iter())
+                    .map(|(one, other)| (binder_use(one, mint), binder_use(other, mint)))
+                    .collect();
+                Expr::Block(BlockExpr {
+                    span: case.span,
+                    stmts: compare_fold(pairs, mint),
+                    trailing_trivia: Vec::new(),
+                })
+            } else {
+                sign_expr(mint, index, other_index)
+            };
+            inner_arms.push(MatchArm {
+                span: other_case.span,
+                pat: other_pat,
+                ann: None,
+                guard: None,
+                body,
+            });
+        }
+        let inner = Expr::Match {
+            span: mint.span(),
+            scrutinee: Box::new(path_expr("other", mint.span())),
+            arms: inner_arms,
+        };
+        arms.push(MatchArm {
+            span: case.span,
+            pat,
+            ann: None,
+            guard: None,
+            body: inner,
+        });
+    }
+    Expr::Match {
+        span: mint.span(),
+        scrutinee: Box::new(self_expr(mint)),
+        arms,
+    }
+}
+
+/// One case's pattern with its payload bound to `prefix`-numbered
+/// binders: a tuple element binds by position, a struct field through a
+/// renamed binder (so the outer and the inner match never collide on a
+/// name), a part-less case carries none.
+fn case_pattern(case: &EnumCase, prefix: &str, mint: &mut Mint) -> (Pattern, Vec<Ident>) {
+    // The case path is a name use, so each pattern occurrence mints
+    // its own span (one compare names every case path several times:
+    // once in the outer match, once per inner arm).
+    let span = mint.span();
+    let path = Path {
+        span,
+        segments: vec![Ident {
+            span,
+            name: case.name.name.clone(),
+        }],
+    };
+    match &case.payload {
+        EnumPayload::None => (Pattern::Path { span, path }, Vec::new()),
+        EnumPayload::Tuple(items) => {
+            let mut binders = Vec::with_capacity(items.len());
+            let mut args = Vec::with_capacity(items.len());
+            for index in 0..items.len() {
+                let binder = mint_binder(mint, prefix, index);
+                args.push(Pattern::Binding {
+                    span: binder.span,
+                    name: binder.clone(),
+                });
+                binders.push(binder);
+            }
+            (
+                Pattern::Call {
+                    span: case.span,
+                    path,
+                    args,
+                },
+                binders,
+            )
+        },
+        EnumPayload::Struct(fields) => {
+            let mut binders = Vec::with_capacity(fields.len());
+            let mut pat_fields = Vec::with_capacity(fields.len());
+            for (index, field) in fields.iter().enumerate() {
+                let binder = mint_binder(mint, prefix, index);
+                pat_fields.push((
+                    field.name.clone(),
+                    Some(Pattern::Binding {
+                        span: binder.span,
+                        name: binder.clone(),
+                    }),
+                ));
+                binders.push(binder);
+            }
+            (
+                Pattern::Struct {
+                    span: case.span,
+                    path,
+                    fields: pat_fields,
+                },
+                binders,
+            )
+        },
+    }
+}
+
+fn mint_binder(mint: &mut Mint, prefix: &str, index: usize) -> Ident {
+    Ident {
+        span: mint.span(),
+        name: format!("{prefix}{index}"),
+    }
+}
+
+/// The lexicographic fold over one derived body's part pairs: one
+/// `const` per pair (a `compare` dispatch over the pair), then an
+/// if-chain answering the first non-zero result, the last pair's result
+/// the tail.
+fn compare_fold(pairs: Vec<(Expr, Expr)>, mint: &mut Mint) -> Vec<Stmt> {
+    if pairs.is_empty() {
+        return vec![expr_stmt(zero_expr(mint))];
+    }
+    let mut stmts = Vec::with_capacity(pairs.len() + 1);
+    let mut binders = Vec::with_capacity(pairs.len());
+    for (index, (lhs, rhs)) in pairs.into_iter().enumerate() {
+        let init = pair_compare(lhs, rhs, mint);
+        let binder = Ident {
+            span: mint.span(),
+            name: format!("c{index}"),
+        };
+        stmts.push(Stmt {
+            span: binder.span,
+            kind: StmtKind::Local(LocalDecl {
+                span: binder.span,
+                mutable: false,
+                pat: Pattern::Binding {
+                    span: binder.span,
+                    name: binder.clone(),
+                },
+                ty: None,
+                init,
+            }),
+            leading_trivia: Vec::new(),
+            trailing_trivia: Vec::new(),
+        });
+        binders.push(binder);
+    }
+    let last = binders.len() - 1;
+    let mut chain = binder_use(&binders[last], mint);
+    for binder in binders[..last].iter().rev() {
+        let cond = Expr::Binary {
+            span: mint.span(),
+            op: BinaryOp::Ne,
+            left: Box::new(binder_use(binder, mint)),
+            right: Box::new(zero_expr(mint)),
+        };
+        let answer = expr_stmt(binder_use(binder, mint));
+        chain = Expr::If {
+            span: mint.span(),
+            cond: Box::new(cond),
+            then: BlockExpr {
+                span: answer.span,
+                stmts: vec![answer],
+                trailing_trivia: Vec::new(),
+            },
+            else_: Some(Box::new(chain)),
+        };
+    }
+    stmts.push(expr_stmt(chain));
+    stmts
+}
+
+/// One part pair's compare: `lhs.compare(rhs)`, the uniform dispatch.
+fn pair_compare(lhs: Expr, rhs: Expr, mint: &mut Mint) -> Expr {
+    let callee = Expr::Field {
+        span: mint.span(),
+        recv: Box::new(lhs),
+        name: Ident {
+            span: mint.span(),
+            name: "compare".to_owned(),
+        },
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: vec![CallArg {
+            span: rhs.span(),
+            name: None,
+            value: rhs,
+        }],
+        trailing: None,
+    }
+}
+
+/// A field read of the receiver or the other operand: `base.name`.
+fn field_read(base: &str, field: &Ident, mint: &mut Mint) -> Expr {
+    let recv = path_expr(base, mint.span());
+    Expr::Field {
+        span: mint.span(),
+        recv: Box::new(recv),
+        name: Ident {
+            span: mint.span(),
+            name: field.name.clone(),
+        },
+    }
+}
+
+/// One use of a payload binder or a fold const.
+fn binder_use(binder: &Ident, mint: &mut Mint) -> Expr {
+    path_expr(&binder.name, mint.span())
+}
+
+/// An integer-literal answer.
+fn int_answer(mint: &mut Mint, text: &str) -> Expr {
+    Expr::Literal {
+        span: mint.span(),
+        lit: Literal::Int {
+            suffix: String::new(),
+            text: text.to_owned(),
+        },
+    }
+}
+
+/// The equal answer of a part-less shape.
+fn zero_expr(mint: &mut Mint) -> Expr {
+    int_answer(mint, "0")
+}
+
+/// The case-order sign between the receiver's case and the other
+/// operand's: the later case compares greater.
+fn sign_expr(mint: &mut Mint, index: usize, other_index: usize) -> Expr {
+    if index > other_index {
+        int_answer(mint, "1")
+    } else {
+        Expr::Unary {
+            span: mint.span(),
+            op: UnaryOp::Neg,
+            expr: Box::new(int_answer(mint, "1")),
+        }
+    }
+}
+
+/// Synthesizes `impl hash for <decl> { fn hash(self) -> int { ... } }`:
+/// the field-order content fold over the wrap arithmetic (B7's `+%`/`*%`,
+/// the operators the record names for hash use), one fixed seed and mix
+/// constant — the FNV-1a pair the content-hash natives hash under — so
+/// structurally equal data answers equal hashes. Every part folds
+/// through a `hash` dispatch, so a part whose type carries no impl fails
+/// at the synthesized call with the standard missing-impl diagnostic
+/// over the part's own span: a float part through the ambient's
+/// `float_hash`-backed impl, a string or char part through its own
+/// content-hash-native-backed impl. An enum folds its case index first,
+/// a tag answers the seed constant. Refuses exactly like `show` and
+/// `ord`: a generic declaration at the attribute, a non-data
+/// declaration, a function-typed or `~Copyable` part.
+fn hash_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "hash"));
+        return None;
+    }
+    let (name, generics, body) = match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "hash",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            (
+                &decl.name,
+                decl.generics.as_slice(),
+                struct_hash_body(&fields, mint),
+            )
+        },
+        ItemKind::Enum(decl) => {
+            for case in &decl.cases {
+                let parts = payload_parts(&case.payload, &case.name.name);
+                for (part_name, part, span) in parts {
+                    check_part(
+                        part,
+                        span,
+                        "hash",
+                        &part_name,
+                        "enum case payload",
+                        linear,
+                        diags,
+                    )?;
+                }
+            }
+            (
+                &decl.name,
+                decl.generics.as_slice(),
+                enum_hash_body(decl, mint),
+            )
+        },
+        ItemKind::Tag(decl) => {
+            let none: &[TypeParam] = &[];
+            (&decl.name, none, vec![expr_stmt(seed_answer(mint))])
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            return None;
+        },
+    };
+    Some(impl_item(
+        attr,
+        name,
+        generics,
+        hash_member(mint),
+        body,
+        mint,
+    ))
+}
+
+/// `hash`'s member, spelled as its trait member spells it: the borrowed
+/// receiver alone.
+fn hash_member(mint: &mut Mint) -> Member {
+    Member {
+        trait_name: "hash",
+        fn_name: "hash",
+        params: vec![self_param(mint.span())],
+        ret: name_type(mint, "int"),
+    }
+}
+
+/// The hash member's struct body: the seed binding, then every field's
+/// fold step, then the accumulator's answer.
+fn struct_hash_body(fields: &[&FieldDecl], mint: &mut Mint) -> Vec<Stmt> {
+    let mut stmts = vec![seed_local(mint)];
+    for field in fields {
+        let part = field_read("self", &field.name, mint);
+        stmts.push(mix_stmt(part, mint));
+    }
+    stmts.push(expr_stmt(h_use(mint)));
+    stmts
+}
+
+/// The hash member's enum body: the seed binding, one match over the
+/// receiver folding each case's index then its payload parts, then the
+/// accumulator's answer.
+fn enum_hash_body(decl: &EnumDecl, mint: &mut Mint) -> Vec<Stmt> {
+    if decl.cases.is_empty() {
+        return vec![expr_stmt(seed_answer(mint))];
+    }
+    let mut stmts = vec![seed_local(mint)];
+    let arms = decl
+        .cases
+        .iter()
+        .enumerate()
+        .map(|(index, case)| {
+            let (pat, binders) = case_pattern(case, "p", mint);
+            let mut fold = vec![mix_stmt(int_answer(mint, &index.to_string()), mint)];
+            for binder in &binders {
+                fold.push(mix_stmt(binder_use(binder, mint), mint));
+            }
+            // every arm answers the accumulator's word, so the discarded
+            // match joins over one int shape
+            fold.push(expr_stmt(h_use(mint)));
+            MatchArm {
+                span: case.span,
+                pat,
+                ann: None,
+                guard: None,
+                body: Expr::Block(BlockExpr {
+                    span: case.span,
+                    stmts: fold,
+                    trailing_trivia: Vec::new(),
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let match_span = mint.span();
+    stmts.push(Stmt {
+        span: match_span,
+        kind: StmtKind::Expr(Expr::Match {
+            span: match_span,
+            scrutinee: Box::new(self_expr(mint)),
+            arms,
+        }),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    });
+    stmts.push(expr_stmt(h_use(mint)));
+    stmts
+}
+
+/// The seed binding every fold accumulates through: `var h = <seed>`.
+fn seed_local(mint: &mut Mint) -> Stmt {
+    let span = mint.span();
+    Stmt {
+        span,
+        kind: StmtKind::Local(LocalDecl {
+            span,
+            mutable: true,
+            pat: Pattern::Binding {
+                span,
+                name: Ident {
+                    span,
+                    name: "h".to_owned(),
+                },
+            },
+            ty: None,
+            init: seed_answer(mint),
+        }),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// The part-less answer: the seed constant itself, the fold of no parts.
+fn seed_answer(mint: &mut Mint) -> Expr {
+    Expr::Unary {
+        span: mint.span(),
+        op: UnaryOp::Neg,
+        expr: Box::new(int_answer(mint, HASH_SEED)),
+    }
+}
+
+/// The accumulator's one use: `h`, at a fresh minted span.
+fn h_use(mint: &mut Mint) -> Expr {
+    path_expr("h", mint.span())
+}
+
+/// One part's fold step: `h = h *% <mix> +% part.hash()`, both operators
+/// wrapping (B7), the part through the uniform `hash` dispatch.
+fn mix_stmt(part: Expr, mint: &mut Mint) -> Stmt {
+    let value = Expr::Binary {
+        span: mint.span(),
+        op: BinaryOp::WrapAdd,
+        left: Box::new(Expr::Binary {
+            span: mint.span(),
+            op: BinaryOp::WrapMul,
+            left: Box::new(h_use(mint)),
+            right: Box::new(int_answer(mint, HASH_MIX)),
+        }),
+        right: Box::new(trait_call(part, "hash", mint)),
+    };
+    let span = mint.span();
+    Stmt {
+        span,
+        kind: StmtKind::Expr(Expr::Assign {
+            span,
+            op: AssignOp::Plain,
+            left: Box::new(h_use(mint)),
+            right: Box::new(value),
+        }),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// One part's trait-member dispatch: `part.<member>()`, the uniform call
+/// every part takes, so a missing impl names the part's own span.
+fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
+    let callee = Expr::Field {
+        span: mint.span(),
+        recv: Box::new(part),
+        name: Ident {
+            span: mint.span(),
+            name: member.to_owned(),
+        },
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: Vec::new(),
+        trailing: None,
+    }
+}
+
+/// Synthesizes `impl clone for <decl> { fn clone(self) -> Self { ... } }`:
+/// the shallow duplicate (C4's contract: the body is a construction over
+/// the live borrowed receiver, and the placement pass dups each Ref
+/// word the construction reads — a count bump per reference, never a
+/// deep copy — so the family adds no uop and no native, the one whose
+/// body is zero runtime work beyond the count traffic). The struct body
+/// is the construction with one `clone` dispatch per field; the enum
+/// body matches the receiver and constructs each case from per-part
+/// dispatches (every payload shape); the tag body is the receiver
+/// itself. A part whose type carries no impl fails at the synthesized
+/// call with the standard missing-impl diagnostic over the part's own
+/// span; a hand-written part impl answers through it. A part-less
+/// struct refuses: its `Self` carries no word, so the member's return
+/// would lower to a zero-width RETSPAN, which the ABI refuses by
+/// design (plain fns returning one share the hole). Refuses otherwise
+/// exactly like `hash`: a generic declaration at the attribute, a
+/// non-data declaration, a function-typed or `~Copyable` part.
+fn clone_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "clone"));
+        return None;
+    }
+    let (name, generics, body) = match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            if fields.is_empty() {
+                diags.push(partless_refused(attr.span));
+                return None;
+            }
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "clone",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(
+                struct_clone_body(&decl.name, &fields, mint),
+            )])
+        },
+        ItemKind::Enum(decl) => {
+            for case in &decl.cases {
+                let parts = payload_parts(&case.payload, &case.name.name);
+                for (part_name, part, span) in parts {
+                    check_part(
+                        part,
+                        span,
+                        "clone",
+                        &part_name,
+                        "enum case payload",
+                        linear,
+                        diags,
+                    )?;
+                }
+            }
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(
+                enum_clone_body(decl, mint),
+            )])
+        },
+        ItemKind::Tag(decl) => {
+            let none: &[TypeParam] = &[];
+            (&decl.name, none, vec![expr_stmt(self_expr(mint))])
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            return None;
+        },
+    };
+    Some(impl_item(
+        attr,
+        name,
+        generics,
+        clone_member(mint),
+        body,
+        mint,
+    ))
+}
+
+/// The part-less struct refusal: the member's `Self` return carries no
+/// word, so its RETSPAN would be zero-width, which the ABI refuses.
+fn partless_refused(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::DeriveClonePartless,
+        "derive `clone` refuses a part-less struct [G1]",
+    )
+    .with_primary(span, "this struct's `Self` carries no word")
+    .with_note(
+        "the member's Self return would lower to a zero-width RETSPAN, which the ABI refuses by \
+         design; a value must occupy at least one word",
+    )
+}
+
+/// `clone`'s member, spelled as its trait member spells it: the borrowed
+/// receiver alone, `Self` back.
+fn clone_member(mint: &mut Mint) -> Member {
+    Member {
+        trait_name: "clone",
+        fn_name: "clone",
+        params: vec![self_param(mint.span())],
+        ret: name_type(mint, "Self"),
+    }
+}
+
+/// The clone member's struct body: the construction with one `clone`
+/// dispatch per field, `X { f: self.f.clone(), ... }`. Every name the
+/// literal carries mints its own span (the struct path, each field
+/// name), because resolution records name uses by span.
+fn struct_clone_body(name: &Ident, fields: &[&FieldDecl], mint: &mut Mint) -> Expr {
+    let path_span = mint.span();
+    let path = Path {
+        span: path_span,
+        segments: vec![Ident {
+            span: path_span,
+            name: name.name.clone(),
+        }],
+    };
+    let literal = fields
+        .iter()
+        .map(|field| {
+            let field_name = Ident {
+                span: mint.span(),
+                name: field.name.name.clone(),
+            };
+            let part = field_read("self", &field.name, mint);
+            (field_name, Some(trait_call(part, "clone", mint)))
+        })
+        .collect();
+    Expr::Struct {
+        span: mint.span(),
+        path,
+        fields: literal,
+    }
+}
+
+/// The clone member's enum body: one match arm per case constructing
+/// the case from per-part `clone` dispatches — a unit case names
+/// itself, a tuple case calls with the bound parts in order, a struct
+/// case calls with named arguments over them. An empty enum never
+/// inhabits a value, so its arms never run and the body is the
+/// receiver (the checker refuses the impl head itself).
+fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
+    if decl.cases.is_empty() {
+        return self_expr(mint);
+    }
+    let arms = decl
+        .cases
+        .iter()
+        .map(|case| {
+            let (pat, binders) = case_pattern(case, "p", mint);
+            // One minted span shared by the construction's path and its
+            // identifier, whatever the payload shape: resolution records
+            // the case's name use at the identifier's span and lowering
+            // looks it up by the expression's, which must coincide.
+            let span = mint.span();
+            let callee = Path {
+                span,
+                segments: vec![Ident {
+                    span,
+                    name: case.name.name.clone(),
+                }],
+            };
+            let value = match &case.payload {
+                EnumPayload::None => Expr::Path { span, path: callee },
+                EnumPayload::Tuple(items) => {
+                    let args = binders
+                        .iter()
+                        .zip(items.iter())
+                        .map(|(binder, _)| CallArg {
+                            span: mint.span(),
+                            name: None,
+                            value: trait_call(binder_use(binder, mint), "clone", mint),
+                        })
+                        .collect();
+                    Expr::Call {
+                        span: mint.span(),
+                        callee: Box::new(Expr::Path { span, path: callee }),
+                        args,
+                        trailing: None,
+                    }
+                },
+                EnumPayload::Struct(fields) => {
+                    let args = binders
+                        .iter()
+                        .zip(fields.iter())
+                        .map(|(binder, field)| CallArg {
+                            span: mint.span(),
+                            name: Some(Ident {
+                                span: mint.span(),
+                                name: field.name.name.clone(),
+                            }),
+                            value: trait_call(binder_use(binder, mint), "clone", mint),
+                        })
+                        .collect();
+                    Expr::Call {
+                        span: mint.span(),
+                        callee: Box::new(Expr::Path { span, path: callee }),
+                        args,
+                        trailing: None,
+                    }
+                },
+            };
+            MatchArm {
+                span: case.span,
+                pat,
+                ann: None,
+                guard: None,
+                body: value,
+            }
+        })
+        .collect::<Vec<_>>();
+    Expr::Match {
+        span: mint.span(),
+        scrutinee: Box::new(self_expr(mint)),
+        arms,
+    }
+}
+
+/// The synthesized impl's member: the trait it implements, the fn's
+/// name, its parameters (the receiver first, spelled as its trait
+/// member spells it), and its return type.
+struct Member {
+    trait_name: &'static str,
+    fn_name: &'static str,
+    params: Vec<Param>,
+    ret: Type,
+}
+
+/// The receiver parameter, a declaration keeping the attribute's span.
+fn self_param(span: Span) -> Param {
+    Param {
+        span,
+        mode: ParamMode::Borrow,
+        name: Ident {
+            span,
+            name: "self".to_owned(),
+        },
+        ty: None,
+        default: None,
+    }
+}
+
+/// A one-name written type at fresh minted spans: a name use, so the
+/// type, the path, and the identifier each mint their own.
+fn name_type(mint: &mut Mint, name: &str) -> Type {
+    let span = mint.span();
+    let path = Path {
+        span: mint.span(),
+        segments: vec![Ident {
+            span: mint.span(),
+            name: name.to_owned(),
+        }],
+    };
+    Type::Path {
+        span,
+        path,
+        args: Vec::new(),
+    }
+}
+
+/// One synthesized statement over an expression, the span shared.
+fn expr_stmt(expr: Expr) -> Stmt {
+    Stmt {
+        span: expr.span(),
+        kind: StmtKind::Expr(expr),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// The assembled impl item:
+/// `impl <trait> for <target> { fn <member> ... }`.
 fn impl_item(
     attr: &Attribute,
     name: &Ident,
     generics: &[TypeParam],
-    body: Expr,
+    member: Member,
+    body: Vec<Stmt>,
     mint: &mut Mint,
 ) -> Item {
     let span = attr.span;
     // A generic declaration derives per instantiation: the impl declares
-    // the same parameters with `show` added to whatever bound the
+    // the same parameters with the trait added to whatever bound the
     // declaration wrote, and the target applies them in order.
     let impl_generics: Vec<TypeParam> = generics
         .iter()
@@ -544,9 +1571,9 @@ fn impl_item(
                 Some(written) => Some(Type::Intersect {
                     span: p.span,
                     left: Box::new(written.clone()),
-                    right: Box::new(show_type(mint)),
+                    right: Box::new(trait_type(mint, member.trait_name)),
                 }),
-                None => Some(show_type(mint)),
+                None => Some(trait_type(mint, member.trait_name)),
             };
             TypeParam {
                 span: p.span,
@@ -555,11 +1582,18 @@ fn impl_item(
             }
         })
         .collect();
+    // The target is a name use, so it mints its own span: two families
+    // expanding one item each synthesize an impl, and the declaration's
+    // own name span cannot serve both targets' use records.
+    let target_span = mint.span();
     let target = Type::Path {
-        span: name.span,
+        span: target_span,
         path: Path {
-            span: name.span,
-            segments: vec![name.clone()],
+            span: target_span,
+            segments: vec![Ident {
+                span: target_span,
+                name: name.name.clone(),
+            }],
         },
         args: generics
             .iter()
@@ -573,49 +1607,29 @@ fn impl_item(
             })
             .collect(),
     };
-    // The trait reference and the return type are name uses, so each
-    // mints its own span; the fn name and the receiver parameter are
-    // declarations and keep the attribute's span.
-    let show = Ident {
+    // The trait reference is a name use, so it mints its own span.
+    let trait_ident = Ident {
         span: mint.span(),
-        name: "show".to_owned(),
+        name: member.trait_name.to_owned(),
     };
+    // The member fn declaration mints one span for the declaration, the
+    // fn name, and the body: two families expanding one attribute each
+    // synthesize a member fn, the trait-member match is by name, and the
+    // solved returns ride the span-keyed impl table — the attribute's
+    // shared span would keep only the later family's return.
+    let fn_span = mint.span();
     let fn_decl = FnDecl {
-        span,
+        span: fn_span,
         name: Ident {
-            span,
-            name: "show".to_owned(),
+            span: fn_span,
+            name: member.fn_name.to_owned(),
         },
         generics: Vec::new(),
-        params: vec![Param {
-            span,
-            mode: ParamMode::Borrow,
-            name: Ident {
-                span,
-                name: "self".to_owned(),
-            },
-            ty: None,
-            default: None,
-        }],
-        ret: Some(Type::Path {
-            span: mint.span(),
-            path: Path {
-                span: mint.span(),
-                segments: vec![Ident {
-                    span: mint.span(),
-                    name: "string".to_owned(),
-                }],
-            },
-            args: Vec::new(),
-        }),
+        params: member.params,
+        ret: Some(member.ret),
         body: Some(BlockExpr {
-            span,
-            stmts: vec![Stmt {
-                span: body.span(),
-                kind: StmtKind::Expr(body),
-                leading_trivia: Vec::new(),
-                trailing_trivia: Vec::new(),
-            }],
+            span: fn_span,
+            stmts: body,
             trailing_trivia: Vec::new(),
         }),
         doc: Vec::new(),
@@ -628,10 +1642,10 @@ fn impl_item(
             span,
             generics: impl_generics,
             trait_ref: Some(TypeRef {
-                span: show.span,
+                span: trait_ident.span,
                 path: Path {
-                    span: show.span,
-                    segments: vec![show],
+                    span: trait_ident.span,
+                    segments: vec![trait_ident],
                 },
                 args: Vec::new(),
             }),
@@ -644,8 +1658,9 @@ fn impl_item(
     }
 }
 
-/// The `show` trait as a written type, at a fresh minted span.
-fn show_type(mint: &mut Mint) -> Type {
+/// The derived trait as a written bound, at one fresh minted span
+/// shared by the type, the path, and the identifier.
+fn trait_type(mint: &mut Mint, name: &str) -> Type {
     let span = mint.span();
     Type::Path {
         span,
@@ -653,7 +1668,7 @@ fn show_type(mint: &mut Mint) -> Type {
             span,
             segments: vec![Ident {
                 span,
-                name: "show".to_owned(),
+                name: name.to_owned(),
             }],
         },
         args: Vec::new(),
@@ -695,18 +1710,23 @@ fn path_expr(name: &str, span: Span) -> Expr {
 
 /// Allocates the synthesized nodes' spans inside the attributed item's
 /// own byte range: the declaration contains no expressions, so its
-/// bytes collide with no real expression span, and distinct one-byte
-/// slices keep the checker's span-keyed tables (name uses, expression
-/// types, trait calls, binder facts) collision-free. The budget is the
-/// item's whole text — several bytes per part against three minted
-/// spans per part — so exhaustion needs a part shorter than its own
-/// minted spans; the cycle start-over is the degenerate guard,
-/// degrading a diagnostic's span only.
+/// bytes collide with no real expression span, and distinct slices keep
+/// the checker's span-keyed tables (name uses, expression types, trait
+/// calls, binder facts, member fns' solved returns) collision-free. A
+/// pass spends one span per byte; a spent pass is followed by one over
+/// one-byte-longer spans, so the budget grows with the square of the
+/// item's length while every synthesized node — the member fn
+/// declarations included — mints only a few spans per part (the `ord`
+/// fold's dozen against a part's few bytes), leaving the budget better
+/// than two spans per span spent on every reachable declaration: the
+/// wrap never runs out, its cycle start-over degrading a diagnostic's
+/// span only.
 struct Mint {
     file: ds_diag::FileId,
     start: u32,
     next: u32,
     end: u32,
+    len: u32,
 }
 
 impl Mint {
@@ -716,14 +1736,17 @@ impl Mint {
             start: item.start,
             next: item.start,
             end: item.end.saturating_sub(1),
+            len: 1,
         }
     }
 
     fn span(&mut self) -> Span {
-        if self.next >= self.end {
+        let range = self.end.saturating_sub(self.start);
+        if self.len > range || self.next + self.len > self.end {
             self.next = self.start;
+            self.len = if self.len >= range { 1 } else { self.len + 1 };
         }
-        let span = Span::new(self.file, self.next, self.next + 1);
+        let span = Span::new(self.file, self.next, self.next + self.len);
         self.next += 1;
         span
     }

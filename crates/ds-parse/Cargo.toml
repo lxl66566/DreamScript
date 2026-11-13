@@ -13,11 +13,18 @@ readme.workspace       = true
 [lints]
 workspace = true
 
+[features]
+# Serialize/Deserialize over the AST type family (plus ds-diag's
+# Span/FileId): the codec surface of ds-stdlib's precompiled ambient AST
+# blob. Off by default so the parser path carries no serializer.
+ast-serde = ["dep:serde", "ds-diag/ast-serde"]
+
 [dependencies]
 pest.workspace        = true
 pest_derive.workspace = true
 ds-diag = { path = "../ds-diag" }
 memchr.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

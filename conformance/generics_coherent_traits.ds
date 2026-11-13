@@ -4,7 +4,6 @@
 // stack: stage: typecheck
 // push: stage: typecheck
 // pop: stage: typecheck
-// ord: stage: typecheck
 // json: stage: typecheck
 // impl-json-int: stage: typecheck
 // impl-json-bool: stage: typecheck
@@ -27,9 +26,6 @@ fn pop[t: ~Copyable](s: stack[t]) -> (stack[t], t?) {
 }
 
 // 2. traits with disjoint instance heads [B6]
-trait ord {
-  fn compare(self, other: Self) -> int
-}
 trait json {
   fn to_json(self) -> string
 }

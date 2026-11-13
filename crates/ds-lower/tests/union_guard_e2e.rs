@@ -9,6 +9,9 @@
 //! over the base state, so a consumed count would dec again at a later
 //! exit — read-only guards and guards consuming their own binder copy
 //! run; a guard taking an outer or scrutinee-aliased count refuses. A
+//! unit member's guard may consume the scrutinee's own name: the arm's
+//! tag test proved the value holds no live Ref word under the tag, so
+//! the consume takes no count and the slide's re-read decs nothing. A
 //! can-fail arm needs a later settling arm covering its atom (or the
 //! catchall): the checker's tag-exhaustiveness proof ignores guards and
 //! value tests, so a slide past the last arm would fall into no
@@ -200,6 +203,46 @@ fn main() -> int {
 }
 "#,
         "the zero\nword nine\nempty\n",
+    );
+}
+
+#[test]
+fn a_unit_member_s_guard_consuming_the_scrutinee_runs() {
+    // the unit arm's tag test proved the value holds no live Ref word
+    // under the tag, so the consuming guard takes no count: a failed
+    // guard slides to the later settling arm re-reading the consumed
+    // scrutinee's tag word count-free, and a held guard runs the arm
+    // body off the consumed value
+    acceptance(
+        "unit_scrutinee_consume",
+        r#"
+enum mark {
+  word(string)
+  empty
+}
+fn eatall(x: move mark, k: bool) -> bool {
+  match x {
+    word(w) => w == "x"
+    empty => k
+  }
+}
+fn pick(move m: mark, k: bool) -> string {
+  match m {
+    empty if eatall(m, k) => "eaten"
+    word(w) => "word ${w}"
+    empty => "empty"
+  }
+}
+fn main() -> int {
+  var k = false
+  println(pick(empty, k))
+  k = true
+  println(pick(empty, k))
+  println(pick(word("x"), k))
+  0
+}
+"#,
+        "empty\neaten\nword x\n",
     );
 }
 
@@ -416,8 +459,11 @@ fn the_guard_vocabulary_keeps_its_honest_refusals() {
     // a guard taking a count the base state holds: the shared sections
     // are emitted over the base state, so the consumed count would dec
     // again at a later exit; the direct scrutinee spelling is checker-
-    // refused (the arm narrows the scrutinee's name), so the reachable
-    // form reads through an aliased outer binding
+    // refused for a payloaded member (the arm's narrowing leaves the
+    // scrutinee's type outside the whole union the consuming parameter
+    // takes, DS2001), a unit member's own spelling running count-free
+    // above, so this reachable form reads through an aliased outer
+    // binding
     refused(
         r#"
 enum mark {

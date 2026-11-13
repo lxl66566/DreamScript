@@ -84,6 +84,14 @@ const GENERICS_AMBIENT: &str = concat!(
     "tag string\n",
     "tag bool\n",
     "trait Copyable { }\n",
+    "trait ord {\n",
+    "  fn compare(self, other: Self) -> int\n",
+    "}\n",
+    "impl ord for int {\n",
+    "  fn compare(self, other: Self) -> int {\n",
+    "    if self < other { -1 } else if self > other { 1 } else { 0 }\n",
+    "  }\n",
+    "}\n",
     "struct list[t]\n",
     "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
     "extern fn head[t] (xs: list[t]) -> t?\n",
@@ -476,16 +484,54 @@ fn generics_diagnostics_stay_in_later_milestone_items() {
     }
 }
 
-/// Ambient for the derive slice: the show trait the derive targets,
-/// beside the primitives and the Copyable marker (the file's `res`
-/// names the marker in its supers).
+/// Ambient for the derive slice: the show, ord, hash, and clone traits
+/// the derives target beside the primitives' own impls (ord's int
+/// directly, string, char, and byte through their compare natives;
+/// hash's int mixing its own word; clone's int answering itself), the
+/// compare and hash externs those impls call, and the Copyable marker
+/// (the file's `res` names the marker in its supers).
 const DERIVES_AMBIENT: &str = concat!(
     "tag int\n",
     "tag string\n",
+    "tag char\n",
+    "tag byte\n",
     "trait Copyable { }\n",
     "trait show {\n",
     "  fn show(self) -> string\n",
     "}\n",
+    "trait ord {\n",
+    "  fn compare(self, other: Self) -> int\n",
+    "}\n",
+    "impl ord for int {\n",
+    "  fn compare(self, other: Self) -> int {\n",
+    "    if self < other { -1 } else if self > other { 1 } else { 0 }\n",
+    "  }\n",
+    "}\n",
+    "impl ord for string {\n",
+    "  fn compare(self, other: Self) -> int { str_compare(self, other) }\n",
+    "}\n",
+    "impl ord for char {\n",
+    "  fn compare(self, other: Self) -> int { char_compare(self, other) }\n",
+    "}\n",
+    "impl ord for byte {\n",
+    "  fn compare(self, other: Self) -> int { byte_compare(self, other) }\n",
+    "}\n",
+    "trait hash {\n",
+    "  fn hash(self) -> int\n",
+    "}\n",
+    "impl hash for int {\n",
+    "  fn hash(self) -> int { self }\n",
+    "}\n",
+    "trait clone {\n",
+    "  fn clone(self) -> Self\n",
+    "}\n",
+    "impl clone for int {\n",
+    "  fn clone(self) -> Self { self }\n",
+    "}\n",
+    "extern fn str[t] (v: t) -> string\n",
+    "extern fn str_compare (a: string, b: string) -> int\n",
+    "extern fn char_compare (a: char, b: char) -> int\n",
+    "extern fn byte_compare (a: byte, b: byte) -> int\n",
     "extern fn println (s: string) -> ()\n",
 );
 
@@ -504,9 +550,9 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
             "`mystery` is not a derive name [G1]",
         ),
         (
-            "hash-cell",
+            "to-json-cell",
             "DS2024",
-            "derive `hash` is ruled but not implemented yet [G1]",
+            "derive `to_json` is ruled but not implemented yet [G1]",
         ),
         (
             "cb-cell",
@@ -541,9 +587,10 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
 
 #[test]
 fn derives_run_items_check_clean_with_synthesized_impls() {
-    // The show derives synthesize their impls and every run item checks
-    // clean beside the ambient's own show trait; `res` (the linear
-    // declaration the holder reject names) typechecks on its own.
+    // The show, ord, hash, and clone derives synthesize their impls and
+    // every run item checks clean beside the ambient's own traits;
+    // `res` (the linear declaration the holder reject names)
+    // typechecks on its own.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/derives.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);

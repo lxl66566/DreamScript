@@ -175,6 +175,8 @@ error_codes! {
     DeriveNonDataItem => "DS2028", Type,
     /// A derive on a declaration carrying its own type parameters; the synthesized member reads its parts through those variables, which the one-body-per-impl runtime seam cannot carry (per-instantiation frames are the JIT tier's).
     DeriveGenericRefused => "DS2029", Type,
+    /// A `clone` derive on a part-less struct; the member's Self return would lower to a zero-width RETSPAN, which the ABI refuses (a value must occupy at least one word; plain fns returning one share the hole).
+    DeriveClonePartless => "DS2030", Type,
 
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
@@ -273,6 +275,7 @@ mod tests {
             ("DeriveEqRefused", "DS2027", ErrorClass::Type),
             ("DeriveNonDataItem", "DS2028", ErrorClass::Type),
             ("DeriveGenericRefused", "DS2029", ErrorClass::Type),
+            ("DeriveClonePartless", "DS2030", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

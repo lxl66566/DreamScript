@@ -209,6 +209,11 @@ struct Instance {
     /// solved snapshot can go stale until link-time re-solving.
     head_expr: TypeExpr,
     head: Ty,
+    /// The declaration's head as written, pre-decomposition: every branch
+    /// of one declaration shares it, and the member body behind those
+    /// branches was checked over it. A declaration-time snapshot like
+    /// `head`.
+    written: Ty,
     /// Conditions as written, re-solved alongside the head at link time.
     condition_exprs: Vec<Condition<TypeExpr>>,
     conditions: Vec<Condition<Ty>>,
@@ -326,6 +331,15 @@ impl InstanceEnv {
             .ok_or(Error::UnknownInstance(id))
     }
 
+    /// The declaration's written head a branch came from, before union
+    /// decomposition: sibling branches of one declaration share it.
+    pub fn written(&self, id: InstanceId) -> Result<Ty, Error> {
+        self.instances
+            .get(id.index() as usize)
+            .map(|inst| inst.written)
+            .ok_or(Error::UnknownInstance(id))
+    }
+
     /// The solved conditions of an instance.
     pub fn conditions(&self, id: InstanceId) -> Result<&[Condition<Ty>], Error> {
         self.instances
@@ -366,6 +380,15 @@ impl InstanceEnv {
             }
             heads.push(head);
         }
+
+        // The declaration's written head, pre-decomposition: the union of
+        // the solved branch heads, so sibling branches share one handle
+        // and no second solve runs.
+        let mut written_members = Vec::new();
+        for &head in &heads {
+            written_members.extend(universe.members(head));
+        }
+        let written = universe.set_ty(&written_members);
 
         // Declaration-time coherence [B6]: every new branch against every
         // existing same-trait head, then new branches against each other
@@ -410,6 +433,7 @@ impl InstanceEnv {
                 trait_id: decl.trait_id,
                 head_expr: expr,
                 head,
+                written,
                 condition_exprs: decl.conditions.clone(),
                 conditions: conditions.clone(),
             });

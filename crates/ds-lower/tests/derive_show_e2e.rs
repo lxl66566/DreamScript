@@ -57,9 +57,10 @@ fn run_lowered(lowered: &Lowered) -> Vm {
 
 /// The one acceptance: the construction spelling prints through every
 /// call spelling of the derived member — the struct's fields, each enum
-/// payload shape (unit, tuple, struct), the bare tag, and the generic
-/// bound dispatch over the tag's one-word
-/// receiver — one body, three call forms, identical answers.
+/// payload shape (unit, tuple, struct), the bare tag, the generic
+/// bound dispatch over the tag's one-word receiver, and a full-union
+/// binding through the sibling branches — one body, three call forms,
+/// identical answers.
 #[test]
 fn derived_show_answers_through_every_call_spelling() {
     let lowered = lower_probe();
@@ -79,6 +80,8 @@ fn derived_show_answers_through_every_call_spelling() {
             "hit(3)\n",
             "miss\n",
             "span { from: 2, to: 9 }\n",
+            "miss\n",   // the full-union binding u1: mark
+            "hit(3)\n", // the full-union binding u2: mark
         )
         .as_bytes(),
         "the direct, qualified, and generic call spellings agree"

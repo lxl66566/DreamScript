@@ -1,19 +1,25 @@
-// source: G1 the derive engine's first slice, the show family round 2026-11-13
-// purpose: `#[derive(show)]` on a struct, an enum, and a tag expands into the ordinary impl show item after parse (parts derive structurally: fields, every payload shape), every call spelling reaches the one body, and each ruled refusal names its class
+// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15
+// purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, and `#[derive(clone)]` on structs, enums, and tags expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape), every call spelling reaches the one body, and each ruled refusal names its class
 // items:
 // point: stage: run
 // mark: stage: run
 // flag: stage: run
+// seg: stage: run
+// rank: stage: run
+// tone: stage: run
 // render: stage: run
 // main: stage: run
 // eq-cell: stage: reject `==` is universal structural equality and never derived [B9]
 // mystery-cell: stage: reject a name outside the ruled set names the ruled set [G1]
-// hash-cell: stage: reject a ruled family not yet implemented names itself and the ruled set [G1]
+// hash-cell: stage: run
+// clone-cell: stage: run
+// to-json-cell: stage: reject a ruled family not yet implemented names itself and the ruled set [G1]
 // cb-cell: stage: reject a function-typed part refuses structural derivation, naming the part [G1, B9]
 // res: stage: typecheck
 // holder: stage: reject a ~Copyable-headed part refuses structural derivation, naming the part [G1, B9]
 // not-data: stage: reject a derive applies only to a struct, enum, or tag declaration [G1]
 // gen-cell: stage: reject a generic declaration refuses: the runtime seam lowers one member body per impl [G1]
+// named-cell: stage: run
 
 #[derive(show)]
 struct point { x: int, y: int }
@@ -23,6 +29,15 @@ enum mark { miss, hit(int), span { from: int, to: int } }
 
 #[derive(show)]
 tag flag
+
+#[derive(ord)]
+struct seg { from: int, to: int }
+
+#[derive(ord)]
+enum rank { low, mid(int), high { w: int } }
+
+#[derive(ord)]
+tag tone
 
 fn render[t: show](v: t) -> string { v.show() }
 
@@ -37,6 +52,27 @@ fn main() -> int {
   println(miss.show())
   const s = span(from: 2, to: 9)
   println(s.show())
+  const g1 = seg { from: 1, to: 2 }
+  const g2 = seg { from: 1, to: 3 }
+  println(str(g1.compare(g2)))
+  println(str(ord::compare(g1, g2)))
+  println(str(low.compare(low)))
+  println(str(mid(3).compare(mid(4))))
+  println(str(high(w: 2).compare(high(w: 9))))
+  println(str(tone.compare(tone)))
+  const n1 = named_cell { s: "arch", c: 'a', b: b'x' }
+  const n2 = named_cell { s: "ark", c: 'a', b: b'y' }
+  println(str(n1.compare(n2)))
+  println(str(n2.compare(n1)))
+  const fm: mark = hit(3)
+  println(fm.show())
+  const r1: rank = mid(3)
+  println(str(r1.compare(low)))
+  println(str(low.compare(r1)))
+  const hc = hash_cell { v: 7 }
+  println(str(hc.hash()))
+  const cc = clone_cell { v: 7 }.clone()
+  println(str(cc.v))
   0
 }
 
@@ -49,10 +85,16 @@ struct mystery_cell { v: int }
 #[derive(hash)]
 struct hash_cell { v: int }
 
+#[derive(clone)]
+struct clone_cell { v: int }
+
+#[derive(to_json)]
+struct to_json_cell { v: int }
+
 #[derive(show)]
 struct cb_cell { cb: fn(int) -> int }
 
-struct res: ~Copyable { }
+struct res: ~Copyable {}
 
 #[derive(show)]
 struct holder { kept: res }
@@ -62,3 +104,6 @@ fn not_data(v: int) -> int { v }
 
 #[derive(show)]
 struct gen_cell[t] { v: t }
+
+#[derive(ord)]
+struct named_cell { s: string, c: char, b: byte }

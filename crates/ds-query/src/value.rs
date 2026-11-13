@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use ds_check::{
-    EffectRow, Effects,
+    Analyzed, EffectRow, Effects,
     linearity::{DropSite, LastUse, Move},
     resolve::{Package, Resolutions},
 };
@@ -122,12 +122,19 @@ impl PartialEq for LinearityOutput {
 
 impl Eq for LinearityOutput {}
 
-/// Result of the [`FileLinearity`](crate::QueryKey::FileLinearity) query:
-/// the M2 affine pass (C1, C5) over one file, the substrate every
-/// definition's [`LinearityOutput`] slices. The fact lists are shared, so
-/// a memo hit clones arcs, not the facts.
+/// Result of the [`PackageLinearity`](crate::QueryKey::PackageLinearity)
+/// query: the M2 affine pass (C1, C5) over the package's derive-expanded
+/// trees, the substrate every definition's [`LinearityOutput`] slices. The
+/// fact lists are shared, so a memo hit clones arcs, not the facts.
+///
+/// Renewal identity: the fact lists themselves. The pass reads the analyzed
+/// bundle for its tables, but the bundle may renew against an unchanged
+/// identity while a span-keyed fact moved, so the dependency set also
+/// carries the expansion — whose recompute always counts as changed — and
+/// the pass re-derives on every parse move, renewing only when its own
+/// facts compare equal.
 #[derive(Clone, Debug)]
-pub struct FileLinearityOutput {
+pub struct PackageLinearityOutput {
     /// Diagnostics in walk order.
     pub diags: Arc<[Diagnostic]>,
     /// Consuming uses of owned non-copyable bindings (C1).
@@ -141,20 +148,20 @@ pub struct FileLinearityOutput {
     pub(crate) facts: Arc<LinearityFacts>,
 }
 
-/// The block-grain index of one file's affine pass.
+/// The block-grain index of the package's affine pass.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LinearityFacts {
-    /// Diagnostics, by index into [`FileLinearityOutput::diags`].
+    /// Diagnostics, by index into [`PackageLinearityOutput::diags`].
     pub(crate) diags: BlockFacts,
-    /// Moves, by index into [`FileLinearityOutput::moves`].
+    /// Moves, by index into [`PackageLinearityOutput::moves`].
     pub(crate) moves: BlockFacts,
-    /// Drop sites, by index into [`FileLinearityOutput::drops`].
+    /// Drop sites, by index into [`PackageLinearityOutput::drops`].
     pub(crate) drops: BlockFacts,
-    /// Final uses, by index into [`FileLinearityOutput::last_uses`].
+    /// Final uses, by index into [`PackageLinearityOutput::last_uses`].
     pub(crate) last_uses: BlockFacts,
 }
 
-impl PartialEq for FileLinearityOutput {
+impl PartialEq for PackageLinearityOutput {
     fn eq(&self, other: &Self) -> bool {
         same_diags(&self.diags, &other.diags)
             && self.moves == other.moves
@@ -163,11 +170,44 @@ impl PartialEq for FileLinearityOutput {
     }
 }
 
-impl Eq for FileLinearityOutput {}
+impl Eq for PackageLinearityOutput {}
+
+/// Result of the [`Expanded`](crate::QueryKey::Expanded) query: the
+/// package's parse memos' trees through the derive expansion (G1), shared
+/// so every package-grain pass checks the same synthesized impls without
+/// expanding per query.
+///
+/// Renewal identity: none — a recomputed expansion always counts as
+/// changed. The trees implement no structural equality, so renewal
+/// cannot prove the recompute equal; the conservative answer only costs
+/// the recompute itself, since a parse value moves only when its source
+/// text did, and each reader then renews through its own identity.
+#[derive(Clone, Debug)]
+pub struct ExpandedOutput {
+    /// The expanded trees, position-aligned with the package's parseable
+    /// files (a file whose parse failed contributes no tree).
+    pub asts: Arc<[Ast]>,
+    /// Derive-refusal diagnostics: unimplemented or unknown derive names,
+    /// un-derivable parts, and the B9 equality refusal. Shared like the
+    /// parse payload: memo hits clone the arc, not the diagnostics.
+    pub diags: Arc<[Diagnostic]>,
+}
+
+impl PartialEq for ExpandedOutput {
+    // Always changed; see the type docs for why the conservative answer
+    // is the only sound one and what it costs.
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl Eq for ExpandedOutput {}
 
 /// Result of the [`Resolve`](crate::QueryKey::Resolve) query: one
 /// package's collected namespace, per-file resolutions, and the
-/// collection and resolution diagnostics (G3).
+/// derive-refusal, collection, and resolution diagnostics (G3) — the
+/// expansion's classes ride with the resolve half because the expanded
+/// trees are its input.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ResolveOutput {
     /// The package namespace every file of the package declared into.
@@ -176,8 +216,9 @@ pub struct ResolveOutput {
     /// (parseable ones only; a file whose parse failed contributes no
     /// declarations and no uses).
     pub resolutions: Arc<[Resolutions]>,
-    /// Duplicate-definition and unknown-name diagnostics. Shared like the
-    /// parse payload: memo hits clone the arc, not the diagnostics.
+    /// Derive-refusal, duplicate-definition, and unknown-name
+    /// diagnostics. Shared like the parse payload: memo hits clone the
+    /// arc, not the diagnostics.
     pub diags: Arc<[Diagnostic]>,
 }
 
@@ -274,6 +315,68 @@ impl PartialEq for PackageEffectsOutput {
 
 impl Eq for PackageEffectsOutput {}
 
+/// Result of the [`Analyzed`](crate::QueryKey::Analyzed) query: the full
+/// check bundle (B2) — the derive-expanded trees, namespace, per-file
+/// resolutions, declaration tables, and typed result — as shared handles
+/// (the trees, namespace, resolutions, and resolution-time diagnostics
+/// are the `Expanded` and `Resolve` memos' own arcs), so a memo hit
+/// clones pointers, not the package, and a consumer holding the bundle
+/// keeps the universe its `Ty`s were minted by alive.
+#[derive(Clone)]
+pub struct AnalyzedOutput {
+    /// The bundle: everything the affine pass (C1) and the lowering pass
+    /// (M3) read, the analyzer's own pass over the parse memos' trees.
+    pub analyzed: Analyzed,
+}
+
+/// The identity of one analyzed package: the raw index and rendered type
+/// of every top-level binding, order-stable across the map's iteration
+/// order. Solved handles are meaningless outside the universe that minted
+/// them, so renewal compares rendered names.
+fn rendered_def_types(bundle: &Analyzed) -> Vec<(u32, String)> {
+    let mut names: Vec<_> = bundle
+        .checked
+        .def_types
+        .iter()
+        .map(|(&def, &ty)| (def.index(), bundle.decls.universe.render(ty)))
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+impl PartialEq for AnalyzedOutput {
+    // Renewal identity: the facts consumers observe — the namespace, the
+    // resolutions, the diagnostics, and every top-level type rendered
+    // through the bundle's own universe (solved handles are meaningless
+    // outside the universe that minted them), the same identity
+    // `CheckedPackageOutput` carries. The expanded trees and the
+    // span-keyed side tables (binder, expression, and call facts) are not
+    // identity: they move only when the expansion value moves, and the
+    // expansion recomputes only when some parse value moved — its source
+    // text did — so a reader whose tables went stale re-derives through
+    // its own dependency chain, never through this renewal alone.
+    fn eq(&self, other: &Self) -> bool {
+        let (left, right) = (&self.analyzed, &other.analyzed);
+        left.package == right.package
+            && left.resolutions == right.resolutions
+            && left.checked.diags == right.checked.diags
+            && rendered_def_types(left) == rendered_def_types(right)
+    }
+}
+
+impl Eq for AnalyzedOutput {}
+
+impl fmt::Debug for AnalyzedOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The bundle owns no renderable summary beyond its counts; the
+        // diagnostics and definitions are its whole observable surface.
+        f.debug_struct("AnalyzedOutput")
+            .field("diags", &self.analyzed.checked.diags.len())
+            .field("defs", &self.analyzed.package.len())
+            .finish()
+    }
+}
+
 /// Result of the [`PlatformCheck`](crate::QueryKey::PlatformCheck) query:
 /// the platform-declaration and capability-subset diagnostics (H5, E1) of
 /// one package, shared like the resolve payload so memo hits clone the
@@ -299,6 +402,8 @@ pub enum QueryValue {
     /// Value of [`QueryKey::BlockSource`](crate::QueryKey::BlockSource): the
     /// block's source text.
     BlockSource(Arc<str>),
+    /// Value of [`QueryKey::Expanded`](crate::QueryKey::Expanded).
+    Expanded(ExpandedOutput),
     /// Value of [`QueryKey::Resolve`](crate::QueryKey::Resolve).
     Resolve(ResolveOutput),
     /// Value of [`QueryKey::TypeOf`](crate::QueryKey::TypeOf).
@@ -310,8 +415,11 @@ pub enum QueryValue {
     EffectRow(EffectRow),
     /// Value of [`QueryKey::CheckedPackage`](crate::QueryKey::CheckedPackage).
     CheckedPackage(CheckedPackageOutput),
-    /// Value of [`QueryKey::FileLinearity`](crate::QueryKey::FileLinearity).
-    FileLinearity(FileLinearityOutput),
+    /// Value of [`QueryKey::Analyzed`](crate::QueryKey::Analyzed).
+    Analyzed(AnalyzedOutput),
+    /// Value of
+    /// [`QueryKey::PackageLinearity`](crate::QueryKey::PackageLinearity).
+    PackageLinearity(PackageLinearityOutput),
     /// Value of [`QueryKey::PackageEffects`](crate::QueryKey::PackageEffects).
     PackageEffects(PackageEffectsOutput),
     /// Value of [`QueryKey::PlatformCheck`](crate::QueryKey::PlatformCheck):

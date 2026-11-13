@@ -718,3 +718,227 @@ fn scalar_stores_write_the_var_word_directly() {
         Value::I64(7)
     );
 }
+
+const DIRECT_COMPUTED_STORE_SOURCE: &str = "
+tag int
+fn main() -> int {
+  var x: int = 8
+  x = x % 3
+  x
+}";
+
+/// The plain assignment of a computed scalar: the right-hand side's
+/// outermost data op writes the var word itself, aliasing its own
+/// operand read (the VM reads both operands before writing dst), and no
+/// re-store Mov rides the store.
+#[test]
+fn computed_scalar_stores_write_the_var_word_directly() {
+    let lowered = lower_inline(DIRECT_COMPUTED_STORE_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    assert!(
+        placed
+            .iter()
+            .all(|op| !matches!(op, PlacedOp::Uop(Uop::Mov { .. }))),
+        "no re-store Mov rides the computed store: {placed:?}"
+    );
+    let mods: Vec<u8> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(Uop::ModI64 { dst, lhs, .. }) if dst == lhs => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        mods.len(),
+        1,
+        "the outermost mod writes the var word over its own read: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, DIRECT_COMPUTED_STORE_SOURCE, ""),
+        Value::I64(2)
+    );
+}
+
+const DIRECT_ARG_STAGING_SOURCE: &str = "
+tag int
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+fn main() -> int {
+  var x: int = 4
+  var y: int = add(2, x * 3 + 1)
+  y
+}";
+
+/// The overlay word count below `main`'s body span, for telling the
+/// staging words a Mov or data op addresses apart from body words.
+fn body_len(lowered: &Lowered, name: &str) -> usize {
+    let index = lowered
+        .function_index(name)
+        .expect("the function is planned");
+    lowered.module().functions()[usize::try_from(index).expect("an index fits usize")]
+        .layout()
+        .body_len()
+}
+
+/// The direct argument staging: a literal scalar argument's constant load
+/// writes its overlay word at the staging position, a single-use
+/// computed scalar argument's outermost data op writes its overlay word,
+/// and no staging Mov rides the call (the one Mov left copies the
+/// result span out of the overlay).
+#[test]
+fn scalar_arguments_write_their_overlay_words_directly() {
+    let lowered = lower_inline(DIRECT_ARG_STAGING_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let body = body_len(&lowered, "main");
+    let staging_movs: Vec<Uop> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(m @ Uop::Mov { dst, .. }) if usize::from(*dst) >= body => Some(*m),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        staging_movs.is_empty(),
+        "no staging Mov rides the direct arguments: {placed:?}"
+    );
+    let const_words: Vec<u8> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(Uop::Kimm { dst, .. }) if usize::from(*dst) >= body => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        const_words,
+        vec![u8::try_from(body).expect("the first overlay word fits u8")],
+        "the literal argument's load writes the first overlay word: {placed:?}"
+    );
+    let data_words: Vec<u8> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(Uop::AddI64 { dst, .. }) if usize::from(*dst) >= body => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        data_words,
+        vec![u8::try_from(body + 1).expect("the second overlay word fits u8")],
+        "the computed argument's outermost op writes the second overlay word: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, DIRECT_ARG_STAGING_SOURCE, ""),
+        Value::I64(15)
+    );
+}
+
+const DEFERRED_ARG_STAGING_SOURCE: &str = "
+tag int
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+fn main() -> int {
+  var x: int = 4
+  var y: int = add(x % 3, x % 5)
+  y
+}";
+
+/// An argument whose later sibling also computes keeps its staging Mov:
+/// a later argument's evaluation may stage over an already written
+/// overlay word, so only the last argument of a call may write its
+/// overlay word directly.
+#[test]
+fn a_later_computing_argument_keeps_the_earlier_staging_mov() {
+    let lowered = lower_inline(DEFERRED_ARG_STAGING_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let body = body_len(&lowered, "main");
+    let staging_movs: Vec<Uop> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(m @ Uop::Mov { dst, .. }) if usize::from(*dst) >= body => Some(*m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        staging_movs.len(),
+        1,
+        "the first argument keeps its staging Mov: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, DEFERRED_ARG_STAGING_SOURCE, ""),
+        Value::I64(5)
+    );
+}
+
+const TAIL_ARG_STAGING_SOURCE: &str = "
+tag int
+fn id(v: int) -> int {
+  v
+}
+
+fn main() -> int {
+  var x: int = 4
+  id(x % 7)
+}";
+
+/// A tail transfer keeps the evaluated temp + staging Mov: the transfer
+/// stages its arguments past the exit claims, which stage through the
+/// overlay over them, so a directly written word would be clobbered.
+#[test]
+fn a_tail_transfer_argument_keeps_its_staging_mov() {
+    let lowered = lower_inline(TAIL_ARG_STAGING_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let body = body_len(&lowered, "main");
+    let staging_movs: Vec<Uop> = placed
+        .iter()
+        .filter_map(|op| match op {
+            PlacedOp::Uop(m @ Uop::Mov { dst, .. }) if usize::from(*dst) >= body => Some(*m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        staging_movs.len(),
+        1,
+        "the tail argument keeps its staging Mov: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, TAIL_ARG_STAGING_SOURCE, ""),
+        Value::I64(4)
+    );
+}
+
+const DIRECT_CALLS_STAGING_SOURCE: &str = "
+tag int
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+fn main() -> int {
+  const f = add
+  var x: int = 4
+  var y: int = f(x % 5, 2)
+  y
+}";
+
+/// The callable-value call path stages its scalar arguments the same
+/// way: the fn-typed binding's CALLS reads the directly written overlay
+/// words with no staging Mov.
+#[test]
+fn callable_value_arguments_write_their_overlay_words_directly() {
+    let lowered = lower_inline(DIRECT_CALLS_STAGING_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let body = body_len(&lowered, "main");
+    assert!(
+        placed.iter().all(|op| match op {
+            PlacedOp::Uop(Uop::Mov { dst, .. }) => usize::from(*dst) < body,
+            _ => true,
+        }),
+        "no staging Mov rides the direct arguments: {placed:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, DIRECT_CALLS_STAGING_SOURCE, ""),
+        Value::I64(6)
+    );
+}

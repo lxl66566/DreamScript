@@ -171,7 +171,8 @@ pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
         checked,
     } = crate::type_of::analyze(files, asts);
     let lin = linearity_check(&expanded, &package, &resolutions, &decls, &checked);
-    (checked, lin)
+    // The bundle's refcount is one here, so the unwrap moves the tables.
+    (Arc::unwrap_or_clone(checked), lin)
 }
 
 /// Runs the affine pass over a package whose bidirectional check already

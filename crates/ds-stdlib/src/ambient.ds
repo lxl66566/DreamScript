@@ -7,7 +7,7 @@
 // fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
 // parse_err — the runtime discriminants the platform natives answer), so
 // the five fallible reads return real success unions. Still file-owned:
-// file, url, raw_fd, ord, json, and the stack API — `open`/`read_exact`
+// file, url, raw_fd, json, and the stack API — `open`/`read_exact`
 // stay absent because their signatures cannot name the caller's `file`.
 
 // The default platform (H5, E1): the `ds` CLI is this platform's
@@ -41,6 +41,99 @@ impl show for char {
 }
 impl show for string {
   fn show(self) -> string { "$self" }
+}
+
+// The ord derive's target (G1, B9's ruling that ordering is never
+// structural): one member answering the field-order lexicographic
+// comparison; `#[derive(ord)]` synthesizes the impl. The primitives
+// carry ord themselves, each part's sort key an explicit compare
+// native: float through `total_compare` (the IEEE total order, the one
+// total comparison the trapping `<`/`>` cannot spell), and string,
+// char, and byte through their own compare natives (the UTF-8 byte
+// order, the Unicode scalar order, and the u8 order).
+trait ord {
+  fn compare(self, other: Self) -> int
+}
+impl ord for int {
+  fn compare(self, other: Self) -> int {
+    if self < other { -1 } else if self > other { 1 } else { 0 }
+  }
+}
+impl ord for bool {
+  fn compare(self, other: Self) -> int {
+    if self { if other { 0 } else { 1 } } else { if other { -1 } else { 0 } }
+  }
+}
+impl ord for float {
+  fn compare(self, other: Self) -> int { total_compare(self, other) }
+}
+impl ord for string {
+  fn compare(self, other: Self) -> int { str_compare(self, other) }
+}
+impl ord for char {
+  fn compare(self, other: Self) -> int { char_compare(self, other) }
+}
+impl ord for byte {
+  fn compare(self, other: Self) -> int { byte_compare(self, other) }
+}
+
+// The hash derive's target (G1, B9's ruling that hash stays consistent
+// with universal structural `==`): one member answering the content
+// hash; `#[derive(hash)]` synthesizes the impl. Every primitive part
+// carries hash itself: int and bool mix their own word, byte through
+// its decimal text (the atom sits outside the int conversion family),
+// string and char through the FNV-1a native over their bytes, and
+// float through the fold native (which normalizes -0.0 to +0.0 and
+// every NaN payload to the one canonical NaN, the bit-structural
+// equality B9 pins).
+trait hash {
+  fn hash(self) -> int
+}
+impl hash for int {
+  fn hash(self) -> int { self }
+}
+impl hash for bool {
+  fn hash(self) -> int { if self { 1 } else { 0 } }
+}
+impl hash for float {
+  fn hash(self) -> int { float_hash(self) }
+}
+impl hash for string {
+  fn hash(self) -> int { str_hash(self) }
+}
+impl hash for char {
+  fn hash(self) -> int { char_hash(self) }
+}
+impl hash for byte {
+  fn hash(self) -> int { str_hash(str(self)) }
+}
+
+// The clone derive's target (G1): one member answering the shallow
+// duplicate; `#[derive(clone)]` synthesizes the impl. The primitives
+// carry clone themselves (the one-word atom answers itself, byte's
+// included), so the derived body is a construction over the borrowed
+// receiver whose Ref parts dup through the placement pass — a count
+// bump per reference, never a deep copy (C4).
+trait clone {
+  fn clone(self) -> Self
+}
+impl clone for int {
+  fn clone(self) -> Self { self }
+}
+impl clone for bool {
+  fn clone(self) -> Self { self }
+}
+impl clone for float {
+  fn clone(self) -> Self { self }
+}
+impl clone for string {
+  fn clone(self) -> Self { self }
+}
+impl clone for char {
+  fn clone(self) -> Self { self }
+}
+impl clone for byte {
+  fn clone(self) -> Self { self }
 }
 
 tag int
@@ -110,6 +203,13 @@ extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
 extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
 extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 extern fn str[t] (v: t) -> string
+extern fn total_compare (a: float, b: float) -> int
+extern fn str_compare (a: string, b: string) -> int
+extern fn char_compare (a: char, b: char) -> int
+extern fn byte_compare (a: byte, b: byte) -> int
+extern fn str_hash (s: string) -> int
+extern fn float_hash (f: float) -> int
+extern fn char_hash (c: char) -> int
 extern fn println (msg: string) -> ()
 extern fn print (msg: string) -> ()
 extern fn log (msg: string) -> ()

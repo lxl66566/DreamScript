@@ -1,0 +1,49 @@
+// purpose: the wrapping operators lower end to end through the wrap
+// IntArith uops — `+%`/`-%`/`*%` and unary `-%` (the `0 -% a` spelling) —
+// with modulo-2^64 answers on the edges the trapping forms refuse [B7].
+// The probe pins the wrap edges, the wrap negation of int-min, plain
+// assignment accumulating through the wrap add, and the contrast: the
+// trapping `+` and unary `-` keep their cold overflow edge.
+
+tag int
+tag bool
+
+fn main() -> bool {
+  wrap_edges() && neg_of_min() == -9223372036854775807 - 1 && wrap_accumulate(5) == 5
+}
+
+fn wrap_edges() -> bool {
+  const int_max = 9223372036854775807
+  const int_min = int_max +% 1
+  int_min == -9223372036854775807 - 1 &&
+    int_min -% 1 == int_max &&
+    int_min *% -1 == int_min &&
+    int_min *% 2 == 0 &&
+    -%5 == 0 - 5 &&
+    1 +% 2 +% 3 == 6
+}
+
+fn neg_of_min() -> int {
+  const int_min = 9223372036854775807 +% 1
+  -%int_min
+}
+
+fn trapping_add() -> int {
+  const int_max = 9223372036854775807
+  int_max + 1
+}
+
+fn trapping_neg() -> int {
+  const int_min = 9223372036854775807 +% 1
+  -int_min
+}
+
+fn wrap_accumulate(rounds: int) -> int {
+  var acc = 0
+  var i = 0
+  while i < rounds {
+    acc = acc +% 1
+    i = i + 1
+  }
+  acc
+}

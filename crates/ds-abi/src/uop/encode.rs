@@ -19,7 +19,7 @@ use super::{
         Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr,
         KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64,
         NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, StrCatArena, SubF64, SubI64, TagNew,
-        TagTest, TagTestNot,
+        TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -119,6 +119,9 @@ impl Uop {
                 2 => r3!(MulI64),
                 3 => r3!(DivI64),
                 4 => r3!(ModI64),
+                5 => r3!(WrapAddI64),
+                6 => r3!(WrapSubI64),
+                7 => r3!(WrapMulI64),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             FloatArith => match minor {
@@ -336,9 +339,11 @@ impl Uop {
             | UCallg { .. }
             | ArenaRestore { .. }
             | StrCatArena { .. } => 4,
-            // minor 5 spans majors: GTI64/GTF64 and CALLTG
-            GtI64 { .. } | GtF64 { .. } | UCalltg { .. } => 5,
-            UCalls { .. } => 6,
+            // minor 5 spans majors: GTI64/GTF64, CALLTG, and the first
+            // IntArith wrap variant WRAPADDI64
+            GtI64 { .. } | GtF64 { .. } | UCalltg { .. } | WrapAddI64 { .. } => 5,
+            WrapSubI64 { .. } | UCalls { .. } => 6,
+            WrapMulI64 { .. } => 7,
         }
     }
 
@@ -351,6 +356,9 @@ impl Uop {
             | MulI64 { dst, .. }
             | DivI64 { dst, .. }
             | ModI64 { dst, .. }
+            | WrapAddI64 { dst, .. }
+            | WrapSubI64 { dst, .. }
+            | WrapMulI64 { dst, .. }
             | AddF64 { dst, .. }
             | SubF64 { dst, .. }
             | MulF64 { dst, .. }
@@ -433,6 +441,9 @@ impl Uop {
             | MulI64 { lhs, rhs, .. }
             | DivI64 { lhs, rhs, .. }
             | ModI64 { lhs, rhs, .. }
+            | WrapAddI64 { lhs, rhs, .. }
+            | WrapSubI64 { lhs, rhs, .. }
+            | WrapMulI64 { lhs, rhs, .. }
             | AddF64 { lhs, rhs, .. }
             | SubF64 { lhs, rhs, .. }
             | MulF64 { lhs, rhs, .. }

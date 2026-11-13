@@ -1,0 +1,41 @@
+// purpose: the combined-family derive — one `#[derive(show, ord)]`
+// attribute on one declaration synthesizes both members through the
+// one shared mint, and both answer through the VM: the show member
+// prints its case, the ord member signs the case order and the equal
+// pair. A unit-case enum keeps both bodies small while the one
+// attribute expands into two impls.
+// items:
+// int: stage: run
+// string: stage: run
+// println: stage: run
+// str: stage: run
+// show: stage: run
+// ord: stage: run
+// color: stage: run
+// main: stage: run
+
+tag int
+tag string
+
+extern fn println(s: string) -> ()
+extern fn str[t](v: t) -> string
+
+trait show {
+  fn show(self) -> string
+}
+
+trait ord {
+  fn compare(self, other: Self) -> int
+}
+
+#[derive(show, ord)]
+enum color { red, green, blue }
+
+fn main() -> int {
+  println(red.show())
+  println(blue.show())
+  println(str(red.compare(green)))
+  println(str(green.compare(green)))
+  println(str(blue.compare(red)))
+  0
+}

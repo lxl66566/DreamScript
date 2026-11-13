@@ -136,26 +136,35 @@ pub struct Db {
 impl Db {
     /// Creates an empty database with the computes for
     /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`],
-    /// [`QueryKey::BlockSource`], [`QueryKey::Resolve`],
-    /// [`QueryKey::CheckedPackage`], [`QueryKey::FileLinearity`],
+    /// [`QueryKey::BlockSource`], [`QueryKey::Expanded`],
+    /// [`QueryKey::Resolve`], [`QueryKey::CheckedPackage`],
+    /// [`QueryKey::Analyzed`], [`QueryKey::PackageLinearity`],
     /// [`QueryKey::PackageEffects`], [`QueryKey::TypeOf`],
     /// [`QueryKey::LinearityCheck`], [`QueryKey::EffectsOf`], and
     /// [`QueryKey::PlatformCheck`] registered: `ds-parse` for the tree and
     /// diagnostics, the tree's block spans for the index, the block-text
-    /// seam for sources, the ds-check collection and resolution passes
-    /// over the registered files (G3), the bidirectional check (B2), the M2
-    /// affine pass (C1, C5) per file, the ds-check effects pass over the
-    /// registered files (E1), and the per-definition slices of those three
-    /// (see the crate docs).
+    /// seam for sources, the ds-check derive expansion of every parse
+    /// (G1), the ds-check collection and resolution passes over the
+    /// expanded trees (G3), the bidirectional check (B2) over each of the
+    /// two halves — the checked package and the full analyzed bundle the
+    /// run path lowers from — the M2 affine pass (C1, C5) over the
+    /// expanded trees, the ds-check effects pass over the expanded trees
+    /// (E1), and the per-definition slices of those (see the crate
+    /// docs).
     #[must_use]
     pub fn new() -> Self {
         let mut db = Self::default();
         db.set_compute(QueryKind::ParseFile, crate::queries::parse);
         db.set_compute(QueryKind::BlockIndex, crate::queries::block_index);
         db.set_compute(QueryKind::BlockSource, crate::queries::block_source);
+        db.set_compute(QueryKind::Expanded, crate::queries::expanded);
         db.set_compute(QueryKind::Resolve, crate::queries::resolve);
         db.set_compute(QueryKind::CheckedPackage, crate::queries::checked_package);
-        db.set_compute(QueryKind::FileLinearity, crate::queries::file_linearity);
+        db.set_compute(QueryKind::Analyzed, crate::queries::analyzed);
+        db.set_compute(
+            QueryKind::PackageLinearity,
+            crate::queries::package_linearity,
+        );
         db.set_compute(QueryKind::PackageEffects, crate::queries::package_effects);
         db.set_compute(QueryKind::TypeOf, crate::queries::type_of);
         db.set_compute(QueryKind::LinearityCheck, crate::queries::linearity_check);

@@ -23,9 +23,13 @@ clap.workspace      = true
 ds-check.workspace  = true
 ds-diag             = { workspace = true, features = ["json"] }
 ds-query.workspace  = true
-ds-stdlib.workspace = true
+ds-stdlib = { workspace = true, features = ["ast-serde"] }
 ds-mod.workspace    = true
 ds-vm.workspace     = true
 ds-lower = { path = "../ds-lower" }
+ds-lsp   = { path = "../ds-lsp" }
+# the async runtime behind `ds lsp`'s protocol loop (built and dropped
+# inside the subcommand; no analysis code is async)
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "time"] }
 ds-parse = { path = "../ds-parse" }
 ds-fmt   = { path = "../ds-fmt" }

@@ -13,34 +13,45 @@
 //! * `block_source` reads the parse result and the block index and slices out one block's text.
 //!   Downstream block-keyed queries depend on this value — not on the file — so a file edit that
 //!   leaves a block's text unchanged renews (not invalidates) that block's dependents.
-//! * `resolve` reads every registered file's parse and runs the ds-check collection and resolution
-//!   passes (G3): every registered file is the package, a file whose parse failed contributes no
-//!   declarations, and the value carries the namespace, per-file use tables, and the collection and
-//!   resolution diagnostics. The dependency is the whole set of parses plus the file-set input
-//!   ([`Ctx::file_count`]), so the query invalidates at file grain and on registration — collection
-//!   is package-wide, so any parse edit can change any resolution.
-//! * `checked_package` reads the resolve value and every parse, runs the ds-check bidirectional
-//!   pass (B2) over the package once, and carries the package's diagnostics plus every top-level
-//!   binding's rendered type. Package grain: its dependency is the whole parse set like `resolve`.
-//! * `file_linearity` reads one file's parse and runs the M2 affine pass (C1, C5) over that file as
-//!   a single-file package. File grain: the pass is a package fixpoint (cross-item moves are legal
-//!   inside a file), so block-grain renewal would under-approximate it; the block-grain seam stays
-//!   what the M3 lowering reads.
-//! * `package_effects` reads the resolve value and every registered file's parse and runs the
-//!   ds-check effects pass (E1) over the already collected and resolved package: the M2 package is
-//!   all registered files (G3), a file whose parse failed contributes no tree (its definitions are
-//!   absent). The file-set input rides along with the parses, so registration invalidates every row
-//!   too.
+//! * `expanded` reads every registered file's parse (and the file-set input through
+//!   [`Ctx::file_count`]) and runs the ds-check derive expansion (G1): the one place the package's
+//!   trees expand, so every package-grain pass below checks the same synthesized impls. Package
+//!   grain — any parse edit, and a derive attribute edit in particular, re-derives this value and
+//!   everything reading it.
+//! * `resolve` reads the expanded value and runs the ds-check collection and resolution passes (G3)
+//!   over the expanded trees — expansion precedes resolution — so a derive-synthesized member
+//!   resolves like a hand-written one. Every registered file is the package, a file whose parse
+//!   failed contributes no declarations, and the value carries the namespace, per-file use tables,
+//!   and the expansion-refusal, collection, and resolution diagnostics; its dependency is the
+//!   expansion alone, so the query invalidates at file grain and on registration through it
+//!   (collection is package-wide, so any parse edit can change any resolution).
+//! * `checked_package` reads the resolve and expanded values, runs the ds-check bidirectional pass
+//!   (B2) over the expanded trees once, and carries the package's diagnostics plus every top-level
+//!   binding's rendered type. Package grain: its dependencies are the two values.
+//! * `analyzed` reads the expanded and resolve values and runs the analyzer's check half over them
+//!   (B2), bundling the shared trees, namespace, resolutions, declaration tables, and typed result:
+//!   the value the run path lowers from, over the expansion's own trees, so no consumer re-expands
+//!   or re-resolves the queries' inputs. Package grain like `checked_package`.
+//! * `package_linearity` reads the analyzed bundle and the expansion and runs the M2 affine pass
+//!   (C1, C5) over the expansion's own trees — the same trees the check family checked — so a
+//!   derive-synthesized impl body answers linearity facts like a hand-written one, computed from
+//!   the bundle's own tables with no second expansion, resolution, or check. Package grain like
+//!   `checked_package`: the expansion is the identity anchor (its recompute always counts as
+//!   changed), the fact lists are the value's own renewal identity.
+//! * `package_effects` reads the resolve and expanded values and runs the ds-check effects pass
+//!   (E1) over the already collected and resolved expanded trees: the M2 package is all registered
+//!   files (G3), a file whose parse failed contributes no tree (its definitions are absent). The
+//!   file-set input rides along through the expansion, so registration invalidates every row too.
 //! * `type_of` reads the checked package and slices one definition's story out of it: the
 //!   declaration and body diagnostics whose primary labels address the definition's block, plus the
 //!   solved type of each binding it holds. The slice's dependencies are the checked package and the
 //!   definition file's block index, so deep verification walks three keys however many files or
 //!   definitions the package has.
-//! * `linearity_check` reads the definition file's `file_linearity` value and the block index, and
+//! * `linearity_check` reads the package's `package_linearity` value and the block index, and
 //!   slices out the definition's facts. Same per-definition dependency shape as `type_of`.
 //! * `effects_of` reads `package_effects` and answers one definition's row by its package index.
-//! * `platform_check` reads the parses and `package_effects`, and runs `ds_check::check_platform`
-//!   over the same trees against the package's platform declaration.
+//! * `platform_check` reads the expanded value and `package_effects`, and runs
+//!   `ds_check::check_platform` over the same trees against the package's platform declaration.
 //!
 //! [`Ctx::file_content`]: crate::Ctx::file_content
 //! [`Ctx::file_count`]: crate::Ctx::file_count
@@ -58,9 +69,10 @@ use crate::{
     key::{BlockId, DefId, PackageId, QueryKey},
     query::{BlockIndex, ParseFile},
     value::{
-        BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
-        FileLinearityOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput, ParseOutput,
-        PlatformCheckOutput, QueryValue, ResolveOutput, TypeOfOutput,
+        AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
+        ExpandedOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput,
+        PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
+        TypeOfOutput,
     },
 };
 
@@ -77,20 +89,44 @@ fn package_asts(ctx: &mut Ctx<'_>) -> Result<Vec<Arc<Ast>>, QueryError> {
     Ok(asts)
 }
 
-/// Name resolution for the package (G3): the ds-check collection and
-/// resolution passes over the registered files. The [`PackageId`] key is
-/// the package grain — M2 has one package, every registered file, so the
-/// id is ignored until M7's package loading mints real identity.
-pub(crate) fn resolve(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
-    let QueryKey::Resolve(_) = key else {
+/// The package's derive-expanded trees (G1): every registered file's
+/// parse through the ds-check expansion, the substrate the resolve and
+/// check family below computes over — the one place the package's trees
+/// expand, so every pass checks the same synthesized impls. Package
+/// grain like `resolve`: the dependency is the whole parse set plus the
+/// file-set input, so a derive attribute edit anywhere re-derives this
+/// value and everything reading it.
+pub(crate) fn expanded(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::Expanded(_) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let asts = package_asts(ctx)?;
-    let (package, resolutions, diags) = ds_check::resolve_package(&asts);
+    let (asts, diags) = ds_check::expand_derives(&asts);
+    Ok(QueryValue::Expanded(ExpandedOutput {
+        asts: asts.into(),
+        diags: diags.into(),
+    }))
+}
+
+/// Name resolution for the package (G3): the ds-check collection and
+/// resolution passes over the expanded trees (the `expanded` value's),
+/// so a derive-synthesized member resolves like a hand-written one; the
+/// value's diagnostics carry the expansion's refusal classes ahead of
+/// the collection and resolution ones. The [`PackageId`] key is the
+/// package grain — M2 has one package, every registered file, so the id
+/// is ignored until M7's package loading mints real identity.
+pub(crate) fn resolve(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::Resolve(package) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let expanded = ctx.get::<crate::query::Expanded>(package)?;
+    let (package, resolutions, diags) = ds_check::resolve_package(&expanded.asts);
+    let mut all = expanded.diags.to_vec();
+    all.extend(diags);
     Ok(QueryValue::Resolve(ResolveOutput {
         package: Arc::new(package),
         resolutions: resolutions.into(),
-        diags: diags.into(),
+        diags: all.into(),
     }))
 }
 
@@ -137,20 +173,26 @@ fn placement_spans(facts: impl Iterator<Item = Span>) -> Vec<(u32, Span)> {
 }
 
 /// The whole-package bidirectional check (B2): the ds-check declaration
-/// and body pass over every parseable file, after the package's collection
-/// and resolution. The substrate every definition's typed story slices, so
-/// the pass runs once per package; its fact index buckets every definition
-/// and every diagnostic's primary label by the block it addresses, so a
-/// story is one lookup instead of a scan of the package.
+/// and body pass over the package's expanded trees, after the collection
+/// and resolution over the same trees. The substrate every definition's
+/// typed story slices, so the pass runs once per package; its fact index
+/// buckets every definition and every diagnostic's primary label by the
+/// block it addresses, so a story is one lookup instead of a scan of the
+/// package.
 pub(crate) fn checked_package(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::CheckedPackage(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let resolved = ctx.get::<crate::query::Resolve>(package)?;
-    let asts = package_asts(ctx)?;
-    let checked =
-        ds_check::check_resolved(ctx.files(), &asts, &resolved.package, &resolved.resolutions);
-    let blocks: Vec<(u32, Span)> = asts
+    let expanded = ctx.get::<crate::query::Expanded>(package)?;
+    let checked = ds_check::check_resolved(
+        ctx.files(),
+        &expanded.asts[..],
+        &resolved.package,
+        &resolved.resolutions,
+    );
+    let blocks: Vec<(u32, Span)> = expanded
+        .asts
         .iter()
         .flat_map(|ast| {
             ast.blocks
@@ -172,6 +214,30 @@ pub(crate) fn checked_package(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryV
         diags: checked.checked.diags.into(),
         type_names: Arc::new(checked.type_names),
         facts,
+    }))
+}
+
+/// The analyzed package (B2): the analyzer's check half over the
+/// expansion and resolve values — the trees, namespace, resolutions,
+/// and resolution-time diagnostics the memos already hold — bundled as
+/// the value the run path lowers from, over the expansion's own trees,
+/// so the run path never re-expands or re-resolves the queries' inputs.
+/// Package grain like `checked_package`: its dependencies are the two
+/// package-grain values.
+pub(crate) fn analyzed(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::Analyzed(package) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let expanded = ctx.get::<crate::query::Expanded>(package)?;
+    let resolved = ctx.get::<crate::query::Resolve>(package)?;
+    Ok(QueryValue::Analyzed(AnalyzedOutput {
+        analyzed: ds_check::analyze_resolved(
+            ctx.files(),
+            expanded.asts,
+            resolved.package,
+            resolved.resolutions,
+            resolved.diags.to_vec(),
+        ),
     }))
 }
 
@@ -216,32 +282,47 @@ pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Qu
     Ok(QueryValue::TypeOf(TypeOfOutput { types, diags }))
 }
 
-/// The M2 affine pass (C1, C5) over one file, run as a single-file
-/// package: the substrate every definition's linearity facts slice. The
-/// pass is a package fixpoint (cross-item moves are legal inside a file),
-/// so it runs at file grain, not per definition; its fact index buckets
-/// every placement and every diagnostic's primary label by the block it
-/// addresses, so a definition's facts are one lookup.
-pub(crate) fn file_linearity(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
-    let QueryKey::FileLinearity(file) = key else {
+/// The M2 affine pass (C1, C5) over the package's expanded trees: the
+/// walk the run path lowers from, reusing the analyzed bundle's own
+/// trees, namespace, resolutions, declaration tables, and binder facts,
+/// so a derive-synthesized impl body answers linearity facts like a
+/// hand-written one and no second expansion, resolution, or check runs.
+/// Package grain like `checked_package`: the bundle is the data substrate
+/// and the expansion is the identity anchor — the bundle may renew
+/// against an unchanged identity while a span-keyed fact moved, so the
+/// pass re-derives whenever the expansion recomputes (always) and renews
+/// through its own fact lists. The fact index buckets every placement and
+/// every diagnostic's primary label by the block it addresses, so a
+/// definition's facts are one lookup.
+pub(crate) fn package_linearity(
+    ctx: &mut Ctx<'_>,
+    key: QueryKey,
+) -> Result<QueryValue, QueryError> {
+    let QueryKey::PackageLinearity(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
-    let parse = ctx.get::<ParseFile>(file)?;
-    let empty = FileLinearityOutput {
-        diags: Vec::new().into(),
-        moves: Vec::new().into(),
-        drops: Vec::new().into(),
-        last_uses: Vec::new().into(),
-        facts: Arc::default(),
-    };
-    let Some(ast) = parse.ast.as_deref() else {
-        return Ok(QueryValue::FileLinearity(empty));
-    };
-    let (_, lin) = ds_check::linearity::check(ctx.files(), std::slice::from_ref(ast));
-    let blocks: Vec<(u32, Span)> = ast
-        .blocks
+    // The expansion read is the identity anchor, not a data source: the
+    // bundle below may renew against an unchanged identity while a
+    // span-keyed fact moved, so the recompute must key on the expansion's
+    // always-changed rule.
+    ctx.get::<crate::query::Expanded>(package)?;
+    let analyzed = ctx.get::<crate::query::Analyzed>(package)?;
+    let bundle = &analyzed.analyzed;
+    let lin = ds_check::linearity_check(
+        &bundle.asts,
+        &bundle.package,
+        &bundle.resolutions,
+        &bundle.decls,
+        &bundle.checked,
+    );
+    let blocks: Vec<(u32, Span)> = bundle
+        .asts
         .iter()
-        .map(|block| (file.as_u32(), block.span))
+        .flat_map(|ast| {
+            ast.blocks
+                .iter()
+                .map(|block| (ast.file.as_u32(), block.span))
+        })
         .collect();
     let facts = Arc::new(LinearityFacts {
         diags: BlockFacts::build(blocks.iter().copied(), primary_label_spans(&lin.diags)),
@@ -258,7 +339,7 @@ pub(crate) fn file_linearity(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryVa
             placement_spans(lin.last_uses.iter().map(|fact| fact.at)),
         ),
     });
-    Ok(QueryValue::FileLinearity(FileLinearityOutput {
+    Ok(QueryValue::PackageLinearity(PackageLinearityOutput {
         diags: lin.diags.into(),
         moves: lin.moves.into(),
         drops: lin.drops.into(),
@@ -289,19 +370,19 @@ pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue,
 }
 
 /// The package's effect rows (E1): the ds-check effects pass over the
-/// registered files' parses, reusing the `resolve` value's collected
-/// package and per-file resolutions instead of re-running collection and
-/// resolution per file. Package grain like `resolve` — the dependency is
-/// the whole parse set plus the file-set input, and the declared-row and
-/// capability tables are fixed database inputs.
+/// expanded trees, reusing the `resolve` value's collected package and
+/// per-file resolutions (built over the same trees) instead of re-running
+/// collection and resolution per file. Package grain like `resolve` — its
+/// dependencies are the resolve and expanded values, and the declared-row
+/// and capability tables are fixed database inputs.
 pub(crate) fn package_effects(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::PackageEffects(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let resolved = ctx.get::<crate::query::Resolve>(package)?;
-    let asts = package_asts(ctx)?;
+    let expanded = ctx.get::<crate::query::Expanded>(package)?;
     let effects = ds_check::effects::effects_of_resolved(
-        &asts,
+        &expanded.asts[..],
         &resolved.package,
         &resolved.resolutions,
         ctx.declared_rows(),
@@ -314,19 +395,27 @@ pub(crate) fn package_effects(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryV
 
 /// Parses one file with `ds-parse`: tree plus diagnostics as one value.
 ///
-/// A pure function of exactly one input — the file's `FileContent` read
-/// through [`Ctx::file_content`]; nothing else in the context is read.
-/// `ParseOutput::eq` (value.rs) compares only the source text on the
-/// strength of that purity: if this compute ever grows more inputs, that
-/// equality must widen with it.
+/// The ambient member is the one file with a shortcut: when the content is
+/// the ambient source and the embedded blob verifies (source hash plus file
+/// id), the precompiled tree serves in place of the parse — a pure cache,
+/// every blob miss falling back to the fresh parse. The blob is a
+/// build-time constant, so the compute stays a pure function of exactly one
+/// input — the file's `FileContent` read through [`Ctx::file_content`];
+/// nothing else in the context is read. `ParseOutput::eq` (value.rs)
+/// compares only the source text on the strength of that purity: if this
+/// compute ever grows more inputs, that equality must widen with it.
 pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::ParseFile(file) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let source = ctx.file_content(file)?;
-    let (ast, diagnostics) = match ds_parse::parse(ctx.files(), file) {
-        Ok(ast) => (Some(Arc::new(ast)), Vec::new()),
-        Err(diags) => (None, diags),
+    let (ast, diagnostics) = if source.as_ref() == ds_stdlib::AMBIENT_SOURCE {
+        match ds_stdlib::ambient_ast(file) {
+            Ok(ast) => (Some(Arc::new(ast)), Vec::new()),
+            Err(_) => parse_fresh(ctx, file),
+        }
+    } else {
+        parse_fresh(ctx, file)
     };
     Ok(QueryValue::ParseFile(ParseOutput {
         ast,
@@ -335,18 +424,27 @@ pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Quer
     }))
 }
 
+/// The fresh-parse half of the parse compute: `ds-parse` over the file,
+/// tree plus diagnostics as one value.
+fn parse_fresh(ctx: &Ctx<'_>, file: FileId) -> (Option<Arc<Ast>>, Vec<Diagnostic>) {
+    match ds_parse::parse(ctx.files(), file) {
+        Ok(ast) => (Some(Arc::new(ast)), Vec::new()),
+        Err(diags) => (None, diags),
+    }
+}
+
 /// The package's platform check (H5, E1): the package's computed rows
 /// (rows plus world-capability attribution) verified inside what its
 /// platform declaration provides. Package grain like `resolve` — the
-/// dependency is the whole parse set plus the file-set input, read through
-/// the `package_effects` memo so the effects pass runs once.
+/// dependencies are read through the `package_effects` and `expanded`
+/// memos, so the effects pass and the expansion each run once.
 pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
-    let QueryKey::PlatformCheck(_) = key else {
+    let QueryKey::PlatformCheck(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
-    let effects = ctx.get::<crate::query::PackageEffects>(PackageId::new(0))?;
-    let asts = package_asts(ctx)?;
-    let diags = ds_check::check_platform(&asts, &effects.effects);
+    let effects = ctx.get::<crate::query::PackageEffects>(package)?;
+    let expanded = ctx.get::<crate::query::Expanded>(package)?;
+    let diags = ds_check::check_platform(&expanded.asts[..], &effects.effects);
     Ok(QueryValue::PlatformCheck(PlatformCheckOutput {
         diags: diags.into(),
     }))
@@ -400,19 +498,20 @@ pub(crate) fn block_source(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValu
     Ok(QueryValue::BlockSource(Arc::from(text)))
 }
 
-/// Slices one definition's facts out of its file's linearity pass.
+/// Slices one definition's facts out of the package's linearity pass.
 /// `DefId` packs `(file, block)` until the real definition table lands, so
 /// the definition is its block and its facts are those the block's bucket
 /// holds.
 ///
 /// A file that fails to parse yields empty facts for every definition:
-/// syntax diagnostics are the parse query's data and flow through it.
+/// it contributes no tree to the expansion, so no fact addresses its
+/// blocks.
 pub(crate) fn linearity_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::LinearityCheck(def) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let (block, _) = def_block(ctx, def)?;
-    let lin = ctx.get::<crate::query::FileLinearity>(block.file)?;
+    let lin = ctx.get::<crate::query::PackageLinearity>(PackageId::new(0))?;
     let diags = lin
         .facts
         .diags

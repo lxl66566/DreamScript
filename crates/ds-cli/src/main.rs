@@ -3,8 +3,9 @@
 //! `ds check` runs the static story over .ds sources, `ds run` executes
 //! one module — a dsmod file, or a .ds source compiled in-process —, `ds
 //! build` compiles a .ds source to a dsmod module, `ds fmt` rewrites
-//! .ds sources in place, and `ds repl` reads-eval-prints against the
-//! in-process pipeline with a persistent session. Every further
+//! .ds sources in place, `ds repl` reads-eval-prints against the
+//! in-process pipeline with a persistent session, and `ds lsp` serves
+//! the language-server protocol on stdin/stdout. Every further
 //! subcommand (info, dev, save, bind, link) lands when the backend it
 //! drives lands — no stub commands.
 
@@ -15,6 +16,7 @@ use clap::{Parser, Subcommand};
 mod build;
 mod check;
 mod fmt;
+mod lsp;
 mod repl;
 mod run;
 mod source;
@@ -43,6 +45,8 @@ enum Command {
     Fmt(fmt::FmtArgs),
     /// Interactive read-eval-print loop over the in-process pipeline
     Repl(repl::ReplArgs),
+    /// Serve the language-server protocol on stdin/stdout
+    Lsp(lsp::LspArgs),
 }
 
 fn main() -> ExitCode {
@@ -53,6 +57,7 @@ fn main() -> ExitCode {
         Command::Build(args) => build::build(&args).map(|()| ExitCode::SUCCESS),
         Command::Fmt(args) => Ok(fmt::fmt(&args)),
         Command::Repl(args) => repl::repl(&args),
+        Command::Lsp(args) => lsp::lsp(&args),
     };
     match result {
         // the subcommand reports its own exit code (diagnostics vs clean)

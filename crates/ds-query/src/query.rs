@@ -14,9 +14,9 @@ use ds_diag::FileId;
 use crate::{
     key::{BlockId, DefId, PackageId, QueryKey},
     value::{
-        BlockIndexOutput, CheckedPackageOutput, FileLinearityOutput, LinearityOutput,
-        PackageEffectsOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
-        TypeOfOutput,
+        AnalyzedOutput, BlockIndexOutput, CheckedPackageOutput, ExpandedOutput, LinearityOutput,
+        PackageEffectsOutput, PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue,
+        ResolveOutput, TypeOfOutput,
     },
 };
 
@@ -91,10 +91,32 @@ impl Query for LinearityCheck {
     }
 }
 
+/// Marker for the expanded-package query: [`QueryKey::Expanded`]. The
+/// key is the package id; the value is the package's parse memos' trees
+/// through the derive expansion (G1), the substrate the resolve and
+/// check family computes over.
+pub struct Expanded;
+
+impl Query for Expanded {
+    type Key = PackageId;
+    type Value = ExpandedOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::Expanded(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::Expanded(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
 /// Marker for the resolve query: [`QueryKey::Resolve`]. The key is the
 /// package id — 0 while M2's one package is every registered file; the
 /// value is the package's namespace, per-file resolutions, and the
-/// collection and resolution diagnostics (G3).
+/// expansion-refusal, collection, and resolution diagnostics (G3).
 pub struct Resolve;
 
 impl Query for Resolve {
@@ -197,22 +219,44 @@ impl Query for CheckedPackage {
     }
 }
 
-/// Marker for the file-linearity query: [`QueryKey::FileLinearity`]. The
-/// key is the file id; the value is the M2 affine pass (C1, C5) over that
-/// file, the substrate the per-definition facts slice.
-pub struct FileLinearity;
+/// Marker for the analyzed-package query: [`QueryKey::Analyzed`]. The key
+/// is the package id; the value is the full check bundle (B2) the run path
+/// lowers from, the analyzer's own pass over the parse memos' trees.
+pub struct Analyzed;
 
-impl Query for FileLinearity {
-    type Key = FileId;
-    type Value = FileLinearityOutput;
+impl Query for Analyzed {
+    type Key = PackageId;
+    type Value = AnalyzedOutput;
 
     fn make_key(key: Self::Key) -> QueryKey {
-        QueryKey::FileLinearity(key)
+        QueryKey::Analyzed(key)
     }
 
     fn extract(value: QueryValue) -> Option<Self::Value> {
         match value {
-            QueryValue::FileLinearity(out) => Some(out),
+            QueryValue::Analyzed(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the package-linearity query:
+/// [`QueryKey::PackageLinearity`]. The key is the package id; the value
+/// is the M2 affine pass (C1, C5) over the expansion's own trees, the
+/// substrate the per-definition facts slice.
+pub struct PackageLinearity;
+
+impl Query for PackageLinearity {
+    type Key = PackageId;
+    type Value = PackageLinearityOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::PackageLinearity(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::PackageLinearity(out) => Some(out),
             _ => None,
         }
     }

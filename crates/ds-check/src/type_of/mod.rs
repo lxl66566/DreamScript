@@ -44,7 +44,7 @@
 //! feed method selection, `~Copyable` is M4); ranges, indexing, and
 //! `in`-containment (they need the M3 stdlib's type vocabulary).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use ds_diag::{Diagnostic, ErrorCode, Files, Span};
 use ds_parse::{
@@ -127,7 +127,7 @@ pub type GenericCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>, Ty)>;
 
 /// The result of one package check: diagnostics in walk order plus the
 /// memoized type of every top-level binding (G3).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Checked {
     /// All diagnostics of collection, resolution, declaration, and bodies.
     pub diags: Vec<Diagnostic>,
@@ -223,7 +223,9 @@ use scope::ScopedMap;
 /// supplies source text for machine-readable suggestions.
 #[must_use]
 pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
-    analyze(files, asts).checked
+    // The bundle built above is the arc's only holder, so this moves the
+    // tables out instead of cloning them.
+    Arc::unwrap_or_clone(analyze(files, asts).checked)
 }
 
 /// The typed result of one resolved package: the full bidirectional check
@@ -247,16 +249,55 @@ pub struct TypedPackage {
 /// a second pass over the same sources mints an unrelated universe. The
 /// affine pass (C1) and the lowering pass (M3) consume exactly these.
 ///
+/// Every field of the bundle is a shared handle, so cloning it clones
+/// pointers — the query layer hands the bundle out of a memo without
+/// copying the namespace — and a consumer holding the bundle keeps the
+/// universe its `Ty`s were minted by alive.
+///
 /// The check runs over the derive-expanded trees (G1): consumed derive
 /// attributes became ordinary impl items, and [`Analyzed::asts`] carries
 /// exactly the trees every table was built over, so the lowering pass
 /// consumes those, never the caller's originals (a package with no
-/// derive attribute expands to an identical clone).
-pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
-    let (asts, mut diags) = crate::derive::expand(asts);
+/// derive attribute expands to an identical clone). `asts` may hold
+/// shared trees (`Borrow<Ast>`, like [`check_resolved`]): the query
+/// layer analyzes its parse memos without cloning the trees. Expansion
+/// precedes resolution (the landed ruling), and the split below lets a
+/// caller that already resolved through a memo hand that memo's own
+/// expanded trees and resolution in instead of resolving again.
+pub fn analyze<T>(files: &Files, asts: &[T]) -> Analyzed
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
+    let (asts, mut diags) = crate::derive::expand(&trees);
     let (package, resolutions, resolve_diags) = crate::resolve_package(&asts);
     diags.extend(resolve_diags);
-    let (decls, checked) = check_bodies(files, &asts, &package, &resolutions);
+    analyze_resolved(
+        files,
+        asts.into(),
+        package.into(),
+        resolutions.into(),
+        diags,
+    )
+}
+
+/// The check half of [`analyze`] over pre-resolved trees: builds the
+/// declaration tables and body-checks every item, then bundles the
+/// caller's own trees, namespace, and resolutions (the shared handles,
+/// adopted as-is) with `resolve_diags` merged ahead of the declaration
+/// and body classes (the expansion's refusal classes ride with them).
+/// The trees must be the ones `package` and `resolutions` were built
+/// over — the derive-expanded ones — so a caller holding a resolve
+/// memo's value passes its parts here unchanged.
+pub fn analyze_resolved(
+    files: &Files,
+    asts: Arc<[Ast]>,
+    package: Arc<Package>,
+    resolutions: Arc<[Resolutions]>,
+    resolve_diags: Vec<Diagnostic>,
+) -> Analyzed {
+    let (decls, checked) = check_bodies(files, &asts[..], &package, &resolutions[..]);
+    let mut diags = resolve_diags;
     diags.extend(checked.diags);
     let checked = Checked {
         diags,
@@ -274,8 +315,8 @@ pub fn analyze(files: &Files, asts: &[Ast]) -> Analyzed {
         asts,
         package,
         resolutions,
-        decls,
-        checked,
+        decls: Rc::new(decls),
+        checked: Arc::new(checked),
     }
 }
 
@@ -384,22 +425,30 @@ where
     })
 }
 
-/// The tables of one analyzed package; see [`analyze`].
+/// The tables of one analyzed package; see [`analyze`]. Every field is a
+/// shared handle, so cloning the bundle clones pointers — the query layer
+/// hands it out of a memo without copying the namespace — and a consumer
+/// holding the bundle keeps the universe its `Ty`s were minted by alive.
 #[must_use]
+#[derive(Clone)]
 pub struct Analyzed {
     /// The derive-expanded trees the tables were built over (G1):
     /// consumed derive attributes became ordinary impl items here. The
     /// lowering pass consumes these trees, never the caller's originals.
-    pub asts: Vec<Ast>,
+    pub asts: Arc<[Ast]>,
     /// The package namespace: definitions, name tables, method registry.
-    pub package: Package,
-    /// Per-file name resolutions, indexed by file id.
-    pub resolutions: Vec<Resolutions>,
-    /// The declaration tables, owning the universe that minted every `Ty`.
-    pub decls: Decls,
-    /// The typed result: diagnostics, top-level types, binder facts,
-    /// per-expression types.
-    pub checked: Checked,
+    pub package: Arc<Package>,
+    /// Per-file name resolutions, aligning with the package's collected
+    /// (parseable) files.
+    pub resolutions: Arc<[Resolutions]>,
+    /// The declaration tables, owning the universe that minted every
+    /// `Ty`. Shared without atomics: the tables hold `Rc` sets (see
+    /// `Universe`), so the bundle is not `Send` however it is shared.
+    pub decls: Rc<Decls>,
+    /// The typed result: diagnostics (resolve classes merged ahead of the
+    /// declaration and body classes, like [`analyze`]), top-level types,
+    /// binder facts, per-expression types.
+    pub checked: Arc<Checked>,
 }
 
 /// The tree position of each file id: file ids index a `Files` registry
@@ -3240,7 +3289,7 @@ impl Bodies<'_> {
             }
             self.record_solved_dispatch(method, recv_val.ty, span);
         }
-        self.member_call(&sig, recv_val.ty, &args[1..], trailing, span)
+        self.member_call(method, &sig, recv_val.ty, &args[1..], trailing, span)
     }
 
     fn dot_call(
@@ -3330,7 +3379,9 @@ impl Bodies<'_> {
                         continue;
                     }
                     match self.instance_resolution(trait_id, recv_val.ty) {
-                        Resolution::Unique(_) | Resolution::Ambiguous(_) => {
+                        Resolution::Unique(_)
+                        | Resolution::Covered(_)
+                        | Resolution::Ambiguous(_) => {
                             survivors.push((candidate, sig));
                         },
                         // A head that matched while its bound failed is
@@ -3445,7 +3496,7 @@ impl Bodies<'_> {
         }
         let (method, sig) = survivors.remove(0);
         self.record_solved_dispatch(method, recv_val.ty, span);
-        self.member_call(&sig, recv_val.ty, args, trailing, span)
+        self.member_call(method, &sig, recv_val.ty, args, trailing, span)
     }
 
     /// Whether an inherent impl's owner accepts the receiver (F3): every
@@ -3474,10 +3525,11 @@ impl Bodies<'_> {
 
     /// Records one selected method's solved dispatch at the call's own
     /// span. A trait survivor records the instance the environment
-    /// resolved for the receiver's type — a containing head, or a
-    /// generic head that unifies under provable bounds (B6) — where the
-    /// solved instance is the declared one and the recorded receiver
-    /// type carries the substitution. An inherent survivor records its
+    /// resolved for the receiver's type — a containing head, a generic
+    /// head that unifies under provable bounds (B6), or a covering
+    /// group of sibling branches whose representative names the shared
+    /// impl item — where the solved instance is the declared one and
+    /// the recorded receiver type carries the substitution. An inherent survivor records its
     /// method id (the lowerer resolves the impl item through it, and no
     /// instance exists). A site satisfied only through an in-scope
     /// assumption with no resolving instance records nothing — its
@@ -3507,7 +3559,7 @@ impl Bodies<'_> {
             return;
         };
         match self.instance_resolution(trait_id, recv) {
-            Resolution::Unique(instance) => {
+            Resolution::Unique(instance) | Resolution::Covered(instance) => {
                 // a generic impl's body dispatches on runtime evidence:
                 // record the per-bound instances the substitution serves,
                 // so the lowering side stages them without re-deriving types
@@ -3533,18 +3585,50 @@ impl Bodies<'_> {
         }
     }
 
+    /// The `Self` a member call binds: the receiver's type, widened to the
+    /// solving instance's written head when that head is closed and
+    /// contains the receiver — the dispatched member body was checked
+    /// over the written head, so its `Self`-typed parameters accept the
+    /// head's whole member set and a case-narrowed receiver no longer
+    /// pins them to its own case. A generic written head keeps the
+    /// receiver, which carries the call's substitution.
+    fn self_binding(&self, method: MethodId, recv: Ty) -> Ty {
+        let MethodOwner::Trait(def) = &self.package.method(method).owner else {
+            return recv;
+        };
+        let Some(&trait_id) = self.decls.traits.get(def) else {
+            return recv;
+        };
+        let id = match self.instance_resolution(trait_id, recv) {
+            Resolution::Unique(id) | Resolution::Covered(id) => id,
+            _ => return recv,
+        };
+        let Ok(written) = self.decls.instances.written(id) else {
+            return recv;
+        };
+        if self.decls.universe.contains(written, recv)
+            && !crate::instance_solve::head_carries_vars(&self.decls.universe, written)
+        {
+            written
+        } else {
+            recv
+        }
+    }
+
     /// One selected method's call check: the member signature with `Self`
-    /// bound to the receiver's type [record 6.1].
+    /// bound through [`Self::self_binding`] [record 6.1].
     fn member_call(
         &mut self,
+        method: MethodId,
         sig: &FnSig,
         recv_ty: Ty,
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
     ) -> Val {
+        let self_ty = self.self_binding(method, recv_ty);
         self.type_vars
-            .push(FxHashMap::from_iter([("Self".to_owned(), recv_ty)]));
+            .push(FxHashMap::from_iter([("Self".to_owned(), self_ty)]));
         let mut param_tys = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
             param_tys.push(param.ty.as_ref().and_then(|t| self.solve_here(t)));
@@ -5004,7 +5088,7 @@ impl Bodies<'_> {
             return true;
         }
         match self.instance_resolution(trait_id, ty) {
-            Resolution::Unique(_) => true,
+            Resolution::Unique(_) | Resolution::Covered(_) => true,
             Resolution::Ambiguous(candidates) => {
                 self.instance_ambiguity(trait_id, ty, &candidates, span);
                 false

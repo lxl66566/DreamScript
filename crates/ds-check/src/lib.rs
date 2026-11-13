@@ -176,7 +176,7 @@ pub use resolve::{
 };
 pub use type_of::{
     Analyzed, Checked, GenericCallBounds, InherentCallBounds, TraitCall, TypedPackage, Val,
-    analyze, check_resolved, type_check,
+    analyze, analyze_resolved, check_resolved, type_check,
 };
 pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};

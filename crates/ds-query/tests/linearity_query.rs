@@ -1,9 +1,10 @@
 //! The real `linearity_check` compute: per-definition facts sliced out of
-//! the M2 affine pass, memoized through the engine, and recomputed when the
-//! file's parse changes [C1, C5].
+//! the package's M2 affine pass over the expansion's own trees, memoized
+//! through the engine, and recomputed when the package's expansion changes
+//! [C1, C5].
 
 use ds_diag::FileId;
-use ds_query::{BlockId, Db, DefId, LinearityCheck};
+use ds_query::{BlockId, Db, DefId, LinearityCheck, PackageId, QueryKey, Resolve};
 
 const CLEAN: &str = concat!(
     "trait Copyable { }\n",
@@ -32,6 +33,134 @@ fn def(file: u32, block: u32) -> DefId {
         index: block,
     })
     .expect("fixture files stay under the packing bounds")
+}
+
+/// One derive attribute whose impl resolves inside the package: the
+/// expansion appends the synthesized impl beside the struct, so the
+/// affine pass walks its member body like a hand-written one.
+const DERIVED: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait show {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "#[derive(show)]\n",
+    "struct point { x: int, y: int }\n",
+    "##\n",
+    "fn plain() -> int { 1 }\n",
+);
+
+/// The linear layer declared in another file: the package expansion
+/// refuses the derive (its linear-head scan is package-wide), so no impl
+/// body exists and the block answers no facts — the same refusal the
+/// resolve value carries.
+const LINEAR_DECL: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait Copyable { }\n",
+    "trait show {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "struct cell: ~Copyable {\n",
+    "  n: int\n",
+    "}\n",
+);
+
+/// The copyable part declared in another file: no `~Copyable` veto, so
+/// a derive over it accepts and the expansion appends the synthesized
+/// impl beside the cross-file struct.
+const COPYABLE_DECL: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait show {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "struct cell { n: int }\n",
+);
+
+/// The accepting mirror of the refused derive: the struct in the second
+/// file derives over the first file's part.
+const CROSS_DERIVE: &str = concat!("#[derive(show)]\n", "struct box { c: cell }\n",);
+
+#[test]
+fn a_derived_member_body_answers_linearity_facts() {
+    let mut db = Db::new();
+    let _ = db.add_file("t.ds", DERIVED);
+
+    // The derive's block: the synthesized member's borrowed receiver is a
+    // final use, so the block answers it through the package pass over the
+    // expansion's trees. The raw parse tree holds no impl body at all, so
+    // this fact exists only because the pass walks the expanded trees.
+    let derived = db.get::<LinearityCheck>(def(0, 0)).unwrap();
+    assert!(derived.diags.is_empty());
+    assert_eq!(derived.last_uses.len(), 1);
+    assert!(derived.last_uses[0].borrowed);
+
+    // The plain fn answers as before: its body tracks nothing.
+    let plain = db.get::<LinearityCheck>(def(0, 1)).unwrap();
+    assert!(plain.diags.is_empty());
+    assert!(plain.moves.is_empty());
+    assert!(plain.last_uses.is_empty());
+
+    // One package pass serves both definitions.
+    assert_eq!(
+        db.compute_count(&QueryKey::PackageLinearity(PackageId::new(0))),
+        1
+    );
+}
+
+#[test]
+fn facts_follow_the_package_expansion_s_refusals() {
+    let mut db = Db::new();
+    let _ = db.add_file("a.ds", LINEAR_DECL);
+    let _ = db.add_file("b.ds", "#[derive(show)]\nstruct box { c: cell }\n");
+
+    // The package expansion refuses the derive over the cross-file linear
+    // part, so no member body exists to walk: the block answers no facts.
+    let lin = db.get::<LinearityCheck>(def(1, 0)).unwrap();
+    assert!(lin.diags.is_empty());
+    assert!(lin.moves.is_empty());
+    assert!(lin.drops.is_empty());
+    assert!(
+        lin.last_uses.is_empty(),
+        "the refused derive synthesizes no body"
+    );
+
+    // The same refusal rides the resolve value: both surfaces answer from
+    // the one expansion.
+    let resolved = db.get::<Resolve>(PackageId::new(0)).unwrap();
+    assert_eq!(resolved.diags.len(), 1);
+    assert_eq!(resolved.diags[0].code.as_str(), "DS2026");
+}
+
+#[test]
+fn a_cross_file_derive_answers_the_member_s_facts() {
+    let mut db = Db::new();
+    let _ = db.add_file("a.ds", COPYABLE_DECL);
+    let _ = db.add_file("b.ds", CROSS_DERIVE);
+
+    // The expansion accepts the derive over the cross-file copyable
+    // part, so the attributed block answers the synthesized member's
+    // facts: the borrowed receiver is a final use.
+    let derived = db.get::<LinearityCheck>(def(1, 0)).unwrap();
+    assert!(derived.diags.is_empty());
+    assert_eq!(derived.last_uses.len(), 1);
+    assert!(derived.last_uses[0].borrowed);
+
+    // The accept mirrors the refusal surface: the expansion carries no
+    // diagnostic.
+    let resolved = db.get::<Resolve>(PackageId::new(0)).unwrap();
+    assert!(resolved.diags.is_empty());
+
+    // One package pass serves both files: the part's own declaration
+    // block answers from the same pass.
+    let decls = db.get::<LinearityCheck>(def(0, 0)).unwrap();
+    assert!(decls.diags.is_empty());
+    assert!(decls.last_uses.is_empty());
+    assert_eq!(
+        db.compute_count(&QueryKey::PackageLinearity(PackageId::new(0))),
+        1
+    );
 }
 
 #[test]

@@ -16,7 +16,11 @@
 //! unifies arguments; a tuple head matches element-wise). Each receiver
 //! member unifies under its own substitution, so a union receiver
 //! `list[int] | list[string]` is covered when every branch is — the
-//! instance still serves the call with one dispatch target.
+//! instance still serves the call with one dispatch target. A union
+//! receiver no single instance serves is covered branch-wise when the
+//! covering instances are sibling branches of one written head: their
+//! one impl item (the member body checked over that head) serves the
+//! whole union, and resolution names a representative branch.
 //!
 //! # Bounds
 //!
@@ -62,6 +66,10 @@ pub enum Resolution {
     None,
     /// The one instance that serves it.
     Unique(InstanceId),
+    /// A union receiver no single instance serves, covered member-wise by
+    /// sibling branches of one written head: the representative names the
+    /// group, whose one impl item serves the whole union.
+    Covered(InstanceId),
     /// Several instances serve it; true ambiguity, never a priority order.
     Ambiguous(Vec<InstanceId>),
     /// A head matched but a declared bound failed for its substitution.
@@ -83,11 +91,12 @@ impl Resolution {
         !matches!(self, Self::None | Self::BoundUnsat { .. })
     }
 
-    /// The solved instance, when resolution is unique.
+    /// The solved instance, when resolution names one: the unique server,
+    /// or a covering group's representative branch.
     #[must_use]
     pub fn solved(&self) -> Option<InstanceId> {
         match self {
-            Self::Unique(id) => Some(*id),
+            Self::Unique(id) | Self::Covered(id) => Some(*id),
             _ => None,
         }
     }
@@ -141,11 +150,80 @@ fn resolve_members(
             }
         }
     }
+    // A union receiver no single instance serves may still be covered
+    // member-wise by sibling branches of one written head; the check
+    // runs only on the empty answer, so a serving instance always wins
+    // and the nearest-miss diagnostics survive a partial cover.
+    if serving.is_empty()
+        && members.len() > 1
+        && let Some(covered) = covered_branches(universe, env, assumptions, trait_id, members)
+    {
+        return covered;
+    }
     match (serving.as_slice(), miss) {
         ([], None) => Resolution::None,
         ([], Some(miss)) => miss,
         ([only], _) => Resolution::Unique(*only),
         (many, _) => Resolution::Ambiguous(many.to_vec()),
+    }
+}
+
+/// The branch-wise aggregation over a union receiver no single instance
+/// serves: per member atom, the instances that cover it; a group of
+/// sibling instances sharing one written head (the per-branch
+/// decomposition of one union-head declaration, one impl item behind
+/// them) serves the union when every member is covered by some instance
+/// of the group. Distinct written heads covering the union together do
+/// not — dispatch cannot pick between impl items — so members answered
+/// by separate declarations still refuse. Exactly one covering group
+/// answers [`Resolution::Covered`] with its first branch as the
+/// representative; several covering groups stay true ambiguity; none
+/// leaves the caller's nearest-miss answer in place.
+fn covered_branches(
+    universe: &Universe,
+    env: &InstanceEnv,
+    assumptions: &[(TraitId, Ty)],
+    trait_id: TraitId,
+    members: &[TypeId],
+) -> Option<Resolution> {
+    // Instances grouped by written head, in declaration order; each entry
+    // carries its per-member coverage.
+    let mut heads: Vec<Ty> = Vec::new();
+    let mut groups: Vec<Vec<(InstanceId, Vec<bool>)>> = Vec::new();
+    for index in 0..env.len() {
+        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
+        if env.trait_of(id) != Ok(trait_id) {
+            continue;
+        }
+        let Ok(written) = env.written(id) else {
+            continue;
+        };
+        let coverage: Vec<bool> = members
+            .iter()
+            .map(|&member| serves(universe, env, assumptions, id, &[member], MAX_DEPTH))
+            .collect();
+        match heads.iter().position(|&head| head == written) {
+            Some(pos) => groups[pos].push((id, coverage)),
+            None => {
+                heads.push(written);
+                groups.push(vec![(id, coverage)]);
+            },
+        }
+    }
+    let mut representatives = Vec::new();
+    for group in &groups {
+        let covers = members
+            .iter()
+            .enumerate()
+            .all(|(index, _)| group.iter().any(|(_, coverage)| coverage[index]));
+        if covers {
+            representatives.push(group[0].0);
+        }
+    }
+    match representatives.as_slice() {
+        [] => None,
+        [only] => Some(Resolution::Covered(*only)),
+        many => Some(Resolution::Ambiguous(many.to_vec())),
     }
 }
 
@@ -651,16 +729,17 @@ pub(crate) fn instantiation_overlap(
     None
 }
 
-/// Whether a head can carry variables into the probe: only a single-atom
-/// head does (written unions decompose at declaration; a trait-as-type or
-/// negation head names no generic parameter, and a multi-atom head that
-/// merely snapshots minted variables is left to the set algebra —
-/// grounding it would rewrite coverage that never depended on them).
-fn head_carries_vars(universe: &Universe, head: Ty) -> bool {
-    match universe.members(head) {
-        [only] => carries_vars(universe, *only),
-        _ => false,
-    }
+/// Whether a head can carry variables into the probe: every member
+/// decides (written unions decompose at declaration; a trait-as-type or
+/// negation head names no generic parameter), so a multi-atom head
+/// whose any member names a variable carries like a single-atom one —
+/// leaving such a head to the set algebra would let a written head
+/// with variables pass the carries-none gate.
+pub(crate) fn head_carries_vars(universe: &Universe, head: Ty) -> bool {
+    universe
+        .members(head)
+        .iter()
+        .any(|&atom| carries_vars(universe, atom))
 }
 
 /// Whether an atom names a variable anywhere in its shape.

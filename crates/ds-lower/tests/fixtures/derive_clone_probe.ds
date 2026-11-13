@@ -1,0 +1,98 @@
+// purpose: the derive-clone slice end to end — `#[derive(clone)]` on a
+// struct (a nested struct part and string, char, byte parts), an enum
+// (every payload shape: unit, tuple, struct), and a tag synthesizes one
+// ordinary impl clone item after parse, and every spelling reaches that
+// one body: the direct dot call, the qualified clone::clone escape
+// hatch, and a free generic function's bound dispatch (CALLG over the
+// impl member body). The duplicate is shallow (C4): the member is a
+// construction over the borrowed receiver, so each Ref part dups
+// through the placement pass — a count bump, never a deep copy — and
+// the clone-and-drop cycles balance the heap. A union-typed binding
+// dispatches through the sibling branches of the one written head.
+// items:
+// int: stage: run
+// string: stage: run
+// char: stage: run
+// byte: stage: run
+// println: stage: run
+// str: stage: run
+// concat: stage: run
+// clone: stage: run
+// inner: stage: run
+// outer: stage: run
+// wrap: stage: run
+// mark: stage: run
+// tone: stage: run
+// keyed: stage: run
+// dup: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag char
+tag byte
+
+extern fn println(s: string) -> ()
+extern fn str[t](v: t) -> string
+extern fn concat (a: string, b: string) -> string
+
+trait clone {
+  fn clone(self) -> Self
+}
+
+impl clone for int {
+  fn clone(self) -> Self { self }
+}
+impl clone for string {
+  fn clone(self) -> Self { self }
+}
+impl clone for char {
+  fn clone(self) -> Self { self }
+}
+impl clone for byte {
+  fn clone(self) -> Self { self }
+}
+
+#[derive(clone)]
+struct inner { a: int, s: string }
+
+#[derive(clone)]
+struct outer { i: inner, t: string, c: char, b: byte }
+
+#[derive(clone)]
+struct wrap { s: string }
+
+#[derive(clone)]
+enum mark { miss, hit(int), rect { w: int, h: int } }
+
+#[derive(clone)]
+tag tone
+
+fn keyed[t: clone](v: t) -> t { v.clone() }
+
+fn dup(v: wrap) -> wrap { v.clone() }
+
+fn main() -> int {
+  const o = outer { i: inner { a: 1, s: "arch" }, t: "beta", c: 'k', b: b'x' }
+  const c = o.clone()
+  const c2 = clone::clone(o)
+  println(c.i.s)
+  println(c2.i.s)
+  println(c.t)
+  println(str(c.i.a))
+  println(str(c2.i.a))
+  println(str(c.c))
+  println(str(c2.b))
+  const s = concat("al", "pha")
+  const w = wrap { s: s }
+  const w2 = dup(w)
+  println(w2.s)
+  const u1: mark = miss
+  const u2: mark = hit(3)
+  println(str(match u1.clone() { miss => 0, hit(n) => n, rect { w, h } => w }))
+  println(str(match u2.clone() { miss => 0, hit(n) => n, rect { w, h } => w }))
+  println(str(match rect(w: 2, h: 9).clone() { miss => 0, hit(n) => n, rect { w, h } => w + h }))
+  println(str(match tone.clone() { tone => 7 }))
+  println(str(keyed(5)))
+  0
+}

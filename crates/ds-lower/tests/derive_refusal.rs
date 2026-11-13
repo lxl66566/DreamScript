@@ -39,27 +39,33 @@ fn an_unimplemented_family_refuses_at_the_checker() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
+        "trait hash {\n",
+        "  fn hash(self) -> int\n",
+        "}\n",
+        "impl hash for int {\n",
+        "  fn hash(self) -> int { self }\n",
+        "}\n",
         "trait show {\n",
         "  fn show(self) -> string\n",
         "}\n",
-        "#[derive(hash, show, ord)]\n",
+        "#[derive(hash, show, to_json)]\n",
         "struct point { x: int, y: int }\n",
         "fn main() -> int { 0 }\n",
     );
     let rendered = refusals(source);
     assert_eq!(
         rendered.len(),
-        2,
-        "hash and ord refuse once each: {rendered:?}"
+        1,
+        "hash and show synthesize; only to_json refuses: {rendered:?}"
     );
     assert!(
-        rendered[0].contains("DS2024") && rendered[1].contains("DS2024"),
-        "the checklist refusal, both: {rendered:?}"
+        rendered[0].contains("DS2024"),
+        "the checklist refusal: {rendered:?}"
     );
     assert!(
         rendered
             .iter()
-            .any(|r| r.contains("derive `hash` is ruled but not implemented yet")),
+            .any(|r| r.contains("derive `to_json` is ruled but not implemented yet")),
         "{rendered:?}"
     );
     assert!(rendered.iter().all(|r| {
@@ -203,6 +209,214 @@ fn a_generic_declaration_refuses() {
     assert!(
         rendered[0].contains("derive `show` refuses a generic declaration"),
         "{}",
+        rendered[0]
+    );
+}
+
+/// The ord family refuses its own carve-outs, each naming the family:
+/// a function-typed part, a `~Copyable` part, and a generic declaration
+/// at the attribute. Every primitive part carries an ambient impl, so
+/// a part with no impl (a user type without one) is the honest
+/// boundary: the impl synthesizes and the call fails with the standard
+/// missing-impl diagnostic over the part's own span.
+#[test]
+fn the_ord_family_refuses_its_carve_outs() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait Copyable { }\n",
+        "trait ord {\n",
+        "  fn compare(self, other: Self) -> int\n",
+        "}\n",
+        "impl ord for int {\n",
+        "  fn compare(self, other: Self) -> int {\n",
+        "    if self < other { -1 } else if self > other { 1 } else { 0 }\n",
+        "  }\n",
+        "}\n",
+        "#[derive(ord)]\n",
+        "struct handler { cb: fn(int) -> int, v: int }\n",
+        "struct lease: ~Copyable { }\n",
+        "#[derive(ord)]\n",
+        "struct holder { kept: lease }\n",
+        "#[derive(ord)]\n",
+        "struct gen[t] { v: t }\n",
+        "struct plain { v: int }\n",
+        "#[derive(ord)]\n",
+        "struct named { v: plain }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 4, "the four ord refusals: {rendered:?}");
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `ord` refuses the field `cb`: a function-typed part")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `ord` refuses the field `kept`")
+            && r.contains("this part carries no structural ord")),
+        "the primary label names the ord family: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2029")
+                && r.contains("derive `ord` refuses a generic declaration")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2013") && r.contains("no instance of `ord` for `plain`")),
+        "{rendered:?}"
+    );
+}
+
+/// The hash family refuses its own carve-outs, each naming the family:
+/// a function-typed part, a `~Copyable` part, and a generic declaration
+/// at the attribute. Every primitive part carries an ambient impl, so a
+/// part with no impl (a user type without one) is the honest boundary:
+/// the impl synthesizes and the call fails with the standard
+/// missing-impl diagnostic over the part's own span.
+#[test]
+fn the_hash_family_refuses_its_carve_outs() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait Copyable { }\n",
+        "trait hash {\n",
+        "  fn hash(self) -> int\n",
+        "}\n",
+        "impl hash for int {\n",
+        "  fn hash(self) -> int { self }\n",
+        "}\n",
+        "#[derive(hash)]\n",
+        "struct handler { cb: fn(int) -> int, v: int }\n",
+        "struct lease: ~Copyable { }\n",
+        "#[derive(hash)]\n",
+        "struct holder { kept: lease }\n",
+        "#[derive(hash)]\n",
+        "struct gen[t] { v: t }\n",
+        "struct plain { v: int }\n",
+        "#[derive(hash)]\n",
+        "struct named { v: plain }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 4, "the four hash refusals: {rendered:?}");
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `hash` refuses the field `cb`: a function-typed part")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `hash` refuses the field `kept`")
+            && r.contains("this part carries no structural hash")),
+        "the primary label names the hash family: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2029")
+                && r.contains("derive `hash` refuses a generic declaration")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2013") && r.contains("no instance of `hash` for `plain`")),
+        "{rendered:?}"
+    );
+}
+
+/// The clone family refuses its own carve-outs, each naming the family:
+/// a function-typed part, a `~Copyable` part, and a generic declaration
+/// at the attribute. Every primitive part carries an ambient-impl shape
+/// in the probe, so a part with no impl (a user type without one) is the
+/// honest boundary: the impl synthesizes and the call fails with the
+/// standard missing-impl diagnostic over the part's own span.
+#[test]
+fn the_clone_family_refuses_its_carve_outs() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait Copyable { }\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "impl clone for int {\n",
+        "  fn clone(self) -> Self { self }\n",
+        "}\n",
+        "#[derive(clone)]\n",
+        "struct handler { cb: fn(int) -> int, v: int }\n",
+        "struct lease: ~Copyable { }\n",
+        "#[derive(clone)]\n",
+        "struct holder { kept: lease }\n",
+        "#[derive(clone)]\n",
+        "struct gen[t] { v: t }\n",
+        "struct plain { v: int }\n",
+        "#[derive(clone)]\n",
+        "struct named { v: plain }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 4, "the four clone refusals: {rendered:?}");
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `clone` refuses the field `cb`: a function-typed part")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `clone` refuses the field `kept`")
+            && r.contains("this part carries no structural clone")),
+        "the primary label names the clone family: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2029")
+                && r.contains("derive `clone` refuses a generic declaration")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2013") && r.contains("no instance of `clone` for `plain`")),
+        "{rendered:?}"
+    );
+}
+
+/// A part-less struct refuses the clone derive at the attribute: the
+/// member's `Self` return carries no word, so it would lower to a
+/// zero-width RETSPAN, which the ABI refuses by design (a plain fn
+/// returning the same value shares the hole, a pre-existing boundary).
+#[test]
+fn a_partless_struct_refuses_the_clone_derive() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "impl clone for int {\n",
+        "  fn clone(self) -> Self { self }\n",
+        "}\n",
+        "#[derive(clone)]\n",
+        "struct unit { }\n",
+        "#[derive(clone)]\n",
+        "struct point { x: int }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(
+        rendered.len(),
+        1,
+        "only the part-less struct refuses: {rendered:?}"
+    );
+    assert!(rendered[0].contains("DS2030"), "{}", rendered[0]);
+    assert!(
+        rendered[0].contains("derive `clone` refuses a part-less struct"),
+        "{}",
+        rendered[0]
+    );
+    assert!(
+        rendered[0].contains("zero-width RETSPAN"),
+        "the refusal names the ABI boundary: {}",
         rendered[0]
     );
 }

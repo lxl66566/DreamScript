@@ -46,8 +46,9 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
 ///   propagation pair) — the io failure, `default_config`, and the config type ride the ambient.
 /// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
-///   the derive engine behind `json for point`); the expression-error epoch keeps each root alone
-///   (the unresolved `fields`' not-callable and iteration follow-ons no longer print).
+///   the derive engine behind `json for point` — its to_json refusal class surfaces through the
+///   expansion-aware resolve and print as staged noise); the expression-error epoch keeps each root
+///   alone (the unresolved `fields`' not-callable and iteration follow-ons no longer print).
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
 ///   wants narrowing); `read_config`/`default_config`/`load_rows` resolve through the ambient.
@@ -69,7 +70,7 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
-    assert_corpus_clean("generics_coherent_traits.ds", 6);
+    assert_corpus_clean("generics_coherent_traits.ds", 7);
     assert_corpus_clean("syntax_ts_heart.ds", 5);
     assert_corpus_clean("linearity_modes_rc.ds", 8);
     assert_corpus_clean("effects_nursery.ds", 0);
@@ -243,6 +244,18 @@ fn a_missing_source_reports_the_path() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(stderr.contains("reading tests/fixtures/absent.ds"));
+}
+
+/// A derived member's call checks clean: the resolve and check queries run
+/// over the derive-expanded trees, so the synthesized impl resolves like a
+/// hand-written one and the call's story is silent.
+#[test]
+fn a_derived_members_call_checks_clean() {
+    let out = ds_check(&["check", "--no-ambient", "tests/fixtures/derive_call.ds"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert_eq!(stderr, "", "the derived call carries no diagnostics");
+    assert_eq!(out.stdout, [] as [u8; 0]);
 }
 
 /// A file past the DefId block budget reports the packing limit instead of

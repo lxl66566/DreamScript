@@ -1,0 +1,14 @@
+// purpose: a derived member's call checks clean at the check grain — the
+// resolve and check queries run over the derive-expanded trees, so the
+// synthesized impl resolves and checks like a hand-written one.
+tag int
+tag string
+
+trait show {
+  fn show(self) -> string
+}
+
+#[derive(show)]
+struct point { x: int, y: int }
+
+fn render(p: point) -> string { p.show() }

@@ -1,0 +1,123 @@
+// purpose: the derive-ord slice end to end — `#[derive(ord)]` on a
+// struct, an enum, and a tag synthesizes one ordinary impl ord item
+// after parse, and every spelling reaches that one body: the direct dot
+// call, the qualified ord::compare escape hatch, and a free generic
+// function's bound dispatch (CALLG over the impl member body). Float
+// parts order through the explicit total_compare native, string, char,
+// and byte parts through their own compare natives. A union-typed
+// binding dispatches through the sibling branches of the one written
+// head, and `Self` binds to that head, so the cross-case sign arms
+// answer: both-union operands, a case value against another case's
+// value, and the qualified spelling over the union.
+// items:
+// int: stage: run
+// float: stage: run
+// string: stage: run
+// char: stage: run
+// byte: stage: run
+// println: stage: run
+// str: stage: run
+// total_compare: stage: run
+// str_compare: stage: run
+// char_compare: stage: run
+// byte_compare: stage: run
+// ord: stage: run
+// point: stage: run
+// span: stage: run
+// mark: stage: run
+// tone: stage: run
+// named: stage: run
+// order: stage: run
+// main: stage: run
+
+tag int
+tag float
+tag string
+tag char
+tag byte
+
+extern fn println(s: string) -> ()
+extern fn str[t](v: t) -> string
+extern fn total_compare(a: float, b: float) -> int
+extern fn str_compare(a: string, b: string) -> int
+extern fn char_compare(a: char, b: char) -> int
+extern fn byte_compare(a: byte, b: byte) -> int
+
+trait ord {
+  fn compare(self, other: Self) -> int
+}
+
+impl ord for int {
+  fn compare(self, other: Self) -> int {
+    if self < other { -1 } else if self > other { 1 } else { 0 }
+  }
+}
+impl ord for float {
+  fn compare(self, other: Self) -> int { total_compare(self, other) }
+}
+impl ord for string {
+  fn compare(self, other: Self) -> int { str_compare(self, other) }
+}
+impl ord for char {
+  fn compare(self, other: Self) -> int { char_compare(self, other) }
+}
+impl ord for byte {
+  fn compare(self, other: Self) -> int { byte_compare(self, other) }
+}
+
+#[derive(ord)]
+struct point { x: int, y: int }
+
+#[derive(ord)]
+struct span { from: float, to: float }
+
+#[derive(ord)]
+enum mark { miss, hit(int), rect { w: int, h: int } }
+
+#[derive(ord)]
+tag tone
+
+#[derive(ord)]
+struct named { s: string, c: char, b: byte }
+
+fn order[t: ord](a: t, b: t) -> int { a.compare(b) }
+
+fn main() -> int {
+  const a = point { x: 1, y: 2 }
+  const b = point { x: 1, y: 3 }
+  println(str(a.compare(b)))
+  println(str(b.compare(a)))
+  println(str(a.compare(a)))
+  println(str(ord::compare(a, b)))
+  println(str(order(tone, tone)))
+  const s1 = span { from: 1.5, to: 2.0 }
+  const s2 = span { from: 1.5, to: 9.0 }
+  println(str(s1.compare(s2)))
+  println(str(s2.compare(s1)))
+  println(str(s1.compare(s1)))
+  println(str(miss.compare(miss)))
+  println(str(hit(3).compare(hit(4))))
+  println(str(hit(3).compare(hit(3))))
+  println(str(rect(w: 2, h: 9).compare(rect(w: 3, h: 1))))
+  println(str(rect(w: 2, h: 9).compare(rect(w: 2, h: 9))))
+  println(str(tone.compare(tone)))
+  const n1 = named { s: "arch", c: 'a', b: b'x' }
+  const n2 = named { s: "ark", c: 'a', b: b'x' }
+  const n3 = named { s: "ark", c: 'b', b: b'x' }
+  const n4 = named { s: "ark", c: 'a', b: b'y' }
+  println(str(n1.compare(n2)))
+  println(str(n2.compare(n1)))
+  println(str(n3.compare(n2)))
+  println(str(n4.compare(n3)))
+  println(str(n2.compare(n4)))
+  println(str(n4.compare(n4)))
+  const u1: mark = miss
+  const u2: mark = hit(3)
+  println(str(u1.compare(u2)))
+  println(str(u2.compare(u1)))
+  println(str(hit(3).compare(rect(w: 2, h: 9))))
+  println(str(rect(w: 5, h: 5).compare(u2)))
+  println(str(u1.compare(miss)))
+  println(str(ord::compare(u1, u2)))
+  0
+}

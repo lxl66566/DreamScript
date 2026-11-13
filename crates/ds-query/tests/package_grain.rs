@@ -46,6 +46,10 @@ fn effects() -> QueryKey {
     QueryKey::PackageEffects(PackageId::new(0))
 }
 
+fn linearity() -> QueryKey {
+    QueryKey::PackageLinearity(PackageId::new(0))
+}
+
 /// Reads every per-definition query over the whole package.
 fn read_every_definition(db: &mut Db, blocks: &[(FileId, u32)], def_count: usize) {
     for &(file, block) in blocks {
@@ -81,12 +85,10 @@ fn one_package_pass_serves_every_definition() {
     let def_count = checked.package.len();
     read_every_definition(&mut db, &blocks, def_count);
 
-    // One pass per package (and per file for the affine pass), however
-    // many definitions the package holds.
+    // One pass per package, however many definitions or files it holds.
     assert_eq!(db.compute_count(&package()), 1);
     assert_eq!(db.compute_count(&effects()), 1);
-    assert_eq!(db.compute_count(&QueryKey::FileLinearity(a)), 1);
-    assert_eq!(db.compute_count(&QueryKey::FileLinearity(b)), 1);
+    assert_eq!(db.compute_count(&linearity()), 1);
     assert_eq!(db.compute_count(&QueryKey::Resolve(PackageId::new(0))), 1);
     for &(file, block) in &blocks {
         let id = def(file.as_u32(), block);
@@ -171,9 +173,9 @@ fn an_edit_recomputes_each_package_pass_once() {
 
     assert_eq!(db.compute_count(&package()), 2);
     assert_eq!(db.compute_count(&effects()), 2);
-    assert_eq!(db.compute_count(&QueryKey::FileLinearity(a)), 2);
-    // File b's affine facts: the input did not move, so the pass renews.
-    assert_eq!(db.compute_count(&QueryKey::FileLinearity(b)), 1);
+    // The affine pass re-derives once for the whole package, like the
+    // other two: its grain is the expansion, not the edited file.
+    assert_eq!(db.compute_count(&linearity()), 2);
     // The resolve value re-derives (the edited block is one of its parse
     // dependencies) and renews: the edited block declares the same
     // definition it did before, so nothing above it moves.

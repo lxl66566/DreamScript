@@ -33,14 +33,16 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_CHAR_AT, BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD,
-        BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_JOIN, BUILTIN_LEN,
+        BUILTIN_BYTE_COMPARE, BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH,
+        BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_FILTER,
+        BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD, BUILTIN_JOIN, BUILTIN_LEN,
         BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
         BUILTIN_LIST_PUSH, BUILTIN_MAP, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
         BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL,
         BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP,
-        BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_STR_BOOL, BUILTIN_STR_FLOAT,
-        BUILTIN_STR_INT, BUILTIN_TAIL,
+        BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_STR_BOOL,
+        BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL,
+        BUILTIN_TOTAL_COMPARE,
     },
     platform::{
         OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_PRINT, OP_PRINTLN, Platform, STD_NAME,
@@ -1026,11 +1028,33 @@ fn both_native_modules_are_installed_and_resolvable() {
     // the fork-join fold (48) as a reserved slot: its ONE body lives in
     // the generic table, CALLG-addressed
     assert!(reg.resolve_native("builtin", BUILTIN_PAR_REDUCE).is_some());
+    // the float sort key (49), the ord derive's explicit total_compare
     assert!(
-        reg.resolve_native("builtin", 49).is_none(),
-        "49 table entries: the core's, the list block, the fiber pair, the push, the map block, \
+        reg.resolve_native("builtin", BUILTIN_TOTAL_COMPARE)
+            .is_some()
+    );
+    // the string, char, and byte sort keys (50-52), the ord derive's
+    // compare natives
+    assert!(reg.resolve_native("builtin", BUILTIN_STR_COMPARE).is_some());
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_CHAR_COMPARE)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_BYTE_COMPARE)
+            .is_some()
+    );
+    // the string, float, and char content hashes (53-55), the hash
+    // derive's hash natives
+    assert!(reg.resolve_native("builtin", BUILTIN_STR_HASH).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_FLOAT_HASH).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_CHAR_HASH).is_some());
+    assert!(
+        reg.resolve_native("builtin", 56).is_none(),
+        "56 table entries: the core's, the list block, the fiber pair, the push, the map block, \
          the generic container closes, the reentrant combinators, the nursery seams, the join, \
-         the partition, the fork-join combinator, the fork-join fold"
+         the partition, the fork-join combinator, the fork-join fold, the float sort key, the \
+         string, char, and byte sort keys, the string, float, and char content hashes"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

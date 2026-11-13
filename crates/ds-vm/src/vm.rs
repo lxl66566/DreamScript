@@ -1653,6 +1653,35 @@ fn fused_jmpif_not(code: &[u32], idx: usize, dst: u8) -> Option<u16> {
     (op == OP_JMPIF_NOT).then_some(u16::from_be_bytes([hi, lo]))
 }
 
+// The peek-next tag-branch fusion [BL-4, the census' ranked third family]:
+// a TAGTEST whose immediately following word is the measured census branch
+// spelling — JMPIF, the match dispatch's arm-guard exit — testing the tag
+// test's own dst takes its branch decision inside the tag test's dispatch,
+// the compare-branch slice's discipline exactly: one dispatch for two
+// uops, the uop stream and the module format staying byte-identical. The
+// bool write stays (the dst may be read on either path), and the branch
+// runs through the exact JMPIF arm body, so the `jump!` macro's bounds
+// check, trap attribution, and taken-backward cancel observation read the
+// branch's own pc exactly as the unfused spelling does — a fused back-edge
+// preempts a parked fiber where the two-dispatch run does, jump-to-self
+// included. An intervening word fails the opcode-byte match, and a tag
+// test at the code end peeks nothing (`code.get` on the out-of-bounds
+// index). JMPIF_NOT after a TAGTEST never fuses (the census measured no
+// such pair — the guard loops the lowering emits around tag tests spell
+// JMPIF), and TAGTEST_NOT stays outside the family entirely: no kernel
+// stream carries the uop at all, so it has no measured pair.
+
+/// The fused pair shape for a tag test at `idx`: the next word's biased
+/// jump field when it is a JMPIF whose tested cond is the tag test's own
+/// dst.
+fn fused_jmpif(code: &[u32], idx: usize, dst: u8) -> Option<u16> {
+    let [op, cond, hi, lo] = code.get(idx + 1)?.to_be_bytes();
+    if cond != dst {
+        return None;
+    }
+    (op == OP_JMPIF).then_some(u16::from_be_bytes([hi, lo]))
+}
+
 /// Reads a closure word's header and stages its capture block through the
 /// shared buffer, routing to the word's own heap. The disjoint-field
 /// parameters keep the staged slice's borrow on the staging buffer alone,
@@ -2082,6 +2111,9 @@ const OP_SUB_I64: u8 = 0x11;
 const OP_MUL_I64: u8 = 0x12;
 const OP_DIV_I64: u8 = 0x13;
 const OP_MOD_I64: u8 = 0x14;
+const OP_WRAPADD_I64: u8 = 0x15;
+const OP_WRAPSUB_I64: u8 = 0x16;
+const OP_WRAPMUL_I64: u8 = 0x17;
 const OP_ADD_F64: u8 = 0x20;
 const OP_SUB_F64: u8 = 0x21;
 const OP_MUL_F64: u8 = 0x22;
@@ -5288,6 +5320,27 @@ impl Vm {
                         }
                     }};
                 }
+                // the fused tag-branch tail: the JMPIF polarity of
+                // `fused_jmpif_not!` — taken on the held bool — over the
+                // same pc-first bump onto the branch's own word
+                macro_rules! fused_jmpif {
+                    ($field:expr, $cond:expr) => {{
+                        pc.0 += 1;
+                        let Ok(target) = u32::try_from(
+                            i64::from(pc.0) + 1 + i64::from(($field ^ BIAS_J) as i16),
+                        ) else {
+                            bad_encoding!(DecodeError::JumpOutOfRange {
+                                pc: pc.0,
+                                field: $field
+                            })
+                        };
+                        if $cond {
+                            jump!(target);
+                        } else {
+                            pc.0 += 1;
+                        }
+                    }};
+                }
                 // one dispatch table over the raw opcode byte: the loader
                 // validated every word, and decode stays the canonicity
                 // authority for whatever the fast arms refuse, so the hot
@@ -5348,8 +5401,18 @@ impl Vm {
                                 OP_SUB_I64 => x.checked_sub(y).ok_or(Trap::IntegerOverflow),
                                 OP_MUL_I64 => x.checked_mul(y).ok_or(Trap::IntegerOverflow),
                                 // the fourth fused arith, MODI64: the same
-                                // zero-divide / overflow split as DIVI64
-                                _ => int_mod(x, y),
+                                // zero-divide / overflow split as DIVI64,
+                                // spelled inline so `int_mod` keeps its one
+                                // call site (a second site leaves the helper
+                                // outlined, and the per-mod call and result
+                                // move show up on the reentry kernels)
+                                _ => {
+                                    if y == 0 {
+                                        Err(Trap::DivideByZero)
+                                    } else {
+                                        x.checked_rem(y).ok_or(Trap::IntegerOverflow)
+                                    }
+                                },
                             }
                             .map_err(|e| (e, at))?;
                             write_slot(
@@ -5531,6 +5594,66 @@ impl Vm {
                         let r = int_mod(x, y).map_err(|e| (e, pc))?;
                         write_slot(&mut self.stack, fp, dst, slots, body_len, Value::I64(r))
                             .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    // the wrapping trio never traps (B7's wrap set), so
+                    // these are the only IntArith arms without a cold
+                    // overflow edge
+                    OP_WRAPADD_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let (x, y) = (
+                            read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                            read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                        );
+                        write_slot(
+                            &mut self.stack,
+                            fp,
+                            dst,
+                            slots,
+                            body_len,
+                            Value::I64(x.wrapping_add(y)),
+                        )
+                        .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_WRAPSUB_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let (x, y) = (
+                            read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                            read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                        );
+                        write_slot(
+                            &mut self.stack,
+                            fp,
+                            dst,
+                            slots,
+                            body_len,
+                            Value::I64(x.wrapping_sub(y)),
+                        )
+                        .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_WRAPMUL_I64 => {
+                        let dst = fa;
+                        let lhs = fb;
+                        let rhs = fc;
+                        let (x, y) = (
+                            read_i64(&self.stack, fp, lhs, slots, body_len).map_err(|e| (e, pc))?,
+                            read_i64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
+                        );
+                        write_slot(
+                            &mut self.stack,
+                            fp,
+                            dst,
+                            slots,
+                            body_len,
+                            Value::I64(x.wrapping_mul(y)),
+                        )
+                        .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
                     OP_ADD_F64 => {
@@ -6033,16 +6156,14 @@ impl Vm {
                         let tag = fc;
                         let v =
                             read_tag(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
-                        write_slot(
-                            &mut self.stack,
-                            fp,
-                            dst,
-                            slots,
-                            body_len,
-                            Value::Bool(v == tag),
-                        )
-                        .map_err(|e| (e, pc))?;
-                        pc.0 += 1;
+                        let held = v == tag;
+                        write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(held))
+                            .map_err(|e| (e, pc))?;
+                        if let Some(field) = fused_jmpif(code, idx, dst) {
+                            fused_jmpif!(field, held);
+                        } else {
+                            pc.0 += 1;
+                        }
                     },
                     OP_TAG_TEST_NOT => {
                         let dst = fa;
@@ -7592,6 +7713,34 @@ mod tests {
         assert_eq!(OP_JMPIF_NOT, byte(Uop::JmpifNot { cond: 0, target: 0 }));
     }
 
+    /// The fused tag-branch predicate peeks raw opcode bytes: the fused
+    /// TAGTEST arm and the JMPIF dispatch constant must equal ds-abi's
+    /// `Uop::opcode()` derivation, so a uop renumbering fails here instead
+    /// of silently unfusing (or mis-fusing) at runtime. TAGTEST_NOT stays
+    /// outside the fused set: no kernel stream carries the uop, so the
+    /// census measured no pair for it.
+    #[test]
+    fn fused_tag_branch_opcode_bytes_match_the_abi_encoding() {
+        let byte = |op: Uop| op.opcode();
+        assert_eq!(
+            OP_TAG_TEST,
+            byte(Uop::TagTest {
+                dst: 0,
+                src: 0,
+                tag: 0
+            })
+        );
+        assert_eq!(
+            OP_TAG_TEST_NOT,
+            byte(Uop::TagTestNot {
+                dst: 0,
+                src: 0,
+                tag: 0
+            })
+        );
+        assert_eq!(OP_JMPIF, byte(Uop::Jmpif { cond: 0, target: 0 }));
+    }
+
     /// The peek-next predicate fires exactly on the measured census pairs
     /// — a fused arith whose lhs or rhs reads the load's dst — and on
     /// nothing else: DIVI64 stays unfused, a non-consuming arith stays
@@ -7665,10 +7814,26 @@ mod tests {
                 "{arith:?} consumes the loaded dst and fuses"
             );
         }
-        // the negatives: DIVI64 (unmeasured), the wrong-kind follower, a
+        // the negatives: DIVI64 (unmeasured), the wrap trio (new minors,
+        // never census-measured), the wrong-kind follower, a
         // non-consuming arith, an RC word between, and the code end
         let negatives = [
             Uop::DivI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::WrapAddI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::WrapSubI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::WrapMulI64 {
                 dst: 0,
                 lhs: 2,
                 rhs: 1,

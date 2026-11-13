@@ -1,9 +1,10 @@
 //! The pin-bake harness: a nextest-runnable bake of the gungraun pins.
-//! The four pin benches live in `benches/` and run under `cargo bench`
-//! (the runner's model has no test target); this companion compiles
-//! their fixtures into the test binary via `#[path]` and measures the
-//! same `drive()` kernels under a raw Callgrind child — so the
-//! committed pin table below is asserted on every tree the gate runs,
+//! The nine pinned kernels live in four `benches/` files and run
+//! under `cargo bench` (the runner's model has no test target); this
+//! companion compiles their fixtures into the test binary via
+//! `#[path]` and measures the same `drive()` kernels under a raw
+//! Callgrind child — so the committed pin table below is asserted on
+//! every tree the gate runs,
 //! and a worktree-vs-tree divergence fails the gate instead of
 //! surfacing months later in an A/B.
 //!
@@ -130,26 +131,26 @@ const KERNELS: &[Kernel] = &[
 /// [`KERNELS`] entry must appear here exactly once — a kernel without
 /// a pin or a pin without a kernel fails the gate.
 const PINS: &[(&str, u64)] = &[
-    ("scalar_loop::scalar_loop::scalar_dispatch", 6_550_837_727),
-    ("strcat_temp::strcat_temp::serving_cats", 8_570_830_657),
-    ("strcat_temp::strcat_temp::claiming_cats", 15_200_830_761),
-    ("string_temp::string_temp::borrowing_loads", 4_545_826_149),
-    ("string_temp::string_temp::claiming_loads", 16_360_824_268),
+    ("scalar_loop::scalar_loop::scalar_dispatch", 6_598_296_283),
+    ("strcat_temp::strcat_temp::serving_cats", 8_650_788_791),
+    ("strcat_temp::strcat_temp::claiming_cats", 15_335_789_029),
+    ("string_temp::string_temp::borrowing_loads", 4_600_784_261),
+    ("string_temp::string_temp::claiming_loads", 16_455_782_394),
     (
         "loop_claims::loop_claims::reset_held_to_overwrite",
-        4_455_825_189,
+        4_530_783_277,
     ),
     (
         "loop_claims::loop_claims::reset_released_at_use",
-        8_880_825_158,
+        8_955_783_259,
     ),
     (
         "loop_claims::loop_claims::rebuild_held_to_overwrite",
-        10_705_830_807,
+        10_800_788_923,
     ),
     (
         "loop_claims::loop_claims::rebuild_released_at_use",
-        10_705_830_003,
+        10_800_788_091,
     ),
 ];
 

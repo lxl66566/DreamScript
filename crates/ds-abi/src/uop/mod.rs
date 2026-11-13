@@ -39,7 +39,7 @@
 //! |----------------------|-------------------------|----------|------------|------------|----------
 //! | Const (0x0)          | KIMM, KCONST, KSTR,   | dst slot | —          | —          | const idx
 //! |                      | KSTR_BORROW           |          |            |            |           |
-//! | IntArith (0x1)       | ADDI64 .. MODI64        | dst slot | lhs slot   | rhs slot   | —
+//! | IntArith (0x1)       | ADDI64 .. WRAPMULI64    | dst slot | lhs slot   | rhs slot   | —
 //! | FloatArith (0x2)     | ADDF64 .. DIVF64        | dst slot | lhs slot   | rhs slot   | —
 //! | IntCmp (0x3)         | EQI64 .. GTI64          | dst slot | lhs slot   | rhs slot   | —
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
@@ -211,6 +211,15 @@ pub enum Uop {
     /// `0x1.4` — `slots[dst] = slots[lhs] % slots[rhs]`, i64, traps on zero
     /// divide and on `MIN % -1` overflow (B7).
     ModI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.5` — `slots[dst] = slots[lhs] +% slots[rhs]`, i64 wrapping
+    /// modulo 2^64; the one add form that never traps (B7's wrap set).
+    WrapAddI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.6` — `slots[dst] = slots[lhs] -% slots[rhs]`, i64 wrapping
+    /// modulo 2^64; never traps (B7's wrap set).
+    WrapSubI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.7` — `slots[dst] = slots[lhs] *% slots[rhs]`, i64 wrapping
+    /// modulo 2^64; never traps (B7's wrap set).
+    WrapMulI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x2.0` — `slots[dst] = slots[lhs] + slots[rhs]`, f64.
     AddF64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x2.1` — `slots[dst] = slots[lhs] - slots[rhs]`, f64.

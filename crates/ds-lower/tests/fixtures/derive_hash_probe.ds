@@ -1,0 +1,108 @@
+// purpose: the derive-hash slice end to end — `#[derive(hash)]` on a
+// struct, an enum, and a tag synthesizes one ordinary impl hash item
+// after parse, and every spelling reaches that one body: the direct dot
+// call, the qualified hash::hash escape hatch, and a free generic
+// function's bound dispatch (CALLG over the impl member body). Every
+// part folds through the primitive hash impls: int mixes its own word,
+// float through the fold native (which normalizes -0.0 to +0.0 and the
+// NaNs to one canonical payload, so bit-structurally equal floats hash
+// equal [B9]; the -0.0 operand is spelled arithmetically, 0.0 / (0.0 -
+// 1.0), since float negation is not in the lowering contract), string
+// and char through the FNV-1a natives, byte through its decimal text.
+// A union-typed binding dispatches through the sibling branches of the
+// one written head.
+// items:
+// int: stage: run
+// float: stage: run
+// bool: stage: run
+// string: stage: run
+// char: stage: run
+// byte: stage: run
+// println: stage: run
+// str: stage: run
+// str_hash: stage: run
+// float_hash: stage: run
+// char_hash: stage: run
+// hash: stage: run
+// point: stage: run
+// span: stage: run
+// mark: stage: run
+// tone: stage: run
+// named: stage: run
+// keyed: stage: run
+// hash_f: stage: run
+// main: stage: run
+
+tag int
+tag float
+tag bool
+tag string
+tag char
+tag byte
+
+extern fn println(s: string) -> ()
+extern fn str[t](v: t) -> string
+extern fn str_hash(s: string) -> int
+extern fn float_hash(f: float) -> int
+extern fn char_hash(c: char) -> int
+
+trait hash {
+  fn hash(self) -> int
+}
+
+impl hash for int {
+  fn hash(self) -> int { self }
+}
+impl hash for float {
+  fn hash(self) -> int { float_hash(self) }
+}
+impl hash for string {
+  fn hash(self) -> int { str_hash(self) }
+}
+impl hash for char {
+  fn hash(self) -> int { char_hash(self) }
+}
+impl hash for byte {
+  fn hash(self) -> int { str_hash(str(self)) }
+}
+
+#[derive(hash)]
+struct point { x: int, y: int }
+
+#[derive(hash)]
+struct span { from: float, to: float }
+
+#[derive(hash)]
+enum mark { miss, hit(int), rect { w: int, h: int } }
+
+#[derive(hash)]
+tag tone
+
+#[derive(hash)]
+struct named { s: string, c: char, b: byte }
+
+fn keyed[t: hash](v: t) -> int { v.hash() }
+
+fn hash_f(f: float) -> int { f.hash() }
+
+fn main() -> int {
+  const a = point { x: 1, y: 2 }
+  println(str(a.hash()))
+  println(str(hash::hash(a)))
+  println(str(keyed(tone)))
+  const s1 = span { from: 1.5, to: 2.0 }
+  println(str(s1.hash()))
+  println(str(miss.hash()))
+  println(str(hit(3).hash()))
+  println(str(rect(w: 2, h: 9).hash()))
+  println(str(tone.hash()))
+  const n1 = named { s: "arch", c: 'a', b: b'x' }
+  println(str(n1.hash()))
+  const u1: mark = miss
+  const u2: mark = hit(3)
+  println(str(u1.hash()))
+  println(str(u2.hash()))
+  println(str(hash_f(0.0) == hash_f(0.0 / (0.0 - 1.0))))
+  println(str(hash_f(0.0 / 0.0) == hash_f(0.0 / 0.0 + 1.0)))
+  0
+}

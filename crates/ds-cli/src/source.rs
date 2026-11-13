@@ -70,7 +70,7 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
     let mut asts = Vec::new();
     if !no_ambient {
         let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
-        asts.push(parse(&files, id).expect("the ambient parses"));
+        asts.push(ambient_tree(&files, id));
     }
     // The given file is the entry: script mode folds its top-level
     // statements into a synthesized `main` (the ambient stays
@@ -130,6 +130,13 @@ pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSou
         name,
         entry_args,
     })
+}
+
+/// The ambient member's tree: the embedded precompiled blob when it
+/// verifies against this registration, a fresh parse otherwise — the blob
+/// is a pure cache, never correctness-load-bearing.
+fn ambient_tree(files: &Files, id: ds_diag::FileId) -> ds_parse::Ast {
+    ds_stdlib::ambient_ast(id).unwrap_or_else(|_| parse(files, id).expect("the ambient parses"))
 }
 
 /// Renders every diagnostic to stderr and summarizes the report as one

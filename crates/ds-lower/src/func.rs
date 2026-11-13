@@ -69,6 +69,9 @@ pub(crate) enum DataOp {
     MulI64,
     DivI64,
     ModI64,
+    WrapAddI64,
+    WrapSubI64,
+    WrapMulI64,
     AddF64,
     SubF64,
     MulF64,
@@ -99,6 +102,9 @@ impl DataOp {
             Self::MulI64 => Uop::MulI64 { dst, lhs, rhs },
             Self::DivI64 => Uop::DivI64 { dst, lhs, rhs },
             Self::ModI64 => Uop::ModI64 { dst, lhs, rhs },
+            Self::WrapAddI64 => Uop::WrapAddI64 { dst, lhs, rhs },
+            Self::WrapSubI64 => Uop::WrapSubI64 { dst, lhs, rhs },
+            Self::WrapMulI64 => Uop::WrapMulI64 { dst, lhs, rhs },
             Self::AddF64 => Uop::AddF64 { dst, lhs, rhs },
             Self::SubF64 => Uop::SubF64 { dst, lhs, rhs },
             Self::MulF64 => Uop::MulF64 { dst, lhs, rhs },
@@ -130,6 +136,9 @@ impl DataOp {
             | Self::MulI64
             | Self::DivI64
             | Self::ModI64
+            | Self::WrapAddI64
+            | Self::WrapSubI64
+            | Self::WrapMulI64
             | Self::AddF64
             | Self::SubF64
             | Self::MulF64
@@ -1750,6 +1759,8 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// Overlay word usage: index -> word types seen there.
     overlay: Vec<HashSet<SlotType>>,
     overlay_len: usize,
+    /// The scalar destination offer live for one expression evaluation.
+    scalar_dst: Option<ScalarDst>,
     /// The Perceus dup/drop placement over this function's walk (C4).
     rc: Placement,
     /// This body's runtime-evidence pairs to their frame slots: a nested
@@ -1926,6 +1937,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             scopes: vec![HashMap::new()],
             overlay: Vec::new(),
             overlay_len: 0,
+            scalar_dst: None,
             rc: Placement::from_linearity(lin),
             evidence: HashMap::new(),
             bounds: planned.bounds.clone(),
@@ -2971,7 +2983,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Ok(None);
         };
         let target = self.temp_span(fact.ty)?;
-        self.scalar_const_into(constant, target.base);
+        self.scalar_const_into(constant, Slot::body(target.base));
         let place = self.place_of_ty(target.base, fact.ty)?;
         self.guard_deinit_union_member(fact.ty, fact.ty, local.span)?;
         self.binders.insert(*span, place.clone());
@@ -2980,23 +2992,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(Some(TypedPlace { place, ty: fact.ty }))
     }
 
-    /// Loads one probed scalar constant into the word `dst` with the
+    /// Loads one probed scalar constant into the slot `dst` with the
     /// literal arm's own op spelling (Kimm for I64, Kconst for F64).
-    fn scalar_const_into(&mut self, constant: ScalarConst, dst: u8) {
+    fn scalar_const_into(&mut self, constant: ScalarConst, dst: Slot) {
         match constant {
             ScalarConst::I64(value) => {
                 let kidx = self.pool(Constant::I64(value));
-                self.emit(Op::Kimm {
-                    dst: Slot::body(dst),
-                    kidx,
-                });
+                self.emit(Op::Kimm { dst, kidx });
             },
             ScalarConst::F64(value) => {
                 let kidx = self.pool(Constant::F64(value));
-                self.emit(Op::Kconst {
-                    dst: Slot::body(dst),
-                    kidx,
-                });
+                self.emit(Op::Kconst { dst, kidx });
             },
         }
     }
@@ -3143,11 +3149,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     && let Expr::Literal { lit, .. } = peel_parens(right)
                     && let Some(constant) = scalar_const(lit, slot)
                 {
-                    self.scalar_const_into(constant, place.base);
+                    self.scalar_const_into(constant, Slot::body(place.base));
                     TypedPlace {
                         place: place.clone(),
                         ty: declared,
                     }
+                } else if let PlaceShape::Word(slot @ (SlotType::I64 | SlotType::F64)) = place.shape
+                    && arith_shape(right)
+                {
+                    // A computed scalar stores straight into the var
+                    // word: the assignment offers the word to the
+                    // right-hand side's outermost data op (the scalar
+                    // destination offer), whose produced temp is
+                    // single-use by construction — this store is its
+                    // only consumer. A shape that declines the offer
+                    // (a call result, a path read) keeps the temp +
+                    // re-store.
+                    self.scalar_dst = Some(ScalarDst::Var {
+                        word: place.base,
+                        slot,
+                    });
+                    let assigned_val = self.value(right)?;
+                    let _ = self.scalar_dst.take();
+                    assigned_val
                 } else {
                     self.value(right)?
                 }
@@ -5391,6 +5415,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if str_add {
             self.rc.native_open();
         }
+        // The scalar destination offer: the assignment store or the
+        // call staging that owns this expression may have offered its
+        // word to this node. The offer is taken here, before operand
+        // evaluation, so no nested node can write the offered word; an
+        // arm that declines restores it for the offering site to read
+        // back as unconsumed.
+        let offered = match op {
+            BinaryOp::Add if !str_add => self.scalar_dst.take(),
+            BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::WrapAdd
+            | BinaryOp::WrapSub
+            | BinaryOp::WrapMul => self.scalar_dst.take(),
+            _ => None,
+        };
         let lhs = self.value(left)?;
         if str_add {
             let words = self
@@ -5399,37 +5440,90 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc.native_reads(words.iter().map(|addr| addr.slot));
         }
         let rhs = self.value(right)?;
-        let place = match op {
-            BinaryOp::Eq | BinaryOp::Ne => self.eq_chain(&lhs, &rhs, e.span())?,
-            BinaryOp::Add if str_add => self.concat_value(&lhs, &rhs, static_ty, *span)?,
-            BinaryOp::Add => self.arith(DataOp::AddI64, DataOp::AddF64, &lhs, &rhs, *span)?,
-            BinaryOp::Sub => self.arith(DataOp::SubI64, DataOp::SubF64, &lhs, &rhs, *span)?,
-            BinaryOp::Mul => self.arith(DataOp::MulI64, DataOp::MulF64, &lhs, &rhs, *span)?,
-            BinaryOp::Div => self.arith(DataOp::DivI64, DataOp::DivF64, &lhs, &rhs, *span)?,
+        let (place, landed) = match op {
+            BinaryOp::Eq | BinaryOp::Ne => (self.eq_chain(&lhs, &rhs, e.span())?, false),
+            BinaryOp::Add if str_add => (self.concat_value(&lhs, &rhs, static_ty, *span)?, false),
+            BinaryOp::Add => {
+                self.arith_dst(DataOp::AddI64, DataOp::AddF64, &lhs, &rhs, offered, *span)?
+            },
+            BinaryOp::Sub => {
+                self.arith_dst(DataOp::SubI64, DataOp::SubF64, &lhs, &rhs, offered, *span)?
+            },
+            BinaryOp::Mul => {
+                self.arith_dst(DataOp::MulI64, DataOp::MulF64, &lhs, &rhs, offered, *span)?
+            },
+            BinaryOp::Div => {
+                self.arith_dst(DataOp::DivI64, DataOp::DivF64, &lhs, &rhs, offered, *span)?
+            },
             BinaryOp::Rem => {
                 self.reject_float_rem(&lhs, *span)?;
-                self.arith(DataOp::ModI64, DataOp::ModI64, &lhs, &rhs, *span)?
+                self.arith_dst(DataOp::ModI64, DataOp::ModI64, &lhs, &rhs, offered, *span)?
             },
-            BinaryOp::Lt => self.compare(DataOp::LtI64, DataOp::LtF64, &lhs, &rhs, *span)?,
-            BinaryOp::Le => self.compare(DataOp::LeI64, DataOp::LeF64, &lhs, &rhs, *span)?,
-            BinaryOp::Gt => self.compare(DataOp::GtI64, DataOp::GtF64, &lhs, &rhs, *span)?,
-            BinaryOp::Ge => self.compare(DataOp::GeI64, DataOp::GeF64, &lhs, &rhs, *span)?,
-            BinaryOp::WrapAdd
-            | BinaryOp::WrapSub
-            | BinaryOp::WrapMul
-            | BinaryOp::Shl
+            BinaryOp::Lt => (
+                self.compare(DataOp::LtI64, DataOp::LtF64, &lhs, &rhs, *span)?,
+                false,
+            ),
+            BinaryOp::Le => (
+                self.compare(DataOp::LeI64, DataOp::LeF64, &lhs, &rhs, *span)?,
+                false,
+            ),
+            BinaryOp::Gt => (
+                self.compare(DataOp::GtI64, DataOp::GtF64, &lhs, &rhs, *span)?,
+                false,
+            ),
+            BinaryOp::Ge => (
+                self.compare(DataOp::GeI64, DataOp::GeF64, &lhs, &rhs, *span)?,
+                false,
+            ),
+            BinaryOp::WrapAdd => {
+                self.reject_float_wrap(&lhs, *span)?;
+                self.arith_dst(
+                    DataOp::WrapAddI64,
+                    DataOp::WrapAddI64,
+                    &lhs,
+                    &rhs,
+                    offered,
+                    *span,
+                )?
+            },
+            BinaryOp::WrapSub => {
+                self.reject_float_wrap(&lhs, *span)?;
+                self.arith_dst(
+                    DataOp::WrapSubI64,
+                    DataOp::WrapSubI64,
+                    &lhs,
+                    &rhs,
+                    offered,
+                    *span,
+                )?
+            },
+            BinaryOp::WrapMul => {
+                self.reject_float_wrap(&lhs, *span)?;
+                self.arith_dst(
+                    DataOp::WrapMulI64,
+                    DataOp::WrapMulI64,
+                    &lhs,
+                    &rhs,
+                    offered,
+                    *span,
+                )?
+            },
+            BinaryOp::Shl
             | BinaryOp::Shr
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor => {
                 return Err(LowerError::unsupported(
                     *span,
-                    "a bitwise, shift, or wrapping operator",
+                    "a bitwise or shift operator",
                     "outside the M3 uop contract",
                 ))
             },
             BinaryOp::And | BinaryOp::Or | BinaryOp::In => unreachable!("handled above"),
         };
+        if !landed {
+            self.scalar_dst = offered;
+        }
         if *op == BinaryOp::Ne {
             // `!=` over spans: invert the eq chain's bool
             let true_word = self.temp_word(SlotType::Bool)?;
@@ -5463,6 +5557,47 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<Place, LowerError> {
         let op = self.pick_int_float(int_op, float_op, lhs, span)?;
         self.emit_data(op, lhs, rhs, span)
+    }
+
+    /// arith over the offered scalar destination: the data op writes
+    /// the offered word directly when its result kind matches the
+    /// destination's own, and the fresh temp otherwise. The VM reads
+    /// both operands before writing dst, so the offered word may alias
+    /// an operand read — the same guarantee the compound store relies
+    /// on.
+    fn arith_dst(
+        &mut self,
+        int_op: DataOp,
+        float_op: DataOp,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        dst: Option<ScalarDst>,
+        span: Span,
+    ) -> Result<(Place, bool), LowerError> {
+        let op = self.pick_int_float(int_op, float_op, lhs, span)?;
+        let Some(dst) = dst else {
+            return Ok((self.emit_data(op, lhs, rhs, span)?, false));
+        };
+        let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
+        let slot = op.result_slot(l.slot_ty);
+        if slot != dst.slot() {
+            return Ok((self.emit_data(op, lhs, rhs, span)?, false));
+        }
+        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
+        let word = dst.word();
+        self.emit(Op::Data {
+            op,
+            dst: dst.slot_word(),
+            lhs: Slot::body(l.slot),
+            rhs: Slot::body(r.slot),
+        });
+        Ok((
+            Place {
+                base: word,
+                shape: PlaceShape::Word(slot),
+            },
+            true,
+        ))
     }
 
     /// arith writing the pinned word `dst` — the compound assignment's
@@ -5526,18 +5661,41 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// float rem [B7], but the locked uop set carries ModI64 only — both
     /// Rem sites (the binary operator and the compound assignment) check
     /// the left operand's word and reject F64 at compile time.
-    fn reject_float_rem(&mut self, lhs: &TypedPlace, span: Span) -> Result<(), LowerError> {
+    fn reject_float_operand(
+        &mut self,
+        lhs: &TypedPlace,
+        span: Span,
+        subject: &'static str,
+        reason: &'static str,
+    ) -> Result<(), LowerError> {
         if let [only] = self.word_addrs(&lhs.place, lhs.ty)?.as_slice()
             && only.slot_ty == SlotType::F64
         {
-            return Err(LowerError::unsupported(
-                span,
-                "a float remainder",
-                "no ModF64 uop exists in the locked set; the numeric table admits float rem — \
-                 library rem arrives with @std",
-            ));
+            return Err(LowerError::unsupported(span, subject, reason));
         }
         Ok(())
+    }
+
+    fn reject_float_rem(&mut self, lhs: &TypedPlace, span: Span) -> Result<(), LowerError> {
+        self.reject_float_operand(
+            lhs,
+            span,
+            "a float remainder",
+            "no ModF64 uop exists in the locked set; the numeric table admits float rem — library \
+             rem arrives with @std",
+        )
+    }
+
+    /// The defensive float refusal behind the checker's own [B7] rule: the
+    /// wrap uops are i64-only, so a float operand that slips the check
+    /// refuses here instead of mis-lowering as an i64 word.
+    fn reject_float_wrap(&mut self, lhs: &TypedPlace, span: Span) -> Result<(), LowerError> {
+        self.reject_float_operand(
+            lhs,
+            span,
+            "a float wrapping operand",
+            "wrapping operators are integer-only; floats are IEEE [B7]",
+        )
     }
 
     fn compare(
@@ -6153,11 +6311,33 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     "only int negation and boolean not are in the M3 contract",
                 ))
             },
+            UnaryOp::WrapNeg if only.slot_ty == SlotType::I64 => {
+                // `-%a` lowers as `0 -% a`: the KIMM zero mirrors int
+                // negation and the wrapping sub never traps, so negating
+                // int-min wraps to int-min (B7's wrap set)
+                let zero = self.temp_word(SlotType::I64)?;
+                let kidx = self.pool(Constant::I64(0));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(zero),
+                    kidx,
+                });
+                let dst = self.temp_word(SlotType::I64)?;
+                self.emit(Op::Data {
+                    op: DataOp::WrapSubI64,
+                    dst: Slot::body(dst),
+                    lhs: Slot::body(zero),
+                    rhs: Slot::body(only.slot),
+                });
+                Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::I64),
+                }
+            },
             UnaryOp::WrapNeg => {
                 return Err(LowerError::unsupported(
                     span,
                     "a wrapping negation",
-                    "no wrapping uop is in the M3 contract",
+                    "wrapping operators are integer-only; floats are IEEE [B7]",
                 ))
             },
         };
@@ -8152,6 +8332,66 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
+    /// One call argument's single scalar word kind, when its checked
+    /// type is one I64/F64 word and its parameter neither re-spans the
+    /// value (a union parameter takes the member's whole region) nor
+    /// erases the staging kind (a type variable stages Raw).
+    fn scalar_arg_slot(
+        &mut self,
+        arg: &Expr,
+        param_ty: Option<Ty>,
+    ) -> Result<Option<SlotType>, LowerError> {
+        let ty = self.val(arg.span())?.ty;
+        if let Some(param) = param_ty
+            && (param != ty && self.is_union_ty(param)? || self.is_var_ty(param))
+        {
+            return Ok(None);
+        }
+        Ok(match &*self.shapes.shape(ty)? {
+            Shape::Word(slot @ (SlotType::I64 | SlotType::F64)) => Some(*slot),
+            _ => None,
+        })
+    }
+
+    /// A literal scalar argument's word kind and constant, when it may
+    /// stage directly: the load emits at the staging position with
+    /// every argument already evaluated, so a later argument's nested
+    /// call cannot clobber the word, and the temp the ordinary
+    /// spelling allocates is single-use by construction.
+    fn direct_literal(
+        &mut self,
+        arg: &Expr,
+        param_ty: Option<Ty>,
+    ) -> Result<Option<(SlotType, ScalarConst)>, LowerError> {
+        let Expr::Literal { lit, .. } = peel_parens(arg) else {
+            return Ok(None);
+        };
+        let Some(slot) = self.scalar_arg_slot(arg, param_ty)? else {
+            return Ok(None);
+        };
+        Ok(scalar_const(lit, slot).map(|constant| (slot, constant)))
+    }
+
+    /// A computed scalar argument's word kind, when its outermost data
+    /// op may write its overlay word directly: the argument itself must
+    /// be the arithmetic binary that takes the offer, and every later
+    /// argument must evaluate without touching the overlay — a later
+    /// argument's nested call would stage over the word first. The call
+    /// site additionally keeps tail calls on the evaluated temp (a tail
+    /// transfer stages its arguments past the exit claims, which stage
+    /// through the overlay over them).
+    fn direct_compute(
+        &mut self,
+        arg: &Expr,
+        param_ty: Option<Ty>,
+        later: &[&Expr],
+    ) -> Result<Option<SlotType>, LowerError> {
+        if !arith_shape(arg) || !later.iter().all(|expr| trivially_staged(expr)) {
+            return Ok(None);
+        }
+        self.scalar_arg_slot(arg, param_ty)
+    }
+
     /// One list literal `[a, b, c]`: the empty `list_new` call, then one
     /// `list_push` per element — the list word staged first, the
     /// element's words after it (an element expression may itself
@@ -8649,8 +8889,42 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // (native borrows never dup), deferring the dec to the flush
         // after the CALL
         self.rc.native_open();
+        let mut consts: Vec<(usize, ScalarConst)> = Vec::new();
         for (index, arg) in arg_exprs.iter().enumerate() {
+            let param_ty = param_types
+                .as_ref()
+                .and_then(|types| types.get(index).copied());
+            // A literal scalar argument stages its constant directly on
+            // its overlay word. A tail transfer defers the staging past
+            // the exit claims, so it keeps the evaluated temp.
+            if !tail && let Some((slot, constant)) = self.direct_literal(arg, param_ty)? {
+                if index == 0 {
+                    receiver_ty = Some(self.val(arg.span())?.ty);
+                }
+                let at = staged.len();
+                staged.push(slot);
+                counted.push(false);
+                word_arg.push(index);
+                consts.push((at, constant));
+                continue;
+            }
+            // A single-use computed scalar argument writes its overlay
+            // word directly: the offer goes to the argument's outermost
+            // data op, taken only when every later argument evaluates
+            // without touching the overlay.
+            let offered = if !tail
+                && let Some(slot) = self.direct_compute(arg, param_ty, &arg_exprs[index + 1..])?
+            {
+                self.scalar_dst = Some(ScalarDst::Arg {
+                    index: u8::try_from(staged.len()).expect("overlay word fits u8"),
+                    slot,
+                });
+                true
+            } else {
+                false
+            };
             let arg_val = self.value(arg)?;
+            let direct = offered && self.scalar_dst.take().is_none();
             if index == 0 {
                 receiver_ty = Some(arg_val.ty);
             }
@@ -8730,18 +9004,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 _ => arg_val,
             };
             let var_word = self.is_var_ty(arg_val.ty);
-            let addrs = self
-                .word_addrs(&arg_val.place, arg_val.ty)
-                .map_err(|err| err.respanned(arg.span()))?;
             // a free generic fn's parameter over its own type variable
             // claims the argument as the variable's single Raw word, so
             // an argument spanning more than one word refuses here —
             // the one-word instantiation boundary, at the site where
             // the type is concrete
-            let var_param = param_types
-                .as_ref()
-                .and_then(|types| types.get(index))
-                .is_some_and(|&param_ty| self.is_var_ty(param_ty));
+            let var_param = param_ty.is_some_and(|param| self.is_var_ty(param));
             if var_param {
                 self.guard_one_word_instantiation(
                     self.members(arg_val.ty),
@@ -8749,18 +9017,34 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     arg.span(),
                 )?;
             }
-            for addr in addrs {
-                self.rc.native_reads([addr.slot]);
-                moves.push((staged.len(), addr.slot));
-                // the variable's single word stages as the wildcard: the
-                // overlay word records Raw (the runtime kind is the
-                // callee's fact), so the ABI slide admits the pairing
-                // whatever the source's static kind — a scalar staged at
-                // an overlay index no other type visits would otherwise
-                // fail the slide's static check against the Raw parameter
-                staged.push(if var_param { SlotType::Raw } else { addr.slot_ty });
-                counted.push(addr.slot_ty == SlotType::Ref || var_word);
+            if direct {
+                // the argument's outermost data op wrote its overlay
+                // word: the staging records the word's kind and the
+                // argument's ownership; no Mov and no window read ride
+                // it (a scalar word carries no count)
+                let PlaceShape::Word(slot) = arg_val.place.shape else {
+                    return Err(mismatch("a directly staged scalar argument"));
+                };
+                staged.push(slot);
+                counted.push(false);
                 word_arg.push(index);
+            } else {
+                let addrs = self
+                    .word_addrs(&arg_val.place, arg_val.ty)
+                    .map_err(|err| err.respanned(arg.span()))?;
+                for addr in addrs {
+                    self.rc.native_reads([addr.slot]);
+                    moves.push((staged.len(), addr.slot));
+                    // the variable's single word stages as the wildcard: the
+                    // overlay word records Raw (the runtime kind is the
+                    // callee's fact), so the ABI slide admits the pairing
+                    // whatever the source's static kind — a scalar staged at
+                    // an overlay index no other type visits would otherwise
+                    // fail the slide's static check against the Raw parameter
+                    staged.push(if var_param { SlotType::Raw } else { addr.slot_ty });
+                    counted.push(addr.slot_ty == SlotType::Ref || var_word);
+                    word_arg.push(index);
+                }
             }
         }
         // a closure word in a callable-defaulted parameter has no CALLT
@@ -8789,6 +9073,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // call's argument span stages after them, ahead of the CALLT
         let tail_transfer = tail && !in_place_tail;
         self.guard_staged_count(staged.len())?;
+        // the literal arguments' constant loads land on their overlay
+        // words at the staging position, in staged order
+        for &(at, constant) in &consts {
+            self.scalar_const_into(
+                constant,
+                Slot::overlay(u8::try_from(at).expect("overlay word fits u8")),
+            );
+        }
         for &(index, slot) in &moves {
             if !tail_transfer {
                 self.emit(Op::Mov {
@@ -8939,6 +9231,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 };
                 trait_evidence.append(&mut words);
             }
+            // The instance word is a per-branch id: a union-receiver
+            // dispatch stages the representative branch of the covering
+            // group, whose written head names the one impl item the word
+            // stands for (the inline-cache story keys on the written
+            // head, never on this branch id).
             trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
             for _ in 0..=pairs.len() * (1 + FOLLOW_WORDS) {
                 staged.push(SlotType::I64);
@@ -9353,8 +9650,35 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let mut deinit_arg = false;
         self.rc.native_open();
         self.rc.native_reads([word.slot]);
+        let mut consts: Vec<(usize, ScalarConst)> = Vec::new();
         for (index, &arg) in arg_exprs.iter().enumerate() {
+            let param_ty = params.get(index).copied();
+            // A literal scalar argument stages its constant directly on
+            // its overlay word. A tail transfer defers the staging past
+            // the exit claims, so it keeps the evaluated temp.
+            if !tail && let Some((slot, constant)) = self.direct_literal(arg, param_ty)? {
+                let at = staged.len();
+                staged.push(slot);
+                consts.push((at, constant));
+                continue;
+            }
+            // A single-use computed scalar argument writes its overlay
+            // word directly: the offer goes to the argument's outermost
+            // data op, taken only when every later argument evaluates
+            // without touching the overlay.
+            let offered = if !tail
+                && let Some(slot) = self.direct_compute(arg, param_ty, &arg_exprs[index + 1..])?
+            {
+                self.scalar_dst = Some(ScalarDst::Arg {
+                    index: u8::try_from(staged.len()).expect("overlay word fits u8"),
+                    slot,
+                });
+                true
+            } else {
+                false
+            };
             let arg_val = self.value(arg)?;
+            let direct = offered && self.scalar_dst.take().is_none();
             if self.deinit_claim(arg_val.ty, arg.span())?.is_some() {
                 // a consuming parameter behind a callable word has no
                 // claim contract: the affine pass borrows the argument
@@ -9409,13 +9733,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 },
                 _ => arg_val,
             };
-            for addr in self
-                .word_addrs(&arg_val.place, arg_val.ty)
-                .map_err(|err| err.respanned(arg.span()))?
-            {
-                self.rc.native_reads([addr.slot]);
-                moves.push((staged.len(), addr.slot));
-                staged.push(addr.slot_ty);
+            if direct {
+                // the argument's outermost data op wrote its overlay
+                // word: the staging records the word's kind; no Mov
+                // and no window read ride it (a scalar word carries
+                // no count)
+                let PlaceShape::Word(slot) = arg_val.place.shape else {
+                    return Err(mismatch("a directly staged scalar argument"));
+                };
+                staged.push(slot);
+            } else {
+                for addr in self
+                    .word_addrs(&arg_val.place, arg_val.ty)
+                    .map_err(|err| err.respanned(arg.span()))?
+                {
+                    self.rc.native_reads([addr.slot]);
+                    moves.push((staged.len(), addr.slot));
+                    staged.push(addr.slot_ty);
+                }
             }
         }
         self.guard_staged_count(staged.len())?;
@@ -9438,6 +9773,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // argument takes it — the count-free word needs no settling and
         // the named function's own pool FuncRef drives the CALLT
         let tail_transfer = tail && proven_fn.is_some() && defaulted.is_empty() && !deinit_arg;
+        // the literal arguments' constant loads land on their overlay
+        // words at the staging position, in staged order
+        for &(at, constant) in &consts {
+            self.scalar_const_into(
+                constant,
+                Slot::overlay(u8::try_from(at).expect("overlay word fits u8")),
+            );
+        }
         for &(index, slot) in &moves {
             if !tail_transfer {
                 self.emit(Op::Mov {
@@ -13070,6 +13413,36 @@ fn eq_op(slot: SlotType) -> Result<DataOp, LowerError> {
 }
 
 /// The single identifier of a one-segment path expression, if it is one.
+/// Whether one expression is an arithmetic binary at its outermost
+/// node: the only shape that can take a scalar destination offer, so
+/// the offer never survives into branch arms or nested calls, which own
+/// other words.
+fn arith_shape(expr: &Expr) -> bool {
+    matches!(peel_parens(expr), Expr::Binary {
+        op: BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::WrapAdd
+            | BinaryOp::WrapSub
+            | BinaryOp::WrapMul,
+        ..
+    })
+}
+
+/// Whether one argument's evaluation provably touches no overlay word
+/// and mutates nothing: plain paths, literals, and field projections
+/// over such expressions. A directly staged overlay word may be written
+/// only while every later argument stays one of these.
+fn trivially_staged(expr: &Expr) -> bool {
+    match peel_parens(expr) {
+        Expr::Literal { .. } | Expr::Path { .. } => true,
+        Expr::Field { recv, .. } => trivially_staged(recv),
+        _ => false,
+    }
+}
+
 fn single_path_ident(expr: &Expr) -> Option<&Ident> {
     match expr {
         Expr::Path { path, .. } if path.segments.len() == 1 => path.segments.first(),
@@ -13213,6 +13586,46 @@ fn parse_int(text: &str) -> Option<i64> {
 enum ScalarConst {
     I64(i64),
     F64(f64),
+}
+
+/// One scalar word an expression evaluation is offered as the
+/// destination of its outermost data op: an assignment's var word, or
+/// the overlay staging word a call site reserves for one argument.
+/// `emit_data` always allocates a fresh temp for its result, so the
+/// offered word is born at the consuming op with exactly one consumer
+/// — the store that reads it back, or the CALL whose overlay slot
+/// holds it — which is the single-use proof the direct write rides
+/// on; a shape that does not take the offer keeps the temp spelling.
+#[derive(Clone, Copy)]
+enum ScalarDst {
+    /// A scalar var word an assignment's plain store writes.
+    Var { word: u8, slot: SlotType },
+    /// An overlay staging word a call's argument writes.
+    Arg { index: u8, slot: SlotType },
+}
+
+impl ScalarDst {
+    /// The word index the consuming op's produced place reports.
+    fn word(self) -> u8 {
+        match self {
+            Self::Var { word, .. } | Self::Arg { index: word, .. } => word,
+        }
+    }
+
+    /// The word kind the destination carries.
+    fn slot(self) -> SlotType {
+        match self {
+            Self::Var { slot, .. } | Self::Arg { slot, .. } => slot,
+        }
+    }
+
+    /// The symbolic slot the consuming data op writes.
+    fn slot_word(self) -> Slot {
+        match self {
+            Self::Var { word, .. } => Slot::body(word),
+            Self::Arg { index, .. } => Slot::overlay(index),
+        }
+    }
 }
 
 /// Probes one literal against a scalar word's slot: suffixed or

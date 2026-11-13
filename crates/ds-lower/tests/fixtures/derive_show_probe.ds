@@ -3,7 +3,9 @@
 // after parse, and every spelling reaches that one impl body: the
 // direct dot call, the qualified show::show escape hatch, and a free
 // generic function's bound dispatch (CALLG over the impl member body,
-// the runtime-evidence form over the one-word tag receiver).
+// the runtime-evidence form over the one-word tag receiver). A
+// union-typed binding dispatches through the sibling branches of the
+// one written head.
 // items:
 // int: stage: run
 // string: stage: run
@@ -46,5 +48,9 @@ fn main() -> int {
   println(miss.show())
   const s = span(from: 2, to: 9)
   println(s.show())
+  const u1: mark = miss
+  const u2: mark = hit(3)
+  println(u1.show())
+  println(u2.show())
   0
 }

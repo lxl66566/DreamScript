@@ -21,3 +21,6 @@ rustc-hash = "2"
 ds-diag = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
 ds-check = { path = "../ds-check" }
+# the ambient member's precompiled parse tree: the parse compute serves it
+# from the embedded blob, the fresh parse as the fallback
+ds-stdlib = { workspace = true, features = ["ast-serde"] }

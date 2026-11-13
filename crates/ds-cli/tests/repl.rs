@@ -3,7 +3,10 @@
 //! and resets it; one session pins the expression print (value, inferred
 //! type, effect row); one session pins rejection and recovery (a syntax
 //! error, an unknown name, a trap — each leaving the session usable) and
-//! the `:` command refusals.
+//! the `:` command refusals; one session runs a `#[derive(show)]`
+//! declaration and calls the derived member — the check queries run over
+//! the derive-expanded trees, so the call clears the check grain and the
+//! run lowers through the analyzed query's own expanded trees.
 
 use std::{env, process::Command};
 
@@ -108,4 +111,37 @@ fn errors_reject_the_line_and_the_session_recovers() {
         "no binding ghost in the session",
         "usage: :drop <name>",
     ]);
+}
+
+#[test]
+fn a_derived_members_call_checks_and_runs_in_a_session() {
+    // The member's call clears the expansion-aware check grain and runs
+    // through the synthesized impl body, printing the construction
+    // spelling of the value.
+    let (out, ok) = session(concat!(
+        "#[derive(show)] struct point { x: int, y: int }\n",
+        "const p = point { x: 1, y: 2 }\n",
+        "println(p.show())\n",
+    ));
+    assert!(ok, "the session exits cleanly: {out}");
+    in_order(&out, &[
+        ">>> point declared",
+        ">>> p: point\n~ pure",
+        ">>> point { x: 1, y: 2 }\n: ()\n~ world",
+    ]);
+}
+
+#[test]
+fn a_derived_declaration_lowers_through_the_analyzed_query() {
+    // A `#[derive(show)]` declaration joins the session as a declaration
+    // block and the line still runs: the run path lowers the analyzed
+    // bundle's own expanded trees, where the consumed attribute became
+    // an ordinary impl item — an attribute reaching the lowering pass
+    // unexpanded is the misuse the M3 contract refuses.
+    let (out, ok) = session(concat!(
+        "#[derive(show)] struct point { x: int, y: int }\n",
+        "const p = point { x: 1, y: 2 }\n",
+    ));
+    assert!(ok, "the session exits cleanly: {out}");
+    in_order(&out, &[">>> point declared", ">>> p: point\n~ pure"]);
 }

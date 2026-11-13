@@ -9,7 +9,8 @@ use super::{
         CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64,
         GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64,
         LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat,
-        StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot,
+        StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64,
+        WrapSubI64,
     },
 };
 
@@ -24,7 +25,8 @@ use super::{
 pub enum Major {
     /// 0x0 — constant loads: KIMM, KCONST (`a` = dst, `d` = pool index).
     Const = 0x0,
-    /// 0x1 — i64 arithmetic: ADDI64, SUBI64, MULI64, DIVI64, MODI64.
+    /// 0x1 — i64 arithmetic: ADDI64 .. MODI64 trapping, WRAPADDI64 ..
+    /// WRAPMULI64 wrapping (B7's wrap set).
     IntArith = 0x1,
     /// 0x2 — f64 arithmetic: ADDF64, SUBF64, MULF64, DIVF64.
     FloatArith = 0x2,
@@ -142,9 +144,14 @@ impl Uop {
     pub fn major(&self) -> Major {
         match self {
             Kimm { .. } | Kconst { .. } | Kstr { .. } | KstrBorrow { .. } => Major::Const,
-            AddI64 { .. } | SubI64 { .. } | MulI64 { .. } | DivI64 { .. } | ModI64 { .. } => {
-                Major::IntArith
-            },
+            AddI64 { .. }
+            | SubI64 { .. }
+            | MulI64 { .. }
+            | DivI64 { .. }
+            | ModI64 { .. }
+            | WrapAddI64 { .. }
+            | WrapSubI64 { .. }
+            | WrapMulI64 { .. } => Major::IntArith,
             AddF64 { .. } | SubF64 { .. } | MulF64 { .. } | DivF64 { .. } => Major::FloatArith,
             EqI64 { .. }
             | NeqI64 { .. }
@@ -220,6 +227,9 @@ impl Uop {
             | MulI64 { lhs, rhs, .. }
             | DivI64 { lhs, rhs, .. }
             | ModI64 { lhs, rhs, .. }
+            | WrapAddI64 { lhs, rhs, .. }
+            | WrapSubI64 { lhs, rhs, .. }
+            | WrapMulI64 { lhs, rhs, .. }
             | AddF64 { lhs, rhs, .. }
             | SubF64 { lhs, rhs, .. }
             | MulF64 { lhs, rhs, .. }
@@ -257,6 +267,9 @@ impl Uop {
             | MulI64 { dst, .. }
             | DivI64 { dst, .. }
             | ModI64 { dst, .. }
+            | WrapAddI64 { dst, .. }
+            | WrapSubI64 { dst, .. }
+            | WrapMulI64 { dst, .. }
             | AddF64 { dst, .. }
             | SubF64 { dst, .. }
             | MulF64 { dst, .. }

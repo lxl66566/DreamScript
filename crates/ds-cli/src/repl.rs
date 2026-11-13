@@ -31,14 +31,14 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
-use ds_check::{DefKind, analyze};
+use ds_check::DefKind;
 use ds_diag::{Diagnostic, FileId, Files, LabelStyle, render};
 use ds_lower::lower;
 use ds_mod::Hash128;
 use ds_parse::{Ast, ItemKind, Pattern, Stmt, StmtKind};
 use ds_query::{
-    BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile, PlatformCheck,
-    QueryError, Resolve, TypeOf,
+    Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile,
+    PlatformCheck, QueryError, Resolve, TypeOf,
 };
 use ds_vm::{LoadError, ModuleRegistry, Platform, Value, Vm, native};
 
@@ -88,7 +88,6 @@ pub fn repl(_args: &ReplArgs) -> Result<ExitCode> {
 /// text, the submitted lines, and the persistent VM.
 struct Session {
     db: Db,
-    ambient: FileId,
     file: FileId,
     decls: Vec<String>,
     stmts: Vec<String>,
@@ -122,11 +121,13 @@ impl Session {
     fn new() -> Self {
         let mut db = Db::with_declared_rows(ds_stdlib::declared_rows().clone())
             .with_world_caps(ds_stdlib::world_caps().clone());
-        let ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+        // The ambient is a session package member (G3): its definitions
+        // resolve for every submission, and its file id is never needed
+        // again.
+        let _ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let file = db.add_file(SESSION_FILE, &Self::text(&[], &[]));
         Self {
             db,
-            ambient,
             file,
             decls: Vec::new(),
             stmts: Vec::new(),
@@ -226,34 +227,40 @@ impl Session {
         Ok(false)
     }
 
-    /// Compiles the clean session (the run path re-analyzes the query
-    /// pass's own trees — the database does not expose an analyzed value
-    /// to lower from yet), installs the module over its own retiring
-    /// version, runs `main`, and prints the value, the inferred type,
-    /// and the effect row. A lowering refusal, an install failure, or a
-    /// trap is a [`Failure`] the caller rolls back.
+    /// Compiles the clean session through the analyzed query — the
+    /// analyzer's check half over the expansion and resolve memos,
+    /// memoized like every other pass, lowered over the bundle's own
+    /// expanded trees —
+    /// installs the module over its own retiring version, runs `main`,
+    /// and prints the value, the inferred type, and the effect row. A
+    /// lowering refusal, an install failure, or a trap is a [`Failure`]
+    /// the caller rolls back.
     fn execute(&mut self, text: &str, zone: Zone) -> std::result::Result<(), Failure> {
-        let ambient =
-            query(self.db.get::<ParseFile>(self.ambient), "parse").map_err(Failure::Engine)?;
-        let session =
-            query(self.db.get::<ParseFile>(self.file), "parse").map_err(Failure::Engine)?;
-        let (ambient_ast, session_ast) = match (ambient.ast.as_deref(), session.ast.as_deref()) {
-            (Some(a), Some(s)) => (a.clone(), s.clone()),
-            // a clean check implies both trees exist
-            _ => return Err(Failure::Engine(anyhow!("the session parse lost its tree"))),
-        };
-        let asts = [ambient_ast, session_ast.clone()];
-        let analyzed = analyze(self.db.files(), &asts);
-        let lowered = lower(MODULE, Hash128::compute(text.as_bytes()), &asts, &analyzed)
-            .map_err(|error| Failure::lower(&error, self.db.files()))?;
+        let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")
+            .map_err(Failure::Engine)?
+            .analyzed;
+        let lowered = lower(
+            MODULE,
+            Hash128::compute(text.as_bytes()),
+            &analyzed.asts,
+            &analyzed,
+        )
+        .map_err(|error| Failure::lower(&error, self.db.files()))?;
         let (decls, stmts) = (self.decls.len(), self.stmts.len());
         self.vm
             .install_dsmod(lowered.into_module())
             .map_err(|error| Failure::install(&error, decls, stmts))?;
         match self.vm.run(MODULE, "main", &[]) {
-            Ok(value) => self
-                .report(&session_ast, &analyzed, &value, zone)
-                .map_err(Failure::Engine),
+            Ok(value) => {
+                let session =
+                    query(self.db.get::<ParseFile>(self.file), "parse").map_err(Failure::Engine)?;
+                // a clean check implies the tree exists
+                let Some(session_ast) = session.ast.as_deref() else {
+                    return Err(Failure::Engine(anyhow!("the session parse lost its tree")));
+                };
+                self.report(session_ast, &analyzed, &value, zone)
+                    .map_err(Failure::Engine)
+            },
             Err(trap) => Err(Failure::Trap(run::trap_error(&self.vm, &trap))),
         }
     }
@@ -536,9 +543,18 @@ fn declaration_zone(line: &str) -> Zone {
     const NAMELESS: [&str; 3] = ["impl", "import", "platform"];
     let first = first_line(line);
     let mut words = first.split_whitespace();
-    let Some(head) = words.next() else {
+    let Some(mut head) = words.next() else {
         return Zone::Statement;
     };
+    // A leading attribute is not the declaration's head (a `#[derive(...)]`
+    // token carries no declaration of its own): skip attribute tokens to
+    // the first plain word.
+    while head.starts_with('#') {
+        match words.next() {
+            Some(next) => head = next,
+            None => return Zone::Statement,
+        }
+    }
     let head = match head {
         "pub" | "extern" => match words.next() {
             Some(next) => next,

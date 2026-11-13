@@ -621,6 +621,68 @@ fn arithmetic_and_conversion_edges_trap() {
     );
 }
 
+/// The wrapping IntArith trio: modulo-2^64 answers on the overflow edges
+/// the trapping forms refuse, over the same pool constants.
+#[test]
+fn wrap_arith_arms_wrap_and_never_trap() {
+    let bin_i64 = |name: &str, ka: u16, kb: u16, op: Uop| {
+        def(name, &[I64, I64], 0, 0, &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Kimm {
+                dst: 0,
+                kidx: k(ka),
+            },
+            Uop::Kimm {
+                dst: 1,
+                kidx: k(kb),
+            },
+            op,
+            Uop::Ret { src: 0 },
+        ])
+    };
+    let reg = registry(
+        "wrap",
+        &[
+            Const::I64(i64::MAX),
+            Const::I64(1),
+            Const::I64(i64::MIN),
+            Const::I64(-1),
+            Const::I64(2),
+        ],
+        vec![
+            bin_i64("wadd", 0, 1, Uop::WrapAddI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            }),
+            bin_i64("wsub", 2, 1, Uop::WrapSubI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            }),
+            bin_i64("wmul_min", 2, 3, Uop::WrapMulI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            }),
+            bin_i64("wmul_two", 2, 4, Uop::WrapMulI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            }),
+        ],
+    );
+    let mut vm = Vm::new(reg);
+    // MAX +% 1 wraps to MIN
+    assert_eq!(vm.run("wrap", "wadd", &[]), Ok(Value::I64(i64::MIN)));
+    // MIN -% 1 wraps to MAX
+    assert_eq!(vm.run("wrap", "wsub", &[]), Ok(Value::I64(i64::MAX)));
+    // MIN *% -1 wraps to MIN (the only value `x *% -1` cannot name)
+    assert_eq!(vm.run("wrap", "wmul_min", &[]), Ok(Value::I64(i64::MIN)));
+    // MIN *% 2 wraps to zero
+    assert_eq!(vm.run("wrap", "wmul_two", &[]), Ok(Value::I64(0)));
+}
+
 /// Entry-argument validation and HALT reporting.
 #[test]
 fn run_entry_checks_and_halt_report_the_slot_value() {

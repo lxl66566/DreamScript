@@ -17,6 +17,10 @@ workspace = true
 # the `--error-format=json` renderer; off by default so the checker path
 # carries no serializer
 json = ["dep:serde", "dep:sonic-rs"]
+# Serialize/Deserialize over Span and FileId: the codec surface of the
+# precompiled ambient AST blob (ds-parse's `ast-serde` feature turns it on);
+# off by default so the diagnostic path carries no serializer
+ast-serde = ["dep:serde"]
 
 [dependencies]
 serde    = { workspace = true, optional = true }

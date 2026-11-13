@@ -87,6 +87,13 @@
 //! | 46    | `partition[t] (xs: list, f: fn(t) -> bool) -> two list refs` (generic; CALLG, reentrant, the tag-less two-word total) |
 //! | 47    | `par_map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, fork-join) |
 //! | 48    | `par_reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, fork-join) |
+//! | 49    | `total_compare (a, b: float) -> int` |
+//! | 50    | `str_compare (a, b: string) -> int` |
+//! | 51    | `char_compare (a, b: char) -> int` |
+//! | 52    | `byte_compare (a, b: byte) -> int` |
+//! | 53    | `str_hash (s: string) -> int` |
+//! | 54    | `float_hash (f: float) -> int` |
+//! | 55    | `char_hash (c: char) -> int` |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -526,6 +533,50 @@ pub const BUILTIN_PAR_REDUCE: u32 = 48;
 /// [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_PARTITION: u32 = 46;
 
+/// `total_compare(a: float, b: float) -> int` - the explicit float sort
+/// key the `ord` derive orders float parts through (B7): the IEEE-754
+/// total order over f64 (negative NaN least, positive NaN greatest,
+/// `-0.0` before `+0.0`), answered as one i64 word of -1, 0, or 1. Every
+/// pair is ordered, so it is the one total comparison the op set's
+/// trapping `<`/`>` cannot spell.
+pub const BUILTIN_TOTAL_COMPARE: u32 = 49;
+
+/// `str_compare(a: string, b: string) -> int` - the string sort key the
+/// `ord` derive orders string parts through: the lexicographic order
+/// over the UTF-8 bytes (the code-point order), answered as one i64
+/// word of -1, 0, or 1.
+pub const BUILTIN_STR_COMPARE: u32 = 50;
+
+/// `char_compare(a: char, b: char) -> int` - the char sort key the `ord`
+/// derive orders char parts through: the Unicode scalar order over the
+/// two one-char strings, answered as one i64 word of -1, 0, or 1.
+pub const BUILTIN_CHAR_COMPARE: u32 = 51;
+
+/// `byte_compare(a: byte, b: byte) -> int` - the byte sort key the `ord`
+/// derive orders byte parts through: the u8 order over the two byte
+/// words, answered as one i64 word of -1, 0, or 1.
+pub const BUILTIN_BYTE_COMPARE: u32 = 52;
+
+/// `str_hash(s: string) -> int` - the content hash the `hash` derive
+/// folds string parts through: FNV-1a over the UTF-8 bytes (offset
+/// basis 14695981039346656037, prime 1099511628211, the same pair the
+/// derive's fold mixes through), answered as one i64 word. The value is
+/// an implementation detail; consistency with structural `==` is the
+/// contract [B9].
+pub const BUILTIN_STR_HASH: u32 = 53;
+
+/// `float_hash(f: float) -> int` - the content hash the `hash` derive
+/// folds float parts through: the FNV-1a over the f64's canonical bits —
+/// the fold normalizes `-0.0` to `+0.0` and every NaN payload to the one
+/// canonical NaN, so bit-structurally equal floats hash equal [B9].
+pub const BUILTIN_FLOAT_HASH: u32 = 54;
+
+/// `char_hash(c: char) -> int` - the content hash the `hash` derive
+/// folds char parts through: FNV-1a over the one-char string's UTF-8
+/// bytes (a char rides a string `Ref`, the char-compare convention), so
+/// a char and its own one-char string hash identically.
+pub const BUILTIN_CHAR_HASH: u32 = 55;
+
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
 /// the module docs).
@@ -739,6 +790,137 @@ fn substring_fn(
     let (begin, stop) = heaps.char_byte_range(id, start, end)?;
     let part = heaps.alloc_substr(id, begin, stop)?;
     Ok(NativeResult::Word(heaps.word(part)))
+}
+
+fn total_compare_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    match args {
+        [Value::F64(a), Value::F64(b)] => {
+            Ok(NativeResult::Word(Value::I64(match a.total_cmp(b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })))
+        },
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::F64,
+            actual: args.first().map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
+fn str_compare_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so one operand copies out
+    let a = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let b = heaps.str_at(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::I64(
+        match a.as_bytes().cmp(b.as_bytes()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+    )))
+}
+
+fn char_compare_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so one operand copies out
+    let a = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let b = heaps.str_at(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::I64(
+        match a.chars().cmp(b.chars()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+    )))
+}
+
+fn byte_compare_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Ok(NativeResult::Word(Value::I64(
+        match i64_arg(args, 0)?.cmp(&i64_arg(args, 1)?) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+    )))
+}
+
+/// The one content-hash algorithm the hash family uses: FNV-1a over the
+/// bytes (offset basis 14695981039346656037, prime 1099511628211, both
+/// wrapping in u64) — the same pair the derive's fold mixes through, so
+/// every primitive part hashes under one scheme.
+fn fnv1a(bytes: &[u8]) -> i64 {
+    let mut hash = 14695981039346656037u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash as i64
+}
+
+fn str_hash_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so the operand copies out
+    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    Ok(NativeResult::Word(Value::I64(fnv1a(text.as_bytes()))))
+}
+
+fn float_hash_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    match args {
+        [Value::F64(f)] => {
+            // the fold: -0.0 shares +0.0's bits and every NaN payload the
+            // one canonical NaN's, so bit-structurally equal floats hash
+            // equal (B9)
+            let canonical = if f.is_nan() {
+                f64::NAN
+            } else if *f == 0.0 {
+                0.0
+            } else {
+                *f
+            };
+            Ok(NativeResult::Word(Value::I64(fnv1a(
+                &canonical.to_bits().to_le_bytes(),
+            ))))
+        },
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::F64,
+            actual: args.first().map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
+fn char_hash_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so the operand copies out
+    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    Ok(NativeResult::Word(Value::I64(fnv1a(text.as_bytes()))))
 }
 
 fn concat_fn(
@@ -2162,7 +2344,11 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// nursery controls, `partition` ([`BUILTIN_PARTITION`], the tag-less
 /// two-word total) appends past `join`, and the fork-join combinator
 /// `par_map` ([`BUILTIN_PAR_MAP`]) appends past `partition`, and the fork-join fold `par_reduce`
-/// ([`BUILTIN_PAR_REDUCE`]) appends past `par_map`.
+/// ([`BUILTIN_PAR_REDUCE`]) appends past `par_map`, and the float sort key
+/// `total_compare` ([`BUILTIN_TOTAL_COMPARE`], the `ord` derive's) appends
+/// past the generic tail, and the string, char, and byte sort keys
+/// ([`BUILTIN_STR_COMPARE`], [`BUILTIN_CHAR_COMPARE`],
+/// [`BUILTIN_BYTE_COMPARE`]) append past it.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
     let fns = vec![
@@ -2380,10 +2566,66 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_46),
         reserved_entry(builtin_reserved_47),
         reserved_entry(builtin_reserved_48),
+        NativeFunction {
+            name: "total_compare",
+            params: &[SlotType::F64, SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: total_compare_fn,
+        },
+        NativeFunction {
+            name: "str_compare",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: str_compare_fn,
+        },
+        NativeFunction {
+            name: "char_compare",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: char_compare_fn,
+        },
+        NativeFunction {
+            name: "byte_compare",
+            params: &[SlotType::I64, SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: byte_compare_fn,
+        },
+        NativeFunction {
+            name: "str_hash",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: str_hash_fn,
+        },
+        NativeFunction {
+            name: "float_hash",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: float_hash_fn,
+        },
+        NativeFunction {
+            name: "char_hash",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: char_hash_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_PAR_REDUCE, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_PAR_REDUCE as usize + 1);
+    // BUILTIN_CHAR_HASH, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_CHAR_HASH as usize + 1);
     fns
 }
 
@@ -2800,12 +3042,19 @@ mod tests {
         );
         assert_eq!(fns[BUILTIN_NURSERY_CANCEL as usize].name, "nursery_cancel");
         assert_eq!(fns[BUILTIN_JOIN as usize].name, "join");
-        assert_eq!(fns.len(), 49);
+        assert_eq!(fns[BUILTIN_TOTAL_COMPARE as usize].name, "total_compare");
+        assert_eq!(fns[BUILTIN_STR_COMPARE as usize].name, "str_compare");
+        assert_eq!(fns[BUILTIN_CHAR_COMPARE as usize].name, "char_compare");
+        assert_eq!(fns[BUILTIN_BYTE_COMPARE as usize].name, "byte_compare");
+        assert_eq!(fns[BUILTIN_STR_HASH as usize].name, "str_hash");
+        assert_eq!(fns[BUILTIN_FLOAT_HASH as usize].name, "float_hash");
+        assert_eq!(fns[BUILTIN_CHAR_HASH as usize].name, "char_hash");
+        assert_eq!(fns.len(), 56);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
             0u32, 1, 5, 6, 7, 8, 9, 10, 19, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-            46, 47,
+            46, 47, 48,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }
@@ -2833,6 +3082,13 @@ mod tests {
             (BUILTIN_JOIN, 1),
             (BUILTIN_MAP_NEW, 1),
             (BUILTIN_MAP_SET, 1),
+            (BUILTIN_TOTAL_COMPARE, 1),
+            (BUILTIN_STR_COMPARE, 1),
+            (BUILTIN_CHAR_COMPARE, 1),
+            (BUILTIN_BYTE_COMPARE, 1),
+            (BUILTIN_STR_HASH, 1),
+            (BUILTIN_FLOAT_HASH, 1),
+            (BUILTIN_CHAR_HASH, 1),
         ] {
             assert_eq!(fns[index as usize].result_words, want);
         }
@@ -3048,6 +3304,67 @@ mod tests {
             };
             assert_eq!(heaps.str_at(part), Ok(want), "trimmed {text:?}");
             assert_ne!(part, src, "a fresh object for {text:?}");
+        }
+    }
+
+    /// `float_hash` folds every NaN payload to the one canonical NaN and
+    /// the two zeros to one before hashing, so bit-structurally equal
+    /// floats hash equal (B9): a payloaded qNaN, a negative NaN, and the
+    /// canonical NaN answer identically, the zero pair likewise.
+    #[test]
+    fn float_hash_folds_nan_payloads_and_zeros_to_one() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let mut hash = |f: f64| {
+            let Value::I64(word) = float_hash_fn(&mut heaps, &mut out, &[Value::F64(f)])
+                .expect("float hashes")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("an int word")
+            };
+            word
+        };
+        let canonical = hash(f64::NAN);
+        for f in [
+            f64::from_bits(0x7ff0_0000_0000_0001),
+            f64::from_bits(0xfff0_0000_0000_0001),
+        ] {
+            assert_eq!(hash(f), canonical, "{f} folds to the canonical NaN");
+        }
+        assert_eq!(hash(0.0), hash(-0.0), "the zero pair shares bits");
+    }
+
+    /// `char_hash` and `str_hash` fold the same FNV-1a over the same
+    /// UTF-8 bytes, so a char and its one-char string answer identically
+    /// (the hash family's char/string ruling).
+    #[test]
+    fn char_hash_answers_str_hash_over_the_same_bytes() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        for text in ["a", "\u{6f22}"] {
+            let word = heaps.new_intern(text);
+            let Value::I64(as_char) = char_hash_fn(&mut heaps, &mut out, &[word])
+                .expect("char hashes")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("an int word")
+            };
+            let Value::I64(as_str) = str_hash_fn(&mut heaps, &mut out, &[word])
+                .expect("string hashes")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("an int word")
+            };
+            assert_eq!(as_char, as_str, "{text:?} hashes the same either way");
         }
     }
 

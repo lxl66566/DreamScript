@@ -807,3 +807,180 @@ fn generic_impl_serves_union_receivers_member_wise() {
     let spans = call_spans(&ast);
     assert!(analyzed.checked.trait_calls.contains_key(&spans[0]));
 }
+
+const UNION_HEAD_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "trait ordered {\n",
+    "  fn compare(self, other: Self) -> int\n",
+    "}\n",
+    "enum mark { miss, hit(int) }\n",
+    "impl showable for mark {\n",
+    "  fn show(self) -> string { \"m\" }\n",
+    "}\n",
+    "impl ordered for mark {\n",
+    "  fn compare(self, other: Self) -> int { 0 }\n",
+    "}\n",
+    "fn order[t: ordered](a: t, b: t) -> int { a.compare(b) }\n",
+    "fn calls(u: mark, o: mark) -> () {\n",
+    "  u.show()\n",
+    "  showable::show(u)\n",
+    "  const c1 = u.compare(o)\n",
+    "  const c2 = order(u, o)\n",
+    "  if u is miss {\n",
+    "    const c3 = u.compare(o)\n",
+    "  }\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A union-head impl decomposes into per-branch instances, and a union
+/// receiver is served branch-wise by those siblings: one impl item sits
+/// behind them, so dispatch records a representative branch and the
+/// member's `Self` binds to the written head — a case-narrowed receiver
+/// accepts a union `other: Self`, and a free generic fn's bound check
+/// passes over the whole union.
+#[test]
+fn union_receiver_resolves_through_sibling_branches() {
+    let (ast, analyzed) = analyze_source("union_head.ds", UNION_HEAD_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "every union-receiver spelling checks clean: {rendered:?}"
+    );
+    let impls = impl_spans(&ast);
+    assert_eq!(impls.len(), 2, "the showable and ordered impls");
+    // Four calls record: the union-receiver dot call and its qualified
+    // spelling over the showable impl, the union-operand compare, and the
+    // `is`-narrowed compare against a union other. The free generic's
+    // own body call (the first span collected) records nothing — an
+    // in-scope assumption serves it.
+    let spans = call_spans(&ast);
+    assert!(
+        !analyzed.checked.trait_calls.contains_key(&spans[0]),
+        "the generic body's call rides its assumption"
+    );
+    let mut by_site: Vec<_> = analyzed.checked.trait_calls.values().collect();
+    by_site.sort_by_key(|call| call.impl_site.map(|span| span.start));
+    assert_eq!(
+        by_site.len(),
+        4,
+        "dot, qualified, union-operand compare, narrowed compare"
+    );
+    let shows = by_site[0];
+    assert_eq!(shows.impl_site, Some(impls[0]), "the shared showable item");
+    assert_eq!(
+        analyzed.decls.universe.render(shows.recv),
+        "miss | hit",
+        "the recorded receiver is the whole union"
+    );
+    let written = analyzed
+        .decls
+        .instances
+        .written(shows.instance)
+        .expect("the representative names a declared branch");
+    assert_eq!(
+        analyzed.decls.universe.render(written),
+        "miss | hit",
+        "the written head survived decomposition"
+    );
+    let head = analyzed
+        .decls
+        .instances
+        .head(shows.instance)
+        .expect("the representative is a branch instance");
+    assert!(
+        ["miss", "hit"].contains(&analyzed.decls.universe.render(head).as_str()),
+        "the representative is one branch, not the union: {}",
+        analyzed.decls.universe.render(head)
+    );
+    for call in &by_site[2..] {
+        assert_eq!(call.impl_site, Some(impls[1]), "the compare spellings");
+    }
+}
+
+const DISTINCT_IMPLS_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "enum mark { miss, hit(int) }\n",
+    "impl showable for miss {\n",
+    "  fn show(self) -> string { \"m\" }\n",
+    "}\n",
+    "impl showable for hit {\n",
+    "  fn show(self) -> string { \"h\" }\n",
+    "}\n",
+    "fn calls(u: mark) -> () {\n",
+    "  u.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// Members covered by distinct impl items never serve a union receiver:
+/// dispatch cannot pick between the two bodies, so the refusal stays the
+/// plain missing-instance one, naming the union.
+#[test]
+fn union_members_covered_by_distinct_impls_still_refuse() {
+    let (_ast, analyzed) = analyze_source("distinct_impls.ds", DISTINCT_IMPLS_SOURCE);
+    assert!(
+        analyzed.checked.diags.len() == 1,
+        "one refusal: {:?}",
+        analyzed.checked.diags
+    );
+    let diag = &analyzed.checked.diags[0];
+    assert_eq!(diag.code.as_str(), "DS2013");
+    assert_eq!(
+        diag.message, "no instance of `showable` for `miss | hit`",
+        "the refusal names the union, not a member"
+    );
+    assert!(
+        analyzed.checked.trait_calls.is_empty(),
+        "no dispatch records"
+    );
+}
+
+const UNCOVERED_MEMBER_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "enum mark { miss, hit(int), rect { w: int } }\n",
+    "impl showable for miss | hit {\n",
+    "  fn show(self) -> string { \"m\" }\n",
+    "}\n",
+    "fn calls(u: mark) -> () {\n",
+    "  u.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A union with an uncovered member still refuses: the sibling group
+/// covers `miss` and `hit` but never `rect`, so branch-wise aggregation
+/// stays out and the missing-instance diagnostic names the union.
+#[test]
+fn a_union_with_an_uncovered_member_still_refuses() {
+    let (_ast, analyzed) = analyze_source("uncovered_member.ds", UNCOVERED_MEMBER_SOURCE);
+    assert!(
+        analyzed.checked.diags.len() == 1,
+        "one refusal: {:?}",
+        analyzed.checked.diags
+    );
+    let diag = &analyzed.checked.diags[0];
+    assert_eq!(diag.code.as_str(), "DS2013");
+    assert!(
+        diag.message.starts_with("no instance of `showable` for `"),
+        "the refusal names the union: {}",
+        diag.message
+    );
+}

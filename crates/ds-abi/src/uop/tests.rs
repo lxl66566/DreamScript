@@ -266,6 +266,30 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
             0x14,
         ),
         (
+            WrapAddI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x15,
+        ),
+        (
+            WrapSubI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x16,
+        ),
+        (
+            WrapMulI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x17,
+        ),
+        (
             AddF64 {
                 dst: 0,
                 lhs: 0,
@@ -667,6 +691,13 @@ fn field_map_matches_the_module_doc_table() {
             0xa411_0203,
         ),
         (
+            Calltg {
+                callee: kidx,
+                nargs: 0x11,
+            },
+            0xa511_0203,
+        ),
+        (
             Calls {
                 callee_slot: 0x22,
                 nargs: 0x11,
@@ -688,8 +719,9 @@ fn field_map_matches_the_module_doc_table() {
         0x22 MulF64, 0x23 DivF64, 0x30 EqI64, 0x31 NeqI64, 0x32 LtI64, 0x33 GeI64, 0x34 LeI64,
         0x35 GtI64, 0x40 EqF64, 0x41 NeqF64, 0x42 LtF64, 0x43 GeF64, 0x44 LeF64, 0x45 GtF64,
         0x50 EqBool, 0x51 NeqBool, 0xD0 EqStr, 0xD1 NeqStr, 0xD2 StrCat, 0xD4 StrCatArena,
+        0x15 WrapAddI64, 0x16 WrapSubI64, 0x17 WrapMulI64,
     ]);
-    assert_eq!(cases.len(), 51, "one sentinel per variant");
+    assert_eq!(cases.len(), 55, "one sentinel per variant");
     for (uop, word) in cases {
         assert_eq!(uop.encode(0), Ok(word), "field map drift: {uop:?}");
     }
@@ -993,6 +1025,9 @@ fn effects_are_consistent_with_slot_operands() {
             | MulI64 { dst, lhs, rhs }
             | DivI64 { dst, lhs, rhs }
             | ModI64 { dst, lhs, rhs }
+            | WrapAddI64 { dst, lhs, rhs }
+            | WrapSubI64 { dst, lhs, rhs }
+            | WrapMulI64 { dst, lhs, rhs }
             | AddF64 { dst, lhs, rhs }
             | SubF64 { dst, lhs, rhs }
             | MulF64 { dst, lhs, rhs }

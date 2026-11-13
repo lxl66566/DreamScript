@@ -301,6 +301,33 @@ impl Resolutions {
     pub fn is_empty(&self) -> bool {
         self.uses.is_empty()
     }
+
+    /// The resolution whose recorded use span encloses `at`, if any.
+    ///
+    /// A point query (the LSP's go-to-definition): `at` names one position
+    /// (its start; the end is ignored), and the answer is the covering use
+    /// with the latest start, so the innermost name wins when uses nest
+    /// (a call's own use covers its arguments'). The table is sorted by
+    /// start, so the walk back from the last use starting at or before the
+    /// position meets the winner first; a walk that never covers answers
+    /// `None`, and the walk is linear in the file's use count in the
+    /// worst case (a position on whitespace between names).
+    #[must_use]
+    pub fn enclosing(&self, at: Span) -> Option<&Res> {
+        let mut index = self
+            .uses
+            .partition_point(|(span, _)| {
+                (span.file.as_u32(), span.start) <= (at.file.as_u32(), at.start)
+            })
+            .checked_sub(1)?;
+        loop {
+            let (span, res) = &self.uses[index];
+            if span.file == at.file && span.end >= at.start {
+                return Some(res);
+            }
+            index = index.checked_sub(1)?;
+        }
+    }
 }
 
 /// The sort key of one use span: file, then byte offsets.

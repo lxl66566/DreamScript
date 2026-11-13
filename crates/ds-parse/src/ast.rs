@@ -13,6 +13,7 @@ use ds_diag::{FileId, Span};
 
 /// One parsed file: its blocks in source order.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ast {
     /// The file these blocks were parsed from.
     pub file: FileId,
@@ -24,6 +25,7 @@ pub struct Ast {
 
 /// A `##`-delimited slice of a file (G3).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Block {
     /// Span from the first item to the last (or the separator).
     pub span: Span,
@@ -35,6 +37,7 @@ pub struct Block {
 
 /// A comment kept as AST payload for lossless formatting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Trivia {
     /// Source range of the comment.
     pub span: Span,
@@ -44,6 +47,7 @@ pub struct Trivia {
 
 /// Which comment syntax a [`Trivia`] came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TriviaKind {
     /// `// ...` up to the line end.
     Line,
@@ -53,6 +57,7 @@ pub enum TriviaKind {
 
 /// A top-level definition, possibly attributed and visibility-annotated.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Item {
     /// Span of the whole item including attributes and visibility.
     pub span: Span,
@@ -78,6 +83,7 @@ pub struct Item {
 
 /// A `#[name(args)]` attribute.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Attribute {
     /// Span including `#[...]`.
     pub span: Span,
@@ -89,6 +95,7 @@ pub struct Attribute {
 
 /// Visibility of a definition (G4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Vis {
     /// `pub`: visible to dependents, enters the `.dsi`.
     Pub(Span),
@@ -108,6 +115,7 @@ impl Vis {
 
 /// One top-level definition.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ItemKind {
     /// `import path (sel)? as alias? if cond?` (G4).
     Import(ImportDecl),
@@ -138,6 +146,7 @@ pub enum ItemKind {
 
 /// An import declaration (G4).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImportDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -153,6 +162,7 @@ pub struct ImportDecl {
 
 /// The `@std/csv`-style path of an import.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImportPath {
     /// Span of the whole path.
     pub span: Span,
@@ -164,6 +174,7 @@ pub struct ImportPath {
 
 /// One entry of an import's selective list.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImportSel {
     /// Span of the entry.
     pub span: Span,
@@ -175,6 +186,7 @@ pub struct ImportSel {
 
 /// A `const`/`var` binding statement or item.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LocalDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -192,6 +204,7 @@ pub struct LocalDecl {
 /// trait/impl member (bodied `fn` declarations at top level convert onto
 /// [`ItemKind::Local`]).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FnDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -215,6 +228,7 @@ pub struct FnDecl {
 
 /// One declared generic parameter.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TypeParam {
     /// Span of the parameter.
     pub span: Span,
@@ -226,6 +240,7 @@ pub struct TypeParam {
 
 /// One parameter of a function or function type.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Param {
     /// Span of the parameter.
     pub span: Span,
@@ -243,6 +258,7 @@ pub struct Param {
 
 /// A parameter's passing mode (C2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ParamMode {
     /// Default immutable borrow.
     Borrow,
@@ -256,6 +272,7 @@ pub enum ParamMode {
 
 /// A struct declaration.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StructDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -273,6 +290,7 @@ pub struct StructDecl {
 
 /// One member of a struct body.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StructMember {
     /// `name: type` field.
     Field(FieldDecl),
@@ -287,6 +305,7 @@ pub enum StructMember {
 
 /// A struct field or struct-pattern field.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FieldDecl {
     /// Span of `name: type`.
     pub span: Span,
@@ -303,6 +322,7 @@ pub struct FieldDecl {
 
 /// An enum declaration.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnumDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -318,6 +338,7 @@ pub struct EnumDecl {
 
 /// One case of an enum.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnumCase {
     /// Span of the case.
     pub span: Span,
@@ -329,6 +350,7 @@ pub struct EnumCase {
 
 /// The payload of an enum case.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EnumPayload {
     /// No payload.
     None,
@@ -344,6 +366,7 @@ pub enum EnumPayload {
 /// capabilities the platform serves, an absent list providing nothing
 /// (the embed target).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlatformDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -355,6 +378,7 @@ pub struct PlatformDecl {
 
 /// The platform's name: one plain string literal's text.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlatformName {
     /// Span of the string literal.
     pub span: Span,
@@ -364,6 +388,7 @@ pub struct PlatformName {
 
 /// A unit tag declaration (B1).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TagDecl {
     /// Span of the declaration.
     pub span: Span,
@@ -373,6 +398,7 @@ pub struct TagDecl {
 
 /// A type alias (F7).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TypeAliasDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -386,6 +412,7 @@ pub struct TypeAliasDecl {
 
 /// A trait declaration (B6).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraitDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -401,6 +428,7 @@ pub struct TraitDecl {
 
 /// One trait member.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TraitMember {
     /// Associated type `type A` (B6).
     AssocType {
@@ -419,6 +447,7 @@ pub enum TraitMember {
 /// An impl block (B6): inherent (`impl list<t> { ... }`) or
 /// trait (`impl[T: ord] ord for list<t> { ... }`).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImplDecl {
     /// Span of the whole declaration.
     pub span: Span,
@@ -434,6 +463,7 @@ pub struct ImplDecl {
 
 /// A type expression (B1, B4).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Type {
     /// Nominal path, optionally generic: `list<int>`.
     Path {
@@ -554,6 +584,7 @@ impl Type {
 
 /// A path of `::`-separated identifiers.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Path {
     /// Span of the whole path.
     pub span: Span,
@@ -575,6 +606,7 @@ impl Path {
 
 /// A trait reference in an impl head: path plus optional generic args.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TypeRef {
     /// Span of the reference.
     pub span: Span,
@@ -586,6 +618,7 @@ pub struct TypeRef {
 
 /// An identifier with its span.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ident {
     /// Span of the name.
     pub span: Span,
@@ -595,6 +628,7 @@ pub struct Ident {
 
 /// A pattern (F4).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pattern {
     /// `_`.
     Wildcard(Span),
@@ -673,6 +707,7 @@ pub enum Pattern {
 
 /// One match arm (F4).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchArm {
     /// Span of the whole arm.
     pub span: Span,
@@ -688,6 +723,7 @@ pub struct MatchArm {
 
 /// A `{ ... }` block; its value is the final expression (F2).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockExpr {
     /// Span including braces.
     pub span: Span,
@@ -699,6 +735,7 @@ pub struct BlockExpr {
 
 /// One statement inside a block.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Stmt {
     /// Span of the statement.
     pub span: Span,
@@ -712,6 +749,7 @@ pub struct Stmt {
 
 /// A statement is a binding or an expression (F1).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StmtKind {
     /// `const`/`var` binding.
     Local(LocalDecl),
@@ -721,6 +759,7 @@ pub enum StmtKind {
 
 /// An expression.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Expr {
     /// Integer literal (B7); text is unparsed digits plus suffix.
     Literal {
@@ -1034,6 +1073,7 @@ impl Expr {
 
 /// One argument of a call (F7): positional, or named (`f(x: 1)`).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallArg {
     /// Span of the whole argument.
     pub span: Span,
@@ -1045,6 +1085,7 @@ pub struct CallArg {
 
 /// One part of an interpolated string (F6).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StrPart {
     /// Literal text with escapes already cooked.
     Text {
@@ -1071,6 +1112,7 @@ pub enum StrPart {
 
 /// A non-string literal.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Literal {
     /// Integer (B7): raw digits text (radix prefix kept) and suffix.
     Int {
@@ -1096,6 +1138,7 @@ pub enum Literal {
 
 /// Unary operator (F5, B7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UnaryOp {
     /// Negate (traps on int-min).
     Neg,
@@ -1107,6 +1150,7 @@ pub enum UnaryOp {
 
 /// Binary operator — the frozen set (F5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryOp {
     /// `+` (traps).
     Add,
@@ -1156,6 +1200,7 @@ pub enum BinaryOp {
 
 /// Assignment operator.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AssignOp {
     /// `=`.
     Plain,

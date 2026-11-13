@@ -12,6 +12,10 @@
 //!
 //! The ambient is data, three halves:
 //!
+//! * [`ambient_blob`]: the precompiled parse tree of the source member, behind the `ast-serde`
+//!   feature — a checked-in postcard artifact the cold-start seams decode in place of parsing the
+//!   member (a pure cache: every seam falls back to the fresh parse on any artifact miss).
+//!
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
 //!   parse, resolve, the declaration tables, the bidirectional check. A file that redeclares an
@@ -42,21 +46,27 @@
 //! `fn map[t, r]` coexist: brace and type positions resolve the struct,
 //! the dot position resolves the function. Consequences that remain:
 //!
-//! * Per-file types stay file-owned: `file`, `raw_fd`, `url`, `ord`, `json`, and the stack API
+//! * Per-file types stay file-owned: `file`, `raw_fd`, `url`, `json`, and the stack API
 //!   (`push`/`pop`) are corpus declarations. `open` and `read_exact` are absent for that reason
 //!   (their signatures cannot name the caller's own `file` struct); their uses surface as staged
 //!   run-item noise. The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`,
 //!   `parse_err` — the discriminants the platform natives answer), so `read_file`, `parse_int`,
 //!   `load_rows`, `read_config`, and `fetch` return real success unions.
-//! * `max` carries no bound: the `[t: ord]` constraint needs a stdlib-owned `ord` trait, and the
-//!   corpus declares its own. Likewise `u32` is a distinct atom (B7) (mixed-width arithmetic is the
-//!   corpus's staged noise), and `close` takes `int` because `raw_fd` is a file-owned alias of it.
+//! * `max` carries no bound even though the ambient now owns the `ord` trait: the native's one
+//!   generic body plans against no instance, so the bound would add nothing to route. Likewise
+//!   `u32` is a distinct atom (B7) (mixed-width arithmetic is the corpus's staged noise), and
+//!   `close` takes `int` because `raw_fd` is a file-owned alias of it.
 
 #![warn(missing_docs)]
 
 use std::sync::LazyLock;
 
 use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps};
+
+#[cfg(feature = "ast-serde")]
+pub mod ambient_blob;
+#[cfg(feature = "ast-serde")]
+pub use ambient_blob::{AmbientBlobError, ambient_ast};
 
 /// The world-capability attribution, built once per process.
 static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
@@ -175,6 +185,13 @@ mod tests {
             "read_file",
             "str",
             "max",
+            "total_compare",
+            "str_compare",
+            "char_compare",
+            "byte_compare",
+            "str_hash",
+            "float_hash",
+            "char_hash",
             "list_new",
             "list_len",
             "list_get",
@@ -194,6 +211,8 @@ mod tests {
             "byte",
             "list",
             "map",
+            "ord",
+            "hash",
             "row",
             "config",
             "io_err",

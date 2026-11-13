@@ -108,7 +108,14 @@ pub(crate) struct Native {
 
 /// The natives the M3 lowering contract routes: the console and scalar
 /// conversions, the pure string ops (the surfaces UFCS chains feed —
-/// `s.trim()`, `s.to_upper()`, `"42".parse_int()` [F3]), the list and
+/// `s.trim()`, `s.to_upper()`, `"42".parse_int()` [F3]), the float sort
+/// key `total_compare` (the `ord` derive's ruled spelling [B7], two
+/// f64 words to one i64), the three primitive sort keys `str_compare`,
+/// `char_compare`, and `byte_compare` (the `ord` derive's string, char,
+/// and byte spellings, each two words to one i64), the three content
+/// hashes `str_hash`, `float_hash`, and `char_hash` (the `hash`
+/// derive's string, float, and char spellings, each one word to one
+/// i64), the list and
 /// map construction and mutation surfaces (one heap-object `Ref` per
 /// value, element and pair words opaque to the natives), the file-IO
 /// surface including `fs_list`, and the TCP surface. The ambient's
@@ -232,6 +239,48 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: 45,
         shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "total_compare",
+        module: NativeModule::Builtin,
+        index: 49,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "str_compare",
+        module: NativeModule::Builtin,
+        index: 50,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "char_compare",
+        module: NativeModule::Builtin,
+        index: 51,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "byte_compare",
+        module: NativeModule::Builtin,
+        index: 52,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "str_hash",
+        module: NativeModule::Builtin,
+        index: 53,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "float_hash",
+        module: NativeModule::Builtin,
+        index: 54,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "char_hash",
+        module: NativeModule::Builtin,
+        index: 55,
+        shape: NativeShape::Total(SlotType::I64),
     },
     Native {
         name: "read_file",

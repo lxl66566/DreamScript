@@ -817,3 +817,55 @@ fn inherent_methods_key_by_owner_type() {
         "the forward reference registers"
     );
 }
+
+#[test]
+fn enclosing_finds_the_covering_use() {
+    let f = fixture(&[
+        (
+            "a.ds",
+            concat!(
+                "tag t\n",
+                "fn f(x: t) -> t { x }\n",
+                "fn caller(x: t) -> t { f(x) }\n",
+            ),
+        ),
+        ("b.ds", "fn other(y: t) -> t { y }\n"),
+    ]);
+    assert!(f.collect.is_empty(), "{:?}", f.collect);
+    let (uses, diags) = f.resolve(0);
+    assert!(diags.is_empty(), "{diags:?}");
+    let file = file_of(&f, 0);
+    let source = f.source(0);
+    let callee = span_in(source, file, "f(x)", 0, "f");
+
+    // A position inside the callee use resolves to the free function.
+    let inside = Span::new(file, callee.start + 1, callee.start + 1);
+    match uses.enclosing(inside) {
+        Some(Res::Def(id)) => assert_eq!(*id, f.package.lookup_value("f").unwrap()),
+        other => panic!("the callee use must cover: {other:?}"),
+    }
+
+    // A position at a use's start covers it (the partition key must not
+    // skip uses that merely start at the position).
+    let at_start = Span::new(file, callee.start, callee.start);
+    assert!(uses.enclosing(at_start).is_some());
+
+    // A position on whitespace between names covers nothing.
+    let between = span_of(source, file, "fn caller", 0);
+    let gap = Span::new(file, between.start + 2, between.start + 2);
+    assert!(uses.enclosing(gap).is_none(), "no use covers the space");
+
+    // A position in another file, covered by none of that file's uses,
+    // answers None even though the first file's uses sit earlier in the
+    // table: the file is part of the containment test.
+    let second = file_of(&f, 1);
+    let other_source = f.source(1);
+    let head = span_of(other_source, second, "fn other", 0);
+    let other_gap = Span::new(second, head.start + 1, head.start + 1);
+    let (second_uses, second_diags) = f.resolve(1);
+    assert!(second_diags.is_empty(), "{second_diags:?}");
+    assert!(
+        second_uses.enclosing(other_gap).is_none(),
+        "an earlier file's use must not cover"
+    );
+}

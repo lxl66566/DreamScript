@@ -39,16 +39,24 @@
 //!
 //! A checker pass is memoized at its own grain, and the per-definition
 //! queries slice its value instead of re-running it: `CheckedPackage` runs
-//! the bidirectional check (B2) once per package, `FileLinearity` the
-//! affine pass (C1, C5) once per file, and `PackageEffects` the effects
-//! pass (E1) once per package. `TypeOf`, `LinearityCheck`, and `EffectsOf`
-//! therefore depend on one package- or file-grain key each (plus the block
-//! index for the definition's block), so a definition's cost is one bucket
-//! lookup in the pass's block-grain fact index plus that block's facts, and
+//! the bidirectional check (B2) once per package, `PackageLinearity` the
+//! affine pass (C1, C5) once per package over the expansion's own trees,
+//! and `PackageEffects` the effects pass (E1) once per package. `TypeOf`,
+//! `LinearityCheck`, and `EffectsOf` therefore depend on one package-grain
+//! key each (plus the block index for the definition's block), so a
+//! definition's cost is one bucket lookup in the pass's block-grain fact
+//! index plus that block's facts, and
 //! deep verification walks a handful of keys however many definitions the
 //! package holds. The memoed payloads are shared arcs, so answering a read
 //! from a memo clones pointers. `PlatformCheck` reads the same effects
-//! memo, so the effects pass runs once for both.
+//! memo, so the effects pass runs once for both. `Expanded` runs the derive
+//! expansion (G1) once over the parse set, and `Resolve` with the check
+//! family computes over its trees, so a derived member's call resolves and
+//! checks at the ordinary grain — `ds check` and a REPL session's check
+//! no longer refuse it. `Analyzed` reuses the expansion and resolve values
+//! and runs the analyzer's check half once per package; its bundle carries
+//! the expansion's own trees, so the run path lowers from it instead of
+//! re-expanding or re-resolving the queries' inputs.
 //!
 //! # Cycle policy
 //!
@@ -113,11 +121,11 @@ pub use ds_check::{Effect, EffectRow};
 pub use error::QueryError;
 pub use key::{BlockId, DefId, Dependency, InputKey, PackageId, QueryKey, QueryKind};
 pub use query::{
-    BlockIndex, BlockSource, CheckedPackage, EffectsOf, FileLinearity, LinearityCheck,
-    PackageEffects, ParseFile, PlatformCheck, Query, Resolve, TypeOf,
+    Analyzed, BlockIndex, BlockSource, CheckedPackage, EffectsOf, Expanded, LinearityCheck,
+    PackageEffects, PackageLinearity, ParseFile, PlatformCheck, Query, Resolve, TypeOf,
 };
 pub use value::{
-    BlockIndexOutput, BlockInfo, CheckedPackageOutput, FileLinearityOutput, LinearityOutput,
-    PackageEffectsOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
-    TypeOfOutput,
+    AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageOutput, ExpandedOutput,
+    LinearityOutput, PackageEffectsOutput, PackageLinearityOutput, ParseOutput,
+    PlatformCheckOutput, QueryValue, ResolveOutput, TypeOfOutput,
 };

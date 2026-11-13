@@ -1,0 +1,33 @@
+[package]
+name         = "ds-lsp"
+description  = "Language-server protocol slice over the ds-query memoized front end"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+readme.workspace       = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace     = true
+rustc-hash.workspace  = true
+# The only async consumer: the server loop and the command channel to the
+# engine's worker thread. lsp-types comes from tower-lsp's pin, never added
+# separately, so the protocol version cannot drift from the server crate.
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "macros", "sync", "time"] }
+ds-diag = { path = "../ds-diag" }
+ds-check = { path = "../ds-check" }
+ds-parse = { path = "../ds-parse" }
+ds-query.workspace = true
+ds-fmt = { path = "../ds-fmt" }
+ds-stdlib.workspace = true
+
+[dev-dependencies]
+# Test-side JSON only: reading the server's replies in the smoke test.
+serde_json = "1"

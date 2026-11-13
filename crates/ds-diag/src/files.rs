@@ -4,6 +4,7 @@ use core::ops::Range;
 
 /// Identifier of a source file, handed out by [`Files::add_source`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileId(u32);
 
 impl FileId {
@@ -25,6 +26,7 @@ impl FileId {
 /// Offsets are raw byte offsets into the registered source. Invariant:
 /// `start <= end`, enforced by [`Span::new`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     /// The file the range lies in.
     pub file: FileId,
