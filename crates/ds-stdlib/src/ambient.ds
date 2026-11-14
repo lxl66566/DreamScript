@@ -6,9 +6,12 @@
 // be redeclared by a corpus file only in the other namespace. The
 // fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
 // parse_err — the runtime discriminants the platform natives answer), so
-// the five fallible reads return real success unions. Still file-owned:
+// the fallible reads return real success unions. Still file-owned:
 // file, url, raw_fd, json, and the stack API — `open`/`read_exact`
 // stay absent because their signatures cannot name the caller's `file`.
+// Every extern here names a callee the lowering answers (a native, a
+// generic native, or a rule-routed family); a declaration whose callee
+// no table answers was the dead-name footgun this surface shed.
 
 // The default platform (H5, E1): the `ds` CLI is this platform's
 // provider, and the checker verifies the package's world usage stays
@@ -174,21 +177,29 @@ enum net_err {
   refused
 }
 
-// A text row: keyed lookup over strings (get feeds the first parameter).
+// A text row: keyed lookup over strings.
 type row = map[string, string]
 
-// The config the readers answer and the fallback rebuilds (the optional
-// port is the tutorial's b14 extraction shape; an int constructs in).
+// The config record (the optional port is the tutorial's b14 extraction
+// shape; an int constructs in). The reader/fallback externs that answered
+// it are gone from the ambient — no native answered them — so a package
+// wanting them declares its own externs over this shape.
 struct config { host: string, port: int?, retries: int }
 
-// The fetch result; body extraction is consume.
+// An opaque response value. The fetch/consume externs that answered it
+// are gone from the ambient — no native answered them — so a package
+// wanting them declares its own externs over this shape.
 struct response
 
-// The comptime reflection vocabulary (G1, G2): the field record
-// `fields` answers — name, the field's type as a type value, and the
-// field's nominal tag name when its type is a bare atom (empty for
-// composite field types this round). The two builtins run inside
-// comptime functions only; the checker refuses calls elsewhere.
+// The comptime reflection vocabulary (G1, G2): the one record `fields`
+// answers over declared data — a struct's fields and an enum's cases
+// share the (name, type, tag) triple. A field's record: its declared
+// name, its type as a type value, and its nominal tag name when its
+// type is a bare atom (empty for composite field types). A case's
+// record: its declared name, its payload as a type value (the case's
+// own minted atom, or none when the case constructs bare), and its own
+// constructor tag name. The two builtins run inside comptime functions
+// only; the checker refuses calls elsewhere.
 struct field { name: string, type: type, tag: string }
 extern fn fields (t: type) -> list[field]
 extern fn type_name (t: type) -> string
@@ -196,7 +207,6 @@ extern fn type_name (t: type) -> string
 // The nursery demo's fixed page list.
 const urls = ["https://ds.dev", "https://example.org"]
 
-extern fn get[k, v] (m: map[k, v], key: k) -> v | none
 extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 extern fn head[t] (xs: list[t]) -> t?
@@ -235,9 +245,6 @@ extern fn float_hash (f: float) -> int
 extern fn char_hash (c: char) -> int
 extern fn println (msg: string) -> ()
 extern fn print (msg: string) -> ()
-extern fn log (msg: string) -> ()
-extern fn close (fd: int) -> ()
-extern fn to_u32_le (b: bytes) -> u32
 extern fn read_file (path: string) -> string | io_err
 extern fn write_file (path: string, contents: string) -> ()
 extern fn file_exists (path: string) -> bool
@@ -249,11 +256,6 @@ extern fn net_recv (conn: int, max_bytes: int) -> string
 extern fn net_close (conn: int) -> ()
 extern fn http_get (url: string) -> string
 extern fn parse_json (text: string) -> string
-extern fn load_rows (path: string) -> list[row] | io_err
-extern fn read_config (path: string) -> config | io_err
-extern fn default_config () -> config
-extern fn fetch (u: string) -> response | net_err
-extern fn consume (r: response) -> string
 extern fn cancel[t] (e: t) -> ()
 extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
@@ -264,5 +266,4 @@ extern fn unwrap_or[t] (x: t?, y: t) -> t
 extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
 extern fn ok_or[t, e] (x: t?, err: e) -> t | e
 extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
-extern fn die[t] (msg: string) -> t
 extern fn max[t] (a: t, b: t) -> t

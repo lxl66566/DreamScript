@@ -1,9 +1,10 @@
 //! `ds fmt` as a compiler component (H6 item 2): a block-aware, zero-option
 //! formatter over the parse query. The public entry formats a whole file;
 //! internally every `##` block renders from its own AST plus trivia only
-//! (`render_block`), so the LSP on-type path can later format one block
-//! without touching its neighbors — block boundaries are the only thing the
-//! file-level assembly reads.
+//! (`render_block`), and one item renders standalone ([`format_item`]), so
+//! the LSP on-type path formats a single declaration without touching its
+//! neighbors — block boundaries are the only thing the file-level assembly
+//! reads.
 //!
 //! # Canonical form (zero options)
 //!
@@ -66,7 +67,7 @@ mod ty;
 
 use ctx::Ctx;
 use ds_diag::{FileId, Files};
-use ds_parse::{Ast, Block};
+use ds_parse::{Ast, Block, Item};
 use expr::{ElemStream, push_comment};
 
 /// Formats one parsed file. Zero options: layout follows the canonical form
@@ -83,41 +84,94 @@ pub fn format_source(files: &Files, file: FileId, ast: &Ast) -> String {
 }
 
 /// Renders one block from its own items and trivia only. This is the
-/// block-grain unit the LSP on-type path will call; it never reads another
-/// block's nodes.
+/// block-grain unit; it never reads another block's nodes.
 pub(crate) fn render_block(ctx: &Ctx, block: &Block) -> String {
     let mut out = String::new();
     let mut stream = ElemStream::new(false);
     for item in &block.items {
-        for t in &item.leading_trivia {
-            push_comment(ctx, &mut out, &mut stream, 0, t);
-        }
-        stream.begin(ctx, &mut out, item.span.start);
-        decl::write_item(ctx, &mut out, 0, item);
-        // An attached member/field doc run prints at its member inside the
-        // rendered body, so the trailing migration skips those trivia —
-        // only the remaining interior comments (and a same-line trailing
-        // comment) land behind the item. The element's end is the furthest
-        // of the item's own extent and the comments it rendered: a
-        // same-line tail comment sits past the item, while a migrated deep
-        // comment sits before the closing brace in the source, so its end
-        // alone would manufacture a phantom blank line before the next
-        // element.
-        let mut end = item.span.end;
-        for t in &item.trailing_trivia {
-            if decl::is_member_doc(&item.kind, t.span) {
-                continue;
-            }
-            out.push(' ');
-            out.push_str(ctx.comment_text(t));
-            end = end.max(t.span.end);
-        }
-        stream.end(end);
+        render_item(ctx, &mut out, &mut stream, item);
     }
     for t in &block.trailing_trivia {
         push_comment(ctx, &mut out, &mut stream, 0, t);
     }
     out
+}
+
+/// Writes one item's full standalone rendering — its leading comments,
+/// the item at indent 0, and the same-line trailing comments — appended
+/// through the caller's element stream. A single item rendered over a
+/// fresh stream is exactly its slice of the block render, which is what
+/// [`format_item`] serves the on-type path.
+fn render_item(ctx: &Ctx, out: &mut String, stream: &mut ElemStream, item: &Item) {
+    for t in &item.leading_trivia {
+        push_comment(ctx, out, stream, 0, t);
+    }
+    stream.begin(ctx, out, item.span.start);
+    decl::write_item(ctx, out, 0, item);
+    // An attached member/field doc run prints at its member inside the
+    // rendered body, so the trailing migration skips those trivia —
+    // only the remaining interior comments (and a same-line trailing
+    // comment) land behind the item. The element's end is the furthest
+    // of the item's own extent and the comments it rendered: a
+    // same-line tail comment sits past the item, while a migrated deep
+    // comment sits before the closing brace in the source, so its end
+    // alone would manufacture a phantom blank line before the next
+    // element.
+    for t in &item.trailing_trivia {
+        if decl::is_member_doc(&item.kind, t.span) {
+            continue;
+        }
+        out.push(' ');
+        out.push_str(ctx.comment_text(t));
+    }
+    let (.., end) = item_region(item);
+    stream.end(end);
+}
+
+/// The source bounds (byte offsets) of one block item's format region:
+/// the item's span widened left over its leading comments and right over
+/// the trailing comments the rendering appends inline (member docs stay
+/// inside the item's own span). The on-type path probes containment
+/// against exactly these bounds, so what it formats is what it replaces.
+#[must_use]
+pub fn item_region(item: &Item) -> (u32, u32) {
+    let start = item
+        .leading_trivia
+        .first()
+        .map_or(item.span.start, |t| t.span.start.min(item.span.start));
+    let mut end = item.span.end;
+    for t in &item.trailing_trivia {
+        if !decl::is_member_doc(&item.kind, t.span) {
+            end = end.max(t.span.end);
+        }
+    }
+    (start, end)
+}
+
+/// One block item's canonical rendering together with the source region
+/// it replaces in isolation: the tightest unit on-type formatting
+/// reformats. Neighboring items, separators, and the whitespace between
+/// elements stay untouched — those belong to the whole-file assembly.
+#[must_use]
+pub struct ItemFormat {
+    /// First byte of the region.
+    pub start: u32,
+    /// One past the region's last byte.
+    pub end: u32,
+    /// The region's canonical text (no trailing newline).
+    pub text: String,
+}
+
+/// Renders one block item standalone: the canonical text of
+/// [`item_region`]'s range, the item's own slice of the whole-file
+/// format. The `item` must belong to the parse of `file` in `files`.
+pub fn format_item(files: &Files, file: FileId, item: &Item) -> ItemFormat {
+    let ctx = Ctx::new(files.source(file));
+    let mut text = String::new();
+    let mut stream = ElemStream::new(false);
+    render_item(&ctx, &mut text, &mut stream, item);
+    let (start, end) = item_region(item);
+    ItemFormat { start, end, text }
 }
 
 /// First content offset of a block (leading comments, first item, or block
@@ -309,6 +363,44 @@ mod tests {
         );
         assert_eq!(fmt_src("##\n##\ntag a\n"), "##\n##\ntag a\n");
         assert_eq!(fmt_src("tag a\n##\n"), "tag a\n##\n");
+    }
+
+    /// A single item rendered standalone is its slice of the whole-file
+    /// output, and the region bounds cover exactly the bytes the text
+    /// replaces: leading comments included, the trailing newline and any
+    /// neighbor excluded.
+    #[test]
+    fn items_render_standalone() {
+        let src = "const one=1\n// about f\nfn  f() -> int { x\n}\nconst two=2\n";
+        let mut files = Files::new();
+        let file = files.add_source("t.ds", src);
+        let ast = parse(&files, file).expect("parses");
+        let items: Vec<&Item> = ast.blocks.iter().flat_map(|b| b.items.iter()).collect();
+        assert_eq!(items.len(), 3, "three top-level items");
+        let whole = format_source(&files, file, &ast);
+        // The middle item's region starts at its leading comment and ends
+        // at its own last byte; the rendered text carries the comment.
+        let (start, end) = item_region(items[1]);
+        assert_eq!(
+            &src[start as usize..end as usize],
+            "// about f\nfn  f() -> int { x\n}"
+        );
+        let standalone = format_item(&files, file, items[1]);
+        assert_eq!(standalone.start, start);
+        assert_eq!(standalone.end, end);
+        assert_eq!(standalone.text, "// about f\nfn f() -> int {\n  x\n}");
+        assert!(
+            whole.contains(&standalone.text),
+            "the standalone render is the item's slice of the file: {whole}"
+        );
+        // A trailing same-line comment widens the region past the item.
+        let src = "const a = 1 // tail\n";
+        let file = files.add_source("u.ds", src);
+        let ast = parse(&files, file).expect("parses");
+        let item = &ast.blocks[0].items[0];
+        let (start, end) = item_region(item);
+        assert_eq!(&src[start as usize..end as usize], "const a = 1 // tail");
+        assert_eq!(format_item(&files, file, item).text, "const a = 1 // tail");
     }
 
     #[test]

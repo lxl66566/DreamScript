@@ -3,6 +3,8 @@
 // items:
 // raw_fd: stage: typecheck
 // io_error: stage: typecheck
+// close: stage: typecheck
+// to_u32_le: stage: typecheck
 // file: stage: typecheck
 // read_u32: stage: run
 // sum_file: stage: run
@@ -12,6 +14,13 @@
 
 type raw_fd = int
 tag io_error
+
+// the fd close and the little-endian read, file-owned since the ambient
+// shed its dead declarations (no native answers these callees; the uses
+// keep their staged spellings and refuse at lowering as the header
+// records — to_u32_le consumes its bytes, the move the affine gate pins)
+extern fn close(fd: raw_fd) -> ()
+extern fn to_u32_le(move b: bytes) -> u32
 
 struct file: ~Copyable {
   fd: raw_fd

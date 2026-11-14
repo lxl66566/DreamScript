@@ -1,11 +1,17 @@
 // source: the record's construction story (B3, F7) and D2's COW collections — the map literal rides the anonymous-record-literal reservation, builder calls interim
 // purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, the entry count, and the report builder's string `+` operands over the concat call
 // items:
+// get: stage: typecheck
 // build_report: stage: run
 // overwritten: stage: run
 // counted: stage: run
 // get_spelling: stage: typecheck
 // reject-ctor-args: stage: reject the empty-map constructor takes no value arguments (DS2001)
+
+// the record's own tutorial-facing lookup, file-owned since the ambient
+// shed its dead declarations (no native answers the callee; the spelling
+// keeps its typecheck stage and refuses at lowering)
+extern fn get[k, v](m: map[k, v], key: k) -> v | none
 
 // the checked reads and their `.ok`/`.err` extraction run (the
 // map_probe fixture); the `+` operands over strings lower to the

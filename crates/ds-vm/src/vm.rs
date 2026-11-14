@@ -350,7 +350,7 @@ pub(crate) struct CallInfo {
 }
 
 /// The function the dispatcher is executing.
-struct Active {
+pub(crate) struct Active {
     version: VersionIdx,
     func: u32,
 }
@@ -807,7 +807,7 @@ impl FrameAnswer {
 /// completed, it parked at a yield whose resumer is the host, a nested
 /// drive's reentry frame returned, or it parked at a cross-nursery join
 /// whose drive the host must run first.
-enum DriveOutcome {
+pub(crate) enum DriveOutcome {
     /// The current fiber's entry frame returned or `HALT`ed.
     Died(Value),
     /// The current fiber yielded with no in-language resumer.
@@ -827,7 +827,7 @@ enum DriveOutcome {
 /// A parked joiner's pending nursery drive: the join/boundary seam parked
 /// the calling fiber and asks its host drive to drain the joined nursery
 /// before the answer is delivered back onto the parked call site.
-struct InterlockRequest {
+pub(crate) struct InterlockRequest {
     /// The open nursery being joined.
     nursery: NurseryId,
     /// The fiber parked at the join call (the joiner).
@@ -966,7 +966,7 @@ struct StackState<'a> {
     stack: &'a mut Segment,
     callinfo: &'a mut Vec<CallInfo>,
     versions: &'a ModuleRegistry,
-    limit: usize,
+    pub(crate) limit: usize,
     max_len: &'a mut usize,
 }
 
@@ -2069,35 +2069,35 @@ pub struct BacktraceFrame {
 /// ([`crate::platform`]) — a bare VM carries no world surface.
 #[derive(Debug)]
 pub struct Vm {
-    registry: ModuleRegistry,
+    pub(crate) registry: ModuleRegistry,
     /// The running fiber's heap object store, swapped in from its pool
     /// slot beside the segment; the slot holds a scratch store while
     /// the fiber runs. Host-facing store access routes by the current
     /// fiber ([`Vm::objects`]).
-    objects: Objects,
+    pub(crate) objects: Objects,
     out: OutputSink,
     /// The running fiber's segment and call chain, swapped in from its
     /// pool slot beside the store; `ctx_live` tracks whether they are
     /// here (true) or stashed in the slot (false).
-    stack: Segment,
-    callinfo: Vec<CallInfo>,
-    ctx_live: bool,
-    pool: Vec<Fiber>,
-    current: FiberId,
+    pub(crate) stack: Segment,
+    pub(crate) callinfo: Vec<CallInfo>,
+    pub(crate) ctx_live: bool,
+    pub(crate) pool: Vec<Fiber>,
+    pub(crate) current: FiberId,
     /// The nursery pool [E2]: one slot per open-or-consumed nursery, Dead
     /// slots reuse like fiber slots.
-    nurseries: Vec<Nursery>,
+    pub(crate) nurseries: Vec<Nursery>,
     /// The live root nursery bare host spawns route into [E2]; `None` or a
     /// consumed id = the host itself is the supervisor.
     root_nursery: Option<NurseryId>,
-    limit: usize,
-    trap_pc: Option<CodePc>,
+    pub(crate) limit: usize,
+    pub(crate) trap_pc: Option<CodePc>,
     /// Per-fiber claim ledgers, parallel to the pool: the multiset of
     /// counts each fiber's frames own (crates/ds-vm/src/claims.rs) —
     /// what the teardown drain walk releases. Index-parallel to the
     /// pool, never swapped: the running fiber's ledger is reached
     /// through `current` directly.
-    claims: Vec<ClaimTable>,
+    pub(crate) claims: Vec<ClaimTable>,
     /// The CALL-site inline cache: one direct-mapped slot bank keyed on
     /// (caller function identity, pc), entries stamped with the registry
     /// generation they resolved against. Fibers share the bank safely —
@@ -2133,6 +2133,22 @@ pub struct Vm {
     /// `to_vec` copies are gone; a borrow of this buffer lives only
     /// within one dispatch arm or hosted call, never across a reentry).
     calls_staging: CaptureStaging,
+    /// The resumed-frame seam's pre-step state (crates/ds-vm/src/repl.rs):
+    /// what a trapped submission's rollback restores to. `None` while no
+    /// REPL drive is mid-flight.
+    pub(crate) repl_pre: Option<crate::repl::ReplPre>,
+    /// The fork-join worker pool opt-in (E3's 2026-11-15 sendability
+    /// ruling, crates/ds-vm/src/forkpool.rs): off by default — the
+    /// sequential interlock drive is M5's backend — and when on, a
+    /// `par_map` frame whose children hold exclusively scalar entry
+    /// words drives them on youpipe workers through whole-fiber
+    /// ownership transfer, everything else keeping the sequential drive.
+    fork_pool: bool,
+    /// How many fork frames this VM drove on the worker pool: the
+    /// non-vacuity witness for the differential tests (a pool-enabled
+    /// run that answers every fork sequentially through the gate's
+    /// fallback reads zero).
+    fork_pool_drives: usize,
 }
 
 /// The opcode byte each canonical uop occupies in the hot dispatch table:
@@ -2235,7 +2251,33 @@ impl Vm {
             hook_dirs_stamp: u64::MAX,
             teardown_drive: false,
             calls_staging: CaptureStaging::new(),
+            repl_pre: None,
+            fork_pool: false,
+            fork_pool_drives: 0,
         }
+    }
+
+    /// How many fork frames this VM drove on the worker pool: the
+    /// non-vacuity witness for the differential tests.
+    #[must_use]
+    pub fn pooled_fork_drives(&self) -> usize {
+        self.fork_pool_drives
+    }
+
+    /// Opts this VM's fork-join combinator drives into the worker pool
+    /// (E3's 2026-11-15 sendability ruling): a `par_map` frame whose
+    /// children hold exclusively scalar entry words transfers each whole
+    /// fiber — segment, arena, heap store, call chain, claim ledger — to
+    /// a youpipe worker for the element body and receives it at the
+    /// join, the answers assembling in spawn order exactly as the
+    /// sequential interlock does. Everything the gate refuses (a `Ref`
+    /// word in an entry frame, `par_reduce`'s fold chain, every other
+    /// seam) keeps the sequential drive, so behavior stays identical;
+    /// pooled children run pure code — the world surface never reaches a
+    /// worker and a world call refuses with the standard unresolved
+    /// trap, the pool's purity contract.
+    pub fn enable_fork_pool(&mut self) {
+        self.fork_pool = true;
     }
 
     /// Interns a string into the root fiber's heap and hands back its
@@ -3119,6 +3161,90 @@ impl Vm {
         }
     }
 
+    /// The worker-pool half of the fork drive [E3, the 2026-11-15
+    /// sendability ruling, crates/ds-vm/src/forkpool.rs]: eligible frames
+    /// are exactly a `par_map` seam (`par_reduce`'s fold chains one child
+    /// per step — the left data dependency — and every other seam keeps
+    /// the sequential drive) whose children all still belong to the
+    /// nursery and all pass the scalar sendability gate — a `Ref` word in
+    /// an entry frame names a heap a worker cannot route, so one such
+    /// child sends the whole frame back to the sequential interlock,
+    /// byte-identical by construction. The eligible children's fibers and
+    /// ledgers leave the pool (the slots vacated) for a youpipe scoped
+    /// drive over the code snapshot, and the homecoming runs the
+    /// sequential drive's own tails in spawn order: the death walk for a
+    /// fiber the worker left non-Dead (a trapped child keeps its frames),
+    /// the nursery's ledger write, and the first-failure flag. The seam's
+    /// consumption after the frame pops is untouched — the same ledger
+    /// feeds it, so the assembly, deliveries, and count crossings are
+    /// the sequential drive's own.
+    fn try_fork_pool(&mut self, frame: &mut NurseryDrive) -> bool {
+        if !matches!(
+            frame.seam,
+            DriveSeam::Fork(crate::native::ForkStage::Map { .. })
+        ) || frame.children.len() < 2
+            || !frame.children.iter().all(|&child| {
+                self.pool[child.index()].nursery == Some(frame.nursery)
+                    && crate::forkpool::poolable(&self.pool[child.index()])
+            })
+        {
+            return false;
+        }
+        let nursery = frame.nursery;
+        self.fork_pool_drives += 1;
+        let mut cargos = Vec::with_capacity(frame.children.len());
+        for &child in &frame.children {
+            let fiber = std::mem::replace(&mut self.pool[child.index()], Fiber::empty(child));
+            let claims = std::mem::replace(&mut self.claims[child.index()], ClaimTable::new(child));
+            cargos.push(crate::forkpool::ForkCargo {
+                fiber,
+                claims,
+                child,
+            });
+        }
+        let code = self.registry.code_snapshot();
+        let drive = crate::forkpool::next_drive_id();
+        let limit = self.limit;
+        let returns = youpipe::scope(|s| {
+            s.pipe(cargos)
+                .map(|cargo| crate::forkpool::exec_cargo(cargo, drive, &code, limit))
+                .collect()
+        });
+        // the homecoming's first half, in spawn order (the scoped collect
+        // is index-addressed): every fiber back in its own slot with its
+        // ledger and its nursery link restored, before any count routes
+        // through the pool
+        let mut ledger = Vec::with_capacity(returns.len());
+        for ret in returns {
+            let child = ret.child;
+            let mut fiber = ret.fiber;
+            fiber.nursery = Some(nursery);
+            self.pool[child.index()] = fiber;
+            self.claims[child.index()] = ret.claims;
+            ledger.push((child, ret.outcome));
+        }
+        // the sequential drive's own tails, in spawn order: the death
+        // walk for a fiber the worker left non-Dead (a trapped child
+        // keeps its frames — hooks first, then the claim drain), the
+        // ledger write, and the first-failure flag
+        for (child, outcome) in ledger {
+            if self.pool[child.index()].state != FiberState::Dead {
+                self.fire_teardown_hooks(child, &[]);
+                self.drain_claims_except(child, &[]);
+                let fiber = &mut self.pool[child.index()];
+                fiber.state = FiberState::Dead;
+                fiber.resume = None;
+            }
+            let outcome = outcome.unwrap_or(ChildOutcome::Cancelled);
+            if matches!(outcome, ChildOutcome::Trapped(_)) {
+                self.nurseries[nursery.index()].cancelled = true;
+            }
+            self.nurseries[nursery.index()].record(child, outcome);
+        }
+        frame.cursor = frame.children.len();
+        true
+    }
+
     /// Drives one frame's remaining children in spawn order, each to death
     /// before the next (sequential — the deterministic choice). Every
     /// death path ledgers its outcome into the nursery whoever ran it, so
@@ -3131,6 +3257,9 @@ impl Vm {
     /// parks and returns the request — the frame pauses on that child
     /// until the pushed frame's answer re-enters it.
     fn drive_frame_children(&mut self, frame: &mut NurseryDrive) -> Option<InterlockRequest> {
+        if self.fork_pool && self.try_fork_pool(frame) {
+            return None;
+        }
         while frame.cursor < frame.children.len() {
             let child = frame.children[frame.cursor];
             // a reused slot belongs to another nursery: the child died and
@@ -3694,7 +3823,7 @@ impl Vm {
     /// Runs one host-drive step, draining any interlock the step raises
     /// before the interrupted fiber continues (its join answer delivered
     /// onto the parked call site).
-    fn execute_host_step(
+    pub(crate) fn execute_host_step(
         &mut self,
         active: Active,
         pc: CodePc,
@@ -3717,7 +3846,7 @@ impl Vm {
     /// its nursery's cancel flag [E2 first failure]. The fiber's own state
     /// is the caller's business (interrupted under interactive drives,
     /// marked dead by the nursery walk).
-    fn trap_child(&mut self, fiber: FiberId, trap: &Trap) {
+    pub(crate) fn trap_child(&mut self, fiber: FiberId, trap: &Trap) {
         if let Some(n) = self.pool[fiber.index()].nursery {
             let nursery = &mut self.nurseries[n.index()];
             nursery.record(fiber, ChildOutcome::Trapped(trap.clone()));
@@ -3757,7 +3886,12 @@ impl Vm {
     /// argument word kinds (a Ref word against a Fn parameter is the
     /// callable-defaulted slot), and the entry frame versus the stack
     /// limit.
-    fn entry_checks(&self, version: VersionIdx, func_id: u32, args: &[Value]) -> Result<(), Trap> {
+    pub(crate) fn entry_checks(
+        &self,
+        version: VersionIdx,
+        func_id: u32,
+        args: &[Value],
+    ) -> Result<(), Trap> {
         let target = &self.registry.pinned(version).functions()[func_id as usize];
         if args.len() != target.layout.params_len() {
             return Err(Trap::ArityMismatch {
@@ -3797,7 +3931,7 @@ impl Vm {
     /// arguments, zero-filled to the frame span. The caller has already
     /// reset the segment (`clear` for a fresh root run, `truncate(0)` to
     /// reuse a dead fiber's chunks).
-    fn push_entry_frame(
+    pub(crate) fn push_entry_frame(
         fiber: &mut Fiber,
         version: VersionIdx,
         func_id: u32,
@@ -3827,7 +3961,7 @@ impl Vm {
     /// Stashes the running fiber's context into its pool slot, ending a
     /// drive; the pool is then the single home of every fiber's state —
     /// three buffer swaps, no word or object ever copied.
-    fn host_release(&mut self) {
+    pub(crate) fn host_release(&mut self) {
         if !self.ctx_live {
             return;
         }
@@ -3900,7 +4034,7 @@ impl Vm {
     /// spawn arguments). The caller has validated the target. Entering
     /// the fiber the last drive ended on is the host's O(1) round-trip:
     /// its context was stashed at host release and swaps back in.
-    fn switch_in(&mut self, target: FiberId, payload: Value) -> (Active, CodePc) {
+    pub(crate) fn switch_in(&mut self, target: FiberId, payload: Value) -> (Active, CodePc) {
         if target != self.current {
             self.host_release(); // stash the outgoing fiber's context if live
         }
@@ -4225,6 +4359,31 @@ impl Vm {
                     payload.push(control_word(&self.stack, fp, caller, index)?);
                 }
                 Err(Trap::NurseryCancelled { payload })
+            },
+            ControlNative::ReplPark => {
+                // the REPL's resumed frame parks here: the staged span is
+                // the submission's answer (the splice mirrored the exit's
+                // RET staging), and word 0 rides the event to the host.
+                // Only a host drive ever meets the seam — the call sites
+                // live in the entry function the splice owns — so the
+                // resumer switch of the yield arm cannot occur; a stray
+                // in-language resumer still gets the honest switch.
+                if usize::from(nargs) > caller.arg_area_len() {
+                    return Err(Trap::CallLayout(SlideError::StagingTooSmall {
+                        available: caller.arg_area_len(),
+                        needed: usize::from(nargs),
+                    }));
+                }
+                let payload = control_word(&self.stack, fp, caller, 0)?;
+                self.park_current(active, CodePc(pc + 1));
+                let resumer = self.pool[self.current.index()].resumer;
+                match resumer.filter(|&r| self.pool[r.index()].resumable()) {
+                    None => Ok(SwitchOutcome::Host(DriveOutcome::Yielded(payload))),
+                    Some(target) => {
+                        let (a, at) = self.switch_in(target, payload);
+                        Ok(SwitchOutcome::Entered(a, at))
+                    },
+                }
             },
         }
     }
@@ -4636,7 +4795,7 @@ impl Vm {
     /// cross-heap count mutation on a death. A bogus word (a
     /// hand-assembled release without an acquire) errors and is ignored:
     /// the walk releases what the store knows.
-    fn drain_claims(&mut self, fiber: FiberId) {
+    pub(crate) fn drain_claims(&mut self, fiber: FiberId) {
         self.drain_claims_except(fiber, &[]);
     }
 
@@ -4694,7 +4853,7 @@ impl Vm {
     /// remaining hooks' claims drain unfired — teardown never re-enters
     /// the nursery and never surfaces a user-hook failure, exactly the
     /// death walk's bogus-word honesty.
-    fn fire_teardown_hooks(&mut self, fiber: FiberId, held: &[RefId]) {
+    pub(crate) fn fire_teardown_hooks(&mut self, fiber: FiberId, held: &[RefId]) {
         if self.teardown_drive {
             // a door inside a teardown drive never starts a second pass.
             // The nursery seams refuse under the drive flag, so no path
@@ -4840,7 +4999,7 @@ impl Vm {
     /// hand-assembled shape) falls back to the claim ledger: every `Ref`
     /// word of the span must still hold a count. `None` = skip.
     #[allow(clippy::too_many_arguments)]
-    fn gate_teardown_site(
+    pub(crate) fn gate_teardown_site(
         &self,
         fiber: FiberId,
         fp: usize,
@@ -4918,7 +5077,7 @@ impl Vm {
     /// The derived deinit-claim directory of one function (crates/ds-vm/
     /// src/claims.rs), cached per (version, function) and swept wholesale
     /// when the registry generation moves — the kstr cache's discipline.
-    fn hook_sites_for(
+    pub(crate) fn hook_sites_for(
         &mut self,
         version: VersionIdx,
         func: u32,
@@ -4945,7 +5104,7 @@ impl Vm {
     /// A value crossing to the host from the drive-ended fiber: its
     /// claim leaves the ledger. The host never releases, so the count
     /// lives until the stores die — exactly the pre-split behavior.
-    fn host_delivery(&mut self, value: &Value) {
+    pub(crate) fn host_delivery(&mut self, value: &Value) {
         if let Value::Ref(word) = value {
             self.claims[self.current.index()].release(*word);
         }
@@ -4953,7 +5112,7 @@ impl Vm {
 
     /// The payload span a nursery trap carries: delivered to the host
     /// like any drive-ending value, one `Ref` word at a time.
-    fn trap_delivery(&mut self, trap: &Trap) {
+    pub(crate) fn trap_delivery(&mut self, trap: &Trap) {
         match trap {
             Trap::NurseryCancelled { payload } | Trap::NurseryUncontained { payload } => {
                 for value in payload {

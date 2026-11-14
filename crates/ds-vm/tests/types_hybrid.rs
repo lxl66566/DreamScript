@@ -1050,11 +1050,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_FLOAT_HASH).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_CHAR_HASH).is_some());
     assert!(
-        reg.resolve_native("builtin", 56).is_none(),
-        "56 table entries: the core's, the list block, the fiber pair, the push, the map block, \
+        reg.resolve_native("builtin", 57).is_none(),
+        "57 table entries: the core's, the list block, the fiber pair, the push, the map block, \
          the generic container closes, the reentrant combinators, the nursery seams, the join, \
          the partition, the fork-join combinator, the fork-join fold, the float sort key, the \
-         string, char, and byte sort keys, the string, float, and char content hashes"
+         string, char, and byte sort keys, the string, float, and char content hashes, and the \
+         REPL's spliced park"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

@@ -109,6 +109,16 @@ struct Narrow {
     ty: Ty,
 }
 
+/// The outcome of one interpolation hole's `show` proof (F6): dispatched
+/// (the solved instance records at the hole's own span), refused (no
+/// candidate serves, the F6 diagnostic answers), or reported (an
+/// ambiguity or bound seam already answered in its own words).
+enum HoleShow {
+    Dispatched,
+    Refused,
+    Reported,
+}
+
 /// The per-call-site runtime-evidence record of an inherent call
 /// entering a generic impl's body: one entry per declared bound — the
 /// bound's variable atom, its trait, and the unique instance serving the
@@ -1530,8 +1540,10 @@ impl Bodies<'_> {
 
     /// Interpolated strings: every hole is an explicit string context
     /// (F6) — a printable primitive (bool, char, float, int, string)
-    /// converts through `str(e)` implicitly; every other operand needs
-    /// extraction or the `show` derive (the M6 seam).
+    /// converts through `str(e)` implicitly; every other operand is
+    /// legal exactly when its type carries `show`, the same
+    /// solved-instance proof a written `.show()` runs, the dispatch
+    /// recorded at the hole's own span for the lowering's staging.
     fn string_expr(&mut self, span: Span, parts: &[StrPart]) -> Val {
         let string_ty = self.named_atom_ty(span, "string", "string literal");
         let Some(string_ty) = string_ty else {
@@ -1545,10 +1557,14 @@ impl Bodies<'_> {
             let (hole_span, hole_val) = match part {
                 StrPart::Text { .. } => continue,
                 StrPart::Expr { span, expr } => (*span, self.expr(expr, Some(string_ty))),
-                StrPart::Ident { name, .. } => {
+                StrPart::Ident { span, name } => {
                     let val = self.ident_hole_value(name);
                     self.expr_types.insert(name.span, val);
-                    (name.span, val)
+                    // the hole's own span (`$x`, dollar included) is the
+                    // dispatch record's key — the lowerer's synthetic
+                    // member call carries it, and the name's own span
+                    // keeps recording the operand's type
+                    (*span, val)
                 },
             };
             if self.printable_hole(hole_val.ty) {
@@ -1559,18 +1575,23 @@ impl Bodies<'_> {
             if self.decls.universe.is_empty(hole_val.ty) || hole_val.poisoned {
                 continue;
             }
+            match self.hole_show_dispatch(hole_span, hole_val.ty, string_ty) {
+                HoleShow::Dispatched | HoleShow::Reported => continue,
+                HoleShow::Refused => {},
+            }
             let hole_ty = hole_val.ty;
             let note = if self.decls.universe.members(hole_ty).len() == 1 {
-                "the `show` derive arrives with M6"
+                "derive `show` (`#[derive(show)]`) or implement `show` for this type"
             } else {
-                "extract a member first [B4, E4]"
+                "extract a member first [B4, E4], or implement `show` over the whole union"
             };
             self.diags.push(
                 Diagnostic::error(
                     ErrorCode::TypeMismatch,
                     format!(
                         "interpolation hole has type `{}`; the printable primitives (bool, char, \
-                         float, int, string) convert implicitly [F6]",
+                         float, int, string) convert implicitly, every other type carries `show` \
+                         [F6]",
                         self.decls.universe.render(hole_ty)
                     ),
                 )
@@ -1582,6 +1603,97 @@ impl Bodies<'_> {
             ty: string_ty,
             diverges: false,
             poisoned: false,
+        }
+    }
+
+    /// One hole's `show` proof (F6): the candidate selection a written
+    /// `.show()` runs — trait owners through the solved-instance
+    /// environment (a union receiver through its covering sibling group),
+    /// inherent owners by coverage — with the survivor's dispatch
+    /// recorded at the hole's own span, exactly where a written call's
+    /// span records it, so the lowering stages the ordinary member call.
+    /// The survivor's registered signature must be the family's shape:
+    /// the receiver alone, `string` back. An in-scope assumption's
+    /// runtime-evidence dispatch has no surface spelling to record, so
+    /// the hole refuses naming the explicit call.
+    fn hole_show_dispatch(&mut self, span: Span, ty: Ty, string_ty: Ty) -> HoleShow {
+        let mut survivors: Vec<MethodId> = Vec::new();
+        let mut ambiguous = None;
+        for &candidate in self.package.method_candidates("show") {
+            let Some(sig) = self.member_sig(candidate) else {
+                continue;
+            };
+            // the family's call shape: the receiver alone, `string` back —
+            // the hole stages no argument and concatenates one string word
+            let receiver_only = sig.params.len() == 1 && sig.params[0].name == "self";
+            let ret_string =
+                sig.ret.as_ref().and_then(|ret| self.solve_here(ret)) == Some(string_ty);
+            if !receiver_only || !ret_string {
+                continue;
+            }
+            match &self.package.method(candidate).owner {
+                MethodOwner::Trait(def) => {
+                    let Some(trait_id) = self.decls.traits.get(def).copied() else {
+                        continue;
+                    };
+                    if self.assumption_covers(trait_id, ty) {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "interpolation hole has type `{}` whose `show` answers through a \
+                                 generic bound; spell the dispatch inside the hole [F6]",
+                                self.decls.universe.render(ty)
+                            ),
+                            span,
+                            "no solved instance here",
+                        );
+                        return HoleShow::Reported;
+                    }
+                    match self.instance_resolution(trait_id, ty) {
+                        Resolution::Unique(_) | Resolution::Covered(_) => {
+                            survivors.push(candidate);
+                        },
+                        Resolution::Ambiguous(candidates) => {
+                            ambiguous = Some((trait_id, candidates));
+                        },
+                        Resolution::None | Resolution::BoundUnsat { .. } => {},
+                    }
+                },
+                MethodOwner::Inherent(target) => {
+                    if self.inherent_accepts(target, ty) {
+                        survivors.push(candidate);
+                    }
+                },
+            }
+        }
+        if let Some((trait_id, candidates)) = ambiguous {
+            self.instance_ambiguity(trait_id, ty, &candidates, span);
+            return HoleShow::Reported;
+        }
+        match survivors.as_slice() {
+            [only] => {
+                self.record_solved_dispatch(*only, ty, span);
+                self.expr_types.insert(span, Val {
+                    ty: string_ty,
+                    diverges: false,
+                    poisoned: false,
+                });
+                HoleShow::Dispatched
+            },
+            [] => HoleShow::Refused,
+            _ => {
+                self.error(
+                    ErrorCode::AmbiguousCall,
+                    format!(
+                        "the interpolation hole's `show` is ambiguous between {} owners; write \
+                         the dispatch inside the hole and qualify it [F3, F6]",
+                        survivors.len()
+                    ),
+                    span,
+                    "ambiguous implicit dispatch",
+                );
+                HoleShow::Reported
+            },
         }
     }
 
@@ -1948,10 +2060,11 @@ impl Bodies<'_> {
         // The body is a fresh expression world: a stale citation from
         // this lambda's own feeding site must not reach a nested lambda.
         self.expected_ty_span = None;
-        // The comptime parameter surface (G1): round one admits it on a
+        // The comptime parameter surface (G1): round two admits it on a
         // free fn only, with every parameter comptime and annotated
-        // `type` — the evaluator stages one reflection index per
-        // parameter and embeds the call's result, so any other shape
+        // `type` (the evaluator stages one reflection index per
+        // parameter) or one of the four scalar atoms — the evaluator
+        // stages a plain literal of the annotation — so any other shape
         // refuses at the declaration instead of at each call site.
         let on_fn_decl = self.comptime.declaring_fn;
         self.comptime.declaring_fn = false;
@@ -1968,11 +2081,11 @@ impl Bodies<'_> {
                 .any(|p| !matches!(p.mode, ds_parse::ParamMode::Comptime(_)))
             {
                 Some("every parameter of a comptime function is comptime this round")
-            } else if params
-                .iter()
-                .any(|p| !matches!(&p.ty, Some(Type::TypeKw(_))))
-            {
-                Some("a comptime parameter is annotated `type` this round")
+            } else if params.iter().any(|p| !comptime_annotation(p.ty.as_ref())) {
+                Some(
+                    "a comptime parameter is annotated `type` or one of the scalar atoms int, \
+                     float, bool, string this round",
+                )
             } else {
                 None
             };
@@ -3635,6 +3748,34 @@ impl Bodies<'_> {
         }
     }
 
+    /// Refusal epilogue shared by `static_member_call`'s dead ends: the
+    /// argument words are still walked so their own checks run, then the
+    /// empty-typed value returns. `poisoned` is that value's cascade flag;
+    /// `reported` raises `solve_reported` before the walk, as the drained
+    /// words may observe it.
+    fn refuse_static_member_call(
+        &mut self,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        poisoned: bool,
+        reported: bool,
+    ) -> Val {
+        if reported {
+            self.solve_reported = true;
+        }
+        for arg in args {
+            self.expr(&arg.value, None);
+        }
+        if let Some(tail) = trailing {
+            self.expr(tail, None);
+        }
+        Val {
+            ty: self.empty(),
+            diverges: false,
+            poisoned,
+        }
+    }
+
     /// The type-keyed static member call (the 2026-11-15 ruling): the
     /// receiver names a type, the member lives in that type's own impl,
     /// and the call carries no instance — resolution is a check-time
@@ -3657,32 +3798,10 @@ impl Bodies<'_> {
         // A missing record means the resolver reported the missing member at
         // the method position; the empty result must not cascade.
         let Some(Res::Dot(DotRes::Static { candidates })) = self.res.get(name.span) else {
-            self.solve_reported = true;
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: true,
-            };
+            return self.refuse_static_member_call(args, trailing, true, true);
         };
         let Some(&method) = candidates.first() else {
-            self.solve_reported = true;
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: true,
-            };
+            return self.refuse_static_member_call(args, trailing, true, true);
         };
         let Some(sig) = self.member_sig(method) else {
             self.error(
@@ -3691,17 +3810,7 @@ impl Bodies<'_> {
                 span,
                 "no signature",
             );
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
+            return self.refuse_static_member_call(args, trailing, false, false);
         };
         // A receiver-taking member is not reachable through the type name
         // — the type-keyed surface serves receiverless members only.
@@ -3715,17 +3824,7 @@ impl Bodies<'_> {
                 span,
                 "receiverless call of a receiver member",
             );
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
+            return self.refuse_static_member_call(args, trailing, false, false);
         }
         // A generic impl's member cannot be spelled through the bare type
         // name: the call would need the impl's type arguments, and the
@@ -3743,17 +3842,7 @@ impl Bodies<'_> {
                 span,
                 "generic impl member",
             );
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
+            return self.refuse_static_member_call(args, trailing, false, false);
         }
         // The owner's own type binds `Self` at the call: solved through
         // the normal name solver over the receiver's own name, so an
@@ -3776,17 +3865,7 @@ impl Bodies<'_> {
                 span,
                 "no owner type",
             );
-            for arg in args {
-                self.expr(&arg.value, None);
-            }
-            if let Some(tail) = trailing {
-                self.expr(tail, None);
-            }
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
+            return self.refuse_static_member_call(args, trailing, false, false);
         };
         // The static dispatch record: the method id at the call's own
         // span, the same table a solved inherent dot-call records into —
@@ -6066,6 +6145,23 @@ fn generic_of(param: &TypeParam) -> GenericParam {
 
 fn param_is_mut(param: &Param) -> bool {
     !matches!(param.mode, ds_parse::ParamMode::Borrow)
+}
+
+/// One comptime parameter's annotation inside the round's shape: the
+/// builtin `type` atom (the evaluator stages a reflection index) or one
+/// of the four scalar atoms by name (it stages a plain literal word).
+/// Anything else has no comptime staging and refuses at the declaration.
+fn comptime_annotation(ty: Option<&Type>) -> bool {
+    match ty {
+        Some(Type::TypeKw(_)) => true,
+        Some(Type::Path { path, args, .. }) if args.is_empty() => {
+            let [only] = path.segments.as_slice() else {
+                return false;
+            };
+            matches!(only.name.as_str(), "int" | "float" | "bool" | "string")
+        },
+        _ => false,
+    }
 }
 
 /// A synthetic path type naming one identifier — the written form of a

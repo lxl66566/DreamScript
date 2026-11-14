@@ -1,0 +1,68 @@
+// The comptime witness (G1, G2): the comptime functions below run at
+// compile time on the same uop VM — reading the struct's declared
+// fields and the enum's declared cases through the fields/type_name
+// builtins, taking plain scalar literals as arguments — and their
+// answers (strings, ints, and a list of strings) embed at the call
+// sites as the literals a user would have written: everything printed
+// here is a constant by the time main runs.
+
+struct page {
+  title: string
+  views: int
+  tags: list[string]
+}
+
+enum tone {
+  quiet
+  loud { volume: int }
+}
+
+fn schema(comptime t: type) -> string {
+  var s = "{"
+  for f in fields(t) {
+    s += f.name + ": " + type_name(f.type) + ", "
+  }
+  s + "}"
+}
+
+fn cases(comptime t: type) -> string {
+  var s = "{"
+  for c in fields(t) {
+    s += c.name + ": " + type_name(c.type) + "/" + c.tag + ", "
+  }
+  s + "}"
+}
+
+fn field_names(comptime t: type) -> list[string] {
+  var ns = list[string]()
+  for f in fields(t) {
+    ns.list_push(f.name)
+  }
+  ns
+}
+
+fn field_count(comptime t: type) -> int {
+  var n = 0
+  for f in fields(t) {
+    n += 1
+  }
+  n
+}
+
+fn banner(comptime label: string, comptime width: int) -> string {
+  var s = label
+  var i = 0
+  while i < width {
+    s += "="
+    i += 1
+  }
+  s
+}
+
+fn main() -> () {
+  println(schema(page))
+  println(cases(tone))
+  println(join(field_names(page), ", "))
+  println("fields: ${field_count(page)}")
+  println(banner("schema ", 6))
+}

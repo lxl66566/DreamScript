@@ -44,14 +44,15 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///
 /// * types_hybrid: get_port's `pv is int` tension over the json atoms (two ordering errors) and
 ///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
-///   propagation pair) — the io failure, `default_config`, and the config type ride the ambient.
+///   propagation pair) — the io failure and the config type ride the ambient, the fallback's
+///   `log`/`default_config`/`get` externs are the file's own.
 /// * generics: the reject item's intended overlap plus the derive engine behind `json for point`
 ///   (its to_json refusal class surfaces through the expansion-aware resolve, and the uncovered
 ///   instance follows); the comptime `fields`/`type_name` items now check clean under the ambient's
 ///   reflection vocabulary.
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
-///   wants narrowing); `read_config`/`default_config`/`load_rows` resolve through the ambient.
+///   wants narrowing); the config/rows readers resolve through the file's own externs.
 /// * linearity_modes_rc: run items only — `open`/`read_exact` absence (their signatures cannot name
 ///   the file's own `file` struct; the dot-callee resolution failure reports alone since the
 ///   root-cause-first fix) and `u32`'s distinct width [B7] (the `.err` fallback meets
@@ -81,8 +82,8 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // the one error is the file's own reject item (the union destructuring)
     assert_corpus_clean("tuples_surface.ds", 1);
     // the one error is the file's own reject item (the constructor
-    // arguments); the `get` spelling item checks under the ambient's own
-    // `get` declaration
+    // arguments); the `get` spelling item checks under the file's own
+    // `get` extern (the ambient shed its dead declarations)
     assert_corpus_clean("maps_surface.ds", 1);
     // the one error is the file's own reject item (the non-optional
     // unwrap_or receiver); the run items ride the checked list reads

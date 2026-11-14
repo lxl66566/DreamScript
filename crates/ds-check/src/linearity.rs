@@ -94,7 +94,7 @@ use crate::{
     decls::{Decls, FnSig, linear_marker},
     expr::TypeExpr,
     resolve::{DefId, DefKind, DotRes, MethodId, Package, Res, Resolutions},
-    type_of::Checked,
+    type_of::{Checked, TraitCall},
     universe::Ty,
 };
 
@@ -192,6 +192,8 @@ pub fn linearity_check(
         facts: &checked.binders,
         def_types: &checked.def_types,
         res: resolutions.first(),
+        hole_dispatches: &checked.trait_calls,
+        hole_inherents: &checked.inherent_calls,
         out: Linearity::default(),
         state: FxHashMap::default(),
         undo: Vec::new(),
@@ -425,6 +427,13 @@ struct Lin<'a> {
     facts: &'a HashMap<Span, BinderFact>,
     def_types: &'a FxHashMap<DefId, Ty>,
     res: Option<&'a Resolutions>,
+    /// The interpolation holes whose `show` the checker solved at their
+    /// own span (F6): the solved dispatch, read for the receiver's
+    /// passing mode — the implicit dispatch borrows exactly where the
+    /// written `.show()` would.
+    hole_dispatches: &'a FxHashMap<Span, TraitCall>,
+    /// The same table for solved inherent dispatches.
+    hole_inherents: &'a FxHashMap<Span, MethodId>,
     out: Linearity,
     state: States,
     /// State writes made while walking the open branch, arm, or loop body,
@@ -821,12 +830,18 @@ impl<'a> Lin<'a> {
             Expr::Str { parts, .. } => {
                 for part in parts {
                     match part {
-                        ds_parse::StrPart::Expr { expr, .. } => {
-                            self.expr(expr, true);
+                        ds_parse::StrPart::Expr { span, expr } => {
+                            let consuming = self.hole_dispatch_consuming(*span).unwrap_or(true);
+                            self.expr(expr, consuming);
                         },
                         // `$x` is a consuming value use of the name, same
-                        // as a `${x}` hole
-                        ds_parse::StrPart::Ident { name, .. } => self.name_use(name, true),
+                        // as a `${x}` hole — unless the checker solved a
+                        // `show` dispatch behind the hole, whose receiver
+                        // passes per the solved member's mode (F6)
+                        ds_parse::StrPart::Ident { span, name, .. } => {
+                            let consuming = self.hole_dispatch_consuming(*span).unwrap_or(true);
+                            self.name_use(name, consuming);
+                        },
                         ds_parse::StrPart::Text { .. } => {},
                     }
                 }
@@ -960,6 +975,25 @@ impl<'a> Lin<'a> {
             },
             None | Some(Res::TraitMethod(_) | Res::Dot(_) | Res::Handler) => {},
         }
+    }
+
+    /// The receiver mode one interpolation hole's solved `show` dispatch
+    /// passes (F6): consuming exactly when the solved member's receiver
+    /// parameter consumes, mirroring the written dot-call's rule; `None`
+    /// when no dispatch record sits at the span, leaving the hole's own
+    /// value-use mode.
+    fn hole_dispatch_consuming(&self, span: Span) -> Option<bool> {
+        let method = self
+            .hole_dispatches
+            .get(&span)
+            .map(|call| call.method)
+            .or_else(|| self.hole_inherents.get(&span).copied())?;
+        let sig = self.member_sig(method)?;
+        Some(
+            sig.params
+                .first()
+                .is_some_and(|p| matches!(p.mode, ParamMode::Consume(_))),
+        )
     }
 
     fn is_data_def(&self, def: DefId) -> bool {
@@ -1509,6 +1543,8 @@ mod tests {
             facts: &checked.binders,
             def_types: &checked.def_types,
             res: resolutions.first(),
+            hole_dispatches: &checked.trait_calls,
+            hole_inherents: &checked.inherent_calls,
             out: Linearity::default(),
             state: FxHashMap::from_iter([(place, State::Uninit)]),
             undo: Vec::new(),

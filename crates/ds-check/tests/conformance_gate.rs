@@ -21,7 +21,8 @@ use ds_parse::{Ast, Item, ItemKind, parse};
 /// Ambient stdlib stubs per conformance/README.md's types_hybrid list:
 /// signatures only (extern), the M3 stdlib owns the bodies. The failure
 /// taxonomy (io_err) and the config type mirror the shared ambient's
-/// ownership of them.
+/// ownership of them; the log/default_config/get externs are the corpus
+/// file's own (the ambient shed its dead declarations).
 const TYPES_AMBIENT: &str = concat!(
     "tag int\n",
     "tag float\n",
@@ -38,13 +39,13 @@ const TYPES_AMBIENT: &str = concat!(
     "extern fn read_file (path: string) -> string | io_err\n",
     "extern fn parse_json (text: string) -> json | io_err\n",
     "extern fn str[t] (v: t) -> string\n",
-    "extern fn log (msg: string) -> ()\n",
-    "extern fn default_config () -> config\n",
-    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
 );
 
 /// Ambient stdlib stubs per the linearity_modes_rc list: modes included,
-/// since C2 consumption is what the affine pass reads at call sites.
+/// since C2 consumption is what the affine pass reads at call sites. The
+/// close/to_u32_le externs are the corpus file's own (the ambient shed
+/// its dead declarations); open/read_exact stay stub-only absence
+/// stand-ins so the affine pass sees the moves they stage.
 const LINEARITY_AMBIENT: &str = concat!(
     "tag int\n",
     "tag char\n",
@@ -55,9 +56,7 @@ const LINEARITY_AMBIENT: &str = concat!(
     "struct bytes: ~Copyable { len: int }\n",
     "struct list[t]\n",
     "extern fn open (path: string) -> file\n",
-    "extern fn close (fd: raw_fd) -> ()\n",
     "extern fn read_exact (f: mut file, n: int) -> bytes\n",
-    "extern fn to_u32_le (b: move bytes) -> u32\n",
     "extern fn split (s: string, sep: char) -> list[string]\n",
     "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
     "extern fn collect[r] (xs: list[r]) -> list[r]\n",
@@ -197,7 +196,7 @@ const LISTS_AMBIENT: &str = concat!(
 
 /// Ambient stdlib stubs per the maps_surface list: the checked map reads
 /// the constructor and builder calls build against (the `get` spelling is
-/// the record's own tutorial-facing lookup).
+/// the corpus file's own extern — the ambient shed its dead declarations).
 const MAPS_AMBIENT: &str = concat!(
     "tag int\n",
     "tag string\n",
@@ -207,11 +206,11 @@ const MAPS_AMBIENT: &str = concat!(
     "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
     "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
-    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
 );
 /// Ambient for extraction_family: the primitives, the collection reads,
 /// the family's own extern spellings, and the ambient-owned config the
-/// b14 spellings extract over.
+/// b14 spellings extract over (the `get` extern is the corpus file's
+/// own).
 const EXTRACTION_AMBIENT: &str = concat!(
     "tag int\n",
     "tag string\n",
@@ -223,7 +222,6 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "struct config { host: string, port: int?, retries: int }\n",
     "extern fn println (msg: string) -> ()\n",
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
     "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",

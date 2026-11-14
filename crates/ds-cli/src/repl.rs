@@ -1,6 +1,6 @@
 //! The `ds repl` subcommand: an interactive read-eval-print loop over the
-//! in-process pipeline with a persistent session (H6 item 4's first
-//! slice).
+//! in-process pipeline with a persistent session — the resumed frame
+//! (H6 item 4).
 //!
 //! # Session model
 //!
@@ -8,21 +8,42 @@
 //! `struct`, ...) append verbatim as their own `##` blocks; statement and
 //! expression submissions append verbatim as statements of one REPL-owned
 //! `fn main` block — the only scope where a later line both sees an
-//! earlier line's bindings and the block's tail expression returns the
-//! last submission's value (the script-mode fold fixes its synthesized
-//! `main` at `-> ()`, which would strap the value print; owning `main`
-//! keeps every component stock). Every submission re-runs the memoized
-//! queries over the whole session text through one query database —
-//! block-grain invalidation renews the untouched declaration blocks, so
-//! only the new block and `main` recompute — then re-executes `main` on
-//! one persistent VM: the freshly lowered module installs under the same
-//! name each time, so the two-slot swap retires the previous version.
+//! earlier line's bindings and the block's tail returns the last
+//! submission's value. An expression submission lowers as the initializer
+//! of one synthesized answer binding (`const __repl_ans = (<it>)`)
+//! followed by the binding's name as the tail: the wrapper keeps every
+//! component stock, gives `main` a single exit (the answer's `RET`), and
+//! forces the value-position lowering that no tail call can replace.
 //!
-//! Re-execution is the model: side effects repeat, and every live
-//! binding dies through its ordinary scope-exit deinit at each run's end
-//! — a value is never silently dropped between runs because none is ever
-//! alive between runs. `:drop <name>` removes the binding's line so later
-//! runs never recreate it; `:reset` clears the text and rebuilds the VM.
+//! Every submission re-runs the memoized queries over the whole session
+//! text through one query database (the check is session-length;
+//! block-grain invalidation renews the untouched declaration blocks), then
+//! lowers in the resumed-frame mode — `main`'s binders pin, their words
+//! claimed to the frame's teardown, since a session-live value must
+//! never die at a text-relative last use a later submission may extend.
+//!
+//! # The resumed frame
+//!
+//! Execution inverts re-running: the freshly lowered module is spliced
+//! (the answer staging `RET` would perform plus a `repl_park` control
+//! call at the tail's exit boundary) and installed, and the VM keeps
+//! `main`'s frame alive between submissions — prior statements ran once,
+//! and only the new statement computes. The resume target is the previous
+//! statement's value end in the CURRENT round's own lowering (the
+//! lowerer's per-statement fact), so the discarded statement's reference
+//! counts release at the next resume without its value ever recomputing;
+//! a declaration round re-parks at the boundary, restaging the last
+//! answer. A failing or trapping line never commits: the frame rolls
+//! back to the parked extent (the partial run's words zero, its acquired
+//! counts released against a pre-step ledger reading) — its own deinit
+//! hooks never fire, matching the trap path's honesty. `:drop <name>`
+//! fires one live binding's deinit exactly once and neuters its words
+//! (the binding's line is renamed so later lines cannot resolve it, the
+//! text-level death that keeps every later binding's placement stable;
+//! a name other lines still reference refuses the drop — a referencing
+//! line would poison every later submission's check); the session end
+//! (`:quit`, end of input, `:reset`) is the scope exit: every surviving
+//! deinit fires, then the claims drain.
 //!
 //! # Reading
 //!
@@ -34,6 +55,7 @@
 //! process: the VM has no step budget to observe an interrupt at.
 
 use std::{
+    collections::HashMap,
     io::{self, BufRead, IsTerminal, Write},
     process::ExitCode,
 };
@@ -41,15 +63,18 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use ds_check::DefKind;
-use ds_diag::{Diagnostic, FileId, Files, LabelStyle, render};
-use ds_lower::lower;
+use ds_diag::{Diagnostic, FileId, Files, LabelStyle, Span, render};
+use ds_lower::{LowerMode, lower_in_mode};
 use ds_mod::Hash128;
-use ds_parse::{Ast, ItemKind, Pattern, Stmt, StmtKind};
+use ds_parse::{Ast, ItemKind, LocalDecl, Pattern, StmtKind};
 use ds_query::{
     Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageEffects, PackageId,
     ParseFile, PlatformCheck, QueryError, Resolve, TypeOf,
 };
-use ds_vm::{LoadError, ModuleRegistry, Platform, Value, Vm, native};
+use ds_vm::{
+    LoadError, ModuleRegistry, Platform, ReplOutcome, SpliceError, Value, Vm, abi::CodePc, native,
+    splice_park,
+};
 
 use crate::run;
 
@@ -59,6 +84,11 @@ const MODULE: &str = "repl";
 
 /// The session file's name in the diagnostic registry.
 const SESSION_FILE: &str = "repl.ds";
+
+/// The synthesized answer binding's stem: the wrapper that keeps `main`'s
+/// tail a plain path (never a tail call) and `main`'s return the last
+/// expression's own type.
+const ANS: &str = "__repl_ans";
 
 /// The `ds repl` surface: no options in the first slice.
 #[derive(Debug, Args)]
@@ -90,12 +120,16 @@ pub fn repl(_args: &ReplArgs) -> Result<ExitCode> {
 }
 
 /// The read-dispatch loop over one read layer: submissions run, `:`
-/// commands answer, end of input ends the session, an interrupt discards
-/// the line in progress and re-issues the prompt.
+/// commands answer, end of input ends the session (the scope exit runs
+/// the surviving deinits), an interrupt discards the line in progress and
+/// re-issues the prompt.
 fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode> {
     loop {
         match read_submission(reader) {
-            ReadOutcome::Eof => return Ok(ExitCode::SUCCESS),
+            ReadOutcome::Eof => {
+                session.vm.repl_teardown();
+                return Ok(ExitCode::SUCCESS);
+            },
             // Ctrl-C at the prompt: the submission in progress is already
             // discarded; a newline closes the aborted line and the prompt
             // re-issues. The session survives.
@@ -106,6 +140,7 @@ fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode>
                 }
                 if let Some(command) = line.strip_prefix(':') {
                     if !session.command(command)? {
+                        session.vm.repl_teardown();
                         return Ok(ExitCode::SUCCESS);
                     }
                 } else {
@@ -117,19 +152,28 @@ fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode>
 }
 
 /// One live session: the query database over the ambient plus the session
-/// text, the submitted lines, and the persistent VM.
+/// text, the submitted lines, the persistent VM, and the last committed
+/// round's placement facts (the `:drop` seam's word discovery).
 struct Session {
     db: Db,
     file: FileId,
     decls: Vec<String>,
     stmts: Vec<String>,
     vm: Vm,
+    /// `main`'s binder spans to body slots, from the last committed
+    /// round's lowering.
+    binders: HashMap<Span, Vec<u8>>,
+    /// The renamed-away drop counter: one fresh unspellable-by-accident
+    /// stem per `:drop`.
+    drops: usize,
 }
 
 impl Session {
     /// The growing module text: declaration blocks, then the REPL-owned
     /// `main` carrying every statement submission in order — the last
-    /// expression submission as its tail, so `main` returns its value.
+    /// expression submission wrapped as one answer binding whose name is
+    /// the tail, so `main` returns its value (a binding submission is its
+    /// own tail and returns unit).
     fn text(decls: &[String], stmts: &[String]) -> String {
         let mut text = String::new();
         for (index, decl) in decls.iter().enumerate() {
@@ -142,9 +186,24 @@ impl Session {
             text.push_str("\n##\n");
         }
         text.push_str("fn main() {\n");
-        for stmt in stmts {
-            text.push_str(stmt);
-            text.push('\n');
+        if let Some((last, head)) = stmts.split_last() {
+            for stmt in head {
+                text.push_str(stmt);
+                text.push('\n');
+            }
+            if is_binding(last) {
+                text.push_str(last);
+                text.push('\n');
+            } else {
+                let ans = answer_name(decls, stmts);
+                text.push_str("const ");
+                text.push_str(&ans);
+                text.push_str(" = (");
+                text.push_str(last);
+                text.push_str(")\n");
+                text.push_str(&ans);
+                text.push('\n');
+            }
         }
         text.push_str("}\n");
         text
@@ -164,6 +223,8 @@ impl Session {
             decls: Vec::new(),
             stmts: Vec::new(),
             vm: fresh_vm(),
+            binders: HashMap::new(),
+            drops: 0,
         }
     }
 
@@ -175,9 +236,9 @@ impl Session {
 
     /// Handles one language submission: trial-append the line, run the
     /// memoized query pass over the whole session text, and on a clean
-    /// pass execute `main` on the persistent VM. A submission with
-    /// diagnostics, a lowering refusal, or a trap is not committed — a
-    /// poisoned line would re-fail (or re-trap) every later run.
+    /// pass drive the resumed frame. A submission with diagnostics, a
+    /// lowering refusal, or a trap is not committed — a poisoned line
+    /// would re-fail (or re-trap) every later round.
     fn submit(&mut self, line: &str) -> Result<()> {
         let before = (self.decls.clone(), self.stmts.clone());
         let zone = declaration_zone(line);
@@ -188,27 +249,20 @@ impl Session {
         let trial = self.committed();
         self.db.set_file_content(self.file, &trial)?;
         if !self.check_clean()? {
-            return self.rollback(&before, false);
+            return self.rollback(&before);
         }
         match self.execute(&trial, zone) {
             Ok(()) => Ok(()),
             Err(Failure::Engine(error)) => Err(error),
-            Err(failure) => {
-                println!("{}", failure.message());
-                self.rollback(&before, failure.rebuilds_vm())
-            },
+            Err(_) => self.rollback(&before),
         }
     }
 
     /// Removes the just-tried submission from the session and restores
-    /// the database; a trap additionally rebuilds the VM (the fiber a
-    /// trap unwound is not one to keep running on).
-    fn rollback(&mut self, before: &(Vec<String>, Vec<String>), trapped: bool) -> Result<()> {
+    /// the database; the VM's own state was restored at the failure site.
+    fn rollback(&mut self, before: &(Vec<String>, Vec<String>)) -> Result<()> {
         self.decls.clone_from(&before.0);
         self.stmts.clone_from(&before.1);
-        if trapped {
-            self.vm = fresh_vm();
-        }
         let committed = self.committed();
         self.db.set_file_content(self.file, &committed)?;
         Ok(())
@@ -259,31 +313,64 @@ impl Session {
         Ok(false)
     }
 
-    /// Compiles the clean session through the analyzed query — the
+    /// Compiles the clean session through the analyzed query (the
     /// analyzer's check half over the expansion and resolve memos,
-    /// memoized like every other pass, lowered over the bundle's own
-    /// expanded trees —
-    /// installs the module over its own retiring version, runs `main`,
-    /// and prints the value, the inferred type, and the effect row. A
-    /// lowering refusal, an install failure, or a trap is a [`Failure`]
-    /// the caller rolls back.
+    /// lowered over the bundle's own expanded trees, in the resumed-frame
+    /// mode), splices the park into `main`, installs the module over its
+    /// own retiring version, and drives the frame: prior statements never
+    /// re-run, only the new statement computes, and the parked frame
+    /// carries the session's live bindings to the next round. A trap
+    /// rolls the frame back to the parked extent before this answers.
     fn execute(&mut self, text: &str, zone: Zone) -> std::result::Result<(), Failure> {
         let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")
             .map_err(Failure::Engine)?
             .analyzed;
-        let lowered = lower(
+        let lowered = lower_in_mode(
             MODULE,
             Hash128::compute(text.as_bytes()),
             &analyzed.asts,
             &analyzed,
+            LowerMode::ResumedFrame,
         )
         .map_err(|error| Failure::lower(&error, self.db.files()))?;
-        let (decls, stmts) = (self.decls.len(), self.stmts.len());
+        let Some(ends) = lowered.value_ends("main").map(<[u32]>::to_vec) else {
+            return Err(Failure::Engine(anyhow!(
+                "the session main lowered no statement value ends"
+            )));
+        };
+        let Some(boundary) = ends.last().copied() else {
+            return Err(Failure::Engine(anyhow!(
+                "the session main lowered no statement value ends"
+            )));
+        };
+        let binders = lowered.registered("main").cloned().unwrap_or_default();
+        let spliced =
+            splice_park(lowered.into_module(), "main", boundary).map_err(Failure::splice)?;
         self.vm
-            .install_dsmod(lowered.into_module())
-            .map_err(|error| Failure::install(&error, decls, stmts))?;
-        match self.vm.run(MODULE, "main", &[]) {
-            Ok(value) => {
+            .install_dsmod(spliced)
+            .map_err(|error| Failure::install(&error))?;
+        // The resume begins the new submission's code at the previous
+        // statement's value end — the record's entry `stmts.len() - 1`
+        // (the leading body start stands for the zeroth statement, and
+        // the wrapper is not a committed statement, so the entries up to
+        // the new one are exactly the committed statements' value ends) —
+        // where the discarded statement's counts release at the next
+        // resume; a declaration round owns no statement, so it re-parks
+        // at the boundary and the last answer restages.
+        let at = if let Zone::Statement = zone {
+            let at = (self.stmts.len() - 1).min(ends.len() - 1);
+            ends[at]
+        } else {
+            boundary
+        };
+        let driven = if self.vm.repl_parked() {
+            self.vm.repl_resume(MODULE, "main", CodePc(at))
+        } else {
+            self.vm.repl_start(MODULE, "main")
+        };
+        match driven {
+            Ok(ReplOutcome::Parked(value)) => {
+                self.binders = binders;
                 let session =
                     query(self.db.get::<ParseFile>(self.file), "parse").map_err(Failure::Engine)?;
                 // a clean check implies the tree exists
@@ -293,17 +380,36 @@ impl Session {
                 self.report(session_ast, &analyzed, &value, zone)
                     .map_err(Failure::Engine)
             },
-            Err(trap) => Err(Failure::Trap(run::trap_error(&self.vm, &trap))),
+            Ok(ReplOutcome::Died(_)) => {
+                // the spliced body has no live exit path, so a completion
+                // is a should-not-happen: the frame is gone, and the
+                // session rebuilds from the next submission's fresh start
+                self.vm.repl_teardown();
+                self.vm = fresh_vm();
+                println!("the entry frame completed instead of parking; the session rebuilt");
+                Err(Failure::Frame)
+            },
+            Err(trap) => {
+                // the report reads the interrupted fiber's kept frames
+                print!("{}", run::trap_error(&self.vm, &trap));
+                if let Err(rebuild) = self.vm.repl_rollback(MODULE, "main", CodePc(at)) {
+                    self.vm.repl_teardown();
+                    self.vm = fresh_vm();
+                    print!("{}", run::trap_error(&self.vm, &rebuild));
+                    return Err(Failure::Frame);
+                }
+                Err(Failure::Trap)
+            },
         }
     }
 
     /// Prints the submission's story: the value of an expression tail
     /// (the unit word is inert, so a unit-typed tail prints no value),
     /// the inferred type, and the effect row — the answer expression's
-    /// own row from the effects pass's per-span table (a statement
-    /// submission's answer is the tail expression, or the binding line's
-    /// initializer), falling back to the touched definition's row when
-    /// no span covers it.
+    /// own row from the effects pass's per-span table (an expression
+    /// submission's answer is the wrapper's initializer, a binding
+    /// submission's the binding line's initializer), falling back to the
+    /// touched definition's row when no span covers it.
     fn report(
         &mut self,
         ast: &Ast,
@@ -333,17 +439,25 @@ impl Session {
                 Ok(())
             },
             Zone::Statement => {
-                let Some(stmt) = main_tail(ast) else {
+                let Some(answer) = main_answer(ast) else {
                     return Ok(());
                 };
-                // The submission's answer expression: the tail
-                // expression, or the binding line's initializer.
-                let answer = match &stmt.kind {
-                    StmtKind::Local(local) => Some(&local.init),
-                    StmtKind::Expr(expr) => Some(expr),
-                };
-                match &stmt.kind {
-                    StmtKind::Local(local) => {
+                match answer {
+                    Answer::Expr(_) => {
+                        // The wrapper's initializer is the submission's
+                        // expression: `main`'s solved return is its type
+                        // (the universe spells the arity-0 tuple "()",
+                        // the inert unit word).
+                        if let Some(ret) = main_return(analyzed, universe) {
+                            if ret != "()" {
+                                print_result(value);
+                            }
+                            println!(": {ret}");
+                        }
+                    },
+                    Answer::Bindings(local) => {
+                        // A binding tail prints each binder's name and
+                        // type; the frame's value is the unit word.
                         let mut names = Vec::new();
                         pattern_names(&local.pat, &mut names);
                         for ident in names {
@@ -352,27 +466,22 @@ impl Session {
                             }
                         }
                     },
-                    StmtKind::Expr(_) => {
-                        // `main` is the REPL's own zero-arg wrapper, so
-                        // its solved return is the tail expression's
-                        // type; the universe spells the arity-0 tuple
-                        // "()", the inert unit word.
-                        if let Some(ret) = main_return(analyzed, universe) {
-                            if ret != "()" {
-                                print_result(value);
-                            }
-                            println!(": {ret}");
-                        }
-                    },
                 }
                 // The answer's own row (the tightest recorded span
                 // covering it — earlier statements' effects stay out);
                 // the definition grain is the fallback.
+                // the wrapper's initializer carries the submission's own
+                // expression; paren layers are placement, not the answer
+                let answer_expr = match answer {
+                    Answer::Expr(expr) => Some(expr),
+                    Answer::Bindings(local) => Some(&local.init),
+                }
+                .map(unwrap_parens);
                 let effects = query(
                     self.db.get::<PackageEffects>(PackageId::new(0)),
                     "package effects",
                 )?;
-                let row = answer
+                let row = answer_expr
                     .and_then(|expr| effects.effects.covering_row(expr.span()))
                     .or_else(|| {
                         analyzed
@@ -396,7 +505,8 @@ impl Session {
         Ok(())
     }
 
-    /// Handles one `:` command; `:quit` answers false and ends the loop.
+    /// Handles one `:` command; `:quit` answers false and ends the loop
+    /// (the scope exit runs the surviving deinits first).
     fn command(&mut self, command: &str) -> Result<bool> {
         let mut words = command.split_whitespace();
         match words.next() {
@@ -410,8 +520,10 @@ impl Session {
                 Ok(true)
             },
             Some("reset") => {
+                self.vm.repl_teardown();
                 self.decls.clear();
                 self.stmts.clear();
+                self.binders.clear();
                 let empty = Self::text(&[], &[]);
                 self.db.set_file_content(self.file, &empty)?;
                 self.vm = fresh_vm();
@@ -429,23 +541,88 @@ impl Session {
         }
     }
 
-    /// Removes one binding's line from the session, so later runs never
-    /// recreate it. Between submissions nothing is alive — each run
-    /// already ended `main`'s scope, firing the binding's deinit through
-    /// the ordinary path — so removal is the whole death.
+    /// `:drop <name>`: the binding's death runs now — its deinit fires
+    /// exactly once (when its type carries one), its counts release, its
+    /// words neuter — and its line is renamed so later submissions cannot
+    /// resolve the name (the text-level death; the renamed binder's slots
+    /// stay reserved, keeping every later binding's placement stable).
+    /// A declaration drop removes the block: no frame words exist for
+    /// it, and the next round's own lowering decides whether the session
+    /// still checks.
     fn drop_binding(&mut self, name: &str) {
-        if let Some(pos) = self.stmts.iter().position(|s| binds_name(s, name)) {
-            self.stmts.remove(pos);
-        } else if let Some(pos) = self.decls.iter().position(|d| declares_name(d, name)) {
-            self.decls.remove(pos);
-        } else {
-            println!("no binding {name} in the session");
+        let Some(pos) = self.stmts.iter().position(|s| binds_name(s, name)) else {
+            if let Some(at) = self.decls.iter().position(|d| declares_name(d, name)) {
+                self.decls.remove(at);
+                let committed = self.committed();
+                if self.db.set_file_content(self.file, &committed).is_ok() {
+                    println!("dropped {name}");
+                }
+            } else {
+                println!("no binding {name} in the session");
+            }
+            return;
+        };
+        // A name other lines still reference cannot die textually: the
+        // referencing line (live or already-dropped) would stop checking,
+        // refusing every later submission. The drop names them and stays.
+        let referencing: Vec<&str> = self
+            .stmts
+            .iter()
+            .enumerate()
+            .filter(|(at, line)| *at != pos && references_name(line, name))
+            .map(|(_, line)| first_line(line))
+            .chain(
+                self.decls
+                    .iter()
+                    .filter(|decl| references_name(decl, name))
+                    .map(|decl| first_line(decl)),
+            )
+            .collect();
+        if let Some(line) = referencing.first() {
+            println!("cannot drop {name}: `{line}` still references it");
             return;
         }
+        // the binder's words: the span the last committed round placed it
+        // at, when the registration owns them (an alias's death is its
+        // owner's)
+        let owned = self
+            .binder_span(pos, name)
+            .and_then(|span| self.binders.get(&span).cloned());
+        match owned {
+            // an empty registration is a scalar alias (no words, no
+            // counts): the rename is the whole death
+            Some(words) if !words.is_empty() => {
+                if let Err(trap) = self.vm.repl_drop_binding(MODULE, "main", &words) {
+                    println!("{}", run::trap_error(&self.vm, &trap));
+                }
+            },
+            _ => println!("{name} holds no live words of its own (a constant or an alias)"),
+        }
+        self.drops += 1;
+        let fresh = format!("__repl_dropped_{}", self.drops);
+        self.stmts[pos] = rename_binding(&self.stmts[pos], &fresh);
         let committed = self.committed();
         if self.db.set_file_content(self.file, &committed).is_ok() {
             println!("dropped {name}");
         }
+    }
+
+    /// The span of the `pos`-th statement's binder named `name`, from the
+    /// committed round's own tree.
+    fn binder_span(&mut self, pos: usize, name: &str) -> Option<Span> {
+        let parse = self.db.get::<ParseFile>(self.file).ok()?;
+        let ast = parse.ast.as_deref()?;
+        let block = main_block(ast)?;
+        let stmt = block.stmts.get(pos)?;
+        let StmtKind::Local(local) = &stmt.kind else {
+            return None;
+        };
+        let mut names = Vec::new();
+        pattern_names(&local.pat, &mut names);
+        names
+            .into_iter()
+            .find(|ident| ident.name == name)
+            .map(|i| i.span)
     }
 }
 
@@ -462,58 +639,54 @@ enum Zone {
     Statement,
 }
 
-/// Why a clean-checked submission still did not run: the caller prints
-/// the message and rolls the submission back (a trapped line would
-/// re-trap every later run). A trap additionally rebuilds the VM.
+/// Why a clean-checked submission still did not run: every arm but
+/// [`Failure::Engine`] prints at its own site and leaves the session
+/// usable (the caller rolls the text back).
 enum Failure {
     /// A query-engine failure; session-fatal.
     Engine(anyhow::Error),
     /// A lowering refusal, rendered like `ds run`'s at construction.
-    Lower(anyhow::Error),
-    /// An install failure after a clean check.
-    Install(anyhow::Error),
-    /// A runtime trap; the VM is rebuilt after printing.
-    Trap(anyhow::Error),
+    Lower,
+    /// An install failure after a clean check: the swap consumed the
+    /// module, so the session rebuilt its frame.
+    Install,
+    /// A park splice refusal, reported at construction.
+    Splice,
+    /// A runtime trap: reported and rolled back at its own site.
+    Trap,
+    /// The frame rebuilt at its own site (a completion or a rollback
+    /// refusal).
+    Frame,
 }
 
 impl Failure {
     /// A lowering refusal: spanned constructs render as diagnostics, the
     /// package-level errors stay one line (the `ds run` rule).
     fn lower(error: &ds_lower::LowerError, files: &Files) -> Self {
-        match error.span() {
-            Some(span) => {
-                let diagnostic =
-                    Diagnostic::error(ds_diag::ErrorCode::LowerUnsupported, error.to_string())
-                        .with_primary(span, "outside the M3 lowering contract");
-                print!("{}", render::human(&diagnostic, files));
-                Self::Lower(anyhow!("the line does not lower under the M3 contract"))
-            },
-            None => Self::Lower(anyhow!("{error}")),
+        if let Some(span) = error.span() {
+            let diagnostic =
+                Diagnostic::error(ds_diag::ErrorCode::LowerUnsupported, error.to_string())
+                    .with_primary(span, "outside the M3 lowering contract");
+            print!("{}", render::human(&diagnostic, files));
+            println!("the line does not lower under the M3 contract");
+        } else {
+            println!("{error}");
         }
+        Self::Lower
+    }
+
+    /// A park splice refusal; a clean check makes this a
+    /// should-not-happen, so one self-describing line is enough.
+    fn splice(error: SpliceError) -> Self {
+        println!("splicing the session park failed: {error}");
+        Self::Splice
     }
 
     /// An install failure; a clean check makes this a should-not-happen,
     /// so one self-describing line is enough.
-    fn install(error: &LoadError, decls: usize, stmts: usize) -> Self {
-        Self::Install(anyhow!(
-            "installing the session module failed: {error:?} ({decls} declaration(s), {stmts} \
-             statement(s))"
-        ))
-    }
-
-    /// The failure's message.
-    fn message(&self) -> String {
-        match self {
-            Self::Engine(error) | Self::Lower(error) | Self::Install(error) | Self::Trap(error) => {
-                format!("{error:#}")
-            },
-        }
-    }
-
-    /// Whether the VM needs a rebuild: a trap unwound a fiber, and a
-    /// failed install may have consumed the module mid-swap.
-    fn rebuilds_vm(&self) -> bool {
-        matches!(self, Self::Trap(_) | Self::Install(_))
+    fn install(error: &LoadError) -> Self {
+        println!("installing the session module failed: {error:?}");
+        Self::Install
     }
 }
 
@@ -736,6 +909,14 @@ fn declaration_zone(line: &str) -> Zone {
     Zone::Statement
 }
 
+/// Whether a statement line is a simple `const`/`var` binding.
+fn is_binding(line: &str) -> bool {
+    matches!(
+        first_line(line).split_whitespace().next(),
+        Some("const" | "var")
+    )
+}
+
 /// The name a statement line binds (`const x`/`var x`), when it is a
 /// simple binding.
 fn binds_name(line: &str, name: &str) -> bool {
@@ -751,6 +932,22 @@ fn binds_name(line: &str, name: &str) -> bool {
         Some(bound) => bound == name,
         None => false,
     }
+}
+
+/// Whether one line references `name` as a whole word.
+fn references_name(line: &str, name: &str) -> bool {
+    let mut word = String::new();
+    for c in line.chars().chain([' ']) {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            if word == name {
+                return true;
+            }
+            word.clear();
+        }
+    }
+    false
 }
 
 /// Whether a declaration block declares `name`.
@@ -784,20 +981,41 @@ fn first_line(text: &str) -> &str {
         .unwrap_or("")
 }
 
-/// The rendered return type of the REPL-owned `main`, when its solved
-/// type is the zero-arg function it is built to be.
-fn main_return(analyzed: &ds_check::Analyzed, universe: &ds_check::Universe) -> Option<String> {
-    let def = analyzed.package.lookup("main")?;
-    let ty = *analyzed.checked.def_types.get(&def)?;
-    let [atom] = universe.members(ty) else {
-        return None;
+/// The answer binding's name: the stem, suffixed until no session text
+/// holds it (a user binding of the same name must not collide).
+fn answer_name(decls: &[String], stmts: &[String]) -> String {
+    let mut stem = ANS.to_owned();
+    let mut n = 1;
+    let holds = |name: &str| {
+        decls
+            .iter()
+            .chain(stmts.iter())
+            .any(|text| text.contains(name))
     };
-    let (_, ret) = universe.fn_sig(*atom)?;
-    Some(universe.render(ret))
+    while holds(&stem) {
+        n += 1;
+        stem = format!("{ANS}_{n}");
+    }
+    stem
 }
 
-/// The last statement of the REPL-owned `main`'s body.
-fn main_tail(ast: &Ast) -> Option<&Stmt> {
+/// Rewrites one binding line's bound name to `fresh` (the `:drop`
+/// neutering): only the identifier after the `const`/`var` head changes,
+/// so the line's shape, placement, and every later line's offsets stay.
+fn rename_binding(line: &str, fresh: &str) -> String {
+    let first = first_line(line);
+    let Some(head) = first.split_whitespace().next() else {
+        return line.to_owned();
+    };
+    let Some(old) = ident_after(first, head) else {
+        return line.to_owned();
+    };
+    let at = line.find(&old).unwrap_or(0);
+    format!("{}{}{}", &line[..at], fresh, &line[at + old.len()..])
+}
+
+/// The REPL-owned `main`'s body block.
+fn main_block(ast: &Ast) -> Option<&ds_parse::BlockExpr> {
     let main = ast.blocks.iter().flat_map(|b| b.items.iter()).find(|item| {
         matches!(
             &item.kind,
@@ -814,7 +1032,65 @@ fn main_tail(ast: &Ast) -> Option<&Stmt> {
     let ds_parse::Expr::Block(block) = body.as_ref() else {
         return None;
     };
-    block.stmts.last()
+    Some(block)
+}
+
+/// The last statement of the REPL-owned `main`'s body, as the answer
+/// surface sees it.
+enum Answer<'a> {
+    /// An expression submission: the synthesized wrapper binding's
+    /// initializer.
+    Expr(&'a ds_parse::Expr),
+    /// A binding submission: the binding reports its binders.
+    Bindings(&'a LocalDecl),
+}
+
+/// The last statement of `main`'s body as the answer surface sees it.
+fn main_answer(ast: &Ast) -> Option<Answer<'_>> {
+    let stmts = &main_block(ast)?.stmts;
+    let stmt = stmts.last()?;
+    match &stmt.kind {
+        StmtKind::Expr(expr) => {
+            if is_answer_path(expr) {
+                // the wrapper binding's initializer, one statement below
+                // the tail path
+                match &stmts.get(stmts.len().checked_sub(2)?)?.kind {
+                    StmtKind::Local(local) => Some(Answer::Expr(&local.init)),
+                    StmtKind::Expr(expr) => Some(Answer::Expr(expr)),
+                }
+            } else {
+                Some(Answer::Expr(expr))
+            }
+        },
+        StmtKind::Local(local) => Some(Answer::Bindings(local)),
+    }
+}
+
+/// Whether an expression is the session's synthesized answer path.
+fn is_answer_path(expr: &ds_parse::Expr) -> bool {
+    matches!(expr, ds_parse::Expr::Path { path, .. }
+        if path.segments.len() == 1 && path.segments[0].name.starts_with(ANS))
+}
+
+/// The expression beneath any paren layers (the wrapper's placement, not
+/// the answer itself).
+fn unwrap_parens(expr: &ds_parse::Expr) -> &ds_parse::Expr {
+    match expr {
+        ds_parse::Expr::Paren { inner, .. } => unwrap_parens(inner),
+        other => other,
+    }
+}
+
+/// The rendered return type of the REPL-owned `main`, when its solved
+/// type is the zero-arg function it is built to be.
+fn main_return(analyzed: &ds_check::Analyzed, universe: &ds_check::Universe) -> Option<String> {
+    let def = analyzed.package.lookup("main")?;
+    let ty = *analyzed.checked.def_types.get(&def)?;
+    let [atom] = universe.members(ty) else {
+        return None;
+    };
+    let (_, ret) = universe.fn_sig(*atom)?;
+    Some(universe.render(ret))
 }
 
 /// Every binding name of a pattern, in source order.

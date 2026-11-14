@@ -89,6 +89,22 @@ pub struct Lowered {
     functions: Vec<String>,
     tags: HashMap<String, u8>,
     placed: Vec<Vec<PlacedOp>>,
+    facts: Vec<FnFacts>,
+}
+
+/// One function's lowering facts beyond the artifact itself: the
+/// per-statement value ends of `main` (the resumed-frame seam's resume
+/// targets — the code length after each direct body statement's value
+/// code, the last entry the tail's exit boundary), and every binder's
+/// registered body slots (the `:drop` seam's word discovery).
+#[derive(Clone, Debug, Default)]
+pub struct FnFacts {
+    /// Code positions, one per direct body statement plus the tail's
+    /// exit boundary; empty for every function that is not `main`.
+    pub(crate) value_ends: Vec<u32>,
+    /// The binder span to body-slot words map (`main`'s is the `:drop`
+    /// seam's discovery surface).
+    pub(crate) registered: HashMap<Span, Vec<u8>>,
 }
 
 impl Lowered {
@@ -153,11 +169,41 @@ impl Lowered {
         self.function_index(name)
             .and_then(|index| self.placed.get(index as usize).map(Vec::as_slice))
     }
+
+    /// `main`'s per-statement value ends, in statement order, the last
+    /// entry the tail's exit boundary: the resumed-frame seam's resume
+    /// targets, read against the current round's own lowering.
+    #[must_use]
+    pub fn value_ends(&self, name: &str) -> Option<&[u32]> {
+        self.function_index(name)
+            .and_then(|index| self.facts.get(index as usize))
+            .map(|facts| facts.value_ends.as_slice())
+    }
+
+    /// One binder's registered body slots in the named function: the
+    /// `:drop` seam's word discovery. Borrowed registrations (an alias of
+    /// another binding's value) answer none.
+    #[must_use]
+    pub fn binder_slots(&self, name: &str, span: Span) -> Option<&[u8]> {
+        self.function_index(name)
+            .and_then(|index| self.facts.get(index as usize))
+            .and_then(|facts| facts.registered.get(&span).map(Vec::as_slice))
+    }
+
+    /// The named function's whole registration map: binder span to body
+    /// slots, owning registrations only.
+    #[must_use]
+    pub fn registered(&self, name: &str) -> Option<&HashMap<Span, Vec<u8>>> {
+        self.function_index(name)
+            .and_then(|index| self.facts.get(index as usize))
+            .map(|facts| &facts.registered)
+    }
 }
 
 /// One embedded comptime answer, as the runtime module materializes it
 /// at the call site (G1): the evaluator's recorded constant. The
-/// round-one embeddable results are the scalar atoms and string — a
+/// embeddable results are the scalar atoms, string, and a list over
+/// embeddable elements (the literal a user would have written) — a
 /// comptime function answering anything else refuses at the evaluator,
 /// never here.
 #[derive(Clone, Debug)]
@@ -170,6 +216,22 @@ pub enum ComptimeConst {
     Float(f64),
     /// A bool answer.
     Bool(bool),
+    /// A list answer over embeddable elements, in order.
+    List(Vec<ComptimeConst>),
+}
+
+/// How the round lowers: the ordinary program mode, or the REPL's
+/// resumed-frame session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowerMode {
+    /// The ordinary run path: a binder's words die where the placement
+    /// proves their last use, and `main`'s scope exit runs at completion.
+    Program,
+    /// The REPL's resumed frame: `main`'s binders pin (their words stay
+    /// claimed to the frame's teardown — a session-live value must never
+    /// die at a text-relative last use, since a later submission may
+    /// still read it), and the per-statement value ends record.
+    ResumedFrame,
 }
 
 /// The evaluator's recorded answers, keyed by each comptime call's span:
@@ -202,9 +264,10 @@ impl ComptimeValues {
 /// The shared lowering core behind the entries: `main_required` waives
 /// the run contract's entry check for the ambient's declaration-only
 /// generation and the comptime slice, `served` splices pre-lowered
-/// function bodies over the planned prefix instead of walking them, and
+/// function bodies over the planned prefix instead of walking them,
 /// `comptime` selects the evaluator's slice or embeds its recorded
-/// answers at the call sites.
+/// answers at the call sites, and `mode` carries the REPL session's
+/// resumed-frame facts.
 fn lower_module(
     module_name: &str,
     source_hash: Hash128,
@@ -213,6 +276,7 @@ fn lower_module(
     main_required: bool,
     served: Option<Vec<ds_mod::Function>>,
     comptime: func::ComptimeRun<'_>,
+    mode: LowerMode,
 ) -> Result<Lowered, LowerError> {
     let slice = matches!(comptime, func::ComptimeRun::Slice);
     if !analyzed.checked.diags.is_empty() {
@@ -270,8 +334,15 @@ fn lower_module(
         &analyzed.decls,
         &analyzed.checked,
     );
-    let (functions, placed, shapes) =
-        lower_all(&mut plan, analyzed, &lin, &platform_name(asts), served, comptime)?;
+    let (functions, placed, facts, shapes) = lower_all(
+        &mut plan,
+        analyzed,
+        &lin,
+        &platform_name(asts),
+        served,
+        comptime,
+        mode,
+    )?;
 
     let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
     for function in functions {
@@ -293,6 +364,7 @@ fn lower_module(
         functions: plan.names(),
         tags,
         placed,
+        facts,
     })
 }
 
@@ -310,12 +382,32 @@ pub fn lower(
     asts: &[Ast],
     analyzed: &Analyzed,
 ) -> Result<Lowered, LowerError> {
-    lower_with_comptime(
+    lower_in_mode(module_name, source_hash, asts, analyzed, LowerMode::Program)
+}
+
+/// [`lower`] under an explicit [`LowerMode`] — the REPL's resumed-frame
+/// session is the second caller.
+///
+/// # Errors
+///
+/// [`lower`]'s own.
+pub fn lower_in_mode(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+    mode: LowerMode,
+) -> Result<Lowered, LowerError> {
+    let empty = ComptimeValues::default();
+    lower_module(
         module_name,
         source_hash,
         asts,
         analyzed,
-        &ComptimeValues::default(),
+        true,
+        None,
+        func::ComptimeRun::Runtime(&empty),
+        mode,
     )
 }
 
@@ -346,6 +438,7 @@ pub fn lower_ambient(
         false,
         None,
         func::ComptimeRun::Runtime(&empty),
+        LowerMode::Program,
     )
 }
 
@@ -373,6 +466,7 @@ pub fn lower_with_comptime(
         true,
         None,
         func::ComptimeRun::Runtime(values),
+        LowerMode::Program,
     )
 }
 
@@ -403,6 +497,7 @@ pub fn lower_comptime_slice(
         false,
         None,
         func::ComptimeRun::Slice,
+        LowerMode::Program,
     )
 }
 
@@ -438,6 +533,7 @@ pub fn lower_with_served(
         true,
         Some(served),
         func::ComptimeRun::Runtime(values),
+        LowerMode::Program,
     )
 }
 
@@ -981,7 +1077,12 @@ fn collect_bounds(
 
 /// What lowering every planned function yields: the module's functions,
 /// each function's placed op sequence, and the shared shape tables.
-type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
+type LowerAll<'b> = (
+    Vec<ds_mod::Function>,
+    Vec<Vec<PlacedOp>>,
+    Vec<FnFacts>,
+    Shapes<'b>,
+);
 
 /// The platform name the world natives' pool FuncRefs address (H5, E1):
 /// the package's `platform "..."` declaration's name, the default
@@ -1010,10 +1111,12 @@ fn lower_all<'b>(
     platform: &str,
     served: Option<Vec<ds_mod::Function>>,
     comptime: func::ComptimeRun<'b>,
+    mode: LowerMode,
 ) -> Result<LowerAll<'b>, LowerError> {
     let mut shapes = Shapes::new(analyzed, plan.declared_deinits());
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
+    let mut facts = Vec::with_capacity(plan.functions().len());
     // The served prefix installs verbatim (names already validated
     // against the plan): its bodies carry their own placed streams as
     // code words, so their placed rows here stay empty and the walk
@@ -1022,6 +1125,7 @@ fn lower_all<'b>(
         for body in served {
             functions.push(body);
             placed.push(Vec::new());
+            facts.push(FnFacts::default());
         }
     }
     let mut index = functions.len();
@@ -1031,7 +1135,7 @@ fn lower_all<'b>(
         // node-observing re-point lands on the function being lowered:
         // the sentinel renders against the first file's first line,
         // which is the stdlib ambient in the CLI pipeline.
-        let (function, ops) = FnLower::lower(
+        let (function, ops, fact) = FnLower::lower(
             analyzed,
             res,
             plan,
@@ -1042,12 +1146,14 @@ fn lower_all<'b>(
             func::RunContext {
                 platform: platform.to_owned(),
                 comptime,
+                mode,
             },
         )
         .map_err(|err| err.respanned(planned.lambda.span()))?;
         functions.push(function);
         placed.push(ops);
+        facts.push(fact);
         index += 1;
     }
-    Ok((functions, placed, shapes))
+    Ok((functions, placed, facts, shapes))
 }

@@ -22,11 +22,12 @@ diag = ["ds-rt/diag"]
 ds-abi = { path = "../ds-abi" }
 ds-mod = { path = "../ds-mod" }
 ds-rt = { path = "../ds-rt" }
+# the fork-join worker pool's scoped scheduler (E3's measured candidate)
+youpipe.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
-youpipe.workspace = true
 
 [[bench]]
 name    = "vm"

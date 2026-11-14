@@ -1,10 +1,12 @@
 //! The comptime declaration surface through the checker (G1, G2): a
 //! free fn whose parameters are all `comptime name: type` checks clean
 //! with type names as argument values, the reflection builtins answer
-//! inside its body, and every other shape refuses at its own door — a
-//! `type` annotation without the comptime mode (DS2030), a comptime
-//! parameter off the round-one shape (DS2031), and a reflection builtin
-//! outside a comptime evaluation context (DS2032).
+//! inside its body, a scalar-annotated comptime parameter (round two's
+//! literal staging) checks clean beside them, and every other shape
+//! refuses at its own door — a `type` annotation without the comptime
+//! mode (DS2030), a comptime parameter off the round's shape (DS2031),
+//! and a reflection builtin outside a comptime evaluation context
+//! (DS2032).
 
 use ds_check::analyze;
 use ds_diag::Files;
@@ -92,15 +94,35 @@ fn mixed_comptime_params_refuse() {
 }
 
 #[test]
-fn comptime_non_type_annotation_refuses() {
+fn comptime_scalar_annotation_checks_clean() {
+    let source = format!(
+        "{AMBIENT}fn sized(comptime n: int) -> int {{ n }}
+fn labeled(comptime label: string) -> string {{ label }}
+fn main() -> () {{
+  println(\"${{sized(4)}} ${{labeled(\"x\")}}\")
+}}
+"
+    );
+    let analyzed = analyze_source("scalar.ds", &source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "the scalar-annotated comptime parameters check clean: {rendered:?}"
+    );
+}
+
+#[test]
+fn comptime_non_scalar_annotation_refuses() {
     let analyzed = analyze_source(
-        "int_param.ds",
-        &format!("{AMBIENT}fn sized(comptime n: int) -> int {{ n }}\n"),
+        "struct_param.ds",
+        &format!(
+            "{AMBIENT}fn sized(comptime p: point) -> int {{ 0 }}\nstruct point {{ x: int }}\n"
+        ),
     );
     let rendered = messages(&analyzed);
     assert!(
         rendered.iter().any(|m| m.starts_with("DS2031")),
-        "a non-type comptime parameter refuses: {rendered:?}"
+        "a non-scalar comptime parameter refuses: {rendered:?}"
     );
 }
 

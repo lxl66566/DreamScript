@@ -3,6 +3,9 @@
 // items:
 // json: stage: typecheck
 // cfg_err: stage: typecheck
+// log: stage: typecheck
+// default_config: stage: typecheck
+// get: stage: typecheck
 // get_port: stage: run
 // load: stage: run
 // cfg: stage: run
@@ -27,6 +30,13 @@ enum cfg_err {
   missing
   bad_port { got: int }
 }
+
+// the config fallback's seams, file-owned since the ambient shed its dead
+// declarations (no native answers these callees; the uses keep their
+// staged spellings and refuse at lowering as the header records)
+extern fn log(msg: string) -> ()
+extern fn default_config() -> config
+extern fn get[k, v](m: map[k, v], key: k) -> v | none
 
 fn get_port(j: json) -> int | missing | bad_port {
   if j is json_obj {

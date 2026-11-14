@@ -15,11 +15,12 @@ use tower_lsp::{
     lsp_types::{
         self as lsp, CompletionOptions, CompletionParams, CompletionResponse,
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
-        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-        HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-        MarkupContent, MarkupKind, OneOf, PrepareRenameResponse, ReferenceParams, RenameOptions,
-        RenameParams, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        DocumentFormattingParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
+        DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
+        InitializeResult, InitializedParams, MarkupContent, MarkupKind, OneOf,
+        PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams,
+        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
         SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
         ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
         TextDocumentSyncKind, WorkDoneProgressOptions, WorkspaceEdit,
@@ -183,6 +184,12 @@ impl LanguageServer for Backend {
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                // A newline inside a body formats the enclosing
+                // declaration; a `}` formats the declaration it closed.
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_owned(),
+                    more_trigger_character: Some(vec!["}".to_owned()]),
+                }),
                 // Whole-document tokens only: no delta, no range this
                 // slice (memoization is the latency story).
                 semantic_tokens_provider: Some(
@@ -435,6 +442,29 @@ impl LanguageServer for Backend {
         };
         self.call(move |reply| Request::Format { path, reply })
             .await
+    }
+
+    /// The format options ride through unaccepted: `ds-fmt` is
+    /// zero-option, so the client's tab size and insert-spaces never
+    /// change the canonical form.
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> jsonrpc::Result<Option<Vec<lsp::TextEdit>>> {
+        let doc = params.text_document_position.text_document;
+        let pos = params.text_document_position.position;
+        let ch = params.ch;
+        let Some(path) = Self::path_of(&doc.uri) else {
+            return Ok(None);
+        };
+        self.call(move |reply| Request::OnTypeFormat {
+            path,
+            line: pos.line,
+            character: pos.character,
+            ch,
+            reply,
+        })
+        .await
     }
 
     async fn semantic_tokens_full(

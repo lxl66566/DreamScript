@@ -12,9 +12,10 @@ const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 
 /// Ambient stdlib stubs for the corpus file, mirroring the shared
 /// ambient's ownership of the failure taxonomy and the config type plus
-/// the types_hybrid list (`read_file`, `parse_json`, `log`,
-/// `default_config`, the `map`/`list` types) and the `get` call the file
-/// makes; the M3 stdlib owns their real spellings.
+/// the types_hybrid list (`read_file`, `parse_json`, the `map`/`list`
+/// types); the M3 stdlib owns their real spellings. The
+/// `log`/`default_config`/`get` externs are the corpus file's own (the
+/// ambient shed its dead declarations).
 const AMBIENT: &str = concat!(
     "tag int\n",
     "tag float\n",
@@ -25,9 +26,6 @@ const AMBIENT: &str = concat!(
     "struct config { host: string, port: int?, retries: int }\n",
     "fn read_file(path: string) -> string { \"\" }\n",
     "fn parse_json(text: string) -> string { \"\" }\n",
-    "fn log(msg: string) -> () { }\n",
-    "fn default_config() -> config { config { host: \"h\", port: 1, retries: 1 } }\n",
-    "fn get(m: map[string, string], key: string) -> string { \"\" }\n",
 );
 
 struct Fixture {
@@ -584,7 +582,6 @@ fn conformance_types_hybrid_resolves_fully() {
     for (context, target) in [
         ("read_file(path", "read_file"),
         ("parse_json(text", "parse_json"),
-        ("default_config()", "default_config"),
     ] {
         let span = span_in(src, file, context, 0, target);
         match uses.get(span) {
@@ -592,9 +589,16 @@ fn conformance_types_hybrid_resolves_fully() {
             other => panic!("{target} should resolve to a stub def: {other:?}"),
         }
     }
+    // the file's own extern declarations resolve like any package def
+    // (occurrence 0 is the declaration's own name, which records no use).
+    match uses.get(span_in(src, file, "default_config()", 1, "default_config")) {
+        Some(Res::Def(id)) => assert_eq!(f.package.def(*id).kind, DefKind::Fn),
+        other => panic!("default_config should resolve to the file's extern: {other:?}"),
+    }
     // the interpolation hole's receiver resolves through the arm
     // binding; `.err(...)` is the handler form; `.get(...)` is a UFCS
-    // free-fn call; the punned `port` field uses the local.
+    // free-fn call over the file's own extern; the punned `port` field
+    // uses the local.
     assert!(matches!(
         uses.get(span_in(src, file, "b.got", 0, "b")),
         Some(Res::Local { .. })

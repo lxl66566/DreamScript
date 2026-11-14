@@ -533,6 +533,25 @@ impl Module {
         self
     }
 
+    /// Replaces the record named by `function.name()` in place, keeping
+    /// the table's order and every other module section (the park-splice
+    /// seam: the REPL rewrites the entry function's body between the
+    /// lowerer and the install). Returns false when no record carries the
+    /// name.
+    pub fn replace_function(&mut self, function: Function) -> bool {
+        match self
+            .functions
+            .iter()
+            .position(|f| f.name() == function.name())
+        {
+            Some(at) => {
+                self.functions[at] = function;
+                true
+            },
+            None => false,
+        }
+    }
+
     /// The evidence-chain table, in stored order [H3].
     #[must_use]
     pub fn chains(&self) -> &[EvidenceChain] {

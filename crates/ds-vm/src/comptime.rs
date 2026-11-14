@@ -34,30 +34,35 @@ use crate::{
 pub const COMPTIME_MODULE: &str = "comptime";
 
 /// One reflected field record, the 2026-11-14 derive-extension ruling's
-/// (name, type, tag) triple over declared data: the field's name, the
-/// reflection index of its type, and the field's nominal tag name (the
-/// type's own name when the field type is a bare atom, empty for
-/// composite field types this round).
+/// (name, type, tag) triple over declared data. Over a struct's fields:
+/// the field's name, the reflection index of its type, and the field's
+/// nominal tag name (the type's own name when the field type is a bare
+/// atom, empty for composite field types). Over an enum's cases (the
+/// same record shape, one per case): the case's name, the reflection
+/// index of its payload (the case's own minted atom, or `none` when the
+/// case constructs bare), and the constructor tag its values carry at
+/// runtime (the case's own name).
 #[derive(Clone, Debug)]
 pub struct ComptimeField {
-    /// The field's declared name.
+    /// The field's (or case's) declared name.
     pub name: String,
-    /// The reflection index of the field's type.
+    /// The reflection index of the field's type (or the case's payload).
     pub type_index: u8,
-    /// The field's nominal tag name, empty when the field type is
-    /// composite.
+    /// The field's nominal tag name (empty when the field type is
+    /// composite), or the case's own constructor tag name.
     pub tag: String,
 }
 
-/// One reflected type: its name and its declared fields (empty for
-/// enums, tags, and composite projections this round — enum case
-/// traversal is the reflection round's residual).
+/// One reflected type: its name and its declared fields — one record
+/// per field over a struct, one record per case over a non-generic
+/// enum. Empty over tags, generic declarations (atoms kept opaque until
+/// substitution lands), and composite projections.
 #[derive(Clone, Debug)]
 pub struct ComptimeType {
     /// The type's declared name, or its rendered spelling for a
     /// composite projection.
     pub name: String,
-    /// The declared fields, in declaration order.
+    /// The declared fields (or cases), in declaration order.
     pub fields: Vec<ComptimeField>,
 }
 

@@ -94,6 +94,7 @@
 //! | 53    | `str_hash (s: string) -> int` |
 //! | 54    | `float_hash (f: float) -> int` |
 //! | 55    | `char_hash (c: char) -> int` |
+//! | 56    | `repl_park (answer words, variadic)` (control seam; the REPL's spliced park) |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -577,6 +578,13 @@ pub const BUILTIN_FLOAT_HASH: u32 = 54;
 /// a char and its own one-char string hash identically.
 pub const BUILTIN_CHAR_HASH: u32 = 55;
 
+/// `repl_park(words...)` — the control seam behind the REPL's resumed
+/// frame (crates/ds-vm/src/repl.rs): no source spelling reaches it, and
+/// the only call sites are the ones that module splices into the entry
+/// function's body, so the table row exists for the splice's pool
+/// reference and the dispatcher's interception.
+pub const BUILTIN_REPL_PARK: u32 = 56;
+
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
 /// the module docs).
@@ -650,6 +658,13 @@ pub enum ControlNative {
     /// the payload; the trap path raises its nursery's cancel flag. The
     /// call never answers.
     NurseryCancel,
+    /// `repl_park(words...)`: the REPL's resumed-frame seam (every call site
+    /// is spliced into the entry function's body, never lowered from
+    /// source): park the current fiber and hand the host drive the
+    /// first staged word — the submission's answer. The host re-enters
+    /// at the next submission's code with the inert unit as the call's
+    /// answer, a word no later instruction reads.
+    ReplPark,
 }
 
 /// A native's result: one word on the caller's overlay slot 0, a
@@ -2629,10 +2644,21 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             control: None,
             func: char_hash_fn,
         },
+        NativeFunction {
+            // the REPL's park seam: the staged words are the submission's
+            // answer span (word 0 rides the park event to the host), so the
+            // arity is whatever the splice staged and no kind is checked
+            name: "repl_park",
+            params: &[],
+            variadic: true,
+            result_words: 1,
+            control: Some(ControlNative::ReplPark),
+            func: fiber_control_bounce_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_CHAR_HASH, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_CHAR_HASH as usize + 1);
+    // BUILTIN_REPL_PARK, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_REPL_PARK as usize + 1);
     fns
 }
 
@@ -3056,7 +3082,8 @@ mod tests {
         assert_eq!(fns[BUILTIN_STR_HASH as usize].name, "str_hash");
         assert_eq!(fns[BUILTIN_FLOAT_HASH as usize].name, "float_hash");
         assert_eq!(fns[BUILTIN_CHAR_HASH as usize].name, "char_hash");
-        assert_eq!(fns.len(), 56);
+        assert_eq!(fns[BUILTIN_REPL_PARK as usize].name, "repl_park");
+        assert_eq!(fns.len(), 57);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
@@ -3096,6 +3123,7 @@ mod tests {
             (BUILTIN_STR_HASH, 1),
             (BUILTIN_FLOAT_HASH, 1),
             (BUILTIN_CHAR_HASH, 1),
+            (BUILTIN_REPL_PARK, 1),
         ] {
             assert_eq!(fns[index as usize].result_words, want);
         }

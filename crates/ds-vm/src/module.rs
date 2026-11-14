@@ -341,7 +341,7 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VersionIdx(pub(crate) u32);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModuleSlots {
     /// The module id a scalar FuncRef word addresses (F2): this name's
     /// first-install position in the registry's id space.
@@ -428,11 +428,50 @@ struct ResolvedEntry {
     func_id: u32,
 }
 
+/// The `Send + Sync` code snapshot a fork-join drive hands its workers
+/// (E3's 2026-11-15 sendability ruling): the registry's read face — the
+/// module slots, the native tables, the id space, and `Arc` clones of
+/// every version-table row — with the platform handlers stripped, so a
+/// pooled child's world call refuses with the standard unresolved-callee
+/// trap instead of writing a worker sink (the pool's purity contract).
+/// Row indices, module ids, and the generation match the host registry
+/// exactly, so a `VersionIdx` or scalar `FuncRef` word staged on the host
+/// resolves identically on a worker. Installs happen only on the host
+/// between drives, so a snapshot taken at a drive's start stays exact for
+/// the drive's duration; a cached worker VM re-snapshots whenever its
+/// drive identity disagrees.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeSnapshot {
+    modules: BTreeMap<String, ModuleSlots>,
+    natives: BTreeMap<String, Arc<Vec<NativeFunction>>>,
+    id_names: Vec<String>,
+    versions: Vec<Option<Arc<ModuleVersion>>>,
+    generation: u64,
+}
+
 impl ModuleRegistry {
     /// An empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The workers' code snapshot: the read face above minus the platform
+    /// handlers (both their `Arc<Platform>` records and the native tables
+    /// installed under their names, so neither the capability gate nor an
+    /// op body is reachable on a worker).
+    pub(crate) fn code_snapshot(&self) -> CodeSnapshot {
+        let mut natives = self.natives.clone();
+        for name in self.platforms.keys() {
+            natives.remove(name);
+        }
+        CodeSnapshot {
+            modules: self.modules.clone(),
+            natives,
+            id_names: self.id_names.clone(),
+            versions: self.versions.clone(),
+            generation: self.generation,
+        }
     }
 
     /// Installs a version: it becomes the module's current slot, the
@@ -715,6 +754,24 @@ impl ModuleRegistry {
     }
 }
 
+impl CodeSnapshot {
+    /// A worker VM's registry over the snapshot: identical ids, slots,
+    /// rows, and generation, no platforms, and a cold entry hint. The
+    /// worker never installs, so its rows never retire and the snapshot's
+    /// `Arc`s pin its versions for the worker VM's lifetime.
+    pub(crate) fn to_registry(&self) -> ModuleRegistry {
+        ModuleRegistry {
+            modules: self.modules.clone(),
+            natives: self.natives.clone(),
+            platforms: BTreeMap::new(),
+            id_names: self.id_names.clone(),
+            versions: self.versions.clone(),
+            entry: RefCell::new(None),
+            generation: self.generation,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ds_abi::uop::{DecodeError, Uop};
@@ -822,6 +879,47 @@ mod tests {
         fn assert_shared<T: Send + Sync>() {}
         assert_shared::<ModuleVersion>();
         assert_shared::<Arc<ModuleVersion>>();
+    }
+
+    /// The code snapshot a pool drive hands its workers carries the same
+    /// `Send + Sync` contract (E3's 2026-11-15 sendability ruling), so the
+    /// shared-read half of the ownership-transfer design is
+    /// compiler-proved.
+    #[test]
+    fn the_code_snapshot_is_send_and_sync() {
+        fn assert_shared<T: Send + Sync>() {}
+        assert_shared::<CodeSnapshot>();
+    }
+
+    /// The snapshot answers the host's read face exactly — same ids, same
+    /// slots, same rows, same generation — minus the platforms, so a
+    /// staged `VersionIdx` or scalar `FuncRef` resolves identically on a
+    /// worker while a world call refuses.
+    #[test]
+    fn the_snapshot_mirrors_the_read_face_minus_platforms() {
+        let mut reg = ModuleRegistry::new();
+        reg.install_native("builtin", Vec::new());
+        let v1 = reg
+            .install(ModuleVersion::new("m", vec![empty_def("a")]).expect("valid fixture module"));
+        reg.install_platform(Platform::new("std", &[]));
+        let snap = reg.code_snapshot();
+        let worker = snap.to_registry();
+        assert_eq!(worker.generation(), reg.generation());
+        assert_eq!(worker.module_id("m"), reg.module_id("m"));
+        assert_eq!(worker.resolve_indexed("m", 0), Some((v1, 0)));
+        assert!(worker.native_table("builtin").is_some());
+        assert!(
+            worker.native_table("std").is_none(),
+            "the platform's native table never reaches a worker"
+        );
+        assert!(reg.native_table("std").is_some());
+        // the snapshot's rows are Arc clones of the same allocations: a
+        // worker reading through `to_registry` sees the host's code, and
+        // the host sweep cannot free it under a live drive
+        assert!(std::ptr::eq(
+            worker.version(v1).expect("the row resolves"),
+            reg.version(v1).expect("the host row resolves")
+        ));
     }
 
     #[test]

@@ -439,6 +439,7 @@ mod tests {
             &analyzed.asts,
             &analyzed,
             Some(served),
+            &ds_lower::ComptimeValues::default(),
         )
         .expect("the disagreeing serve still compiles");
         let fresh = ds_lower::lower(

@@ -51,30 +51,131 @@ fn in_order(output: &str, fragments: &[&str]) {
 }
 
 #[test]
-fn session_binds_uses_drops_and_resets_a_linear_resource() {
-    // The deinit fires at every run's scope exit while the binding lives
-    // (twice: the binding line, the use line), never again after :drop,
-    // and the dropped name is gone until :reset clears the broken text.
+fn session_binds_drops_and_resets_a_linear_resource() {
+    // The resumed frame: the binding lives in the parked frame (no deinit
+    // at the binding line — the scope never exits between submissions),
+    // `:drop` fires the deinit exactly once at the drop, the dropped name
+    // is gone, and `:reset` clears the session. A use line keeps its
+    // reference, so the drop of a used binding refuses (the later test).
     let (out, ok) = session(
         "struct res: ~Copyable {\n  id: int\n  deinit { println(\"dying ${self.id}\") }\n}\nconst \
-         r = res { id: 7 }\nr.id + 1\n:drop r\nr.id + 1\n:reset\n1 + 1\n",
+         r = res { id: 7 }\n:drop r\nr\n:reset\n1 + 1\n",
     );
     assert!(ok, "the session exits cleanly: {out}");
     in_order(&out, &[
         "DreamScript repl",
         ">>> ... ... ... res declared",
-        ">>> dying 7\nr: res\n~ pure",
-        ">>> dying 7\n8\n: int\n~ trap",
-        ">>> dropped r",
+        ">>> r: res\n~ pure",
+        ">>> dying 7\ndropped r",
         "error[DS2004]: unknown name `r`",
         ">>> session reset",
         ">>> 2\n: int\n~ trap",
     ]);
     assert_eq!(
         out.matches("dying 7").count(),
-        2,
-        "the deinit fires once per run while the binding lives, never after the drop: {out}"
+        1,
+        "the deinit fires exactly once, at the drop — never at the binding line, never again \
+         after: {out}"
     );
+}
+
+#[test]
+fn side_effects_run_once_across_submissions() {
+    // The pin of the resumed frame: a print in submission 1 prints once
+    // across submissions 2..n — prior statements never re-run — and each
+    // later submission's own print fires exactly its own once.
+    let (out, ok) = session(concat!(
+        "println(\"first\")\n",
+        "1 + 1\n",
+        "const x = 5\n",
+        "println(\"second\")\n",
+        "x + 1\n",
+        "2 + 2\n",
+    ));
+    assert!(ok, "the session exits cleanly: {out}");
+    assert_eq!(
+        out.matches("first").count(),
+        1,
+        "one print, one firing: {out}"
+    );
+    assert_eq!(
+        out.matches("second").count(),
+        1,
+        "one print, one firing: {out}"
+    );
+    in_order(&out, &[
+        "first", "2\n: int", "x: int", "second", "6\n: int", "4\n: int",
+    ]);
+}
+
+#[test]
+fn the_session_end_runs_the_surviving_deinits() {
+    // The scope exit at end of input: the surviving binding's deinit
+    // fires there, the dropped binding's fired exactly once at its drop,
+    // and neither fires twice.
+    let (out, ok) = session(concat!(
+        "struct res: ~Copyable {\n  id: int\n  deinit { println(\"bye ${self.id}\") }\n}\n",
+        "const a = res { id: 1 }\n",
+        "const b = res { id: 2 }\n",
+        ":drop a\n",
+        "2 + 2\n",
+    ));
+    assert!(ok, "the session exits cleanly: {out}");
+    in_order(&out, &[
+        "a: res",
+        "b: res",
+        "bye 1\ndropped a",
+        "4\n: int",
+        "bye 2",
+    ]);
+    assert_eq!(
+        out.matches("bye 1").count(),
+        1,
+        "the drop fires once: {out}"
+    );
+    assert_eq!(
+        out.matches("bye 2").count(),
+        1,
+        "the scope exit fires once: {out}"
+    );
+}
+
+#[test]
+fn a_trap_leaves_the_live_frame_consistent() {
+    // A trapping line never commits and the frame does not advance: the
+    // prior binding still reads, the trapped line is gone from the
+    // session, and the corrected resubmission runs.
+    let (out, ok) = session(concat!("const x = 10\n", "1 / 0\n", "x + 5\n", "6 / 2\n",));
+    assert!(ok, "the session exits cleanly: {out}");
+    in_order(&out, &[
+        "x: int",
+        "trap: division by zero",
+        ">>> 15\n: int",
+        ">>> 3\n: int",
+    ]);
+}
+
+#[test]
+fn a_referenced_binding_refuses_its_drop_and_the_session_continues() {
+    // A name other lines reference cannot die textually — the referencing
+    // line would poison every later submission's check — so the drop
+    // names it and stays; an alias's drop renames only (the value lives
+    // with its owner, which still reads afterwards).
+    let (out, ok) = session(concat!(
+        "const a = 21\n",
+        "const b = a\n",
+        ":drop a\n",
+        ":drop b\n",
+        "a + 1\n",
+    ));
+    assert!(ok, "the session exits cleanly: {out}");
+    in_order(&out, &[
+        ">>> a: int",
+        ">>> b: int",
+        "cannot drop a: `const b = a` still references it",
+        "b holds no live words of its own (a constant or an alias)\ndropped b",
+        ">>> 22\n: int",
+    ]);
 }
 
 #[test]

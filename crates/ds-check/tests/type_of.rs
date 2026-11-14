@@ -692,7 +692,7 @@ fn interpolation_holes_convert_printable_primitives() {
 
 #[test]
 fn interpolation_rejects_unprintable_and_union_holes() {
-    // a struct operand waits for the M6 show derive
+    // a struct operand without a `show` impl refuses naming the remedy
     assert_eq!(
         check(concat!(
             "const c = config { host: \"h\", port: 1 }\n",
@@ -700,14 +700,99 @@ fn interpolation_rejects_unprintable_and_union_holes() {
         )),
         [
             "DS2001 interpolation hole has type `config`; the printable primitives (bool, char, \
-             float, int, string) convert implicitly [F6]"
+             float, int, string) convert implicitly, every other type carries `show` [F6]"
         ]
     );
-    // a union operand extracts first
+    // a union operand extracts first (or carries a whole-union impl)
     assert_eq!(check("fn f(x: int | io_err) -> string { \"${x}\" }\n"), [
         "DS2001 interpolation hole has type `int | io_err`; the printable primitives (bool, char, \
-         float, int, string) convert implicitly [F6]"
+         float, int, string) convert implicitly, every other type carries `show` [F6]"
     ]);
+}
+
+/// The refusal's help note names what to do (F6): derive or implement
+/// `show` for a single-member type, extract or impl for a union — the
+/// stale "arrives with M6" promise is gone.
+#[test]
+fn interpolation_refusal_notes_name_the_remedy() {
+    let note_of = |source: &str| -> Vec<String> {
+        let combined = format!("{PRELUDE}{source}");
+        let mut files = Files::new();
+        let file = files.add_source("t.ds", &combined);
+        let ast = parse(&files, file).unwrap_or_else(|diags| panic!("should parse: {diags:?}"));
+        type_check(&files, &[ast])
+            .diags
+            .iter()
+            .flat_map(|d| d.notes.clone())
+            .collect()
+    };
+    assert_eq!(
+        note_of(concat!(
+            "const c = config { host: \"h\", port: 1 }\n",
+            "const s = \"${c}\"\n",
+        )),
+        ["derive `show` (`#[derive(show)]`) or implement `show` for this type"]
+    );
+    assert_eq!(note_of("fn f(x: int | io_err) -> string { \"${x}\" }\n"), [
+        "extract a member first [B4, E4], or implement `show` over the whole union"
+    ]);
+}
+
+/// A hole whose operand carries `show` checks clean (F6): the derived
+/// impl, the hand-written trait impl, the inherent member, and a
+/// whole-union head all answer; a bound-variable receiver refuses
+/// naming the explicit spelling.
+#[test]
+fn interpolation_accepts_show_carrying_operands() {
+    clean(concat!(
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "struct cell { v: int }\n",
+        "impl show for cell {\n",
+        "  fn show(self) -> string { \"cell\" }\n",
+        "}\n",
+        "const c = cell { v: 1 }\n",
+        "const s = \"$c and ${c}\"\n",
+    ));
+    clean(concat!(
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "struct cell { v: int }\n",
+        "impl cell {\n",
+        "  fn show(self) -> string { \"cell\" }\n",
+        "}\n",
+        "const c = cell { v: 1 }\n",
+        "const s = \"$c\"\n",
+    ));
+    clean(concat!(
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "impl show for int | io_err {\n",
+        "  fn show(self) -> string { \"u\" }\n",
+        "}\n",
+        "fn f(x: int | io_err) -> string { \"${x}\" }\n",
+    ));
+    // the runtime-evidence form has no surface spelling to record; the
+    // variable renders under its minted internal name, so the stable
+    // tail is the assertion
+    let bound = check(concat!(
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "fn f[t: show](v: t) -> string { \"$v\" }\n",
+    ));
+    assert_eq!(bound.len(), 1);
+    assert!(
+        bound[0].starts_with("DS2001 interpolation hole has type `$t#")
+            && bound[0].ends_with(
+                "whose `show` answers through a generic bound; spell the dispatch inside the hole \
+                 [F6]"
+            ),
+        "the bound-variable hole refuses naming the explicit spelling: {bound:?}"
+    );
 }
 
 #[test]

@@ -33,7 +33,9 @@
 //! package, the declaration included when asked), rename and
 //! prepare-rename as a plain identifier substitution over a definition or
 //! local binder and every use of it, document symbols from the parse
-//! tree, whole-document formatting through `ds-fmt`, and
+//! tree, whole-document formatting through `ds-fmt`, on-type formatting
+//! of the tightest declaration region the trigger names (a newline
+//! inside a body, a closing `}`) through `ds-fmt`'s per-item seam, and
 //! `textDocument/semanticTokens/full`: a whole-document token stream over
 //! the lossless parse tree plus the analysis the engine holds (keywords
 //! and operators where the tree or a verified gap spells them, comments
@@ -73,6 +75,11 @@
 //!   selection. Extern names refuse (they are platform link spellings), and so does any edit
 //!   reaching the ambient stdlib (no open document carries it); references of an ambient name
 //!   answer only the open documents' uses.
+//! * On-type formatting reformats the tightest declaration region the trigger names — the
+//!   declaration enclosing a typed newline or the one a typed `}` just closed — through `ds-fmt`'s
+//!   zero-option canonical form: the client's tab-size and insert-spaces options are unaccepted, a
+//!   poisoned parse answers nothing (broken code never reformats its neighbors), and one trimmed
+//!   edit covers the changed middle of the region alone, never the whole document.
 //! * `.dsi` hover waits on the interface-artifact round (M7); hover answers the checked type of the
 //!   expression at the position.
 //! * Ambient stdlib names resolve (the ambient registers first), but the ambient file has no client
@@ -191,6 +198,15 @@ enum Request {
     /// The document's canonical-format edits.
     Format {
         path: PathBuf,
+        reply: Reply<Option<Vec<lsp::TextEdit>>>,
+    },
+    /// The on-type format edits at one position after one trigger
+    /// character.
+    OnTypeFormat {
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        ch: String,
         reply: Reply<Option<Vec<lsp::TextEdit>>>,
     },
     /// The document's whole-file semantic token stream.
@@ -908,6 +924,87 @@ impl Session {
         Ok(Some(vec![edit]))
     }
 
+    /// The on-type format edit at the position after one trigger
+    /// keystroke: the tightest declaration region the trigger names —
+    /// the enclosing declaration of a newline typed inside a body, the
+    /// declaration a `}` just closed — rendered through `ds-fmt`'s
+    /// per-item seam over the session's current text. One trimmed edit
+    /// covers the reformatted region, never the whole document; a
+    /// poisoned parse (no region is determinable, so nothing
+    /// reformats), a trigger the server never registered, a position no
+    /// region names, or a region already carrying the canonical form
+    /// answers no edits.
+    fn on_type_format(
+        &mut self,
+        file: FileId,
+        line: u32,
+        character: u32,
+        ch: &str,
+    ) -> Result<Option<Vec<lsp::TextEdit>>, QueryError> {
+        if ch != "\n" && ch != "}" {
+            return Ok(Some(Vec::new()));
+        }
+        let parse = self.db.get::<ParseFile>(file)?;
+        let Some(ast) = &parse.ast else {
+            return Ok(None);
+        };
+        let offset = convert::offset(self.db.files(), file, lsp::Position { line, character });
+        // The typed character sits just behind the cursor on both
+        // registered triggers, so the position and its left neighbor
+        // name the region: the declaration containing the position
+        // first, then the one the typed character closed (a newline
+        // directly behind an item's end).
+        let item = [offset, offset.saturating_sub(1)]
+            .iter()
+            .find_map(|&probe| {
+                ast.blocks
+                    .iter()
+                    .flat_map(|block| block.items.iter())
+                    .filter(|item| !item.synthesized)
+                    .find(|item| {
+                        let (start, end) = ds_fmt::item_region(item);
+                        start <= probe && probe <= end
+                    })
+            });
+        let Some(item) = item else {
+            return Ok(Some(Vec::new()));
+        };
+        let region = ds_fmt::format_item(self.db.files(), file, item);
+        let source = self.db.files().source(file);
+        // The shared prefix and suffix stay in place: the edit covers
+        // exactly the changed middle of the region, the minimal range.
+        let old = &source[region.start as usize..region.end as usize];
+        let prefix = old
+            .chars()
+            .zip(region.text.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a.len_utf8())
+            .sum::<usize>();
+        let suffix = old[prefix..]
+            .chars()
+            .rev()
+            .zip(region.text[prefix..].chars().rev())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a.len_utf8())
+            .sum::<usize>();
+        let start = u32::try_from(region.start as usize + prefix)
+            .expect("a region start fits u32 byte offsets");
+        let end = u32::try_from(region.end as usize - suffix)
+            .expect("a region end fits u32 byte offsets");
+        let new_text = &region.text[prefix..region.text.len() - suffix];
+        if start == end && new_text.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let files = self.db.files();
+        Ok(Some(vec![lsp::TextEdit {
+            range: lsp::Range::new(
+                convert::position(files, file, start),
+                convert::position(files, file, end),
+            ),
+            new_text: new_text.to_owned(),
+        }]))
+    }
+
     /// The document's whole-file semantic token stream, delta-encoded,
     /// cached per file on the engine revision: a request over an
     /// unchanged revision answers the cached stream, and any input
@@ -1152,6 +1249,25 @@ fn handle(request: Request, session: &mut Session) {
                 session.file(&path).map_or_else(
                     || Ok(None),
                     |file| session.format(file).map_err(|error| error.to_string()),
+                )
+            });
+            reply.send(answer).ok();
+        },
+        Request::OnTypeFormat {
+            path,
+            line,
+            character,
+            ch,
+            reply,
+        } => {
+            let answer = guarded(move || {
+                session.file(&path).map_or_else(
+                    || Ok(None),
+                    |file| {
+                        session
+                            .on_type_format(file, line, character, &ch)
+                            .map_err(|error| error.to_string())
+                    },
                 )
             });
             reply.send(answer).ok();
@@ -1809,6 +1925,117 @@ mod tests {
             session.rename(file, u32::MAX, u32::MAX, "x").is_ok(),
             "rename survives a u32::MAX position"
         );
+        assert!(
+            session
+                .on_type_format(file, u32::MAX, u32::MAX, "\n")
+                .is_ok(),
+            "on-type formatting survives a u32::MAX position"
+        );
+    }
+
+    /// Applies one edit list to the document's source.
+    fn apply(session: &Session, file: FileId, edits: &[lsp::TextEdit]) -> String {
+        let files = session.db.files();
+        let mut out = files.source(file).to_owned();
+        for edit in edits.iter().rev() {
+            let start = convert::offset(files, file, edit.range.start) as usize;
+            let end = convert::offset(files, file, edit.range.end) as usize;
+            out.replace_range(start..end, &edit.new_text);
+        }
+        out
+    }
+
+    /// A newline typed inside a declaration body formats the enclosing
+    /// declaration: the body's mis-indentation repairs through one edit
+    /// whose range starts past the shared header — never a
+    /// whole-document edit — and applying it yields the canonical form.
+    #[test]
+    fn on_type_newline_formats_the_enclosing_declaration() {
+        let mut session = Session::new();
+        let source = "fn area(width: int) -> int {\nconst s = width\ns\n}\n";
+        let file = open(&mut session, "a.ds", source);
+        // Enter typed at the end of the first body line: the cursor
+        // opens the next line inside the body.
+        let edits = session
+            .on_type_format(file, 2, 0, "\n")
+            .expect("the pass runs")
+            .expect("the parse is clean");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        // The shared header stays out of the edit: it starts on the
+        // first body line, not at the document start.
+        assert_eq!(edits[0].range.start.line, 1, "{edits:?}");
+        assert_eq!(edits[0].range.start.character, 0, "{edits:?}");
+        assert_eq!(
+            apply(&session, file, &edits),
+            "fn area(width: int) -> int {\n  const s = width\n  s\n}\n"
+        );
+    }
+
+    /// A `}` closing a declaration formats that declaration alone: the
+    /// header's spacing and the body's indent repair, and a
+    /// mis-formatted neighbor stays untouched (the region discipline).
+    #[test]
+    fn on_type_brace_formats_the_closed_declaration() {
+        let mut session = Session::new();
+        let source = "const  one=1\nfn  greet( name:string ) ->string{\n\"hi\"\n}";
+        let file = open(&mut session, "a.ds", source);
+        // The typed `}` closes the fn; the cursor sits right behind it.
+        let edits = session
+            .on_type_format(file, 3, 1, "}")
+            .expect("the pass runs")
+            .expect("the parse is clean");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(
+            apply(&session, file, &edits),
+            "const  one=1\nfn greet(name: string) -> string {\n  \"hi\"\n}",
+            "the closed declaration repairs, the neighbor keeps its own form"
+        );
+    }
+
+    /// A region already carrying the canonical form answers no edits,
+    /// not an identity edit; so do an unregistered trigger character and
+    /// a newline in the whitespace between declarations (no region names
+    /// the position).
+    #[test]
+    fn on_type_answers_no_edits_when_nothing_changes() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn area(width: int) -> int {\n  const s = width\n  s\n}\n",
+        );
+        let edits = session
+            .on_type_format(file, 2, 0, "\n")
+            .expect("the pass runs")
+            .expect("the parse is clean");
+        assert!(edits.is_empty(), "an already-canonical region: {edits:?}");
+        let edits = session
+            .on_type_format(file, 2, 0, ";")
+            .expect("the pass runs")
+            .expect("the parse is clean");
+        assert!(edits.is_empty(), "an unregistered trigger: {edits:?}");
+        let other = open(&mut session, "b.ds", "const one = 1\n\n\nconst two = 2\n");
+        let edits = session
+            .on_type_format(other, 2, 0, "\n")
+            .expect("the pass runs")
+            .expect("the parse is clean");
+        assert!(
+            edits.is_empty(),
+            "a gap position names no region: {edits:?}"
+        );
+    }
+
+    /// A poisoned parse answers no edits: broken code never reformats
+    /// the valid declarations around it (the whole-document formatter
+    /// refuses the same tree).
+    #[test]
+    fn on_type_poisoned_parse_answers_no_edits() {
+        let mut session = Session::new();
+        let file = open(&mut session, "a.ds", "const one = 1\nconst broken = ,\n");
+        match session.on_type_format(file, 1, 15, "\n") {
+            Ok(None) => {},
+            other => panic!("a poisoned parse answers no edits: {other:?}"),
+        }
     }
 
     /// A duplicate within one document publishes both the primary range

@@ -516,6 +516,11 @@ impl Hasher for InternHasher {
 
 /// The heap: the id table over ds-rt's counted blocks, the table's free
 /// list threading freed ids, and the string intern map.
+///
+/// `Send` (moves whole with its fiber under the fork-join ownership
+/// transfer, E3's 2026-11-15 ruling) but not `Sync`: the block headers
+/// and counts are confined state, sound only while exactly one thread
+/// holds the store — the same contract ds-rt's `Heap` carries.
 pub struct Objects {
     /// The owning fiber: the local/foreign test every count mutation on
     /// a stored word runs against (the pool index is the word's owner
@@ -529,6 +534,13 @@ pub struct Objects {
     pending: VecDeque<ForeignOp>,
     scratch: DeathScratch,
 }
+
+// SAFETY: the store's raw pointers (the table's block headers, the death
+// scratch) point into the `Heap` that moves with the store, and the
+// fork-join pool transfers the whole fiber — store, heap, and ledger —
+// exclusively: the host pool slot is vacated for the drive's duration,
+// so no second thread can reach the store while it is away.
+unsafe impl Send for Objects {}
 
 impl fmt::Debug for Objects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -241,7 +241,7 @@ async fn the_handshake_diagnoses_and_answers() {
         .await;
         let reply = expect(&mut client, Wanted::Id(5)).await;
         assert!(
-            reply["result"].is_array() && reply["result"].as_array().unwrap().is_empty(),
+            reply["result"].as_array().is_some_and(Vec::is_empty),
             "{}",
             reply["result"]
         );
@@ -372,6 +372,116 @@ async fn the_handshake_diagnoses_and_answers() {
         )
         .await;
         let reply = expect(&mut client, Wanted::Id(11)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// The on-type formatting wire: the capability registers its trigger
+/// characters, a closing `}` repairs the declaration it closed through
+/// one trimmed edit, a newline inside the body answers the same region,
+/// and an unregistered trigger character answers no edits.
+#[tokio::test]
+async fn on_type_formatting_answers_over_the_wire() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_ontype.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(1)).await;
+        let provider = &reply["result"]["capabilities"]["documentOnTypeFormattingProvider"];
+        assert_eq!(provider["firstTriggerCharacter"], "\n", "{provider}");
+        assert_eq!(provider["moreTriggerCharacter"], json!(["}"]), "{provider}");
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        let source = "fn  greet( name:string ) ->string{\n\"hi\"\n}";
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        // The open publishes the clean document's (empty) diagnostics;
+        // the request loop below skips them.
+        let on_type = |id: u64, line: u32, character: u32, ch: &str| {
+            request(
+                id,
+                "textDocument/onTypeFormatting",
+                &json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": character},
+                    "ch": ch,
+                    "options": {"tabSize": 2, "insertSpaces": true},
+                }),
+            )
+        };
+
+        // The `}` closing the fn repairs it: one edit over the changed
+        // middle of the declaration alone — the shared `fn ` header and
+        // the `"hi"}` tail stay out of the range, and the edit ends
+        // where the re-indented body begins diverging.
+        send(&mut client, &on_type(2, 2, 1, "}")).await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let edits = reply["result"]
+            .as_array()
+            .expect("on-type formatting answers an edit list");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(edits[0]["range"]["start"]["line"], 0, "{edits:?}");
+        assert_eq!(edits[0]["range"]["start"]["character"], 3, "{edits:?}");
+        assert_eq!(edits[0]["range"]["end"]["line"], 1, "{edits:?}");
+        assert_eq!(edits[0]["range"]["end"]["character"], 0, "{edits:?}");
+        assert_eq!(edits[0]["newText"], "greet(name: string) -> string {\n  ");
+
+        // A newline typed inside the body answers the same region.
+        send(&mut client, &on_type(3, 1, 0, "\n")).await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
+        let edits = reply["result"]
+            .as_array()
+            .expect("on-type formatting answers an edit list");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(edits[0]["newText"], "greet(name: string) -> string {\n  ");
+
+        // A trigger the server never registered answers no edits.
+        send(&mut client, &on_type(4, 1, 0, ";")).await;
+        let reply = expect(&mut client, Wanted::Id(4)).await;
+        assert!(
+            reply["result"].as_array().is_some_and(Vec::is_empty),
+            "{}",
+            reply["result"]
+        );
+
+        send(
+            &mut client,
+            r#"{"jsonrpc":"2.0","id":5,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(5)).await;
         assert!(reply.get("error").is_none(), "{reply}");
         send(&mut client, &notification("exit", &json!({}))).await;
     })

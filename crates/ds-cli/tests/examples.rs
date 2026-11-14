@@ -291,6 +291,21 @@ fn script_entry_runs_top_level_statements() {
 }
 
 #[test]
+fn schema_builds_its_table_at_comptime() {
+    // The comptime witness (G1, G2): schema(page) and cases(tone)
+    // evaluate on the fenced VM at compile time over the declared
+    // fields and enum cases, the list of field names embeds through the
+    // round-two list surface, and the banner's scalar-literal arguments
+    // stage beside the type argument — every printed line is a constant
+    // by the time main runs.
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("schema.ds"))),
+        "{title: string, views: int, tags: list[string], }\n{quiet: none/quiet, loud: loud/loud, \
+         }\ntitle, views, tags\nfields: 3\nschema ======\n0\n"
+    );
+}
+
+#[test]
 fn build_then_run_the_module_reproduces_the_source_output() {
     let dir = env::temp_dir().join("ds_cli_build_example");
     let _ = fs::remove_dir_all(&dir);

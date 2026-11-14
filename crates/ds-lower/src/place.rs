@@ -172,6 +172,17 @@ pub(crate) struct Placement {
     binders: HashMap<u8, HashSet<Span>>,
     /// The words each binder names (for use notification).
     binder_words: HashMap<Span, Vec<u8>>,
+    /// Every binder's words at registration, never removed by a scope
+    /// pop: the session-long placement record the REPL's `:drop` seam
+    /// reads (unlike `binder_words`, which scope ends consume).
+    registered: HashMap<Span, Vec<u8>>,
+    /// The resumed-frame session's pin rule: every binder's words pin
+    /// (their death never derives from a last use — a session-live value
+    /// must survive to the frame's teardown, since a later submission may
+    /// still read it). Words registered before their production wait in
+    /// `pin_later`.
+    pin_bound: bool,
+    pin_later: HashSet<u8>,
     /// The death use of each word: the latest last-use among its binders,
     /// or the forced move site. `None`-keyed absence means no binder death
     /// is known (anonymous temps die at first consumption; unused binders
@@ -235,6 +246,9 @@ impl Placement {
             owned: BTreeMap::new(),
             binders: HashMap::new(),
             binder_words: HashMap::new(),
+            registered: HashMap::new(),
+            pin_bound: false,
+            pin_later: HashSet::new(),
             death: HashMap::new(),
             seen: HashMap::new(),
             forwarded: HashSet::new(),
@@ -262,7 +276,7 @@ impl Placement {
             hook: None,
             band: None,
             count: true,
-            pinned: false,
+            pinned: self.pin_bound && self.pin_later.remove(&slot),
             depth: self.loop_depth,
         });
     }
@@ -452,11 +466,24 @@ impl Placement {
     /// A binder starts naming `words`. Aliases add to the set; the word's
     /// death use widens to the latest last-use among all its binders.
     pub(crate) fn bound(&mut self, binder: Span, words: &[u8]) {
+        self.registered.insert(binder, words.to_vec());
         self.binder_words.insert(binder, words.to_vec());
         for &word in words {
             self.binders.entry(word).or_default().insert(binder);
+            if self.pin_bound {
+                if let Some(owned) = self.owned.get_mut(&word) {
+                    owned.pinned = true;
+                } else {
+                    self.pin_later.insert(word);
+                }
+            }
             self.recompute_death(word);
         }
+    }
+
+    /// Turns on the binder pin rule (the resumed-frame session's `main`).
+    pub(crate) fn pinning_binders(&mut self) {
+        self.pin_bound = true;
     }
 
     /// A borrowing binder's registration (a parameter, a handler's
@@ -466,6 +493,8 @@ impl Placement {
     /// not re-establish this frame's claim over it, the owner's drop
     /// firing the hook once.
     pub(crate) fn bound_borrowed(&mut self, binder: Span, base: u8, words: &[u8]) {
+        // borrowed registrations never anchor this frame's claim, so the
+        // drop seam must not find them: an alias's death is its owner's
         self.borrowed.insert(base);
         self.bound(binder, words);
     }
@@ -476,6 +505,12 @@ impl Placement {
     /// a fresh word — does.
     pub(crate) fn anchors_claim(&self, base: u8) -> bool {
         !self.borrowed.contains(&base)
+    }
+
+    /// Takes the session-long registration record (the lowerer hands it
+    /// to the caller beside the finished body).
+    pub(crate) fn take_registered(&mut self) -> HashMap<Span, Vec<u8>> {
+        std::mem::take(&mut self.registered)
     }
 
     /// A binder's scope ends: drop what only it kept alive. Bind order is

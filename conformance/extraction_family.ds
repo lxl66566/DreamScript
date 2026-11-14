@@ -2,6 +2,7 @@
 // purpose: the @std extraction family — unwrap_or's eager fallback, unwrap_or_else's inlined lazy one, ok_or's ?-composed early exit, ok_or's degenerate union (the err value's own type is the extracted side, so the result collapses to a plain binding) and the bound union read through match, map_err's handled-member mapping — plus the negative: the non-optional receiver (the two struct-field and row.get spellings stage to typecheck: union-typed struct fields and the map read are not in the M3 lowering contract yet)
 // items:
 // parse_error: stage: typecheck
+// get: stage: typecheck
 // env_port: stage: typecheck
 // port_of: stage: typecheck
 // lazy_port: stage: typecheck
@@ -16,6 +17,11 @@
 // plain_receiver: stage: reject unwrap_or over a receiver without the none member names the receiver type [E4]
 
 enum parse_error { missing_field(string) }
+
+// the row read's callee, file-owned since the ambient shed its dead
+// declarations (no native answers it; the b15 spelling keeps its
+// typecheck stage and refuses at lowering)
+extern fn get[k, v](m: map[k, v], key: k) -> v | none
 
 fn env_port() -> int {
   9000

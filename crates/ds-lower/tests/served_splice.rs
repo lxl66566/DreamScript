@@ -15,9 +15,9 @@ use ds_parse::parse;
 /// splices over, exactly the ambient's shape in the run path's combined
 /// package. The atoms are declared here (the probe runs ambient-free).
 const SOURCE: &str = "tag int\n\ntag bool\n\ntrait twice {\nfn twice(self) -> int\n}\n\nimpl \
-                      twice for int {\nfn twice(self) -> int { self + self }\n}\n\nimpl twice \
-                      for bool {\nfn twice(self) -> int { if self { 2 } else { 0 } }\n}\n\nfn \
-                      main() -> int {\nconst x = 21\nx.twice()\n}\n";
+                      twice for int {\nfn twice(self) -> int { self + self }\n}\n\nimpl twice for \
+                      bool {\nfn twice(self) -> int { if self { 2 } else { 0 } }\n}\n\nfn main() \
+                      -> int {\nconst x = 21\nx.twice()\n}\n";
 
 /// The analyzed probe plus its freshly lowered module bytes.
 fn fresh() -> (ds_check::Analyzed, Vec<u8>) {

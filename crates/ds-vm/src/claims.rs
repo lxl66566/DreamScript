@@ -274,6 +274,39 @@ impl ClaimTable {
         }
     }
 
+    /// One reading of the whole ledger (the REPL rollback seam): the
+    /// counts a later [`Self::release_since`] diffs against.
+    pub(crate) fn reading(&self) -> ClaimReading {
+        ClaimReading {
+            counts: self.counts.clone(),
+            foreign: self.foreign.clone(),
+        }
+    }
+
+    /// Releases every count acquired since `before` (the rollback half of
+    /// the reading seam): a trapped submission's frames die unwired, so
+    /// the counts its partial run acquired — bindings, temporaries,
+    /// pushed callee frames — leave through here while the parked frame's
+    /// own stay. Counts that LEFT since the reading (a var reassignment's
+    /// dec of the old value) are gone either way; the reading never
+    /// re-acquires them.
+    pub(crate) fn release_since(&mut self, before: &ClaimReading) {
+        let owner = self.owner;
+        let mut excess: Vec<RefId> = Vec::new();
+        for (id, &now) in self.counts.iter().enumerate() {
+            let was = before.counts.get(id).copied().unwrap_or(0);
+            let word = RefId::new(owner, u32::try_from(id).expect("the id space fits u32"));
+            excess.extend(std::iter::repeat_n(word, now.saturating_sub(was) as usize));
+        }
+        for (word, &now) in &self.foreign {
+            let was = before.foreign.get(word).copied().unwrap_or(0);
+            excess.extend(std::iter::repeat_n(*word, now.saturating_sub(was) as usize));
+        }
+        for word in excess {
+            self.release(word);
+        }
+    }
+
     /// The drain walk's input: every claim with its multiplicity, taken
     /// out of the ledger — the local words in id order, then the foreign
     /// rows. `held` — the words about to ride their recorded outcome to a
@@ -306,6 +339,14 @@ impl ClaimTable {
         }
         out
     }
+}
+
+/// One ledger reading (the REPL rollback seam's before-state): the local
+/// id-indexed counts plus the foreign rows, both plain snapshots.
+#[derive(Debug)]
+pub(crate) struct ClaimReading {
+    counts: Vec<u32>,
+    foreign: HashMap<RefId, u32, WordBuild>,
 }
 
 #[cfg(test)]
@@ -406,6 +447,40 @@ mod tests {
         table.acquire(word(2));
         assert_eq!(table.count_of(word(4096)), 0, "the earlier life is gone");
         assert_eq!(table.take_all_except(&[]), vec![(word(2), 1)]);
+    }
+
+    /// The rollback seam: a reading taken before a partial run, then
+    /// release_since, drops exactly what the run acquired — both local and
+    /// foreign rows — while pre-existing counts and counts the run already
+    /// released stay as they stand.
+    #[test]
+    fn release_since_drops_exactly_the_acquired_diff() {
+        let mut table = ClaimTable::default();
+        let kept = word(1);
+        table.acquire(kept);
+        let before = table.reading();
+        // the partial run: one more on the kept word, one fresh local, one
+        // fresh foreign, and one release of a never-acquired word
+        table.acquire(kept);
+        table.acquire(word(5));
+        table.acquire(RefId::new(FiberId(2), 5));
+        table.release(word(9));
+        table.release_since(&before);
+        assert_eq!(table.count_of(kept), 1, "the parked frame's count stays");
+        assert_eq!(
+            table.count_of(word(5)),
+            0,
+            "the partial run's binding drops"
+        );
+        assert_eq!(
+            table.count_of(RefId::new(FiberId(2), 5)),
+            0,
+            "the foreign acquisition drops"
+        );
+        assert!(
+            table.take_all_except(&[]).iter().all(|&(w, _)| w == kept),
+            "only the pre-reading claim survives"
+        );
     }
 
     /// A take that holds a word back keeps the id space: the surviving row

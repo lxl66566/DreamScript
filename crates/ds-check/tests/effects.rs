@@ -271,11 +271,13 @@ fn corpus_computes_rows_without_panicking() {
 #[test]
 fn effects_nursery_rows_match_the_record() {
     let effects = corpus("effects_nursery.ds");
-    // row-bearing definitions are the four functions; the file's two
-    // type declarations carry none (the net failure taxonomy is the
+    // row-bearing definitions are the four functions plus the file's own
+    // fetch/consume/die externs (the ambient shed its dead declarations,
+    // so the file owns the spellings it stages); the file's two type
+    // declarations carry none (the net failure taxonomy is the
     // ambient's).
-    assert_eq!(effects.defs().len(), 4);
-    assert_eq!(effects.def_count(), 6);
+    assert_eq!(effects.defs().len(), 7);
+    assert_eq!(effects.def_count(), 9);
     assert_eq!(effects.of_name("url"), None);
     assert_eq!(effects.of_name("page"), None);
     assert_eq!(row_of(&effects, "fetch_body").render(), "error");
@@ -285,10 +287,13 @@ fn effects_nursery_rows_match_the_record() {
     );
     assert_eq!(row_of(&effects, "with_retry").render(), "error");
     let main = row_of(&effects, "main");
-    assert!(main.contains(Effect::Trap));
     assert!(main.contains(Effect::Cancel));
-    // the `.err` handler consumed fetch_all's failure members [E4].
+    // the `.err` handler consumed fetch_all's failure members [E4]; the
+    // trap is the par fold's trapping `+` (die's own trap row died with
+    // the ambient declaration it rode — the file-owned extern declares
+    // no row).
     assert!(!main.contains(Effect::Error));
+    assert!(main.contains(Effect::Trap));
 }
 
 #[test]

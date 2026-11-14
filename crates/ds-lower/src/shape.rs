@@ -764,16 +764,24 @@ impl<'a> Shapes<'a> {
 
     /// The member entry a single-atom source writes into a union: the
     /// direct entry when the union carries the atom itself, else the
-    /// one heap-application member sharing the source's constructor. A
-    /// written generic head keys its members by the variable's atom
-    /// (`int | list[$t]`) while the entering site carries the
-    /// substituted concrete value, whose word shape the member's
-    /// region carries identically — a heap application spans one Ref
-    /// word whatever its type argument, so the member's tag names the
-    /// value truthfully. Anything else (a struct or tuple member over
-    /// the variable, whose claimed words depend on the substitution)
-    /// answers None — the honest refusal — and two constructor-mates
-    /// (`list[t] | list[u]`) are ambiguous, answering None too.
+    /// one member the source matches under a consistent variable
+    /// binding. A written generic head keys its members by the
+    /// variable's atoms (`int | list[$t]`, `int | ($t, $t)`) while the
+    /// entering site carries the substituted concrete value, so the
+    /// lookup matches structurally: a variable binds (consistently —
+    /// one variable, one binding), a heap application matches by
+    /// constructor alone (its one Ref word is argument-independent),
+    /// any other application by constructor with recursively matched
+    /// arguments, a tuple by arity with recursively matched elements,
+    /// and every other kind by identity. The member's region claims a
+    /// Raw word wherever a variable sat, and Raw accepts any runtime
+    /// kind, so the member's tag names the substituted value
+    /// truthfully whatever the site's substitution; the claimed word
+    /// COUNT is structural (one word per tuple element, one Ref word
+    /// per heap application), so the pairing against the source's own
+    /// words stays exact — never a runtime width guess. No matching
+    /// member, or two matching members (`(t, t) | (t, int)` at an
+    /// `(int, int)` site), answers None — the honest refusal.
     pub(crate) fn member_for<'b>(
         &self,
         u: &'b UnionShape,
@@ -782,22 +790,94 @@ impl<'a> Shapes<'a> {
         if let Some(member) = u.member(atom) {
             return Some(member);
         }
-        let universe = &self.analyzed.decls.universe;
-        let decl = universe.atom_decl(atom).ok()?;
-        let ds_check::AtomKind::Apply(ctor, _) = &decl.kind else {
-            return None;
-        };
-        if !self.heap_ref(*ctor) {
-            return None;
-        }
-        let mut mates = u.members.iter().filter(|member| {
-            matches!(
-                universe.atom_decl(member.atom).ok().map(|decl| &decl.kind),
-                Some(ds_check::AtomKind::Apply(member_ctor, _)) if member_ctor == ctor
-            )
+        let mut matched = u.members.iter().filter(|member| {
+            let mut bindings = Vec::new();
+            self.atom_under(member.atom, atom, &mut bindings)
         });
-        let only = mates.next()?;
-        mates.next().is_none().then_some(only)
+        let only = matched.next()?;
+        matched.next().is_none().then_some(only)
+    }
+
+    /// Whether `pattern` (a member's atom, its variables as binders)
+    /// matches `value` (the entering site's atom) under one consistent
+    /// binding: a variable atom binds anything, a heap-reference
+    /// application matches by constructor alone, any other application
+    /// by constructor with pairwise-matched arguments, a tuple by
+    /// arity with pairwise-matched elements, and every other kind by
+    /// identity. The binding lives for one candidate match alone —
+    /// consistency is a property of that single match.
+    fn atom_under(
+        &self,
+        pattern: TypeId,
+        value: TypeId,
+        bindings: &mut Vec<(TypeId, Vec<TypeId>)>,
+    ) -> bool {
+        if pattern == value {
+            return true;
+        }
+        let universe = &self.analyzed.decls.universe;
+        let (Ok(pdecl), Ok(vdecl)) = (universe.atom_decl(pattern), universe.atom_decl(value))
+        else {
+            return false;
+        };
+        if self.is_var_atom(pattern) {
+            return bind(pattern, vec![value], bindings);
+        }
+        match (&pdecl.kind, &vdecl.kind) {
+            // one Ref word whatever the argument, so the constructor
+            // alone identifies the match
+            (ds_check::AtomKind::Apply(pctor, _), ds_check::AtomKind::Apply(vctor, _))
+                if pctor == vctor && self.heap_ref(*pctor) =>
+            {
+                true
+            },
+            (ds_check::AtomKind::Apply(pctor, pargs), ds_check::AtomKind::Apply(vctor, vargs))
+                if pctor == vctor && pargs.len() == vargs.len() =>
+            {
+                pargs
+                    .iter()
+                    .zip(vargs.iter())
+                    .all(|(p, v)| self.ty_under(*p, *v, bindings))
+            },
+            (ds_check::AtomKind::Tuple(pelems), ds_check::AtomKind::Tuple(velems))
+                if pelems.len() == velems.len() =>
+            {
+                pelems
+                    .iter()
+                    .zip(velems.iter())
+                    .all(|(p, v)| self.atom_under(*p, *v, bindings))
+            },
+            _ => false,
+        }
+    }
+
+    /// One application argument's solved member set under the matcher:
+    /// a single variable binds the whole set (its own word count is the
+    /// runtime fact the Raw claim carries), a pair of single atoms
+    /// delegates to [`atom_under`](Self::atom_under), and anything else
+    /// matches by member-list identity — a compound pattern over a
+    /// union argument never guesses a decomposition.
+    fn ty_under(&self, pattern: Ty, value: Ty, bindings: &mut Vec<(TypeId, Vec<TypeId>)>) -> bool {
+        let universe = &self.analyzed.decls.universe;
+        let pmembers = universe.members(pattern);
+        let vmembers = universe.members(value);
+        match (pmembers, vmembers) {
+            ([p], _) if self.is_var_atom(*p) => bind(*p, vmembers.to_vec(), bindings),
+            ([p], [v]) => self.atom_under(*p, *v, bindings),
+            _ => pmembers == vmembers,
+        }
+    }
+}
+
+/// Binds one variable to a member list under the matcher's consistency
+/// rule: a repeated variable agrees with its earlier binding or the
+/// candidate match fails.
+fn bind(var: TypeId, bound: Vec<TypeId>, bindings: &mut Vec<(TypeId, Vec<TypeId>)>) -> bool {
+    if let Some((_, existing)) = bindings.iter_mut().find(|(v, _)| v == &var) {
+        *existing == bound
+    } else {
+        bindings.push((var, bound));
+        true
     }
 }
 

@@ -3,6 +3,9 @@
 // items:
 // url: stage: typecheck
 // page: stage: typecheck
+// fetch: stage: typecheck
+// consume: stage: typecheck
+// die: stage: typecheck
 // fetch_body: stage: typecheck
 // fetch_all: stage: typecheck
 // with_retry: stage: typecheck
@@ -11,6 +14,13 @@
 
 type url = string
 struct page { url: url, body: string }
+
+// the fetch/consume/die seams, file-owned since the ambient shed its dead
+// declarations: no native answers these callees, so the bodies below
+// check clean and refuse at lowering
+extern fn fetch(u: string) -> response | net_err
+extern fn consume(r: response) -> string
+extern fn die[t](msg: string) -> t
 
 // the fetch extern has no builtin seam (consume is the same shape of
 // callee), so the body refuses at lowering though it checks clean

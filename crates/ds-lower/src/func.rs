@@ -1754,6 +1754,9 @@ pub(crate) struct RunContext<'a> {
     pub platform: String,
     /// The comptime run mode.
     pub comptime: ComptimeRun<'a>,
+    /// The lowering mode: the REPL's resumed-frame session facts ride
+    /// it.
+    pub mode: crate::LowerMode,
 }
 
 /// Which run one lowering drives: the runtime module embeds the
@@ -1880,11 +1883,17 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// single `Kimm 0` spliced at the frame top in `finalize`. Every unit
     /// value in the frame is this one place.
     unit_slot: Option<u8>,
+    /// `main`'s per-statement value ends (the resumed-frame seam): the
+    /// code length after each direct body statement's value code, before
+    /// its discards, plus the tail's exit boundary — recorded only for
+    /// `main`, rebased through `finalize`'s movements.
+    value_ends: Vec<u32>,
 }
 
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Lowers one planned function to a validated ds-mod function record
     /// plus its placed (RC-bearing) op sequence.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn lower(
         analyzed: &'a Analyzed,
         res: &'a Resolutions,
@@ -1894,7 +1903,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         planned: &PlannedFn,
         index: u32,
         run: RunContext<'a>,
-    ) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
+    ) -> Result<(ds_mod::Function, Vec<PlacedOp>, crate::FnFacts), LowerError> {
         // A declared impl-member body lowers its declaration's params (the
         // `Self` receiver among them) and block body; every other entry
         // is a lambda's shape.
@@ -2022,7 +2031,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             overlay: Vec::new(),
             overlay_len: 0,
             scalar_dst: None,
-            rc: Placement::from_linearity(lin),
+            rc: {
+                let mut rc = Placement::from_linearity(lin);
+                if run.mode == crate::LowerMode::ResumedFrame && planned.name == "main" {
+                    rc.pinning_binders();
+                }
+                rc
+            },
             evidence: HashMap::new(),
             bounds: planned.bounds.clone(),
             index,
@@ -2031,6 +2046,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             nurseries: Vec::new(),
             spawn_child: planned.spawn_child,
             unit_slot: None,
+            value_ends: Vec::new(),
         };
         if planned.deinit.is_some() {
             this.bind_deinit_param(params)?;
@@ -2254,7 +2270,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(match place.shape {
             PlaceShape::Word(SlotType::Ref) => vec![place.base],
             _ if self.is_var_ty(ty) => vec![place.base],
-            _ => self.ref_words(place.base, ty)?,
+            _ => self.count_words(place.base, ty)?,
         })
     }
 
@@ -2269,15 +2285,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The words the RC pass tracks for one value at `base`: its Ref
-    /// words plus the one Raw word of a type-variable value — the VM's
-    /// RC ops check the runtime kind, so a scalar instantiation decs
-    /// nothing and a reference instantiation stays balanced.
+    /// words plus every Raw word — a type variable's own single word or
+    /// a variable-keyed union member's region claim, whose runtime kind
+    /// is the caller's fact. The VM's RC ops check the runtime kind, so
+    /// a scalar instantiation decs nothing and a reference
+    /// instantiation stays balanced.
     fn count_words(&mut self, base: u8, ty: Ty) -> Result<Vec<u8>, LowerError> {
-        let mut words = self.ref_words(base, ty)?;
-        if self.is_var_ty(ty) && !words.contains(&base) {
-            words.push(base);
-        }
-        Ok(words)
+        let words = self.shapes.words(ty)?;
+        Ok(words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| **word == SlotType::Ref || **word == SlotType::Raw)
+            .map(|(index, _)| base + u8::try_from(index).expect("span width fits u8"))
+            .collect())
     }
 
     /// The establishment band word of one claim site: a fresh Tag body
@@ -2574,7 +2594,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 _ => PlaceShape::Span(ty),
             };
             self.binders.insert(bind, Place { base, shape });
-            for word in self.ref_words(base, ty)? {
+            for word in self.count_words(base, ty)? {
                 self.rc.produced(word);
             }
             self.rc_bind_borrowed(bind, base, ty)?;
@@ -2754,7 +2774,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Moves one field's whole word span from `srcs` (the source value's
     /// word addresses, in span order) into the words at `base +
-    /// field.word`: a Mov per word, an RC copy per Ref word.
+    /// field.word`: a Mov per word, an RC copy per counted word (Ref, or
+    /// Raw — a variable-keyed member's claim, whose runtime kind the RC
+    /// ops check).
     fn store_field_span(&mut self, base: u8, field: &MemberField, srcs: &[WordAddr]) {
         for (offset, addr) in srcs.iter().enumerate() {
             let word = base + field.word + u8::try_from(offset).expect("field span offset fits u8");
@@ -2762,7 +2784,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 dst: Slot::body(word),
                 src: Slot::body(addr.slot),
             });
-            if addr.slot_ty == SlotType::Ref {
+            if matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) {
                 self.rc.copied(&mut self.code, word, addr.slot);
             }
         }
@@ -2882,15 +2904,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), LowerError> {
         match &stmt.kind {
-            StmtKind::Local(local) => self.local_stmt(local).map(|_| ()),
+            StmtKind::Local(local) => {
+                self.local_stmt(local)?;
+                self.note_value_end();
+                Ok(())
+            },
             StmtKind::Expr(expr) => {
                 let tp = self.value(expr)?;
+                self.note_value_end();
                 // a statement-position value is discarded: its references
                 // die at this use when nothing else keeps them
                 let words = self.discard_words(&tp.place, tp.ty, expr.span())?;
                 self.rc.discard(&mut self.code, &words);
                 Ok(())
             },
+        }
+    }
+
+    /// Records one body-level statement's value end (the resumed-frame
+    /// seam): the resume target the REPL computes against the current
+    /// round's own lowering, so the discarded statement's decs run at the
+    /// next resume and its value never re-computes.
+    fn note_value_end(&mut self) {
+        if self.root && self.scopes.len() == 2 {
+            self.value_ends
+                .push(u32::try_from(self.code.len()).expect("code length fits u32"));
         }
     }
 
@@ -3337,7 +3375,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if self.deinit_claim(declared, e.span())?.is_some() {
             self.rc.store_over(&mut self.code, &[place.base]);
         } else {
-            for word in self.ref_words(place.base, declared)? {
+            for word in self.count_words(place.base, declared)? {
                 self.rc.store_over(&mut self.code, &[word]);
             }
         }
@@ -4834,7 +4872,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// One interpolating string: a STRCAT chain over its parts; a hole
     /// is `str(e)` [F6] — printable primitives route through their str
-    /// natives, a string or char passes its Ref word through.
+    /// natives, a string or char passes its Ref word through, and an
+    /// operand whose `show` the checker solved at the hole's own span
+    /// dispatches through the ordinary member-call machinery.
     fn string_expr(&mut self, parts: &[StrPart]) -> Result<Place, LowerError> {
         let mut acc: Option<u8> = None;
         for part in parts {
@@ -4845,18 +4885,50 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     self.kstr(dst, kidx);
                     dst
                 },
-                StrPart::Expr { expr, .. } => {
-                    let val = self.value(expr)?;
-                    self.hole_word(expr.span(), &val)?
+                StrPart::Expr { span, expr } => {
+                    // A derive-synthesized body's non-printable part hole
+                    // mints one span shared by the hole and the written
+                    // `.show()` call it wraps: that record belongs to the
+                    // call, so the expression lowers as written, not as an
+                    // implicit dispatch over its own result
+                    let written_show = matches!(
+                        &**expr,
+                        Expr::Call {
+                            span: call_span,
+                            callee,
+                            ..
+                        } if call_span == span
+                            && matches!(
+                                &**callee,
+                                Expr::Field { name, .. } if name.name == "show"
+                            )
+                    );
+                    if !written_show && self.hole_show_dispatch(*span) {
+                        self.show_dispatch_word(*span, (**expr).clone())?
+                    } else {
+                        let val = self.value(expr)?;
+                        self.hole_word(expr.span(), &val)?
+                    }
                 },
-                StrPart::Ident { name, .. } => {
-                    let ty = self.val(name.span)?.ty;
-                    let path = Path {
-                        span: name.span,
-                        segments: vec![name.clone()],
-                    };
-                    let place = self.path_value(&path, name.span, ty)?;
-                    self.hole_word(name.span, &TypedPlace { place, ty })?
+                StrPart::Ident { span, name } => {
+                    if self.hole_show_dispatch(*span) {
+                        let recv = Expr::Path {
+                            span: name.span,
+                            path: Path {
+                                span: name.span,
+                                segments: vec![name.clone()],
+                            },
+                        };
+                        self.show_dispatch_word(*span, recv)?
+                    } else {
+                        let ty = self.val(name.span)?.ty;
+                        let path = Path {
+                            span: name.span,
+                            segments: vec![name.clone()],
+                        };
+                        let place = self.path_value(&path, name.span, ty)?;
+                        self.hole_word(name.span, &TypedPlace { place, ty })?
+                    }
                 },
             };
             acc = Some(match acc {
@@ -4893,14 +4965,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// `str(e)` of one hole [F6]: the operand's checked type routes the
     /// conversion. Anything the checker did not prove printable lands as
-    /// a lowering error (the `show` derive is the M6 CALL_GENERIC seam).
+    /// a lowering error (a `show`-carrying operand never reaches here —
+    /// the checker's hole record routed it through the dispatch above).
     fn hole_word(&mut self, span: Span, val: &TypedPlace) -> Result<u8, LowerError> {
         let members = self.members(val.ty);
         let [atom] = members else {
             return Err(LowerError::unsupported(
                 span,
                 "an interpolation hole",
-                "the operand's type is not a printable primitive; the `show` derive is the M6 seam",
+                "the operand's type is not a printable primitive and carries no solved `show` \
+                 dispatch; report the construct",
             ));
         };
         let name = self
@@ -4933,7 +5007,49 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => Err(LowerError::unsupported(
                 span,
                 "an interpolation hole",
-                "the operand's type is not a printable primitive; the `show` derive is the M6 seam",
+                "the operand's type is not a printable primitive and carries no solved `show` \
+                 dispatch; report the construct",
+            )),
+        }
+    }
+
+    /// Whether the checker solved one hole's `show` at its own span [F6]:
+    /// the trait-dispatch record (or the inherent one) the synthetic
+    /// member call below resolves through.
+    fn hole_show_dispatch(&self, span: Span) -> bool {
+        self.analyzed.checked.trait_calls.contains_key(&span)
+            || self.analyzed.checked.inherent_calls.contains_key(&span)
+    }
+
+    /// One hole's `show` dispatch [F6]: the receiver wrapped as the
+    /// written `recv.show()` call — no surface name exists, so the
+    /// checker's span-keyed record is the resolution — staging through
+    /// the ordinary member-call machinery (receiver argument, evidence
+    /// words, the CALLG dispatch) and answering the hole's one string
+    /// word. The receiver expression is the hole's own operand, so it
+    /// evaluates exactly once.
+    fn show_dispatch_word(&mut self, span: Span, recv: Expr) -> Result<u8, LowerError> {
+        let call = Expr::Call {
+            span,
+            callee: Box::new(Expr::Field {
+                span,
+                recv: Box::new(recv),
+                name: Ident {
+                    span,
+                    name: "show".to_owned(),
+                },
+            }),
+            args: Vec::new(),
+            trailing: None,
+        };
+        let val = self.value(&call)?;
+        let addrs = self.word_addrs(&val.place, val.ty)?;
+        match addrs.as_slice() {
+            [only] if only.slot_ty == SlotType::Ref => Ok(only.slot),
+            _ => Err(LowerError::unsupported(
+                span,
+                "an interpolation hole",
+                "the `show` dispatch did not answer one reference word",
             )),
         }
     }
@@ -8577,42 +8693,57 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.rc.native_open();
             self.rc.native_reads([list]);
             let item_val = self.value(item)?;
-            self.guard_list_element(&item_val, item.span(), "a list literal element")?;
-            let push = crate::native::lookup("list_push")
-                .expect("the list surface is covered by the native table");
-            let mut staged = vec![SlotType::Ref];
-            let mut moves = vec![(0usize, list)];
-            for addr in self.word_addrs(&item_val.place, item_val.ty)? {
-                moves.push((staged.len(), addr.slot));
-                staged.push(addr.slot_ty);
-            }
-            self.guard_staged_count(staged.len())?;
-            for (index, slot) in moves {
-                self.emit(Op::Mov {
-                    dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
-                    src: Slot::body(slot),
-                });
-                // index 0 is the construction target itself: the list is
-                // the frame's own unique word, so its staging is a borrow
-                // that never drops mid-construction — the value's real
-                // death (a binder's scope end or the frame exit) owns the
-                // count
-                if index > 0 && staged[index] == SlotType::Ref {
-                    self.rc.staged_native(slot, false);
-                }
-            }
-            self.overlay_site(&staged, &[SlotType::I64]); // the unit word
-            let kidx = self.pool(self.funcref_const(Callee::Builtin(push)));
-            self.emit(Op::Call {
-                callee: kidx,
-                nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
-            });
-            self.rc.native_done(&mut self.code);
+            self.list_push_word(list, &item_val, item.span())?;
         }
         Ok(Place {
             base: list,
             shape: PlaceShape::Word(SlotType::Ref),
         })
+    }
+
+    /// One element's push onto a list under construction: the guarded
+    /// element staged through the `list_push` native's overlay. The
+    /// literal construction and the embedded comptime answer share the
+    /// spelling; the caller owns the borrow window and the element's own
+    /// lowering.
+    fn list_push_word(
+        &mut self,
+        list: u8,
+        item_val: &TypedPlace,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        self.guard_list_element(item_val, span, "a list literal element")?;
+        let push = crate::native::lookup("list_push")
+            .expect("the list surface is covered by the native table");
+        let mut staged = vec![SlotType::Ref];
+        let mut moves = vec![(0usize, list)];
+        for addr in self.word_addrs(&item_val.place, item_val.ty)? {
+            moves.push((staged.len(), addr.slot));
+            staged.push(addr.slot_ty);
+        }
+        self.guard_staged_count(staged.len())?;
+        for (index, slot) in moves {
+            self.emit(Op::Mov {
+                dst: Slot::overlay(u8::try_from(index).expect("overlay word fits u8")),
+                src: Slot::body(slot),
+            });
+            // index 0 is the construction target itself: the list is
+            // the frame's own unique word, so its staging is a borrow
+            // that never drops mid-construction — the value's real
+            // death (a binder's scope end or the frame exit) owns the
+            // count
+            if index > 0 && staged[index] == SlotType::Ref {
+                self.rc.staged_native(slot, false);
+            }
+        }
+        self.overlay_site(&staged, &[SlotType::I64]); // the unit word
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(push)));
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+        });
+        self.rc.native_done(&mut self.code);
+        Ok(())
     }
 
     /// The empty-list word: the zero-argument `list_new` call whose one
@@ -8729,6 +8860,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         _ty: Ty,
         span: Span,
     ) -> Result<Place, LowerError> {
+        if let crate::ComptimeConst::List(items) = constant {
+            return self.embedded_list(items, span);
+        }
         let synth = match constant {
             crate::ComptimeConst::Str(text) => Expr::Str {
                 span,
@@ -8755,9 +8889,105 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 span,
                 lit: Literal::Bool(*value),
             },
+            crate::ComptimeConst::List(_) => unreachable!("handled above"),
         };
         let typed = self.value(&synth)?;
         Ok(typed.place)
+    }
+
+    /// A list answer: the list literal a user would have written at the
+    /// call's span — one `list_push` per element, each element's literal
+    /// staged from the element type the call's own checked fact names
+    /// (the evaluator refused every answer whose call type is not the
+    /// list application before recording it).
+    fn embedded_list(
+        &mut self,
+        items: &[crate::ComptimeConst],
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let elem_ty = self.embedded_list_element_ty(span)?;
+        let list = self.list_new_word()?;
+        for item in items {
+            // the push's borrow window opens before the element staging,
+            // the literal construction's own discipline
+            self.rc.native_open();
+            self.rc.native_reads([list]);
+            let item_val = self.embedded_scalar(item, elem_ty, span)?;
+            self.list_push_word(list, &item_val, span)?;
+        }
+        Ok(Place {
+            base: list,
+            shape: PlaceShape::Word(SlotType::Ref),
+        })
+    }
+
+    /// The element type of one embedded list answer's call site: the one
+    /// application argument of the singleton apply the checker recorded
+    /// at the span (the evaluator's embed gate and this read agree; a
+    /// disagreement is the belt refusal, never a silent mis-lowering).
+    fn embedded_list_element_ty(&self, span: Span) -> Result<Ty, LowerError> {
+        let ty = self.val(span)?.ty;
+        let elem = self
+            .analyzed
+            .decls
+            .universe
+            .members(ty)
+            .first()
+            .and_then(|&atom| {
+                let decl = self.analyzed.decls.universe.atom_decl(atom).ok()?;
+                match &decl.kind {
+                    AtomKind::Apply(_, args) => args.first().copied(),
+                    _ => None,
+                }
+            });
+        elem.ok_or_else(|| {
+            LowerError::unsupported(
+                span,
+                "an embedded list answer",
+                "the call's checked type is not a list application; the evaluator's gate \
+                 disagrees with the recorded answer",
+            )
+        })
+    }
+
+    /// One embedded element's literal place: the element type comes from
+    /// the list's own construction because the synthesized node carries
+    /// no checked fact of its own.
+    fn embedded_scalar(
+        &mut self,
+        constant: &crate::ComptimeConst,
+        ty: Ty,
+        span: Span,
+    ) -> Result<TypedPlace, LowerError> {
+        let place = match constant {
+            crate::ComptimeConst::Str(text) => self.string_expr(&[StrPart::Text {
+                span,
+                text: text.clone(),
+            }])?,
+            crate::ComptimeConst::Int(value) => self.literal(
+                &Literal::Int {
+                    suffix: String::new(),
+                    text: value.to_string(),
+                },
+                span,
+            )?,
+            crate::ComptimeConst::Float(value) => self.literal(
+                &Literal::Float {
+                    suffix: String::new(),
+                    text: value.to_string(),
+                },
+                span,
+            )?,
+            crate::ComptimeConst::Bool(value) => self.literal(&Literal::Bool(*value), span)?,
+            crate::ComptimeConst::List(_) => {
+                return Err(LowerError::unsupported(
+                    span,
+                    "an embedded list element",
+                    "a nested list answer refuses at the evaluator",
+                ));
+            },
+        };
+        Ok(TypedPlace { place, ty })
     }
 
     /// Constructs one minted enum case by call form [B3]: the case's own
@@ -8921,6 +9151,35 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         None,
                         name.span,
                         args.iter().map(|arg| &arg.value).collect(),
+                        Some(dispatch),
+                    )
+                },
+                // An implicit dispatch site (an interpolation hole's
+                // `show`, F6): no surface name sits behind the dot, so
+                // the resolutions carry nothing here — the checker's
+                // span-keyed dispatch records ARE the site's resolution,
+                // and the method-name candidates come from the registry
+                // by the synthetic name.
+                _ if self.analyzed.checked.trait_calls.contains_key(&call_span)
+                    || self
+                        .analyzed
+                        .checked
+                        .inherent_calls
+                        .contains_key(&call_span) =>
+                {
+                    let candidates = self.analyzed.package.method_candidates(&name.name).to_vec();
+                    let dispatch = self.resolve_method_dispatch(
+                        call_span,
+                        name.span,
+                        Some(recv),
+                        &candidates,
+                    )?;
+                    (
+                        None,
+                        name.span,
+                        std::iter::once(&**recv)
+                            .chain(args.iter().map(|arg| &arg.value))
+                            .collect(),
                         Some(dispatch),
                     )
                 },
@@ -9290,9 +9549,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     // callee's fact), so the ABI slide admits the pairing
                     // whatever the source's static kind — a scalar staged at
                     // an overlay index no other type visits would otherwise
-                    // fail the slide's static check against the Raw parameter
+                    // fail the slide's static check against the Raw parameter.
+                    // A Raw-classified staged word always records the count
+                    // hand-off: the RC ops check the runtime kind, so a
+                    // scalar instantiation is a no-op (a variable-keyed union
+                    // member's region claim holds a counted reference under a
+                    // reference substitution)
                     staged.push(if var_param { SlotType::Raw } else { addr.slot_ty });
-                    counted.push(addr.slot_ty == SlotType::Ref || var_word);
+                    counted.push(matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) || var_word);
                     word_arg.push(index);
                 }
             }
@@ -12955,6 +13219,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn emit_return_inner(&mut self, place: &Place, src_ty: Ty) -> Result<(), LowerError> {
+        // the tail's value end is the exit boundary: the last entry of
+        // the resumed-frame seam's per-statement record
+        self.note_value_end();
         // A fn-typed return slot keeps the provenance rule over the
         // unproven callable words: the caller classifies the result
         // word Fn unless the tail is the factory lambda, so a
@@ -13190,14 +13457,30 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Shape::Union(u) = &*shape else {
             return Err(mismatch("a re-span destination"));
         };
-        let entry = u
-            .member(member)
+        // the entry resolves through the substitution-aware lookup: a
+        // strict sub-union of the site's substituted head carries the
+        // substituted member atoms, which the destination's
+        // variable-keyed entries match structurally
+        let entry = self
+            .shapes
+            .member_for(u, member)
             .ok_or_else(|| mismatch("a re-span member"))?;
         let src_tag = self.tag_addr(src)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(dst.base),
-            src: Slot::body(src_tag),
-        });
+        if entry.atom == member {
+            // tag ids are module-wide, so the source's own tag moves
+            self.emit(Op::Mov {
+                dst: Slot::body(dst.base),
+                src: Slot::body(src_tag),
+            });
+        } else {
+            // a substituted source atom names no entry of this head;
+            // writing its tag would dispatch a member the body's tag
+            // tests never test, so the tag mints the entry's own id
+            self.emit(Op::TagNew {
+                dst: Slot::body(dst.base),
+                tag: entry.tag,
+            });
+        }
         self.zero_init_member(dst.base, &u.words, &entry.fields)?;
         let PlaceShape::Span(underlying) = src.shape else {
             return Err(mismatch("a re-span source"));
@@ -13283,7 +13566,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     dst: Slot::body(word),
                     src: Slot::body(addr.slot),
                 });
-                if addr.slot_ty == SlotType::Ref {
+                if matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) {
                     self.rc.copied(&mut self.code, word, addr.slot);
                 }
             }
@@ -13297,7 +13580,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     dst: Slot::body(dst.base),
                     src: Slot::body(addr.slot),
                 });
-                if addr.slot_ty == SlotType::Ref {
+                if matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) {
                     self.rc.copied(&mut self.code, dst.base, addr.slot);
                 }
                 Ok(())
@@ -13320,7 +13603,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         dst: Slot::body(dst.base + field.word),
                         src: Slot::body(addr.slot),
                     });
-                    if addr.slot_ty == SlotType::Ref {
+                    if matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) {
                         self.rc
                             .copied(&mut self.code, dst.base + field.word, addr.slot);
                     }
@@ -13367,19 +13650,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 let atom = self.only_atom(src.ty, span)?;
                 // a written generic head keys its members by the
-                // variable's atom while the entering site carries the
+                // variable's atoms while the entering site carries the
                 // substituted concrete value, so the lookup resolves
-                // through the substitution's constructor mate and the
-                // tag writes the member's own minted id — re-minting
-                // the source's atom would tag a member the body's
-                // tests never dispatch on
+                // through the substitution's structural match — a heap
+                // application by its constructor (one Ref word whatever
+                // the argument), a tuple member by its elements (one
+                // Raw-claimed word each, filled from the substituted
+                // value's own words) — and the tag writes the member's
+                // own minted id: re-minting the source's atom would tag
+                // a member the body's tests never dispatch on
                 let member = self.shapes.member_for(u, atom).ok_or_else(|| {
                     LowerError::unsupported(
                         span,
                         "a union member write",
                         "the destination union carries no member whose region holds the value's \
-                         shape; a written generic head takes a heap-application member's \
-                         substituted argument alone",
+                         shape; a written generic head takes the member the site's substitution \
+                         names — a heap application by its constructor, or a tuple member whose \
+                         one-word-per-element claim the substituted value pairs exactly",
                     )
                 })?;
                 // a callable word entering the union's fn-typed
@@ -13411,7 +13698,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// dispatches both. FUNCF occupies word 0 and every op occupies one
     /// word, so a label's stream position is its op index plus one; jump
     /// targets cannot shift.
-    fn finalize(mut self) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
+    #[allow(clippy::too_many_lines)]
+    fn finalize(mut self) -> Result<(ds_mod::Function, Vec<PlacedOp>, crate::FnFacts), LowerError> {
         // The canonical unit word's one `Kimm 0` enters at the frame top:
         // a use inside a branch arm must not own the only write (a path
         // through another arm would read the previous frame's garbage),
@@ -13434,6 +13722,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if span.back != usize::MAX {
                     span.back += 1;
                 }
+            }
+            for end in &mut self.value_ends {
+                *end += 1;
             }
         }
         // Stage three's temporary slices: every slot the placement pass
@@ -13578,6 +13869,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 self.labels[label] = base - removed + added;
             }
+            // the value ends ride the same movements (the seam's resume
+            // targets stay on the ops they named)
+            for end in &mut self.value_ends {
+                let base = usize::try_from(*end).expect("code length fits usize");
+                let (mut removed, mut added) = (0usize, 0usize);
+                while removed < dead.len() && dead[removed] < base {
+                    removed += 1;
+                }
+                while added < insertions.len() && insertions[added].0 < base {
+                    added += 1;
+                }
+                *end = u32::try_from(base - removed + added).expect("code length fits u32");
+            }
         }
         let body_len = self.slots.len();
         // one word type per overlay slot, or Raw when shapes mix there
@@ -13698,7 +14002,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let function = ds_mod::Function::new(self.name.clone(), layout, self.pool, code)
             .map_err(|error| LowerError::Build(error.to_string()))?;
-        Ok((function, placed))
+        // FUNCF occupies stream word 0, so every recorded value end sits
+        // one word above its pre-finalize index; the leading zero is the
+        // body's start — the target that runs everything, standing for
+        // the value end of the zeroth statement
+        let facts = crate::FnFacts {
+            value_ends: std::iter::once(0)
+                .chain(self.value_ends.iter().map(|end| end + 1))
+                .collect(),
+            registered: self.rc.take_registered(),
+        };
+        Ok((function, placed, facts))
     }
 }
 
@@ -13759,10 +14073,14 @@ impl FnLower<'_, '_, '_> {
             },
             SlotType::F64 => self.pool(Constant::F64(0.0)),
             SlotType::Bool => self.pool(Constant::Bool(false)),
-            SlotType::Ref => {
+            SlotType::Ref | SlotType::Raw => {
                 // the dead payload word owns its interned empty-string
                 // reference like any production — a borrow candidate like
-                // every KSTR load
+                // every KSTR load. A Raw dead word (a variable-keyed
+                // member's claim another member's write kills) rides the
+                // same discipline: its count is a runtime fact, and the
+                // kind-checked dec reads a valid reference whatever the
+                // instantiation
                 let k = self.pool_str("");
                 self.kstr(dst, k);
                 return;
@@ -13782,7 +14100,26 @@ impl FnLower<'_, '_, '_> {
                 });
                 return;
             },
-            SlotType::Tag | SlotType::I32 | SlotType::Raw => return,
+            // A dead Tag word still needs kind-true content: RETSPAN
+            // hands the whole span to the caller, whose layout types
+            // every word of the union's span, so moving the frame's
+            // inert I64 zero into a Tag-classified slot would trap the
+            // caller's typed write. Tag id 0 is the module's first
+            // minted user tag — a Tag region word only exists once some
+            // union field's shape minted one — and a dead word is never
+            // read (only the live member's words are), so the
+            // discriminant's identity is inert; only its kind matters.
+            SlotType::Tag => {
+                self.emit(Op::TagNew {
+                    dst: Slot::body(dst),
+                    tag: 0,
+                });
+                return;
+            },
+            // no shape mints an I32 region word (explicit-width locals
+            // only), and no uop writes one; unreachable until that
+            // vocabulary exists
+            SlotType::I32 => return,
         };
         self.emit(Op::Kconst {
             dst: Slot::body(dst),
