@@ -1,0 +1,21 @@
+[package]
+name       = "ds-meta"
+version    = "0.1.0"
+edition    = "2024"
+rust-version = "1.85"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/lxl66566/DreamScript"
+keywords   = ["dreamscript", "language", "compiler"]
+categories = ["compilers"]
+description = "The DreamScript comptime evaluator: comptime calls run as ordinary code on the same uop VM in a world-fenced context (M6)"
+
+[lints]
+workspace = true
+
+[dependencies]
+ds-diag   = { workspace = true }
+ds-parse  = { workspace = true }
+ds-check  = { workspace = true }
+ds-lower  = { workspace = true }
+ds-mod    = { workspace = true }
+ds-vm     = { workspace = true }

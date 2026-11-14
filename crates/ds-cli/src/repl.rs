@@ -23,9 +23,18 @@
 //! — a value is never silently dropped between runs because none is ever
 //! alive between runs. `:drop <name>` removes the binding's line so later
 //! runs never recreate it; `:reset` clears the text and rebuilds the VM.
+//!
+//! # Reading
+//!
+//! An interactive terminal reads through a line editor (in-memory
+//! history: up/down recall prior submissions; Ctrl-C answers as an event,
+//! so the line in progress is discarded and the prompt re-issues while
+//! the session survives); a piped stdin reads plain lines — no editing
+//! exists over a pipe. Ctrl-C while a submission computes still kills the
+//! process: the VM has no step budget to observe an interrupt at.
 
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, IsTerminal, Write},
     process::ExitCode,
 };
 
@@ -37,8 +46,8 @@ use ds_lower::lower;
 use ds_mod::Hash128;
 use ds_parse::{Ast, ItemKind, Pattern, Stmt, StmtKind};
 use ds_query::{
-    Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile,
-    PlatformCheck, QueryError, Resolve, TypeOf,
+    Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageEffects, PackageId,
+    ParseFile, PlatformCheck, QueryError, Resolve, TypeOf,
 };
 use ds_vm::{LoadError, ModuleRegistry, Platform, Value, Vm, native};
 
@@ -67,21 +76,44 @@ pub fn repl(_args: &ReplArgs) -> Result<ExitCode> {
         "DreamScript repl {} (:quit, :drop <name>, :reset)",
         env!("CARGO_PKG_VERSION")
     );
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    while let Some(line) = read_submission(&mut input)? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(command) = line.strip_prefix(':') {
-            if !session.command(command)? {
-                break;
-            }
-        } else {
-            session.submit(&line)?;
+    if io::stdin().is_terminal() {
+        let mut reader = EditorInput::new()?;
+        drive(&mut session, &mut reader)
+    } else {
+        let stdin = io::stdin();
+        let mut locked = stdin.lock();
+        let mut reader = PipedInput {
+            input: &mut locked as &mut dyn BufRead,
+        };
+        drive(&mut session, &mut reader)
+    }
+}
+
+/// The read-dispatch loop over one read layer: submissions run, `:`
+/// commands answer, end of input ends the session, an interrupt discards
+/// the line in progress and re-issues the prompt.
+fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode> {
+    loop {
+        match read_submission(reader) {
+            ReadOutcome::Eof => return Ok(ExitCode::SUCCESS),
+            // Ctrl-C at the prompt: the submission in progress is already
+            // discarded; a newline closes the aborted line and the prompt
+            // re-issues. The session survives.
+            ReadOutcome::Interrupted => println!(),
+            ReadOutcome::Text(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Some(command) = line.strip_prefix(':') {
+                    if !session.command(command)? {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                } else {
+                    session.submit(&line)?;
+                }
+            },
         }
     }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// One live session: the query database over the ambient plus the session
@@ -267,8 +299,11 @@ impl Session {
 
     /// Prints the submission's story: the value of an expression tail
     /// (the unit word is inert, so a unit-typed tail prints no value),
-    /// the inferred type, and the effect row — the row of the definition
-    /// the submission touched, the grain the checker exposes.
+    /// the inferred type, and the effect row — the answer expression's
+    /// own row from the effects pass's per-span table (a statement
+    /// submission's answer is the tail expression, or the binding line's
+    /// initializer), falling back to the touched definition's row when
+    /// no span covers it.
     fn report(
         &mut self,
         ast: &Ast,
@@ -301,6 +336,12 @@ impl Session {
                 let Some(stmt) = main_tail(ast) else {
                     return Ok(());
                 };
+                // The submission's answer expression: the tail
+                // expression, or the binding line's initializer.
+                let answer = match &stmt.kind {
+                    StmtKind::Local(local) => Some(&local.init),
+                    StmtKind::Expr(expr) => Some(expr),
+                };
                 match &stmt.kind {
                     StmtKind::Local(local) => {
                         let mut names = Vec::new();
@@ -324,8 +365,23 @@ impl Session {
                         }
                     },
                 }
-                if let Some(def) = analyzed.package.lookup("main") {
-                    self.print_row(def.index())?;
+                // The answer's own row (the tightest recorded span
+                // covering it — earlier statements' effects stay out);
+                // the definition grain is the fallback.
+                let effects = query(
+                    self.db.get::<PackageEffects>(PackageId::new(0)),
+                    "package effects",
+                )?;
+                let row = answer
+                    .and_then(|expr| effects.effects.covering_row(expr.span()))
+                    .or_else(|| {
+                        analyzed
+                            .package
+                            .lookup("main")
+                            .and_then(|def| effects.effects.of(def))
+                    });
+                if let Some(row) = row {
+                    println!("~ {}", row.render());
                 }
                 Ok(())
             },
@@ -474,30 +530,135 @@ fn fresh_vm() -> Vm {
     Vm::new(registry)
 }
 
-/// Reads one submission: lines until the bracket depth closes, `>>> ` for
-/// the first line and `... ` while open. End of input answers `None`.
-fn read_submission(input: &mut impl BufRead) -> Result<Option<String>> {
-    let mut text = String::new();
-    loop {
-        print!("{}", if text.is_empty() { ">>> " } else { "... " });
+/// One read at the prompt: a completed submission, end of input, or an
+/// interrupt that discards the submission in progress (the session
+/// continues).
+enum ReadOutcome {
+    /// A submission whose bracket depth closed.
+    Text(String),
+    /// End of input.
+    Eof,
+    /// Ctrl-C: the submission in progress is discarded.
+    Interrupted,
+}
+
+/// One line event from the read layer: a line, end of input, or an
+/// interrupt (Ctrl-C at the prompt — an event the session survives, not a
+/// kill).
+enum LineEvent {
+    /// One read line, its trailing newline trimmed.
+    Line(String),
+    /// End of input.
+    Eof,
+    /// An interrupt discarded the line in progress.
+    Interrupted,
+}
+
+/// The prompt-level read layer: one line per call. The interactive layer
+/// is a line editor (up/down recall of prior submissions, Ctrl-C as an
+/// event); the piped layer is a plain buffered read — no editing exists
+/// over a pipe, and there is nothing to interrupt.
+trait ReadsLines {
+    /// Reads one line, rendering `prompt` first.
+    fn read_line(&mut self, prompt: &str) -> Result<LineEvent>;
+    /// Records one completed submission for recall.
+    fn record(&mut self, submission: &str);
+}
+
+/// The piped read layer over any buffered input.
+struct PipedInput<'a> {
+    input: &'a mut dyn BufRead,
+}
+
+impl ReadsLines for PipedInput<'_> {
+    fn read_line(&mut self, prompt: &str) -> Result<LineEvent> {
+        print!("{prompt}");
         io::stdout().flush()?;
         let mut line = String::new();
-        match input.read_line(&mut line) {
-            Ok(0) => {
-                if text.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(text));
-            },
-            Ok(_) => text.push_str(&line),
+        match self.input.read_line(&mut line) {
+            Ok(0) => Ok(LineEvent::Eof),
+            Ok(_) => Ok(LineEvent::Line(
+                line.trim_end_matches(['\r', '\n']).to_owned(),
+            )),
+            // An interrupted read (a signal landing mid-read) discards its
+            // partial line; the loop re-issues the prompt.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(LineEvent::Interrupted),
             Err(error) => {
                 println!("cannot read input: {error}");
-                return Ok(None);
+                Ok(LineEvent::Eof)
+            },
+        }
+    }
+
+    fn record(&mut self, _submission: &str) {}
+}
+
+/// The interactive read layer: a line editor with one in-memory history
+/// (rustyline over the terminal's raw keys on Unix, the console's key
+/// events on Windows), so up/down recall prior submissions and Ctrl-C
+/// answers `Interrupted` instead of killing the process.
+struct EditorInput {
+    editor: rustyline::DefaultEditor,
+}
+
+impl EditorInput {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            editor: rustyline::DefaultEditor::new().context("the line editor starts")?,
+        })
+    }
+}
+
+impl ReadsLines for EditorInput {
+    fn read_line(&mut self, prompt: &str) -> Result<LineEvent> {
+        match self.editor.readline(prompt) {
+            Ok(line) => Ok(LineEvent::Line(line)),
+            Err(rustyline::error::ReadlineError::Interrupted) => Ok(LineEvent::Interrupted),
+            Err(rustyline::error::ReadlineError::Eof) => Ok(LineEvent::Eof),
+            Err(error) => Err(anyhow!("the line editor failed: {error}")),
+        }
+    }
+
+    fn record(&mut self, submission: &str) {
+        // Recall is best-effort: a history store refusing one more entry
+        // never fails the session.
+        let _ = self.editor.add_history_entry(submission);
+    }
+}
+
+/// Reads one submission: lines until the bracket depth closes, `>>> ` for
+/// the first line and `... ` while open. End of input mid-submission
+/// answers the partial text; an interrupt discards it. A completed
+/// non-blank submission is recorded for recall.
+fn read_submission(reader: &mut dyn ReadsLines) -> ReadOutcome {
+    let mut text = String::new();
+    loop {
+        let prompt = if text.is_empty() { ">>> " } else { "... " };
+        match reader.read_line(prompt) {
+            Ok(LineEvent::Line(line)) => {
+                text.push_str(&line);
+                text.push('\n');
+            },
+            Ok(LineEvent::Eof) => {
+                return if text.is_empty() {
+                    ReadOutcome::Eof
+                } else {
+                    ReadOutcome::Text(text.trim_end_matches(['\r', '\n']).to_owned())
+                };
+            },
+            Ok(LineEvent::Interrupted) => return ReadOutcome::Interrupted,
+            Err(error) => {
+                println!("{error:#}");
+                return ReadOutcome::Eof;
             },
         }
         let trimmed = text.trim_end_matches(['\r', '\n']);
         if bracket_depth(trimmed) <= 0 {
-            return Ok(Some(trimmed.to_owned()));
+            let submission = trimmed.to_owned();
+            if !submission.trim().is_empty() {
+                reader.record(&submission);
+            }
+            return ReadOutcome::Text(submission);
         }
     }
 }
@@ -717,5 +878,101 @@ fn print_result(value: &Value) {
         },
         Value::Tag(tag) if *tag == native::PLATFORM_NONE => println!("none"),
         value => run::print_value(value),
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use anyhow::Result;
+    use rustyline::history::History;
+
+    use super::{EditorInput, LineEvent, ReadOutcome, ReadsLines, Session, drive, read_submission};
+
+    /// A scripted read layer: line events played in order, recording the
+    /// completed submissions it is asked to recall. The injected
+    /// `Interrupted` event is the test stand-in for Ctrl-C at the prompt
+    /// (a live console event is not portable to spawn from a test).
+    struct Scripted {
+        events: Vec<LineEvent>,
+        recorded: Vec<String>,
+    }
+
+    impl ReadsLines for Scripted {
+        fn read_line(&mut self, _prompt: &str) -> Result<LineEvent> {
+            Ok(self.events.remove(0))
+        }
+
+        fn record(&mut self, submission: &str) {
+            self.recorded.push(submission.to_owned());
+        }
+    }
+
+    fn scripted(events: Vec<LineEvent>) -> Scripted {
+        Scripted {
+            events,
+            recorded: Vec::new(),
+        }
+    }
+
+    /// Multi-line submissions join until the depth closes and record once;
+    /// blanks record nothing; an interrupt discards the submission in
+    /// progress without recording it.
+    #[test]
+    fn submissions_join_record_once_and_interrupt_discards() {
+        let mut reader = scripted(vec![
+            LineEvent::Line("const x = (".into()),
+            LineEvent::Line("1,".into()),
+            LineEvent::Line("2)".into()),
+        ]);
+        let read = read_submission(&mut reader);
+        assert!(matches!(read, ReadOutcome::Text(text) if text == "const x = (\n1,\n2)"));
+        assert_eq!(reader.recorded, ["const x = (\n1,\n2)"]);
+
+        let mut reader = scripted(vec![LineEvent::Line(String::new())]);
+        assert!(matches!(read_submission(&mut reader), ReadOutcome::Text(t) if t.is_empty()));
+        assert!(reader.recorded.is_empty(), "blank lines never recall");
+
+        let mut reader = scripted(vec![
+            LineEvent::Line("fn f() {".into()),
+            LineEvent::Interrupted,
+        ]);
+        assert!(matches!(
+            read_submission(&mut reader),
+            ReadOutcome::Interrupted
+        ));
+        assert!(
+            reader.recorded.is_empty(),
+            "the interrupted partial never recalls"
+        );
+    }
+
+    /// Ctrl-C at the prompt keeps the session: the injected interrupt
+    /// discards the line in progress, the loop re-issues the prompt, and
+    /// the next submission commits and runs.
+    #[test]
+    fn ctrl_c_at_the_prompt_keeps_the_session() {
+        let mut reader = scripted(vec![
+            LineEvent::Interrupted,
+            LineEvent::Line("1 + 1".into()),
+            LineEvent::Eof,
+        ]);
+        let mut session = Session::new();
+        let code = drive(&mut session, &mut reader).expect("the session ends cleanly");
+        assert_eq!(code, std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            session.stmts,
+            ["1 + 1"],
+            "the post-interrupt line committed"
+        );
+        assert_eq!(reader.recorded, ["1 + 1"]);
+    }
+
+    /// The editor layer records what it is asked to recall into its own
+    /// history store (the up/down recall itself is the editor's).
+    #[test]
+    fn the_editor_records_history_entries() {
+        let mut editor = EditorInput::new().expect("the editor starts without a terminal");
+        editor.record("1 + 1");
+        assert_eq!(editor.editor.history_mut().len(), 1);
     }
 }

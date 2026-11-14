@@ -37,6 +37,15 @@ pub enum LowerError {
         /// Words the frame would need.
         need: usize,
     },
+    /// The served ambient bodies disagree with the plan: the artifact's
+    /// function-table prefix is not what planning produced, so the
+    /// splice cannot install it. The caller falls back to the fresh
+    /// lowering; this is a cache miss, never a source problem.
+    #[error("the served ambient bodies disagree with the plan: {detail}")]
+    ServedDrift {
+        /// What disagreed.
+        detail: String,
+    },
 }
 
 impl LowerError {

@@ -7,18 +7,30 @@
 //! list[record] checked reads, the transitive dispatch chain, and the
 //! E5 teardown deinit prints (their order deterministic across runs).
 
-use std::{path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
+    command.env("DS_CACHE", test_cache());
     command
 }
 
+/// A private per-process script-cache root: spawned runs never read or
+/// write a real user cache directory.
+fn test_cache() -> PathBuf {
+    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            dir
+        })
+        .clone()
+}
+
 fn corpus(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance")
-        .join(name)
+    ds_corpus_path::file(name)
 }
 
 fn run_golden(name: &str, golden: &str) {

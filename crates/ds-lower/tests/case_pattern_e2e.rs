@@ -479,7 +479,7 @@ fn main() -> int {
     );
     // an atom-named payload binder resolves through the type namespace
     // [F9], so it binds nothing — and the payload has no union of its
-    // own to test (union-typed payload fields refuse at their shape)
+    // own to test
     refused(
         r#"
 struct pt { x: int, y: int }

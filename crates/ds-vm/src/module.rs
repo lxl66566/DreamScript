@@ -77,6 +77,15 @@ pub enum ModuleBuildError {
         /// The function's slot count.
         slots: usize,
     },
+    /// An evidence-chain entry indexes outside the module's own tables
+    /// (the function or the chain table itself): the dsmod reader rejects
+    /// this class at parse, so reaching it names a bypassed producer.
+    ChainIndex {
+        /// The offending chain-table index.
+        chain: usize,
+        /// The index that escapes its table.
+        index: u32,
+    },
 }
 
 /// A loaded function: definition plus its two-word entry descriptor [H2].
@@ -97,16 +106,28 @@ pub struct Function {
     pub entry: EntryDescriptor,
 }
 
-/// One immutable version of a module: a name, a function table, and its
-/// name index. Every function body is decode-checked once at load, its
-/// `FUNCF` cross-checked against its layout, and every pool-index operand
-/// checked against its pool's kinds, so a bad stream never reaches the
-/// dispatcher.
+/// One immutable version of a module: a name, a function table, its name
+/// index, and the content hash the load protocol validates dependency
+/// links against when the version is installed. Every function body is
+/// decode-checked once at load, its `FUNCF` cross-checked against its
+/// layout, and every pool-index operand checked against its pool's
+/// kinds, so a bad stream never reaches the dispatcher.
 #[derive(Debug)]
 pub struct ModuleVersion {
     name: String,
     functions: Vec<Function>,
+    /// The evidence-chain table [H3]: one entry per chain object the
+    /// staged evidence words index. Module-local — a chain's `func` and
+    /// `next` indexes address this version's own tables, resolved at
+    /// dispatch like the sentinel slot word, so no install-time rewrite
+    /// runs over them.
+    chains: Vec<ds_mod::EvidenceChain>,
     index: BTreeMap<String, u32>,
+    /// The content identity the load protocol validates dependency
+    /// links against (a dsmod module's content hash is its source hash
+    /// this round); `None` for a directly built version, which carries
+    /// no content identity.
+    content_hash: Option<ds_mod::Hash128>,
 }
 
 impl ModuleVersion {
@@ -136,8 +157,63 @@ impl ModuleVersion {
         Ok(Self {
             name: name.into(),
             functions,
+            chains: Vec::new(),
             index,
+            content_hash: None,
         })
+    }
+
+    /// Attaches the module's evidence-chain table [H3], validating every
+    /// entry's function index against the function table and every tail
+    /// index against the chain table itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModuleBuildError::ChainIndex`] when an entry escapes its
+    /// table — the dsmod reader already rejects the class at parse, so a
+    /// failure here names a producer that bypassed it.
+    pub fn with_chains(
+        mut self,
+        chains: Vec<ds_mod::EvidenceChain>,
+    ) -> Result<Self, ModuleBuildError> {
+        let len = chains.len();
+        for (chain, entry) in chains.iter().enumerate() {
+            if usize::try_from(entry.func).is_ok_and(|func| func < self.functions.len())
+                && entry
+                    .next
+                    .iter()
+                    .all(|tail| usize::try_from(*tail).is_ok_and(|tail| tail < len))
+            {
+                continue;
+            }
+            let index = if usize::try_from(entry.func).is_ok_and(|func| func < self.functions.len())
+            {
+                entry.next.first().copied().unwrap_or(u32::MAX)
+            } else {
+                entry.func
+            };
+            return Err(ModuleBuildError::ChainIndex { chain, index });
+        }
+        self.chains = chains;
+        Ok(self)
+    }
+
+    /// Records the version's content hash: the identity the load
+    /// protocol validates a dependent's linked hash against. The dsmod
+    /// install stamps it from the module's source hash; a host building
+    /// a version directly records none.
+    #[must_use]
+    pub fn with_content_hash(mut self, hash: ds_mod::Hash128) -> Self {
+        self.content_hash = Some(hash);
+        self
+    }
+
+    /// The version's recorded content hash, if any: what a dependency
+    /// link's hash is compared against when this version holds the
+    /// linked name's current slot.
+    #[must_use]
+    pub const fn content_hash(&self) -> Option<ds_mod::Hash128> {
+        self.content_hash
     }
 
     /// The module's name.
@@ -150,6 +226,12 @@ impl ModuleVersion {
     #[must_use]
     pub fn functions(&self) -> &[Function] {
         &self.functions
+    }
+
+    /// The evidence-chain table the staged evidence words index [H3].
+    #[must_use]
+    pub fn chains(&self) -> &[ds_mod::EvidenceChain] {
+        &self.chains
     }
 
     /// Looks a function up by name.
@@ -251,35 +333,47 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
     Ok(())
 }
 
+/// A module version's row in the per-VM version table: the u32 name the hot
+/// seams carry — every frame's chain entry, every parked fiber's resume
+/// point, every CALL-cache row — in place of a shared handle, so a call or
+/// a return moves no reference count. Assigned at install, never reused:
+/// the table only appends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionIdx(pub(crate) u32);
+
 #[derive(Debug)]
 pub struct ModuleSlots {
     /// The module id a scalar FuncRef word addresses (F2): this name's
     /// first-install position in the registry's id space.
     id: u32,
-    current: Arc<ModuleVersion>,
-    retiring: Option<Arc<ModuleVersion>>,
+    current: VersionIdx,
+    retiring: Option<VersionIdx>,
 }
 
 impl ModuleSlots {
-    /// The version qualified calls resolve through.
+    /// The version-table row of the version qualified calls resolve
+    /// through.
     #[must_use]
-    pub fn current(&self) -> &ModuleVersion {
-        &self.current
+    pub fn current_idx(&self) -> VersionIdx {
+        self.current
     }
 
-    /// The previous version, if any frames may still run it.
+    /// The version-table row of the previous version, if any frames may
+    /// still run it.
     #[must_use]
-    pub fn retiring(&self) -> Option<&ModuleVersion> {
-        self.retiring.as_deref()
+    pub fn retiring_idx(&self) -> Option<VersionIdx> {
+        self.retiring
     }
 }
 
-/// The module registry: every loaded module's two slots, plus the native
-/// modules. The VM owns one and resolves every call through the current
-/// slot, so a swap changes the destination of subsequent calls immediately;
-/// frames already running a retiring version keep their code and pool until
-/// they return (their frames hold an `Arc` to the version they entered)
-/// [H6 item 5]. Native modules ([`NativeFunction`] tables, the builtin
+/// The module registry: every loaded module's two slots, the version
+/// table, and the native modules. The VM owns one and resolves every call
+/// through the current slot, so a swap changes the destination of
+/// subsequent calls immediately; frames already running a retiring version
+/// keep their code and pool until nothing references them — every frame
+/// carries a [`VersionIdx`], and the table owns each version's survival
+/// until an install-time sweep proves nothing references its row [H6
+/// item 5]. Native modules ([`NativeFunction`] tables, the builtin
 /// mechanism) live in the same name space: a pool FuncRef resolves through
 /// the uop tables first, the native tables second, so `CALL` has one
 /// resolution path for both callee kinds.
@@ -300,6 +394,16 @@ pub struct ModuleRegistry {
     /// name-to-id direction rides each slot's own `id`, so a name lookup
     /// is one `modules` descent.
     id_names: Vec<String>,
+    /// The per-VM version table: one row per installed version, appended
+    /// at install and never reused. The row holds the one `Arc` that owns
+    /// the version's survival — the version's single home, so immutable
+    /// code stays `Send + Sync` for worker sharing — and every other
+    /// holder of a version is a [`VersionIdx`] naming the row. A row is
+    /// dropped only by the install-time sweep, which proves no live frame
+    /// or parked fiber names it — the hint and cache entries never reach a
+    /// sweep, since the install takes the hint and empties the cache
+    /// before it runs.
+    versions: Vec<Option<Arc<ModuleVersion>>>,
     /// The last run entry [`ModuleRegistry::resolve`] answered, as of
     /// `generation`: a host drive re-entering one entry skips both name
     /// lookups. A hint beside the authoritative lookup, so a miss costs one
@@ -320,7 +424,7 @@ struct ResolvedEntry {
     module: String,
     func: String,
     stamp: u64,
-    version: Arc<ModuleVersion>,
+    version: VersionIdx,
     func_id: u32,
 }
 
@@ -331,28 +435,34 @@ impl ModuleRegistry {
         Self::default()
     }
 
-    /// Installs a version: it becomes the module's current slot, the previous
-    /// current moves to the retiring slot, and an older retiring version is
-    /// retired (dropped). Returns the shared handle to the installed version.
-    pub fn install(&mut self, version: ModuleVersion) -> Arc<ModuleVersion> {
+    /// Installs a version: it becomes the module's current slot, the
+    /// previous current moves to the retiring slot, and the version table
+    /// appends the installed version as a fresh row (the row the retiring
+    /// slot drops is the sweep's business, never this method's). Answers
+    /// the installed version's table row: the row's `Arc` is the one
+    /// owner of the version's survival, and no second home exists to
+    /// outlive it — a host inspecting the installed code reads through
+    /// [`ModuleRegistry::version`] on this row while it stays live.
+    pub fn install(&mut self, version: ModuleVersion) -> VersionIdx {
+        let name = version.name().to_owned();
         let installed = Arc::new(version);
-        if let Some(slots) = self.modules.get_mut(&installed.name) {
-            slots.retiring = Some(std::mem::replace(
-                &mut slots.current,
-                Arc::clone(&installed),
-            ));
+        let row = VersionIdx(u32::try_from(self.versions.len()).expect("version rows fit u32"));
+        self.versions.push(Some(installed));
+        if let Some(slots) = self.modules.get_mut(&name) {
+            slots.retiring = Some(slots.current);
+            slots.current = row;
         } else {
             let id = u32::try_from(self.id_names.len()).expect("module count fits u32");
-            self.id_names.push(installed.name.clone());
-            self.modules.insert(installed.name.clone(), ModuleSlots {
+            self.id_names.push(name.clone());
+            self.modules.insert(name, ModuleSlots {
                 id,
-                current: Arc::clone(&installed),
+                current: row,
                 retiring: None,
             });
         }
         self.generation += 1;
         self.entry.borrow_mut().take();
-        installed
+        row
     }
 
     /// The install generation: the version stamp inline caches validate
@@ -372,33 +482,129 @@ impl ModuleRegistry {
         self.modules.get(module).map(|slots| slots.id)
     }
 
+    /// The module id a payload FuncRef naming `module` resolves to at
+    /// install: the installed name's own id, or the fresh tail id the
+    /// name's first install assigns. Ids are one per name in
+    /// first-install order and never move, so a pre-install resolve and
+    /// the install itself agree; a failed install discards the derived
+    /// id and the next attempt derives it again.
+    pub(crate) fn id_for_install(&self, module: &str) -> u32 {
+        self.modules.get(module).map_or_else(
+            || u32::try_from(self.id_names.len()).expect("module count fits u32"),
+            |slots| slots.id,
+        )
+    }
+
     /// The module name an id addresses, for call-time resolution of
     /// scalar FuncRef words.
     pub(crate) fn module_name(&self, module: u32) -> Option<&str> {
         self.id_names.get(module as usize).map(String::as_str)
     }
 
-    /// Resolves a function by name through the module's current slot, for
-    /// run entries: the version plus the function's table index. The last
-    /// answer is kept in the `entry` hint, so a drive re-entering one entry
-    /// answers without either name lookup.
+    /// The version a table row names, if the sweep has not retired it:
+    /// the host's only read of installed code — no owning handle exists,
+    /// the row is the version's single home, so the borrow ends with the
+    /// row's life.
     #[must_use]
-    pub fn resolve(&self, module: &str, func: &str) -> Option<(Arc<ModuleVersion>, u32)> {
+    pub fn version(&self, row: VersionIdx) -> Option<&ModuleVersion> {
+        self.versions.get(row.0 as usize).and_then(Option::as_deref)
+    }
+
+    /// The strong count of the row a `VersionIdx` names (0 once the sweep
+    /// retired it): the single-home invariant's witness for this crate's
+    /// own tests — the row's `Arc` is the version's one owner, so a live
+    /// row answers 1, and any seam regressing into minting a second home
+    /// moves the count.
+    #[cfg(test)]
+    pub(crate) fn row_arc_count(&self, row: VersionIdx) -> usize {
+        self.versions
+            .get(row.0 as usize)
+            .and_then(Option::as_ref)
+            .map_or(0, Arc::strong_count)
+    }
+
+    /// The version a table row names, read through the address-stable
+    /// pointer its row pins: the row's `Arc` keeps the version's heap
+    /// allocation alive and unmoved from install until a sweep retires
+    /// the row. The answer carries no borrow, so a dispatch arm may hold
+    /// it across the arm's own whole-VM calls.
+    ///
+    /// Safety of the raw pointer: the sweep retires a row only when no
+    /// frame or parked fiber names it, and a sweep runs only inside an
+    /// install — a host call on the `!Send`, single-threaded VM, which
+    /// also empties every cache entry before the sweep, so no dispatch
+    /// is in flight while a row retires and every reference this method
+    /// answers is dead before the next install. Nothing that outlives a
+    /// dispatch may hold the answer.
+    pub(crate) fn pinned(&self, row: VersionIdx) -> &'static ModuleVersion {
+        let version = self
+            .version(row)
+            .expect("a named row stays pinned until a sweep retires it");
+        // SAFETY: the row's Arc pins the version's allocation for the
+        // method's whole contract (see above), so the pointee is valid.
+        unsafe { &*std::ptr::from_ref(version) }
+    }
+
+    /// How many rows the version table holds (live and retired): the
+    /// reachability bitset's width at a sweep.
+    pub(crate) fn version_rows(&self) -> usize {
+        self.versions.len()
+    }
+
+    /// Marks the rows the registry itself keeps alive into `live`: every
+    /// module's current and retiring slot. The run-entry hint never
+    /// reaches a sweep — the install that runs the sweep takes the hint
+    /// first — so it is no marking source.
+    pub(crate) fn mark_own_rows(&self, live: &mut [bool]) {
+        for slots in self.modules.values() {
+            live[slots.current.0 as usize] = true;
+            if let Some(row) = slots.retiring {
+                live[row.0 as usize] = true;
+            }
+        }
+    }
+
+    /// The install-time sweep's retire half: drops every row `live` leaves
+    /// unmarked and answers the pool addresses of the retired versions'
+    /// functions (the kstr rows keyed by those pools are dead hints). A
+    /// dropped row releases the table's one reference, and the row is the
+    /// version's single home, so the version's memory frees right there.
+    pub(crate) fn retire_unmarked_rows(&mut self, live: &[bool]) -> Vec<usize> {
+        let mut pools = Vec::new();
+        for (at, row) in self.versions.iter_mut().enumerate() {
+            if live[at] {
+                continue;
+            }
+            if let Some(version) = row.take() {
+                pools.extend(version.functions().iter().map(|f| f.pool.as_ptr() as usize));
+            }
+        }
+        pools
+    }
+
+    /// Resolves a function by name through the module's current slot, for
+    /// run entries: the version's table row plus the function's table
+    /// index. The last answer is kept in the `entry` hint, so a drive
+    /// re-entering one entry answers without either name lookup; the
+    /// answer names a row, so resolution moves no reference count.
+    #[must_use]
+    pub fn resolve(&self, module: &str, func: &str) -> Option<(VersionIdx, u32)> {
         {
             let entry = self.entry.borrow();
             if let Some(entry) = entry.as_ref() {
                 if entry.stamp == self.generation && entry.module == module && entry.func == func {
-                    return Some((Arc::clone(&entry.version), entry.func_id));
+                    return Some((entry.version, entry.func_id));
                 }
             }
         }
-        let version = Arc::clone(&self.modules.get(module)?.current);
-        let &func_id = version.index.get(func)?;
+        let slots = self.modules.get(module)?;
+        let version = slots.current;
+        let &func_id = self.version(version)?.index.get(func)?;
         *self.entry.borrow_mut() = Some(ResolvedEntry {
             module: module.to_owned(),
             func: func.to_owned(),
             stamp: self.generation,
-            version: Arc::clone(&version),
+            version,
             func_id,
         });
         Some((version, func_id))
@@ -406,15 +612,15 @@ impl ModuleRegistry {
 
     /// Resolves a pool FuncRef through the target module's current slot
     /// [H6 item 5]: `func` is the function-table index (entry word 0). A
-    /// swap between a call's issue and its resolution redirects here.
+    /// swap between a call's issue and its resolution redirects here, and
+    /// the answer names a table row, so the resolution mints no handle.
     #[must_use]
-    pub fn resolve_indexed(&self, module: &str, func: u32) -> Option<(Arc<ModuleVersion>, u32)> {
-        let version = &self.modules.get(module)?.current;
-        if usize::try_from(func).is_ok_and(|i| i < version.functions.len()) {
-            Some((Arc::clone(version), func))
-        } else {
-            None
-        }
+    pub fn resolve_indexed(&self, module: &str, func: u32) -> Option<(VersionIdx, u32)> {
+        let version = self.modules.get(module)?.current;
+        let bounds = |functions: &[_]| usize::try_from(func).is_ok_and(|i| i < functions.len());
+        self.version(version)
+            .filter(|v| bounds(&v.functions))
+            .map(|_| (version, func))
     }
 
     /// Whether a uop module under `module`'s current slot would resolve
@@ -423,16 +629,35 @@ impl ModuleRegistry {
     /// FuncRef validation run it.
     #[must_use]
     pub fn has_uop(&self, module: &str, func: u32) -> bool {
-        match self.modules.get(module) {
-            Some(slots) => usize::try_from(func).is_ok_and(|i| i < slots.current.functions.len()),
-            None => false,
-        }
+        self.modules
+            .get(module)
+            .and_then(|slots| self.version(slots.current))
+            .is_some_and(|version| usize::try_from(func).is_ok_and(|i| i < version.functions.len()))
     }
 
     /// A module's two slots, if the module is loaded.
     #[must_use]
     pub fn slots(&self, module: &str) -> Option<&ModuleSlots> {
         self.modules.get(module)
+    }
+
+    /// The current version's own reference, if the module is loaded: the
+    /// slot lookup for hosts inspecting code (the version table's row
+    /// indirection).
+    #[must_use]
+    pub fn current_version(&self, module: &str) -> Option<&ModuleVersion> {
+        self.modules
+            .get(module)
+            .and_then(|slots| self.version(slots.current))
+    }
+
+    /// The retiring version's own reference, if the module has one: the
+    /// version a pending sweep may still retire.
+    #[must_use]
+    pub fn retiring_version(&self, module: &str) -> Option<&ModuleVersion> {
+        self.modules
+            .get(module)
+            .and_then(|slots| self.version(slots.retiring?))
     }
 
     /// Installs a platform handler (H5.5, E1): the world surface `platform`
@@ -522,30 +747,81 @@ mod tests {
     #[test]
     fn resolve_answers_the_current_slot_and_follows_a_swap() {
         let mut reg = ModuleRegistry::new();
-        let v1 = reg.install(
+        let v1_row = reg.install(
             ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
         );
         let (first, func_id) = reg.resolve("m", "b").expect("installed");
         assert_eq!(func_id, 1);
-        assert!(Arc::ptr_eq(&first, &v1));
+        assert_eq!(first, v1_row);
         // the repeat query answers from the hint, and a name the hint does
         // not carry falls back to the full lookup
-        assert!(Arc::ptr_eq(
-            &reg.resolve("m", "b").expect("installed").0,
-            &v1
-        ));
+        assert_eq!(reg.resolve("m", "b").expect("installed").0, first);
         assert!(reg.resolve("m", "nowhere").is_none());
-        // the swap retires v1: the hint holds no handle of its own, so the
-        // retiring slot plus the caller's are the only two
-        drop(first);
-        let v2 = reg.install(
+        let v2_row = reg.install(
             ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
         );
-        assert_eq!(Arc::strong_count(&v1), 2);
-        assert!(Arc::ptr_eq(
-            &reg.resolve("m", "b").expect("installed").0,
-            &v2
+        // the swap moved v1's row to the retiring slot; the row's own Arc
+        // is the version's single home, so its count never left 1
+        assert_eq!(reg.row_arc_count(v1_row), 1);
+        assert_eq!(
+            reg.slots("m").and_then(ModuleSlots::retiring_idx),
+            Some(v1_row)
+        );
+        let (second, _) = reg.resolve("m", "b").expect("installed");
+        assert_eq!(second, v2_row);
+    }
+
+    #[test]
+    fn the_sweep_retires_only_unnamed_rows() {
+        let mut reg = ModuleRegistry::new();
+        let v1_row = reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        let v1_arc = reg.versions[v1_row.0 as usize]
+            .clone()
+            .expect("the fresh row holds its version");
+        // two more installs: the second moves v1's row out of every slot
+        // the registry itself marks
+        reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        let mut live = vec![false; reg.version_rows()];
+        reg.mark_own_rows(&mut live);
+        live[v1_row.0 as usize] = true; // a parked fiber's frame
+        let pools = reg.retire_unmarked_rows(&live);
+        assert!(pools.is_empty(), "the named row stays");
+        assert!(std::ptr::eq(
+            reg.version(v1_row).expect("still live"),
+            v1_arc.as_ref()
         ));
+        assert_eq!(
+            reg.row_arc_count(v1_row),
+            2,
+            "the row plus this test's private probe"
+        );
+        // the same sweep with no live reference drops the row and answers
+        // the retired version's pool addresses; the row was the version's
+        // single home, so the drop frees it (this probe keeps the last
+        // count here)
+        let mut live = vec![false; reg.version_rows()];
+        reg.mark_own_rows(&mut live);
+        let pools = reg.retire_unmarked_rows(&live);
+        assert_eq!(pools.len(), 2, "the two retired functions' pools");
+        assert!(reg.version(v1_row).is_none());
+        assert_eq!(reg.row_arc_count(v1_row), 0);
+    }
+
+    /// The worker-sharing contract the fork-join tier queues on: a
+    /// version's immutable code is `Send + Sync`, so the table's rows can
+    /// back workers reading code concurrently.
+    #[test]
+    fn module_version_code_is_send_and_sync() {
+        fn assert_shared<T: Send + Sync>() {}
+        assert_shared::<ModuleVersion>();
+        assert_shared::<Arc<ModuleVersion>>();
     }
 
     #[test]

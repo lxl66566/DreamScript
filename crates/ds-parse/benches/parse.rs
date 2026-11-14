@@ -19,7 +19,7 @@ struct Corpus {
 }
 
 fn corpus() -> Corpus {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let root = ds_corpus_path::dir();
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&root)
         .expect("the conformance directory lists")
         .map(|entry| entry.expect("the directory entry reads").path())

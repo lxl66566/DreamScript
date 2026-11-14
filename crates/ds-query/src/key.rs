@@ -95,6 +95,14 @@ pub enum QueryKey {
     /// The source text of one block; the seam downstream block-keyed queries
     /// depend on so file edits invalidate at block grain.
     BlockSource(BlockId),
+    /// One file's local scope frames: the value scopes the resolver walks
+    /// (function and lambda parameters, block bindings, match-arm and
+    /// for-pattern binders), each with its region and the offset each
+    /// binding turns visible from — the substrate the position slice for
+    /// completion reads, so the walk runs once per file instead of once
+    /// per request. Package-level declarations need no frames: they are
+    /// the [`QueryKey::Resolve`] value's own table.
+    ScopeIndex(FileId),
     /// The derive-expanded trees of one package (G1): every parseable
     /// file's tree through the ds-check expansion, the substrate the
     /// package-grain passes below compute over — `Resolve`, the check
@@ -173,6 +181,7 @@ impl QueryKey {
             Self::ParseFile(_) => QueryKind::ParseFile,
             Self::BlockIndex(_) => QueryKind::BlockIndex,
             Self::BlockSource(_) => QueryKind::BlockSource,
+            Self::ScopeIndex(_) => QueryKind::ScopeIndex,
             Self::Expanded(_) => QueryKind::Expanded,
             Self::Resolve(_) => QueryKind::Resolve,
             Self::TypeOf(_) => QueryKind::TypeOf,
@@ -199,6 +208,8 @@ pub enum QueryKind {
     BlockIndex,
     /// Kind of [`QueryKey::BlockSource`].
     BlockSource,
+    /// Kind of [`QueryKey::ScopeIndex`].
+    ScopeIndex,
     /// Kind of [`QueryKey::Expanded`].
     Expanded,
     /// Kind of [`QueryKey::Resolve`].

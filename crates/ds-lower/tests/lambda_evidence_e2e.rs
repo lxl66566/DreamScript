@@ -13,7 +13,7 @@ use ds_abi::{SlotType, Uop};
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Constant, Hash128, read_checked, write};
+use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -90,7 +90,10 @@ fn evidence_slot(lowered: &Lowered, body: &str) -> u32 {
         .find_map(|op| match op {
             PlacedOp::Uop(Uop::Callg { callee, .. } | Uop::Calltg { callee, .. }) => {
                 match &pool[usize::from(callee.0)] {
-                    Constant::FuncRef { module, func } if module == "$evidence" => Some(*func),
+                    Constant::FuncRef {
+                        key: FuncRefKey::Native(module),
+                        func,
+                    } if module == "$evidence" => Some(*func),
                     _ => None,
                 }
             },
@@ -131,18 +134,17 @@ fn two_instantiations_run_the_lambda_evidence_shape() {
 }
 
 /// The lowered evidence flow, pinned: the member body's closure
-/// construction carries exactly the lambda's evidence area (the pair's
-/// slot plus its follow words, no real captures), the entering site
-/// stages the serving member body's area plus the declared instance
-/// ahead of its CALLG, and the lambda body's own dispatch reads the
-/// trailing capture slot its frame bound (the `x` parameter at word 0,
-/// the evidence slot at word 1).
+/// construction carries exactly the lambda's evidence word (the pair's
+/// chain word, no real captures), the entering site stages the chain
+/// object plus the declared instance ahead of its CALLG, and the lambda
+/// body's own dispatch reads the trailing capture slot its frame bound
+/// (the `x` parameter at word 0, the evidence slot at word 1).
 #[test]
 fn the_capture_block_carries_the_lambda_evidence_word() {
     let lowered = lower_probe("generic_lambda_map_probe.ds", MAP_PROBE);
     let body = "shows#list[t]#show";
     let placed = lowered.placed(body).expect("the member body lowers");
-    // the closure construction stages the lambda's evidence area: n
+    // the closure construction stages the lambda's evidence word: n
     // names the capture block's words, and there are no real captures
     let closures: Vec<u8> = placed
         .iter()
@@ -153,11 +155,11 @@ fn the_capture_block_carries_the_lambda_evidence_word() {
         .collect();
     assert_eq!(
         closures,
-        vec![3],
-        "one closure over the pair's slot and two follow words"
+        vec![1],
+        "one closure over the pair's one chain word"
     );
-    // the entering sites in main stage the serving member body's index
-    // then the declared instance, in Kimm words right before each CALLG
+    // the entering sites in main stage the chain word then the declared
+    // instance, in Kimm words right before each CALLG
     let main = lowered.function_index("main").expect("main is planned");
     let placed = lowered.placed("main").expect("main lowers");
     let pool = &lowered.module().functions()[main as usize].constants();
@@ -176,28 +178,32 @@ fn the_capture_block_carries_the_lambda_evidence_word() {
             _ => pending.clear(),
         }
     }
-    let int_body = i64::from(
-        lowered
-            .function_index("shows#int#show")
-            .expect("the int member body is planned"),
-    );
-    let string_body = i64::from(
-        lowered
-            .function_index("shows#string#show")
-            .expect("the string member body is planned"),
-    );
+    let int_body = lowered
+        .function_index("shows#int#show")
+        .expect("the int member body is planned");
+    let string_body = lowered
+        .function_index("shows#string#show")
+        .expect("the string member body is planned");
     let instance = i64::from(2); // shows int, shows string, shows list[t]
-    assert_eq!(
-        evidence,
-        vec![vec![int_body, int_body, int_body, instance], vec![
-            string_body,
-            string_body,
-            string_body,
-            instance
-        ],],
-        "each entering site stages the serving body's area (follow words padded at the concrete \
-         end), then the instance"
-    );
+    assert_eq!(evidence.len(), 2, "one staged span per entering site");
+    let chains = lowered.module().chains();
+    for (site, span) in evidence.iter().enumerate() {
+        assert_eq!(
+            span.len(),
+            2,
+            "the chain word then the instance trail the receiver"
+        );
+        assert_eq!(span[1], instance, "the declared instance rides last");
+        let chain = chains
+            .get(usize::try_from(span[0]).expect("chain index fits usize"))
+            .expect("the staged word names a chain object");
+        let expected = if site == 0 { int_body } else { string_body };
+        assert_eq!(chain.func, expected, "the chain names the serving body");
+        assert!(
+            chain.next.is_empty(),
+            "the concrete serving body demands nothing"
+        );
+    }
     // the lambda body dispatches from its trailing capture slot: the
     // parameter at word 0, the evidence word at word 1
     let lambda = the_lambda(&lowered, "shows#list[t]#show");

@@ -29,8 +29,10 @@
 //! variable replaced by its solved members) and the bound trait must hold
 //! for that type — through an in-scope assumption, an instance whose head
 //! contains it, or recursively another instance that serves it by
-//! unification. Recursion depth is capped: the declared set's condition
-//! cycles were already rejected structurally at declaration, so the cap
+//! unification. Every condition a branch carries names variables its own
+//! head mentions (per-branch solving), so the substitution binds each
+//! one; a branch naming no bound variable is unconditional. Recursion depth is capped: the declared
+//! set's condition cycles were already rejected structurally at declaration, so the cap
 //! is a safety net against pathological growth, and reaching it counts
 //! as unsatisfied.
 //!
@@ -202,12 +204,11 @@ fn covered_branches(
             .iter()
             .map(|&member| serves(universe, env, assumptions, id, &[member], MAX_DEPTH))
             .collect();
-        match heads.iter().position(|&head| head == written) {
-            Some(pos) => groups[pos].push((id, coverage)),
-            None => {
-                heads.push(written);
-                groups.push(vec![(id, coverage)]);
-            },
+        if let Some(pos) = heads.iter().position(|&head| head == written) {
+            groups[pos].push((id, coverage));
+        } else {
+            heads.push(written);
+            groups.push(vec![(id, coverage)]);
         }
     }
     let mut representatives = Vec::new();
@@ -376,6 +377,80 @@ pub fn evidence_bounds(
         out.push((var, cond.trait_id, served));
     }
     out
+}
+
+/// The trait's declared generics substituted at one receiver (B6): the
+/// impl behind the solved instance spells the substitution in its trait
+/// reference, and unifying the instance's head pattern with the
+/// receiver's members binds the impl's own variables — each argument
+/// rewritten through that binding names the type its trait generic holds
+/// at this site, so a member call's arguments check against the site's
+/// own substitution rather than binding the generics freely. An argument
+/// still naming an unbound variable answers `None` in its position (the
+/// caller leaves that generic free, exactly as an impl spelling no
+/// arguments does); `None` overall when the head does not unify with the
+/// receiver (a covered union receiver).
+#[must_use]
+pub fn substituted_trait_args(
+    universe: &mut Universe,
+    env: &InstanceEnv,
+    instance: InstanceId,
+    args: &[Ty],
+    recv: Ty,
+) -> Option<Vec<Option<Ty>>> {
+    let head = env.head(instance).ok()?;
+    let subst = pattern_substitution(universe, head, recv)?;
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args {
+        match rewrite_set(universe, &subst, *arg) {
+            Some(members) => out.push(Some(universe.set_ty(&members))),
+            None => out.push(None),
+        }
+    }
+    Some(out)
+}
+
+/// Rewrites one member set through a substitution, structurally: a
+/// minted variable expands to its bound members, an application re-mints
+/// with rewritten arguments, every other atom stays. `None` when any
+/// variable the shape names stays unbound — no atom spells it, so the
+/// caller leaves the generic it serves free.
+fn rewrite_set(
+    universe: &mut Universe,
+    subst: &[(TypeId, Vec<TypeId>)],
+    ty: Ty,
+) -> Option<Vec<TypeId>> {
+    // Rewriting mints through the universe, so the member set is read by
+    // index; minting appends and never moves an existing handle's set.
+    let len = universe.members(ty).len();
+    let mut out = Vec::with_capacity(len);
+    for index in 0..len {
+        let atom = universe.members(ty)[index];
+        if is_var(universe, atom) {
+            let (_, bound) = subst.iter().find(|(var, _)| *var == atom)?;
+            out.extend(bound.iter().copied());
+            continue;
+        }
+        let Ok(decl) = universe.atom_decl(atom) else {
+            out.push(atom);
+            continue;
+        };
+        match decl.kind {
+            AtomKind::Apply(ctor, ref args) => {
+                // the owned copy ends the declaration borrow before the
+                // rewriting mints through the universe
+                let owned: Vec<Ty> = args.to_vec();
+                let mut rewritten = Vec::with_capacity(owned.len());
+                for arg in owned {
+                    let members = rewrite_set(universe, subst, arg)?;
+                    rewritten.push(universe.set_ty(&members));
+                }
+                out.push(universe.apply_atom(ctor, &rewritten).ok()?);
+            },
+            _ => out.push(atom),
+        }
+    }
+    Some(out)
 }
 
 /// One step of a call site's transitive evidence chain (H3), over a
@@ -595,7 +670,7 @@ fn bind(subst: &mut Vec<(TypeId, Vec<TypeId>)>, var: TypeId, mut value: Vec<Type
 
 /// Whether one of the checker's minted type variables (an inference hole,
 /// never a data type): names of surface atoms cannot contain `$`.
-fn is_var(universe: &Universe, atom: TypeId) -> bool {
+pub(crate) fn is_var(universe: &Universe, atom: TypeId) -> bool {
     universe
         .atom_decl(atom)
         .is_ok_and(|decl| decl.name.starts_with('$'))

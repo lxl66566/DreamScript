@@ -29,14 +29,10 @@
 //! complete — live in the dispatcher (`crate::vm`); this module is the data
 //! representation and the per-fiber TCO/stack-limit accounting surface.
 
-use std::sync::Arc;
-
 use ds_abi::CodePc;
 use ds_rt::Arena;
 
-use crate::{
-    module::ModuleVersion, nursery::NurseryId, object::Objects, value::Word, vm::CallInfo,
-};
+use crate::{module::VersionIdx, nursery::NurseryId, object::Objects, value::Word, vm::CallInfo};
 
 /// Log2 of [`CHUNK_WORDS`]: chunk lookup is a shift and a mask.
 const CHUNK_SHIFT: usize = 8;
@@ -80,11 +76,13 @@ pub enum FiberState {
     Dead,
 }
 
-/// Where a parked fiber continues: the module version and function it was
-/// executing, and the instruction after the call that parked it.
+/// Where a parked fiber continues: the version-table row of the module
+/// version it was executing, the function, and the instruction after the
+/// call that parked it. The row costs no count and the table pins it while
+/// the fiber's resume point stands.
 #[derive(Debug)]
 pub(crate) struct ResumePoint {
-    pub(crate) version: Arc<ModuleVersion>,
+    pub(crate) version: VersionIdx,
     pub(crate) func: u32,
     pub(crate) pc: CodePc,
 }

@@ -4,6 +4,14 @@
 //! bare field span per struct, and a tag word plus a payload region per
 //! union. This module owns the mapping and the module-wide tag-id table.
 //!
+//! # The unit word
+//!
+//! A part-less struct spans one reserved word in every value position —
+//! an unnamed I64 word whose content is never written or read (the
+//! frame's inert zero holds it), so no value spans zero words and the
+//! ABI's RETSPAN minimum holds without exception (the unit-word
+//! ruling).
+//!
 //! # Union payload strategy (the M3 choice, per the golden fixtures)
 //!
 //! One payload region per union TYPE: each member's fields claim the
@@ -16,9 +24,13 @@
 //! `SlotType` for the union's life, and dead words are zero-initialized
 //! per word. The claim algorithm is span-generic — the inline-spans
 //! design, with the reboxing alternative rejected — and a struct-typed
-//! field claims its whole flattened word span (a multi-word field);
-//! union, tuple, and application field types still refuse, so those
-//! spans wait on the span channel.
+//! field claims its whole flattened word span (a multi-word field); a
+//! union-typed field claims the union's own tag-plus-region span, a
+//! tuple field one plain word per element (the tuple value
+//! vocabulary), and a heap-application field (`list[t]`, `map[k, v]`)
+//! its one Ref word — a member value stored into a union-typed field
+//! re-spans through the same tag/zero/write construction the
+//! annotated-binding widen uses.
 //!
 //! # Primitive atoms
 //!
@@ -49,7 +61,11 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 /// word, the runtime convention the list natives' separator pins.
 /// `byte` shares the integer slot [F6]: the word carries the 0-255
 /// value, while the checker holds it outside the int conversion family.
+/// `type` is the builtin comptime type-value atom (G1, G2): one `Tag`
+/// word carrying the evaluator's reflection index — never constructed
+/// at runtime, so the word only ever appears inside comptime evaluation.
 const PRIMITIVES: &[(&str, SlotType)] = &[
+    ("type", SlotType::Tag),
     ("int", SlotType::I64),
     ("byte", SlotType::I64),
     ("float", SlotType::F64),
@@ -103,6 +119,15 @@ struct PayloadField {
     name: Option<String>,
     /// The field's word types, in span order.
     slots: Vec<SlotType>,
+}
+
+/// The part-less struct's reserved word: one unnamed I64 word whose
+/// content is never written or read — the frame's inert zero holds it —
+/// so a part-less struct spans one word in every value position (the
+/// bare value, a struct-typed field, a union payload) and the one-word
+/// minimum holds without exception.
+fn reserved_word() -> PayloadField {
+    PayloadField::word(None, SlotType::I64)
 }
 
 impl PayloadField {
@@ -311,11 +336,7 @@ impl<'a> Shapes<'a> {
         // The member set is the analysis's own: reading it through the
         // analyzed reference keeps it borrowed across the shape walk below.
         let members = self.analyzed.decls.universe.members(ty);
-        let shape = match members {
-            [] => Shape::Word(SlotType::I64), // the empty type; never flows
-            [only] => self.atom_shape(*only)?,
-            _ => self.union_shape(members)?,
-        };
+        let shape = self.members_shape(members, 0)?;
         let shape = Rc::new(shape);
         self.cache.insert(ty, shape.clone());
         Ok(shape)
@@ -341,14 +362,28 @@ impl<'a> Shapes<'a> {
         if let Some(words) = self.member_cache.get(members) {
             return Ok(words.clone());
         }
-        let shape = match members {
-            [] => Shape::Word(SlotType::I64), // the empty type; never flows
-            [only] => self.atom_shape(*only)?,
-            _ => self.union_shape(members)?,
-        };
+        let shape = self.members_shape(members, 0)?;
         let words: SpanWords = shape_words(&shape).into();
         self.member_cache.insert(members.into(), words.clone());
         Ok(words)
+    }
+
+    /// The shape of one member list: the shared body of
+    /// [`shape`](Self::shape) and [`member_words`](Self::member_words),
+    /// and the union field's span walk's own entry. `depth` threads the
+    /// field-span budget through a union-typed field's members, so a
+    /// struct nesting through a union back into itself refuses typed at
+    /// the budget instead of recursing.
+    pub(crate) fn members_shape(
+        &mut self,
+        members: &[TypeId],
+        depth: usize,
+    ) -> Result<Shape, LowerError> {
+        Ok(match members {
+            [] => Shape::Word(SlotType::I64), // the empty type; never flows
+            [only] => self.atom_shape(*only)?,
+            _ => self.union_shape(members, depth)?,
+        })
     }
 
     /// A union span: the tag word plus the shared payload region, member
@@ -356,13 +391,13 @@ impl<'a> Shapes<'a> {
     /// strategy. A member's `claimed` set scopes to that member alone:
     /// members share region words by kind, one member's fields never
     /// share a word among themselves.
-    fn union_shape(&mut self, members: &[TypeId]) -> Result<Shape, LowerError> {
+    fn union_shape(&mut self, members: &[TypeId], depth: usize) -> Result<Shape, LowerError> {
         let mut region: Vec<SlotType> = Vec::new();
         let mut shapes = Vec::with_capacity(members.len());
         for atom in members {
             let tag = self.tag_id(*atom)?;
             self.guard_deinit_member(*atom)?;
-            let payload = self.payload_fields(*atom, 0)?;
+            let payload = self.payload_fields(*atom, depth)?;
             let mut claimed = vec![false; region.len()];
             let mut fields = Vec::with_capacity(payload.len());
             for field in payload {
@@ -475,7 +510,8 @@ impl<'a> Shapes<'a> {
     /// tags carry no payload; primitives carry their own word; struct
     /// members carry their declared fields, a struct-typed field carrying
     /// its whole flattened span; a tuple member carries one positional
-    /// word per element. Union and application field types refuse.
+    /// word per element. A field type the inline-span vocabulary cannot
+    /// spell refuses.
     fn payload_fields(
         &mut self,
         atom: TypeId,
@@ -498,6 +534,11 @@ impl<'a> Shapes<'a> {
                 Some(slot) => Ok(vec![PayloadField::word(None, slot)]),
                 None => Ok(Vec::new()),
             },
+            // A part-less struct's payload is its one reserved word
+            // (the unit-word ruling): an unnamed I64 word holding the
+            // frame's inert zero, never written and never read, so the
+            // shape's every value position spans at least one word.
+            ds_check::AtomKind::Struct(fields) if fields.is_empty() => Ok(vec![reserved_word()]),
             // Positional slots (tuple-payload enum cases [B3]) keep
             // their `None` name; the span places them by word offset.
             ds_check::AtomKind::Struct(fields) => fields
@@ -509,9 +550,9 @@ impl<'a> Shapes<'a> {
                     }),
                     None => Err(unsupported(
                         "a struct payload field",
-                        "struct fields lower as inline word spans of primitive, unit, or struct \
-                         type; union, tuple, and application field types stay outside the \
-                         inline-span vocabulary",
+                        "struct fields lower as inline word spans of primitive, unit, struct, \
+                         tuple, union, or heap-application type; this field's shape stays outside \
+                         the inline-span vocabulary",
                     )),
                 })
                 .collect(),
@@ -555,35 +596,76 @@ impl<'a> Shapes<'a> {
     }
 
     /// The word span of a written field type: a primitive or unit one
-    /// word, a type variable's Raw word, and a struct's whole flattened
-    /// inline span (its fields' spans concatenated). `None` is the shared
-    /// refusal: union, tuple, and application types stay outside the
-    /// inline-span vocabulary. `depth` bounds the recursion — a cyclic
-    /// field type has no finite span, and the budget refuses it typed
-    /// instead of recursing.
+    /// word, a type variable's Raw word, a struct's whole flattened
+    /// inline span (its fields' spans concatenated), a tuple's one plain
+    /// word per element, a union's own tag-plus-region span, and a heap
+    /// application's one Ref word. `None` is the shared refusal: any
+    /// other shape stays outside the inline-span vocabulary. `depth`
+    /// bounds the recursion — a cyclic field type has no finite span,
+    /// and the budget refuses it typed instead of recursing.
     fn field_span(
         &mut self,
         expr: &TypeExpr,
         depth: usize,
     ) -> Result<Option<Vec<SlotType>>, LowerError> {
         const SPAN_DEPTH_LIMIT: usize = 32;
-        let TypeExpr::Atom(id) = expr else {
-            return Ok(None);
-        };
+        if depth >= SPAN_DEPTH_LIMIT {
+            return Err(unsupported(
+                "a struct payload field",
+                "the field's inline span nests past the depth budget; a cyclic field type has no \
+                 finite span",
+            ));
+        }
+        match expr {
+            // one plain frame word per element — the tuple value
+            // vocabulary: a wider element (a nested tuple, a struct, a
+            // union) stays outside, exactly as a tuple literal's element
+            // does
+            TypeExpr::Tuple(elements) => {
+                let mut slots = Vec::with_capacity(elements.len());
+                for element in elements {
+                    match self.field_span(element, depth + 1)?.as_deref() {
+                        Some([only]) => slots.push(*only),
+                        _ => return Ok(None),
+                    }
+                }
+                Ok(Some(slots))
+            },
+            // the union's own span: tag word plus payload region, the
+            // same layout the checked reads shape
+            TypeExpr::Union(..) => {
+                let Some(members) = expr_members(expr) else {
+                    return Ok(None);
+                };
+                let shape = self.members_shape(&members, depth + 1)?;
+                Ok(Some(shape_words(&shape)))
+            },
+            TypeExpr::Atom(id) => self.atom_field_span(*id, depth),
+            _ => Ok(None),
+        }
+    }
+
+    /// The word span of a nominal field type, the atom half of
+    /// [`field_span`](Self::field_span).
+    fn atom_field_span(
+        &mut self,
+        id: TypeId,
+        depth: usize,
+    ) -> Result<Option<Vec<SlotType>>, LowerError> {
         let universe = &self.analyzed.decls.universe;
-        let Ok(decl) = universe.atom_decl(*id) else {
+        let Ok(decl) = universe.atom_decl(id) else {
             return Ok(None);
         };
-        if self.is_var_atom(*id) {
+        if self.is_var_atom(id) {
             return Ok(Some(vec![SlotType::Raw]));
         }
         if let Some(slot) = primitive_slot(&decl.name) {
             return Ok(Some(vec![slot]));
         }
-        match decl.kind {
+        match &decl.kind {
             ds_check::AtomKind::Unit => Ok(Some(vec![SlotType::I64])), // a unit word
             ds_check::AtomKind::Struct(_) => {
-                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(id)
+                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(&id)
                     && self.declared_deinits.contains(def)
                 {
                     return Err(unsupported(
@@ -593,17 +675,27 @@ impl<'a> Shapes<'a> {
                          own the seam",
                     ));
                 }
-                if depth >= SPAN_DEPTH_LIMIT {
-                    return Err(unsupported(
-                        "a struct payload field",
-                        "the field's inline span nests past the depth budget; a cyclic field type \
-                         has no finite span",
-                    ));
-                }
-                let payload = self.payload_fields(*id, depth + 1)?;
+                let payload = self.payload_fields(id, depth + 1)?;
                 Ok(Some(
                     payload.into_iter().flat_map(|field| field.slots).collect(),
                 ))
+            },
+            // a heap-reference application (a list, a map): the one Ref
+            // word `atom_shape` rules the bare value
+            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
+                Ok(Some(vec![SlotType::Ref]))
+            },
+            // an aliased tuple: the same one-word-per-element rule the
+            // written tuple spelling takes
+            ds_check::AtomKind::Tuple(elements) => {
+                let mut slots = Vec::with_capacity(elements.len());
+                for element in elements {
+                    match self.atom_shape(*element)? {
+                        Shape::Word(slot) => slots.push(slot),
+                        _ => return Ok(None),
+                    }
+                }
+                Ok(Some(slots))
             },
             _ => Ok(None),
         }
@@ -669,6 +761,44 @@ impl<'a> Shapes<'a> {
             .atom_decl(ctor)
             .is_ok_and(|decl| HEAP_REFS.contains(&decl.name.as_str()))
     }
+
+    /// The member entry a single-atom source writes into a union: the
+    /// direct entry when the union carries the atom itself, else the
+    /// one heap-application member sharing the source's constructor. A
+    /// written generic head keys its members by the variable's atom
+    /// (`int | list[$t]`) while the entering site carries the
+    /// substituted concrete value, whose word shape the member's
+    /// region carries identically — a heap application spans one Ref
+    /// word whatever its type argument, so the member's tag names the
+    /// value truthfully. Anything else (a struct or tuple member over
+    /// the variable, whose claimed words depend on the substitution)
+    /// answers None — the honest refusal — and two constructor-mates
+    /// (`list[t] | list[u]`) are ambiguous, answering None too.
+    pub(crate) fn member_for<'b>(
+        &self,
+        u: &'b UnionShape,
+        atom: TypeId,
+    ) -> Option<&'b MemberShape> {
+        if let Some(member) = u.member(atom) {
+            return Some(member);
+        }
+        let universe = &self.analyzed.decls.universe;
+        let decl = universe.atom_decl(atom).ok()?;
+        let ds_check::AtomKind::Apply(ctor, _) = &decl.kind else {
+            return None;
+        };
+        if !self.heap_ref(*ctor) {
+            return None;
+        }
+        let mut mates = u.members.iter().filter(|member| {
+            matches!(
+                universe.atom_decl(member.atom).ok().map(|decl| &decl.kind),
+                Some(ds_check::AtomKind::Apply(member_ctor, _)) if member_ctor == ctor
+            )
+        });
+        let only = mates.next()?;
+        mates.next().is_none().then_some(only)
+    }
 }
 
 /// The generic parameter name behind one minted type variable: the
@@ -725,6 +855,26 @@ fn word_of(index: usize) -> Result<u8, LowerError> {
 }
 
 /// The word types of one shape's span.
+/// The member atoms a written union of atoms names, read-only: an atom
+/// itself, or a union of such sides, sorted and deduplicated — the
+/// interned solved set's own order, so a field's layout is the one its
+/// checked reads shape. `None` marks a side the walk cannot name
+/// without solving (a tuple product, a trait constraint); those field
+/// types keep their refusal.
+pub(crate) fn expr_members(expr: &TypeExpr) -> Option<Vec<TypeId>> {
+    match expr {
+        TypeExpr::Atom(id) => Some(vec![*id]),
+        TypeExpr::Union(a, b) => {
+            let mut members = expr_members(a)?;
+            members.extend(expr_members(b)?);
+            members.sort();
+            members.dedup();
+            Some(members)
+        },
+        _ => None,
+    }
+}
+
 fn shape_words(shape: &Shape) -> Vec<SlotType> {
     match shape {
         Shape::Word(slot) => vec![*slot],
@@ -1007,6 +1157,71 @@ mod tests {
                 (Some("n".into()), vec![I64], 2),
             ]
         );
+    }
+
+    /// A part-less struct spans its one reserved word in every value
+    /// position: the bare value's shape carries the unnamed I64 field
+    /// at word 0, a struct-typed field of the shape claims one word of
+    /// the enclosing inline span, and a union member of the shape
+    /// claims one region word — so no value position spans zero words
+    /// and a fn returning the shape never lowers an empty RETSPAN.
+    #[test]
+    fn a_partless_struct_spans_its_reserved_word_everywhere() {
+        let src = concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct marker {}\n",
+            "struct holder { m: marker, n: int }\n",
+            "tag miss\n",
+            "extern fn println (msg: string) -> ()\n",
+            "fn make() -> marker { marker {} }\n",
+            "fn make_h() -> holder { holder { m: marker {}, n: 1 } }\n",
+            "fn tag_of(u: marker | miss) -> () {\n",
+            "  match u {\n",
+            "    marker {} => println(\"m\"),\n",
+            "    miss => println(\"x\"),\n",
+            "  }\n",
+            "}\n",
+        );
+        let bare = shape_of(src, "marker");
+        let Shape::Struct(s) = &*bare else {
+            panic!("the part-less struct is a bare struct shape");
+        };
+        assert_eq!(s.fields, [MemberField {
+            name: None,
+            slots: vec![I64],
+            word: 0,
+        }]);
+        let held = shape_of(src, "holder");
+        let Shape::Struct(h) = &*held else {
+            panic!("holder is a bare struct shape");
+        };
+        assert_eq!(h.fields, [
+            MemberField {
+                name: Some("m".into()),
+                slots: vec![I64],
+                word: 0,
+            },
+            MemberField {
+                name: Some("n".into()),
+                slots: vec![I64],
+                word: 1,
+            },
+        ]);
+        let union = shape_of(src, "marker | miss");
+        let Shape::Union(u) = &*union else {
+            panic!("the probe union is a union shape");
+        };
+        let marker = u
+            .members
+            .iter()
+            .find(|m| m.fields.len() == 1)
+            .expect("the part-less member claims one region word");
+        assert_eq!(marker.fields, [MemberField {
+            name: None,
+            slots: vec![I64],
+            word: 1,
+        }]);
     }
 
     #[test]

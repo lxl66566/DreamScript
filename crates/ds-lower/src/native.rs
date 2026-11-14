@@ -48,7 +48,16 @@ pub(crate) enum NativeModule {
     /// The platform handler: the world surface, served by the host's
     /// installed platform under the declaration's name.
     Platform,
+    /// The comptime reflection module (G1, G2): served only by the
+    /// comptime evaluator's fenced VMs, never installed at runtime —
+    /// the checker refuses the builtins outside comptime functions, so
+    /// a runtime module never carries a reference to it.
+    Comptime,
 }
+
+/// The comptime reflection module's reserved name, matching the VM's
+/// `ds_vm::comptime::COMPTIME_MODULE`.
+pub(crate) const COMPTIME_MODULE_NAME: &str = "comptime";
 
 /// A native's result shape on the caller's overlay words.
 #[derive(Clone, Copy, Debug)]
@@ -281,6 +290,18 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: 55,
         shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        name: "fields",
+        module: NativeModule::Comptime,
+        index: 0,
+        shape: NativeShape::Total(SlotType::Ref), // the record list
+    },
+    Native {
+        name: "type_name",
+        module: NativeModule::Comptime,
+        index: 1,
+        shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
         name: "read_file",
@@ -719,10 +740,12 @@ mod drift {
     fn natives_match_the_vm_native_tables() {
         let core = ds_vm::native::builtin_module();
         let platform = ds_vm::platform::platform_module(&ds_vm::platform::Platform::std());
+        let comptime = ds_vm::comptime::comptime_module();
         for native in NATIVES {
             let table = match native.module {
                 NativeModule::Builtin => &core,
                 NativeModule::Platform => &platform,
+                NativeModule::Comptime => &comptime,
             };
             assert!(
                 (native.index as usize) < table.len(),

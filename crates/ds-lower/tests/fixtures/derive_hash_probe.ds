@@ -7,7 +7,10 @@
 // float through the fold native (which normalizes -0.0 to +0.0 and the
 // NaNs to one canonical payload, so bit-structurally equal floats hash
 // equal [B9]; the -0.0 operand is spelled arithmetically, 0.0 / (0.0 -
-// 1.0), since float negation is not in the lowering contract), string
+// 1.0), since float negation is not in the lowering contract, and the
+// payloaded NaN pair rides main's float params as host-supplied entry
+// args, since ds-source arithmetic only spells the one platform NaN
+// pattern), string
 // and char through the FNV-1a natives, byte through its decimal text.
 // A union-typed binding dispatches through the sibling branches of the
 // one written head.
@@ -85,7 +88,7 @@ fn keyed[t: hash](v: t) -> int { v.hash() }
 
 fn hash_f(f: float) -> int { f.hash() }
 
-fn main() -> int {
+fn main(na: float, nb: float) -> int {
   const a = point { x: 1, y: 2 }
   println(str(a.hash()))
   println(str(hash::hash(a)))
@@ -104,5 +107,6 @@ fn main() -> int {
   println(str(u2.hash()))
   println(str(hash_f(0.0) == hash_f(0.0 / (0.0 - 1.0))))
   println(str(hash_f(0.0 / 0.0) == hash_f(0.0 / 0.0 + 1.0)))
+  println(str(hash_f(na) == hash_f(nb)))
   0
 }

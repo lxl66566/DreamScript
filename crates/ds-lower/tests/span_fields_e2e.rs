@@ -190,22 +190,22 @@ fn a_tuple_member_binds_positionally_over_the_region() {
 /// one-word native seams.
 #[test]
 fn the_refusal_openings_keep_their_honest_names() {
-    // a union-typed struct field: the inline-span vocabulary refuses it
-    // (the literal forces the field's shape)
+    // a tuple product over a union element: the inline-span vocabulary
+    // refuses it (the literal forces the field's shape)
     refuses(
         "refuse_union_field",
         concat!(
             "tag int\n",
             "tag string\n",
-            "struct outer { x: int | string }\n",
+            "struct outer { x: (int | string, int) }\n",
             "fn main() -> () {\n",
-            "  const box = outer { x: 1 }\n",
+            "  const box = outer { x: (1, 2) }\n",
             "  println(\"unreachable\")\n",
             "}\n",
             "extern fn println (msg: string) -> ()\n",
         ),
         "a struct payload field",
-        "union, tuple, and application field types stay outside",
+        "this field's shape stays outside the inline-span vocabulary",
     );
     // a tuple whose element type spans words: the tuple vocabulary keeps
     // one word per element

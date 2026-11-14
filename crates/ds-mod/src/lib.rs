@@ -40,8 +40,11 @@
 //! (the module-level constants section and every per-function pool): a tag
 //! byte then the value — 0 = i64 (8 bytes LE), 1 = f64 (8 bytes LE, bit
 //! pattern), 2 = bool (1 byte), 3 = UTF-8 string (uleb length + bytes),
-//! 4 = FuncRef (uleb-length module name, empty for the enclosing module,
-//! then a uleb function index within that module's blocks payload).
+//! 4 = FuncRef (a key selector byte then the key: selector 0 a uleb
+//! dependency-list position, 0 the enclosing module itself, `n` the
+//! `n-1`-th dependency entry; selector 1 a uleb-length native-surface
+//! name), then a uleb function index within the addressed module's
+//! blocks payload.
 //!
 //! The section directory lists kinds in the writer's canonical order
 //! (blocks, constants, type metadata, effect rows, then optionally debug
@@ -57,17 +60,17 @@
 //! checksum) are committed fields with pending values: writers emit 0
 //! until M3 defines their computation, and the reader accepts and
 //! round-trips non-zero values without validating them. The blocks payload
-//! is version 1 (below); the type-metadata and effect-rows payloads remain
+//! is version 3 (below); the type-metadata and effect-rows payloads remain
 //! versioned minimal placeholders (payload version 0 plus a reserved zero
 //! uleb), completed at M2/M3 inside the locked framing by bumping their
 //! per-section payload version. Debug spans are a list of byte-offset
 //! spans into the source and the only strippable section: a module built
 //! with [`Flags::STRIP`] set carries no debug-spans section.
 //!
-//! # Blocks payload, version 1 [BL-5, BL-6, BL-7]
+//! # Blocks payload, version 3 [BL-5, BL-6, BL-7]
 //!
 //! ```text
-//! u8    payload version = 1
+//! u8    payload version = 3
 //! uleb  function count
 //! per function:
 //!   uleb len + UTF-8   local function name (the qualified module path is
@@ -86,6 +89,20 @@
 //!   u32 + u32          entry-descriptor placeholder word pair: zero on
 //!                      disk, filled with tier pointers by the loader at
 //!                      install time
+//! uleb  evidence-chain count, then per chain (the chain table the staged
+//!      evidence words index; version 2's addition):
+//!   uleb               serving body's function-table index
+//!   uleb               tail count, then one uleb chain-table index per
+//!                      the serving body's evidence pairs
+//! uleb  tag-table count (the name side of the code's tag ids; version
+//!      3's addition), then per row:
+//!   uleb len + UTF-8   member atom's declared name
+//!   uleb               the module-wide tag id
+//! uleb  entry-table count (which top-level names are run entries and how
+//!      their parameters stage), then per entry:
+//!   uleb len + UTF-8   entry name
+//!   uleb               plan count, then one plan byte per parameter:
+//!                      Int=0, Float=1, Bool=2, OptionalInt=3, Foreign=4
 //! ```
 //!
 //! Read-side validation: every code word must decode at its pc — uops and
@@ -126,7 +143,10 @@ pub use cache::cache_path;
 pub use hash::Hash128;
 pub use header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass};
 pub use mmap::{LoadError, MappedModule, read_mmap};
-pub use module::{Constant, DebugSpan, Function, FunctionError, Module};
+pub use module::{
+    Constant, DebugSpan, EntryArg, EntryPlan, EvidenceChain, FuncRefKey, Function, FunctionError,
+    MemberTag, Module,
+};
 pub use read::{ReadError, read, read_checked};
 pub use write::write;
 
@@ -138,7 +158,10 @@ pub const MAGIC: [u8; 4] = *b"\0DSM";
 /// Version 2 commits the BL-7 module-level scalars (max call depth at
 /// offset 24, IR-version checksum at offset 28) in the fixed header
 /// prefix. Version 3 adds the FuncRef constants-pool kind (tag 4) for
-/// qualified callees; the constants payload is locked and carries no
-/// payload version of its own, so any change visible in it bumps this
-/// version. Files of older versions are rejected.
-pub const FORMAT_VERSION: u8 = 3;
+/// qualified callees. Version 4 makes that FuncRef selector-led: a
+/// dependency-position key (0 the enclosing module) addresses uop
+/// dependencies, a native-by-name key covers the native surfaces; the
+/// constants payload is locked and carries no payload version of its
+/// own, so any change visible in it bumps this version. Files of older
+/// versions are rejected.
+pub const FORMAT_VERSION: u8 = 4;

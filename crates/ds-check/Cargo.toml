@@ -21,6 +21,7 @@ rustc-hash = "2"
 
 [dev-dependencies]
 ds-stdlib.workspace = true
+ds-corpus-path.workspace = true
 # the fuzz mirrors render `render::to_json`
 ds-diag             = { path = "../ds-diag", features = ["json"] }
 

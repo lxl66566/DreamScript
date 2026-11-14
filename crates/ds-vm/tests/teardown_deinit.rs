@@ -14,7 +14,8 @@
 //! name.
 
 use ds_vm::{
-    Const, FIBER_ROOT, FiberId, FunctionDef, ModuleRegistry, ModuleVersion, Platform, Value, Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FiberId, FunctionDef, ModuleRegistry, ModuleVersion, Platform,
+    Value, Vm,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble, native,
 };
@@ -39,10 +40,10 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Inst]
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// The observer hook `res$deinit`: one borrowed `Ref` parameter (the
@@ -68,10 +69,10 @@ fn observer_deinit() -> FunctionDef {
         ],
     );
     hook.pool = vec![
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::Bool(false),
     ];
     hook
@@ -155,14 +156,14 @@ fn a_cancel_cut_child_fires_its_kept_deinit_at_the_cut() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -223,10 +224,10 @@ fn a_cancel_cut_child_fires_its_kept_deinit_at_the_cut() {
     cut_child.pool = vec![
         Const::Str("cut value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -311,10 +312,10 @@ fn a_trapped_child_fires_its_kept_deinit_at_the_death_walk() {
         builtin(BUILTIN_NURSERY_OPEN),
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -358,10 +359,10 @@ fn a_trapped_child_fires_its_kept_deinit_at_the_death_walk() {
     child.pool = vec![
         Const::Str("trapped value".into()),
         builtin(BUILTIN_NURSERY_CANCEL),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
     ];
 
     let version =
@@ -443,14 +444,14 @@ fn a_teardown_hook_that_dies_refuses_and_the_drain_still_empties() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -505,10 +506,10 @@ fn a_teardown_hook_that_dies_refuses_and_the_drain_still_empties() {
     cut_child.pool = vec![
         Const::Str("never printed".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -599,14 +600,14 @@ fn a_looping_teardown_hook_under_a_raised_flag_refuses_at_the_back_edge() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -661,10 +662,10 @@ fn a_looping_teardown_hook_under_a_raised_flag_refuses_at_the_back_edge() {
     cut_child.pool = vec![
         Const::Str("loop value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -762,14 +763,14 @@ fn a_teardown_hook_that_spawns_refuses_and_the_drain_still_empties() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -837,14 +838,14 @@ fn a_teardown_hook_that_spawns_refuses_and_the_drain_still_empties() {
         Const::Str("spawn value".into()),
         Const::Str("second value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 4,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -890,17 +891,17 @@ fn a_teardown_hook_that_spawns_refuses_and_the_drain_still_empties() {
     );
     let mut spawn_hook = spawn_hook;
     spawn_hook.pool = vec![
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::Str("before spawn".into()),
         builtin(BUILTIN_NURSERY_SPAWN),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 5,
-        },
+        }),
         Const::Str("after spawn".into()),
         Const::Bool(false),
     ];
@@ -1022,20 +1023,20 @@ fn a_teardown_hook_that_joins_refuses_and_the_drive_stays_silent() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 4,
-        },
+        }),
     ];
 
     let flag_child = def(
@@ -1088,10 +1089,10 @@ fn a_teardown_hook_that_joins_refuses_and_the_drive_stays_silent() {
     cut_child.pool = vec![
         Const::Str("join value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -1131,10 +1132,10 @@ fn a_teardown_hook_that_joins_refuses_and_the_drive_stays_silent() {
     );
     let mut join_hook = join_hook;
     join_hook.pool = vec![
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::Str("before join".into()),
         builtin(BUILTIN_NURSERY_JOIN),
         Const::I64(1),
@@ -1165,10 +1166,10 @@ fn a_teardown_hook_that_joins_refuses_and_the_drive_stays_silent() {
     let mut plain = plain;
     plain.pool = vec![
         Const::Str("b ran".into()),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -1236,10 +1237,10 @@ fn a_trapped_root_fires_its_kept_deinit_at_the_next_runs_reset() {
     let mut boom = boom;
     boom.pool = vec![
         Const::Str("root value".into()),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -1340,14 +1341,14 @@ fn two_kept_deinits_fire_in_directory_order_across_repeated_runs() {
             builtin(BUILTIN_NURSERY_SPAWN),
             builtin(BUILTIN_NURSERY_BOUNDARY),
             Const::I64(0),
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "dwh".into(),
                 func: 1,
-            },
-            Const::FuncRef {
+            }),
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "dwh".into(),
                 func: 2,
-            },
+            }),
             Const::I64(0),
             Const::I64(1),
         ];
@@ -1415,10 +1416,10 @@ fn two_kept_deinits_fire_in_directory_order_across_repeated_runs() {
             Const::Str("first".into()),
             Const::Str("second".into()),
             Const::Bool(true),
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "dwh".into(),
                 func: 3,
-            },
+            }),
             Const::I64(0),
         ];
 
@@ -1542,20 +1543,20 @@ fn band_cut_module(cut_child: FunctionDef, hook: FunctionDef, extra: Option<Func
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 4,
-        },
+        }),
     ];
 
     let flag_child = def(
@@ -1618,10 +1619,10 @@ fn marker_deinit() -> FunctionDef {
         ],
     );
     hook.pool = vec![
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::Str("counted value".into()),
         Const::Bool(false),
     ];
@@ -1669,10 +1670,14 @@ fn an_int_only_claim_fires_once_at_the_cut_and_the_recycle_stays_silent() {
     );
     let mut cut_child = cut_child;
     // [0] the value, [1] the loop condition, [2] the hook
-    cut_child.pool = vec![Const::I64(7), Const::Bool(true), Const::FuncRef {
-        module: "dwh".into(),
-        func: 3,
-    }];
+    cut_child.pool = vec![
+        Const::I64(7),
+        Const::Bool(true),
+        Const::FuncRef(ConstFuncRef::Named {
+            module: "dwh".into(),
+            func: 3,
+        }),
+    ];
 
     let expected = b"counted value\n";
     for _ in 0..5 {
@@ -1758,10 +1763,10 @@ fn a_dead_claim_with_an_outstanding_borrow_fires_only_its_ordinary_death() {
     cut_child.pool = vec![
         Const::Str("died value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 3,
-        },
+        }),
     ];
 
     let mut vm = band_cut_module(cut_child, observer_deinit(), None);
@@ -1825,10 +1830,10 @@ fn a_moved_claim_stays_silent_at_the_cut() {
     cut_child.pool = vec![
         Const::Str("moved value".into()),
         Const::Bool(true),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 5,
-        },
+        }),
     ];
 
     // the mover: holds the word and loops on a backward branch, so the
@@ -1912,10 +1917,10 @@ fn an_int_only_trapped_child_fires_at_the_death_marking() {
     child.pool = vec![
         Const::I64(9),
         builtin(native::BUILTIN_NURSERY_CANCEL),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 2,
-        },
+        }),
     ];
 
     let parent = def(
@@ -1960,10 +1965,10 @@ fn an_int_only_trapped_child_fires_at_the_death_marking() {
         builtin(native::BUILTIN_NURSERY_OPEN),
         builtin(native::BUILTIN_NURSERY_SPAWN),
         builtin(native::BUILTIN_NURSERY_BOUNDARY),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
     ];
@@ -2038,10 +2043,10 @@ fn an_int_only_root_claim_fires_at_the_next_runs_reset() {
     // [0] the value, [1] the hook, [2] the zero divisor
     boom.pool = vec![
         Const::I64(5),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dwh".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -2159,14 +2164,14 @@ fn a_recycle_door_over_a_live_spawner_returns_to_the_spawner() {
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_JOIN),
         Const::I64(0),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dws".into(),
             func: 1,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dws".into(),
             func: 3,
-        },
+        }),
         Const::I64(0),
     ];
 
@@ -2212,10 +2217,10 @@ fn a_recycle_door_over_a_live_spawner_returns_to_the_spawner() {
     trapped_child.pool = vec![
         Const::Str("held value".into()),
         builtin(native::BUILTIN_NURSERY_CANCEL),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dws".into(),
             func: 2,
-        },
+        }),
     ];
 
     let plain_child = def("plain_child", &[SlotType::I64], 0, 0, &[

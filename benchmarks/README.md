@@ -28,20 +28,20 @@ benchmarks/run.sh check                  # correctness: all kernels, all availab
 benchmarks/run.sh bench                  # wall-clock table, one run per kernel per interpreter
 ```
 
-`check` compares each interpreter's final `result:` line against `<name>.golden` and exits nonzero on any mismatch; a missing interpreter prints a `SKIP` line and is not a failure. The ds binary is found at `../target/release/ds` relative to `benchmarks/` (`.exe` on Windows); set `DS_BIN` to point elsewhere, e.g. at a shared `CARGO_TARGET_DIR` worktree build. Optional arguments filter kernels: `run.sh check fib strings`.
+`check` compares each interpreter's final `result:` line against `<name>.golden` and exits nonzero on any mismatch; a missing interpreter prints a `SKIP` line and is not a failure. The ds binary is found at `../target/release/ds` relative to `benchmarks/` (`.exe` on Windows); set `DS_BIN` to point elsewhere, e.g. at a shared `CARGO_TARGET_DIR` worktree build. Optional arguments filter kernels: `run.sh check fib strings`. Every ds invocation forces the cold path (`--no-cache`): the suite measured the full pipeline before the script-mode dsmod cache existed, the timings stay comparable, and no run inherits or writes a user cache directory.
 
 The runner is POSIX sh and runs under git bash on Windows and on Linux. Timing uses `date +%s%N` wall clock, so platforms without GNU date cannot time. Interpreter versions matter: record the versions you benched with (python/python3, lua or lua5.4/5.3, node) alongside any results you keep — the runner does not pin them.
 
 ## Startup
 
-`startup.sh bench` times three fixed ds cold-start stages as medians over N runs (default 30; `-n` to change, `--json` for one machine-readable line per metric). `floor` (`ds --version`) isolates the process + allocator floor under the harness; `trivial` (`startup/trivial.ds`, three arithmetic statements and one print) adds front-end + check + lower + VM entry; `small-real` (`startup/small-real.ds`, a list literal, a map through the interim constructor, one reduce) adds the first-allocations cost. The adjacent deltas are the diagnostic: `trivial - floor` is compiler-pipeline entry cost, `small-real - trivial` is first-allocation cost. On Windows git bash the floor includes the msys fork/exec overhead — compare deltas across stages, not the floor against other platforms.
+`startup.sh bench` times three fixed ds cold-start stages plus the script-cache hit stage as medians over N runs (default 30; `-n` to change, `--json` for one machine-readable line per metric). `floor` (`ds --version`) isolates the process + allocator floor under the harness; `trivial` (`startup/trivial.ds`, three arithmetic statements and one print) adds front-end + check + lower + VM entry; `small-real` (`startup/small-real.ds`, a list literal, a map through the interim constructor, one reduce) adds the first-allocations cost; `warm` runs the trivial fixture served from the script-mode dsmod cache (a private `DS_CACHE` root primed untimed), so `warm - floor` is the artifact load + install + execute cost. The cold stages force `--no-cache`, so they never inherit or write a user cache and stay comparable with the pre-cache suite. The adjacent deltas are the diagnostic: `trivial - floor` is compiler-pipeline entry cost, `small-real - trivial` is first-allocation cost, `trivial - warm` is what the cache deletes of the front end. On Windows git bash the floor includes the msys fork/exec overhead — compare deltas across stages, not the floor against other platforms.
 
 ```sh
 benchmarks/startup.sh bench                 # median/min/p95 table, ms
 DS_BIN=<ds> benchmarks/startup.sh bench --json -n 50
 ```
 
-DS_BIN resolution and the `date +%s%N` wall clock follow run.sh; the fixtures sit at `ds fmt`'s canonical form. Every timed run's `result:` line is checked against the fixture's `.golden` and any mismatch or nonzero exit fails loudly — a wrong-result benchmark is worse than none. The mmap-hit variant arrives with M7 loading. Numbers are never committed: performance rounds record the three startup medians in the commit message alongside the other gate numbers.
+DS_BIN resolution and the `date +%s%N` wall clock follow run.sh; the fixtures sit at `ds fmt`'s canonical form. Every timed run's `result:` line is checked against the fixture's `.golden` and any mismatch or nonzero exit fails loudly — a wrong-result benchmark is worse than none. Numbers are never committed: performance rounds record the startup medians in the commit message alongside the other gate numbers.
 
 ## Rules
 

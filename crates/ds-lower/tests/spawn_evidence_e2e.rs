@@ -1,11 +1,11 @@
 //! Runtime evidence across spawned-child frames end to end: a spawn
-//! lexically inside a generic impl member body stages the pair's whole
-//! evidence area — the serving member body's slot plus its follow words
-//! — from the enclosing frame's evidence slots into the child's entry
+//! lexically inside a generic impl member body stages the pair's
+//! evidence word — the chain object's index — from the enclosing
+//! frame's evidence slot into the child's entry
 //! argument area beside the captures (the closure object's capture
 //! block becomes the spawned fiber's entry arguments verbatim, so the
 //! words ride the entry frame the VM writes). A lambda lexically
-//! inside the spawned body stages the same words again from the child
+//! inside the spawned body stages the same word again from the child
 //! frame's slots into its capture block, so a demand crosses two child
 //! boundaries. The residual keeps its honest refusal in
 //! `generic_impl_refusals.rs`: a serving body whose spawned subtrees
@@ -15,7 +15,7 @@ use ds_abi::{SlotType, Uop};
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Constant, Hash128, read_checked, write};
+use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -89,7 +89,10 @@ fn evidence_slot(lowered: &Lowered, body: &str) -> u32 {
         .find_map(|op| match op {
             PlacedOp::Uop(Uop::Callg { callee, .. } | Uop::Calltg { callee, .. }) => {
                 match &pool[usize::from(callee.0)] {
-                    Constant::FuncRef { module, func } if module == "$evidence" => Some(*func),
+                    Constant::FuncRef {
+                        key: FuncRefKey::Native(module),
+                        func,
+                    } if module == "$evidence" => Some(*func),
                     _ => None,
                 }
             },
@@ -134,10 +137,10 @@ fn spawned_children_run_the_evidence_shape() {
 }
 
 /// The lowered evidence flow, pinned: the spawn site's closure
-/// construction carries the captures plus the pair's whole evidence
-/// area (the slot and two follow words), the child frame declares that
-/// area as its trailing entry parameters (the entry argument area's
-/// words), and the child's own dispatch reads the trailing slot.
+/// construction carries the captures plus the pair's evidence word (the
+/// chain word), the child frame declares that word as its trailing
+/// entry parameter (the entry argument area's words), and the child's
+/// own dispatch reads the trailing slot.
 #[test]
 fn the_spawn_site_stages_the_entry_evidence_words() {
     let lowered = lower_probe("spawn_evidence_probe.ds", SPAWN_PROBE);
@@ -145,7 +148,7 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
     let placed = lowered.placed(body).expect("the member body lowers");
     // the spawn site stages the child's entry area: n names the capture
     // block's words — two real captures (the element word and the shared
-    // list) plus the pair's slot and two follow words
+    // list) plus the pair's one chain word
     let closures: Vec<u8> = placed
         .iter()
         .filter_map(|op| match op {
@@ -155,11 +158,11 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
         .collect();
     assert_eq!(
         closures,
-        vec![5],
-        "one spawn over two captures and the pair's three-word evidence area"
+        vec![3],
+        "one spawn over two captures and the pair's one-word evidence"
     );
-    // the child frame declares the area as trailing entry parameters:
-    // params_len covers the captures plus the evidence words, all I64
+    // the child frame declares the word as a trailing entry parameter:
+    // params_len covers the captures plus the evidence word, all I64
     // trailing the element's raw word and the list's Ref word
     let child = the_spawn_child(&lowered, body);
     let index = lowered
@@ -168,14 +171,14 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
     let function = &lowered.module().functions()[index as usize];
     assert_eq!(
         function.layout().params_len(),
-        5,
-        "the entry argument area carries two captures plus the evidence area"
+        3,
+        "the entry argument area carries two captures plus the evidence word"
     );
     let slots = function.layout().slots();
     assert_eq!(
-        slots[2..5],
-        [SlotType::I64; 3],
-        "the pair's slot and follow words bind as the entry area's trailing words"
+        slots[2..3],
+        [SlotType::I64; 1],
+        "the pair's chain word binds as the entry area's trailing word"
     );
     // the child's nested element call dispatches from its own entry-area
     // slot — the sentinel names the trailing evidence word
@@ -187,8 +190,8 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
 }
 
 /// A lambda inside the spawned body demands transitively: the spawn
-/// carries the pair's area into the child's entry words, the lambda's
-/// construction stages them again from the child frame's slot into its
+/// carries the pair's word into the child's entry words, the lambda's
+/// construction stages it again from the child frame's slot into its
 /// capture block, and both instantiations run through the two child
 /// boundaries.
 #[test]
@@ -210,9 +213,9 @@ fn a_nested_lambda_inside_the_spawned_body_demands_transitively() {
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    // the child frame carries the area as its trailing entry words and
-    // the lambda's closure carries them onward: its construction stages
-    // no real captures, only the pair's three words
+    // the child frame carries the word as its trailing entry word and
+    // the lambda's closure carries it onward: its construction stages
+    // no real captures, only the pair's one word
     let child = the_spawn_child(&lowered, "shows#list[t]#show");
     let placed = lowered.placed(&child).expect("the child lowers");
     let closures: Vec<u8> = placed
@@ -224,8 +227,8 @@ fn a_nested_lambda_inside_the_spawned_body_demands_transitively() {
         .collect();
     assert_eq!(
         closures,
-        vec![3],
-        "the lambda's capture block carries the pair's area alone"
+        vec![1],
+        "the lambda's capture block carries the pair's word alone"
     );
     let mut lambdas: Vec<String> = lowered
         .functions()

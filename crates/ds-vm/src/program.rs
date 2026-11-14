@@ -31,22 +31,43 @@ pub enum Const {
     F64(f64),
     /// A bool immediate.
     Bool(bool),
-    /// A fully-qualified callee: the target module plus the function's index
-    /// in that module's function table. This is the skeleton-registry form
-    /// of the contract's "module index + function index" FuncRef: modules
-    /// are name-keyed until the M7 loading round's link table assigns
-    /// module indices [BL-7], and the function index is the entry-descriptor word-0
-    /// convention. Resolution goes through the target module's current slot,
-    /// so a hot-reload swap redirects subsequent calls [H6 item 5].
-    FuncRef {
+    /// A pool callee, the contract's "module index + function index"
+    /// FuncRef: the module half names an installed uop module by its
+    /// registry id or a native surface by its name, and the function
+    /// index is the entry-descriptor word-0 convention [BL-7].
+    FuncRef(ConstFuncRef),
+    /// A string constant riding the pool; KSTR loads it as an interned
+    /// heap string reference.
+    Str(String),
+}
+
+/// The callee half of a pool [`Const::FuncRef`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstFuncRef {
+    /// An installed uop callee: the registry module id the dsmod install
+    /// resolved from the payload's dep-position key — position 0 the
+    /// enclosing module, `n` the `n-1`-th dependency entry — plus the
+    /// callee's function index. The id is per-VM install state, never
+    /// serialized into any artifact; issue-time resolution reads the
+    /// id's current slot, so a hot-reload swap redirects the next call
+    /// [H6 item 5].
+    Uop {
+        /// The callee module's registry id.
+        module: u32,
+        /// The callee's function-table index.
+        func: u32,
+    },
+    /// A name-keyed callee resolved at issue time: the native surfaces
+    /// always (the `builtin` core, the platform handler, the
+    /// `$evidence` dispatch sentinel — their own tables, never the id
+    /// space), and a directly installed module (the host API path,
+    /// resolved through the name's current slot like the natives).
+    Named {
         /// The callee module's name.
         module: String,
         /// The callee's function-table index.
         func: u32,
     },
-    /// A string constant riding the pool; KSTR loads it as an interned
-    /// heap string reference.
-    Str(String),
 }
 
 impl Const {
@@ -57,7 +78,7 @@ impl Const {
             Self::I64(_) => ConstKind::I64,
             Self::F64(_) => ConstKind::F64,
             Self::Bool(_) => ConstKind::Bool,
-            Self::FuncRef { .. } => ConstKind::FuncRef,
+            Self::FuncRef(_) => ConstKind::FuncRef,
             Self::Str(_) => ConstKind::Str,
         }
     }

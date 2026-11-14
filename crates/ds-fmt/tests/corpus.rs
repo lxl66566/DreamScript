@@ -5,8 +5,6 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use common::{POSITIVE, fmt_once, shape};
 use ds_diag::Files;
 use ds_fmt::format_source;
@@ -44,7 +42,7 @@ fn check(name: &str, src: &str) {
 
 #[test]
 fn conformance_corpus_round_trips() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let dir = ds_corpus_path::dir();
     let entries = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("conformance corpus missing at {}: {e}", dir.display()));
     let mut checked = 0usize;

@@ -116,6 +116,10 @@ error_codes! {
     ScriptMainConflict => "DS1015", Parse,
     /// A match guard's bare identifier directly before `=>` is read as a bare-parameter lambda; parenthesize the guard expression.
     GuardTailLambda => "DS1016", Parse,
+    /// A lambda arrow chain deeper than the parser's unbracketed recursion budget.
+    ArrowChainTooDeep => "DS1017", Parse,
+    /// An `else if` chain deeper than the parser's unbracketed recursion budget.
+    ElseChainTooDeep => "DS1018", Parse,
 
     /// Value's type is not contained in the expected type.
     TypeMismatch => "DS2001", Type,
@@ -175,9 +179,16 @@ error_codes! {
     DeriveNonDataItem => "DS2028", Type,
     /// A derive on a declaration carrying its own type parameters; the synthesized member reads its parts through those variables, which the one-body-per-impl runtime seam cannot carry (per-instantiation frames are the JIT tier's).
     DeriveGenericRefused => "DS2029", Type,
-    /// A `clone` derive on a part-less struct; the member's Self return would lower to a zero-width RETSPAN, which the ABI refuses (a value must occupy at least one word; plain fns returning one share the hole).
-    DeriveClonePartless => "DS2030", Type,
-
+    /// A parameter annotated `type` without the `comptime` mode; type values exist only inside comptime evaluation (G1, G2).
+    TypeParamNotComptime => "DS2030", Type,
+    /// A `comptime` parameter outside the round-one shape: every parameter comptime and `type`-annotated, on a free fn (the message names the broken clause).
+    ComptimeParamShape => "DS2031", Type,
+    /// A type name used as a value, or a reflection builtin called, outside a comptime evaluation context (G2).
+    ComptimeValueOutside => "DS2032", Type,
+    /// A world-touching call inside a comptime function: the evaluation's fence refuses it as a compile error (G1).
+    ComptimeFenceRefusal => "DS2033", Type,
+    /// The comptime evaluator's honest refusals: an argument shape it does not stage, a result it cannot embed, or a trap the fenced run raised.
+    ComptimeEvalRefusal => "DS2034", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -246,6 +257,8 @@ mod tests {
             ("TopLevelStatement", "DS1014", ErrorClass::Parse),
             ("ScriptMainConflict", "DS1015", ErrorClass::Parse),
             ("GuardTailLambda", "DS1016", ErrorClass::Parse),
+            ("ArrowChainTooDeep", "DS1017", ErrorClass::Parse),
+            ("ElseChainTooDeep", "DS1018", ErrorClass::Parse),
             ("TypeMismatch", "DS2001", ErrorClass::Type),
             ("InferenceFailed", "DS2002", ErrorClass::Type),
             ("NonExhaustiveMatch", "DS2003", ErrorClass::Type),
@@ -275,7 +288,11 @@ mod tests {
             ("DeriveEqRefused", "DS2027", ErrorClass::Type),
             ("DeriveNonDataItem", "DS2028", ErrorClass::Type),
             ("DeriveGenericRefused", "DS2029", ErrorClass::Type),
-            ("DeriveClonePartless", "DS2030", ErrorClass::Type),
+            ("TypeParamNotComptime", "DS2030", ErrorClass::Type),
+            ("ComptimeParamShape", "DS2031", ErrorClass::Type),
+            ("ComptimeValueOutside", "DS2032", ErrorClass::Type),
+            ("ComptimeFenceRefusal", "DS2033", ErrorClass::Type),
+            ("ComptimeEvalRefusal", "DS2034", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

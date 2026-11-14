@@ -8,7 +8,10 @@ use crate::{
     FORMAT_VERSION, MAGIC,
     hash::Hash128,
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
-    module::{Constant, DebugSpan, Function, Module, jump_target_of, slot_from_tag},
+    module::{
+        Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
+        entry_arg_from_tag, jump_target_of, slot_from_tag,
+    },
     write::BLOCKS_PAYLOAD_VERSION,
 };
 
@@ -296,9 +299,9 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
 
     // Payloads.
     let (offset, len) = sections[SectionKind::Constants.index()].expect("checked above");
-    let constants = parse_constants(bytes, offset, len)?;
+    let constants = parse_constants(bytes, offset, len, dep_count)?;
     let (offset, len) = sections[SectionKind::Blocks.index()].expect("checked above");
-    let functions = parse_blocks(bytes, offset, len)?;
+    let (functions, chains, tags, entries) = parse_blocks(bytes, offset, len, dep_count)?;
     for kind in [SectionKind::TypeMetadata, SectionKind::EffectRows] {
         let (offset, len) = sections[kind.index()].expect("checked above");
         parse_placeholder(bytes, offset, len)?;
@@ -318,6 +321,9 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
         ir_checksum,
         constants,
         functions,
+        chains,
+        tags,
+        entries,
         debug_spans,
     })
 }
@@ -342,19 +348,24 @@ pub fn read_checked(bytes: &[u8], source: &[u8]) -> Result<Module, ReadError> {
 }
 
 /// Parses the locked constants payload: typed entries (i64/f64/bool/string).
-fn parse_constants(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Constant>, ReadError> {
+fn parse_constants(
+    bytes: &[u8],
+    offset: usize,
+    len: usize,
+    dep_count: usize,
+) -> Result<Vec<Constant>, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let count = p.count()?;
     let mut constants = Vec::with_capacity(p.capacity_for(count, 2));
     for _ in 0..count {
-        constants.push(parse_constant(&mut p)?);
+        constants.push(parse_constant(&mut p, dep_count)?);
     }
     p.exhausted("trailing bytes in constants section")?;
     Ok(constants)
 }
 
 /// One constants-pool entry in the locked encoding.
-fn parse_constant(p: &mut Cursor<'_>) -> Result<Constant, ReadError> {
+fn parse_constant(p: &mut Cursor<'_>, dep_count: usize) -> Result<Constant, ReadError> {
     let at = p.abs();
     let tag = p.u8()?;
     match tag {
@@ -369,21 +380,57 @@ fn parse_constant(p: &mut Cursor<'_>) -> Result<Constant, ReadError> {
         },
         3 => Ok(Constant::Str(p.utf8()?.to_owned())),
         4 => {
-            let module = p.utf8()?.to_owned();
+            let selector = p.u8()?;
+            let key = match selector {
+                0 => {
+                    let position_at = p.abs();
+                    let position = p.uleb()?;
+                    let position = u32::try_from(position)
+                        .map_err(|_| malformed(at, "FuncRef dep position exceeds u32"))?;
+                    if !usize::try_from(position).is_ok_and(|position| position <= dep_count) {
+                        return Err(malformed(
+                            position_at,
+                            "FuncRef dep position past the dependency list",
+                        ));
+                    }
+                    FuncRefKey::Dep(position)
+                },
+                1 => FuncRefKey::Native(p.utf8()?.to_owned()),
+                _ => return Err(malformed(at, "unknown FuncRef key selector")),
+            };
             let func = p.uleb()?;
             let func = u32::try_from(func)
                 .map_err(|_| malformed(at, "FuncRef function index exceeds u32"))?;
-            Ok(Constant::FuncRef { module, func })
+            Ok(Constant::FuncRef { key, func })
         },
         _ => Err(malformed(at, "unknown constant tag")),
     }
 }
 
-/// Parses the blocks payload, version 1 (BL-7): per-function records. Each
-/// body word is decoded once — every word must decode canonically at its
-/// pc, and every jump must land inside the function's own body — and the
-/// stored words are what the loader takes.
-fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>, ReadError> {
+/// The parsed blocks payload's tables: the function records, the
+/// evidence chains, the tag table, and the entry staging table.
+type BlocksTables = (
+    Vec<Function>,
+    Vec<EvidenceChain>,
+    Vec<MemberTag>,
+    Vec<EntryPlan>,
+);
+
+/// Parses the blocks payload, version 3 (BL-7): per-function records,
+/// then the module-level evidence-chain table, the tag table, and the
+/// entry staging table. Each body word is decoded once — every word must
+/// decode canonically at its pc, and every jump must land inside the
+/// function's own body — and the stored words are what the loader takes.
+/// Every chain's function index must address the function list and every
+/// tail index the chain table itself; the tag and entry tables must spell
+/// unique names (and unique tag ids). Whether an entry's plans agree with
+/// the named function's frame is a run-path concern, not a format one.
+fn parse_blocks(
+    bytes: &[u8],
+    offset: usize,
+    len: usize,
+    dep_count: usize,
+) -> Result<BlocksTables, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
     let at = p.abs();
     if p.u8()? != BLOCKS_PAYLOAD_VERSION {
@@ -409,7 +456,7 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
         let const_count = p.count()?;
         let mut constants = Vec::with_capacity(p.capacity_for(const_count, 2));
         for _ in 0..const_count {
-            constants.push(parse_constant(&mut p)?);
+            constants.push(parse_constant(&mut p, dep_count)?);
         }
         let count_at = p.abs();
         let code_count = p.count()?;
@@ -448,8 +495,74 @@ fn parse_blocks(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Function>
         }
         functions.push(Function::from_words(name, layout, constants, code));
     }
+    let chain_count = p.count()?;
+    let mut chains = Vec::with_capacity(chain_count);
+    for _ in 0..chain_count {
+        let chain_at = p.abs();
+        let func = p.uleb()?;
+        let func = u32::try_from(func)
+            .map_err(|_| malformed(chain_at, "chain function index exceeds u32"))?;
+        if !usize::try_from(func).is_ok_and(|func| func < functions.len()) {
+            return Err(malformed(
+                chain_at,
+                "chain function index escapes the function table",
+            ));
+        }
+        let tail_count = p.count()?;
+        let mut next = Vec::with_capacity(tail_count.min(p.remaining()));
+        for _ in 0..tail_count {
+            let tail_at = p.abs();
+            let tail = p.uleb()?;
+            let tail = u32::try_from(tail)
+                .map_err(|_| malformed(tail_at, "chain tail index exceeds u32"))?;
+            if !usize::try_from(tail).is_ok_and(|tail| tail < chain_count) {
+                return Err(malformed(
+                    tail_at,
+                    "chain tail index escapes the chain table",
+                ));
+            }
+            next.push(tail);
+        }
+        chains.push(EvidenceChain { func, next });
+    }
+    let tag_count = p.count()?;
+    let mut tags = Vec::with_capacity(p.capacity_for(tag_count, 2));
+    let mut names = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..tag_count {
+        let name_at = p.abs();
+        let name = p.utf8()?.to_owned();
+        if !names.insert(name.clone()) {
+            return Err(malformed(name_at, "duplicate tag-table name"));
+        }
+        let id_at = p.abs();
+        let id = p.uleb()?;
+        let id = u8::try_from(id).map_err(|_| malformed(id_at, "tag id exceeds u8"))?;
+        if !ids.insert(id) {
+            return Err(malformed(id_at, "duplicate tag-table id"));
+        }
+        tags.push(MemberTag { name, id });
+    }
+    let entry_count = p.count()?;
+    let mut entries = Vec::with_capacity(p.capacity_for(entry_count, 2));
+    let mut entry_names = std::collections::HashSet::new();
+    for _ in 0..entry_count {
+        let name_at = p.abs();
+        let name = p.utf8()?.to_owned();
+        if !entry_names.insert(name.clone()) {
+            return Err(malformed(name_at, "duplicate entry-table name"));
+        }
+        let plan_count = p.count()?;
+        let mut args = Vec::with_capacity(p.capacity_for(plan_count, 1));
+        for _ in 0..plan_count {
+            let at = p.abs();
+            let arg = p.u8()?;
+            args.push(entry_arg_from_tag(arg).ok_or_else(|| malformed(at, "unknown entry plan"))?);
+        }
+        entries.push(EntryPlan { name, args });
+    }
     p.exhausted("trailing bytes in blocks section")?;
-    Ok(functions)
+    Ok((functions, chains, tags, entries))
 }
 
 /// Parses a versioned placeholder payload (type metadata, effect rows):

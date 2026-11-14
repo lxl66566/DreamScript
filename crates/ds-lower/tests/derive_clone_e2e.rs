@@ -11,11 +11,13 @@
 //! binding dispatching through the sibling branches of the one written
 //! head. The duplicate is shallow (C4): each Ref word dups through the
 //! placement pass — a count bump, never a deep copy — so the
-//! clone-and-drop cycles balance the heap, and the dup of a
-//! runtime-built string carries the count bump alone (an `rc_inc` over
-//! the word, no deep-copy call), pinned at the placed sequence.
+//! clone-and-drop cycles balance the heap, and the placed pin locks the
+//! derived body's shape alone: the Ref word moves by Mov into the one
+//! `clone` dispatch and no deep-copy materialization op rides the body
+//! (the count bump lives inside the dispatched impl, past the placed
+//! sequence).
 
-use ds_abi::{RcOp, Uop};
+use ds_abi::Uop;
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
@@ -160,4 +162,40 @@ fn the_expansion_appends_one_impl_per_derive() {
             .all(|item| item.attrs.is_empty()),
         "consumed attributes are stripped from the expanded trees"
     );
+}
+
+/// The retired refusal (the unit-word ruling): a part-less struct's
+/// `Self` spans the one reserved word, so the clone derive accepts the
+/// shape — the old DS2030 fixture now checks clean and its impl
+/// synthesizes beside the declaration.
+#[test]
+fn a_partless_struct_accepts_the_clone_derive() {
+    let source = concat!(
+        "tag int\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "impl clone for int {\n",
+        "  fn clone(self) -> Self { self }\n",
+        "}\n",
+        "#[derive(clone)]\n",
+        "struct unit { }\n",
+        "#[derive(clone)]\n",
+        "struct point { x: int }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("partless_probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let (expanded, diags) = ds_check::expand_derives(&asts);
+    assert!(
+        diags.is_empty(),
+        "the part-less shape refuses nothing: {diags:?}"
+    );
+    let grown = expanded[0]
+        .blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .count();
+    assert_eq!(grown, 8, "both derives synthesize their impls");
 }

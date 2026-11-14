@@ -75,14 +75,14 @@ use crate::{
     EVIDENCE_MODULE,
     claims::{CLAIM_BAND_CLEAR, CLAIM_BAND_SET, ClaimTable, HookSite, hook_sites},
     fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
-    module::{ModuleRegistry, ModuleSlots, ModuleVersion},
+    module::{ModuleRegistry, ModuleVersion, VersionIdx},
     native::{
         ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction, NativeResult,
         OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
     },
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::{Heaps, Objects},
-    program::{Const, ConstKind},
+    program::{Const, ConstFuncRef, ConstKind},
     value::{ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word},
 };
 
@@ -156,6 +156,15 @@ pub enum Trap {
         expected: SlotType,
         /// The value's type.
         actual: SlotType,
+    },
+    /// A runtime-evidence dispatch read the dead sentinel: the entering
+    /// site staged no chain for a demand whose variable its branch never
+    /// mentions, so the code reading it ran under a narrowing that
+    /// branch cannot satisfy — reachable only through a checker gap,
+    /// never a silent wrong call.
+    DeadEvidenceChain {
+        /// The frame slot holding the sentinel word.
+        slot: u8,
     },
     /// A uop addressed a slot outside its function's frame.
     SlotOutOfRange {
@@ -327,27 +336,28 @@ pub enum Trap {
     TailForkJoin,
 }
 
-/// One entry of the call-info stack: the frame base plus the module version
-/// and function the frame runs. Frames live inline in the fiber's value
-/// stack; this records which version's code and pool a frame executes, so
-/// retiring versions stay runnable until their frames return [H6 item 5].
-/// The chain belongs to the fiber whose segment holds the frames.
+/// One entry of the call-info stack: the frame base plus the module
+/// version's table row and the function the frame runs. Frames live inline
+/// in the fiber's value stack; this records which version's code and pool
+/// a frame executes, so retiring versions stay runnable until nothing
+/// references them [H6 item 5]. The chain belongs to the fiber whose
+/// segment holds the frames.
 #[derive(Clone, Debug)]
 pub(crate) struct CallInfo {
     pub(crate) fp: usize,
-    pub(crate) module: Arc<ModuleVersion>,
+    pub(crate) module: VersionIdx,
     pub(crate) func: u32,
 }
 
 /// The function the dispatcher is executing.
 struct Active {
-    version: Arc<ModuleVersion>,
+    version: VersionIdx,
     func: u32,
 }
 
 /// Where a call transfers control next.
 struct Transfer {
-    version: Arc<ModuleVersion>,
+    version: VersionIdx,
     func: u32,
 }
 
@@ -431,16 +441,16 @@ fn raw_staged_words(caller: &FrameLayout, callee: &FrameLayout) -> Option<Arc<[R
 }
 
 /// An owned CALL-site resolution handed to a dispatch arm: the uop shape
-/// carries the callee's version handle (the frame push owns one) plus the
-/// site's cached layout facts, the native shape the shared table handle
-/// plus index — borrows of the arm's own locals, so no loan on the VM
-/// outlives the arm's whole-self calls (the control-native switch).
+/// carries the callee's version-table row plus the site's cached layout
+/// facts, the native shape the shared table handle plus index — borrows
+/// of the arm's own locals, so no loan on the VM outlives the arm's
+/// whole-self calls (the control-native switch).
 #[derive(Debug)]
 enum Resolved {
     /// Enter the callee's encoded body.
     Uop {
-        /// The callee's module version.
-        version: Arc<ModuleVersion>,
+        /// The callee's module version's table row.
+        version: VersionIdx,
         /// The callee's function-table index.
         func: u32,
         /// The site's cached layout facts (the plan to transfer under).
@@ -456,13 +466,13 @@ enum Resolved {
 }
 
 /// The ownable form of a call-site resolution the inline cache stores: the
-/// uop shape holds the resolved version handle plus the site's layout
+/// uop shape holds the resolved version's table row plus the site's layout
 /// facts, the native shape the shared table plus index (natives are not
 /// values — the table is the stable handle, the index the callee).
 #[derive(Clone, Debug)]
 enum CachedCallee {
     Uop {
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func: u32,
         facts: SiteFacts,
     },
@@ -480,7 +490,7 @@ enum CachedCallee {
 enum DispatchResolved {
     /// Enter (or tail-transfer into) the named uop function's body.
     Uop {
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func: u32,
         /// The site's cached layout facts (the plan to transfer under).
         facts: SiteFacts,
@@ -698,7 +708,7 @@ enum RetOutcome {
     Boundary(Value),
     /// Resume the caller's function at the metadata word's return pc.
     Resume {
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func: u32,
         pc: CodePc,
     },
@@ -955,6 +965,7 @@ enum SwitchOutcome {
 struct StackState<'a> {
     stack: &'a mut Segment,
     callinfo: &'a mut Vec<CallInfo>,
+    versions: &'a ModuleRegistry,
     limit: usize,
     max_len: &'a mut usize,
 }
@@ -989,7 +1000,7 @@ impl StackState<'_> {
         registry: &ModuleRegistry,
         funcref: FuncRef,
         nargs: u8,
-    ) -> Result<(Arc<ModuleVersion>, u32), Trap> {
+    ) -> Result<(VersionIdx, u32), Trap> {
         let name = registry
             .module_name(funcref.module())
             .ok_or(Trap::UnknownModule {
@@ -1002,7 +1013,7 @@ impl StackState<'_> {
                     module: name.to_owned(),
                     func: funcref.func(),
                 })?;
-        let target = &version.functions()[func_id as usize];
+        let target = &registry.pinned(version).functions()[func_id as usize];
         debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
         if usize::from(nargs) != target.layout.params_len() {
             return Err(Trap::ArityMismatch {
@@ -1054,14 +1065,14 @@ impl StackState<'_> {
     /// where the per-call derivation raised it.
     fn call(
         &mut self,
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func_id: u32,
         facts: &SiteFacts,
         caller: &FrameLayout,
         fp: usize,
         return_pc: u32,
     ) -> Result<Transfer, Trap> {
-        let target = &version.functions()[func_id as usize];
+        let target = &self.versions.pinned(version).functions()[func_id as usize];
         let SiteFacts::Ready { raw, .. } = facts else {
             return Err(Trap::CallLayout(facts.refused()));
         };
@@ -1077,7 +1088,7 @@ impl StackState<'_> {
         });
         self.callinfo.push(CallInfo {
             fp: callee_fp,
-            module: Arc::clone(&version),
+            module: version,
             func: func_id,
         });
         Ok(Transfer {
@@ -1098,13 +1109,13 @@ impl StackState<'_> {
     /// the per-call derivation raised it.
     fn tail_call(
         &mut self,
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func_id: u32,
         facts: &SiteFacts,
         caller: &FrameLayout,
         fp: usize,
     ) -> Result<Transfer, Trap> {
-        let target = &version.functions()[func_id as usize];
+        let target = &self.versions.pinned(version).functions()[func_id as usize];
         let SiteFacts::Ready { plan, raw } = facts else {
             return Err(Trap::CallLayout(facts.refused()));
         };
@@ -1140,7 +1151,7 @@ impl StackState<'_> {
         meta.enter_tail_call(target.layout.frame_size());
         self.grow(fp + target.layout.frame_size() as usize)?;
         let frame = self.callinfo.last_mut().expect("a frame is always live");
-        frame.module = Arc::clone(&version);
+        frame.module = version;
         frame.func = func_id;
         Ok(Transfer {
             version,
@@ -1151,17 +1162,12 @@ impl StackState<'_> {
     /// `RET`: the result word overlays slot 0 (the caller reads it from its
     /// outgoing-argument slot 0 [H2]); the stack restores the caller's frame
     /// span; the caller resumes at the metadata word's return pc. The
-    /// restore takes the caller's chain-entry handle back as the new
-    /// [`Active`]: when the popped callee entry's handle names the same
-    /// version (every same-module return), it swaps into the caller's entry
-    /// as the replacement, so the return mints no Arc count and copies no
-    /// `CallInfo`; a different version (a cross-module callee, or a swap
-    /// between the two entries' mints) keeps the mint — the entry retains
-    /// its handle and the restore clones it, so the caller stays pinned to
-    /// the version it was entered under [H6 item 5]. Either way the entry
-    /// always names its frame's version; the frame's one live handle sits
-    /// in the entry while it is suspended and in the dispatcher's snapshot
-    /// while it runs. A nested drive's synthetic reentry frame answers
+    /// restore answers the caller's own chain-entry row as the new
+    /// [`Active`]: the row is a copyable table name, so the return moves no
+    /// Arc count in any shape — a same-module return, a cross-module
+    /// return, or a swap between the two entries' rows alike — and the
+    /// entry always names the version the frame was entered under [H6
+    /// item 5]. A nested drive's synthetic reentry frame answers
     /// [`RetOutcome::Boundary`] instead: its caller is Rust-side code
     /// (`Vm::call_hosted`), not a frame. The sentinel return pc is the
     /// frame's identity marker — every CALL-pushed frame carries a real
@@ -1188,11 +1194,12 @@ impl StackState<'_> {
             return Ok(RetOutcome::Boundary(value));
         }
         // the caller's entry answers the bounds checks (its version's code
-        // length, its layout's frame span); the borrow ends before the
-        // chain moves
+        // length, its layout's frame span); the row is Copy, so no borrow
+        // outlives the chain move
         let caller_at = self.callinfo.len() - 2;
+        let caller_row = self.callinfo[caller_at].module;
         let caller_fn =
-            &self.callinfo[caller_at].module.functions()[self.callinfo[caller_at].func as usize];
+            &self.versions.pinned(caller_row).functions()[self.callinfo[caller_at].func as usize];
         let code_len = code_len_u32(caller_fn.code.len());
         if meta.return_pc.0 >= code_len {
             return Err(Trap::InvalidPc {
@@ -1203,23 +1210,12 @@ impl StackState<'_> {
         let restore =
             (self.callinfo[caller_at].fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
         self.stack.truncate(restore);
-        let mut popped = self
-            .callinfo
+        self.callinfo
             .pop()
             .expect("a caller entry stands below the returning frame");
-        // the take-back: the popped callee handle replaces the entry's
-        // handle when both name one version (no Arc count moves); any other
-        // popped handle drops here and the restore clones the entry's — the
-        // pre-take-back mint discipline
-        let caller = &mut self.callinfo[caller_at];
-        let version = if Arc::ptr_eq(&caller.module, &popped.module) {
-            std::mem::swap(&mut caller.module, &mut popped.module);
-            popped.module
-        } else {
-            Arc::clone(&caller.module)
-        };
+        let caller = &self.callinfo[caller_at];
         Ok(RetOutcome::Resume {
-            version,
+            version: caller.module,
             func: caller.func,
             pc: meta.return_pc,
         })
@@ -1262,55 +1258,98 @@ fn read_value(
     }
 }
 
-/// The rider area one evidence pair claims as its trailing parameters
-/// (H3): the pair's slot word plus its two follow words, the unit both a
-/// serving body's layout and the sentinel dispatch's staged riders count
-/// pairs in.
-const RIDER_WORDS_PER_PAIR: usize = 3;
-
-/// The exact sentinel-arity contract: a runtime-evidence sentinel
-/// dispatch stages its real arguments plus exactly one pair's rider area,
-/// and the target claims its own real parameters plus its evidence pairs
-/// in the same per-pair units — so the parameter count must be the staged
-/// real-argument count plus `RIDER_WORDS_PER_PAIR * pairs`. The
-/// entering-site walk refuses a serving body whose chain demands more
-/// than one member, so a target claims zero or one pair here; any other
-/// gap (the P0 shape: a one-word receiver staged against a multi-word
-/// `self`, the missing word silently taken from a rider) is an arity
-/// violation, never a silent slide of a rider into the parameter span.
-fn sentinel_arity_exact(params_len: usize, nargs: u8) -> bool {
-    let given = usize::from(nargs);
-    given == params_len || given + RIDER_WORDS_PER_PAIR == params_len
-}
-
-/// The evidence riders a runtime-evidence sentinel dispatch stages past
-/// the real arguments (H3), as a defense-in-depth read behind
-/// [`sentinel_arity_exact`]: when the slot word names a generic serving
-/// body, its trailing evidence parameters ride the call and must validate
-/// as count-free I64 words exactly like the static trait path's staged
-/// evidence — a concrete target claims none and the riders stay dead
-/// words past its parameters.
-fn check_evidence_riders(
-    stack: &Segment,
-    params_len: usize,
-    nargs: u8,
-    caller: &FrameLayout,
+/// Resolves one runtime-evidence sentinel dispatch (H3) over the
+/// module's evidence-chain table: the frame's slot word names a chain
+/// object whose `func` is the serving body and whose `next` tail list
+/// answers that body's own evidence demands — one chain word per demand,
+/// staged onto the caller's overlay past the real arguments exactly
+/// where the static trait path's constant stores land. One static table
+/// read per hop, so chain depth is table-bounded, never frame-bounded.
+/// Answers the target's function-table index.
+#[allow(clippy::too_many_arguments)]
+fn evidence_chain_dispatch(
+    vm: &mut Vm,
+    version: VersionIdx,
+    slot: u8,
+    slots: &[SlotType],
+    body_len: usize,
     fp: usize,
-) -> Result<(), Trap> {
-    let body_len = caller.body_len();
-    for i in 0..params_len.saturating_sub(usize::from(nargs)) {
-        let slot = u8::try_from(caller.arg_area().start + usize::from(nargs) + i)
-            .expect("slot index fits u8");
-        let word = read_value(stack, fp, slot, caller.slots(), body_len)?;
-        if word.slot_type() != SlotType::I64 {
-            return Err(Trap::SlotTypeMismatch {
+    caller: &FrameLayout,
+    nargs: u8,
+    pc: CodePc,
+) -> Result<u32, (Trap, CodePc)> {
+    let word = read_value(&vm.stack, fp, slot, slots, body_len).map_err(|e| (e, pc))?;
+    let Value::I64(chain_idx) = word else {
+        return Err((
+            Trap::SlotTypeMismatch {
                 slot,
                 expected: SlotType::I64,
                 actual: word.slot_type(),
-            });
-        }
+            },
+            pc,
+        ));
+    };
+    // the dead sentinel: the entering site staged no chain for a demand
+    // whose variable its branch never mentions, so the code reading it
+    // ran under a narrowing that branch cannot satisfy — a checker gap,
+    // never a silent wrong call
+    if chain_idx < 0 {
+        return Err((Trap::DeadEvidenceChain { slot }, pc));
     }
-    Ok(())
+    let module = vm.registry.pinned(version);
+    let chains = module.chains();
+    let index = usize::try_from(chain_idx)
+        .ok()
+        .filter(|index| *index < chains.len());
+    let Some(index) = index else {
+        return Err((
+            Trap::UnknownCallee {
+                module: EVIDENCE_MODULE.to_owned(),
+                func: chain_idx.try_into().unwrap_or(u32::MAX),
+            },
+            pc,
+        ));
+    };
+    let chain = &chains[index];
+    let func_id = chain.func;
+    let target = &module.functions()[func_id as usize];
+    let params_len = target.layout.params_len();
+    let riders = chain.next.len();
+    // the exact sentinel-arity contract: the chain's tail list was built
+    // one entry per the serving body's own evidence demands, so the
+    // parameter count must be the staged real-argument count plus it — a
+    // gap names a corrupted table (the P0 shape: a one-word receiver
+    // staged against a multi-word `self`), never a silent slide of a
+    // rider into the parameter span
+    if usize::from(nargs) + riders != params_len {
+        return Err((
+            Trap::ArityMismatch {
+                expected: params_len,
+                given: usize::from(nargs),
+            },
+            pc,
+        ));
+    }
+    // the riders share the overlay with the staged arguments; the
+    // lowering reserves the widest serving body's demand count, so an
+    // escape names hand-assembled code
+    if usize::from(nargs) + riders > caller.arg_area_len() {
+        return Err((
+            Trap::CallLayout(SlideError::StagingTooSmall {
+                available: caller.arg_area_len(),
+                needed: usize::from(nargs) + riders,
+            }),
+            pc,
+        ));
+    }
+    let caller_body_len = caller.body_len();
+    for (i, tail) in chain.next.iter().enumerate() {
+        let slot = u8::try_from(caller.arg_area().start + usize::from(nargs) + i)
+            .expect("slot index fits u8");
+        let at = word_of(fp, usize::from(slot), caller_body_len);
+        vm.stack[at] = Word::Slot(Value::I64(i64::from(*tail)));
+    }
+    Ok(func_id)
 }
 
 /// Reads a slot typed `want`; the value-type check doubles as the check of
@@ -2276,21 +2315,25 @@ impl Vm {
     }
 
     /// Installs a module version into its two-slot table (hot reload swap):
-    /// the swap retires the module's previous retiring version out of the
-    /// registry, so its pools' KSTR rows and the cache entries stamped
-    /// before the swap are reclaimed at the same moment.
-    pub fn install_module(&mut self, version: ModuleVersion) -> Arc<ModuleVersion> {
-        let retiring = self.retiring_pool_addrs(version.name());
-        let installed = self.registry.install(version);
-        self.reclaim_retired_kstr_rows(&retiring);
+    /// the swap moves the retiring slot's old row out of the registry's own
+    /// reachability, and the install-time sweep then retires every row no
+    /// live frame or parked fiber names — the retired pools' KSTR rows
+    /// reclaimed at the same moment. Answers the installed version's
+    /// table row, the version's single home.
+    pub fn install_module(&mut self, version: ModuleVersion) -> VersionIdx {
+        let mut dead_pools = self.retiring_pool_addrs(version.name());
+        let row = self.registry.install(version);
         self.sweep_call_cache();
-        installed
+        dead_pools.extend(self.sweep_versions());
+        self.reclaim_retired_kstr_rows(&dead_pools);
+        row
     }
 
     /// Installs a dsmod module into its two-slot table: the loader maps the
     /// payload, fills the entry-descriptor placeholders, and the slots swap
     /// [BL-7, H6 item 5]. The module is consumed, so every body's code
-    /// words reach the installed table without a copy.
+    /// words reach the installed table without a copy. Answers the
+    /// installed version's table row, the version's single home.
     ///
     /// # Errors
     ///
@@ -2299,12 +2342,43 @@ impl Vm {
     pub fn install_dsmod(
         &mut self,
         module: ds_mod::Module,
-    ) -> Result<Arc<ModuleVersion>, crate::LoadError> {
-        let retiring = self.retiring_pool_addrs(module.name());
-        let installed = crate::loader::install(&mut self.registry, module)?;
-        self.reclaim_retired_kstr_rows(&retiring);
+    ) -> Result<VersionIdx, crate::LoadError> {
+        let mut dead_pools = self.retiring_pool_addrs(module.name());
+        let row = crate::loader::install(&mut self.registry, module)?;
         self.sweep_call_cache();
-        Ok(installed)
+        dead_pools.extend(self.sweep_versions());
+        self.reclaim_retired_kstr_rows(&dead_pools);
+        Ok(row)
+    }
+
+    /// Loads a dsmod module with its whole dependency closure: the
+    /// deps-first walk installs every uop dependency the root's dep list
+    /// names (fetching each uninstalled one through `provider`) before
+    /// the root itself, so first-install ids assign in the deterministic
+    /// dep-list depth-first order, and every link's content hash is
+    /// validated — a mismatched link, a dep cycle, or a provider miss
+    /// refuses the load. Resolution keeps reading each name's current
+    /// slot, so a later swap of a loaded dep redirects the dependent's
+    /// calls [H6 item 5]. Answers the root's table row, the version's
+    /// single home.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::LoadError`] for every refusal the walk names;
+    /// dependencies that finished installing stay installed.
+    pub fn load(
+        &mut self,
+        root: ds_mod::Module,
+        provider: impl FnMut(&str, ds_mod::Hash128) -> Option<ds_mod::Module>,
+    ) -> Result<VersionIdx, crate::LoadError> {
+        // only the root can swap a slot (already-installed deps validate
+        // and skip), so the pre-walk retiring pools are exactly its own
+        let mut dead_pools = self.retiring_pool_addrs(root.name());
+        let row = crate::load::load(&mut self.registry, root, provider)?;
+        self.sweep_call_cache();
+        dead_pools.extend(self.sweep_versions());
+        self.reclaim_retired_kstr_rows(&dead_pools);
+        Ok(row)
     }
 
     // -- Bounded-memory reclamation over the two hint caches -------------
@@ -2320,8 +2394,7 @@ impl Vm {
     /// reclaiming them early only costs those frames a re-intern).
     fn retiring_pool_addrs(&self, module: &str) -> Vec<usize> {
         self.registry
-            .slots(module)
-            .and_then(ModuleSlots::retiring)
+            .retiring_version(module)
             .map(|version| {
                 version
                     .functions()
@@ -2332,11 +2405,14 @@ impl Vm {
             .unwrap_or_default()
     }
 
-    /// Drops the KSTR intern rows keyed by pools a swap retired: the
-    /// version leaving the two-slot table never serves another load, so
-    /// its rows are pure memory (a reused address re-keys its row at the
-    /// new pool's first load). Rows of the version moving into the
-    /// retiring slot stay — its in-flight frames still load through them.
+    /// Drops the KSTR intern rows keyed by pools a swap retired. The
+    /// reclaim is unconditional even when kept frames still hold the
+    /// retiring version — the version leaving the two-slot table never
+    /// serves another host entry, but those frames keep loading through
+    /// its pools, and each dropped row costs their next load one full
+    /// intern (a reused address re-keys its row at the new pool's first
+    /// load). Rows of the version moving into the retiring slot stay —
+    /// its in-flight frames still load through them.
     fn reclaim_retired_kstr_rows(&mut self, pools: &[usize]) {
         self.kstr_cache.reclaim(|row| !pools.contains(&row.pool));
     }
@@ -2353,10 +2429,10 @@ impl Vm {
     }
 
     /// Empties the CALL inline-cache entries a swap unstamped: a stale
-    /// entry can never hit again (the stamp check fails), so dropping it
-    /// only releases the swapped-out version's handle early. The full
-    /// lookup stays the fallback and the refill, so dispatch correctness
-    /// never depends on the cache [H3].
+    /// entry can never hit again (the stamp check fails), so by the time
+    /// the install's sweep counts reachability no cache entry is left to
+    /// name a row. The full lookup stays the fallback and the refill, so
+    /// dispatch correctness never depends on the cache [H3].
     fn sweep_call_cache(&mut self) {
         let stamp = self.registry.generation();
         for entry in &mut self.call_cache {
@@ -2364,6 +2440,41 @@ impl Vm {
                 *entry = None;
             }
         }
+    }
+
+    /// The install-time reachability sweep over the version table [H6
+    /// item 5]: a row stays pinned while the registry itself keeps it
+    /// (module slots), while any fiber's live call chain names it (the
+    /// context's while a drive runs, every pool slot's otherwise —
+    /// interrupted fibers keep their frames), or while any parked or
+    /// ready fiber's resume point names it. The run-entry hint and the
+    /// CALL cache never reach a sweep as namers: the install takes the
+    /// hint and the stamp check empties every cache entry before the
+    /// sweep runs, and no dispatch happens between them. Every unmarked
+    /// row is dropped — the table's one reference — and the sweep
+    /// answers the retired versions' pool addresses so their KSTR rows
+    /// die with them; the row is a version's single home, so a retired
+    /// version's memory frees right there.
+    fn sweep_versions(&mut self) -> Vec<usize> {
+        let mut live = vec![false; self.registry.version_rows()];
+        self.registry.mark_own_rows(&mut live);
+        for frame in &self.callinfo {
+            live[frame.module.0 as usize] = true;
+        }
+        for fiber in &self.pool {
+            // every fiber's kept frames pin, a Dead one's included: the
+            // recycle door walks a dead slot's leftover frames firing
+            // whatever banded deinit claims survived the death, so their
+            // rows must outlive the slot's reuse (the reuse itself clears
+            // the chain and drops the pin)
+            for frame in &fiber.callinfo {
+                live[frame.module.0 as usize] = true;
+            }
+            if let Some(resume) = &fiber.resume {
+                live[resume.version.0 as usize] = true;
+            }
+        }
+        self.registry.retire_unmarked_rows(&live)
     }
 
     /// How many (pool, fiber) intern-row keys the KSTR cache holds — the
@@ -2493,7 +2604,7 @@ impl Vm {
                     module: name.to_owned(),
                     func: fref.func(),
                 })?;
-        self.entry_checks(&version, func_id, args)?;
+        self.entry_checks(version, func_id, args)?;
         self.spawn_checked(nursery, version, func_id, args)
     }
 
@@ -2537,10 +2648,10 @@ impl Vm {
                     module: name.to_owned(),
                     func: header.func(),
                 })?;
-        self.entry_checks(&version, func_id, args)?;
+        self.entry_checks(version, func_id, args)?;
         // the capture block lands in the frame's local slots past the
         // parameters — the CALLS range check, before the child exists
-        let layout = &version.functions()[func_id as usize].layout;
+        let layout = &self.registry.pinned(version).functions()[func_id as usize].layout;
         let capture_body_len = layout.body_len();
         let end = layout.params_len() + captures.len();
         if end > capture_body_len {
@@ -2549,7 +2660,7 @@ impl Vm {
                 frame_slots: layout.slots().len(),
             });
         }
-        let child = self.spawn_checked(nursery, Arc::clone(&version), func_id, args)?;
+        let child = self.spawn_checked(nursery, version, func_id, args)?;
         let handoff_owner = self.current;
         for (index, &value) in captures.iter().enumerate() {
             if let Value::Ref(word) = value {
@@ -2590,7 +2701,7 @@ impl Vm {
     fn spawn_checked(
         &mut self,
         nursery: Option<NurseryId>,
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func_id: u32,
         args: &[Value],
     ) -> Result<FiberId, Trap> {
@@ -2619,11 +2730,13 @@ impl Vm {
     fn push_spawned(
         &mut self,
         nursery: Option<NurseryId>,
-        version: Arc<ModuleVersion>,
+        version: VersionIdx,
         func_id: u32,
         args: &[Value],
     ) -> FiberId {
-        let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
+        let frame_size = self.registry.pinned(version).functions()[func_id as usize]
+            .layout
+            .frame_size() as usize;
         // born into the pool: reuse a dead slot above the reserved root,
         // or grow the pool by one
         let slot = match self
@@ -2653,7 +2766,7 @@ impl Vm {
         }
         let fiber = &mut self.pool[slot];
         fiber.segment.truncate(0); // reuse keeps the chunks: spawn stays cheap
-        Self::push_entry_frame(fiber, &version, func_id, args, frame_size);
+        Self::push_entry_frame(fiber, version, func_id, args, frame_size);
         fiber.resume = Some(ResumePoint {
             version,
             func: func_id,
@@ -3628,7 +3741,7 @@ impl Vm {
         module: &str,
         func: &str,
         args: &[Value],
-    ) -> Result<(Arc<ModuleVersion>, u32), Trap> {
+    ) -> Result<(VersionIdx, u32), Trap> {
         let (version, func_id) =
             self.registry
                 .resolve(module, func)
@@ -3636,7 +3749,7 @@ impl Vm {
                     module: module.into(),
                     func: func.into(),
                 })?;
-        self.entry_checks(&version, func_id, args)?;
+        self.entry_checks(version, func_id, args)?;
         Ok((version, func_id))
     }
 
@@ -3644,13 +3757,8 @@ impl Vm {
     /// argument word kinds (a Ref word against a Fn parameter is the
     /// callable-defaulted slot), and the entry frame versus the stack
     /// limit.
-    fn entry_checks(
-        &self,
-        version: &Arc<ModuleVersion>,
-        func_id: u32,
-        args: &[Value],
-    ) -> Result<(), Trap> {
-        let target = &version.functions()[func_id as usize];
+    fn entry_checks(&self, version: VersionIdx, func_id: u32, args: &[Value]) -> Result<(), Trap> {
+        let target = &self.registry.pinned(version).functions()[func_id as usize];
         if args.len() != target.layout.params_len() {
             return Err(Trap::ArityMismatch {
                 expected: target.layout.params_len(),
@@ -3691,7 +3799,7 @@ impl Vm {
     /// reuse a dead fiber's chunks).
     fn push_entry_frame(
         fiber: &mut Fiber,
-        version: &Arc<ModuleVersion>,
+        version: VersionIdx,
         func_id: u32,
         args: &[Value],
         frame_size: usize,
@@ -3710,7 +3818,7 @@ impl Vm {
         fiber.callinfo.clear();
         fiber.callinfo.push(CallInfo {
             fp: 0,
-            module: Arc::clone(version),
+            module: version,
             func: func_id,
         });
         fiber.max_len = frame_size;
@@ -3736,7 +3844,7 @@ impl Vm {
     fn park_current(&mut self, active: &Active, resume_pc: CodePc) {
         let fiber = &mut self.pool[self.current.index()];
         fiber.resume = Some(ResumePoint {
-            version: Arc::clone(&active.version),
+            version: active.version,
             func: active.func,
             pc: resume_pc,
         });
@@ -3812,7 +3920,7 @@ impl Vm {
         let parked = fiber.state == FiberState::Suspended;
         fiber.state = FiberState::Running;
         if parked {
-            let f = &resume.version.functions()[resume.func as usize];
+            let f = &self.registry.pinned(resume.version).functions()[resume.func as usize];
             let fp = self.callinfo[self.callinfo.len() - 1].fp;
             overlay_word(payload, &mut self.stack, &f.layout, fp);
         }
@@ -4127,7 +4235,7 @@ impl Vm {
     /// context is its frame.
     fn overlay_boundary(&mut self, active: &Active, tag: u8, payload: &[Value]) {
         let fp = self.callinfo[self.callinfo.len() - 1].fp;
-        let f = &active.version.functions()[active.func as usize];
+        let f = &self.registry.pinned(active.version).functions()[active.func as usize];
         let area = f.layout.arg_area_len();
         // the span channel's bounds check: the boundary's static floor is
         // the two-word answer, and the payload words check at the write
@@ -4154,7 +4262,7 @@ impl Vm {
     /// rows settle at the joiner's drain door).
     fn overlay_span_tail(&mut self, active: &Active, tail: &[Value]) {
         let fp = self.callinfo[self.callinfo.len() - 1].fp;
-        let f = &active.version.functions()[active.func as usize];
+        let f = &self.registry.pinned(active.version).functions()[active.func as usize];
         let area = f.layout.arg_area_len();
         if 1 + tail.len() > area {
             return;
@@ -4195,7 +4303,9 @@ impl Vm {
     pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<Value, Trap> {
         self.trap_pc = None;
         let (version, func_id) = self.resolve_entry(module, func, args)?;
-        let frame_size = version.functions()[func_id as usize].layout.frame_size() as usize;
+        let frame_size = self.registry.pinned(version).functions()[func_id as usize]
+            .layout
+            .frame_size() as usize;
         self.host_release(); // stash any interrupted drive's context
         // the reset door of the death walk: a halted or trapped root
         // drive's kept frames fire their deinits here (E5), then release
@@ -4206,7 +4316,7 @@ impl Vm {
         self.drain_claims(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();
-        Self::push_entry_frame(root, &version, func_id, args, frame_size);
+        Self::push_entry_frame(root, version, func_id, args, frame_size);
         root.resume = None;
         root.resumer = None;
         root.state = FiberState::Running;
@@ -4278,7 +4388,7 @@ impl Vm {
         let at = self.callinfo.len().checked_sub(2)?;
         let caller = &self.callinfo[at];
         Some(
-            caller.module.functions()[caller.func as usize]
+            self.registry.pinned(caller.module).functions()[caller.func as usize]
                 .layout
                 .arg_area_len(),
         )
@@ -4337,7 +4447,7 @@ impl Vm {
             },
         };
         let (version, func_id) = StackState::resolve_func_word(&self.registry, funcref, nargs)?;
-        let target = &version.functions()[func_id as usize];
+        let target = &self.registry.pinned(version).functions()[func_id as usize];
         let frame_size = target.layout.frame_size() as usize;
         let base = self.stack.len();
         let needed = base + frame_size;
@@ -4415,16 +4525,15 @@ impl Vm {
         }
         self.callinfo.push(CallInfo {
             fp: base,
-            module: Arc::clone(&version),
+            module: version,
             func: func_id,
         });
         let fiber = &mut self.pool[self.current.index()];
         fiber.max_len = fiber.max_len.max(needed);
         let boundary = self.callinfo.len();
         let host = self.current;
-        // the entry holds the resolve's clone; the resolve's own handle
-        // becomes the reentry drive's Active (two mints per hosted call:
-        // the entry and the resolution itself, no third)
+        // the entry and the reentry drive's Active name one table row:
+        // a hosted call mints no version handle
         let active = Active {
             version,
             func: func_id,
@@ -4655,8 +4764,8 @@ impl Vm {
         held: &[RefId],
     ) -> Vec<(FuncRef, Vec<Value>)> {
         let live = self.ctx_live && self.current == fiber;
-        // the frames are read by index, innermost first: the walk clones one
-        // version handle per frame and allocates no frame list of its own
+        // the frames are read by index, innermost first: each frame's
+        // version row is Copy, so the walk holds no handle at all
         let depth =
             if live { self.callinfo.len() } else { self.pool[fiber.index()].callinfo.len() };
         let mut drives = Vec::new();
@@ -4665,15 +4774,18 @@ impl Vm {
         for index in (0..depth).rev() {
             let (fp, version, func) = if live {
                 let frame = &self.callinfo[index];
-                (frame.fp, Arc::clone(&frame.module), frame.func)
+                (frame.fp, frame.module, frame.func)
             } else {
                 let frame = &self.pool[fiber.index()].callinfo[index];
-                (frame.fp, Arc::clone(&frame.module), frame.func)
+                (frame.fp, frame.module, frame.func)
             };
-            let Some(module_id) = self.registry.module_id(version.name()) else {
+            let Some(module_id) = self
+                .registry
+                .module_id(self.registry.pinned(version).name())
+            else {
                 continue;
             };
-            let sites = self.hook_sites_for(&version, func);
+            let sites = self.hook_sites_for(version, func, module_id);
             if sites.is_empty() {
                 continue;
             }
@@ -4685,7 +4797,7 @@ impl Vm {
                 let Some(drive) = self.gate_teardown_site(
                     fiber,
                     fp,
-                    &version,
+                    version,
                     site,
                     module_id,
                     held,
@@ -4732,13 +4844,13 @@ impl Vm {
         &self,
         fiber: FiberId,
         fp: usize,
-        version: &Arc<ModuleVersion>,
+        version: VersionIdx,
         site: HookSite,
         module_id: u32,
         held: &[RefId],
         driven_words: &[RefId],
     ) -> Option<(FuncRef, Vec<Value>)> {
-        let hook = &version.functions()[site.hook as usize];
+        let hook = &self.registry.pinned(version).functions()[site.hook as usize];
         let params = hook.layout.params();
         let width = usize::from(site.width);
         if params.len() != width {
@@ -4806,17 +4918,26 @@ impl Vm {
     /// The derived deinit-claim directory of one function (crates/ds-vm/
     /// src/claims.rs), cached per (version, function) and swept wholesale
     /// when the registry generation moves — the kstr cache's discipline.
-    fn hook_sites_for(&mut self, version: &Arc<ModuleVersion>, func: u32) -> Arc<Vec<HookSite>> {
+    fn hook_sites_for(
+        &mut self,
+        version: VersionIdx,
+        func: u32,
+        own_id: u32,
+    ) -> Arc<Vec<HookSite>> {
         let generation = self.registry.generation();
         if self.hook_dirs_stamp != generation {
             self.hook_dirs.clear();
             self.hook_dirs_stamp = generation;
         }
-        let key = (Arc::as_ptr(version) as usize, func);
+        // the key is the version's pinned address: stable for the row's
+        // whole life, and the directory clears at the same install that
+        // sweeps the row, so a reused address never meets a stale row
+        let pinned = self.registry.pinned(version);
+        let key = (std::ptr::from_ref(pinned) as usize, func);
         if let Some(sites) = self.hook_dirs.get(&key) {
             return Arc::clone(sites);
         }
-        let sites = hook_sites(version, func);
+        let sites = hook_sites(pinned, func, own_id);
         self.hook_dirs.insert(key, Arc::clone(&sites));
         sites
     }
@@ -4912,7 +5033,7 @@ impl Vm {
                     func,
                     facts,
                 } => Resolved::Uop {
-                    version: Arc::clone(version),
+                    version: *version,
                     func: *func,
                     facts: facts.clone(),
                 },
@@ -4943,15 +5064,29 @@ impl Vm {
         stamp: u64,
     ) -> Result<CallSite, Trap> {
         let found = &pool[usize::from(kidx.0)];
-        let Const::FuncRef { module, func } = found else {
+        let Const::FuncRef(entry) = found else {
             return Err(Trap::PoolKind {
                 kidx: kidx.0,
                 expected: ConstKind::FuncRef,
                 found: found.kind(),
             });
         };
-        if let Some((version, func_id)) = self.registry.resolve_indexed(module, *func) {
-            let target = &version.functions()[func_id as usize];
+        // uop first: an install-resolved id addresses the dep's module
+        // directly (its name sits in the registry's id vector), a name
+        // through the module table — so a uop module installed under a
+        // native table's name still shadows the natives
+        let uop_target = match entry {
+            ConstFuncRef::Uop { module, func } => {
+                let name = self
+                    .registry
+                    .module_name(*module)
+                    .ok_or(Trap::UnknownModule { module: *module })?;
+                self.registry.resolve_indexed(name, *func)
+            },
+            ConstFuncRef::Named { module, func } => self.registry.resolve_indexed(module, *func),
+        };
+        if let Some((version, func_id)) = uop_target {
+            let target = &self.registry.pinned(version).functions()[func_id as usize];
             debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
             if usize::from(nargs) != target.layout.params_len() {
                 return Err(Trap::ArityMismatch {
@@ -4971,15 +5106,31 @@ impl Vm {
                 },
             });
         }
+        // the native fallback belongs to name-keyed callees only: a
+        // dep-position callee addressed a uop module at install, so its
+        // miss here is a corrupted pool, never a native
+        let (module, func) = match entry {
+            ConstFuncRef::Uop { module, func } => {
+                let name = self
+                    .registry
+                    .module_name(*module)
+                    .ok_or(Trap::UnknownModule { module: *module })?;
+                return Err(Trap::UnknownCallee {
+                    module: name.to_owned(),
+                    func: *func,
+                });
+            },
+            ConstFuncRef::Named { module, func } => (module.as_str(), *func),
+        };
         let table = self
             .registry
             .native_table(module)
-            .filter(|t| usize::try_from(*func).is_ok_and(|i| i < t.len()))
+            .filter(|t| usize::try_from(func).is_ok_and(|i| i < t.len()))
             .ok_or(Trap::UnknownCallee {
-                module: module.clone(),
-                func: *func,
+                module: module.to_owned(),
+                func,
             })?;
-        let native = &table[*func as usize];
+        let native = &table[func as usize];
         // a variadic native takes at least its named parameters (the
         // staged tail is one element's whole word span, its width the
         // call site's static fact); every other native takes exactly them
@@ -5000,7 +5151,7 @@ impl Vm {
             stamp,
             callee: CachedCallee::Native {
                 table: Arc::clone(table),
-                index: *func,
+                index: func,
             },
         })
     }
@@ -5028,8 +5179,7 @@ impl Vm {
     /// is.
     fn resolve_dispatch_site(
         &mut self,
-        module: &str,
-        func: u32,
+        entry: &ConstFuncRef,
         caller: usize,
         caller_layout: &FrameLayout,
         pc: u32,
@@ -5044,10 +5194,25 @@ impl Vm {
                 && matches!(e.callee, CachedCallee::Uop { .. })
         });
         if !hit {
-            let Some((version, func_id)) = self.registry.resolve_indexed(module, func) else {
+            // an install-resolved id addresses its dep's module directly
+            // (the name sits in the registry's id vector), a name through
+            // the module table
+            let target = match entry {
+                ConstFuncRef::Uop { module, func } => {
+                    let name = self
+                        .registry
+                        .module_name(*module)
+                        .ok_or(Trap::UnknownModule { module: *module })?;
+                    self.registry.resolve_indexed(name, *func)
+                },
+                ConstFuncRef::Named { module, func } => {
+                    self.registry.resolve_indexed(module, *func)
+                },
+            };
+            let Some((version, func_id)) = target else {
                 return Ok(DispatchResolved::NotUop);
             };
-            let target = &version.functions()[func_id as usize];
+            let target = &self.registry.pinned(version).functions()[func_id as usize];
             debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
             if usize::from(nargs) > target.layout.params_len() {
                 return Err(Trap::ArityMismatch {
@@ -5061,7 +5226,7 @@ impl Vm {
                 pc,
                 stamp,
                 callee: CachedCallee::Uop {
-                    version: Arc::clone(&version),
+                    version,
                     func: func_id,
                     facts: facts.clone(),
                 },
@@ -5082,7 +5247,7 @@ impl Vm {
                 func,
                 facts,
             } => Ok(DispatchResolved::Uop {
-                version: Arc::clone(version),
+                version: *version,
                 func: *func,
                 facts: facts.clone(),
             }),
@@ -5187,7 +5352,10 @@ impl Vm {
         // assigns `active`/`pc` and `continue 'transfer`; the pc bounds
         // check stays per instruction.
         'transfer: loop {
-            let f = &active.version.functions()[active.func as usize];
+            // the frame context reads the version table through the
+            // address-stable pointer its row pins, so the borrows below
+            // hold nothing on the VM while the arms call into it whole
+            let f = &self.registry.pinned(active.version).functions()[active.func as usize];
             let code = &f.code;
             let slots = f.layout.slots();
             let frame_slots = slots.len();
@@ -5248,6 +5416,7 @@ impl Vm {
                         StackState {
                             stack: &mut self.stack,
                             callinfo: &mut self.callinfo,
+                            versions: &self.registry,
                             limit: self.limit,
                             max_len: &mut self.pool[self.current.index()].max_len,
                         }
@@ -5441,23 +5610,34 @@ impl Vm {
                         let v = match &pool[usize::from(kidx.0)] {
                             Const::F64(v) => Value::F64(*v),
                             Const::Bool(v) => Value::Bool(*v),
-                            // A fn word (F2): the FuncRef's module name resolves
-                            // through the registry id space at issue time — ids
-                            // are stable across swaps, and CALLS re-resolves the
-                            // word through the target's current slot at call
-                            // time, so a minted word picks up a hot-reload swap
-                            // like a staged one. The loader validated the
-                            // reference at install, so an unresolved name is a
-                            // corrupted pool, never a program fact.
-                            Const::FuncRef { module, func } => {
-                                let module_id = self.registry.module_id(module).ok_or((
-                                    Trap::UnknownCallee {
-                                        module: module.clone(),
-                                        func: *func,
-                                    },
-                                    pc,
-                                ))?;
-                                Value::Fn(FuncRef::new(module_id, *func))
+                            // A fn word (F2): an install-resolved id mints
+                            // the word directly — the dsmod install already
+                            // walked position → dep name → module id, and the
+                            // mint carries exactly that one vector index.
+                            // CALLS re-resolves the word through the target's
+                            // current slot at call time, so a minted word picks
+                            // up a hot-reload swap like a staged one. A
+                            // name-keyed callee resolves at issue time: a
+                            // directly installed module through the registry's
+                            // id space, a native surface refusing as no
+                            // callable word (natives are not values). The
+                            // loader validated the reference at install, so
+                            // an unresolved name is a corrupted pool, never a
+                            // program fact.
+                            Const::FuncRef(callee) => match callee {
+                                ConstFuncRef::Uop { module, func } => {
+                                    Value::Fn(FuncRef::new(*module, *func))
+                                },
+                                ConstFuncRef::Named { module, func } => {
+                                    let module_id = self.registry.module_id(module).ok_or((
+                                        Trap::UnknownCallee {
+                                            module: module.clone(),
+                                            func: *func,
+                                        },
+                                        pc,
+                                    ))?;
+                                    Value::Fn(FuncRef::new(module_id, *func))
+                                },
                             },
                             found => {
                                 let e = Trap::PoolKind {
@@ -6475,7 +6655,8 @@ impl Vm {
                                         if self.callinfo.len() > 1 {
                                             let caller = &self.callinfo[self.callinfo.len() - 2];
                                             let caller_fn =
-                                                &caller.module.functions()[caller.func as usize];
+                                                &self.registry.pinned(caller.module).functions()
+                                                    [caller.func as usize];
                                             let area = caller_fn.layout.arg_area_len();
                                             if 1 + payload.len() > area {
                                                 return Err((
@@ -6505,7 +6686,8 @@ impl Vm {
                                         if self.callinfo.len() > 1 {
                                             let caller = &self.callinfo[self.callinfo.len() - 2];
                                             let caller_fn =
-                                                &caller.module.functions()[caller.func as usize];
+                                                &self.registry.pinned(caller.module).functions()
+                                                    [caller.func as usize];
                                             let area = caller_fn.layout.arg_area_len();
                                             if words.len() > area {
                                                 return Err((
@@ -6619,7 +6801,7 @@ impl Vm {
                         let (version, func_id) =
                             StackState::resolve_func_word(&self.registry, funcref, nargs)
                                 .map_err(|e| (e, pc))?;
-                        let target = &version.functions()[func_id as usize];
+                        let target = &self.registry.pinned(version).functions()[func_id as usize];
                         // a closure's capture block lands in the callee's frame
                         // starting at the first local slot (after the params),
                         // so the body reads a capture where a lowered lambda
@@ -6663,7 +6845,8 @@ impl Vm {
                             // the callee's frame base: fp + 1 + the caller's
                             // body span (the pinned physical mapping)
                             let callee_fp = fp + 1 + f.layout.body_len();
-                            let target = &t.version.functions()[t.func as usize];
+                            let target =
+                                &self.registry.pinned(t.version).functions()[t.func as usize];
                             let capture_owner = self.current;
                             for (index, &value) in block.iter().enumerate() {
                                 if let Value::Ref(word) = value {
@@ -6713,7 +6896,7 @@ impl Vm {
                         // fetch indexes directly and the kind arm is the
                         // corrupted-pool tripwire.
                         let found = &pool[usize::from(callee.0)];
-                        let Const::FuncRef { module, func } = found else {
+                        let Const::FuncRef(callee) = found else {
                             return Err((
                                 Trap::PoolKind {
                                     kidx: callee.0,
@@ -6727,10 +6910,14 @@ impl Vm {
                         // generic impl body [H3]: the sentinel FuncRef
                         // names the calling frame's evidence slot, and
                         // the word staged there by the site that entered
-                        // the body names the serving member body in the
-                        // enclosing module — the dispatch reads it and
-                        // transfers exactly like a CALL's uop callee.
-                        if module == EVIDENCE_MODULE {
+                        // the body names an evidence-chain object — the
+                        // dispatch resolves its serving body and stages
+                        // the tail objects' indices as the body's trailing
+                        // evidence parameters, then transfers exactly like
+                        // a CALL's uop callee.
+                        if let ConstFuncRef::Named { module, func } = callee
+                            && module == EVIDENCE_MODULE
+                        {
                             let slot = u8::try_from(*func).map_err(|_| {
                                 (
                                     Trap::UnknownCallee {
@@ -6740,56 +6927,13 @@ impl Vm {
                                     pc,
                                 )
                             })?;
-                            let word = read_value(&self.stack, fp, slot, slots, body_len)
-                                .map_err(|e| (e, pc))?;
-                            let Value::I64(target_idx) = word else {
-                                return Err((
-                                    Trap::SlotTypeMismatch {
-                                        slot,
-                                        expected: SlotType::I64,
-                                        actual: word.slot_type(),
-                                    },
-                                    pc,
-                                ));
-                            };
-                            let version = Arc::clone(&active.version);
-                            let index = usize::try_from(target_idx)
-                                .ok()
-                                .filter(|index| *index < version.functions().len());
-                            let Some(index) = index else {
-                                return Err((
-                                    Trap::UnknownCallee {
-                                        module: module.clone(),
-                                        func: target_idx.try_into().unwrap_or(u32::MAX),
-                                    },
-                                    pc,
-                                ));
-                            };
-                            let func_id = u32::try_from(index).expect("guarded above");
-                            let target = &version.functions()[func_id as usize];
+                            let version = active.version;
+                            let func_id = evidence_chain_dispatch(
+                                self, version, slot, slots, body_len, fp, &f.layout, nargs, pc,
+                            )?;
+                            let target =
+                                &self.registry.pinned(version).functions()[func_id as usize];
                             debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
-                            if !sentinel_arity_exact(target.layout.params_len(), nargs) {
-                                return Err((
-                                    Trap::ArityMismatch {
-                                        expected: target.layout.params_len(),
-                                        given: usize::from(nargs),
-                                    },
-                                    pc,
-                                ));
-                            }
-                            // the follow riders a generic serving body
-                            // claims as its trailing evidence parameters:
-                            // validated I64 exactly like the static trait
-                            // path's staged words, before the slide reads
-                            // them (a concrete target ignores them)
-                            check_evidence_riders(
-                                &self.stack,
-                                target.layout.params_len(),
-                                nargs,
-                                &f.layout,
-                                fp,
-                            )
-                            .map_err(|e| (e, pc))?;
                             // the serving body is runtime data (the frame's
                             // evidence word named it), so the facts derive
                             // here, once per call
@@ -6825,14 +6969,7 @@ impl Vm {
                         // callee's frame never claims it.
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(
-                                module,
-                                *func,
-                                caller_site,
-                                &f.layout,
-                                pc.0,
-                                nargs,
-                            )
+                            .resolve_dispatch_site(callee, caller_site, &f.layout, pc.0, nargs)
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
@@ -6840,7 +6977,8 @@ impl Vm {
                             facts,
                         } = resolved
                         {
-                            let target = &version.functions()[func_id as usize];
+                            let target =
+                                &self.registry.pinned(version).functions()[func_id as usize];
                             let params_len = target.layout.params_len();
                             if usize::from(nargs) > params_len {
                                 return Err((
@@ -6884,10 +7022,29 @@ impl Vm {
                             pc = CodePc(0);
                             continue 'transfer;
                         }
-                        let g = crate::native::resolve_generic(module, *func).ok_or((
+                        // the generic builtins are native-by-name by
+                        // construction: an id-spelled callee reaches
+                        // NotUop only through a corrupted pool
+                        let (module, func) = match callee {
+                            ConstFuncRef::Named { module, func } => (module.as_str(), *func),
+                            ConstFuncRef::Uop { module, func } => {
+                                let name = self
+                                    .registry
+                                    .module_name(*module)
+                                    .unwrap_or("an uninstalled dependency");
+                                return Err((
+                                    Trap::UnknownCallee {
+                                        module: name.to_owned(),
+                                        func: *func,
+                                    },
+                                    pc,
+                                ));
+                            },
+                        };
+                        let g = crate::native::resolve_generic(module, func).ok_or((
                             Trap::UnknownCallee {
-                                module: module.clone(),
-                                func: *func,
+                                module: module.to_owned(),
+                                func,
                             },
                             pc,
                         ))?;
@@ -6895,7 +7052,7 @@ impl Vm {
                         // teardown-hook drive must return to its driver,
                         // so the fork refuses before its spawn phase runs
                         // (a parked hook would strand the pass)
-                        if self.teardown_drive && crate::native::is_fork_join(module, *func) {
+                        if self.teardown_drive && crate::native::is_fork_join(module, func) {
                             return Err((Trap::ReentrancyRefused, pc));
                         }
                         let needed = generic_staged_check(g, nargs).map_err(|e| (e, pc))?;
@@ -7010,7 +7167,7 @@ impl Vm {
                         // directly and the kind arm is the corrupted-pool
                         // tripwire.
                         let found = &pool[usize::from(callee.0)];
-                        let Const::FuncRef { module, func } = found else {
+                        let Const::FuncRef(callee) = found else {
                             return Err((
                                 Trap::PoolKind {
                                     kidx: callee.0,
@@ -7023,8 +7180,12 @@ impl Vm {
                         // the sentinel names the frame's evidence slot: the
                         // target is runtime data the entering site staged,
                         // so this path reads the slot every time and never
-                        // touches the cache
-                        if module == EVIDENCE_MODULE {
+                        // touches the cache — the chain object stages the
+                        // riders exactly like the CALLG sentinel path above,
+                        // before the frame-reuse slide moves them
+                        if let ConstFuncRef::Named { module, func } = callee
+                            && module == EVIDENCE_MODULE
+                        {
                             let slot = u8::try_from(*func).map_err(|_| {
                                 (
                                     Trap::UnknownCallee {
@@ -7034,53 +7195,13 @@ impl Vm {
                                     pc,
                                 )
                             })?;
-                            let word = read_value(&self.stack, fp, slot, slots, body_len)
-                                .map_err(|e| (e, pc))?;
-                            let Value::I64(target_idx) = word else {
-                                return Err((
-                                    Trap::SlotTypeMismatch {
-                                        slot,
-                                        expected: SlotType::I64,
-                                        actual: word.slot_type(),
-                                    },
-                                    pc,
-                                ));
-                            };
-                            let version = Arc::clone(&active.version);
-                            let index = usize::try_from(target_idx)
-                                .ok()
-                                .filter(|index| *index < version.functions().len());
-                            let Some(index) = index else {
-                                return Err((
-                                    Trap::UnknownCallee {
-                                        module: module.clone(),
-                                        func: target_idx.try_into().unwrap_or(u32::MAX),
-                                    },
-                                    pc,
-                                ));
-                            };
-                            let func_id = u32::try_from(index).expect("guarded above");
-                            let target = &version.functions()[func_id as usize];
+                            let version = active.version;
+                            let func_id = evidence_chain_dispatch(
+                                self, version, slot, slots, body_len, fp, &f.layout, nargs, pc,
+                            )?;
+                            let target =
+                                &self.registry.pinned(version).functions()[func_id as usize];
                             debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
-                            if !sentinel_arity_exact(target.layout.params_len(), nargs) {
-                                return Err((
-                                    Trap::ArityMismatch {
-                                        expected: target.layout.params_len(),
-                                        given: usize::from(nargs),
-                                    },
-                                    pc,
-                                ));
-                            }
-                            // the follow riders, as the CALLG sentinel path
-                            // above validates them
-                            check_evidence_riders(
-                                &self.stack,
-                                target.layout.params_len(),
-                                nargs,
-                                &f.layout,
-                                fp,
-                            )
-                            .map_err(|e| (e, pc))?;
                             // the serving body is runtime data (the frame's
                             // evidence word named it), so the facts derive
                             // here, once per call
@@ -7104,14 +7225,7 @@ impl Vm {
                         // reuses this frame
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(
-                                module,
-                                *func,
-                                caller_site,
-                                &f.layout,
-                                pc.0,
-                                nargs,
-                            )
+                            .resolve_dispatch_site(callee, caller_site, &f.layout, pc.0, nargs)
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
@@ -7119,8 +7233,10 @@ impl Vm {
                             facts,
                         } = resolved
                         {
-                            let params_len =
-                                version.functions()[func_id as usize].layout.params_len();
+                            let params_len = self.registry.pinned(version).functions()
+                                [func_id as usize]
+                                .layout
+                                .params_len();
                             // the staged evidence parameters the body
                             // claims, then the solved instance word — both
                             // count-free I64 constants riding past the
@@ -7166,14 +7282,33 @@ impl Vm {
                         // join parks its site through the drive, and the
                         // tail call would return this frame at the call —
                         // the fork needs the CALLG site
-                        let g = crate::native::resolve_generic(module, *func).ok_or((
+                        // the generic builtins are native-by-name by
+                        // construction: an id-spelled callee reaches
+                        // NotUop only through a corrupted pool
+                        let (module, func) = match callee {
+                            ConstFuncRef::Named { module, func } => (module.as_str(), *func),
+                            ConstFuncRef::Uop { module, func } => {
+                                let name = self
+                                    .registry
+                                    .module_name(*module)
+                                    .unwrap_or("an uninstalled dependency");
+                                return Err((
+                                    Trap::UnknownCallee {
+                                        module: name.to_owned(),
+                                        func: *func,
+                                    },
+                                    pc,
+                                ));
+                            },
+                        };
+                        let g = crate::native::resolve_generic(module, func).ok_or((
                             Trap::UnknownCallee {
-                                module: module.clone(),
-                                func: *func,
+                                module: module.to_owned(),
+                                func,
                             },
                             pc,
                         ))?;
-                        if crate::native::is_fork_join(module, *func) {
+                        if crate::native::is_fork_join(module, func) {
                             return Err((Trap::TailForkJoin, pc));
                         }
                         let needed = generic_staged_check(g, nargs).map_err(|e| (e, pc))?;
@@ -7274,7 +7409,8 @@ impl Vm {
                                 if self.callinfo.len() > 1 {
                                     let caller = &self.callinfo[self.callinfo.len() - 2];
                                     let caller_fn =
-                                        &caller.module.functions()[caller.func as usize];
+                                        &self.registry.pinned(caller.module).functions()
+                                            [caller.func as usize];
                                     let area = caller_fn.layout.arg_area_len();
                                     if 1 + payload.len() > area {
                                         return Err((
@@ -7302,7 +7438,8 @@ impl Vm {
                                 if self.callinfo.len() > 1 {
                                     let caller = &self.callinfo[self.callinfo.len() - 2];
                                     let caller_fn =
-                                        &caller.module.functions()[caller.func as usize];
+                                        &self.registry.pinned(caller.module).functions()
+                                            [caller.func as usize];
                                     let area = caller_fn.layout.arg_area_len();
                                     if words.len() > area {
                                         return Err((
@@ -7415,7 +7552,8 @@ impl Vm {
                             && matches!(self.stack[fp], Word::Meta(m) if m.return_pc.0 == u32::MAX);
                         if self.callinfo.len() > 1 && !at_reentry {
                             let caller = &self.callinfo[self.callinfo.len() - 2];
-                            let caller_fn = &caller.module.functions()[caller.func as usize];
+                            let caller_fn = &self.registry.pinned(caller.module).functions()
+                                [caller.func as usize];
                             let area = caller_fn.layout.arg_area_len();
                             if usize::from(n) > area {
                                 return Err((
@@ -7567,7 +7705,7 @@ impl Vm {
         let mut frames = Vec::with_capacity(fiber.callinfo.len());
         for depth in (0..fiber.callinfo.len()).rev() {
             let ci = &fiber.callinfo[depth];
-            let f = &ci.module.functions()[ci.func as usize];
+            let f = &self.registry.pinned(ci.module).functions()[ci.func as usize];
             let pc = if depth + 1 == fiber.callinfo.len() {
                 self.trap_pc.unwrap_or(CodePc(0))
             } else {
@@ -7581,7 +7719,7 @@ impl Vm {
                 Word::Slot(_) => 0,
             };
             frames.push(BacktraceFrame {
-                module: ci.module.name().to_owned(),
+                module: self.registry.pinned(ci.module).name().to_owned(),
                 func: f.name.clone(),
                 pc,
                 elided,
@@ -7943,5 +8081,88 @@ mod tests {
         let (_, row) = rows.open(key, 4);
         assert_eq!(row.ids.len(), 4);
         assert_eq!(row.ids[1], Some(3));
+    }
+
+    /// The version table's single home: the row's `Arc` is an installed
+    /// version's one owner, so the entry resolution, the call's frame
+    /// push, the return's take-back, and the CALL-cache fills between
+    /// mint no second count — a drive per iteration over a same-module
+    /// CALL, read through the test-only count probe — and the install
+    /// sweep frees the version with its row, since no other home exists.
+    /// A seam regressing into an Arc hand-off — per call, per cache fill,
+    /// or per return — moves the count off 1.
+    #[test]
+    fn the_tables_row_is_a_versions_single_home_across_drives() {
+        // g(n) = n * scale; f(n) = g(n): one same-module CALL plus its
+        // return per drive, the retired take-back seam
+        fn fixture(scale: i64) -> ModuleVersion {
+            let g = crate::program::FunctionDef {
+                name: "g".into(),
+                layout: FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 0)
+                    .expect("valid layout"),
+                pool: vec![Const::I64(scale)],
+                code: crate::program::assemble(&[
+                    Uop::Funcf { frame_slots: 2 },
+                    Uop::Kimm {
+                        dst: 1,
+                        kidx: ConstIdx(0),
+                    },
+                    Uop::MulI64 {
+                        dst: 0,
+                        lhs: 0,
+                        rhs: 1,
+                    },
+                    Uop::Ret { src: 0 },
+                ])
+                .expect("fixture body encodes"),
+            };
+            let f = crate::program::FunctionDef {
+                name: "f".into(),
+                layout: FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 1)
+                    .expect("valid layout"),
+                pool: vec![Const::FuncRef(ConstFuncRef::Named {
+                    module: "m".into(),
+                    func: 0,
+                })],
+                code: crate::program::assemble(&[
+                    Uop::Funcf { frame_slots: 2 },
+                    Uop::Mov { dst: 1, src: 0 },
+                    Uop::Call {
+                        callee: ConstIdx(0),
+                        nargs: 1,
+                    },
+                    Uop::Ret { src: 1 },
+                ])
+                .expect("fixture body encodes"),
+            };
+            ModuleVersion::new("m", vec![g, f]).expect("valid fixture module")
+        }
+        let mut vm = Vm::new(ModuleRegistry::new());
+        let v1 = vm.install_module(fixture(2));
+        for _ in 0..8 {
+            assert_eq!(vm.run("m", "f", &[Value::I64(21)]), Ok(Value::I64(42)));
+        }
+        assert_eq!(
+            vm.registry.row_arc_count(v1),
+            1,
+            "entry, call, return, and cache fills minted no second home"
+        );
+        // one swap pins v1 through the retiring slot, still its single
+        // home; the second swap leaves the slots, but the root drive's
+        // kept entry frame still names v1 — the sweep honestly keeps the
+        // row (the same pin the fiber sweep tests carry)
+        vm.install_module(fixture(3));
+        assert_eq!(vm.registry.row_arc_count(v1), 1);
+        assert!(vm.registry.version(v1).is_some());
+        vm.install_module(fixture(5));
+        assert_eq!(vm.registry.row_arc_count(v1), 1);
+        assert!(vm.registry.version(v1).is_some());
+        // the next run resets the root's kept entry frame onto the
+        // current row, so the install after it retires v1's row — and the
+        // row was the version's single home, so its count reads 0
+        assert_eq!(vm.run("m", "f", &[Value::I64(21)]), Ok(Value::I64(105)));
+        vm.install_module(fixture(7));
+        assert_eq!(vm.registry.row_arc_count(v1), 0);
+        assert!(vm.registry.version(v1).is_none());
     }
 }

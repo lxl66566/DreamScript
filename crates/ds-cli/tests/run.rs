@@ -4,7 +4,7 @@
 
 use std::{env, fs, path::PathBuf, process::Command};
 
-use ds_mod::{Constant, Function, Hash128, Module, TargetClass, write};
+use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass, write};
 use ds_vm::{
     abi::{
         ConstIdx, FrameLayout, SlotType,
@@ -33,7 +33,7 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(1),
             Constant::Bool(true),
             Constant::FuncRef {
-                module: String::new(), // the enclosing module: odd, index 1
+                key: FuncRefKey::Dep(0), // the enclosing key: FuncRefKey::Native(odd), index 1
                 func: 1,
             },
         ],
@@ -69,7 +69,7 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(1),
             Constant::Bool(false),
             Constant::FuncRef {
-                module: String::new(),
+                key: FuncRefKey::Dep(0),
                 func: 0,
             },
         ],
@@ -101,7 +101,7 @@ fn parity_module(depth: i64) -> Module {
         "main",
         layout(&[I64], 0, 1),
         vec![Constant::I64(depth), Constant::FuncRef {
-            module: String::new(),
+            key: FuncRefKey::Dep(0),
             func: 0,
         }],
         vec![
@@ -157,7 +157,7 @@ fn foreign_callee_module() -> Module {
         "main",
         layout(&[I64], 0, 1),
         vec![Constant::I64(5), Constant::FuncRef {
-            module: "dep".into(),
+            key: FuncRefKey::Dep(1), // the "dep" dependency entry
             func: 0,
         }],
         vec![
@@ -171,7 +171,9 @@ fn foreign_callee_module() -> Module {
         ],
     )
     .expect("valid function");
-    Module::new("app", TargetClass::Bytecode, Hash128::compute(b"app")).with_function(main)
+    Module::new("app", TargetClass::Bytecode, Hash128::compute(b"app"))
+        .with_dep("dep", Hash128::ZERO)
+        .with_function(main)
 }
 
 /// A one-function module whose main divides by zero: a mid-run trap with a
@@ -221,9 +223,22 @@ fn platform_tag_module(name: &str, tag: u8) -> Module {
     .with_function(main)
 }
 
+/// A private per-process script-cache root: spawned runs never read or
+/// write a real user cache directory.
+fn test_cache() -> PathBuf {
+    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            dir
+        })
+        .clone()
+}
 /// Runs the built binary and flattens the outcome.
 fn ds_run(args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_ds"))
+        .env("DS_CACHE", test_cache())
         .args(args)
         .output()
         .expect("the ds binary runs");

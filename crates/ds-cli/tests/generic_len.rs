@@ -8,7 +8,21 @@ use std::{env, fs, path::PathBuf, process::Command};
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
+    command.env("DS_CACHE", test_cache());
     command
+}
+
+/// A private per-process script-cache root: spawned runs never read or
+/// write a real user cache directory.
+fn test_cache() -> PathBuf {
+    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            dir
+        })
+        .clone()
 }
 
 fn fixture() -> PathBuf {

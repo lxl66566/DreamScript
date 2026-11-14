@@ -989,9 +989,12 @@ fn ret_span_requires_at_least_one_word() {
         RetSpan { src: 0, n: 0 }.encode(0),
         Err(EncodeError::RetSpanEmpty)
     );
-    let one = RetSpan { src: 3, n: 2 };
-    let word = one.encode(0).expect("a nonempty span encodes");
+    let one = RetSpan { src: 3, n: 1 };
+    let word = one.encode(0).expect("the unit-word span encodes");
     assert_eq!(Uop::decode(0, word), Ok(one));
+    let two = RetSpan { src: 3, n: 2 };
+    let second = two.encode(0).expect("a nonempty span encodes");
+    assert_eq!(Uop::decode(0, second), Ok(two));
 }
 
 #[test]

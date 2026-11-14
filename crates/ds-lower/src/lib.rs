@@ -63,7 +63,7 @@ use std::{
 use ds_abi::{RcOp, Uop};
 use ds_check::{Analyzed, Condition, TraitId, render_type};
 use ds_diag::Span;
-use ds_mod::{Hash128, Module, TargetClass};
+use ds_mod::{EntryPlan, Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
 use func::{BodyId, EvidenceEnv, FnLower, Plan};
@@ -129,14 +129,171 @@ impl Lowered {
         self.tags.get(name).copied()
     }
 
+    /// Records the run surface's entry staging facts into the module, so
+    /// the artifact carries what a warm run needs to stage arguments
+    /// without the front end: one row per top-level lambda (a candidate
+    /// entry name) with one plan per parameter. Lowering owns the tag
+    /// table (recorded at construction); the caller owns which names are
+    /// entries and how their parameters stage.
+    #[must_use]
+    pub fn with_entry_plans(mut self, entries: Vec<EntryPlan>) -> Self {
+        self.module = entries.into_iter().fold(self.module, |module, plan| {
+            module.with_entry(plan.name, plan.args)
+        });
+        self
+    }
+
     /// One function's placed op sequence: the runnable uops plus the
     /// placed RC ops (dup/drop) at their exact positions — the artifact
-    /// the M4 placement contract pins and the VM seam will splice in.
+    /// the M4 placement contract pins and the VM seam will splice in. A
+    /// body served from the checked-in artifact answers an empty stream:
+    /// its code words already ride the module verbatim.
     #[must_use]
     pub fn placed(&self, name: &str) -> Option<&[PlacedOp]> {
         self.function_index(name)
             .and_then(|index| self.placed.get(index as usize).map(Vec::as_slice))
     }
+}
+
+/// One embedded comptime answer, as the runtime module materializes it
+/// at the call site (G1): the evaluator's recorded constant. The
+/// round-one embeddable results are the scalar atoms and string — a
+/// comptime function answering anything else refuses at the evaluator,
+/// never here.
+#[derive(Clone, Debug)]
+pub enum ComptimeConst {
+    /// A string answer.
+    Str(String),
+    /// An int answer.
+    Int(i64),
+    /// A float answer.
+    Float(f64),
+    /// A bool answer.
+    Bool(bool),
+}
+
+/// The evaluator's recorded answers, keyed by each comptime call's span:
+/// the runtime lowering embeds exactly these and refuses a comptime call
+/// whose span is missing (the evaluator's contract).
+#[derive(Clone, Debug, Default)]
+pub struct ComptimeValues {
+    answers: HashMap<Span, ComptimeConst>,
+}
+
+impl ComptimeValues {
+    /// Records one answer.
+    pub fn insert(&mut self, span: Span, constant: ComptimeConst) {
+        self.answers.insert(span, constant);
+    }
+
+    /// One call span's answer.
+    #[must_use]
+    pub fn get(&self, span: Span) -> Option<&ComptimeConst> {
+        self.answers.get(&span)
+    }
+
+    /// Whether any answer was recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+}
+
+/// The shared lowering core behind the entries: `main_required` waives
+/// the run contract's entry check for the ambient's declaration-only
+/// generation and the comptime slice, `served` splices pre-lowered
+/// function bodies over the planned prefix instead of walking them, and
+/// `comptime` selects the evaluator's slice or embeds its recorded
+/// answers at the call sites.
+fn lower_module(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+    main_required: bool,
+    served: Option<Vec<ds_mod::Function>>,
+    comptime: func::ComptimeRun<'_>,
+) -> Result<Lowered, LowerError> {
+    let slice = matches!(comptime, func::ComptimeRun::Slice);
+    if !analyzed.checked.diags.is_empty() {
+        return Err(LowerError::NotChecked {
+            count: analyzed.checked.diags.len(),
+        });
+    }
+    let mut plan = Plan::new();
+    plan.set_demands(collect_demands(asts, analyzed));
+    if !slice {
+        plan_deinits(asts, &mut plan, analyzed);
+    }
+    for ast in asts {
+        for block in &ast.blocks {
+            for item in &block.items {
+                refuse_derive(item)?;
+                plan_item(item, &mut plan, analyzed, slice);
+            }
+        }
+    }
+    if main_required && !slice && !plan.has_main() {
+        return Err(LowerError::NoMain);
+    }
+    if let Some(served) = &served {
+        let names = plan.names();
+        let detail = if names.len() < served.len() {
+            Some(format!(
+                "the plan holds {} functions, the serve holds {}",
+                names.len(),
+                served.len()
+            ))
+        } else {
+            names
+                .iter()
+                .zip(served.iter())
+                .position(|(planned, body)| planned != body.name())
+                .map(|at| {
+                    format!(
+                        "planned function {at} is `{}` but the served body names `{}`",
+                        names[at],
+                        served[at].name()
+                    )
+                })
+        };
+        if let Some(detail) = detail {
+            return Err(LowerError::ServedDrift { detail });
+        }
+    }
+    // the affine facts the placement pass consumes: last uses and moves
+    // come from the checker (C1), never re-derived here
+    let lin = ds_check::linearity_check(
+        asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        &analyzed.decls,
+        &analyzed.checked,
+    );
+    let (functions, placed, shapes) =
+        lower_all(&mut plan, analyzed, &lin, &platform_name(asts), served, comptime)?;
+
+    let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
+    for function in functions {
+        module = module.with_function(function);
+    }
+    for chain in plan.take_chains() {
+        module = module.with_chain(chain);
+    }
+    let tags = shapes.tag_names();
+    // the tag table rides the artifact in first-use order: ids are dense
+    // from zero, so sorting by id reconstructs the assignment order
+    let mut rows: Vec<(&str, u8)> = tags.iter().map(|(name, id)| (name.as_str(), *id)).collect();
+    rows.sort_unstable_by_key(|&(_, id)| id);
+    for (name, id) in rows {
+        module = module.with_tag(name, id);
+    }
+    Ok(Lowered {
+        module,
+        functions: plan.names(),
+        tags,
+        placed,
+    })
 }
 
 /// Lowers one checked package to a ds-mod module named `module_name`.
@@ -153,46 +310,135 @@ pub fn lower(
     asts: &[Ast],
     analyzed: &Analyzed,
 ) -> Result<Lowered, LowerError> {
-    if !analyzed.checked.diags.is_empty() {
-        return Err(LowerError::NotChecked {
-            count: analyzed.checked.diags.len(),
-        });
-    }
-    let mut plan = Plan::new();
-    plan.set_demands(collect_demands(asts, analyzed));
-    plan_deinits(asts, &mut plan, analyzed);
-    for ast in asts {
-        for block in &ast.blocks {
-            for item in &block.items {
-                refuse_derive(item)?;
-                plan_item(item, &mut plan, analyzed);
-            }
-        }
-    }
-    if !plan.has_main() {
-        return Err(LowerError::NoMain);
-    }
-    // the affine facts the placement pass consumes: last uses and moves
-    // come from the checker (C1), never re-derived here
-    let lin = ds_check::linearity_check(
+    lower_with_comptime(
+        module_name,
+        source_hash,
         asts,
-        &analyzed.package,
-        &analyzed.resolutions,
-        &analyzed.decls,
-        &analyzed.checked,
-    );
-    let (functions, placed, shapes) = lower_all(&mut plan, analyzed, &lin, &platform_name(asts))?;
+        analyzed,
+        &ComptimeValues::default(),
+    )
+}
 
-    let mut module = Module::new(module_name, TargetClass::Bytecode, source_hash);
-    for function in functions {
-        module = module.with_function(function);
-    }
-    Ok(Lowered {
-        module,
-        functions: plan.names(),
-        tags: shapes.tag_names(),
-        placed,
-    })
+/// Lowers the ambient's declaration package for the checked-in dsmod
+/// artifact: the run contract's `main` requirement is waived — a
+/// declaration-only member has no entry — and everything else runs
+/// exactly as [`lower`]. The artifact's consumer splices the returned
+/// functions in front of a user package's own table (see
+/// [`lower_with_served`]), so the ambient's items must keep planning
+/// first in the combined package for the indexes to line up.
+///
+/// # Errors
+///
+/// [`LowerError::NotChecked`] and [`LowerError::Unsupported`] as
+/// [`lower`]; never [`LowerError::NoMain`].
+pub fn lower_ambient(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+) -> Result<Lowered, LowerError> {
+    let empty = ComptimeValues::default();
+    lower_module(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        false,
+        None,
+        func::ComptimeRun::Runtime(&empty),
+    )
+}
+
+/// The runtime-module lowering with the comptime evaluator's answers
+/// embedded: comptime functions plan nothing (their call sites emit the
+/// recorded constants), and every other surface lowers exactly like
+/// [`lower`].
+///
+/// # Errors
+///
+/// As [`lower`], plus [`LowerError::Unsupported`] for a comptime call
+/// whose span the evaluator never recorded.
+pub fn lower_with_comptime(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+    values: &ComptimeValues,
+) -> Result<Lowered, LowerError> {
+    lower_module(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        true,
+        None,
+        func::ComptimeRun::Runtime(values),
+    )
+}
+
+/// The comptime slice the evaluator compiles for its fenced run: exactly
+/// the package's comptime functions, lowered as ordinary locals — a
+/// comptime function calling another is a plain intra-module call there,
+/// and calls into runtime functions refuse (the slice's table never
+/// holds them). No `main` is required and no deinit hooks plan (binding
+/// a deinit-carrying struct inside a comptime function refuses at the
+/// hook's claim).
+///
+/// # Errors
+///
+/// [`LowerError::NotChecked`] when the package still carries checker
+/// diagnostics; [`LowerError::Unsupported`] for comptime bodies outside
+/// the covered runtime contract.
+pub fn lower_comptime_slice(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+) -> Result<Lowered, LowerError> {
+    lower_module(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        false,
+        None,
+        func::ComptimeRun::Slice,
+    )
+}
+
+/// Lowers one checked package with the ambient's function bodies served
+/// from a checked-in artifact instead of lowered here. The served bodies
+/// must be exactly what lowering the ambient member alone produces —
+/// [`lower_ambient`] over the same trees — and planning here must
+/// reproduce their function-table prefix: the served list installs at
+/// indexes `0..n`, every body-walking seam (dispatch staging, call
+/// FuncRefs, evidence demands) reads the planned entries as ever, and
+/// only the per-body lowering walk is skipped. The ambient member must
+/// sit first in `asts` (the run path's registration order); a served
+/// list whose length or names disagree with the plan is
+/// [`LowerError::ServedDrift`] — the caller falls back to [`lower`].
+///
+/// # Errors
+///
+/// As [`lower`], plus [`LowerError::ServedDrift`] when the served
+/// prefix disagrees with the plan.
+pub fn lower_with_served(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+    served: Vec<ds_mod::Function>,
+    values: &ComptimeValues,
+) -> Result<Lowered, LowerError> {
+    lower_module(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        true,
+        Some(served),
+        func::ComptimeRun::Runtime(values),
+    )
 }
 
 /// Plans every struct's declared `deinit` member as a synthesized module
@@ -282,15 +528,20 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 /// Collects one top-level item into the plan when it is a lowerable
 /// const-arrow function: a monomorphic one lowers its own body, a free
 /// generic one its single ONE body with the runtime-evidence demands its
-/// bounds collect [H3]. Everything else is skipped; comptime items are
-/// the documented exemption.
-fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
+/// bounds collect [H3]. Everything else is skipped; comptime functions
+/// are the evaluator's slice — the runtime module plans none of them and
+/// the slice plans nothing else.
+fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed, slice: bool) {
     if let ItemKind::Impl(imp) = &item.kind {
-        plan_impl(item, imp, plan, analyzed);
+        if !slice {
+            plan_impl(item, imp, plan, analyzed);
+        }
         return;
     }
     if let ItemKind::Trait(t) = &item.kind {
-        plan_trait_defaults(t, plan, analyzed);
+        if !slice {
+            plan_trait_defaults(t, plan, analyzed);
+        }
         return;
     }
     let ItemKind::Local(local) = &item.kind else {
@@ -302,7 +553,10 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     let Pattern::Binding { name, .. } = &local.pat else {
         return;
     };
-    let Expr::Lambda { generics, .. } = &local.init else {
+    let Expr::Lambda {
+        generics, params, ..
+    } = &local.init
+    else {
         return; // a non-function const: no module function for it
     };
     let Some(def) = analyzed.package.lookup(&name.name) else {
@@ -310,6 +564,12 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
     };
     if !analyzed.checked.def_types.contains_key(&def) {
         return; // the checker has no typed value for it (extern or later stage)
+    }
+    let comptime_fn = params
+        .iter()
+        .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)));
+    if comptime_fn != slice {
+        return; // the runtime module and the comptime slice split here
     }
     if !generics.is_empty() {
         // The ONE generic body [H3]: a free generic fn lowers once,
@@ -359,10 +619,8 @@ fn fn_bounds(def: ds_check::DefId, analyzed: &Analyzed) -> HashMap<String, HashS
 /// mangled identity `<trait>#<target>#<member>` with the checker-solved
 /// return its FnDecl names. A generic impl's bodies lower once per impl
 /// with one runtime-evidence slot per nested bound demand, staged by the
-/// entering call sites from the checker-recorded bounds; the runtime-impl
-/// marker serves the transitive-staging refusal (a nested dispatch whose
-/// serving body is itself generic). Inherent impls plan through their own
-/// mangle below.
+/// entering call sites from the checker-recorded bounds. Inherent impls
+/// plan through their own mangle below.
 fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
     if imp.trait_ref.is_none() {
         plan_inherent_impl(item, imp, plan, analyzed);
@@ -376,15 +634,6 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
         return;
     };
     let bounds = Rc::new(impl_bounds(item.span, analyzed));
-    if !imp.generics.is_empty() {
-        // the runtime-evidence territory [H3]: a generic impl's member
-        // bodies lower once per impl (never per instantiation), the call
-        // sites entering them stage the per-bound evidence words the
-        // body's nested dispatches read, and the marker serves the
-        // transitive refusal — a nested dispatch whose serving body is
-        // itself generic has no staging yet
-        plan.note_runtime_impl(item.span);
-    }
     for f in &imp.fns {
         let Some(body) = &f.body else {
             continue;
@@ -424,13 +673,9 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
 /// lower once per impl with the runtime-evidence machinery the trait form
 /// uses (one evidence slot per nested bound demand); the entering call
 /// sites stage the words through the checker's call-site bounds record —
-/// no instance word exists for an inherent impl — so the runtime-impl
-/// marker serves only the transitive-staging refusal.
+/// no instance word exists for an inherent impl.
 fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) {
     let bounds = Rc::new(impl_bounds(item.span, analyzed));
-    if !imp.generics.is_empty() {
-        plan.note_runtime_impl(item.span);
-    }
     for f in &imp.fns {
         let Some(body) = &f.body else {
             continue;
@@ -738,16 +983,14 @@ fn collect_bounds(
 /// each function's placed op sequence, and the shared shape tables.
 type LowerAll<'b> = (Vec<ds_mod::Function>, Vec<Vec<PlacedOp>>, Shapes<'b>);
 
-/// Lowers the planned functions as a worklist: a body may register
-/// synthesized lambda functions as it lowers (F2), and every registered
-/// function lowers in turn. Each one's resolutions come from its own
-/// file (the bundle is keyed by file id).
 /// The platform name the world natives' pool FuncRefs address (H5, E1):
 /// the package's `platform "..."` declaration's name, the default
 /// platform `std` when no declaration names one — the host must install
 /// a platform under this name or the module's install refuses the world
-/// call sites.
-fn platform_name(asts: &[Ast]) -> String {
+/// call sites. The comptime evaluator serves the same name with an
+/// empty platform, which is the fence.
+#[must_use]
+pub fn platform_name(asts: &[Ast]) -> String {
     for ast in asts {
         for block in &ast.blocks {
             for item in &block.items {
@@ -765,11 +1008,23 @@ fn lower_all<'b>(
     analyzed: &'b Analyzed,
     lin: &ds_check::Linearity,
     platform: &str,
+    served: Option<Vec<ds_mod::Function>>,
+    comptime: func::ComptimeRun<'b>,
 ) -> Result<LowerAll<'b>, LowerError> {
     let mut shapes = Shapes::new(analyzed, plan.declared_deinits());
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
-    let mut index = 0;
+    // The served prefix installs verbatim (names already validated
+    // against the plan): its bodies carry their own placed streams as
+    // code words, so their placed rows here stay empty and the walk
+    // starts at the splice's end.
+    if let Some(served) = served {
+        for body in served {
+            functions.push(body);
+            placed.push(Vec::new());
+        }
+    }
+    let mut index = functions.len();
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
         // Any sentinel-spanned refusal that reached here without a
@@ -784,7 +1039,10 @@ fn lower_all<'b>(
             lin,
             &planned,
             u32::try_from(index).expect("function index fits u32"),
-            platform.to_owned(),
+            func::RunContext {
+                platform: platform.to_owned(),
+                comptime,
+            },
         )
         .map_err(|err| err.respanned(planned.lambda.span()))?;
         functions.push(function);

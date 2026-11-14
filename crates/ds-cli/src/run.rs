@@ -1,23 +1,26 @@
 //! The `ds run` subcommand: execute one module — a validated mmap-read
 //! dsmod file, or a .ds source compiled in-process through the source
-//! pipeline (parse, check, lower, install) — resolving one entry
-//! function and reporting its result.
+//! pipeline (parse, check, lower, install), with the script-mode dsmod
+//! cache consulted before that pipeline — resolving one entry function
+//! and reporting its result.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
-use ds_mod::{LoadError as ModLoadError, ReadError, read_mmap};
+use ds_mod::{EntryArg, LoadError as ModLoadError, Module, ReadError, read_mmap};
 use ds_vm::{
     ArenaMisuse, ArenaPackError, LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap,
     Value, Vm,
-    abi::SlotType,
     native::{PLATFORM_IO_ERR, PLATFORM_NET_ERR, PLATFORM_NONE, PLATFORM_PARSE_ERR},
     platform::Platform,
 };
 
-use crate::source;
+use crate::{
+    run_cache::{RunCache, ServedPlan},
+    source,
+};
 
 /// The CLI is the default platform provider (H5.5, E1): every run
 /// installs the default `std` platform handler (console, fsys, net,
@@ -45,6 +48,9 @@ pub struct RunArgs {
     /// Compile without the stdlib ambient package member (source files only)
     #[arg(long)]
     no_ambient: bool,
+    /// Run .ds sources without consulting the script-mode dsmod cache
+    #[arg(long)]
+    no_cache: bool,
 }
 
 /// Runs one module: the dsmod path mmaps and installs; the source path
@@ -52,7 +58,7 @@ pub struct RunArgs {
 pub fn run(args: &RunArgs) -> Result<()> {
     let mut prepared = match source_or_module(&args.file)? {
         FileKind::Dsmod => read_dsmod(args)?,
-        FileKind::Source => compile_source(args)?,
+        FileKind::Source => run_source(args)?,
     };
     resolve_and_run(&mut prepared, &args.entry)
 }
@@ -91,14 +97,19 @@ struct PreparedRun {
     functions: Vec<String>,
 }
 
-/// The existing dsmod path: validated mmap read and install. The install
-/// consumes the module, so the run's name and function table are read
-/// first.
+/// The existing dsmod path: validated mmap read and install.
 fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let module = read_mmap(&args.file).map_err(|error| open_error(&args.file, &error))?;
-    let name = module.module().name().to_owned();
+    install_module(module.into_module(), args)
+}
+
+/// Installs one finished module into a fresh VM with the default std
+/// platform and stages `--args` as raw i64 words — the dsmod path's
+/// rule, and the cache hit path's: the entry classes the cache serves
+/// are exactly those whose source-path staging is this spelling.
+fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
+    let name = module.name().to_owned();
     let functions: Vec<String> = module
-        .module()
         .functions()
         .iter()
         .map(|function| function.name().to_owned())
@@ -106,7 +117,7 @@ fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
-    vm.install_dsmod(module.into_module())
+    vm.install_dsmod(module)
         .map_err(|error| install_error(&name, functions.len(), &error))?;
     Ok(PreparedRun {
         staged: args.args.iter().map(|&value| Value::I64(value)).collect(),
@@ -116,13 +127,57 @@ fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     })
 }
 
-/// The source path: compile, install, and stage the entry's arguments per
-/// the entry parameters' checked types. The install consumes the lowered
+/// The source path: the script-mode dsmod cache first — a servable
+/// cached artifact installs without the front end — then the in-process
+/// compile exactly as before, caching what a later run of the same
+/// inputs can serve.
+fn run_source(args: &RunArgs) -> Result<PreparedRun> {
+    let cache = RunCache::discover(!args.no_cache, args.no_ambient);
+    if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
+        return run_cached(module, &plan, args);
+    }
+    let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
+    cache.store(&args.entry, compiled.lowered.module());
+    compile_source(args, compiled)
+}
+
+/// The hit path: install the cached module and stage exactly as the
+/// compile path would. A recorded entry's served plan carries the
+/// artifact's per-parameter staging facts plus the int and none member
+/// tags its optional arm stages, so staging runs through the same
+/// function with the same failure order — install first, then the
+/// staging refusals.
+fn run_cached(module: Module, plan: &ServedPlan, args: &RunArgs) -> Result<PreparedRun> {
+    let name = module.name().to_owned();
+    let functions: Vec<String> = module
+        .functions()
+        .iter()
+        .map(|function| function.name().to_owned())
+        .collect();
+    let (entry_args, int_member, none_member) = match &plan {
+        ServedPlan::Raw => (None, None, None),
+        ServedPlan::Empty => (Some(&[][..]), None, None),
+        ServedPlan::Args { plans, int, none } => (Some(plans.as_slice()), *int, *none),
+    };
+    let mut registry = ModuleRegistry::new();
+    provide_platform(&mut registry);
+    let mut vm = Vm::new(registry);
+    vm.install_dsmod(module)
+        .map_err(|error| install_error(&name, functions.len(), &error))?;
+    Ok(PreparedRun {
+        staged: stage_source_args(&name, entry_args, int_member, none_member, &args.args)?,
+        functions,
+        name,
+        vm,
+    })
+}
+
+/// Installs one compiled source and stages the entry's arguments per the
+/// entry parameters' checked types. The install consumes the lowered
 /// module, so the staging plan's inputs (the entry plan and the two member
 /// tags the optional-int arm stages) are read first, keeping the install
 /// first in the failure order.
-fn compile_source(args: &RunArgs) -> Result<PreparedRun> {
-    let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
+fn compile_source(args: &RunArgs, compiled: source::CompiledSource) -> Result<PreparedRun> {
     let name = compiled.name.clone();
     let functions = compiled.lowered.functions().to_vec();
     let int_member = compiled.lowered.tag("int");
@@ -192,17 +247,18 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
 }
 
 /// Stages `--args` onto the entry's parameter words per the parameters'
-/// checked types (the source pipeline's plan): the scalar atoms stage
-/// their word, an `int | none` parameter stages its two-word union span —
-/// a staged value presenting the int member, an absent value presenting
-/// none. The plan and the two member tags are read before the install
-/// consumes the module. Without a plan (the entry is not a source
-/// function) every value stages as its own i64 word, the dsmod rule.
+/// checked types (the source pipeline's plan, served warm from the
+/// artifact's recorded facts): the scalar atoms stage their word, an
+/// `int | none` parameter stages its two-word union span — a staged
+/// value presenting the int member, an absent value presenting none. The
+/// plan and the two member tags are read before the install consumes the
+/// module. Without a plan (the entry is not a source function) every
+/// value stages as its own i64 word, the dsmod rule.
 // the i64->f64 staging of --args is a lossy host conversion by design
 #[allow(clippy::cast_precision_loss)]
 fn stage_source_args(
     entry: &str,
-    plans: Option<&[source::ArgPlan]>,
+    plans: Option<&[EntryArg]>,
     int_member: Option<u8>,
     none_member: Option<u8>,
     raw: &[i64],
@@ -228,22 +284,21 @@ fn stage_source_args(
     let mut staged = Vec::new();
     for (index, plan) in plans.iter().enumerate() {
         let value = raw.get(index).copied();
+        // the scalar plans share one missing-word refusal; the optional and
+        // foreign plans read absence their own way
+        let required = || {
+            value.ok_or_else(|| {
+                anyhow!(
+                    "entry `{entry}` parameter {} expects an --args value",
+                    index + 1
+                )
+            })
+        };
         match plan {
-            source::ArgPlan::Word(slot) => {
-                let Some(value) = value else {
-                    return Err(anyhow!(
-                        "entry `{entry}` parameter {} expects an --args value",
-                        index + 1
-                    ));
-                };
-                staged.push(match *slot {
-                    SlotType::I64 => Value::I64(value),
-                    SlotType::F64 => Value::F64(value as f64),
-                    SlotType::Bool => Value::Bool(value != 0),
-                    other => return Err(anyhow!("--args stages no {other:?} word")),
-                });
-            },
-            source::ArgPlan::OptionalInt => {
+            EntryArg::Int => staged.push(Value::I64(required()?)),
+            EntryArg::Float => staged.push(Value::F64(required()? as f64)),
+            EntryArg::Bool => staged.push(Value::Bool(required()? != 0)),
+            EntryArg::OptionalInt => {
                 if let Some(value) = value {
                     staged.push(Value::Tag(member(int_member, "int")?));
                     staged.push(Value::I64(value));
@@ -252,7 +307,7 @@ fn stage_source_args(
                     staged.push(Value::I64(0));
                 }
             },
-            source::ArgPlan::Foreign => {
+            EntryArg::Foreign => {
                 return Err(anyhow!(
                     "--args cannot stage entry `{entry}`'s parameter {} (int, float, bool, and \\
                      int|none parameters stage)",
@@ -320,6 +375,25 @@ fn install_error(name: &str, function_count: usize, error: &VmLoadError) -> Erro
             "function `{func}` calls world op {index} (`{capability}`), which the platform \
              `{platform}` does not provide; install a platform whose provides list covers it"
         ),
+        VmLoadError::DepCycle { cycle } => anyhow!("dependency cycle: {}", cycle.join(" -> ")),
+        VmLoadError::ProviderMiss { dep, dependent } => {
+            anyhow!("no module for dependency `{dep}` of `{dependent}`: the provider has no answer")
+        },
+        VmLoadError::HashMismatch {
+            dep,
+            dependent,
+            linked,
+            found,
+        } => match found {
+            Some(found) => anyhow!(
+                "dependency `{dep}` of `{dependent}` was linked at content hash {linked} but \
+                 resolves to content {found}"
+            ),
+            None => anyhow!(
+                "dependency `{dep}` of `{dependent}` was linked at content hash {linked}, but the \
+                 installed version records no content hash to validate the link against"
+            ),
+        },
         VmLoadError::Build(error) => anyhow!(
             "module `{name}` fails the VM load checks: {}",
             describe_build_error(error)
@@ -356,6 +430,9 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
             found,
         } => {
             format!("pool entry {kidx} in `{func}` is {found:?}, the uop requires {expected:?}")
+        },
+        ModuleBuildError::ChainIndex { chain, index } => {
+            format!("evidence chain {chain} indexes {index} outside its module's tables")
         },
         ModuleBuildError::RetSpanLayout {
             func,
@@ -483,6 +560,10 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::ArenaHandoff { slot } => {
             format!("an arena temporary reached a count-bearing site at slot {slot}")
         },
+        Trap::DeadEvidenceChain { slot } => format!(
+            "the dead evidence sentinel at slot {slot}: the entering branch staged no chain for a \
+             demand its narrowing can never reach"
+        ),
         Trap::ArenaHandle { class } => match class {
             ArenaMisuse::Chunk => {
                 "an arena handle names a chunk its arena never grew to".to_owned()

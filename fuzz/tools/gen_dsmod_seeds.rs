@@ -9,7 +9,7 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Uop},
 };
-use ds_mod::{Constant, Flags, Function, Hash128, Module, TargetClass, write};
+use ds_mod::{Constant, EntryArg, Flags, Function, FuncRefKey, Hash128, Module, TargetClass, write};
 
 /// xorshift64* PRNG: deterministic, no dependency, good enough for byte noise.
 struct Rng(u64);
@@ -49,14 +49,22 @@ fn random_hash(rng: &mut Rng) -> Hash128 {
     Hash128::new(bytes)
 }
 
-fn random_constant(rng: &mut Rng) -> Constant {
-    match rng.byte() % 5 {
+fn random_constant(rng: &mut Rng, dep_count: usize) -> Constant {
+    match rng.byte() % 6 {
         0 => Constant::I64(rng.next_u64() as i64),
         1 => Constant::F64(f64::from_bits(rng.next_u64())),
         2 => Constant::Bool(rng.byte() & 1 == 1),
         3 => Constant::Str(random_string(rng, 16)),
+        4 => Constant::FuncRef {
+            // a position the header's dep list can address: 0 the
+            // enclosing module, n the n-1-th entry
+            key: FuncRefKey::Dep(
+                u32::from(rng.byte()) % (u32::try_from(dep_count).expect("few deps") + 1),
+            ),
+            func: rng.next_u64() as u32,
+        },
         _ => Constant::FuncRef {
-            module: random_string(rng, 8),
+            key: FuncRefKey::Native(random_string(rng, 8)),
             func: rng.next_u64() as u32,
         },
     }
@@ -100,7 +108,7 @@ fn random_uop(rng: &mut Rng, code_len: usize) -> Uop {
     }
 }
 
-fn random_function(rng: &mut Rng) -> Function {
+fn random_function(rng: &mut Rng, dep_count: usize) -> Function {
     let slot_count = usize::from(rng.byte() % 9);
     let mut slots = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {
@@ -119,7 +127,7 @@ fn random_function(rng: &mut Rng) -> Function {
         FrameLayout::new(slots, params_len, arg_area_len).expect("consistent by construction");
     let mut constants = Vec::new();
     for _ in 0..rng.byte() % 5 {
-        constants.push(random_constant(rng));
+        constants.push(random_constant(rng, dep_count));
     }
     let code_len = usize::from(rng.byte() % 15) + 1;
     let code: Vec<Uop> = (0..code_len).map(|_| random_uop(rng, code_len)).collect();
@@ -137,14 +145,33 @@ fn random_module(rng: &mut Rng) -> Module {
     let mut module = Module::new(name, target, random_hash(rng));
     let bits = rng.byte() & Flags::KNOWN_BITS;
     module = module.with_flags(Flags::from_bits(bits).expect("masked to known bits"));
+    let mut dep_count = 0usize;
     for _ in 0..rng.byte() % 5 {
         module = module.with_dep(random_string(rng, 8), random_hash(rng));
+        dep_count += 1;
     }
     for _ in 0..rng.byte() % 9 {
-        module = module.with_constant(random_constant(rng));
+        module = module.with_constant(random_constant(rng, dep_count));
     }
     for _ in 0..rng.byte() % 3 {
-        module = module.with_function(random_function(rng));
+        module = module.with_function(random_function(rng, dep_count));
+    }
+    // the blocks payload's tag table: dense first-use ids by construction
+    for id in 0..rng.byte() % 5 {
+        module = module.with_tag(random_string(rng, 10), id);
+    }
+    // the entry table: index-prefixed names so rows stay distinct
+    for index in 0..rng.byte() % 4 {
+        let args = (0..rng.byte() % 4)
+            .map(|_| match rng.byte() % 5 {
+                0 => EntryArg::Int,
+                1 => EntryArg::Float,
+                2 => EntryArg::Bool,
+                3 => EntryArg::OptionalInt,
+                _ => EntryArg::Foreign,
+            })
+            .collect();
+        module = module.with_entry(format!("e{index}{}", random_string(rng, 8)), args);
     }
     for _ in 0..rng.byte() % 9 {
         let (a, b) = (rng.next_u64() as u32, rng.next_u64() as u32);

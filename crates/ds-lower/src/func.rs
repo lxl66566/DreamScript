@@ -18,10 +18,10 @@ use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
 use ds_check::{
     Analyzed, AtomKind, BinderFact, DefId, DotRes, Extraction, GenericCallBounds,
     InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
-    Ty, TypeId, Val,
+    Ty, TypeExpr, TypeId, Val,
 };
 use ds_diag::{FileId, Span};
-use ds_mod::Constant;
+use ds_mod::{Constant, FuncRefKey};
 use ds_parse::{
     BinaryOp, BlockExpr, CallArg, EnumPayload, Expr, Ident, Literal, LocalDecl, MatchArm, Param,
     Path, Pattern, Stmt, StmtKind, StrPart, Type, UnaryOp,
@@ -34,7 +34,7 @@ use crate::{
         GENERIC_NATIVES, GenericNative, NURSERY_BOUNDARY_ERR, Native, NativeShape, PLATFORM_IO_OK,
     },
     place::{Hook, Owned, Placement},
-    shape::{MemberField, Shape, Shapes, SpanWords, StructShape},
+    shape::{MemberField, Shape, Shapes, SpanWords, StructShape, expr_members},
 };
 
 /// One symbolic frame slot: a body word, or an outgoing-overlay word that
@@ -500,24 +500,22 @@ impl Demands {
     }
 }
 
-/// The transitive follow words trailing every runtime-evidence slot in a
-/// frame's evidence area: a nested runtime dispatch whose slot word names
-/// a generic serving body slides that body's own evidence area in, one
-/// chain level per hop, so the frame carries the serving-body word plus
-/// this many follow words. A chain deeper than the area keeps its honest
-/// refusal at the entering site.
-const FOLLOW_WORDS: usize = 2;
-
-/// One staged evidence word's source: a function-table constant (the
-/// entering site's substitution is concrete), or a frame slot read (a
-/// nested site inside a generic body whose substitution is that frame's
-/// own — the word rides the frame's evidence area).
+/// One staged evidence word's source: an evidence-chain object's
+/// table index (the entering site's substitution is concrete), or a
+/// frame slot read (a nested site inside a generic body whose
+/// substitution is that frame's own — the word rides the frame's
+/// evidence area).
 #[derive(Clone, Copy)]
 enum EvidenceSrc {
-    /// The serving member body's function-table index.
+    /// The evidence-chain object's index in the module's chain table.
     Const(u32),
     /// This frame's evidence-area word (a `Mov` into the overlay).
     Slot(u8),
+    /// The dead sentinel: a demand the entering branch's head never
+    /// mentions, staged as a word naming no chain object (the nested
+    /// dispatch that reads it can only run under a narrowing that branch
+    /// cannot satisfy).
+    Dead,
 }
 
 /// A solved trait-method call site's dispatch [B6, H3].
@@ -556,10 +554,6 @@ pub(crate) struct Plan {
     /// trait-method call site reaches its body through the solved
     /// instance's impl item, never through a package def.
     impl_index: HashMap<(Span, String), u32>,
-    /// Impl items whose bodies wait on runtime-resolved evidence (the
-    /// generic impls): call sites dispatching into them refuse with the
-    /// seam they wait on.
-    runtime_impls: HashSet<Span>,
     /// The trait's declared default bodies keyed by (trait definition,
     /// member name): a dispatch whose solving impl spells no member
     /// reaches the trait's default body through this tie.
@@ -577,6 +571,15 @@ pub(crate) struct Plan {
     /// their own body's list here, and the lambda/spawn walks at
     /// lowering time read callee bodies' lists through it.
     demands: Demands,
+    /// The module's evidence-chain objects [H3], built during lowering
+    /// as the entering sites walk their chains: entry `i` is what a
+    /// staged word carrying `i` names.
+    chains: Vec<ds_mod::EvidenceChain>,
+    /// The memo the chain walk keys its states by (member, instance,
+    /// substitution): a repeated state shares its entry, which is also
+    /// the walk's termination — a cyclic demand graph builds a cyclic
+    /// table the dispatches walk lazily, one hop per call.
+    chain_memo: HashMap<(MethodId, InstanceId, Option<Vec<TypeId>>), u32>,
 }
 
 impl Plan {
@@ -585,12 +588,13 @@ impl Plan {
             functions: Vec::new(),
             index: HashMap::new(),
             impl_index: HashMap::new(),
-            runtime_impls: HashSet::new(),
             default_index: HashMap::new(),
             default_bodies: HashSet::new(),
             deinits: HashMap::new(),
             declared_deinits: HashSet::new(),
             demands: Demands::default(),
+            chains: Vec::new(),
+            chain_memo: HashMap::new(),
         }
     }
 
@@ -824,14 +828,6 @@ impl Plan {
         index
     }
 
-    /// Marks one impl item as runtime-evidence territory (the generic
-    /// impls): a nested dispatch whose serving body is one of its members
-    /// refuses naming the transitive-staging seam — the bodies themselves
-    /// plan, and the entering call sites stage their evidence words.
-    pub(crate) fn note_runtime_impl(&mut self, impl_site: Span) {
-        self.runtime_impls.insert(impl_site);
-    }
-
     /// The impl-member body a solved instance plus member name address.
     pub(crate) fn impl_body(&self, impl_site: Span, member: &str) -> Option<u32> {
         self.impl_index
@@ -850,11 +846,6 @@ impl Plan {
     /// body.
     pub(crate) fn is_default_body(&self, index: u32) -> bool {
         self.default_bodies.contains(&index)
-    }
-
-    /// Whether an impl item's bodies wait on runtime evidence.
-    pub(crate) fn is_runtime_impl(&self, impl_site: Span) -> bool {
-        self.runtime_impls.contains(&impl_site)
     }
 
     /// Registers one struct's `deinit` member as a synthesized module
@@ -917,6 +908,24 @@ impl Plan {
 
     pub(crate) fn functions(&self) -> &[PlannedFn] {
         &self.functions
+    }
+
+    /// The module's finished evidence-chain table, drained by the module
+    /// build after every body lowered.
+    pub(crate) fn take_chains(&mut self) -> Vec<ds_mod::EvidenceChain> {
+        std::mem::take(&mut self.chains)
+    }
+
+    /// The widest evidence-pair count any planned body claims: a nested
+    /// runtime dispatch site cannot know its runtime-resolved serving
+    /// body's demand count, so its overlay reserves this bound (the
+    /// dispatch itself stages exactly what the chain object carries).
+    pub(crate) fn max_evidence_pairs(&self) -> usize {
+        self.functions
+            .iter()
+            .map(|planned| planned.evidence.len())
+            .max()
+            .unwrap_or(0)
     }
 
     pub(crate) fn names(&self) -> Vec<String> {
@@ -1353,6 +1362,37 @@ pub(crate) fn runtime_pairs(
     walk.out
 }
 
+/// Whether an atom names a minted type variable anywhere in its shape —
+/// any variable (`None`), or one of the given written base name: the
+/// variable itself, or one nested in an application argument. A
+/// trait-reference argument carrying one names a compound substitution
+/// this seam resolves per variable alone; a branch head carrying the
+/// named one keeps its per-branch condition on it.
+fn carries_a_var(universe: &ds_check::Universe, atom: TypeId, want: Option<&str>) -> bool {
+    if let Some(name) = crate::shape::var_param_name(universe, atom) {
+        return want.is_none_or(|want| name == want);
+    }
+    let Ok(decl) = universe.atom_decl(atom) else {
+        return false;
+    };
+    match &decl.kind {
+        AtomKind::Apply(_, args) => args.iter().any(|arg| {
+            universe
+                .members(*arg)
+                .iter()
+                .any(|&a| carries_a_var(universe, a, want))
+        }),
+        _ => false,
+    }
+}
+
+/// The staged chain word for a demand whose variable the entering
+/// branch's head never mentions: no chain object, a marker a nested
+/// dispatch can read only under a narrowing that branch cannot satisfy,
+/// trapping loudly there (a checker gap) rather than calling a wrong
+/// body.
+pub(crate) const DEAD_CHAIN: i64 = -1;
+
 /// The generic parameter one single-atom receiver covers: the atom itself
 /// when it is a minted variable, else the variable at the deepest
 /// single-argument constructor chain inside it (`list[t]` and
@@ -1397,6 +1437,14 @@ impl PairWalk<'_> {
         let Expr::Field { name, .. } = callee else {
             return;
         };
+        // A type-keyed member call carries no receiver value, so no frame
+        // variable can demand an evidence word through it.
+        if matches!(
+            self.res.get(name.span),
+            Some(Res::Dot(DotRes::Static { .. }))
+        ) {
+            return;
+        }
         let Some(Res::Dot(DotRes::Methods { candidates })) = self.res.get(name.span) else {
             return;
         };
@@ -1447,8 +1495,12 @@ impl PairWalk<'_> {
         let id = match callee {
             Expr::Field { name, .. } => match self.res.get(name.span) {
                 Some(Res::Dot(DotRes::Free { func, .. })) => BodyId::Free(*func),
-                Some(Res::Dot(DotRes::Methods { .. })) => {
-                    // the checker-selected inherent member, when one won
+                // the checker-selected inherent member, when one won — the
+                // type-keyed static call selects through the same record;
+                // its receiver is no value, so a runtime-demand answer
+                // (only a generic impl body has one) finds no variable and
+                // contributes nothing, matching the checker's refusal
+                Some(Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. })) => {
                     let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) else {
                         return;
                     };
@@ -1690,6 +1742,34 @@ impl PairWalk<'_> {
     }
 }
 
+/// Which run one lowering drives: the runtime module embeds the
+/// evaluator's answers at comptime call sites and skips the comptime
+/// functions themselves, while the comptime slice lowers exactly those
+/// functions as ordinary locals (their nested comptime calls are plain
+/// intra-module calls there).
+/// The per-run context one lowering carries: the platform name the
+/// world natives address and which comptime run this body lowers for.
+pub(crate) struct RunContext<'a> {
+    /// The platform name for world-call pool FuncRefs.
+    pub platform: String,
+    /// The comptime run mode.
+    pub comptime: ComptimeRun<'a>,
+}
+
+/// Which run one lowering drives: the runtime module embeds the
+/// evaluator's answers at comptime call sites and skips the comptime
+/// functions themselves, while the comptime slice lowers exactly those
+/// functions as ordinary locals (their nested comptime calls are plain
+/// intra-module calls there).
+#[derive(Clone, Copy)]
+pub(crate) enum ComptimeRun<'a> {
+    /// The runtime module: the evaluator's recorded answers, keyed by
+    /// each call's span.
+    Runtime(&'a crate::ComptimeValues),
+    /// The comptime slice the evaluator compiles for its fenced run.
+    Slice,
+}
+
 /// A call target: a module-local function or a contract builtin.
 #[derive(Clone, Copy)]
 enum Callee {
@@ -1729,6 +1809,9 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// dies whole; every other frame returns into a live program and
     /// flushes the counts it owes before the exit.
     root: bool,
+    /// Which run this body lowers for: the runtime module or the
+    /// evaluator's comptime slice.
+    comptime: ComptimeRun<'a>,
     ret_ty: Ty,
     params_len: usize,
     slots: Vec<SlotType>,
@@ -1810,7 +1893,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         lin: &ds_check::Linearity,
         planned: &PlannedFn,
         index: u32,
-        platform: String,
+        run: RunContext<'a>,
     ) -> Result<(ds_mod::Function, Vec<PlacedOp>), LowerError> {
         // A declared impl-member body lowers its declaration's params (the
         // `Self` receiver among them) and block body; every other entry
@@ -1920,9 +2003,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             plan,
             shapes,
             name: planned.name.clone(),
-            platform,
+            platform: run.platform,
             synth: planned.def.is_none() && planned.decl.is_none(),
             root: planned.name == "main",
+            comptime: run.comptime,
             ret_ty: ret,
             params_len: 0,
             slots: Vec::new(),
@@ -2302,7 +2386,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             ));
         };
         let pool = self.pool(Constant::FuncRef {
-            module: String::new(), // the enclosing module
+            key: FuncRefKey::Dep(0), // the enclosing module
             func: index,
         });
         let staged = self.shapes.words(ty)?;
@@ -2327,14 +2411,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         for param in params {
             use ds_parse::ParamMode;
             match param.mode {
-                // a comptime parameter is the metaprogramming round's
-                // seam; the two runtime modes lower below
+                // a comptime parameter binds only inside the evaluator's
+                // slice: the fenced run stages one reflection-index Tag
+                // word per parameter and the body reads it like any
+                // borrowed word. The runtime module never plans a comptime
+                // function (its calls embed their answers), so this arm
+                // refusing at the runtime seam means a comptime parameter
+                // reached a surface the round does not lower — an impl or
+                // trait member, the checker's refusal class.
+                ParamMode::Comptime(_) if matches!(self.comptime, ComptimeRun::Slice) => {},
                 ParamMode::Comptime(_) => {
                     return Err(LowerError::unsupported(
                         param.span,
                         "a comptime parameter",
-                        "comptime evaluation is the metaprogramming round's seam; spell the \
-                         parameter mut or move",
+                        "a comptime parameter is a free-fn surface; the evaluator compiles the \
+                         free fn's body, so spell the member without one",
                     ));
                 },
                 // a mut parameter is a re-storable slot over the borrowed
@@ -2407,18 +2498,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Binds one generic impl member body's runtime-evidence slots: one
-    /// I64 parameter word per recorded pair plus its follow words,
-    /// appended after the declared parameters. The call site entering
-    /// this body stages the words (the serving member body per pair and
-    /// its transitive chain, under its own substitution); the nested
-    /// sites dispatch through them.
+    /// I64 parameter word per recorded pair, appended after the declared
+    /// parameters. The call site entering this body stages the words —
+    /// one evidence-chain object index per pair, under its own
+    /// substitution; the nested sites dispatch through them.
     fn bind_evidence(&mut self, pairs: &[RuntimePair]) -> Result<(), LowerError> {
         for pair in pairs {
             let slot = self.temp_word(SlotType::I64)?;
-            for _ in 0..FOLLOW_WORDS {
-                self.temp_word(SlotType::I64)?;
-            }
-            self.params_len += 1 + FOLLOW_WORDS;
+            self.params_len += 1;
             self.evidence.insert((pair.var.clone(), pair.method), slot);
         }
         Ok(())
@@ -2427,12 +2514,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// Binds one lambda's runtime-evidence words as the trailing
     /// capture words: the construction site staged them from the
     /// enclosing frame's evidence slots, and the CALLS copy-in writes
-    /// them right after the real captures — one word per pair plus its
-    /// follow words, read back by the pair's dispatch riders. They are
-    /// plain I64 words — never counted, never a binder.
+    /// them right after the real captures — one word per pair, read back
+    /// by the pair's dispatch. They are plain I64 words — never counted,
+    /// never a binder.
     fn bind_capture_evidence(&mut self, pairs: &[RuntimePair]) -> Result<(), LowerError> {
         for pair in pairs {
-            let slot = self.alloc(&[SlotType::I64; 1 + FOLLOW_WORDS])?;
+            let slot = self.alloc(&[SlotType::I64; 1])?;
             self.evidence.insert((pair.var.clone(), pair.method), slot);
         }
         Ok(())
@@ -4039,7 +4126,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         evidence: &[RuntimePair],
     ) -> Result<(u8, SlotType), LowerError> {
         let kidx = self.pool(Constant::FuncRef {
-            module: String::new(), // the enclosing module
+            key: FuncRefKey::Dep(0), // the enclosing module
             func: index,
         });
         let func_word = self.temp_word(SlotType::Fn)?;
@@ -4112,20 +4199,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
         }
         // the lambda's evidence words ride the capture block as its
-        // trailing words — the pair's whole area, slot plus follow words:
-        // this frame staged them at its own entry, so the moves read the
-        // evidence slots and the closure carries the words into every
-        // frame the callable enters
+        // trailing words — one per pair: this frame staged them at its
+        // own entry, so the moves read the evidence slots and the
+        // closure carries the words into every frame the callable enters
         for pair in evidence {
             let slot = self
                 .evidence
                 .get(&(pair.var.clone(), pair.method))
                 .copied()
                 .ok_or_else(|| mismatch("a lambda's runtime-evidence demand"))?;
-            for i in 0..=FOLLOW_WORDS {
-                moves.push(slot + u8::try_from(i).expect("follow word fits u8"));
-                staged.push(SlotType::I64);
-            }
+            moves.push(slot);
+            staged.push(SlotType::I64);
         }
         self.guard_staged_count(staged.len())?;
         for (word, slot) in moves.iter().enumerate() {
@@ -4176,7 +4260,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         self.overlay_site(&kinds, result);
         let kidx = self.pool(Constant::FuncRef {
-            module: self.native_module(native.module),
+            key: self.native_key(native.module),
             func: native.index,
         });
         self.emit(Op::Call {
@@ -4964,7 +5048,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                                 ));
                             }
                             let kidx = self.pool(Constant::FuncRef {
-                                module: String::new(), // the enclosing module
+                                key: FuncRefKey::Dep(0), // the enclosing module
                                 func: index,
                             });
                             let dst = self.temp_word(SlotType::Fn)?;
@@ -5249,10 +5333,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let target = self.temp_span(static_ty)?;
         for (name, value) in fields {
-            let field = s
+            let index = s
                 .fields
                 .iter()
-                .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                .position(|f| f.name.as_deref() == Some(name.name.as_str()))
                 .ok_or_else(|| {
                     LowerError::unsupported(
                         name.span,
@@ -5261,10 +5345,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                          or foreign-typed field), so the planned shape carries no such field",
                     )
                 })?;
-            let addrs = if let Some(expr) = value {
+            let field = &s.fields[index];
+            let (v, value_span) = if let Some(expr) = value {
                 let v = self.value(expr)?;
-                self.word_addrs(&v.place, v.ty)
-                    .map_err(|err| err.respanned(expr.span()))?
+                (v, expr.span())
             } else {
                 // punning: the field name is the value's name
                 let bind = self.scope_lookup(&name.name).ok_or_else(|| {
@@ -5286,11 +5370,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .binders
                     .get(&bind)
                     .map_or(static_ty, |f| f.ty);
-                self.word_addrs(&place, ty)
-                    .map_err(|err| err.respanned(name.span))?
+                (TypedPlace { place, ty }, name.span)
             };
+            let addrs = self
+                .word_addrs(&v.place, v.ty)
+                .map_err(|err| err.respanned(value_span))?;
             if addrs.len() != field.width() {
-                return Err(mismatch("a struct literal field's span"));
+                // A member value into a union-typed field re-spans
+                // through the field's own region; anything else is the
+                // honest mismatch.
+                let decl_expr = self.field_decl_expr(static_ty, index);
+                self.store_union_member_field(target.base + field.word, decl_expr, &v, name.span)?;
+                continue;
             }
             // a fn-typed field must prove scalar provenance: a closure word
             // (or a callable-defaulted binding that may hold one at
@@ -5316,6 +5407,69 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .claimed(&mut self.code, target.base, claim.hook, band, &words);
         }
         Ok(target)
+    }
+
+    /// The declared type expression of one field of a struct atom, by
+    /// position: the shape's fields pair with the declaration's, so the
+    /// union store reads the field's own union sides.
+    fn field_decl_expr(&self, ty: Ty, index: usize) -> Option<&'a TypeExpr> {
+        let atom = self.only_atom(ty, no_span()).ok()?;
+        let decl = self.analyzed.decls.universe.atom_decl(atom).ok()?;
+        match &decl.kind {
+            AtomKind::Struct(fields) => fields.get(index).map(|f| &f.ty),
+            _ => None,
+        }
+    }
+
+    /// Stores one member value into a union-typed literal field's
+    /// region: the field's words are the union's tag-plus-payload span,
+    /// and a bare member value re-spans through the same
+    /// tag/zero/write construction the annotated-binding widen uses, so
+    /// the field physically carries its union's tag and zeroed dead
+    /// payload words. A wider union value refuses — narrow it first.
+    fn store_union_member_field(
+        &mut self,
+        region_base: u8,
+        decl_expr: Option<&'a TypeExpr>,
+        v: &TypedPlace,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let mismatched = || mismatch("a struct literal field's span");
+        let Some(expr) = decl_expr else {
+            return Err(mismatched());
+        };
+        let Some(members) = expr_members(expr) else {
+            return Err(mismatched());
+        };
+        let shape = self.shapes.members_shape(&members, 1)?;
+        let Shape::Union(u) = &shape else {
+            return Err(mismatched());
+        };
+        if self.members(v.ty).len() > 1 {
+            return Err(LowerError::unsupported(
+                span,
+                "a union-typed struct field",
+                "the field stores one member value; narrow a union value through a match first",
+            ));
+        }
+        let atom = self.only_atom(v.ty, span)?;
+        let member = u.member(atom).ok_or_else(mismatched)?;
+        // a callable word entering the union's fn-typed payload slot
+        // keeps the var slot's provenance rule: a closure's Ref word
+        // would trap there the same way it traps a re-storable var slot
+        self.refuse_union_fn_payload(v, span)?;
+        let tag = self.shapes.tag_id(atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(region_base),
+            tag,
+        });
+        self.zero_init_member(region_base, &u.words, &member.fields)?;
+        let addrs = self.word_addrs(&v.place, v.ty)?;
+        let srcs = ordered_field_srcs(&addrs, &member.fields)?;
+        for (field, srcs) in member.fields.iter().zip(srcs) {
+            self.store_field_span(region_base, field, srcs);
+        }
+        Ok(())
     }
 
     /// One anonymous tuple `(e0, e1, ...)`: a fresh frame span, one word
@@ -6241,9 +6395,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     kidx: truth,
                 });
             } else {
-                let field = &member.fields[0];
-                let l = field_addrs(lhs.place.base, field);
-                let r = field_addrs(rhs.place.base, field);
+                // the whole payload span compares field by field, the
+                // same per-word chain a bare struct's equality rides
+                let l = member
+                    .fields
+                    .iter()
+                    .flat_map(|field| field_addrs(lhs.place.base, field))
+                    .collect::<Vec<_>>();
+                let r = member
+                    .fields
+                    .iter()
+                    .flat_map(|field| field_addrs(rhs.place.base, field))
+                    .collect::<Vec<_>>();
                 self.emit_word_compares(&l, &r, false_lbl)?;
             }
             self.emit(Op::Jmp { target: done });
@@ -8556,6 +8719,47 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.call_impl(e, ty, false)
     }
 
+    /// One embedded comptime answer: the evaluator's recorded constant
+    /// lowered exactly like the literal a user would have written at the
+    /// call's own span (whose checked type is the call's result type, so
+    /// the literal arm reads a sound fact).
+    fn embedded_value(
+        &mut self,
+        constant: &crate::ComptimeConst,
+        _ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let synth = match constant {
+            crate::ComptimeConst::Str(text) => Expr::Str {
+                span,
+                parts: vec![StrPart::Text {
+                    span,
+                    text: text.clone(),
+                }],
+            },
+            crate::ComptimeConst::Int(value) => Expr::Literal {
+                span,
+                lit: Literal::Int {
+                    suffix: String::new(),
+                    text: value.to_string(),
+                },
+            },
+            crate::ComptimeConst::Float(value) => Expr::Literal {
+                span,
+                lit: Literal::Float {
+                    suffix: String::new(),
+                    text: value.to_string(),
+                },
+            },
+            crate::ComptimeConst::Bool(value) => Expr::Literal {
+                span,
+                lit: Literal::Bool(*value),
+            },
+        };
+        let typed = self.value(&synth)?;
+        Ok(typed.place)
+    }
+
     /// Constructs one minted enum case by call form [B3]: the case's own
     /// struct span, fields filled positionally or by name, exactly like a
     /// struct literal with positional slots admitted.
@@ -8566,23 +8770,27 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let target = self.temp_span(ty)?;
         for (index, arg) in args.iter().enumerate() {
-            let field = match &arg.name {
+            let position = match &arg.name {
                 Some(name) => s
                     .fields
                     .iter()
-                    .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                    .position(|f| f.name.as_deref() == Some(name.name.as_str()))
                     .ok_or_else(|| mismatch("a case construction field"))?,
-                None => s
-                    .fields
-                    .get(index)
-                    .ok_or_else(|| mismatch("a case construction slot"))?,
+                None => index,
+            };
+            let Some(field) = s.fields.get(position) else {
+                return Err(mismatch("a case construction slot"));
             };
             let v = self.value(&arg.value)?;
             let addrs = self
                 .word_addrs(&v.place, v.ty)
                 .map_err(|err| err.respanned(arg.value.span()))?;
             if addrs.len() != field.width() {
-                return Err(mismatch("a case construction slot's span"));
+                // a member value into a union-typed payload field re-spans
+                // through the field's own region, the literal store's rule
+                let decl_expr = self.field_decl_expr(ty, position);
+                self.store_union_member_field(target.base + field.word, decl_expr, &v, arg.span)?;
+                continue;
             }
             self.store_field_span(target.base, field, &addrs);
         }
@@ -8701,6 +8909,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         Some(dispatch),
                     )
                 },
+                // The type-keyed member call: no receiver word stages, so
+                // the written arguments alone feed the body; the dispatch
+                // resolves through the checker's inherent record like any
+                // solved inherent site (a plain local callee — no instance
+                // word, no evidence words, no dispatch uop).
+                Some(Res::Dot(DotRes::Static { candidates })) => {
+                    let dispatch =
+                        self.resolve_method_dispatch(call_span, name.span, None, candidates)?;
+                    (
+                        None,
+                        name.span,
+                        args.iter().map(|arg| &arg.value).collect(),
+                        Some(dispatch),
+                    )
+                },
                 _ => {
                     return Err(LowerError::unsupported(
                         name.span,
@@ -8769,6 +8992,33 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         if case_ctor.is_some() && case_ctor == def {
             return self.case_value(args, ty);
+        }
+        // A comptime call's answer embeds at the call site (G1): the
+        // evaluator ran the callee on the fenced VM and recorded the
+        // result on this call's span, so lowering emits it exactly like
+        // a written literal and the call never reaches the runtime
+        // module. A comptime callee with no recorded answer is the
+        // evaluator's contract broken, not a shape the round owes a
+        // lowering for — the site refuses naming the seam.
+        if let ComptimeRun::Runtime(values) = &self.comptime {
+            if let Some(constant) = values.get(call_span) {
+                return self.embedded_value(constant, ty, call_span);
+            }
+            let is_comptime = def.is_some_and(|def| {
+                self.analyzed.decls.fns.get(&def).is_some_and(|sig| {
+                    sig.params
+                        .iter()
+                        .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)))
+                })
+            });
+            if is_comptime {
+                return Err(LowerError::unsupported(
+                    call_span,
+                    "a comptime call",
+                    "the evaluator recorded no answer for this site; run the comptime evaluator \
+                     before lowering",
+                ));
+            }
         }
         // The E4 extraction family inlines at the call site over the
         // checked receiver's own union shape — no callee, no control
@@ -9184,40 +9434,39 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         // a trait-method dispatch site [H3]: a call into a generic impl
         // body stages the runtime-evidence words its substitution
-        // resolves (one serving member body plus its follow chain per
-        // demand, in body order) and then the solved declared-instance
-        // word; a call into a monomorphic body stages the instance word
-        // alone. A nested bound-variable site stages none of these — its
-        // slot word rides below — and a nested site whose serving body is
-        // itself generic stages the callee's words from this frame's own
-        // evidence area. The staged types register here (the overlay span
-        // sizes from them); on the tail path the stores defer past the
-        // exit claims, staged after them like every tail-staged word (a
-        // claim's overlay window would clobber words staged before it)
+        // resolves (one evidence-chain object index per demand, in body
+        // order) and then the solved declared-instance word; a call into
+        // a monomorphic body stages the instance word alone. A nested
+        // bound-variable site stages none of these — its slot word rides
+        // below — and a nested site whose serving body is itself generic
+        // stages the callee's words from this frame's own evidence area.
+        // The staged types register here (the overlay span sizes from
+        // them); on the tail path the stores defer past the exit claims,
+        // staged after them like every tail-staged word (a claim's
+        // overlay window would clobber words staged before it)
         let mut trait_evidence: Vec<EvidenceSrc> = Vec::new();
         let trait_evidence_at = staged.len();
         if let Some(TraitDispatch::Static { index, call }) = &trait_dispatch {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
-            self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS) + 1)?;
+            self.guard_staged_count(staged.len() + pairs.len() + 1)?;
             for pair in pairs.iter() {
-                let mut words = if self.plan.is_default_body(*index) && pair.var == "Self" {
-                    // the entered body is the trait's declared default: its
-                    // Self-keyed demand is served under this site's own
-                    // solved instance, the receiver substituting Self, so
-                    // the chain starts at the receiver's member set and
-                    // the declared bounds record answers nothing
-                    self.chain_words(
-                        pair,
-                        self.pair_trait_id(
-                            pair,
-                            "a trait-method call into a declared default body",
-                            callee_span,
-                        )?,
+                let words = if self.plan.is_default_body(*index) {
+                    // the entered body is the trait's declared default:
+                    // every demand keys by the trait's own variables —
+                    // `Self` names the receiver (the chain starts at its
+                    // member set under the site's own solved instance),
+                    // every other names a trait generic the impl behind
+                    // that instance substitutes through its trait
+                    // reference — the declared bounds record answers
+                    // neither shape
+                    vec![EvidenceSrc::Const(self.default_pair_chain(
+                        call.method,
                         call.instance,
-                        Some(Cow::Borrowed(self.members(call.recv))),
+                        Some(self.members(call.recv)),
+                        pair,
                         "a trait-method call into a declared default body",
                         callee_span,
-                    )?
+                    )?)]
                 } else {
                     self.evidence_words(
                         pair,
@@ -9229,7 +9478,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         callee_span,
                     )?
                 };
-                trait_evidence.append(&mut words);
+                trait_evidence.extend(words);
             }
             // The instance word is a per-branch id: a union-receiver
             // dispatch stages the representative branch of the covering
@@ -9237,7 +9486,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // stands for (the inline-cache story keys on the written
             // head, never on this branch id).
             trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
-            for _ in 0..=pairs.len() * (1 + FOLLOW_WORDS) {
+            for _ in 0..=pairs.len() {
                 staged.push(SlotType::I64);
             }
             if !tail_transfer {
@@ -9264,10 +9513,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
             if !pairs.is_empty() {
-                self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS))?;
+                self.guard_staged_count(staged.len() + pairs.len())?;
                 let inherent_site = self.analyzed.decls.inherent_impls.get(method).copied();
                 for pair in pairs.iter() {
-                    let mut words = self.evidence_words(
+                    let words = self.evidence_words(
                         pair,
                         bounds,
                         None,
@@ -9276,9 +9525,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         "an inherent method call into a generic impl body",
                         callee_span,
                     )?;
-                    member_evidence.append(&mut words);
+                    member_evidence.extend(words);
                 }
-                for _ in 0..pairs.len() * (1 + FOLLOW_WORDS) {
+                for _ in 0..pairs.len() {
                     staged.push(SlotType::I64);
                 }
                 if !tail_transfer {
@@ -9289,15 +9538,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // a free generic fn's call site [H3]: the callee's ONE body
         // claims its runtime-evidence demands as trailing parameters,
         // so the entering site stages them after the true arguments in
-        // this outgoing-argument area — one serving member body plus
-        // its follow chain per demand, the checker's per-call record
-        // answering each bound under this site's own substitution. The
-        // ordinary CALL below (a tail site's CALLT) names the whole
-        // staged count, like the inherent generic body's entering site.
-        // The staged types register here (the overlay span sizes from
-        // them), while the stores defer past the exit claims on the
-        // tail path (a claim's overlay window would clobber words
-        // staged before it)
+        // this outgoing-argument area — one evidence-chain object index
+        // per demand, the checker's per-call record answering each bound
+        // under this site's own substitution. The ordinary CALL below (a
+        // tail site's CALLT) names the whole staged count, like the
+        // inherent generic body's entering site. The staged types
+        // register here (the overlay span sizes from them), while the
+        // stores defer past the exit claims on the tail path (a claim's
+        // overlay window would clobber words staged before it)
         let mut free_evidence: Vec<EvidenceSrc> = Vec::new();
         let free_evidence_at = staged.len();
         if let Callee::Local(index) = target {
@@ -9322,17 +9570,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         "the checker recorded no bound answer at this site; report the construct",
                     ));
                 };
-                self.guard_staged_count(staged.len() + pairs.len() * (1 + FOLLOW_WORDS))?;
+                self.guard_staged_count(staged.len() + pairs.len())?;
                 for pair in pairs.iter() {
-                    let mut words = self.free_evidence_words(
+                    let words = self.free_evidence_words(
                         pair,
                         &record,
                         "a call into a free generic fn's body",
                         callee_span,
                     )?;
-                    free_evidence.append(&mut words);
+                    free_evidence.extend(words);
                 }
-                for _ in 0..pairs.len() * (1 + FOLLOW_WORDS) {
+                for _ in 0..pairs.len() {
                     staged.push(SlotType::I64);
                 }
                 if !tail_transfer {
@@ -9341,27 +9589,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
         }
         // a nested runtime-resolved site: the target rides the frame's
-        // evidence slot. When that word names a generic serving body, the
-        // dispatch slides the body's own evidence area — staged here from
-        // this frame's follow chain one level down, the last word padded
-        // with the chain's end (the deepest live level never reads past
-        // it); a concrete target ignores the riders past its parameters
+        // evidence slot, whose word names an evidence-chain object. The
+        // DISPATCH stages the chain's tail objects' indices as the
+        // serving body's trailing evidence parameters (a static table
+        // read per hop), so this site stages no words itself — it only
+        // reserves the overlay: the runtime-resolved target's demand
+        // count is bounded by the widest planned body's, and the
+        // dispatch writes exactly what its chain object carries
         let mut runtime_riders = 0usize;
-        let mut runtime_evidence: Vec<EvidenceSrc> = Vec::new();
-        let runtime_evidence_at = staged.len();
-        if let Some(TraitDispatch::Runtime { slot, .. }) = &trait_dispatch {
-            runtime_riders = FOLLOW_WORDS + 1;
+        if let Some(TraitDispatch::Runtime { .. }) = &trait_dispatch {
+            runtime_riders = self.plan.max_evidence_pairs();
             self.guard_staged_count(staged.len() + runtime_riders)?;
-            let last = slot + u8::try_from(FOLLOW_WORDS).expect("follow words fit u8");
-            runtime_evidence = (1..=FOLLOW_WORDS)
-                .map(|i| EvidenceSrc::Slot(slot + u8::try_from(i).expect("follow word fits u8")))
-                .collect();
-            runtime_evidence.push(EvidenceSrc::Slot(last));
             for _ in 0..runtime_riders {
                 staged.push(SlotType::I64);
-            }
-            if !tail_transfer {
-                self.stage_member_evidence(&runtime_evidence, runtime_evidence_at);
             }
         }
         // a checked generic read (`list_get`, `map_get`): the staged span
@@ -9419,7 +9659,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.stage_member_evidence(&words, generic_tail_at);
             }
             self.stage_member_evidence(&trait_evidence, trait_evidence_at);
-            self.stage_member_evidence(&runtime_evidence, runtime_evidence_at);
             self.stage_moves(&moves);
             if dispatch_tail {
                 // the dispatch tail's uop names the real arguments; the
@@ -9427,9 +9666,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let real_args = if let Some(generic) = generic_target {
                     staged.len() - usize::from(generic.evidence)
                 } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
-                    staged.len()
-                        - 1
-                        - self.plan.functions()[*index as usize].evidence.len() * (1 + FOLLOW_WORDS)
+                    staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len()
                 } else {
                     staged.len() - runtime_riders
                 };
@@ -9462,13 +9699,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
         } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
-            // the evidence words trail the real arguments (the pair's
-            // area per the body's runtime demands, then the solved
-            // instance), so the uop names the real-argument count and the
-            // callee claims the rest as its trailing evidence parameters
-            let real_args = staged.len()
-                - 1
-                - self.plan.functions()[*index as usize].evidence.len() * (1 + FOLLOW_WORDS);
+            // the evidence words trail the real arguments (one per the
+            // body's runtime demands, then the solved instance), so the
+            // uop names the real-argument count and the callee claims
+            // the rest as its trailing evidence parameters
+            let real_args =
+                staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len();
             self.emit(Op::Callg {
                 callee: kidx,
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
@@ -9476,8 +9712,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         } else if matches!(trait_dispatch, Some(TraitDispatch::Runtime { .. })) {
             // a nested runtime-resolved site: the sentinel FuncRef names
             // the frame's evidence slot and dispatches from it; the
-            // follow riders trail the real arguments for the generic
-            // body the slot may name
+            // chain's tail words trail the real arguments for the
+            // serving body the slot may name, staged by the dispatch
+            // itself from the chain object
             let real_args = staged.len() - runtime_riders;
             self.emit(Op::Callg {
                 callee: kidx,
@@ -9641,6 +9878,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // the staged arguments resolve to
         let mut staged: Vec<SlotType> = Vec::new();
         let mut moves: Vec<(usize, u8)> = Vec::new();
+        // per staged word, whether it carries a count to the hand-off: a
+        // Ref word always, and the frame's own type-variable word — its
+        // single Raw word may hold a counted reference at runtime (the
+        // evidence-carrying closure's variable parameter dispatches into
+        // Ref-claiming bodies), and the kind-checked inc/dec pair makes
+        // the runtime fact safe to stage blind
+        let mut counted: Vec<bool> = Vec::new();
         // staged indices whose Ref word lands in a callable-defaulted `Fn`
         // parameter: the callee reads the word and never owns its count
         let mut defaulted: Vec<usize> = Vec::new();
@@ -9659,6 +9903,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if !tail && let Some((slot, constant)) = self.direct_literal(arg, param_ty)? {
                 let at = staged.len();
                 staged.push(slot);
+                counted.push(false);
                 consts.push((at, constant));
                 continue;
             }
@@ -9733,6 +9978,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 },
                 _ => arg_val,
             };
+            // the argument's own variable word stages as the wildcard: a
+            // Raw word whose runtime kind the callee claims, so its
+            // count rides the hand-off below like a Ref word's
+            let var_word = self.is_var_ty(arg_val.ty);
             if direct {
                 // the argument's outermost data op wrote its overlay
                 // word: the staging records the word's kind; no Mov
@@ -9742,6 +9991,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Err(mismatch("a directly staged scalar argument"));
                 };
                 staged.push(slot);
+                counted.push(false);
             } else {
                 for addr in self
                     .word_addrs(&arg_val.place, arg_val.ty)
@@ -9750,6 +10000,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     self.rc.native_reads([addr.slot]);
                     moves.push((staged.len(), addr.slot));
                     staged.push(addr.slot_ty);
+                    counted.push(addr.slot_ty == SlotType::Ref || var_word);
                 }
             }
         }
@@ -9793,8 +10044,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // closure word is a plain borrow — the callee reads it (CALLS
             // never consumes) and never owns its count. A transferring
             // tail's count rides the callee like every staged local word
-            // (its own exit drops the handed parameter)
-            if staged[index] == SlotType::Ref {
+            // (its own exit drops the handed parameter). The variable
+            // word's Raw spelling counts too: the kind-checked pair makes
+            // the runtime fact safe to stage blind
+            if counted[index] {
                 if defaulted.contains(&index) {
                     self.rc.staged_native(slot, false);
                 } else if tail_transfer {
@@ -9825,7 +10078,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // claims staging first and the argument moves after them
             let index = proven_fn.expect("the transfer requires a proven function");
             let kidx = self.pool(Constant::FuncRef {
-                module: String::new(), // the enclosing module
+                key: FuncRefKey::Dep(0), // the enclosing module
                 func: index,
             });
             self.rc.native_tail_transfer();
@@ -10170,10 +10423,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             })
     }
 
-    /// The runtime form's evidence words for one pair: this site's
+    /// The runtime form's evidence word for one pair: this site's
     /// substitution is its own frame's, so the receiver's single
     /// variable peels to the frame's written parameter name and the
-    /// pair's area — its slot plus the follow words — reads verbatim
+    /// pair's slot word — the chain object's index — reads verbatim
     /// from the frame's evidence slots.
     fn slot_evidence(
         &self,
@@ -10208,29 +10461,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  their spawned children",
             ));
         };
-        Ok((0..=FOLLOW_WORDS)
-            .map(|i| EvidenceSrc::Slot(slot + u8::try_from(i).expect("follow word fits u8")))
-            .collect())
+        Ok(vec![EvidenceSrc::Slot(slot)])
     }
 
-    /// The staged evidence words for one pair a statically-resolved
-    /// instance serves: the serving member body's function-table index
-    /// plus its follow words, walked from the chain-start substitution
-    /// `start` — the serving body's own bound, substituted at this
-    /// site. A serving body that is itself a generic impl member is
-    /// allowed: its index rides the slot and the follow words carry the
-    /// chain a nested runtime dispatch slides, one level per hop.
-    fn chain_words(
+    /// The evidence-chain object one statically-resolved demand resolves
+    /// to [H3]: the serving member body's function-table index for
+    /// `method` over the substitution `start` names, plus one tail chain
+    /// per the serving body's own evidence demands — each demand's own
+    /// member and substituted type, walked recursively. The staged word
+    /// a site enters this chain through carries the object's table
+    /// index; a nested runtime dispatch reads its frame's slot word,
+    /// resolves the object, dispatches into `func`, and stages the tail
+    /// objects' indices as the body's trailing evidence parameters — so
+    /// depth is table-bounded, never frame-bounded, and a body may
+    /// demand several or different members (one tail chain each).
+    ///
+    /// The walk memoizes its states (member, instance, substitution): a
+    /// repeated state shares its entry, which is also the termination
+    /// story — a cyclic demand graph builds a cyclic table the
+    /// dispatches walk lazily, one hop per call.
+    fn chain_for(
         &mut self,
-        pair: &RuntimePair,
-        trait_id: TraitId,
+        method: MethodId,
         instance: InstanceId,
-        start: Option<Cow<'a, [TypeId]>>,
+        start: Option<&[TypeId]>,
         what: &'static str,
         span: Span,
-    ) -> Result<Vec<EvidenceSrc>, LowerError> {
+    ) -> Result<u32, LowerError> {
         let universe = &self.analyzed.decls.universe;
         let env = &self.analyzed.decls.instances;
+        // the one-word instantiation boundary: this level's serving body
+        // is entered by a nested dispatch that stages the bound
+        // variable's single runtime word, so a substitution spanning more
+        // must refuse at this entering site, where the type is concrete
+        if let Some(members) = start {
+            self.guard_one_word_instantiation(members, what, span)?;
+        }
+        let key = (method, instance, start.map(<[TypeId]>::to_vec));
+        if let Some(&index) = self.plan.chain_memo.get(&key) {
+            return Ok(index);
+        }
         let impl_site = self
             .analyzed
             .decls
@@ -10244,127 +10514,194 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     "the serving instance's impl item is missing from the declaration tables",
                 )
             })?;
-        let mut index = self.serving_body(impl_site, pair.method, what, span)?;
-        let mut words = vec![EvidenceSrc::Const(index)];
-        // the chain start: the substituted type the entered body's own
-        // bound on this pair's variable demands at this receiver — the
-        // follow words serve the dispatches into generic bodies down it.
-        // The entry level is the entering site's own member set; every
-        // deeper link owns the set the previous one solved.
-        let mut cur = start;
-        // the one-word instantiation boundary: the first serving body is
-        // entered by a nested dispatch that stages the bound variable's
-        // single runtime word, so a substitution spanning more must refuse
-        // at this entering site, where the type is concrete
-        if let Some(members) = cur.as_deref() {
-            self.guard_one_word_instantiation(members, what, span)?;
-        }
-        let mut chain_instance = instance;
-        let mut chain_site = impl_site;
-        while words.len() <= FOLLOW_WORDS {
-            let pairs = self.plan.functions()[index as usize].evidence.clone();
-            if pairs.is_empty() {
-                // the chain ends: a concrete body, or a generic one whose
-                // body demands nothing — the remaining words pad with the
-                // last index (the deepest live level never reads past it)
-                while words.len() <= FOLLOW_WORDS {
-                    words.push(words[words.len() - 1]);
+        let func = self.serving_body(impl_site, method, what, span)?;
+        // reserve the entry before the recursion so a cyclic demand
+        // graph closes over it
+        let index = u32::try_from(self.plan.chains.len()).expect("chain table fits u32");
+        self.plan.chains.push(ds_mod::EvidenceChain {
+            func,
+            next: Vec::new(),
+        });
+        self.plan.chain_memo.insert(key, index);
+        let pairs = self.plan.functions()[func as usize].evidence.clone();
+        let mut next = Vec::with_capacity(pairs.len());
+        if !pairs.is_empty() {
+            if self.plan.is_default_body(func) {
+                // the serving body is a trait's declared default: every
+                // demand keys by the trait's own variables and resolves
+                // under the substitution this level entered with — a
+                // self-recursive demand closes onto this very entry
+                // through the memo, so a cyclic demand graph still
+                // builds a cyclic table
+                for pair in pairs.iter() {
+                    next.push(self.default_pair_chain(method, instance, start, pair, what, span)?);
                 }
-                return Ok(words);
-            }
-            // a runtime dispatch into this generic body slides its own
-            // area, so the chain must stay on this member: one demand, the
-            // same method — positional follow words cannot re-key another
-            // member's frame
-            if pairs.len() > 1 || pairs[0].method != pair.method {
-                return Err(LowerError::unsupported(
-                    span,
-                    what,
-                    "the transitive serving body demands a different member (or several); the \
-                     frame's evidence area carries one chain per pair",
-                ));
-            }
-            if self.plan.is_default_body(index) {
-                // the serving body is a trait's declared default: its
-                // demand stays on `Self`, substituted with the receiver
-                // this level received, so the same member re-serves the
-                // same substitution and the remaining follow words name
-                // the default body itself. A demand over the trait's own
-                // generic variables carries this level's substitution in
-                // no record the entering site can read — it refuses here.
-                if pairs[0].var != "Self" {
+            } else {
+                let Some(members) = start else {
                     return Err(LowerError::unsupported(
                         span,
                         what,
                         "the transitive serving body's own bound is not resolvable at this site; \
                          report the construct",
                     ));
+                };
+                for pair in pairs.iter() {
+                    let pair_trait = self.pair_trait_id(pair, what, span)?;
+                    // the serving body's own demand variable names the
+                    // next bound: the serving impl declares it, so its
+                    // conditions key by that written name
+                    let Some((next_members, Some(next_instance))) =
+                        ds_check::instance_solve::evidence_step(
+                            universe,
+                            env,
+                            instance,
+                            members,
+                            Some(pair.var.as_str()),
+                            pair_trait,
+                        )
+                    else {
+                        return Err(LowerError::unsupported(
+                            span,
+                            what,
+                            "the element type's transitive bound has no unique serving instance \
+                             at this site; runtime evidence resolves one body per bound",
+                        ));
+                    };
+                    // the same boundary one level down: the next link's
+                    // serving body receives this substitution as its
+                    // receiver
+                    self.guard_one_word_instantiation(&next_members, what, span)?;
+                    next.push(self.chain_for(
+                        pair.method,
+                        next_instance,
+                        Some(&next_members),
+                        what,
+                        span,
+                    )?);
                 }
-                while words.len() <= FOLLOW_WORDS {
-                    words.push(words[words.len() - 1]);
-                }
-                return Ok(words);
             }
-            let Some(members) = cur.as_deref() else {
+        }
+        self.plan.chains[index as usize].next = next;
+        Ok(index)
+    }
+
+    /// One demand pair's chain inside a trait's declared default body,
+    /// over the member whose default body serves this level, the
+    /// instance whose impl enters it, and the receiver member set the
+    /// body runs with: a `Self`-keyed pair re-serves the receiver under
+    /// the same instance (the entry `chain_for` builds for the called
+    /// member — the memo closes a self-recursive demand onto its own
+    /// entry), while a pair over the trait's own generic variable
+    /// resolves through the argument the impl's trait reference spells
+    /// for it: a concrete argument names the substituted type itself,
+    /// an impl-variable argument names a variable this receiver binds,
+    /// the impl's own declared bound on it carrying the next level
+    /// exactly as the generic-impl branch's step.
+    fn default_pair_chain(
+        &mut self,
+        method: MethodId,
+        instance: InstanceId,
+        start: Option<&[TypeId]>,
+        pair: &RuntimePair,
+        what: &'static str,
+        span: Span,
+    ) -> Result<u32, LowerError> {
+        // the receiver stages as the default body's `Self` variable's
+        // single Raw word, so the one-word instantiation boundary guards
+        // it here (the tail level re-guards what its own chain_for entry
+        // already checked)
+        if let Some(members) = start {
+            self.guard_one_word_instantiation(members, what, span)?;
+        }
+        if pair.var == "Self" {
+            return self.chain_for(pair.method, instance, start, what, span);
+        }
+        let universe = &self.analyzed.decls.universe;
+        let env = &self.analyzed.decls.instances;
+        let trait_id = self.pair_trait_id(pair, what, span)?;
+        // the default body's trait, and the argument its impl substitutes
+        // for the demanded generic (positional over the declaration's
+        // own generics)
+        let MethodOwner::Trait(def) = self.analyzed.package.method(method).owner else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the declared default body's member did not resolve to a trait; report the \
+                 construct",
+            ));
+        };
+        let generics = self.analyzed.decls.trait_generics.get(&def);
+        let impl_site = self.analyzed.decls.instance_impls.get(&instance).copied();
+        let arg = generics
+            .and_then(|names| names.iter().position(|name| name == &pair.var))
+            .zip(impl_site.and_then(|site| self.analyzed.decls.trait_impl_args.get(&site)))
+            .and_then(|(position, args)| args.get(position).copied());
+        let Some(arg) = arg else {
+            return Err(LowerError::unsupported(
+                span,
+                what,
+                "the trait variable's substitution is missing from the impl's trait reference at \
+                 this site; report the construct",
+            ));
+        };
+        let members = universe.members(arg);
+        // the argument is the impl's own variable: this receiver binds
+        // it, and the impl's declared bound on it carries the next level
+        if let [only] = members
+            && let Some(var) = crate::shape::var_param_name(universe, *only)
+        {
+            let Some(recv) = start else {
                 return Err(LowerError::unsupported(
                     span,
                     what,
-                    "the transitive serving body's own bound is not resolvable at this site; \
-                     report the construct",
+                    "the trait variable maps to the impl's own variable, whose substitution this \
+                     site does not carry; report the construct",
                 ));
             };
-            // the serving body's own demand variable names the chain's next
-            // bound: the serving impl declares it, so its conditions key
-            // by that written name
-            let Some((next, Some(next_instance))) = ds_check::instance_solve::evidence_step(
+            let Some((next_members, Some(next_instance))) = ds_check::instance_solve::evidence_step(
                 universe,
                 env,
-                chain_instance,
-                members,
-                Some(pairs[0].var.as_str()),
+                instance,
+                recv,
+                Some(var.as_str()),
                 trait_id,
             ) else {
                 return Err(LowerError::unsupported(
                     span,
                     what,
-                    "the element type's transitive bound has no unique serving instance at this \
-                     site; runtime evidence resolves one body per bound",
+                    "the impl's own bound on the trait variable's substitution has no unique \
+                     serving instance at this site; runtime evidence resolves one body per bound",
                 ));
             };
             // the same boundary one level down: the next link's serving
             // body receives this substitution as its receiver
-            self.guard_one_word_instantiation(&next, what, span)?;
-            let next_site = self
-                .analyzed
-                .decls
-                .instance_impls
-                .get(&next_instance)
-                .copied()
-                .ok_or_else(|| {
-                    LowerError::unsupported(
-                        span,
-                        what,
-                        "the serving instance's impl item is missing from the declaration tables",
-                    )
-                })?;
-            index = self.serving_body(next_site, pair.method, what, span)?;
-            words.push(EvidenceSrc::Const(index));
-            cur = Some(Cow::Owned(next));
-            chain_instance = next_instance;
-            chain_site = next_site;
+            self.guard_one_word_instantiation(&next_members, what, span)?;
+            return self.chain_for(pair.method, next_instance, Some(&next_members), what, span);
         }
-        // the area is full: the last serving body must be concrete (or
-        // demand nothing) — a deeper chain has no words left to slide
-        let pairs = self.plan.functions()[index as usize].evidence.clone();
-        if self.plan.is_runtime_impl(chain_site) && !pairs.is_empty() {
-            return Err(LowerError::unsupported(
-                span,
-                what,
-                "the transitive evidence chain is deeper than the frame's follow words; the seam \
-                 carries two levels past the serving body",
-            ));
+        // the argument is concrete: it names the substituted type itself
+        if !members
+            .iter()
+            .any(|&atom| carries_a_var(universe, atom, None))
+        {
+            let Some(next_instance) =
+                ds_check::instance_solve::resolve(universe, env, &[], trait_id, arg).solved()
+            else {
+                return Err(LowerError::unsupported(
+                    span,
+                    what,
+                    "the trait variable's substituted type has no serving instance at this site; \
+                     runtime evidence resolves one body per bound",
+                ));
+            };
+            self.guard_one_word_instantiation(members, what, span)?;
+            return self.chain_for(pair.method, next_instance, Some(members), what, span);
         }
-        Ok(words)
+        Err(LowerError::unsupported(
+            span,
+            what,
+            "the trait variable substitutes to a compound type over the impl's variables, a shape \
+             this seam resolves per variable alone; report the construct",
+        ))
     }
 
     /// The dispatch target one solved instance names for one member: the
@@ -10394,6 +10731,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         ))
     }
 
+    /// Whether one decomposed branch instance's head mentions a minted
+    /// variable of the written name anywhere in its shape: per-branch
+    /// solving keeps a branch's condition only for the variables its
+    /// own head mentions, so a demand keyed by a name the entering
+    /// branch never carries is unreachable in it — the narrowing the
+    /// demanding code sits under cannot hold there. A missing head
+    /// consults nothing and keeps the honest refusal.
+    fn branch_mentions_var(&self, instance: InstanceId, want: &str) -> bool {
+        let Ok(head) = self.analyzed.decls.instances.head(instance) else {
+            return true;
+        };
+        let universe = &self.analyzed.decls.universe;
+        universe
+            .members(head)
+            .iter()
+            .any(|&atom| carries_a_var(universe, atom, Some(want)))
+    }
+
     /// The staged evidence words a call site entering a generic impl body
     /// stages for one of the body's demands: the checker-recorded bounds
     /// of this call site's solved dispatch answer the pair's bound — a
@@ -10420,6 +10775,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 && *bound == trait_id
         });
         let Some((_, _, served)) = entry else {
+            // a demand whose variable the entering branch's head never
+            // mentions: per-branch solving kept no condition for it, so
+            // the demanding code sits under a narrowing that branch
+            // cannot satisfy — the site stages the dead sentinel, a
+            // chain word naming no object that a dispatch reads only if
+            // the unreachable narrowing ever ran, trapping loudly there.
+            // A union receiver (branches solving the variable
+            // differently) and a head that does mention the variable
+            // keep the honest refusal below.
+            if let Some(instance) = entered
+                && !self.branch_mentions_var(instance, &pair.var)
+                && recv.is_some_and(|recv| self.members(recv).len() == 1)
+            {
+                return Ok(vec![EvidenceSrc::Dead]);
+            }
             return Err(LowerError::unsupported(
                 span,
                 what,
@@ -10468,16 +10838,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             (None, None) => None,
         }
         .map(Cow::Owned);
-        self.chain_words(pair, trait_id, instance, start, what, span)
+        Ok(vec![EvidenceSrc::Const(self.chain_for(
+            pair.method,
+            instance,
+            start.as_deref(),
+            what,
+            span,
+        )?)])
     }
 
     /// The staged evidence words a call into a free generic fn's body
     /// stages for one of the body's demands [H3]: the checker's
     /// per-call record answers the pair's bound under this site's own
-    /// substitution — a concrete answer stages the serving member body
-    /// plus its follow chain, and a `None` answer (the substitution is
-    /// the calling frame's own variable) reads the frame's evidence
-    /// area for the pair.
+    /// substitution — a concrete answer stages the serving chain
+    /// object, and a `None` answer (the substitution is the calling
+    /// frame's own variable) reads the frame's evidence area for the
+    /// pair.
     fn free_evidence_words(
         &mut self,
         pair: &RuntimePair,
@@ -10502,11 +10878,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let instance = *instance;
         // the chain start is the solved type itself: the demand's
-        // variable takes it at this site, and the first follow word
+        // variable takes it at this site, and the first tail chain
         // serves the body the serving instance's own head re-substitutes
         // it into
         let start = Some(Cow::Borrowed(universe.members(*solved)));
-        self.chain_words(pair, trait_id, instance, start, what, span)
+        Ok(vec![EvidenceSrc::Const(self.chain_for(
+            pair.method,
+            instance,
+            start.as_deref(),
+            what,
+            span,
+        )?)])
     }
 
     /// The one-hop chain-start substitution: the instance's declared
@@ -10583,6 +10965,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         src: Slot::body(*slot),
                     });
                 },
+                EvidenceSrc::Dead => {
+                    let kidx = self.pool(Constant::I64(DEAD_CHAIN));
+                    self.emit(Op::Kimm { dst, kidx });
+                },
             }
         }
     }
@@ -10607,6 +10993,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                      fn lowers nothing), so no dispatch reaches it",
                 ));
             }
+        }
+        // the comptime slice carries only comptime functions: a call
+        // into the package's runtime half refuses here, naming the seam
+        if matches!(self.comptime, ComptimeRun::Slice) {
+            return Err(LowerError::unsupported(
+                span,
+                "a call from a comptime function",
+                "a comptime function may call the pure builtins and other comptime functions this \
+                 round; a runtime helper is the slice seam",
+            ));
         }
         Err(LowerError::unsupported(
             span,
@@ -12172,6 +12568,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         | TraitDispatch::Static { .. }
                         | TraitDispatch::Runtime { .. })
                 ),
+                Some(Res::Dot(DotRes::Static { candidates })) => matches!(
+                    self.resolve_method_dispatch(*call_span, name.span, None, candidates),
+                    Ok(TraitDispatch::Inherent { .. })
+                ),
                 _ => false,
             },
             _ => false,
@@ -12352,7 +12752,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
             self.overlay_site(&[], &[SlotType::I64]);
             let kidx = self.pool(Constant::FuncRef {
-                module: self.native_module(native.module),
+                key: self.native_key(native.module),
                 func: native.index,
             });
             self.emit(Op::Call {
@@ -12389,7 +12789,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             staged.extend_from_slice(&kinds);
             self.overlay_site(&staged, &[SlotType::I64]);
             let kidx = self.pool(Constant::FuncRef {
-                module: self.native_module(native.module),
+                key: self.native_key(native.module),
                 func: native.index,
             });
             self.emit(Op::Call {
@@ -12966,19 +13366,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Ok(());
                 }
                 let atom = self.only_atom(src.ty, span)?;
-                let member = u
-                    .member(atom)
-                    .ok_or_else(|| mismatch("a union member write"))?;
+                // a written generic head keys its members by the
+                // variable's atom while the entering site carries the
+                // substituted concrete value, so the lookup resolves
+                // through the substitution's constructor mate and the
+                // tag writes the member's own minted id — re-minting
+                // the source's atom would tag a member the body's
+                // tests never dispatch on
+                let member = self.shapes.member_for(u, atom).ok_or_else(|| {
+                    LowerError::unsupported(
+                        span,
+                        "a union member write",
+                        "the destination union carries no member whose region holds the value's \
+                         shape; a written generic head takes a heap-application member's \
+                         substituted argument alone",
+                    )
+                })?;
                 // a callable word entering the union's fn-typed
                 // payload slot keeps the var slot's provenance rule:
                 // the payload word is Fn-classified and every extraction
                 // re-reads it, so a closure's Ref word traps there the
                 // same way it traps a re-storable var slot
                 self.refuse_union_fn_payload(src, span)?;
-                let tag = self.shapes.tag_id(atom)?;
                 self.emit(Op::TagNew {
                     dst: Slot::body(dst.base),
-                    tag,
+                    tag: member.tag,
                 });
                 self.zero_init_member(dst.base, &u.words, &member.fields)?;
                 let addrs = self.word_addrs(&src.place, src.ty)?;
@@ -13295,35 +13707,41 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 // whole-span moves and typed callee parameters never see a foreign kind
 // (the live member's words are the only ones ever read [BL-2])
 impl FnLower<'_, '_, '_> {
-    /// The module name a native surface's pool FuncRef addresses: the
-    /// builtin core's reserved name, or the platform declaration's
+    /// The native-by-name key a native surface's pool FuncRef addresses:
+    /// the builtin core's reserved name, or the platform declaration's
     /// name for the world surface.
-    fn native_module(&self, module: crate::native::NativeModule) -> String {
+    fn native_key(&self, module: crate::native::NativeModule) -> FuncRefKey {
         match module {
-            crate::native::NativeModule::Builtin => crate::native::BUILTIN_MODULE_NAME.to_owned(),
-            crate::native::NativeModule::Platform => self.platform.clone(),
+            crate::native::NativeModule::Builtin => {
+                FuncRefKey::Native(crate::native::BUILTIN_MODULE_NAME.to_owned())
+            },
+            crate::native::NativeModule::Platform => FuncRefKey::Native(self.platform.clone()),
+            crate::native::NativeModule::Comptime => {
+                FuncRefKey::Native(crate::native::COMPTIME_MODULE_NAME.to_owned())
+            },
         }
     }
 
     /// The pool FuncRef of a callee: a builtin or platform native's
-    /// reserved index, the enclosing module for a local function, the
+    /// reserved index under its native-by-name key, the enclosing
+    /// module's dep-position key for a local function, the
     /// runtime-evidence sentinel for a staged dispatch site.
     fn funcref_const(&self, target: Callee) -> Constant {
         match target {
             Callee::Builtin(native) => Constant::FuncRef {
-                module: self.native_module(native.module),
+                key: self.native_key(native.module),
                 func: native.index,
             },
             Callee::Generic(generic) => Constant::FuncRef {
-                module: self.native_module(generic.module),
+                key: self.native_key(generic.module),
                 func: generic.index,
             },
             Callee::Local(index) => Constant::FuncRef {
-                module: String::new(), // the enclosing module
+                key: FuncRefKey::Dep(0), // the enclosing module
                 func: index,
             },
             Callee::Evidence(slot) => Constant::FuncRef {
-                module: crate::native::EVIDENCE_MODULE.to_owned(),
+                key: FuncRefKey::Native(crate::native::EVIDENCE_MODULE.to_owned()),
                 func: u32::from(slot),
             },
         }
@@ -13355,7 +13773,7 @@ impl FnLower<'_, '_, '_> {
             // word the dead member never calls
             SlotType::Fn => {
                 let k = self.pool(Constant::FuncRef {
-                    module: String::new(), // the enclosing module
+                    key: FuncRefKey::Dep(0), // the enclosing module
                     func: self.index,
                 });
                 self.emit(Op::Kconst {

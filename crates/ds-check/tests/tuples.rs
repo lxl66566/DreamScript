@@ -304,7 +304,8 @@ fn tuple_fixture() -> TupleFixture {
     universe.impl_trait(r, b).unwrap();
 
     // Pre-mint every tuple the family can express, capturing the ids.
-    let mut atoms = vec![TypeId::NONE, a, b];
+    // The builtin `type` atom rides beside none (G1, G2), in no trait.
+    let mut atoms = vec![TypeId::NONE, TypeId::TYPE, a, b];
     let tuples: Vec<TypeExpr> = vec![
         TypeExpr::tuple(vec![]),
         TypeExpr::tuple(vec![a.into()]),
@@ -323,7 +324,7 @@ fn tuple_fixture() -> TupleFixture {
         atoms,
         s,
         r,
-        membership: [(1 << 1) | (1 << 2), 1 << 2],
+        membership: [(1 << 2) | (1 << 3), 1 << 3],
     }
 }
 
@@ -502,11 +503,11 @@ fn exhaustive_pairwise_laws_hold_over_tuple_universe() {
 #[test]
 fn sampled_triple_laws_hold_over_tuple_universe() {
     // Associativity and distributivity over a deterministic stride of the
-    // 256-type space (full 256^3 is out of budget; `algebra.rs` covers the
+    // 512-type space (full 512^3 is out of budget; `algebra.rs` covers the
     // tuple-free universe exhaustively).
     let mut f = tuple_fixture();
     let all = all_types(&mut f);
-    let stride: Vec<&Ty> = all.iter().step_by(16).collect();
+    let stride: Vec<&Ty> = all.iter().step_by(32).collect();
     assert_eq!(stride.len(), 16);
     for &a in &stride {
         for &b in &stride {
@@ -538,7 +539,7 @@ fn all_types(f: &mut TupleFixture) -> Vec<Ty> {
         .map(|id| f.universe.atom_ty(*id).unwrap())
         .collect();
     let mut all = vec![f.universe.empty_ty()];
-    for bits in 1u64..=255 {
+    for bits in 1u64..=511 {
         let mut t = all[0];
         for (i, singleton) in singletons.iter().enumerate() {
             if bits & (1 << i) != 0 {
@@ -547,9 +548,9 @@ fn all_types(f: &mut TupleFixture) -> Vec<Ty> {
         }
         all.push(t);
     }
-    assert_eq!(all.len(), 256);
+    assert_eq!(all.len(), 512);
     let uniq: std::collections::HashSet<Ty> = all.iter().copied().collect();
-    assert_eq!(uniq.len(), 256, "distinct sets must get distinct handles");
+    assert_eq!(uniq.len(), 512, "distinct sets must get distinct handles");
     all
 }
 
@@ -557,7 +558,9 @@ fn all_types(f: &mut TupleFixture) -> Vec<Ty> {
 /// literals with elements denoting subsets of {a, b}), all depth-1 trees,
 /// and depth-2 trees over a deterministic stride — mirroring `algebra.rs`.
 fn expr_family(f: &TupleFixture) -> Vec<TypeExpr> {
-    let (a, b) = (f.atoms[1], f.atoms[2]);
+    // [none, type, a, b, ...]: the declared pair sits past the builtin
+    // atoms every universe carries.
+    let (a, b) = (f.atoms[2], f.atoms[3]);
     let mut literals = vec![
         TypeExpr::atom(TypeId::NONE),
         TypeExpr::atom(a),

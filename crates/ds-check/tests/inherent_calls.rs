@@ -424,3 +424,267 @@ fn an_inherent_call_inside_a_generic_body_records_none() {
         "no instance serves the caller's own variable: {bounds:?}"
     );
 }
+
+// ---- the type-keyed static surface (the 2026-11-15 ruling) --------------
+
+/// A receiverless inherent member is callable through its type name: the
+/// resolution pass records the type-keyed candidates at the method
+/// position, the call records the selected method in the inherent table
+/// at the call's own span (the same record a solved receiver dot-call
+/// writes), and no trait dispatch records at the same site.
+#[test]
+fn a_receiverless_member_calls_through_its_type_name() {
+    let source = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn make() -> counter { counter { ticks: 0 } }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  counter.make().ticks\n",
+        "}\n",
+    );
+    let (ast, analyzed) = analyze_source("static.ds", source);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the type-keyed call checks clean: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>()
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one static call site: {spans:?}");
+    };
+    let method = *analyzed
+        .checked
+        .inherent_calls
+        .get(call)
+        .expect("the static call records its member at the call span");
+    assert!(
+        matches!(
+            analyzed.package.method(method).owner,
+            MethodOwner::Inherent(ref owner) if owner == "counter"
+        ),
+        "the record names the type's own member"
+    );
+    assert!(
+        !analyzed.checked.trait_calls.contains_key(call),
+        "no trait dispatch rides the static call"
+    );
+    assert!(
+        analyzed
+            .checked
+            .inherent_call_bounds
+            .get(call)
+            .is_none_or(Vec::is_empty),
+        "a monomorphic static call stages no evidence words"
+    );
+}
+
+/// The two call forms are disjoint: a value receiver never reaches a
+/// receiverless member (the type-keyed surface owns it), and a bare
+/// type name never reaches a receiver-taking member.
+#[test]
+fn the_two_member_call_forms_are_disjoint() {
+    let value_receiver = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn make() -> counter { counter { ticks: 0 } }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const c = counter { ticks: 1 }\n",
+        "  c.make()\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("value_recv.ds", value_receiver);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("DS2013") && rendered.contains("no method `make` accepts receiver"),
+        "a value receiver does not reach the type-keyed member: {rendered}"
+    );
+
+    let type_receiver = concat!(
+        "tag int\n",
+        "struct counter { ticks: int }\n",
+        "impl counter {\n",
+        "  fn peek(self) -> int { self.ticks }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  counter.peek()\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("type_recv.ds", type_receiver);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("member `peek` of `counter` takes a receiver"),
+        "the bare type name does not reach a receiver member: {rendered}"
+    );
+}
+
+/// The namespace split decides the receiver's tier (F9): a value named
+/// like the type shadows the type-keyed call at the receiver position
+/// (locals first, value defs next, the type namespace last), and a
+/// free function with the member's name never applies behind a type
+/// name.
+#[test]
+fn a_value_shadowing_the_type_keeps_the_value_tier() {
+    let source = concat!(
+        "tag int\n",
+        "struct point { x: int }\n",
+        "impl point {\n",
+        "  fn make() -> point { point { x: 0 } }\n",
+        "}\n",
+        "fn make() -> int { 7 }\n",
+        "fn main() -> int {\n",
+        "  const p = point.make()\n",
+        "  p.x\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("shadow.ds", source);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "the free `make` never shadows the type-keyed call: {rendered}"
+    );
+
+    let local_shadow = concat!(
+        "tag int\n",
+        "struct point { x: int }\n",
+        "impl point {\n",
+        "  fn make() -> point { point { x: 0 } }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const point = point { x: 3 }\n",
+        "  point.make()\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("local_shadow.ds", local_shadow);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("DS2013") && rendered.contains("no method `make` accepts receiver"),
+        "a local binding shadows the type name, keeping the value tier: {rendered}"
+    );
+}
+
+/// The missing member behind a type name reports at the method position
+/// naming the type, and a generic impl's receiverless member refuses
+/// the bare-name call (the spelling carries no type arguments).
+#[test]
+fn the_static_surface_refusals_report_their_seams() {
+    let missing = concat!(
+        "tag int\n",
+        "struct point { x: int }\n",
+        "fn main() -> int {\n",
+        "  point.missing()\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("missing.ds", missing);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("type `point` carries no member `missing`"),
+        "the missing member names its type: {rendered}"
+    );
+
+    let generic = concat!(
+        "tag int\n",
+        "struct list[t]\n",
+        "trait copy { }\n",
+        "impl[t: copy] list[t] {\n",
+        "  fn make() -> list[t] { list[t]() }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  list.make()\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("generic.ds", generic);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains(
+            "member `make` of `list` lives in a generic impl; the type-keyed call cannot spell \
+             its type arguments"
+        ),
+        "the bare-name call cannot spell a generic impl's type arguments: {rendered}"
+    );
+}
+
+/// The rendered diagnostic strings of one analysis, one per line.
+fn render(analyzed: &Analyzed) -> String {
+    analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| format!("{} {}", d.code.as_str(), d.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A tag name behind the dot keeps its constructor-value reading when the
+/// type's own impl carries no member with that name: the trait impl still
+/// dispatches over the tag's value, and the type-keyed tier claims the
+/// spelling only for a member of the receiver's own impl. A same-name
+/// overlap resolves the other way — the type's own receiverless member
+/// owns the bare-name receiver, the value form feeding the trait.
+#[test]
+fn a_tag_name_keeps_its_value_reading_behind_the_dot() {
+    let plain = concat!(
+        "tag string\n",
+        "tag io_err\n",
+        "trait narrated { fn show(self) -> string }\n",
+        "impl narrated for io_err { fn show(self) -> string { \"tagwish\" } }\n",
+        "fn main() -> string { io_err.show() }\n",
+    );
+    let (ast, analyzed) = analyze_source("plain", plain);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the trait dispatch over the tag value: {}",
+        render(&analyzed)
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one call site")
+    };
+    assert!(
+        !analyzed.checked.inherent_calls.contains_key(call),
+        "a tag value receiver dispatches the trait, never the static tier"
+    );
+    assert!(
+        analyzed.checked.trait_calls.contains_key(call),
+        "the trait impl owns the tag value behind the dot"
+    );
+
+    let overlap = concat!(
+        "tag string\n",
+        "tag io_err\n",
+        "trait narrated { fn show(self) -> string }\n",
+        "impl narrated for io_err { fn show(self) -> string { \"valuewish\" } }\n",
+        "impl io_err { fn show() -> string { \"staticwish\" } }\n",
+        "fn main() -> string { io_err.show() }\n",
+    );
+    let (ast, analyzed) = analyze_source("overlap", overlap);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the overlap probe checks clean: {}",
+        render(&analyzed)
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one call site")
+    };
+    let method = *analyzed
+        .checked
+        .inherent_calls
+        .get(call)
+        .expect("the bare-name call records its static pick");
+    assert!(
+        matches!(
+            analyzed.package.method(method).owner,
+            MethodOwner::Inherent(ref owner) if owner == "io_err"
+        ),
+        "the type's own receiverless member owns the bare-name receiver"
+    );
+}

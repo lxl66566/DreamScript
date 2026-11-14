@@ -153,32 +153,36 @@ pub mod linearity;
 mod pattern;
 pub mod platform;
 pub mod resolve;
+pub mod scope;
 pub mod type_of;
 pub mod universe;
 pub mod witness;
 
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
-pub use decls::{Decls, FnSig, GenericParam, render_type};
+pub use decls::{Decls, FnSig, GenericParam, ServedDecls, render_type};
 pub use derive::expand as expand_derives;
-pub use effects::{DeclaredRows, DefEffects, Effect, EffectRow, Effects, effects_of};
+pub use effects::{
+    DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedMethodRow, effects_of,
+};
 pub use error::Error;
 pub use expr::TypeExpr;
 pub use extraction::Extraction;
 pub use id_table::{DenseId, IdTable};
 pub use instance::{
-    Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId,
+    Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId, ServedInstance,
 };
 pub use linearity::{BinderFact, DropSite, LastUse, Linearity, Move, check, linearity_check};
 pub use resolve::{
     Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
-    resolve_package,
+    UseIndex, resolve_package,
 };
+pub use scope::{ScopeBinding, ScopeEntry, ScopeFrame, ScopeKind, scope_frames, visible_at};
 pub use type_of::{
     Analyzed, Checked, GenericCallBounds, InherentCallBounds, TraitCall, TypedPackage, Val,
-    analyze, analyze_resolved, check_resolved, type_check,
+    analyze, analyze_owned, analyze_resolved, analyze_served, check_resolved, type_check,
 };
-pub use universe::{Ty, Universe};
+pub use universe::{ReplayMint, Ty, Universe};
 pub use witness::{Witness, WitnessField};
 
 pub use crate::platform::{

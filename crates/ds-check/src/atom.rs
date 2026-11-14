@@ -24,6 +24,13 @@ impl TypeId {
     /// The distinguished `none` unit atom (B4); every universe declares it
     /// first, so it is also the earliest-declared atom of any universe.
     pub const NONE: Self = Self(0);
+    /// The builtin `type` atom (G1, G2): the type comptime type values
+    /// carry. Every universe declares it second, so the `type` keyword's
+    /// solved form is the same handle everywhere. `type` is a keyword, so
+    /// no declaration can collide with it, and nothing constructs its
+    /// values at runtime — the comptime evaluator stages them during
+    /// compile-time runs and reflection answers them there only.
+    pub const TYPE: Self = Self(1);
 
     /// Builds an id from a raw table index (serialization, tests). Ids are
     /// only meaningful inside the universe that allocated them.

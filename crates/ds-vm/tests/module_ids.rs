@@ -1,16 +1,17 @@
-//! The module-id space (F2 scalar FuncRef words): the registry's interim
-//! assignment, pinned. The dsmod constants payload persists callee module
-//! names, ids are minted at first install per VM (first-install order,
-//! stable across hot-reload swaps, uop modules only), and words never
-//! legitimately cross VMs — two embedders are two independent VMs [H5].
-//! The link table that assigns indices from the format is the M7 loading
-//! round's ruling; these pins hold the interim honest: ids are per-VM
-//! state the format never persists, correctness rests on name resolution
-//! at issue time, and the one hazard — a foreign word silently aliasing
-//! another registry's module — is recorded, not hidden.
-
+//! The module-id space (F2 scalar FuncRef words), pinned. The format-v4
+//! payload spells uop callees as dep-list positions, and the dsmod
+//! install resolves position → dep name → module id into the pool, so a
+//! loaded callee word carries the id its VM minted at first install
+//! (first-install order, stable across hot-reload swaps, uop modules
+//! only); native surfaces and directly installed host modules stay
+//! name-keyed, resolved at issue time through the name's current slot.
+//! Ids are per-VM state the format never persists, and words never
+//! legitimately cross VMs — two embedders are two independent VMs [H5];
+//! the one hazard, a foreign word silently aliasing another registry's
+//! module, is recorded, not hidden.
 use ds_vm::{
-    Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Platform, Trap, Value, Vm,
+    Const, ConstFuncRef, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Platform, Trap,
+    Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Fn as FnSlot, I64},
@@ -84,7 +85,8 @@ fn b_module() -> ModuleVersion {
 }
 
 /// The `main` module: `f(x) = b.negate(a.double(x))` through two pool
-/// FuncRef call sites — name-keyed callees resolved at issue time.
+/// FuncRef call sites — directly installed callees, name-keyed and
+/// resolved at issue time like the dsmod natives.
 fn main_module() -> ModuleVersion {
     ModuleVersion::new("main", vec![def(
         "f",
@@ -92,14 +94,14 @@ fn main_module() -> ModuleVersion {
         1,
         1,
         vec![
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "a".into(),
                 func: 0,
-            },
-            Const::FuncRef {
+            }),
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "b".into(),
                 func: 0,
-            },
+            }),
         ],
         &[
             Uop::Funcf { frame_slots: 4 },
@@ -173,12 +175,11 @@ fn ids_assign_in_first_install_order_and_stay_put_across_swaps() {
     assert_eq!(reg.module_id("nowhere"), None);
 }
 
-/// The same module bytes run identically under either sibling install
-/// order while the ids differ: the format persists names, ids are per-VM
-/// first-install state, and correctness rests on name resolution at issue
-/// time, never on the id values. This is the invariant the M7 link-table
-/// round must keep (or deliberately retire) when indices move into the
-/// format.
+/// The same module tables run identically under either sibling install
+/// order while the ids differ: these directly installed callees resolve
+/// by name at issue time, so correctness never rests on the id values —
+/// the invariant the id-resolved dsmod pool keeps by resolving ids at
+/// install and re-reading the current slot at issue.
 #[test]
 fn module_bytes_run_identically_under_either_sibling_install_order() {
     let build = |order: [ModuleVersion; 3]| {
@@ -228,10 +229,10 @@ fn native_names_never_enter_the_id_space() {
                 &[FnSlot, FnSlot],
                 0,
                 0,
-                vec![Const::FuncRef {
+                vec![Const::FuncRef(ConstFuncRef::Named {
                     module: "u".into(),
                     func: 0,
-                }],
+                })],
                 &[
                     Uop::Funcf { frame_slots: 2 },
                     Uop::Kconst { dst: 0, kidx: k(0) },
@@ -244,10 +245,10 @@ fn native_names_never_enter_the_id_space() {
                 &[FnSlot],
                 0,
                 0,
-                vec![Const::FuncRef {
+                vec![Const::FuncRef(ConstFuncRef::Named {
                     module: "builtin".into(),
                     func: 0,
-                }],
+                })],
                 &[
                     Uop::Funcf { frame_slots: 1 },
                     Uop::Kconst { dst: 0, kidx: k(0) },
@@ -274,12 +275,14 @@ fn native_names_never_enter_the_id_space() {
     );
 }
 
-/// The interim's one sharp edge: a fn word minted under one registry's id
-/// space silently aliases whatever module holds the same id under another
-/// registry. Nothing diagnoses it — the word is an id, the id resolves
-/// through the running VM's table — so the discipline is that words never
-/// cross VMs (two embedders are two independent VMs [H5]); the M7 link
-/// table, moving ids into the format, is what closes the edge.
+/// The id space's one sharp edge: a fn word minted under one registry's
+/// id space silently aliases whatever module holds the same id under
+/// another registry. Nothing diagnoses it — the word is an id, the id
+/// resolves through the running VM's table — and the format never
+/// serializes ids (the dep-position payload re-resolves per VM), so the
+/// discipline stays that words never cross VMs; only the load protocol's
+/// deterministic dep walk can make sibling VMs agree, and only for the
+/// same closure.
 #[test]
 fn a_foreign_word_aliases_the_other_registry_s_module_silently() {
     let mut vm1 = Vm::new(ModuleRegistry::new());

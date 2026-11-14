@@ -13,7 +13,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Vm,
     abi::{BuiltinInstance, ConstIdx, FrameLayout, SlotType, SlotType::Raw, uop::Uop},
     assemble,
     native::{BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_PAR_MAP},
@@ -27,10 +27,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// `(x: i64) -> i64`: the trivial element body (the backend's dispatch
@@ -52,10 +52,10 @@ fn par_main_def(name: &str, elems: &[i64]) -> FunctionDef {
         builtin(BUILTIN_LIST_NEW),
         builtin(BUILTIN_LIST_PUSH),
         builtin(BUILTIN_PAR_MAP),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "bm".into(),
             func: 2, // the passthrough callable
-        },
+        }),
         Const::I64(BuiltinInstance::List as i64),
     ];
     let word_at = |pool: &mut Vec<Const>, word: i64| {

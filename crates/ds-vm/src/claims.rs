@@ -23,7 +23,7 @@ use ds_abi::{Inst, Uop};
 use crate::{
     fiber::{FIBER_ROOT, FiberId},
     module::ModuleVersion,
-    program::Const,
+    program::{Const, ConstFuncRef},
     value::RefId,
 };
 
@@ -73,7 +73,7 @@ pub(crate) struct HookSite {
 /// in first-occurrence stream order — the deterministic fire order of the
 /// teardown pass — deduped per (base, hook): one claim has many drop sites
 /// (one per exit path), all naming the same span and hook.
-pub(crate) fn hook_sites(version: &ModuleVersion, func: u32) -> Arc<Vec<HookSite>> {
+pub(crate) fn hook_sites(version: &ModuleVersion, func: u32, own_id: u32) -> Arc<Vec<HookSite>> {
     let f = &version.functions()[func as usize];
     let body_len = f.layout.slots().len() - f.layout.arg_area_len();
     let mut sites = Vec::new();
@@ -83,18 +83,24 @@ pub(crate) fn hook_sites(version: &ModuleVersion, func: u32) -> Arc<Vec<HookSite
         };
         let width = usize::from(nargs);
         // the callee must be this module's own synthesized deinit: the
-        // pool FuncRef names this version, and the named function carries
-        // the mangled suffix no user name can spell
-        let Some(Const::FuncRef { module, func: hook }) = f.pool.get(usize::from(callee.0)) else {
-            continue;
+        // pool FuncRef names this version — the install-resolved id for
+        // a dsmod-loaded module, the version's own name for a direct
+        // install — and the named function carries the mangled suffix no
+        // user name can spell
+        let (names_this_version, hook) = match f.pool.get(usize::from(callee.0)) {
+            Some(Const::FuncRef(ConstFuncRef::Uop { module, func })) => (*module == own_id, *func),
+            Some(Const::FuncRef(ConstFuncRef::Named { module, func })) => {
+                (module == version.name(), *func)
+            },
+            _ => continue,
         };
-        let Some(hook_fn) = usize::try_from(*hook)
+        let Some(hook_fn) = usize::try_from(hook)
             .ok()
             .and_then(|i| version.functions().get(i))
         else {
             continue;
         };
-        if module != version.name() || !hook_fn.name.ends_with(DEINIT_SUFFIX) {
+        if !names_this_version || !hook_fn.name.ends_with(DEINIT_SUFFIX) {
             continue;
         }
         // the contiguous staging run sits immediately before the call
@@ -107,7 +113,7 @@ pub(crate) fn hook_sites(version: &ModuleVersion, func: u32) -> Arc<Vec<HookSite
         let site = HookSite {
             base,
             width: nargs,
-            hook: *hook,
+            hook,
             band: band_slot(f.code.get(pc + 1).copied(), body_len),
         };
         if !sites.contains(&site) {
@@ -310,7 +316,7 @@ mod tests {
     use crate::{
         fiber::FiberId,
         module::ModuleVersion,
-        program::{Const, FunctionDef, assemble},
+        program::{Const, ConstFuncRef, FunctionDef, assemble},
         value::RefId,
     };
 
@@ -441,14 +447,14 @@ mod tests {
             layout: FrameLayout::new(vec![SlotType::I64, SlotType::Ref, SlotType::Raw], 1, 1)
                 .expect("valid layout"),
             pool: vec![
-                Const::FuncRef {
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "m".into(),
                     func: 1,
-                },
-                Const::FuncRef {
+                }),
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "m".into(),
                     func: 2,
-                },
+                }),
                 Const::I64(0),
             ],
             code: assemble(&[
@@ -494,7 +500,7 @@ mod tests {
     fn the_scan_finds_exactly_the_deinit_drop_shapes() {
         let version = scan_module();
         assert_eq!(
-            hook_sites(&version, 0).as_slice(),
+            hook_sites(&version, 0, 0).as_slice(),
             &[HookSite {
                 base: 1,
                 width: 1,
@@ -504,9 +510,42 @@ mod tests {
             "the staging run plus the $deinit call names the claim; the plain call does not"
         );
         assert!(
-            hook_sites(&version, 1).is_empty(),
+            hook_sites(&version, 1, 0).is_empty(),
             "the hook body itself carries no claim"
         );
+        // the id spelling matches by id: the same scan over a module whose
+        // deinit ref an install resolved to its own id
+        assert_eq!(
+            hook_sites(&id_scan_module(), 0, 9).as_slice(),
+            &[HookSite {
+                base: 1,
+                width: 1,
+                hook: 1,
+                band: None,
+            }],
+            "an install-resolved id names this version as exactly as the name"
+        );
+    }
+
+    /// The id-spelled twin of [`scan_module`]: a dsmod install resolved
+    /// the deinit ref to the registry id (9 here), and the scan must
+    /// still recognize it.
+    fn id_scan_module() -> ModuleVersion {
+        let base = scan_module();
+        let mut defs = Vec::new();
+        for (index, f) in base.functions().iter().enumerate() {
+            let mut def = FunctionDef {
+                name: f.name.clone(),
+                layout: f.layout.clone(),
+                pool: f.pool.clone(),
+                code: f.code.clone(),
+            };
+            if index == 0 {
+                def.pool[0] = Const::FuncRef(ConstFuncRef::Uop { module: 9, func: 1 });
+            }
+            defs.push(def);
+        }
+        ModuleVersion::new("m", defs).expect("valid module")
     }
 
     /// A lowered drop clears the claim's establishment band right after
@@ -519,10 +558,10 @@ mod tests {
             name: "owner".into(),
             layout: FrameLayout::new(vec![SlotType::I64, SlotType::Ref, SlotType::Raw], 1, 1)
                 .expect("valid layout"),
-            pool: vec![Const::FuncRef {
+            pool: vec![Const::FuncRef(ConstFuncRef::Named {
                 module: "m".into(),
                 func: 1,
-            }],
+            })],
             code: assemble(&[
                 // the lowered drop shape: stage body(1), call the hook,
                 // clear the band word at body slot 0, dec the count
@@ -550,7 +589,7 @@ mod tests {
         };
         let version = ModuleVersion::new("m", vec![owner, deinit.clone()]).expect("valid module");
         assert_eq!(
-            hook_sites(&version, 0).as_slice(),
+            hook_sites(&version, 0, 0).as_slice(),
             &[HookSite {
                 base: 1,
                 width: 1,
@@ -565,10 +604,10 @@ mod tests {
             name: "owner".into(),
             layout: FrameLayout::new(vec![SlotType::I64, SlotType::Ref, SlotType::Raw], 1, 1)
                 .expect("valid layout"),
-            pool: vec![Const::FuncRef {
+            pool: vec![Const::FuncRef(ConstFuncRef::Named {
                 module: "m".into(),
                 func: 1,
-            }],
+            })],
             code: assemble(&[
                 Inst::Uop(Uop::Mov {
                     dst: body_len,
@@ -587,7 +626,7 @@ mod tests {
         };
         let version = ModuleVersion::new("m", vec![owner, deinit]).expect("valid module");
         assert_eq!(
-            hook_sites(&version, 0).as_slice(),
+            hook_sites(&version, 0, 0).as_slice(),
             &[HookSite {
                 base: 1,
                 width: 1,
@@ -606,10 +645,10 @@ mod tests {
             name: "owner".into(),
             layout: FrameLayout::new(vec![SlotType::I64, SlotType::Ref, SlotType::Raw], 1, 1)
                 .expect("valid layout"),
-            pool: vec![Const::FuncRef {
+            pool: vec![Const::FuncRef(ConstFuncRef::Named {
                 module: "m".into(),
                 func: 1,
-            }],
+            })],
             code: assemble(&[
                 Inst::Uop(Uop::Mov { dst: 2, src: 2 }),
                 Inst::Uop(Uop::Call {
@@ -627,7 +666,7 @@ mod tests {
         };
         let version = ModuleVersion::new("m", vec![owner, deinit]).expect("valid module");
         assert!(
-            hook_sites(&version, 0).is_empty(),
+            hook_sites(&version, 0, 0).is_empty(),
             "a run whose source is not a body word is not a drop shape"
         );
     }

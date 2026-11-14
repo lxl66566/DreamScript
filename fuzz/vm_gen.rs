@@ -92,7 +92,7 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Inst, RcOp, Uop},
 };
-use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
+use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{
     ChildOutcome, FiberId, FiberState, FuncRef, JoinOutcome, ModuleRegistry, NurseryId,
     NurseryState, Trap, Value, Vm,
@@ -515,10 +515,12 @@ fn name_of(index: usize, total: usize) -> String {
 /// 7=edge f64, 8=false, 9=true, 10=short string.
 fn build_pool(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool, shape: &Shape) -> Pool {
     fn push(constants: &mut Vec<Constant>, module: &str, func: u32) -> u16 {
-        constants.push(Constant::FuncRef {
-            module: module.to_owned(),
-            func,
-        });
+        let key = if module.is_empty() {
+            FuncRefKey::Dep(0) // the enclosing module
+        } else {
+            FuncRefKey::Native(module.to_owned())
+        };
+        constants.push(Constant::FuncRef { key, func });
         u16::try_from(constants.len() - 1).expect("pools stay far below u16")
     }
     fn push_i64(constants: &mut Vec<Constant>, value: i64) -> u16 {
@@ -1436,7 +1438,7 @@ fn emit_defaults_serving(index: usize) -> Function {
     ];
     let pool = vec![
         Constant::FuncRef {
-            module: ds_vm::EVIDENCE_MODULE.to_owned(),
+            key: FuncRefKey::Native(ds_vm::EVIDENCE_MODULE.to_owned()),
             func: 1,
         },
         // the trait's declared default literal, the one the entering site
@@ -2265,7 +2267,7 @@ fn emit_serving(index: usize, tail: bool) -> Function {
     );
     let pool = vec![
         Constant::FuncRef {
-            module: ds_vm::EVIDENCE_MODULE.to_owned(),
+            key: FuncRefKey::Native(ds_vm::EVIDENCE_MODULE.to_owned()),
             func: 1,
         },
         Constant::I64(0),
@@ -2382,7 +2384,7 @@ fn emit_deinit_child(rng: &mut Stream, index: usize, (child, hook): (usize, usiz
         // the drop call's FuncRef names this module: the doors' directory
         // scan matches the callee's module against the version's own name
         pool.push(Constant::FuncRef {
-            module: MODULE_NAME.to_owned(),
+            key: FuncRefKey::Dep(0), // the enclosing module
             func: u32::try_from(hook).expect("function tables are tiny"),
         });
         pool
@@ -2779,8 +2781,11 @@ pub fn exercise_fibers(data: &[u8]) -> (u32, Fibers) {
     vm.capture_output();
     let installed = vm.install_dsmod(back).is_ok();
     if installed {
-        let version = vm.registry().slots(MODULE_NAME).expect("just installed");
-        for (position, f) in version.current().functions().iter().enumerate() {
+        let version = vm
+            .registry()
+            .current_version(MODULE_NAME)
+            .expect("just installed");
+        for (position, f) in version.functions().iter().enumerate() {
             assert_eq!(f.entry.resolve(), position, "install fills entry word 0");
         }
     }

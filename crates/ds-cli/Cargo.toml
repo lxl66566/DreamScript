@@ -27,9 +27,25 @@ ds-stdlib = { workspace = true, features = ["ast-serde"] }
 ds-mod.workspace    = true
 ds-vm.workspace     = true
 ds-lower = { path = "../ds-lower" }
+ds-meta  = { path = "../ds-meta" }
 ds-lsp   = { path = "../ds-lsp" }
 # the async runtime behind `ds lsp`'s protocol loop (built and dropped
 # inside the subcommand; no analysis code is async)
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "time"] }
 ds-parse = { path = "../ds-parse" }
 ds-fmt   = { path = "../ds-fmt" }
+# the script-mode cache key fold (CLI-owned, beside ds-mod's Hash128)
+blake3   = { workspace = true }
+# the script-mode cache artifact's temp-plus-rename atomic write
+tempfile = { workspace = true }
+# the `ds repl` prompt's line editor over an interactive terminal
+# (history recall, Ctrl-C as an event; piped stdin reads plain lines)
+rustyline = "19.0.0"
+
+[dev-dependencies]
+# run-time corpus resolution for the conformance-reading tests
+ds-corpus-path.workspace = true
+
+[build-dependencies]
+# the build identity the cache key folds (see build.rs)
+blake3 = { workspace = true }

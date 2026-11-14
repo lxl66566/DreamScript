@@ -10,6 +10,10 @@
 # The ds interpreter is the release CLI: build it first with
 #   CARGO_TARGET_DIR=<shared target> cargo build -p ds-cli --release
 # and point DS_BIN at the binary when it is not at <repo>/target/release/ds.
+# Every ds invocation forces the cold path (`--no-cache`): the suite
+# measured the full pipeline before the script-mode dsmod cache existed,
+# the numbers stay comparable, and no run inherits or writes a user
+# cache directory.
 
 set -u
 
@@ -57,7 +61,7 @@ run_kernel() {
     interp=$1
     file=$2
     case $interp in
-    ds) "$ds_bin" run "$file" ;;
+    ds) "$ds_bin" run --no-cache "$file" ;;
     python) "$python_bin" "$file" ;;
     lua) "$lua_bin" "$file" ;;
     node) "$node_bin" "$file" ;;

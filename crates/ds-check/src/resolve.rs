@@ -267,6 +267,16 @@ pub enum DotRes {
         /// Candidate method ids: trait members and inherent impl fns.
         candidates: Vec<MethodId>,
     },
+    /// The receiver names a type (the receiverless-member ruling): the
+    /// candidates are that type's own inherent impl members, and the
+    /// call is type-keyed — resolved at check time, dispatched with no
+    /// instance word. A value shadowing the type name (a local or a
+    /// value-namespace def) keeps the value path above, and the
+    /// free-function tier never applies behind a type name.
+    Static {
+        /// Candidate method ids: the type's inherent impl members.
+        candidates: Vec<MethodId>,
+    },
 }
 
 /// The side table a resolution pass produces: use span to resolution.
@@ -280,6 +290,26 @@ pub struct Resolutions {
 }
 
 impl Resolutions {
+    /// Rebuilds one file's resolution table from its recorded uses (the
+    /// checked-ambient artifact's served prefix): the caller's uses must
+    /// already be sorted by span, the pass's own output order.
+    #[must_use]
+    pub fn from_uses(uses: Vec<(Span, Res)>) -> Self {
+        debug_assert!(
+            uses.windows(2)
+                .all(|pair| span_key(pair[0].0) < span_key(pair[1].0)),
+            "served uses must be sorted by span"
+        );
+        Self { uses }
+    }
+
+    /// Every recorded use with its resolution, in span order (the
+    /// artifact generator's extraction view).
+    #[must_use]
+    pub fn uses(&self) -> &[(Span, Res)] {
+        &self.uses
+    }
+
     /// The resolution recorded at a use span, if any.
     #[must_use]
     pub fn get(&self, span: Span) -> Option<&Res> {
@@ -306,14 +336,26 @@ impl Resolutions {
     ///
     /// A point query (the LSP's go-to-definition): `at` names one position
     /// (its start; the end is ignored), and the answer is the covering use
-    /// with the latest start, so the innermost name wins when uses nest
-    /// (a call's own use covers its arguments'). The table is sorted by
-    /// start, so the walk back from the last use starting at or before the
-    /// position meets the winner first; a walk that never covers answers
-    /// `None`, and the walk is linear in the file's use count in the
-    /// worst case (a position on whitespace between names).
+    /// with the latest start. Use spans are identifier tokens and never
+    /// nest; the coverage is inclusive at the end boundary (a use ending
+    /// exactly at the position still answers, so a cursor right after a
+    /// name finds it), and when one use ends at the position where
+    /// another begins, the later-starting name wins. The table is sorted
+    /// by start, so the walk back from the last use starting at or before
+    /// the position meets the winner first; a walk that never covers
+    /// answers `None`, and the walk is linear in the file's use count in
+    /// the worst case (a position on whitespace between names).
     #[must_use]
     pub fn enclosing(&self, at: Span) -> Option<&Res> {
+        self.covering(at).map(|(_, res)| res)
+    }
+
+    /// The covering use's span together with its resolution: the same
+    /// lookup [`Self::enclosing`] answers, answering the span too — the
+    /// tooling queries that edit or highlight the name at the position
+    /// need the occurrence, not only its target.
+    #[must_use]
+    pub fn covering(&self, at: Span) -> Option<(Span, &Res)> {
         let mut index = self
             .uses
             .partition_point(|(span, _)| {
@@ -323,7 +365,7 @@ impl Resolutions {
         loop {
             let (span, res) = &self.uses[index];
             if span.file == at.file && span.end >= at.start {
-                return Some(res);
+                return Some((*span, res));
             }
             index = index.checked_sub(1)?;
         }
@@ -333,6 +375,80 @@ impl Resolutions {
 /// The sort key of one use span: file, then byte offsets.
 fn span_key(span: Span) -> (u32, u32, u32) {
     (span.file.as_u32(), span.start, span.end)
+}
+
+/// The reverse edge of the resolution side table: for one resolved
+/// target, every use that resolved to it. Package grain — a definition's
+/// uses span every file, including the first-registered member's own.
+/// Targets key on identity, never on name: two same-named locals of
+/// different scopes answer disjoint sets, and a local shadowing a
+/// package name never picks up the package definition's uses.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct UseIndex {
+    /// Uses of each package-level definition, keyed by raw index.
+    defs: FxHashMap<u32, Vec<Span>>,
+    /// Uses of each local binder, keyed by the binder's own span.
+    locals: FxHashMap<Span, Vec<Span>>,
+    /// Qualified uses of each registered method (the `Trait::f` form),
+    /// keyed by raw index.
+    methods: FxHashMap<u32, Vec<Span>>,
+}
+
+impl UseIndex {
+    /// Builds the index over every file's resolution table, the same
+    /// compute the tables themselves belong to: uses are fully
+    /// materialized there, so the index costs one walk instead of a
+    /// per-request scan of the whole package.
+    ///
+    /// A dot-call's free-function tier names the definition the bare
+    /// form does, so its use records under that definition; the method
+    /// tier stays type-directed until the checker selects, so a
+    /// methods dot-call names no single target and records nothing; the
+    /// static tier carries no per-use target either, and the handler
+    /// forms name nothing.
+    #[must_use]
+    pub fn build(resolutions: &[Resolutions]) -> Self {
+        let mut index = Self::default();
+        for table in resolutions {
+            for &(use_span, ref res) in &table.uses {
+                match res {
+                    Res::Def(id) => {
+                        index.defs.entry(id.index()).or_default().push(use_span);
+                    },
+                    Res::Local { bind } => {
+                        index.locals.entry(*bind).or_default().push(use_span);
+                    },
+                    Res::TraitMethod(id) => {
+                        index.methods.entry(id.index()).or_default().push(use_span);
+                    },
+                    Res::Dot(DotRes::Free { func, .. }) => {
+                        index.defs.entry(func.index()).or_default().push(use_span);
+                    },
+                    Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. }) | Res::Handler => {},
+                }
+            }
+        }
+        index
+    }
+
+    /// Every use of one package-level definition, in file then source
+    /// order.
+    #[must_use]
+    pub fn def_uses(&self, id: DefId) -> &[Span] {
+        self.defs.get(&id.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every use of one local binder.
+    #[must_use]
+    pub fn local_uses(&self, bind: Span) -> &[Span] {
+        self.locals.get(&bind).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every qualified use of one registered method.
+    #[must_use]
+    pub fn method_uses(&self, id: MethodId) -> &[Span] {
+        self.methods.get(&id.index()).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// A package: the declarations of its files in the type and value
@@ -384,6 +500,32 @@ impl Package {
         Self::default()
     }
 
+    /// Rebuilds a package from its collected parts (the checked-ambient
+    /// artifact's served prefix): the parts are exactly the tables
+    /// [`Package::add_file`](Self::add_file) builds, with the name tables
+    /// as name/id pairs (first-definition wins, the collection rule). A
+    /// package rebuilt this way continues collecting and resolving user
+    /// files like any other — `from_parts` only replaces the collection
+    /// walk over the served member's own items.
+    #[must_use]
+    pub fn from_parts(
+        files: Vec<ds_diag::FileId>,
+        defs: Vec<Def>,
+        type_names: Vec<(String, DefId)>,
+        value_names: Vec<(String, DefId)>,
+        methods: Vec<MethodDecl>,
+        method_index: Vec<(String, Vec<MethodId>)>,
+    ) -> Self {
+        Self {
+            files,
+            defs,
+            type_names: type_names.into_iter().collect(),
+            value_names: value_names.into_iter().collect(),
+            methods,
+            method_index: method_index.into_iter().collect(),
+        }
+    }
+
     /// Collects one parsed file's declarations into the namespace,
     /// returning duplicate-definition diagnostics as they are met (both
     /// spans named; the first definition is the secondary label). Imports
@@ -427,10 +569,22 @@ impl Package {
         &self.defs[id.index() as usize]
     }
 
+    /// Every declaration, in collection order.
+    #[must_use]
+    pub fn defs(&self) -> &[Def] {
+        &self.defs
+    }
+
     /// The declaration of a registered method.
     #[must_use]
     pub fn method(&self, id: MethodId) -> &MethodDecl {
         &self.methods[id.index() as usize]
+    }
+
+    /// The registered methods, in registration order.
+    #[must_use]
+    pub fn methods(&self) -> &[MethodDecl] {
+        &self.methods
     }
 
     /// The definition of a type-namespace name, if any (F9).
@@ -882,10 +1036,12 @@ impl FileResolver<'_> {
                 ..
             } => {
                 match callee.as_ref() {
-                    // UFCS: a dot-callee gets tiered resolution [F3].
+                    // UFCS: a dot-callee gets tiered resolution [F3];
+                    // a bare type name as the receiver takes the
+                    // type-keyed tier instead (the receiverless ruling).
                     Expr::Field { recv, name, .. } => {
                         self.expr(recv);
-                        self.dot_use(name);
+                        self.dot_use(recv, name);
                     },
                     // A call-form name resolves per the namespace split
                     // [F9]; a generic-application constructor head is a
@@ -1222,8 +1378,95 @@ impl FileResolver<'_> {
     /// A UFCS dot-call's method position (F3): free functions first, then
     /// registered methods; the `.err`/`.ok` handler forms are surface
     /// syntax, not names. The dot is a function position, so the free
-    /// tier searches the VALUE namespace only (F9).
-    fn dot_use(&mut self, name: &Ident) {
+    /// tier searches the VALUE namespace only (F9). A receiver that is
+    /// a bare name resolving through the type namespace takes the
+    /// type-keyed tier instead (the receiverless-member ruling): the
+    /// value tiers never apply behind a type name.
+    fn dot_use(&mut self, recv: &Expr, name: &Ident) {
+        if let Some(target) = self.type_keyed_receiver(recv) {
+            self.static_use(target, name);
+            return;
+        }
+        self.dot_use_value(name);
+    }
+
+    /// Whether a dot-call's receiver is a bare name resolving through the
+    /// type namespace: no local and no value-namespace def shadows it
+    /// (the ordinary name-use priority), and a type-namespace def names
+    /// it. Such a receiver is a type, not a value — the type-keyed call
+    /// tier owns it.
+    fn type_keyed_receiver(&self, recv: &Expr) -> Option<DefId> {
+        let only = single_path_ident(recv)?;
+        if self.lookup_local(&only.name).is_some() {
+            return None;
+        }
+        let def = self.package.lookup_type(&only.name)?;
+        self.package
+            .def(def)
+            .kind
+            .in_type_namespace()
+            .then_some(def)
+    }
+
+    /// The method position behind a type-name receiver: the type's own
+    /// inherent impl members with that name claim the spelling — the
+    /// type-keyed tier, resolved at check time with no instance word. A
+    /// tag or case name that names no member of its own type keeps its
+    /// other reading (the constructor value: `tone.show()` dispatches
+    /// the trait impl over the tag's value), so the ordinary value
+    /// tiers serve it; any other type names its members alone.
+    fn static_use(&mut self, target: DefId, name: &Ident) {
+        let type_name = self.package.def(target).name.clone();
+        // one pass serves both halves: the owner's own members claim the
+        // call, and the rest feed the "exists on" note when none do
+        let (candidates, others): (Vec<MethodId>, Vec<MethodId>) = self
+            .package
+            .method_candidates(&name.name)
+            .iter()
+            .copied()
+            .partition(|&id| {
+                matches!(
+                    &self.package.method(id).owner,
+                    MethodOwner::Inherent(owner) if *owner == type_name
+                )
+            });
+        if candidates.is_empty() {
+            if matches!(self.package.def(target).kind, DefKind::Tag | DefKind::Case) {
+                self.dot_use_value(name);
+                return;
+            }
+            let others = others
+                .iter()
+                .map(|&id| self.package.method(id).owner_name(self.package))
+                .collect::<Vec<_>>();
+            let mut diag = Diagnostic::error(
+                ErrorCode::UnresolvedName,
+                format!("type `{type_name}` carries no member `{}`", name.name),
+            )
+            .with_primary(name.span, "not a member of this type")
+            .with_note(
+                "a bare type name as the receiver calls that type's own receiverless impl \
+                 members; other spellings need a value receiver",
+            );
+            if !others.is_empty() {
+                diag = diag.with_note(format!(
+                    "method `{}` exists on: {}",
+                    name.name,
+                    others.join(", ")
+                ));
+            }
+            self.diags.push(diag);
+            return;
+        }
+        self.uses
+            .push((name.span, Res::Dot(DotRes::Static { candidates })));
+    }
+
+    /// The ordinary value tiers behind the dot [F3, F9]: the handler
+    /// forms, then free functions, then every registered method
+    /// candidate. A receiver that reaches here carries a value reading
+    /// (a local, a value def, or a tag/case constructor value).
+    fn dot_use_value(&mut self, name: &Ident) {
         if name.name == "err" || name.name == "ok" {
             self.uses.push((name.span, Res::Handler));
             return;

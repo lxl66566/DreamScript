@@ -19,7 +19,8 @@
 //!   deterministically.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap,
+    Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{I64, Raw},
@@ -37,18 +38,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "ic").
 fn ic_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "ic".into(),
         func: index,
-    }
+    })
 }
 
 fn def(

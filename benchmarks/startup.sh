@@ -1,9 +1,9 @@
 #!/bin/sh
 # Startup bench: cold-start medians for the ds CLI over three fixed
-# stages (M9 performance-gate prep; the mmap-hit variant arrives with
-# M7 loading). Modes:
+# stages plus the script-cache hit stage (M9 performance-gate prep).
+# Modes:
 #   startup.sh bench [--json] [-n runs] [metric...]
-#       metric... filters the stages: floor trivial small-real.
+#       metric... filters the stages: floor trivial small-real warm.
 # Stages:
 #   floor       `ds --version` — the process + allocator + CLI-parse
 #               floor; no compiler or VM code runs.
@@ -13,6 +13,12 @@
 #   small-real  `ds run startup/small-real.ds` — one list literal, a map
 #               through the interim constructor + map_set, one reduce:
 #               the same pipeline plus first-allocations cost.
+#   warm        `ds run startup/trivial.ds` served from the script-mode
+#               dsmod cache (a private DS_CACHE primed untimed) — the
+#               mmap-hit path, so warm - floor is the artifact load +
+#               install + execute cost.
+# The cold stages force `--no-cache`: they never inherit or write a user
+# cache, and their numbers stay comparable with the pre-cache suite.
 # Adjacent deltas are the diagnostic (trivial - floor is pipeline entry
 # cost; small-real - trivial is first-allocation cost).
 #
@@ -44,7 +50,7 @@ mode=${1:-}
 
 usage() {
     echo "usage: startup.sh bench [--json] [-n runs] [metric...]" >&2
-    echo "  metrics: floor trivial small-real" >&2
+    echo "  metrics: floor trivial small-real warm" >&2
     exit 2
 }
 
@@ -93,7 +99,7 @@ if [ -z "$ds_bin" ]; then
     exit 1
 fi
 
-all_metrics="floor trivial small-real"
+all_metrics="floor trivial small-real warm"
 metrics=""
 for name in $all_metrics; do
     keep=0
@@ -114,13 +120,15 @@ fi
 
 for name in $metrics; do
     case $name in
-    trivial | small-real)
-        [ -f "$sdir/$name.ds" ] || {
-            echo "startup.sh: missing fixture $sdir/$name.ds" >&2
+    trivial | small-real | warm)
+        fixture=$name
+        [ "$name" = warm ] && fixture=trivial
+        [ -f "$sdir/$fixture.ds" ] || {
+            echo "startup.sh: missing fixture $sdir/$fixture.ds" >&2
             exit 1
         }
-        [ -s "$sdir/$name.golden" ] || {
-            echo "startup.sh: missing golden $sdir/$name.golden" >&2
+        [ -s "$sdir/$fixture.golden" ] || {
+            echo "startup.sh: missing golden $sdir/$fixture.golden" >&2
             exit 1
         }
         ;;
@@ -133,7 +141,9 @@ done
 
 outtmp=$(mktemp 2>/dev/null) || outtmp="/tmp/ds-startup-out.$$"
 valstmp=$(mktemp 2>/dev/null) || valstmp="/tmp/ds-startup-vals.$$"
-trap 'rm -f "$outtmp" "$valstmp"' EXIT
+warm_cache=$(mktemp -d 2>/dev/null) || warm_cache="/tmp/ds-startup-warm.$$"
+mkdir -p "$warm_cache"
+trap 'rm -f "$outtmp" "$valstmp"; rm -rf "$warm_cache"' EXIT
 trap 'exit 1' INT TERM
 
 die() {
@@ -146,7 +156,8 @@ run_stage() {
     stage=$1
     case $stage in
     floor) "$ds_bin" --version ;;
-    *) "$ds_bin" run "$sdir/$stage.ds" ;;
+    warm) DS_CACHE=$warm_cache "$ds_bin" run "$sdir/trivial.ds" ;;
+    *) "$ds_bin" run --no-cache "$sdir/$stage.ds" ;;
     esac >"$outtmp" 2>/dev/null
 }
 
@@ -160,6 +171,8 @@ check_stage() {
         *) die "floor: expected a version line, got [$out]" ;;
         esac
     fi
+    # the warm stage runs the trivial fixture through the cache
+    [ "$stage" = warm ] && stage=trivial
     golden=$(sed -n 's/\r$//;1p' "$sdir/$stage.golden")
     out=$(sed 's/\r$//' "$outtmp" | grep '^result:' | tail -n 1)
     [ -n "$out" ] || die "$stage: no \`result:\` line on stdout (did the script run?)"
@@ -173,6 +186,8 @@ fi
 
 for metric in $metrics; do
     run_stage "$metric" || die "$metric: warmup run exited $?"
+    # the warm stage's first run primes its private cache; the warmup
+    # above is that prime, so every timed run takes the hit path
     check_stage "$metric"
     : >"$valstmp"
     i=0

@@ -3,9 +3,23 @@
 //! (never assumed equal — an astral character is one scalar but two
 //! units), diagnostic and symbol mappings over the parse tree.
 
+use ds_check::ScopeKind;
 use ds_diag::{Diagnostic, FileId, Files, LabelStyle, Severity, Span};
 use ds_parse::{Ast, Expr, Ident, Item, ItemKind, Pattern};
 use tower_lsp::lsp_types as lsp;
+
+/// The LSP completion-item kind of one scope kind.
+pub(crate) fn completion_kind(kind: ScopeKind) -> lsp::CompletionItemKind {
+    match kind {
+        ScopeKind::Fn => lsp::CompletionItemKind::FUNCTION,
+        ScopeKind::Const => lsp::CompletionItemKind::CONSTANT,
+        ScopeKind::Var | ScopeKind::Let | ScopeKind::Param => lsp::CompletionItemKind::VARIABLE,
+        ScopeKind::Struct | ScopeKind::TypeAlias => lsp::CompletionItemKind::STRUCT,
+        ScopeKind::Enum | ScopeKind::Tag => lsp::CompletionItemKind::ENUM,
+        ScopeKind::Case => lsp::CompletionItemKind::ENUM_MEMBER,
+        ScopeKind::Trait => lsp::CompletionItemKind::INTERFACE,
+    }
+}
 
 /// The LSP position of one byte offset: 0-based line, character counted
 /// in UTF-16 code units from the line's start.
@@ -25,7 +39,11 @@ pub(crate) fn position(files: &Files, file: FileId, byte: u32) -> lsp::Position 
 /// on the line's end, and a character inside a surrogate pair (a
 /// position the client should never send) on the character's start.
 pub(crate) fn offset(files: &Files, file: FileId, pos: lsp::Position) -> u32 {
-    let line = (pos.line + 1).min(files.line_count(file));
+    // The client's line is a raw u32 and may sit far past the document
+    // (u32::MAX included); the 1-based registry line clamps in u64 before
+    // it converts back.
+    let line = (u64::from(pos.line) + 1).min(u64::from(files.line_count(file)));
+    let line = u32::try_from(line).expect("the clamped line fits u32");
     let span = files.line_span(file, line);
     let source = files.source(file);
     let mut byte = span.start;
@@ -63,8 +81,9 @@ fn severity(severity: Severity) -> lsp::DiagnosticSeverity {
 
 /// One engine diagnostic as an LSP diagnostic of `file`: the range is
 /// the file's own label (the primary one, else the first), the other
-/// labels become related locations when their file has a client URI, and
-/// the notes join the message. `None` when no label addresses `file`, so
+/// labels become related locations when their file has a client URI
+/// (same-file labels included, under the document's own URI), and the
+/// notes join the message. `None` when no label addresses `file`, so
 /// per-file publication is the ambient filter: the ambient's own
 /// diagnostics never carry a label in a document.
 pub(crate) fn diagnostic(
@@ -95,11 +114,10 @@ pub(crate) fn diagnostic(
         .labels
         .iter()
         .enumerate()
-        .filter(|(index, label)| {
-            *index != focus && label.span.file != file && uri_of(label.span.file).is_some()
-        })
+        .filter(|(index, _)| *index != focus)
         .filter_map(|(_, label)| {
-            uri_of(label.span.file).map(|uri| lsp::DiagnosticRelatedInformation {
+            let uri = uri_of(label.span.file)?;
+            Some(lsp::DiagnosticRelatedInformation {
                 location: lsp::Location {
                     uri,
                     range: range(files, label.span),
@@ -150,7 +168,7 @@ fn pattern_names(pattern: &Pattern, out: &mut Vec<Ident>) {
 
 /// The LSP symbol kind of one top-level item. LSP has no alias kind, so
 /// a type alias takes the closest named-type kind (type parameter).
-fn symbol_kind(kind: &ItemKind, mutable: bool) -> lsp::SymbolKind {
+fn symbol_kind(kind: &ItemKind) -> lsp::SymbolKind {
     match kind {
         // A written `fn` converts onto a const binding of a lambda at
         // parse time, so the initializer decides the function kind.
@@ -188,37 +206,37 @@ fn symbol(files: &Files, item: &Item) -> Option<lsp::DocumentSymbol> {
                 .collect::<Vec<_>>()
                 .join(", ");
             let span = names.first().map_or(item.span, |ident| ident.span);
-            (name, span, symbol_kind(&item.kind, local.mutable))
+            (name, span, symbol_kind(&item.kind))
         },
         ItemKind::Fn(decl) | ItemKind::ExternFn(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::Struct(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::Enum(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::Tag(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::TypeAlias(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::Trait(decl) => (
             decl.name.name.clone(),
             decl.name.span,
-            symbol_kind(&item.kind, false),
+            symbol_kind(&item.kind),
         ),
         ItemKind::Import(decl) => {
             let name = decl.alias.as_ref().map_or_else(
@@ -240,7 +258,7 @@ fn symbol(files: &Files, item: &Item) -> Option<lsp::DocumentSymbol> {
                 },
                 |alias| alias.name.clone(),
             );
-            (name, decl.path.span, symbol_kind(&item.kind, false))
+            (name, decl.path.span, symbol_kind(&item.kind))
         },
         ItemKind::Impl(_) | ItemKind::Platform(_) => return None,
     };
@@ -314,6 +332,58 @@ mod tests {
         assert_eq!(offset(&files, file, lsp::Position::new(9, 0)), 8);
         assert_eq!(offset(&files, file, lsp::Position::new(0, 99)), 3);
         assert_eq!(offset(&files, file, lsp::Position::new(1, 99)), 7);
+    }
+
+    #[test]
+    fn extreme_positions_clamp_instead_of_overflow() {
+        let (files, file) = files("one\ntwo\n");
+        // A u32::MAX line must clamp to the last line (the 1-based
+        // registry line would overflow the client's raw u32 otherwise).
+        assert_eq!(offset(&files, file, lsp::Position::new(u32::MAX, 0)), 8);
+        assert_eq!(
+            offset(&files, file, lsp::Position::new(u32::MAX, u32::MAX)),
+            8
+        );
+        // A character past a line's end lands on that line's end
+        // (`one\ntwo\n` has an empty third line starting at byte 8).
+        assert_eq!(offset(&files, file, lsp::Position::new(1, u32::MAX)), 7);
+        assert_eq!(offset(&files, file, lsp::Position::new(2, u32::MAX)), 8);
+    }
+
+    #[test]
+    fn same_file_secondary_labels_ride_as_related() {
+        let mut files = Files::new();
+        let here = files.add_source("a.ds", "const one = 1\nconst one = 2\n");
+        let first = Span::new(here, 6, 9);
+        let later = Span::new(here, 20, 23);
+        let diag = Diagnostic::error(
+            ds_diag::ErrorCode::DuplicateDefinition,
+            "`one` is already defined",
+        )
+        .with_secondary(first, "first defined here")
+        .with_primary(later, "redefined here");
+        let uri_of =
+            |file: FileId| (file == here).then(|| lsp::Url::parse("file:///a.ds").unwrap());
+        let mapped = diagnostic(&files, &uri_of, &diag, here)
+            .expect("the primary label addresses this file");
+        assert_eq!(mapped.range.start.line, 1);
+        assert_eq!(mapped.range.start.character, 6);
+        assert_eq!(mapped.range.end.character, 9);
+        // The same file's secondary label rides along under the
+        // document's own URI instead of being dropped.
+        let related = mapped
+            .related_information
+            .as_ref()
+            .expect("the same-file label is a related location");
+        assert_eq!(related.len(), 1, "{related:?}");
+        assert_eq!(
+            related[0].location.uri,
+            lsp::Url::parse("file:///a.ds").unwrap()
+        );
+        assert_eq!(related[0].location.range.start.line, 0);
+        assert_eq!(related[0].location.range.start.character, 6);
+        assert_eq!(related[0].location.range.end.character, 9);
+        assert_eq!(related[0].message, "first defined here");
     }
 
     #[test]

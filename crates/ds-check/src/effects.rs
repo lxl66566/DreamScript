@@ -1,5 +1,9 @@
 //! The `effects_of` pass: per-definition effect rows over the parsed and
-//! resolved surface (B5, B7, E1, E2, E4).
+//! resolved surface (B5, B7, E1, E2, E4), plus the per-expression table
+//! beside them — every walked expression's own row, keyed by its span
+//! ([`Effects::expr_row`], the grain the REPL's answer print and the
+//! LSP's hover read), collected in the same walk the fixpoint graph is
+//! built by and finalized against its solution.
 //!
 //! v1 has no effect syntax (E1) — rows are computed, never written. The
 //! computation is a pure walk over the package's trees and the resolution
@@ -71,11 +75,12 @@
 
 use std::collections::HashMap;
 
-use ds_diag::Span;
+use ds_diag::{FileId, Span};
 use ds_parse::{
     AssignOp, Ast, BinaryOp, BlockExpr, CallArg, Expr, FnDecl, Ident, ImplDecl, Item, ItemKind,
     LocalDecl, MatchArm, Path, Pattern, StmtKind, StrPart, TraitDecl, TraitMember, UnaryOp,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     platform::WorldCaps,
@@ -149,6 +154,20 @@ impl EffectRow {
     #[must_use]
     pub const fn contains(self, effect: Effect) -> bool {
         self.0 & Self::of(effect).0 != 0
+    }
+
+    /// The row's bit set — the wire form the checked-ambient artifact
+    /// carries.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// The row of a raw bit set, the decode side of
+    /// [`EffectRow::bits`].
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
     }
 
     /// Whether the row is empty — a pure definition.
@@ -256,8 +275,9 @@ pub struct DefEffects {
 }
 
 /// The computed rows of one package: every value-producing definition
-/// (named and extern functions, bindings). Type declarations carry no row
-/// and report `None` from [`Effects::of`].
+/// (named and extern functions, bindings) plus the per-expression table
+/// (every walked expression's own row, keyed by its span). Type
+/// declarations carry no row and report `None` from [`Effects::of`].
 #[derive(Clone, Default)]
 pub struct Effects {
     /// Row-bearing definitions, in declaration order.
@@ -266,6 +286,9 @@ pub struct Effects {
     index: Vec<Option<u32>>,
     /// First-wins name lookup, mirroring the package table.
     names: HashMap<String, DefId>,
+    /// Every walked expression's own row (its subtree's intrinsics plus
+    /// its uses' masked callee rows), keyed by the expression's span.
+    expr_rows: FxHashMap<Span, EffectRow>,
 }
 
 impl Effects {
@@ -282,6 +305,43 @@ impl Effects {
     #[must_use]
     pub fn of_name(&self, name: &str) -> Option<EffectRow> {
         self.of(*self.names.get(name)?)
+    }
+
+    /// The row of one expression, keyed by its exact span: `None` when
+    /// the walk recorded no entry there.
+    #[must_use]
+    pub fn expr_row(&self, span: Span) -> Option<EffectRow> {
+        self.expr_rows.get(&span).copied()
+    }
+
+    /// The tightest recorded expression row covering `span` — an
+    /// expression's own row when it is recorded, else the tightest
+    /// enclosing expression's. `None` when no recorded span covers it
+    /// (the caller falls back to the definition grain).
+    #[must_use]
+    pub fn covering_row(&self, span: Span) -> Option<EffectRow> {
+        self.expr_rows
+            .iter()
+            .filter(|(s, _)| s.file == span.file && s.start <= span.start && span.end <= s.end)
+            .min_by_key(|(s, _)| s.end - s.start)
+            .map(|(_, row)| *row)
+    }
+
+    /// The tightest recorded expression row covering the position — a
+    /// non-empty span covers strictly inside it, an empty span only the
+    /// position it is (the hover predicate, mirroring how the type table
+    /// is scanned). `None` when no recorded span covers it.
+    #[must_use]
+    pub fn row_at(&self, file: FileId, offset: u32) -> Option<EffectRow> {
+        self.expr_rows
+            .iter()
+            .filter(|(s, _)| {
+                s.file == file
+                    && ((s.start < s.end && s.start <= offset && offset < s.end)
+                        || (s.start == s.end && s.start == offset))
+            })
+            .min_by_key(|(s, _)| s.end - s.start)
+            .map(|(_, row)| *row)
     }
 
     /// Every row-bearing definition, in declaration order.
@@ -332,6 +392,26 @@ struct Info {
     base_caps: u8,
     /// Call edges.
     edges: Vec<Edge>,
+}
+
+/// One expression's pending row: the intrinsics and call edges collected
+/// inside its subtree so far. Callee rows do not exist until the fixpoint
+/// runs, so the walk accumulates and the table is finalized against the
+/// solved nodes afterwards — one walk, no re-visit.
+#[derive(Default, Debug)]
+struct ExprAcc {
+    /// The subtree's intrinsic contributions.
+    base: EffectRow,
+    /// The subtree's call edges, with each use's own mask.
+    edges: Vec<Edge>,
+}
+
+impl ExprAcc {
+    /// The pending row as one list of fixpoint inputs, ready to merge
+    /// into an enclosing accumulator or a node's [`Info`].
+    fn parts(&self) -> (EffectRow, &[Edge]) {
+        (self.base, &self.edges)
+    }
 }
 
 /// B7's trapping defaults: integer add/sub/mul, div/rem, and shifts trap
@@ -397,8 +477,136 @@ pub fn effects_of_resolved<T>(
 where
     T: std::borrow::Borrow<Ast>,
 {
-    let count = u32::try_from(package.len()).expect("definition count fits u32");
     let mut graph = HashMap::new();
+    let exprs = graph_of(asts, package, resolutions, declared, world, &mut graph);
+    let solved = solve(&graph);
+    let expr_rows = finalize_expr_rows(exprs, &solved);
+    assemble(package, &solved, expr_rows)
+}
+
+/// One registered method's solved row, the checked-ambient artifact's
+/// method-half serve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ServedMethodRow {
+    /// The registered method.
+    pub method: MethodId,
+    /// The solved row.
+    pub row: EffectRow,
+    /// The solved capability bits.
+    pub caps: u8,
+}
+
+/// The checked-ambient artifact's extraction half: the ambient's own
+/// registered methods' solved rows, in registration order, over its own
+/// closed package — the rows a served run seeds so user edges into
+/// ambient method nodes read without walking the ambient's trees. Runs
+/// the same walk and fixpoint [`effects_of_resolved`](self::effects_of_resolved)
+/// runs.
+#[must_use]
+pub fn solved_method_rows<T>(
+    asts: &[T],
+    package: &Package,
+    resolutions: &[Resolutions],
+    declared: &DeclaredRows,
+    world: &WorldCaps,
+) -> Vec<ServedMethodRow>
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut graph = HashMap::new();
+    // The method-half serve reads the solved method nodes only; the
+    // walk's per-span table is dropped unused.
+    let _ = graph_of(asts, package, resolutions, declared, world, &mut graph);
+    let solved = solve(&graph);
+    package
+        .methods()
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let method = MethodId::from_raw(u32::try_from(index).expect("method count fits u32"));
+            let (row, caps) = solved
+                .get(&Node::Method(method))
+                .copied()
+                .unwrap_or((EffectRow::PURE, 0));
+            ServedMethodRow { method, row, caps }
+        })
+        .collect()
+}
+
+/// [`effects_of_resolved`](self::effects_of_resolved) behind a
+/// checked-ambient artifact: only the user trees walk; the ambient's
+/// solved rows — its definitions' (from the artifact's
+/// [`Effects::defs`]) and its registered methods' — seed the graph as
+/// fixed inputs. The ambient's own subgraph cannot reference a user
+/// definition (its bodies name only ambient names), so its fixpoint
+/// solution is independent of the user half and seeding it collapses
+/// that subgraph without walking it; the solve and the assembly then run
+/// exactly as in the fresh pass over the merged package's full
+/// definition range, so the answer equals the fresh one whenever the
+/// served rows are the ambient's true fixpoint rows (the artifact's
+/// drift gate pins that).
+#[must_use]
+pub fn effects_of_resolved_served<T>(
+    user_asts: &[T],
+    package: &Package,
+    user_resolutions: &[Resolutions],
+    served_defs: &[DefEffects],
+    served_methods: &[ServedMethodRow],
+    declared: &DeclaredRows,
+    world: &WorldCaps,
+) -> Effects
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut seeds = HashMap::new();
+    for row in served_defs {
+        seeds.insert(Node::Def(row.def), Info {
+            base: row.row,
+            base_caps: row.caps,
+            edges: Vec::new(),
+        });
+    }
+    for row in served_methods {
+        seeds.insert(Node::Method(row.method), Info {
+            base: row.row,
+            base_caps: row.caps,
+            edges: Vec::new(),
+        });
+    }
+    let exprs = graph_of(
+        user_asts,
+        package,
+        user_resolutions,
+        declared,
+        world,
+        &mut seeds,
+    );
+    let solved = solve(&seeds);
+    // The per-span table covers the walked user trees (the seeded ambient
+    // nodes answer its edges like any solved callee; the ambient's own
+    // spans carry no entries, and no REPL or hover query reaches them).
+    let expr_rows = finalize_expr_rows(exprs, &solved);
+    assemble(package, &solved, expr_rows)
+}
+
+/// Builds the row graph over the walked trees, seeding into `graph` (the
+/// served run's fixed inputs) instead of an empty map when the caller
+/// hands one: nodes up front for every value definition of the merged
+/// package — `entry` keeps a served seed — then one Walker per tree,
+/// which also collects the walk's per-span pending rows (the expression
+/// table's pre-fixpoint form, every walked tree's spans).
+fn graph_of<T>(
+    asts: &[T],
+    package: &Package,
+    resolutions: &[Resolutions],
+    declared: &DeclaredRows,
+    world: &WorldCaps,
+    graph: &mut HashMap<Node, Info>,
+) -> FxHashMap<Span, ExprAcc>
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let count = u32::try_from(package.len()).expect("definition count fits u32");
     // nodes up front, so edges are order-independent across files [G3]
     for raw in 0..count {
         let def = DefId::from_raw(raw);
@@ -406,9 +614,10 @@ where
             package.def(def).kind,
             DefKind::Fn | DefKind::Const | DefKind::Var
         ) {
-            graph.insert(Node::Def(def), Info::default());
+            graph.entry(Node::Def(def)).or_default();
         }
     }
+    let mut exprs = FxHashMap::default();
     for (ast, res) in asts.iter().zip(resolutions) {
         let ast = ast.borrow();
         let mut walker = Walker {
@@ -416,8 +625,10 @@ where
             declared,
             world,
             res,
-            graph: &mut graph,
-            node: Node::Anon(Span::new(ds_diag::FileId::new(0), 0, 0)),
+            graph: &mut *graph,
+            exprs: &mut exprs,
+            pending: Vec::new(),
+            node: Node::Anon(Span::new(FileId::new(0), 0, 0)),
         };
         for block in &ast.blocks {
             for item in &block.items {
@@ -425,7 +636,42 @@ where
             }
         }
     }
-    let solved = solve(&graph);
+    exprs
+}
+
+/// Finalizes the walk's per-span accumulators against the solved nodes:
+/// each pending row unions its edges' masked callee rows (the seeded
+/// ambient nodes answering like any solved callee on the served path).
+/// Same inputs as the node fixpoint, read once — no second walk.
+fn finalize_expr_rows(
+    exprs: FxHashMap<Span, ExprAcc>,
+    solved: &HashMap<Node, (EffectRow, u8)>,
+) -> FxHashMap<Span, EffectRow> {
+    exprs
+        .into_iter()
+        .map(|(span, acc)| {
+            let mut row = acc.base;
+            for edge in &acc.edges {
+                let (callee_row, _) = solved
+                    .get(&edge.callee)
+                    .copied()
+                    .unwrap_or((EffectRow::PURE, 0));
+                row |= callee_row.minus(edge.mask);
+            }
+            (span, row)
+        })
+        .collect()
+}
+
+/// Assembles the solved rows into the package's [`Effects`]: one entry
+/// per value definition in declaration order, the DefId index, the
+/// first-wins name table, and the finalized per-span expression rows.
+fn assemble(
+    package: &Package,
+    solved: &HashMap<Node, (EffectRow, u8)>,
+    expr_rows: FxHashMap<Span, EffectRow>,
+) -> Effects {
+    let count = u32::try_from(package.len()).expect("definition count fits u32");
     let mut defs = Vec::new();
     let mut index = vec![None; package.len()];
     let mut names = HashMap::new();
@@ -449,7 +695,12 @@ where
         }
         names.entry(def.name.clone()).or_insert(def_id);
     }
-    Effects { defs, index, names }
+    Effects {
+        defs,
+        index,
+        names,
+        expr_rows,
+    }
 }
 
 /// Rows and world-capability sets to the least fixpoint over the call
@@ -487,13 +738,23 @@ fn solve(graph: &HashMap<Node, Info>) -> HashMap<Node, (EffectRow, u8)> {
     }
 }
 
-/// One file's walk: fills the graph under the node each item enters.
+/// One file's walk: fills the graph under the node each item enters,
+/// collecting one pending row per enclosing expression on the side.
 struct Walker<'a, 'g> {
     package: &'a Package,
     declared: &'a DeclaredRows,
     world: &'a WorldCaps,
     res: &'a Resolutions,
     graph: &'g mut HashMap<Node, Info>,
+    /// Finished per-expression accumulators, keyed by span: the table's
+    /// pre-fixpoint form, shared across the package's files (spans carry
+    /// their file, so entries never collide).
+    exprs: &'g mut FxHashMap<Span, ExprAcc>,
+    /// The enclosing expressions' pending rows, innermost last: while
+    /// non-empty, contributions land on the top and merge upward as each
+    /// expression exits, so the node's own inputs are exactly what its
+    /// statement roots collected.
+    pending: Vec<(Span, ExprAcc)>,
     /// The node being contributed to; every walk path enters its node
     /// first.
     node: Node,
@@ -506,8 +767,14 @@ impl Walker<'_, '_> {
         self.node = node;
     }
 
-    /// Adds `row` to the current node's own contributions.
+    /// Adds `row` to the current contributions: the innermost enclosing
+    /// expression's pending row, or the node's own when no expression is
+    /// open.
     fn contribute(&mut self, row: EffectRow) {
+        if let Some((_, acc)) = self.pending.last_mut() {
+            acc.base |= row;
+            return;
+        }
         let info = self
             .graph
             .get_mut(&self.node)
@@ -542,11 +809,16 @@ impl Walker<'_, '_> {
     /// node creation order never matters; a callee outside the graph (a
     /// type used as a value) carries the pure row.
     fn edge(&mut self, callee: Node, mask: EffectRow) {
+        let edge = Edge { callee, mask };
+        if let Some((_, acc)) = self.pending.last_mut() {
+            acc.edges.push(edge);
+            return;
+        }
         let info = self
             .graph
             .get_mut(&self.node)
             .expect("walks enter their node first");
-        info.edges.push(Edge { callee, mask });
+        info.edges.push(edge);
     }
 
     // ---- items ------------------------------------------------------------
@@ -722,7 +994,10 @@ impl Walker<'_, '_> {
 
     // ---- expressions ------------------------------------------------------
 
-    /// Walks one expression's contributions into the current node.
+    /// Walks one expression's contributions into the current node, under
+    /// a pending row of its own: every expression leaves its subtree's
+    /// intrinsics and edges in the per-span table, so consumers can read
+    /// any expression's row (the definition grain stays the fixpoint's).
     ///
     /// `mask` is the set of effects consumed before this expression's
     /// value flows on (the E4 consuming forms mask `error`): call edges
@@ -730,6 +1005,13 @@ impl Walker<'_, '_> {
     /// contributions — the `?` and `or return` early exits — are control
     /// flow and never masked.
     fn expr(&mut self, e: &Expr, mask: EffectRow) {
+        self.pending.push((e.span(), ExprAcc::default()));
+        self.expr_intrinsic(e, mask);
+        self.exit_expr();
+    }
+
+    /// The expression walk's match half, under the pushed pending row.
+    fn expr_intrinsic(&mut self, e: &Expr, mask: EffectRow) {
         match e {
             // A fn type in the constructor brackets is a type spelling; it
             // carries no value effects.
@@ -806,6 +1088,30 @@ impl Walker<'_, '_> {
             Expr::Spawn { body, .. } | Expr::Defer { body, .. } => self.block(body, mask),
             Expr::Block(b) => self.block(b, mask),
         }
+    }
+
+    /// Pops the innermost pending row: the expression's own inputs are
+    /// complete (children merged in as they exited), so the span's entry
+    /// is finished, and the inputs flow on — into the enclosing
+    /// expression's pending row, or into the current node when this
+    /// expression is a statement's root. The node's fixpoint inputs are
+    /// exactly what its statement roots collected, so the solved
+    /// definition rows are unchanged by the side table.
+    fn exit_expr(&mut self) {
+        let (span, acc) = self.pending.pop().expect("every expression push exits");
+        let (base, edges) = acc.parts();
+        if let Some((_, parent)) = self.pending.last_mut() {
+            parent.base |= base;
+            parent.edges.extend_from_slice(edges);
+        } else {
+            let info = self
+                .graph
+                .get_mut(&self.node)
+                .expect("walks enter their node first");
+            info.base |= base;
+            info.edges.extend_from_slice(edges);
+        }
+        self.exprs.insert(span, acc);
     }
 
     /// Interpolation: expression holes walk; `$x` holes are value uses.
@@ -935,12 +1241,89 @@ impl Walker<'_, '_> {
             Some(Res::Def(def)) => self.edge(Node::Def(*def), mask),
             Some(Res::TraitMethod(m)) => self.edge(Node::Method(*m), mask),
             Some(Res::Dot(DotRes::Free { func, .. })) => self.edge(Node::Def(*func), mask),
-            Some(Res::Dot(DotRes::Methods { candidates })) => {
+            Some(Res::Dot(DotRes::Methods { candidates } | DotRes::Static { candidates })) => {
                 for m in candidates {
                     self.edge(Node::Method(*m), mask);
                 }
             },
             Some(Res::Local { .. } | Res::Handler) | None => {},
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_diag::{Files, Span};
+    use ds_parse::parse;
+
+    use super::{DeclaredRows, Effect, EffectRow, effects_of};
+    use crate::platform::WorldCaps;
+
+    /// The per-span table reads each expression's own row: the call under
+    /// the cursor, not the sibling statements; the covering and position
+    /// lookups answer the tightest recorded span; the definition rows stay
+    /// the fixpoint's.
+    #[test]
+    fn expression_rows_read_per_span() {
+        let source = concat!(
+            "extern fn speak (t: string) -> ()\n",
+            "fn mixed() -> int {\n",
+            "  speak(\"hi\")\n",
+            "  1 + 2\n",
+            "}\n",
+        );
+        let mut files = Files::new();
+        let file = files.add_source("rows.ds", source);
+        let ast = parse(&files, file).expect("parses");
+        let declared = DeclaredRows::new().with("speak", EffectRow::of(Effect::World));
+        let effects = effects_of(&[ast], &declared, &WorldCaps::new());
+
+        // The definition unions both statements; the tail's own span
+        // carries only its trap, the call's only its world edge.
+        assert_eq!(
+            effects.of_name("mixed").expect("row-bearing").render(),
+            "trap | world"
+        );
+        let at = |needle: &str| {
+            u32::try_from(source.find(needle).expect("the needle occurs"))
+                .expect("the source fits u32 offsets")
+        };
+        let span_of = |text: &str| {
+            let len = u32::try_from(text.len()).expect("the text fits u32 offsets");
+            Span::new(file, at(text), at(text) + len)
+        };
+        let call = span_of("speak(\"hi\")");
+        let literal = span_of("\"hi\"");
+        let sum = span_of("1 + 2");
+        assert_eq!(
+            effects.expr_row(call).expect("the call is walked"),
+            EffectRow::of(Effect::World)
+        );
+        assert_eq!(
+            effects.expr_row(literal).expect("literals are walked"),
+            EffectRow::PURE
+        );
+        assert_eq!(
+            effects.expr_row(sum).expect("the tail is walked"),
+            EffectRow::of(Effect::Trap)
+        );
+
+        // The tightest covering span of an inner position is the operator
+        // gap's enclosing sum (trap), not the pure operands; between the
+        // statements the body block covers (the fn's body is itself an
+        // expression); a position on the extern's signature covers
+        // nothing — the honest fallback boundary.
+        let plus = at("1 + 2") + 2;
+        assert_eq!(
+            effects.row_at(file, plus),
+            Some(EffectRow::of(Effect::Trap))
+        );
+        assert_eq!(effects.row_at(file, at("hi")), Some(EffectRow::PURE));
+        assert_eq!(
+            effects.row_at(file, call.end),
+            Some(EffectRow::of(Effect::Trap) | EffectRow::of(Effect::World))
+        );
+        assert_eq!(effects.row_at(file, at("string")), None);
+        assert_eq!(effects.covering_row(literal), Some(EffectRow::PURE));
     }
 }

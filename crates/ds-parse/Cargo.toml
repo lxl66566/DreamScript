@@ -28,6 +28,7 @@ serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
+ds-corpus-path.workspace = true
 
 [[bench]]
 name    = "parse"

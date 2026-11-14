@@ -2,10 +2,8 @@
 //! hand encodings), the wide-callee CALLT regression, two-slot module swaps,
 //! trap/backtrace behavior, and the float/conversion uops.
 
-use std::sync::Arc;
-
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         BIAS_J, ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, F64, I64},
@@ -19,10 +17,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn funcref(module: &str, func: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: module.into(),
         func,
-    }
+    })
 }
 
 fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
@@ -160,9 +158,8 @@ fn mutual_even_odd_at_ten_million_runs_at_constant_stack() {
     // the encoded words match ds-abi's own locked assertions: JMPIF at pc 3
     // carries the +3 bias, CALLT's d field is the callee pool index
     let even = reg
-        .slots("mut")
+        .current_version("mut")
         .expect("installed")
-        .current()
         .function("even")
         .expect("present");
     assert_eq!(even.code[3] & 0xffff, u32::from(BIAS_J + 3));
@@ -274,28 +271,26 @@ fn counter_version(get_value: i64) -> ModuleVersion {
 #[test]
 fn module_slot_swap_redirects_qualified_calls() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    let v1 = vm.install_module(counter_version(1));
+    let v1_row = vm.install_module(counter_version(1));
     assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(1)));
 
     vm.install_module(counter_version(2));
     // the current slot now answers pool FuncRefs
     assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(2)));
-    // the retiring slot still holds the previous version
-    let slots = vm.registry().slots("counter").expect("module installed");
-    assert_eq!(slots.retiring().map(ModuleVersion::name), Some("counter"));
-    assert_eq!(
-        slots
-            .retiring()
-            .and_then(|v| v.function("get"))
-            .map(|f| f.code.len()),
-        Some(3)
-    );
+    // the retiring slot still names the previous version's table row
+    let retiring = vm
+        .registry()
+        .retiring_version("counter")
+        .expect("the retiring row is live");
+    assert_eq!(retiring.name(), "counter");
+    assert_eq!(retiring.function("get").map(|f| f.code.len()), Some(3));
 
-    // a third install retires the oldest version: the registry drops it and
-    // only the caller's handle keeps v1 alive
+    // a third install retires the oldest version: the row left the
+    // registry's own reachability and the sweep drops it, and the row is
+    // the version's single home, so the version is gone
     vm.install_module(counter_version(3));
     assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(3)));
-    assert_eq!(Arc::strong_count(&v1), 1);
+    assert!(vm.registry().version(v1_row).is_none());
 }
 
 /// Regression: a WIDE callee via CALLT — callee params exceed the caller's

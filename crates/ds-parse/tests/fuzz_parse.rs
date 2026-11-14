@@ -3,8 +3,8 @@
 //! arbitrary bytes, valid UTF-8 or not. Both arms are consumed so coverage
 //! counts accepted and rejected inputs alike.
 
-use ds_diag::Files;
-use ds_parse::parse;
+use ds_diag::{ErrorCode, Files};
+use ds_parse::{parse, parse_script};
 
 /// xorshift64* PRNG: deterministic, no dependency, good enough for byte
 /// noise (mirrors crates/ds-mod/tests/fuzz_read.rs).
@@ -159,4 +159,121 @@ fn nested_delimiters_never_panic() {
         truncated.truncate(truncated.len() / 2);
         property(truncated.as_bytes());
     }
+}
+
+/// Lambda arrow chains around and past the scanner's arrow budget — the
+/// grammar's bracket-free recursion class, where a chain long enough
+/// would otherwise walk the parse worker off its stack (an abort, not a
+/// panic, so surviving in-process is the property). Shapes that nest
+/// without brackets through other spellings are included: parameter-list
+/// lambdas, `else if` heads, `in` right-hand sides, interpolation holes,
+/// and arrows interleaved with counted brackets. Random bytes almost
+/// never build chains, so the budget's refusal path needs these.
+#[test]
+fn arrow_chains_never_panic() {
+    use std::fmt::Write as _;
+
+    let wrap = |body: String, ret: &str| format!("fn f() -> {ret} {{\n  {body}\n}}\n");
+    let bare = |n: usize| wrap(format!("{}1", "x => ".repeat(n)), "int");
+    let paren = |n: usize| {
+        let mut links = String::new();
+        for k in 0..n {
+            let _ = write!(links, "(a{k}) => ");
+        }
+        wrap(format!("{links}1"), "int")
+    };
+    let else_if = |n: usize| {
+        let mut s = String::from("x0 => if c { 1 }");
+        for k in 1..n {
+            let _ = write!(s, "\nelse if x{k} => {{ 1 }} {{ 2 }}");
+        }
+        s.push_str("\nelse { 0 }");
+        wrap(s, "int")
+    };
+    let in_chain = |n: usize| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = writeln!(s, "x{k} => y{k} in");
+        }
+        s.push('z');
+        wrap(s, "bool")
+    };
+    let hole = |n: usize| wrap(format!("\"${{{}1}}\"", "x => ".repeat(n)), "string");
+    let mixed = |n: usize| {
+        wrap(
+            format!("{}{}1{}", "((".repeat(2), "x => ".repeat(n), "))".repeat(2)),
+            "int",
+        )
+    };
+    for n in [1usize, 8, 20, 38, 39, 40, 41, 200, 2000] {
+        for source in [
+            bare(n),
+            paren(n),
+            else_if(n),
+            in_chain(n),
+            hole(n),
+            mixed(n),
+        ] {
+            property(source.as_bytes());
+            let mut truncated = source.clone();
+            truncated.truncate(truncated.len() / 2);
+            property(truncated.as_bytes());
+        }
+    }
+    // An over-budget chain is refused as a diagnostic end to end.
+    let source = bare(200);
+    let mut files = Files::new();
+    let file = files.add_source("deep.ds", &source);
+    let diags = parse(&files, file).expect_err("the budget refuses");
+    assert_eq!(diags[0].code, ErrorCode::ArrowChainTooDeep);
+    // The budget's reset rules are cut against the grammar's sp-crossing,
+    // so the continuation shapes the resets must not break really parse.
+    let parses = |src: &str| {
+        let mut files = Files::new();
+        let file = files.add_source("cont.ds", src);
+        parse_script(&files, file).expect("a legal continuation");
+    };
+    parses("x =>\ny => z\n");
+    parses("x => y +\nz => w\n");
+    parses("x => y in\nz => w\n");
+    parses("if c { 1 } else\nif x => { 2 } { 3 } else { 0 }\n");
+}
+
+/// `else if` chains around and past the scanner's else budget — the
+/// second bracket-free recursion class (`if_expr` right-recurses through
+/// its else clause after the block has closed). Below the limit real
+/// dispatch shapes parse; at and past it the pre-scan reports instead of
+/// walking the worker's stack to pest's own backstop.
+#[test]
+fn else_if_chains_never_panic() {
+    use std::fmt::Write as _;
+
+    let chain = |elses: usize| {
+        let mut s = String::from("fn f(c: int) -> int {\n  if c == 0 { 0 }");
+        for k in 1..elses {
+            let _ = writeln!(s, "\nelse if c == {k} {{ {k} }}");
+        }
+        if elses > 0 {
+            s.push_str("\nelse { 0 }");
+        }
+        s.push_str("\n}\n");
+        s
+    };
+    for elses in [0usize, 1, 100, 119, 499, 500, 599, 2000, 20000] {
+        let source = chain(elses);
+        property(source.as_bytes());
+        let mut truncated = source.clone();
+        truncated.truncate(truncated.len() / 2);
+        property(truncated.as_bytes());
+    }
+    // An over-budget chain is refused as a diagnostic end to end.
+    let source = chain(2000);
+    let mut files = Files::new();
+    let file = files.add_source("deep.ds", &source);
+    let diags = parse(&files, file).expect_err("the budget refuses");
+    assert_eq!(diags[0].code, ErrorCode::ElseChainTooDeep);
+    // A real generated decoder's dispatch (120 branches) parses clean.
+    let mut files = Files::new();
+    let file = files.add_source("dispatch.ds", &chain(119));
+    parse_script(&files, file).expect("a 120-branch dispatch parses");
 }

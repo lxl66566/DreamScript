@@ -4,7 +4,7 @@
 //! duplicate and unknown diagnostics, the call-form ambiguity between the
 //! namespaces, and a full pass over `conformance/types_hybrid.ds`.
 
-use ds_check::{DefKind, DotRes, MethodOwner, Package, Res};
+use ds_check::{DefKind, DotRes, MethodOwner, Package, Res, UseIndex};
 use ds_diag::{Diagnostic, ErrorCode, FileId, Files, Span};
 use ds_parse::{Ast, parse};
 
@@ -850,6 +850,15 @@ fn enclosing_finds_the_covering_use() {
     let at_start = Span::new(file, callee.start, callee.start);
     assert!(uses.enclosing(at_start).is_some());
 
+    // A position at a use's end also covers it: the coverage is
+    // inclusive at the end boundary, so a cursor right after the name
+    // resolves to it.
+    let at_end = Span::new(file, callee.end, callee.end);
+    match uses.enclosing(at_end) {
+        Some(Res::Def(id)) => assert_eq!(*id, f.package.lookup_value("f").unwrap()),
+        other => panic!("the end boundary must cover: {other:?}"),
+    }
+
     // A position on whitespace between names covers nothing.
     let between = span_of(source, file, "fn caller", 0);
     let gap = Span::new(file, between.start + 2, between.start + 2);
@@ -868,4 +877,86 @@ fn enclosing_finds_the_covering_use() {
         second_uses.enclosing(other_gap).is_none(),
         "an earlier file's use must not cover"
     );
+}
+
+/// The reverse edge keys on target identity: two same-named locals of
+/// sibling scopes and a same-named package definition each answer their
+/// own uses only.
+#[test]
+fn use_index_keys_on_target_identity_not_name() {
+    let f = resolve_one(concat!(
+        "const x = 1\n",
+        "fn first(x: int) -> int { x }\n",
+        "fn second() -> int {\n",
+        "  const x = 2\n",
+        "  x\n",
+        "}\n",
+        "fn third() -> int { x }\n",
+    ));
+    let (uses, _) = f.resolve(0);
+    let index = UseIndex::build(&[uses]);
+    let file = file_of(&f, 0);
+    let source = f.source(0);
+    // Each same-named target answers its own uses only: the package
+    // definition's, the parameter's, and the block binding's are
+    // pairwise disjoint.
+    let def = f.package.lookup_value("x").unwrap();
+    let def_use = span_in(source, file, "{ x }", 1, "x");
+    assert_eq!(index.def_uses(def), [def_use]);
+    let param = span_in(source, file, "fn first(x: int)", 0, "x");
+    let param_use = span_in(source, file, "{ x }", 0, "x");
+    assert_eq!(index.local_uses(param), [param_use]);
+    let block = span_in(source, file, "const x = 2", 0, "x");
+    let block_use = span_in(source, file, "  x\n", 0, "x");
+    assert_eq!(index.local_uses(block), [block_use]);
+}
+
+/// A use in one file of a definition in another answers through the
+/// package-grain index, including the first-registered file's own uses
+/// of its own definitions (the ambient's shape).
+#[test]
+fn use_index_spans_files_and_the_first_file_s_uses() {
+    let f = fixture(&[
+        (
+            "ambient.ds",
+            concat!("fn helper() -> int { 1 }\n", "const own = helper()\n",),
+        ),
+        ("doc.ds", "const again = helper()\n"),
+    ]);
+    let (uses_a, _) = f.resolve(0);
+    let (uses_b, _) = f.resolve(1);
+    let index = UseIndex::build(&[uses_a, uses_b]);
+    let helper = f.package.lookup_value("helper").unwrap();
+    let a = file_of(&f, 0);
+    let b = file_of(&f, 1);
+    let own_use = span_in(f.source(0), a, "const own = helper()", 0, "helper");
+    let doc_use = span_in(f.source(1), b, "const again = helper()", 0, "helper");
+    assert_eq!(index.def_uses(helper), [own_use, doc_use]);
+}
+
+/// Qualified `Trait::f` uses answer under the method's own key, and a
+/// dot-call's free-function tier records under the free definition.
+#[test]
+fn use_index_covers_method_and_dot_uses() {
+    let f = resolve_one(concat!(
+        "trait pretty { fn show(self) -> int { 1 } }\n",
+        "fn free(n: int) -> int { n }\n",
+        "const one = free(1)\n",
+        "const two = 1.free()\n",
+        "const three = pretty::show(2)\n",
+    ));
+    let (uses, _) = f.resolve(0);
+    let index = UseIndex::build(&[uses]);
+    let file = file_of(&f, 0);
+    let source = f.source(0);
+    // The free definition's set holds both the bare call and the
+    // dot-call's method position.
+    let free = f.package.lookup_value("free").unwrap();
+    let bare = span_in(source, file, "const one = free(1)", 0, "free");
+    let dotted = span_in(source, file, "const two = 1.free()", 0, "free");
+    assert_eq!(index.def_uses(free), [bare, dotted]);
+    // The qualified trait-method use answers under the method id.
+    let show = f.package.method_candidates("show")[0];
+    let qualified = span_in(source, file, "pretty::show(2)", 0, "show");
+    assert_eq!(index.method_uses(show), [qualified]);
 }

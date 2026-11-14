@@ -19,7 +19,7 @@ workspace = true
 # ds-vm's test binaries.
 
 [dev-dependencies]
-gungraun            = "0.19.4"
+gungraun.workspace  = true
 ds-vm               = { path = "../ds-vm" }
 # the examples/opcode_census tool lowers the benchmark kernels through the compiler chain
 ds-abi              = { path = "../ds-abi" }

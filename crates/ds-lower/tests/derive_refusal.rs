@@ -383,44 +383,6 @@ fn the_clone_family_refuses_its_carve_outs() {
     );
 }
 
-/// A part-less struct refuses the clone derive at the attribute: the
-/// member's `Self` return carries no word, so it would lower to a
-/// zero-width RETSPAN, which the ABI refuses by design (a plain fn
-/// returning the same value shares the hole, a pre-existing boundary).
-#[test]
-fn a_partless_struct_refuses_the_clone_derive() {
-    let rendered = refusals(concat!(
-        "tag int\n",
-        "trait clone {\n",
-        "  fn clone(self) -> Self\n",
-        "}\n",
-        "impl clone for int {\n",
-        "  fn clone(self) -> Self { self }\n",
-        "}\n",
-        "#[derive(clone)]\n",
-        "struct unit { }\n",
-        "#[derive(clone)]\n",
-        "struct point { x: int }\n",
-        "fn main() -> int { 0 }\n",
-    ));
-    assert_eq!(
-        rendered.len(),
-        1,
-        "only the part-less struct refuses: {rendered:?}"
-    );
-    assert!(rendered[0].contains("DS2030"), "{}", rendered[0]);
-    assert!(
-        rendered[0].contains("derive `clone` refuses a part-less struct"),
-        "{}",
-        rendered[0]
-    );
-    assert!(
-        rendered[0].contains("zero-width RETSPAN"),
-        "the refusal names the ABI boundary: {}",
-        rendered[0]
-    );
-}
-
 /// A derive attribute that somehow survives into the trees lowering
 /// walks is the misuse guard: the checker's expansion owns consumption.
 #[test]
@@ -457,5 +419,177 @@ fn an_unconsumed_attribute_refuses_at_lowering() {
             "the checker's derive expansion owns it; lower over the analyzer's expanded trees"
         ),
         "{err}"
+    );
+}
+
+// ---- the `default` family's refusal classes -------------------------------
+
+/// The `default` family's honest refusals: a field type the
+/// type-expression key reaches but the language answers no construction
+/// for (a bare name carrying no `default` member, a one-argument head
+/// that is not the empty-construction shape) fails at the synthesized
+/// call with the standard diagnostic (the family precedent), and the
+/// attribute-level classes — a union naming the open ruling, the shapes
+/// spelling no key, a payloaded or empty enum, a generic declaration —
+/// refuse naming the part or the declaration.
+#[test]
+fn the_default_family_refuses_its_boundaries() {
+    let missing = concat!(
+        "tag int\n",
+        "struct point { x: int, y: int }\n",
+        "#[derive(default)]\n",
+        "struct outer { p: point }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let rendered = refusals(missing);
+    let [one] = rendered.as_slice() else {
+        panic!("one missing-member refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("DS2004") && one.contains("type `point` carries no member `default`"),
+        "the part's own missing impl reports at the synthesized call: {one}"
+    );
+
+    let payloaded = concat!(
+        "tag int\n",
+        "#[derive(default)]\n",
+        "enum keyed {\n",
+        "  big(int)\n",
+        "  tiny\n",
+        "}\n",
+    );
+    let rendered = refusals(payloaded);
+    let [one] = rendered.as_slice() else {
+        panic!("one first-case refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("the family defaults to the first case, which must be a unit case"),
+        "a payloaded first case refuses: {one}"
+    );
+
+    let unpopulated = concat!("tag int\n", "#[derive(default)]\n", "enum void { }\n",);
+    let rendered = refusals(unpopulated);
+    let [one] = rendered.as_slice() else {
+        panic!("one no-cases refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("an enum with no cases has no default value"),
+        "an empty enum has no default value: {one}"
+    );
+
+    // a union field: the family refuses naming the open ruling rather
+    // than inventing a member
+    let union_field = concat!(
+        "tag int\n",
+        "tag string\n",
+        "#[derive(default)]\n",
+        "struct picker { v: int | string }\n",
+    );
+    let rendered = refusals(union_field);
+    let [one] = rendered.as_slice() else {
+        panic!("one union-field refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("a union's default member is an open ruling"),
+        "a union field names the ambiguity instead of inventing a member: {one}"
+    );
+
+    // a two-argument application whose head is not `map`: only the map
+    // spelling constructs empty
+    let non_map_pair = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct pair[a, b]\n",
+        "#[derive(default)]\n",
+        "struct holder { p: pair[int, string] }\n",
+    );
+    let rendered = refusals(non_map_pair);
+    let [one] = rendered.as_slice() else {
+        panic!("one two-argument-head refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains(
+            "a two-argument application constructs empty only through the `map[k, v]()` spelling"
+        ),
+        "a non-map two-argument head refuses naming the spelling: {one}"
+    );
+
+    // an application of more type arguments than any empty construction
+    // spells
+    let triple_apply = concat!(
+        "tag int\n",
+        "struct triple[a, b, c]\n",
+        "#[derive(default)]\n",
+        "struct holder { t: triple[int, int, int] }\n",
+    );
+    let rendered = refusals(triple_apply);
+    let [one] = rendered.as_slice() else {
+        panic!("one arity refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("the empty construction spells no application of 3 type arguments"),
+        "a three-argument application refuses naming the arity: {one}"
+    );
+
+    // a type argument the constructor brackets themselves cannot spell
+    let optional_arg = concat!(
+        "tag int\n",
+        "struct list[t]\n",
+        "#[derive(default)]\n",
+        "struct holder { xs: list[int?] }\n",
+    );
+    let rendered = refusals(optional_arg);
+    let [one] = rendered.as_slice() else {
+        panic!("one bracket-argument refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("the constructor brackets spell no key for this type argument"),
+        "an optional inside the brackets refuses naming the argument: {one}"
+    );
+
+    // a one-argument head the language answers no empty construction
+    // for fails at the synthesized call, the family precedent
+    let applied_fields = concat!(
+        "tag int\n",
+        "struct box[t] { v: t }\n",
+        "#[derive(default)]\n",
+        "struct holder { b: box[int] }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let rendered = refusals(applied_fields);
+    let [one] = rendered.as_slice() else {
+        panic!("one cross-spelling refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("constructs per its declaration, not by type application"),
+        "a fields-carrying head refuses at the synthesized call: {one}"
+    );
+
+    let callable = concat!(
+        "tag int\n",
+        "#[derive(default)]\n",
+        "struct hook { f: fn(int) -> int }\n",
+    );
+    let rendered = refusals(callable);
+    let [one] = rendered.as_slice() else {
+        panic!("one function-typed refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("refuses the field `f`"),
+        "a function-typed part refuses: {one}"
+    );
+
+    let generic = concat!(
+        "tag int\n",
+        "#[derive(default)]\n",
+        "struct box[t] { v: t }\n",
+    );
+    let rendered = refusals(generic);
+    let [one] = rendered.as_slice() else {
+        panic!("one generic refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("DS2029") && one.contains("derive `default` refuses a generic declaration"),
+        "the one-body-per-impl seam refuses: {one}"
     );
 }

@@ -1,8 +1,8 @@
-//! Exhaustive algebra-law checks over a fixed 6-atom, 2-trait universe [B1].
+//! Exhaustive algebra-law checks over a fixed 7-atom, 2-trait universe [B1].
 //!
-//! The semantic space of the fixture universe is 2^6 = 64 solved types, so
-//! the laws run over all of them: every ordered pair (64x64) and, where the
-//! law is ternary, every triple (64^3). An independent bitset model is the
+//! The semantic space of the fixture universe is 2^7 = 128 solved types, so
+//! the laws run over all of them: every ordered pair (128x128) and, where the
+//! law is ternary, every triple (128^3). An independent bitset model is the
 //! oracle for every solver expression family member up to depth two.
 
 use ds_check::{Field, TraitId, Ty, TypeExpr, TypeId, Universe};
@@ -36,9 +36,11 @@ fn fixture() -> Fixture {
     universe.impl_trait(hashable, bad_port).unwrap();
     Fixture {
         universe,
-        atoms: vec![none, io, missing, bad_port, config, txt],
+        // [none, type, io, ...]: the builtin `type` atom rides beside none
+        // in every universe (G1, G2), a member of no trait.
+        atoms: vec![none, TypeId::TYPE, io, missing, bad_port, config, txt],
         traits: [sendable, hashable],
-        membership: [(1 << 1) | (1 << 2), (1 << 2) | (1 << 3)],
+        membership: [(1 << 2) | (1 << 3), (1 << 3) | (1 << 4)],
     }
 }
 
@@ -101,11 +103,11 @@ impl Fixture {
         }
     }
 
-    /// All 64 solved types of the universe, indexed by bitset value.
+    /// All 128 solved types of the universe, indexed by bitset value.
     fn all_types(&mut self) -> Vec<Ty> {
         let singletons: Vec<Ty> = self.atoms.clone().iter().map(|id| self.ty(*id)).collect();
         let mut all = vec![self.universe.empty_ty()];
-        for bits in 1u64..=63 {
+        for bits in 1u64..=127 {
             let mut t = all[0];
             for (i, singleton) in singletons.iter().enumerate() {
                 if bits & (1 << i) != 0 {
@@ -114,9 +116,9 @@ impl Fixture {
             }
             all.push(t);
         }
-        assert_eq!(all.len(), 64);
+        assert_eq!(all.len(), 128);
         let uniq: std::collections::HashSet<Ty> = all.iter().copied().collect();
-        assert_eq!(uniq.len(), 64, "distinct sets must get distinct handles");
+        assert_eq!(uniq.len(), 128, "distinct sets must get distinct handles");
         all
     }
 

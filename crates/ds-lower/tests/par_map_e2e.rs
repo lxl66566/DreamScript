@@ -11,7 +11,7 @@ use ds_abi::Inst;
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::lower;
-use ds_mod::{Hash128, read, write};
+use ds_mod::{FuncRefKey, Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Vm, loader, native};
 
@@ -109,7 +109,7 @@ fn the_callg_stages_the_list_callable_and_two_evidence_words() {
             // fork sites stage the callable
             if f.constants()[usize::from(callee.0)]
                 != (ds_mod::Constant::FuncRef {
-                    module: "builtin".into(),
+                    key: FuncRefKey::Native("builtin".into()),
                     func: native::BUILTIN_PAR_MAP,
                 })
             {

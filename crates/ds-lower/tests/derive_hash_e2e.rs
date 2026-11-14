@@ -7,7 +7,9 @@
 //! field-order content fold over the wrap arithmetic, every enum case
 //! folding its index then its payload parts, a float part hashing
 //! through the fold native (`+0.0` with `-0.0`, the NaNs agreeing, the
-//! equality printed, never the raw values [B9]), a string, char, or
+//! equality printed, never the raw values [B9]; the payloaded NaN pair
+//! rides main's entry args from the host, since ds-source arithmetic
+//! only spells the one platform NaN pattern), a string, char, or
 //! byte part through its own impl, and a union-typed binding
 //! dispatching through the sibling branches of the one written head.
 
@@ -70,8 +72,15 @@ fn run_lowered(lowered: &Lowered) -> Vm {
 fn derived_hash_answers_through_every_call_spelling() {
     let lowered = lower_probe();
     let mut vm = run_lowered(&lowered);
+    // the payloaded NaN pair: one positive and one negative sNaN word,
+    // bit-distinct spellings the fold must answer identically
+    let na = f64::from_bits(0x7ff0_0000_0000_0001);
+    let nb = f64::from_bits(0xfff0_0000_0000_0001);
     assert_eq!(
-        vm.run("derive_hash_probe", "main", &[]),
+        vm.run("derive_hash_probe", "main", &[
+            Value::F64(na),
+            Value::F64(nb)
+        ]),
         Ok(Value::I64(0)),
         "main returns its declared int"
     );
@@ -92,6 +101,7 @@ fn derived_hash_answers_through_every_call_spelling() {
             "true\n",                 /* hash_f(0.0) == hash_f(0.0 / (0.0 - 1.0)): +0.0 folds
                                        * with -0.0 */
             "true\n", // the NaNs agree through the one canonical payload
+            "true\n", // the host-supplied payloaded pair folds the same
         )
         .as_bytes(),
         "the direct, qualified, and generic call spellings agree"

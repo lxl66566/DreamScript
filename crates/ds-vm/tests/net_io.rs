@@ -22,7 +22,7 @@ use std::{
 };
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -40,10 +40,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn platform(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: STD_NAME.into(),
         func: index,
-    }
+    })
 }
 
 /// The shared pool, copied per function: the five net natives, then the

@@ -1,0 +1,92 @@
+// purpose: the unit-word representation (the 2026-11-15 ruling) end to
+// end — a part-less struct occupies one reserved word in every value
+// position, so it constructs, passes as an argument, returns across a
+// fn boundary, nests as a struct-typed field, rides a union member
+// payload, and matches by its empty construction pattern; the word's
+// content is never read, and two constructions answer equal because the
+// frame's inert zero holds the word on both sides. Every derive family
+// synthesizes for the shape: show answers the bare name, ord answers
+// zero, hash answers the seed constant (a part-less tag's own answer),
+// and clone answers the empty construction over the reserved word.
+// items:
+// marker: stage: run
+// blank: stage: run
+// holder: stage: run
+// id: stage: run
+// make: stage: run
+// hash_of: stage: run
+// pick: stage: run
+// tag_of: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag bool
+
+extern fn println (msg: string) -> ()
+extern fn str[t] (v: t) -> string
+
+trait show {
+  fn show(self) -> string
+}
+
+trait ord {
+  fn compare(self, other: Self) -> int
+}
+
+trait hash {
+  fn hash(self) -> int
+}
+
+trait clone {
+  fn clone(self) -> Self
+}
+
+impl clone for int {
+  fn clone(self) -> Self { self }
+}
+
+struct marker {}
+
+#[derive(show, ord, hash, clone)]
+struct blank {}
+
+struct holder { m: marker, n: int }
+
+tag miss
+
+fn id(m: marker) -> marker { m }
+
+fn make() -> blank { blank {} }
+
+fn hash_of(b: blank) -> int { b.hash() }
+
+fn pick(ok: bool) -> marker | miss {
+  if ok { marker {} } else { miss }
+}
+
+fn tag_of(u: marker | miss) -> int {
+  match u {
+    marker {} => 1,
+    miss => 2,
+  }
+}
+
+fn main() -> int {
+  const m = marker {}
+  const back = id(m)
+  const b = make()
+  const c = b.clone()
+  println(blank {}.show())
+  println(str(b.compare(blank {})))
+  println(str(b.hash()))
+  println(str(hash_of(c)))
+  const h = holder { m: back, n: 3 }
+  var slot: marker | miss = pick(true)
+  const first = tag_of(slot)
+  slot = pick(false)
+  const second = tag_of(slot)
+  println(str(first + second + h.n))
+  println(str(back == marker {}))
+  0
+}

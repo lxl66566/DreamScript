@@ -32,6 +32,9 @@ const TYPES_AMBIENT: &str = concat!(
     "struct list[t]\n",
     "struct map[k, v]\n",
     "struct config { host: string, port: int?, retries: int }\n",
+    "struct field { name: string, type: type, tag: string }\n",
+    "extern fn fields (t: type) -> list[field]\n",
+    "extern fn type_name (t: type) -> string\n",
     "extern fn read_file (path: string) -> string | io_err\n",
     "extern fn parse_json (text: string) -> json | io_err\n",
     "extern fn str[t] (v: t) -> string\n",
@@ -93,12 +96,15 @@ const GENERICS_AMBIENT: &str = concat!(
     "  }\n",
     "}\n",
     "struct list[t]\n",
+    "struct field { name: string, type: type, tag: string }\n",
     "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
     "extern fn head[t] (xs: list[t]) -> t?\n",
     "extern fn tail[t] (xs: list[t]) -> list[t]\n",
     "extern fn join (parts: list[string], sep: string) -> string\n",
     "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
     "extern fn str[t] (v: t) -> string\n",
+    "extern fn fields (t: type) -> list[field]\n",
+    "extern fn type_name (t: type) -> string\n",
 );
 
 /// Ambient for pattern_dispatch: the primitives, println, and the
@@ -283,7 +289,7 @@ fn within(span: Span, item: &Item) -> bool {
 }
 
 fn gate(corpus: &str, ambient: &str) -> Vec<(String, String, ds_diag::Diagnostic)> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(corpus);
+    let path = ds_corpus_path::resolve(corpus);
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -357,8 +363,7 @@ fn pattern_dispatch_items_check_clean() {
         PATTERN_DISPATCH_AMBIENT,
     );
     assert_eq!(rejects, [] as [(String, String, ds_diag::Diagnostic); 0]);
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/pattern_dispatch.ds");
+    let path = ds_corpus_path::resolve("../../conformance/pattern_dispatch.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let mut files = Files::new();
     let amb = files.add_source("ambient.ds", PATTERN_DISPATCH_AMBIENT);
@@ -396,7 +401,7 @@ fn extraction_family_items_check_clean() {
 
 #[test]
 fn types_hybrid_known_tension_is_confined_to_get_port() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/types_hybrid.ds");
+    let path = ds_corpus_path::resolve("../../conformance/types_hybrid.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let mut files = Files::new();
     let amb = files.add_source("ambient.ds", TYPES_AMBIENT);
@@ -456,8 +461,7 @@ fn generics_diagnostics_stay_in_later_milestone_items() {
     // The generics file's other diagnostics all sit in m6 items (comptime
     // `fields`/`type_name` builtins, the `ord`-derived `max`, and the
     // derive-driven execution items), which the M2 gate exempts.
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/generics_coherent_traits.ds");
+    let path = ds_corpus_path::resolve("../../conformance/generics_coherent_traits.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -591,7 +595,7 @@ fn derives_run_items_check_clean_with_synthesized_impls() {
     // every run item checks clean beside the ambient's own traits;
     // `res` (the linear declaration the holder reject names)
     // typechecks on its own.
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/derives.ds");
+    let path = ds_corpus_path::resolve("../../conformance/derives.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -634,7 +638,7 @@ fn gate_full(
     ds_check::Linearity,
     String,
 ) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(corpus);
+    let path = ds_corpus_path::resolve(corpus);
     let source = std::fs::read_to_string(&path).unwrap();
     // Unresolved items are commented out in the body and skipped by every
     // runner (corpus README), so they align with no live item.
@@ -810,7 +814,7 @@ fn lists_surface_items_check_with_the_mixed_rejection() {
     );
 
     // every other item checks clean under the same stubs
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/lists_surface.ds");
+    let path = ds_corpus_path::resolve("../../conformance/lists_surface.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -855,7 +859,7 @@ fn maps_surface_items_check_with_the_constructor_rejection() {
     );
 
     // every other item checks clean under the same stubs
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/maps_surface.ds");
+    let path = ds_corpus_path::resolve("../../conformance/maps_surface.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -900,8 +904,7 @@ fn tuples_surface_items_check_with_the_union_destructure_rejection() {
     );
 
     // every other item checks clean under the same stubs
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/tuples_surface.ds");
+    let path = ds_corpus_path::resolve("../../conformance/tuples_surface.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -958,7 +961,7 @@ fn affine_diagnostics_stay_in_reject_or_later_milestone_items() {
         ),
     ];
     for (corpus, ambient) in corpus {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(corpus);
+        let path = ds_corpus_path::resolve(corpus);
         let source = std::fs::read_to_string(&path).unwrap();
         let stages: Vec<Stage> = stages(&source)
             .into_iter()
@@ -1081,8 +1084,7 @@ fn inherent_impls_items_check_with_the_wrong_receiver_rejection() {
     );
 
     // every other item checks clean under the same stubs
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/inherent_impls.ds");
+    let path = ds_corpus_path::resolve("../../conformance/inherent_impls.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
     let mut files = Files::new();
@@ -1139,8 +1141,7 @@ fn toplevel_consumption_checks_with_cross_file_consumer_clean() {
     // The reject aside, the whole two-file package (ambient consumer
     // included) checks and linearity-checks clean: the earlier file's
     // `echo` consumes the later corpus file's `far_seed`.
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/toplevel_consumption.ds");
+    let path = ds_corpus_path::resolve("../../conformance/toplevel_consumption.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let mut files = Files::new();
     let amb = files.add_source("ambient.ds", TOPLEVEL_AMBIENT);
@@ -1227,7 +1228,7 @@ fn teardown_deinit_items_check_clean() {
 /// descriptive slugs and check nothing here.
 #[test]
 fn every_corpus_header_aligns_with_its_items() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let dir = ds_corpus_path::dir();
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("the corpus directory lists")
         .filter_map(|entry| {

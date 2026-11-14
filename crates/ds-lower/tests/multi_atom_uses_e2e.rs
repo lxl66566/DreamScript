@@ -172,6 +172,41 @@ fn union_equality_covers_members_payloads_and_the_tag_mirror() {
     );
 }
 
+/// A struct-payloaded member compares over its whole payload span: a
+/// member differing only in a later field answers false, the equal case
+/// answers true, the unit member's tag pair still routes, and the same
+/// struct spelling outside a union is unchanged.
+#[test]
+fn union_equality_walks_a_struct_members_whole_payload() {
+    let out = runs(
+        "union_eq_payload",
+        concat!(
+            "struct pair { a: int, b: int }\n",
+            "struct wide { a: int, b: int, c: int }\n",
+            "fn one() -> pair | none { pair { a: 1, b: 2 } }\n",
+            "fn two() -> pair | none { pair { a: 1, b: 9 } }\n",
+            "fn w1() -> wide | none { wide { a: 1, b: 2, c: 3 } }\n",
+            "fn w2() -> wide | none { wide { a: 1, b: 2, c: 9 } }\n",
+            "fn gone() -> wide | none { none }\n",
+            "fn main() -> () {\n",
+            "  if one() == two() { println(\"bad\") } else { println(\"second diff\") }\n",
+            "  if one() == one() { println(\"pair same\") } else { println(\"bad\") }\n",
+            "  if w1() == w2() { println(\"bad\") } else { println(\"third diff\") }\n",
+            "  if w1() == w1() { println(\"wide same\") } else { println(\"bad\") }\n",
+            "  if gone() == gone() { println(\"unit same\") } else { println(\"bad\") }\n",
+            "  if w1() == gone() { println(\"bad\") } else { println(\"tag diff\") }\n",
+            "  const l = pair { a: 1, b: 2 }\n",
+            "  const r = pair { a: 1, b: 9 }\n",
+            "  if l == r { println(\"bad\") } else { println(\"bare diff\") }\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(
+        out,
+        "second diff\npair same\nthird diff\nwide same\nunit same\ntag diff\nbare diff\n"
+    );
+}
+
 /// The narrowed spellings run: an `is` refinement carries the payload
 /// use, a match arm's binder compares the member's value, `.ok`
 /// extracts the payload side, and `?` propagates the none side.

@@ -104,7 +104,7 @@ Acceptance: effects_nursery.ds conformance; cancellation of a many-spawn nursery
 
 Goal: metaprogramming without macros.
 
-Open: the derive engine [G1] (`hash`, `show`, `ord` with its explicit `total_compare` variant, `clone`, `to_json`/`from_json`, `default`; `==` never derived); the comptime evaluator [G1, G2] as ordinary code on the same uop VM in a world-fenced context, static reflection over tags-as-data, no runtime type metadata, existentials as evidence-carrying boxes; the free-generic residuals (callee-body demands from inside a generic body, chains deeper than the follow words, serving bodies demanding other members).
+Open: the derive engine [G1] (`hash`, `show`, `ord` with its explicit `total_compare` variant, `clone`, `to_json`/`from_json`, `default`; `==` never derived); the comptime evaluator [G1, G2] as ordinary code on the same uop VM in a world-fenced context, static reflection over tags-as-data, no runtime type metadata, existentials as evidence-carrying boxes; the generic-dispatch residuals (a trait-default serving body's non-Self demand, the instance-solver depth budget).
 
 Acceptance: generics_coherent_traits.ds runs including `schema(comptime T)`; user derives cover user structs; the comptime fence rejects world-touching calls as compile errors.
 

@@ -1,6 +1,7 @@
 //! In-process smoke test of the whole server: the handshake over one
 //! duplex pair, a document open with published diagnostics, hover,
-//! definition, symbols, formatting, and the shutdown cycle.
+//! definition, references, prepare-rename, rename, symbols, formatting,
+//! and the shutdown cycle.
 
 use std::time::Duration;
 
@@ -9,10 +10,18 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     time::timeout,
 };
+use tower_lsp::lsp_types::Url;
 
-/// The document every request addresses; the path need not exist on
-/// disk (the server never reads behind a URI).
-const URI: &str = "file:///tmp/ds_lsp_smoke.ds";
+/// The document every request addresses, spelled from a real temp-dir
+/// path: the server syncs `file://` documents only, and `Url::to_file_path`
+/// refuses a Unix path spelling on Windows, so a hardcoded `file:///tmp/...`
+/// never opens there and the session hangs waiting for its diagnostics.
+/// The path need not exist on disk (the server never reads behind a URI).
+fn document_uri() -> String {
+    Url::from_file_path(std::env::temp_dir().join("ds_lsp_smoke.ds"))
+        .expect("the temp path carries a file URI")
+        .to_string()
+}
 
 fn request(id: u64, method: &str, params: &Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
@@ -84,6 +93,8 @@ async fn expect(stream: &mut DuplexStream, wanted: Wanted) -> Value {
 #[tokio::test]
 async fn the_handshake_diagnoses_and_answers() {
     timeout(Duration::from_secs(120), async {
+        let uri = document_uri();
+        let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         // The server's streams are one duplex pair split into its halves,
         // like stdin/stdout are two ends of the same session.
@@ -109,6 +120,12 @@ async fn the_handshake_diagnoses_and_answers() {
         assert_eq!(reply["result"]["capabilities"]["textDocumentSync"], 1);
         assert_eq!(reply["result"]["capabilities"]["hoverProvider"], true);
         assert_eq!(reply["result"]["capabilities"]["definitionProvider"], true);
+        assert_eq!(reply["result"]["capabilities"]["referencesProvider"], true);
+        assert_eq!(
+            reply["result"]["capabilities"]["renameProvider"]["prepareProvider"],
+            true
+        );
+        assert!(reply["result"]["capabilities"]["completionProvider"].is_object());
         assert_eq!(
             reply["result"]["capabilities"]["documentSymbolProvider"],
             true
@@ -131,7 +148,7 @@ async fn the_handshake_diagnoses_and_answers() {
             &notification(
                 "textDocument/didOpen",
                 &json!({"textDocument": {
-                    "uri": URI,
+                    "uri": uri,
                     "languageId": "dreamscript",
                     "version": 1,
                     "text": source,
@@ -144,7 +161,7 @@ async fn the_handshake_diagnoses_and_answers() {
             Wanted::Method("textDocument/publishDiagnostics"),
         )
         .await;
-        assert_eq!(published["params"]["uri"], URI);
+        assert_eq!(published["params"]["uri"], uri);
         let diags = &published["params"]["diagnostics"];
         assert!(diags.is_array(), "{diags}");
         let mismatch = diags
@@ -161,7 +178,7 @@ async fn the_handshake_diagnoses_and_answers() {
             &request(
                 2,
                 "textDocument/hover",
-                &json!({"textDocument": {"uri": URI}, "position": {"line": 0, "character": 22}}),
+                &json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 22}}),
             ),
         )
         .await;
@@ -177,7 +194,7 @@ async fn the_handshake_diagnoses_and_answers() {
             &request(
                 3,
                 "textDocument/definition",
-                &json!({"textDocument": {"uri": URI}, "position": {"line": 2, "character": 28}}),
+                &json!({"textDocument": {"uri": uri}, "position": {"line": 2, "character": 28}}),
             ),
         )
         .await;
@@ -186,7 +203,7 @@ async fn the_handshake_diagnoses_and_answers() {
             .as_array()
             .expect("definition answers a location list");
         assert_eq!(locations.len(), 1, "{locations:?}");
-        assert_eq!(locations[0]["uri"], URI);
+        assert_eq!(locations[0]["uri"], uri);
         assert_eq!(locations[0]["range"]["start"]["line"], 0);
         assert_eq!(locations[0]["range"]["start"]["character"], 6);
 
@@ -196,7 +213,7 @@ async fn the_handshake_diagnoses_and_answers() {
             &request(
                 4,
                 "textDocument/documentSymbol",
-                &json!({"textDocument": {"uri": URI}}),
+                &json!({"textDocument": {"uri": uri}}),
             ),
         )
         .await;
@@ -216,7 +233,7 @@ async fn the_handshake_diagnoses_and_answers() {
                 5,
                 "textDocument/formatting",
                 &json!({
-                    "textDocument": {"uri": URI},
+                    "textDocument": {"uri": uri},
                     "options": {"tabSize": 4, "insertSpaces": false},
                 }),
             ),
@@ -229,14 +246,514 @@ async fn the_handshake_diagnoses_and_answers() {
             reply["result"]
         );
 
+        // Completion answers the names visible at the position: the
+        // document's declarations and the ambient's, the ambient's
+        // first.
+        send(
+            &mut client,
+            &request(
+                6,
+                "textDocument/completion",
+                &json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 22}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(6)).await;
+        let items = reply["result"]
+            .as_array()
+            .expect("completion answers a list");
+        let labels: Vec<&str> = items
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .collect();
+        for name in ["msg", "broken", "text", "trim"] {
+            assert!(labels.contains(&name), "{labels:?}");
+        }
+        let idx = |name: &str| {
+            labels
+                .iter()
+                .position(|got| *got == name)
+                .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
+        };
+        assert!(idx("trim") < idx("msg"), "{labels:?}");
+
+        // References answer the declaration plus every use of the name at
+        // the position; uses inside the ambient carry no URI and drop.
+        send(
+            &mut client,
+            &request(
+                7,
+                "textDocument/references",
+                &json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 2, "character": 28},
+                    "context": {"includeDeclaration": true},
+                }),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(7)).await;
+        let locations = reply["result"]
+            .as_array()
+            .expect("references answer a location list");
+        assert_eq!(locations.len(), 2, "{locations:?}");
+        assert_eq!(locations[0]["range"]["start"]["line"], 0);
+        assert_eq!(locations[0]["range"]["start"]["character"], 6);
+        assert_eq!(locations[1]["range"]["start"]["line"], 2);
+        assert_eq!(locations[1]["range"]["start"]["character"], 26);
+
+        // Prepare-rename answers the name's range and spelling.
+        send(
+            &mut client,
+            &request(
+                8,
+                "textDocument/prepareRename",
+                &json!({"textDocument": {"uri": uri}, "position": {"line": 2, "character": 28}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(8)).await;
+        assert_eq!(reply["result"]["range"]["start"]["line"], 2);
+        assert_eq!(reply["result"]["range"]["start"]["character"], 26);
+        assert_eq!(reply["result"]["range"]["end"]["character"], 29);
+        assert_eq!(reply["result"]["placeholder"], "msg");
+
+        // Rename answers the edit set over the declaration and the use.
+        send(
+            &mut client,
+            &request(
+                9,
+                "textDocument/rename",
+                &json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 2, "character": 28},
+                    "newName": "greeting",
+                }),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(9)).await;
+        let edits = reply["result"]["changes"][uri]
+            .as_array()
+            .expect("rename answers document changes");
+        assert_eq!(edits.len(), 2, "{edits:?}");
+        assert_eq!(edits[0]["range"]["start"]["line"], 0);
+        assert_eq!(edits[0]["range"]["start"]["character"], 6);
+        assert_eq!(edits[1]["range"]["start"]["line"], 2);
+        assert_eq!(edits[1]["range"]["start"]["character"], 26);
+        assert_eq!(edits[1]["newText"], "greeting");
+
+        // A rename of an ambient name answers an error, honestly worded:
+        // `trim` lives in the stdlib ambient, which no document edits.
+        send(
+            &mut client,
+            &request(
+                10,
+                "textDocument/rename",
+                &json!({
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 2, "character": 23},
+                    "newName": "greeting",
+                }),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(10)).await;
+        let message = reply["error"]["message"]
+            .as_str()
+            .expect("the refusal carries a message");
+        assert!(message.contains("ambient"), "{message}");
+
         // The shutdown cycle answers and ends the server: the request
         // carries no params at all (a params object is a protocol error).
         send(
             &mut client,
-            r#"{"jsonrpc":"2.0","id":6,"method":"shutdown"}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(11)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// The completion slices through the wire: a struct receiver's members,
+/// a self receiver inside an inherent impl, UFCS candidates, a generic
+/// body's type position, prefix ranking, and the honest fallback to
+/// scope names when no checked receiver answers.
+#[tokio::test]
+async fn completion_answers_members_types_and_ranking() {
+    timeout(Duration::from_secs(120), async {
+        let uri = document_uri();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        expect(&mut client, Wanted::Id(1)).await;
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        let source = concat!(
+            "struct point { x: int, y: int }\n",
+            "impl point {\n",
+            "  fn norm(self) -> int {\n",
+            "    self.x\n",
+            "  }\n",
+            "}\n",
+            "fn pick(p: point) -> int {\n",
+            "  p.x\n",
+            "}\n",
+            "fn first[t](v: t) -> t? {\n",
+            "  none\n",
+            "}\n",
+            "fn probe() -> int {\n",
+            "  tr\n",
+            "}\n",
+        );
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        // The open publishes diagnostics (the `tr` line resolves nothing);
+        // the request loop below skips them.
+        let completion = |id: u64, line: u32, character: u32| {
+            request(
+                id,
+                "textDocument/completion",
+                &json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+            )
+        };
+
+        // A struct receiver's dot: fields, the inherent member, and the
+        // UFCS free fn taking the receiver.
+        send(&mut client, &completion(2, 7, 4)).await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let items = reply["result"].as_array().expect("completion answers a list");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels, ["x", "y", "norm", "pick"], "{labels:?}");
+        assert_eq!(items[0]["kind"], 5, "a field item: {items:?}");
+
+        // A self receiver inside the inherent impl answers the same
+        // target type's members (the UFCS candidate included: `self.pick()`
+        // feeds `pick`'s first parameter like any point receiver).
+        send(&mut client, &completion(3, 3, 9)).await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
+        let items = reply["result"].as_array().expect("completion answers a list");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels, ["x", "y", "norm", "pick"], "{labels:?}");
+
+        // A generic body's type position answers the type variable ahead
+        // of the type names, and no value names.
+        send(&mut client, &completion(4, 9, 22)).await;
+        let reply = expect(&mut client, Wanted::Id(4)).await;
+        let items = reply["result"].as_array().expect("completion answers a list");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert_eq!(labels[0], "t", "{labels:?}");
+        for name in ["string", "point"] {
+            assert!(labels.contains(&name), "`{name}` answers: {labels:?}");
+        }
+        assert!(!labels.contains(&"trim"), "value names stay out: {labels:?}");
+
+        // The typed prefix ranks the answer: the exact prefix first, the
+        // word-boundary match next, the substring after, the rest last.
+        send(&mut client, &completion(5, 13, 4)).await;
+        let reply = expect(&mut client, Wanted::Id(5)).await;
+        let items = reply["result"].as_array().expect("completion answers a list");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        let idx = |name: &str| {
+            labels
+                .iter()
+                .position(|got| *got == name)
+                .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
+        };
+        assert_eq!(labels[0], "trim", "{labels:?}");
+        assert!(idx("trim") < idx("str"), "prefix ahead of substring: {labels:?}");
+        assert!(idx("str") < idx("pick"), "substring ahead of the rest: {labels:?}");
+
+        // A dot over an unresolved expression answers the ordinary scope
+        // names honestly, never a guessed member.
+        let broken = Url::from_file_path(std::env::temp_dir().join("ds_lsp_broken.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let broken = broken.as_str();
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": broken,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": "const broken = missing.x\n",
+                }}),
+            ),
+        )
+        .await;
+        send(
+            &mut client,
+            &request(
+                6,
+                "textDocument/completion",
+                &json!({"textDocument": {"uri": broken}, "position": {"line": 0, "character": 22}}),
+            ),
         )
         .await;
         let reply = expect(&mut client, Wanted::Id(6)).await;
+        let items = reply["result"].as_array().expect("completion answers a list");
+        let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+        assert!(labels.contains(&"trim"), "scope names answer: {labels:?}");
+        assert!(labels.contains(&"broken"), "{labels:?}");
+
+        send(&mut client, r#"{"jsonrpc":"2.0","id":7,"method":"shutdown"}"#).await;
+        let reply = expect(&mut client, Wanted::Id(7)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// Hover's effect row reads the tightest covering expression, not the
+/// enclosing definition: the world-effecting call inside a function whose
+/// definition row also traps answers `world`, the trapping arithmetic
+/// answers `trap`.
+#[tokio::test]
+async fn hover_answers_the_tightest_expression_row() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_rows.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        expect(&mut client, Wanted::Id(1)).await;
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        let source = concat!(
+            "fn noisy() -> int {\n",
+            "  println(\"side\")\n",
+            "  1 + 2\n",
+            "}\n",
+        );
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        // The open publishes nothing (the document is clean); the request
+        // loop below would skip it anyway.
+        let hover = |id: u64, line: u32, character: u32| {
+            request(
+                id,
+                "textDocument/hover",
+                &json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+            )
+        };
+
+        // On the world-effecting call: the call's own row, not the
+        // definition's `trap | world`.
+        send(&mut client, &hover(2, 1, 4)).await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let value = reply["result"]["contents"]["value"]
+            .as_str()
+            .expect("the hover carries markdown contents");
+        assert!(value.contains("~ world"), "{value}");
+        assert!(!value.contains("trap"), "{value}");
+
+        // In the arithmetic's operator gap: the sum's own trap.
+        send(&mut client, &hover(3, 2, 5)).await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
+        let value = reply["result"]["contents"]["value"]
+            .as_str()
+            .expect("the hover carries markdown contents");
+        assert!(value.contains("~ trap"), "{value}");
+
+        send(&mut client, r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#).await;
+        let reply = expect(&mut client, Wanted::Id(4)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// The semantic-tokens wire: the capability registers with its legend and
+/// full serving, and `textDocument/semanticTokens/full` answers the flat
+/// delta array — the leading comment first, the keywords, literals, and
+/// resolved names where the session's decode agrees.
+#[tokio::test]
+async fn semantic_tokens_answer_over_the_wire() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_tokens.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(1)).await;
+        let provider = &reply["result"]["capabilities"]["semanticTokensProvider"];
+        assert!(provider.is_object(), "{provider}");
+        let legend = &provider["legend"];
+        assert!(
+            legend["tokenTypes"]
+                .as_array()
+                .is_some_and(|t| !t.is_empty()),
+            "the legend carries the token types: {legend}"
+        );
+        assert_eq!(provider["full"], true, "full serving registers: {provider}");
+        assert_eq!(provider["range"], false, "no range serving: {provider}");
+        let token_types: Vec<&str> = legend["tokenTypes"]
+            .as_array()
+            .expect("the legend is a list")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert_eq!(token_types[0], "keyword");
+        assert!(token_types.contains(&"comment"), "{token_types:?}");
+        assert!(token_types.contains(&"enumMember"), "{token_types:?}");
+        let modifiers: Vec<&str> = legend["tokenModifiers"]
+            .as_array()
+            .expect("the modifiers are a list")
+            .iter()
+            .filter_map(|m| m.as_str())
+            .collect();
+        assert_eq!(modifiers, ["declaration", "readonly"], "{modifiers:?}");
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        let source = concat!(
+            "// a leading comment\n",
+            "const msg: string = \"hi\"\n",
+            "fn clean() -> string {\n",
+            "  msg.trim()\n",
+            "}\n",
+        );
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        // The open publishes nothing (the document is clean); the request
+        // loop below would skip it anyway.
+        send(
+            &mut client,
+            &request(
+                2,
+                "textDocument/semanticTokens/full",
+                &json!({"textDocument": {"uri": uri}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let data = reply["result"]["data"]
+            .as_array()
+            .expect("tokens answer a flat array")
+            .iter()
+            .filter_map(Value::as_u64)
+            .collect::<Vec<_>>();
+        assert_eq!(data.len() % 5, 0, "the array is five u32s per token");
+        // The first token is the leading comment: line 0, character 0,
+        // twenty units, the legend's comment index, no modifiers.
+        assert_eq!(&data[..5], &[0, 0, 20, 2, 0], "{data:?}");
+        // The decoded stream names the document's pieces in order: the
+        // `const` keyword on line 1, the `msg` declaration with
+        // declaration and readonly bits, and the dot-call's free function.
+        let keyword = token_types.iter().position(|t| *t == "keyword").unwrap();
+        let decoded: Vec<[u64; 5]> = data
+            .chunks(5)
+            .map(|c| [c[0], c[1], c[2], c[3], c[4]])
+            .collect();
+        assert_eq!(
+            decoded[1],
+            [1, 0, 5, keyword as u64, 0],
+            "`const` opens line 1: {decoded:?}"
+        );
+        // `msg` (three units) answers variable with declaration (bit 0)
+        // and readonly (bit 1).
+        let variable = token_types.iter().position(|t| *t == "variable").unwrap();
+        assert_eq!(decoded[2], [0, 6, 3, variable as u64, 3], "{decoded:?}");
+        // `trim` answers a function at its use.
+        let function = token_types.iter().position(|t| *t == "function").unwrap();
+        assert!(
+            decoded.iter().any(|t| t[2] == 4 && t[3] == function as u64),
+            "the dot-call's free function answers: {decoded:?}"
+        );
+
+        send(
+            &mut client,
+            r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
         assert!(reply.get("error").is_none(), "{reply}");
         send(&mut client, &notification("exit", &json!({}))).await;
     })

@@ -79,15 +79,14 @@ fn session_binds_uses_drops_and_resets_a_linear_resource() {
 
 #[test]
 fn expression_prints_value_type_and_effect_row() {
-    // The tail expression's value, its inferred type, and main's effect
-    // row (the checker's definition grain): int arithmetic traps on
-    // overflow (B7), a println line is unit-typed and world-effecting.
+    // The tail expression's value, its inferred type, and its own effect
+    // row (the per-span table): int arithmetic traps on overflow (B7), a
+    // println line is unit-typed and world-effecting — and the second
+    // line's row stays the tail's own `world`, not the session row
+    // `trap | world` the earlier statement widens `main` to.
     let (out, ok) = session("1 + 2\nprintln(\"hi\")\n");
     assert!(ok, "the session exits cleanly: {out}");
-    in_order(&out, &[
-        ">>> 3\n: int\n~ trap",
-        ">>> hi\n: ()\n~ trap | world",
-    ]);
+    in_order(&out, &[">>> 3\n: int\n~ trap", ">>> hi\n: ()\n~ world"]);
 }
 
 #[test]

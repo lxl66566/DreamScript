@@ -14,7 +14,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64},
@@ -28,10 +28,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn funcref(module: &str, func: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: module.into(),
         func,
-    }
+    })
 }
 
 fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {

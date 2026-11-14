@@ -13,12 +13,14 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod ambient_dsmod;
 mod build;
 mod check;
 mod fmt;
 mod lsp;
 mod repl;
 mod run;
+mod run_cache;
 mod source;
 
 #[derive(Debug, Parser)]

@@ -327,17 +327,19 @@ fn a_mode_on_a_generic_member_follows_the_runtime_dispatch() {
     );
 }
 
-/// A comptime parameter keeps its honest refusal: comptime evaluation
-/// is the metaprogramming round's seam.
+/// A comptime call refuses at the runtime lowering seam when the
+/// evaluator recorded no answer: `lower` alone never evaluates (the
+/// evaluator owns the fenced run and hands the answers to
+/// `lower_with_comptime`).
 #[test]
 fn a_comptime_parameter_refuses() {
     refused(
         &source(concat!(
-            "fn c(x: comptime int) -> int { x }\n",
+            "fn c(comptime t: type) -> int { 0 }\n",
             "\n",
-            "fn main() -> int { c(1) }\n",
+            "fn main() -> int { c(int) }\n",
         )),
-        "a comptime parameter",
+        "the evaluator recorded no answer",
     );
 }
 

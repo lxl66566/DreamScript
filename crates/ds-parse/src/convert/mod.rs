@@ -447,6 +447,7 @@ impl Ctx {
             span,
             attrs: Vec::new(),
             vis: None,
+            synthesized: false,
             kind: ItemKind::Local(LocalDecl {
                 span,
                 mutable: false,
@@ -630,6 +631,7 @@ impl Ctx {
             span,
             attrs,
             vis,
+            synthesized: false,
             kind: kind.unwrap_or(ItemKind::Tag(TagDecl {
                 span,
                 name: Ident {
@@ -1090,6 +1092,14 @@ impl Ctx {
         let mut ty = Type::TypeKw(span);
         for c in inner(&p) {
             match c.as_rule() {
+                // a declared field name may be a keyword (the reflection
+                // record's `type` member); the wrapper's inner pair is
+                // the identifier either way
+                Rule::field_name => {
+                    if let Some(i) = inner(&c).next() {
+                        name = Some(self.ident(i));
+                    }
+                },
                 Rule::ident => name = Some(self.ident(c)),
                 Rule::type_expr => ty = self.type_expr(c),
                 _ => {},

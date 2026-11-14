@@ -17,7 +17,7 @@
 use std::fs;
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -36,10 +36,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn platform(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: STD_NAME.into(),
         func: index,
-    }
+    })
 }
 
 /// The shared pool, copied per function (the payload granularity): the
@@ -53,10 +53,10 @@ fn pool() -> Vec<Const> {
         platform(OP_FS_LIST),     // k3
         platform(OP_FILE_SIZE),   // k4
         platform(OP_PRINTLN),     // k5
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "io".into(),
             func: 5, // k6: tail_read
-        },
+        }),
     ]
 }
 

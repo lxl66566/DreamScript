@@ -17,7 +17,7 @@ use ds_abi::{BuiltinInstance, Inst};
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Hash128, read, write};
+use ds_mod::{FuncRefKey, Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -155,8 +155,10 @@ fn every_combinator_site_is_one_callg_with_list_evidence() {
             };
             match uop {
                 ds_abi::Uop::Call { callee, .. } | ds_abi::Uop::Callt { callee, .. } => {
-                    if let ds_mod::Constant::FuncRef { module, func } =
-                        &f.constants()[usize::from(callee.0)]
+                    if let ds_mod::Constant::FuncRef {
+                        key: FuncRefKey::Native(module),
+                        func,
+                    } = &f.constants()[usize::from(callee.0)]
                     {
                         assert!(
                             !(module == "builtin" && ROUTED.iter().any(|r| r.0 == *func)),
@@ -165,8 +167,10 @@ fn every_combinator_site_is_one_callg_with_list_evidence() {
                     }
                 },
                 ds_abi::Uop::Callg { callee, nargs } => {
-                    let ds_mod::Constant::FuncRef { module, func } =
-                        &f.constants()[usize::from(callee.0)]
+                    let ds_mod::Constant::FuncRef {
+                        key: FuncRefKey::Native(module),
+                        func,
+                    } = &f.constants()[usize::from(callee.0)]
                     else {
                         panic!("the Callg callee must be a pool FuncRef");
                     };

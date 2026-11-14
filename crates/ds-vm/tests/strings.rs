@@ -15,7 +15,7 @@
 //! words stage arguments first.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, Inst, RcOp, SlideError, SlotType,
         SlotType::{Bool, I64, Raw, Ref, Tag},
@@ -35,17 +35,17 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 fn platform(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: STD_NAME.into(),
         func: index,
-    }
+    })
 }
 
 /// The shared pool, copied per function (the payload granularity). The

@@ -157,6 +157,7 @@ impl Db {
         db.set_compute(QueryKind::ParseFile, crate::queries::parse);
         db.set_compute(QueryKind::BlockIndex, crate::queries::block_index);
         db.set_compute(QueryKind::BlockSource, crate::queries::block_source);
+        db.set_compute(QueryKind::ScopeIndex, crate::queries::scope_index);
         db.set_compute(QueryKind::Expanded, crate::queries::expanded);
         db.set_compute(QueryKind::Resolve, crate::queries::resolve);
         db.set_compute(QueryKind::CheckedPackage, crate::queries::checked_package);

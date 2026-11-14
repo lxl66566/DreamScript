@@ -32,7 +32,8 @@
 //! results declare `Raw`; children spawn during the CALLG, their pool ids numbering up from 1.
 
 use ds_vm::{
-    Const, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
+    Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -50,18 +51,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "pr").
 fn pr_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "pr".into(),
         func: index,
-    }
+    })
 }
 
 fn def(

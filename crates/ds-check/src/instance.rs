@@ -6,7 +6,9 @@
 //! (B6). It is checked incrementally at declaration (per package (G3)) by
 //! [`InstanceEnv::declare`] and again over the final environment — once
 //! the single package's declarations settle, and over every link merge —
-//! by [`InstanceEnv::check_all`]. Heads the set algebra reads
+//! by [`InstanceEnv::check_all`] (a checked-ambient served prefix keeps
+//! its stored snapshots there; that method's doc carries the skip's
+//! ground). Heads the set algebra reads
 //! disjoint because a generic head is opaque get the same rule through
 //! instantiation: the probe in `crate::instance_solve` grounds candidate
 //! instantiations and asks whether both heads serve one, so a concrete and
@@ -39,7 +41,11 @@
 //! A conditional instance carries conditions — trait constraints over types
 //! (`impl show for json_t if eq[json_t]`). Conditions never filter lookup
 //! here ([`InstanceEnv::resolve`] is containment-only); satisfaction is the
-//! checker's resolution step. A condition edge runs from an instance to every
+//! checker's resolution step. A decomposed union head solves its conditions
+//! per branch: each branch instance carries only the conditions whose
+//! variables its own head mentions (a branch naming no bound variable is
+//! unconditional), and a declaration's requirement set is the union over
+//! its branches. A condition edge runs from an instance to every
 //! instance that could satisfy the condition: instance `j` satisfies `(T, Q)`
 //! when `j` implements `T` and `j`'s head contains `Q`. A conditional
 //! instance whose condition edges reach back to itself — directly
@@ -98,7 +104,7 @@
 //! ```
 
 use crate::{
-    atom::TraitId,
+    atom::{AtomKind, TraitId, TypeId},
     error::Error,
     expr::TypeExpr,
     universe::{Ty, Universe, narrow},
@@ -164,6 +170,26 @@ pub struct InherentBounds {
 /// are M2 checker work; the environment carries it without interpreting it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct InstanceBody;
+
+/// One stored instance row in full — the written and solved halves of a
+/// per-branch instance — as a checked-ambient artifact both installs it
+/// ([`InstanceEnv::serve`]) and reads it back ([`InstanceEnv::row`], the
+/// generator's extraction view).
+#[derive(Clone, Debug)]
+pub struct ServedInstance {
+    /// The trait implemented.
+    pub trait_id: TraitId,
+    /// The branch as written.
+    pub head_expr: TypeExpr,
+    /// The head solved at declaration.
+    pub head: Ty,
+    /// The declaration's written head, pre-decomposition.
+    pub written: Ty,
+    /// The conditions this branch kept, as written.
+    pub condition_exprs: Vec<Condition<TypeExpr>>,
+    /// The kept conditions solved at declaration.
+    pub conditions: Vec<Condition<Ty>>,
+}
 
 /// A declared instance as written: the trait implemented, the head (a
 /// [`TypeExpr`], possibly a union), optional conditions, and an opaque body.
@@ -294,6 +320,12 @@ impl CondEdges<'_> {
 #[derive(Default)]
 pub struct InstanceEnv {
     instances: Vec<Instance>,
+    /// The count of leading rows a checked-ambient artifact served
+    /// pre-declared: zero in a fresh build. [`InstanceEnv::check_all`]
+    /// treats the prefix as pre-checked (the artifact's clean generation
+    /// proved it coherent) and probes only the pairs and cycles a fresh
+    /// row takes part in.
+    served: usize,
 }
 
 impl InstanceEnv {
@@ -349,10 +381,11 @@ impl InstanceEnv {
     }
 
     /// Declares an instance: solves and validates the head and conditions,
-    /// decomposes union heads into per-branch instances, checks the new
-    /// branches disjoint from every same-trait head already present (and
-    /// from each other), runs the structural cycle check for the new
-    /// branches, and returns the new per-branch ids.
+    /// decomposes union heads into per-branch instances (each branch
+    /// keeping only the conditions whose variables its own head mentions),
+    /// checks the new branches disjoint from every same-trait head already
+    /// present (and from each other), runs the structural cycle check for
+    /// the new branches, and returns the new per-branch ids.
     ///
     /// A failed declaration leaves the environment unchanged. Unconditional
     /// instances also record their head atoms as trait members
@@ -381,6 +414,27 @@ impl InstanceEnv {
             heads.push(head);
         }
 
+        // Per-branch condition solving: each branch head solves its own
+        // conditions over only the variables the head mentions, so a
+        // condition naming a variable its branch head does not carry
+        // drops for that branch (a head naming no bound variable solves
+        // unconditionally), and the declaration's requirement set is the
+        // union over the branches that keep each condition.
+        let mut per_branch = Vec::with_capacity(heads.len());
+        for &head in &heads {
+            let mut head_vars = Vec::new();
+            shape_vars(universe, head, &mut head_vars);
+            let mut kept = Vec::new();
+            let mut kept_exprs = Vec::new();
+            for (cond, expr) in conditions.iter().zip(&decl.conditions) {
+                if condition_fits(universe, &head_vars, cond.ty) {
+                    kept.push(cond.clone());
+                    kept_exprs.push(expr.clone());
+                }
+            }
+            per_branch.push((kept, kept_exprs));
+        }
+
         // The declaration's written head, pre-decomposition: the union of
         // the solved branch heads, so sibling branches share one handle
         // and no second solve runs.
@@ -393,7 +447,8 @@ impl InstanceEnv {
         // Declaration-time coherence [B6]: every new branch against every
         // existing same-trait head, then new branches against each other
         // (duplicate branches like `int | int` overlap here). Decomposition
-        // precedes the check, so errors name per-branch heads.
+        // precedes the check, so errors name per-branch heads, and each
+        // branch probes under its own kept conditions.
         let first = self.instances.len();
         for (i, &head) in heads.iter().enumerate() {
             for inst in &self.instances {
@@ -404,7 +459,7 @@ impl InstanceEnv {
                         inst.head,
                         &inst.conditions,
                         head,
-                        &conditions,
+                        &per_branch[i].0,
                         decl.trait_id,
                         InstanceId::from_raw(narrow(first + i)),
                     )? {
@@ -417,9 +472,9 @@ impl InstanceEnv {
                     universe,
                     self,
                     head,
-                    &conditions,
+                    &per_branch[i].0,
                     later,
-                    &conditions,
+                    &per_branch[i + 1 + j].0,
                     decl.trait_id,
                     InstanceId::from_raw(narrow(first + i + 1 + j)),
                 )? {
@@ -428,14 +483,14 @@ impl InstanceEnv {
             }
         }
 
-        for (expr, head) in branches.into_iter().zip(heads) {
+        for ((expr, head), (kept, kept_exprs)) in branches.into_iter().zip(heads).zip(per_branch) {
             self.instances.push(Instance {
                 trait_id: decl.trait_id,
                 head_expr: expr,
                 head,
                 written,
-                condition_exprs: decl.conditions.clone(),
-                conditions: conditions.clone(),
+                condition_exprs: kept_exprs,
+                conditions: kept,
             });
         }
         let ids: Vec<InstanceId> = (first..self.instances.len())
@@ -471,6 +526,52 @@ impl InstanceEnv {
         Ok(ids)
     }
 
+    /// Installs rows a checked-ambient artifact serves pre-declared: the
+    /// rows append in artifact order (their ids continue the prefix the
+    /// mint-determinism pin holds stable), and the environment marks the
+    /// served prefix so [`InstanceEnv::check_all`] probes only what a
+    /// fresh row takes part in. The artifact's clean generation ran the
+    /// rows' own declarations and the closure pass over them — the
+    /// per-declaration and closure probes the serve skips — against a
+    /// byte-identical universe state (the drift gate pins the bytes), so
+    /// a served prefix is a proven-coherent instance set. A fresh row
+    /// declaring afterwards probes against the installed rows exactly as
+    /// against declared ones ([`InstanceEnv::declare`]'s rule).
+    pub fn serve(&mut self, rows: Vec<ServedInstance>) {
+        self.served = self.instances.len() + rows.len();
+        self.instances.extend(rows.into_iter().map(|row| Instance {
+            trait_id: row.trait_id,
+            head_expr: row.head_expr,
+            head: row.head,
+            written: row.written,
+            condition_exprs: row.condition_exprs,
+            conditions: row.conditions,
+        }));
+    }
+
+    /// One stored row in full, by id (the artifact generator's extraction
+    /// view).
+    pub fn row(&self, id: InstanceId) -> Result<ServedInstance, Error> {
+        let inst = self
+            .instances
+            .get(id.index() as usize)
+            .ok_or(Error::UnknownInstance(id))?;
+        Ok(ServedInstance {
+            trait_id: inst.trait_id,
+            head_expr: inst.head_expr.clone(),
+            head: inst.head,
+            written: inst.written,
+            condition_exprs: inst.condition_exprs.clone(),
+            conditions: inst.conditions.clone(),
+        })
+    }
+
+    /// Number of rows a checked-ambient artifact served.
+    #[must_use]
+    pub fn served_len(&self) -> usize {
+        self.served
+    }
+
     /// Closure check over the final instance environment (B6, section 10
     /// item 7): every head and condition is first re-solved against the
     /// current universe (stored heads are declaration-time snapshots, and a
@@ -482,10 +583,29 @@ impl InstanceEnv {
     /// the grown universe — shows, so it runs after the single package's
     /// declarations settle and over cross-package link merges. It stops
     /// at the first failure; per-declaration reporting stays complete.
+    ///
+    /// A served prefix ([`InstanceEnv::serve`]) keeps its stored snapshots
+    /// and skips its own pairs and cycles: the artifact's generation
+    /// proved the prefix coherent against a byte-identical universe
+    /// state, and the generator refuses a prefix whose heads or
+    /// conditions name a trait-relative node (`TypeExpr::Trait`/`Not` —
+    /// the only forms whose solving membership growth widens), so no
+    /// later declaration can re-solve a served row wider than its
+    /// snapshot. Every pair and cycle a fresh row takes part in is still
+    /// probed — a fresh row declared with the served rows installed, so
+    /// [`InstanceEnv::declare`]'s own probe covered the served-fresh
+    /// pairs, and any cycle this pass could newly find passes through a
+    /// fresh row (the new-instance lemma above), so the fresh starts
+    /// reach it.
     pub fn check_all(&self, universe: &mut Universe) -> Result<(), Error> {
+        let served = self.served;
         let mut solved_conditions = Vec::with_capacity(self.instances.len());
         let mut heads = Vec::with_capacity(self.instances.len());
-        for inst in &self.instances {
+        for inst in &self.instances[..served] {
+            solved_conditions.push(inst.conditions.clone());
+            heads.push(inst.head);
+        }
+        for inst in &self.instances[served..] {
             let mut conds = Vec::with_capacity(inst.condition_exprs.len());
             for cond in &inst.condition_exprs {
                 conds.push(Condition::new(cond.trait_id, universe.solve(&cond.ty)?));
@@ -499,6 +619,9 @@ impl InstanceEnv {
         };
         for i in 0..self.instances.len() {
             for j in (i + 1)..self.instances.len() {
+                if i < served && j < served {
+                    continue;
+                }
                 let (a, b) = (&self.instances[i], &self.instances[j]);
                 if a.trait_id == b.trait_id {
                     if let Some(err) = overlap_error(
@@ -516,7 +639,7 @@ impl InstanceEnv {
                 }
             }
         }
-        for i in 0..self.instances.len() {
+        for i in served..self.instances.len() {
             let id = InstanceId::from_raw(narrow(i));
             if let Some(cycle) = edges.cycle_from(&self.instances, id, universe) {
                 return Err(Error::ConditionCycle { cycle });
@@ -528,7 +651,8 @@ impl InstanceEnv {
     /// Appends another environment's instances (link (G3)). The appended
     /// instances are renumbered, so previously held ids from `other` are
     /// invalid; callers re-query. Coherence over the merged set is
-    /// [`InstanceEnv::check_all`]'s job.
+    /// [`InstanceEnv::check_all`]'s job; the receiver's own served prefix
+    /// stays served (the appended rows are fresh to the merged set).
     pub fn merge(&mut self, other: Self) {
         self.instances.extend(other.instances);
     }
@@ -597,6 +721,48 @@ fn collect_branches(expr: &TypeExpr, out: &mut Vec<TypeExpr>) {
         },
         _ => out.push(expr.clone()),
     }
+}
+
+/// The minted variables one solved type's shape mentions, in member
+/// order: a variable atom itself, or one nested in an application or
+/// tuple argument.
+fn shape_vars(universe: &Universe, ty: Ty, out: &mut Vec<TypeId>) {
+    for &atom in universe.members(ty) {
+        shape_vars_of_atom(universe, atom, out);
+    }
+}
+
+fn shape_vars_of_atom(universe: &Universe, atom: TypeId, out: &mut Vec<TypeId>) {
+    if crate::instance_solve::is_var(universe, atom) {
+        out.push(atom);
+        return;
+    }
+    let Ok(decl) = universe.atom_decl(atom) else {
+        return;
+    };
+    match &decl.kind {
+        AtomKind::Apply(_, args) => {
+            for arg in args {
+                shape_vars(universe, *arg, out);
+            }
+        },
+        AtomKind::Tuple(elements) => {
+            for element in elements {
+                shape_vars_of_atom(universe, *element, out);
+            }
+        },
+        _ => {},
+    }
+}
+
+/// Whether a condition solves over only variables its branch head
+/// mentions: a condition naming a variable the head does not carry has no
+/// substitution this branch can ever solve, so it drops for the branch;
+/// a condition naming no variable stays for every branch.
+fn condition_fits(universe: &Universe, head_vars: &[TypeId], cond_ty: Ty) -> bool {
+    let mut vars = Vec::new();
+    shape_vars(universe, cond_ty, &mut vars);
+    vars.iter().all(|var| head_vars.contains(var))
 }
 
 /// Builds the overlap error for two same-trait heads that intersect, with a

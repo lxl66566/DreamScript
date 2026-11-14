@@ -11,7 +11,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{I64, Raw, Ref},
@@ -30,10 +30,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 fn def(
@@ -89,10 +89,10 @@ fn par_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         builtin(BUILTIN_LIST_NEW),
         builtin(BUILTIN_LIST_PUSH),
         builtin(BUILTIN_PAR_MAP),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "lb".into(),
             func: callable,
-        },
+        }),
         Const::I64(BuiltinInstance::List as i64),
     ];
     let word_at = |pool: &mut Vec<Const>, word: i64| {

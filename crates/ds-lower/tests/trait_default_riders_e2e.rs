@@ -9,7 +9,7 @@ use ds_abi::Uop;
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Constant, Hash128, read_checked, write};
+use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -112,7 +112,10 @@ fn every_dispatch_names_receiver_and_default_with_riders_trailing() {
         .iter()
         .filter_map(|op| match op {
             PlacedOp::Uop(Uop::Callg { callee, nargs }) => match &pool[usize::from(callee.0)] {
-                Constant::FuncRef { module, .. } if module == "$evidence" => Some(*nargs),
+                Constant::FuncRef {
+                    key: FuncRefKey::Native(module),
+                    ..
+                } if module == "$evidence" => Some(*nargs),
                 _ => None,
             },
             _ => None,

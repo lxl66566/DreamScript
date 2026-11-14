@@ -16,7 +16,7 @@ use crate::{
     value::{
         AnalyzedOutput, BlockIndexOutput, CheckedPackageOutput, ExpandedOutput, LinearityOutput,
         PackageEffectsOutput, PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue,
-        ResolveOutput, TypeOfOutput,
+        ResolveOutput, ScopeIndexOutput, TypeOfOutput,
     },
 };
 
@@ -67,6 +67,27 @@ impl Query for BlockIndex {
     fn extract(value: QueryValue) -> Option<Self::Value> {
         match value {
             QueryValue::BlockIndex(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the scope-index query: [`QueryKey::ScopeIndex`]. The key is
+/// the file; the value is its local scope frames, the substrate
+/// completion's position slice reads.
+pub struct ScopeIndex;
+
+impl Query for ScopeIndex {
+    type Key = FileId;
+    type Value = ScopeIndexOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::ScopeIndex(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::ScopeIndex(out) => Some(out),
             _ => None,
         }
     }

@@ -21,6 +21,29 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Ty(u32);
 
+impl Ty {
+    /// The handle's raw index into its universe's interned sets
+    /// (serialization, the checked-ambient artifact).
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// One shape-phase atom mint a checked-ambient artifact replays: the
+/// mints the skipped impl arms would have performed (impl type variables
+/// and the structural atoms their head solving minted), in mint order.
+#[derive(Clone, Debug)]
+pub enum ReplayMint {
+    /// A minted impl type variable, under its unique name.
+    Var(String),
+    /// A structural tuple atom over its element atoms.
+    Tuple(Vec<TypeId>),
+    /// A structural application atom over its constructor and argument
+    /// sets.
+    Apply(TypeId, Vec<Ty>),
+}
+
 /// Cap on the combinations one tuple distribution may mint. Each combination
 /// mints a named structural atom plus a hash-cons index entry (hundreds of
 /// bytes), so the cap bounds an adversarial distribution (e.g. eight
@@ -59,17 +82,25 @@ pub struct Universe {
 }
 
 impl Universe {
-    /// An empty universe with only the `none` atom declared (B4).
+    /// An empty universe with only the `none` atom declared (B4) and the
+    /// builtin `type` atom beside it (G1, G2) — the comptime type-value
+    /// type, declared in every universe so the keyword's solved handle is
+    /// stable everywhere.
     #[must_use]
     pub fn new() -> Self {
         let none = AtomDecl {
             name: "none".to_owned(),
             kind: AtomKind::Unit,
         };
+        let type_atom = AtomDecl {
+            name: "type".to_owned(),
+            kind: AtomKind::Unit,
+        };
         let mut atom_names = FxHashMap::default();
         atom_names.insert(none.name.clone(), TypeId::NONE);
+        atom_names.insert(type_atom.name.clone(), TypeId::TYPE);
         Self {
-            atoms: vec![none],
+            atoms: vec![none, type_atom],
             traits: Vec::new(),
             atom_names,
             trait_names: FxHashMap::default(),
@@ -78,7 +109,7 @@ impl Universe {
             tuple_index: FxHashMap::default(),
             apply_index: FxHashMap::default(),
             fn_index: FxHashMap::default(),
-            atom_tys: vec![None],
+            atom_tys: vec![None, None],
             full_ty: None,
         }
     }
@@ -382,6 +413,45 @@ impl Universe {
     /// seam over generic impls).
     pub fn set_ty(&mut self, members: &[TypeId]) -> Ty {
         self.intern(members.to_vec())
+    }
+
+    // ---- checked-ambient replay ------------------------------------------
+
+    /// The interned member sets in intern order (the checked-ambient
+    /// artifact's extraction view): handle `i` names entry `i`, so a
+    /// replay of the whole log in order reproduces every handle the
+    /// declaring pass minted.
+    pub fn set_log(&self) -> impl ExactSizeIterator<Item = &[TypeId]> + '_ {
+        self.sets.iter().map(AsRef::as_ref)
+    }
+
+    /// Replays one interned member set from a checked-ambient artifact:
+    /// the log's entries push in intern order, so every replayed handle
+    /// keeps the index the declaring pass minted it under, and every
+    /// later interning continues after the prefix exactly as in that
+    /// pass (the mint-determinism pin). An already-present set answers
+    /// its existing handle — the declaring log never interns one twice,
+    /// so this marks a corrupt artifact, answered harmlessly.
+    pub fn replay_set(&mut self, members: &[TypeId]) -> Ty {
+        self.intern(members.to_vec())
+    }
+
+    /// Replays one shape-phase mint through the declaring pass's own
+    /// operation, so the atom lands at its minted index and the
+    /// hash-cons maps carry it for every later mint of the same shape.
+    pub fn replay_mint(&mut self, mint: &ReplayMint) -> Result<(), Error> {
+        match mint {
+            ReplayMint::Var(name) => {
+                let _ = self.declare_tag(name)?;
+            },
+            ReplayMint::Tuple(elements) => {
+                let _ = self.tuple_atom(elements)?;
+            },
+            ReplayMint::Apply(ctor, args) => {
+                let _ = self.apply_atom(*ctor, args)?;
+            },
+        }
+        Ok(())
     }
 
     /// The singleton type of one atom.

@@ -3,8 +3,8 @@
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{
-    Constant, Hash128, MAGIC, Module, ReadError, SectionKind, TargetClass, read, read_checked,
-    write,
+    Constant, FORMAT_VERSION, FuncRefKey, Hash128, MAGIC, Module, ReadError, SectionKind,
+    TargetClass, read, read_checked, write,
 };
 
 const SOURCE: &[u8] = b"const x = 1";
@@ -54,18 +54,16 @@ fn bad_version_rejected() {
     let error = read(&bytes).expect_err("bad version");
     assert_eq!(error, ReadError::UnsupportedVersion { found: 9 });
     assert_diagnostic(&error, ErrorCode::ModuleVersionUnsupported);
-    // Format version 1 (pre BL-7 header fields) and 2 (pre FuncRef
-    // constants kind) are rejected too.
-    bytes[4] = 1;
-    assert_eq!(
-        read(&bytes).expect_err("version 1 rejected"),
-        ReadError::UnsupportedVersion { found: 1 }
-    );
-    bytes[4] = 2;
-    assert_eq!(
-        read(&bytes).expect_err("version 2 rejected"),
-        ReadError::UnsupportedVersion { found: 2 }
-    );
+    // Format versions 1 (pre BL-7 header fields), 2 (pre FuncRef
+    // constants kind), and 3 (pre selector-led FuncRef keys) are
+    // rejected too.
+    for version in 1..=3 {
+        bytes[4] = version;
+        assert_eq!(
+            read(&bytes).expect_err(&format!("version {version} rejected")),
+            ReadError::UnsupportedVersion { found: version }
+        );
+    }
     // A bare magic runs out of bytes at the version position.
     assert!(matches!(
         read(b"\0DSM"),
@@ -269,6 +267,49 @@ fn constant_payload_corruption_rejected() {
 }
 
 #[test]
+fn funcref_dep_position_past_the_dep_list_rejected() {
+    // One dependency entry, so position 2 addresses no module: the
+    // builder accepts the value (the writer is not a validator), the
+    // reader refuses it.
+    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+        .with_dep("std", Hash128::ZERO)
+        .with_constant(Constant::FuncRef {
+            key: FuncRefKey::Dep(2),
+            func: 0,
+        });
+    let error = read(&write(&module)).expect_err("dangling dep position");
+    assert!(matches!(error, ReadError::Malformed {
+        reason: "FuncRef dep position past the dependency list",
+        ..
+    }));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+#[test]
+fn unknown_funcref_selector_rejected() {
+    let module =
+        Module::new("m", TargetClass::Bytecode, Hash128::ZERO).with_constant(Constant::FuncRef {
+            key: FuncRefKey::Dep(0),
+            func: 7,
+        });
+    let mut bytes = write(&module);
+    // The lone FuncRef constant is tag 4, selector 0, position 0, func 7:
+    // the selector is the byte after the tag.
+    let needle: &[u8] = &[4, 0, 0, 7];
+    let pos = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("funcref constant present");
+    bytes[pos + 1] = 2;
+    let error = read(&bytes).expect_err("unknown selector");
+    assert!(matches!(error, ReadError::Malformed {
+        reason: "unknown FuncRef key selector",
+        ..
+    }));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+#[test]
 fn bad_code_word_rejected() {
     use ds_abi::{FrameLayout, Uop, uop::ConstIdx};
     use ds_mod::Function;
@@ -354,6 +395,60 @@ fn jump_out_of_body_rejected() {
     );
 }
 
+#[test]
+fn unknown_entry_plan_rejected() {
+    // One recorded entry "zebra" with one Int plan: the name, the plan
+    // count 1, and the plan byte 0 sit contiguously in the blocks
+    // payload's entry table; patch the plan byte past the vocabulary.
+    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+        .with_entry("zebra", vec![ds_mod::EntryArg::Int]);
+    let mut bytes = write(&module);
+    let needle: &[u8] = b"zebra\x01\x00";
+    let pos = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("entry record present");
+    bytes[pos + needle.len() - 1] = 5;
+    let error = read(&bytes).expect_err("unknown plan byte");
+    assert!(matches!(error, ReadError::Malformed {
+        reason: "unknown entry plan",
+        ..
+    }));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+#[test]
+fn duplicate_entry_name_rejected() {
+    // The builder accepts the duplicate (the writer is not a validator);
+    // the reader refuses the entry table's second row.
+    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+        .with_entry("dup", Vec::new())
+        .with_entry("dup", vec![ds_mod::EntryArg::Int]);
+    let error = read(&write(&module)).expect_err("duplicate entry name");
+    assert!(matches!(error, ReadError::Malformed {
+        reason: "duplicate entry-table name",
+        ..
+    }));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}
+
+#[test]
+fn duplicate_tag_rows_rejected() {
+    for (first, second) in [
+        (("a", 0u8), ("a", 1u8)), // same name, different ids
+        (("a", 3), ("b", 3)),     // same id, different names
+    ] {
+        let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+            .with_tag(first.0, first.1)
+            .with_tag(second.0, second.1);
+        let error = read(&write(&module)).expect_err("duplicate tag row");
+        assert!(
+            matches!(&error, ReadError::Malformed { reason, .. } if reason.contains("tag-table"))
+        );
+        assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+    }
+}
+
 /// A blocks payload declaring 2^32 code words: the count itself must
 /// reject as malformed data — a pc beyond u32 is unrepresentable, and the
 /// reader never panics on any input. No writer can emit this file, so it
@@ -362,7 +457,7 @@ fn jump_out_of_body_rejected() {
 fn code_word_count_beyond_u32_rejected() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&[3, 0, 0, 0]); // version, target tag, flags, collector flags
+    bytes.extend_from_slice(&[FORMAT_VERSION, 0, 0, 0]); // version, target tag, flags, collector flags
     bytes.extend_from_slice(&[0u8; 16]); // collector hook slots
     bytes.extend_from_slice(&0u32.to_le_bytes()); // max call depth
     bytes.extend_from_slice(&0u32.to_le_bytes()); // IR-version checksum
@@ -373,9 +468,10 @@ fn code_word_count_beyond_u32_rejected() {
     let dir_entries_at = bytes.len();
     bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
     let blocks_at = bytes.len();
-    // blocks payload v1: one function "f" with no params, slots, or
-    // constants, then the over-range code count uleb (2^32)
-    bytes.extend_from_slice(&[1, 1, 1, b'f', 0, 0, 0, 0]);
+    // blocks payload v3: one function "f" with no params, slots, or
+    // constants, then the over-range code count uleb (2^32) — the count
+    // rejects before the trailing tables are reached
+    bytes.extend_from_slice(&[3, 1, 1, b'f', 0, 0, 0, 0]);
     bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
     let blocks_len = bytes.len() - blocks_at;
     let constants_at = bytes.len();
@@ -420,7 +516,7 @@ fn code_word_count_beyond_u32_rejected() {
 fn huge_declared_count_rejected() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&[3, 0, 0, 0]); // version, target tag, flags, collector flags
+    bytes.extend_from_slice(&[FORMAT_VERSION, 0, 0, 0]); // version, target tag, flags, collector flags
     bytes.extend_from_slice(&[0u8; 16]); // collector hook slots
     bytes.extend_from_slice(&0u32.to_le_bytes()); // max call depth
     bytes.extend_from_slice(&0u32.to_le_bytes()); // IR-version checksum

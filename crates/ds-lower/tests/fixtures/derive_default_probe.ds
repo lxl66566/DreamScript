@@ -1,0 +1,95 @@
+// purpose: the `default` derive end to end — `#[derive(default)]`
+// expands into the receiverless inherent impl member
+// `impl <decl> { fn default() -> Self }` (the 2026-11-15 ruling), so
+// the construction answers through the type-keyed call surface with no
+// instance word: a struct's per-field default keyed by the field's
+// type expression (a bare name the `default` dispatch over the
+// primitives' own impl members, a tuple the per-element construction,
+// an optional `none`, an application the empty construction), an enum
+// its first unit case, a tag itself, and a part-less struct the
+// unit-word construction.
+// items:
+// int: stage: run
+// string: stage: run
+// float: stage: run
+// bool: stage: run
+// char: stage: run
+// byte: stage: run
+// list: stage: run
+// map: stage: run
+// cell: stage: run
+// row: stage: run
+// mood: stage: run
+// tone: stage: run
+// tone-is: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag float
+tag bool
+tag char
+tag byte
+
+// the ambient collection slice spelled out: the partless generic
+// structs whose applications construct empty
+struct list[t]
+struct map[k, v]
+
+// the ambient primitive slice spelled out: every primitive carries its
+// own `default` member
+impl int { fn default() -> int { 0 } }
+impl float { fn default() -> float { 0.0 } }
+impl bool { fn default() -> bool { false } }
+impl string { fn default() -> string { "" } }
+impl char { fn default() -> char { '\0' } }
+impl byte { fn default() -> byte { b'\0' } }
+
+#[derive(default)]
+struct cell { n: int, s: string, f: float, b: bool, c: char, by: byte }
+
+// the compound field shapes: the tuple constructs per element, the
+// optional answers none, the applications construct empty
+#[derive(default)]
+struct row {
+  pair: (int, string),
+  maybe: int?,
+  xs: list[int],
+  table: map[string, int],
+}
+
+#[derive(default)]
+enum mood { calm, eager }
+
+#[derive(default)]
+tag tone
+
+extern fn println(s: string) -> ()
+extern fn list_len[t] (xs: list[t]) -> int
+extern fn map_len[k, v] (m: map[k, v]) -> int
+
+// a bare tag compares through its pattern, never a scalar equality
+fn tone_is(t: tone) -> int {
+  match t {
+    tone => 1
+  }
+}
+
+fn main() -> int {
+  const c = cell.default()
+  const m = mood.default()
+  const t = tone.default()
+  const r = row.default()
+  const (pn, ps) = r.pair
+  const mb = r.maybe
+  println("n=${c.n}")
+  println("s=<${c.s}>")
+  println("b=${c.b}")
+  println("calm=${m == calm}")
+  println("tone=${tone_is(t)}")
+  println("pair=${pn}/<${ps}>")
+  match mb { none => println("maybe=none"), n => println("maybe=${n}") }
+  println("xs=${list_len(r.xs)}")
+  println("table=${map_len(r.table)}")
+  0
+}

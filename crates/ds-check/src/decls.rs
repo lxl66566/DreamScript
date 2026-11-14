@@ -221,6 +221,14 @@ pub struct Decls {
     /// impl's trait reference substitutes them positionally when it
     /// spells its arguments (B6).
     pub trait_generics: IdTable<DefId, Vec<String>>,
+    /// The solved trait-reference arguments of every trait impl that
+    /// spells them, keyed by the impl item's span and positional over the
+    /// trait's declared generics (B6): each argument is solved against
+    /// the impl's own minted variable atoms, so a generic trait's default
+    /// body knows which type its own variables substitute to at a site
+    /// entering through this impl. Recorded only when every argument
+    /// converts and solves; an impl spelling no arguments records nothing.
+    pub trait_impl_args: FxHashMap<Span, Vec<Ty>>,
     /// Inherent impl-function signatures keyed by method id (F3).
     pub inherent: IdTable<MethodId, Arc<FnSig>>,
     /// The impl item each inherent impl function lives in, keyed by its
@@ -249,6 +257,39 @@ pub struct Decls {
     /// declaration and body checking draw from it so the package universe
     /// never sees one name twice.
     pub var_counter: u32,
+    /// The count of leading defs whose plain declaration tables arrived
+    /// pre-built from the checked-ambient artifact: zero in a fresh build
+    /// (the gates below never fire), and the reserve/shape arms skip a
+    /// served def's minting and shape solving because the serve already
+    /// installed those products. The hard tables (aliases, consts, the
+    /// solved span-keyed records) build fresh for every def either way;
+    /// the signature and instance tables slice two serves.
+    pub served_defs: u32,
+    /// The count of leading registered methods the checked-ambient
+    /// artifact served signatures for: the inherent-registration arm
+    /// skips a served method, its products already installed.
+    pub served_methods: u32,
+}
+
+/// The declaration-side prefix a checked-ambient artifact serves: the
+/// pre-built [`Decls`] (its universe replayed through the mint log, its
+/// interned sets replayed in intern order, with [`Decls::served_defs`]
+/// and [`Decls::served_methods`] set), the trait memberships the
+/// skipped shape arms would have registered, and the shape-phase atom
+/// mints the skipped impl arms would have performed — all keyed by
+/// index against the spaces the replays reproduce. Memberships and
+/// mints apply after the reserve pass — the mints continue the atom
+/// space exactly where the declaring pass's impl arms did, after every
+/// file's reserve mints — and before the shape pass, whose solving
+/// reads them.
+pub struct ServedDecls {
+    /// The prefix's declaration tables; `served_defs` and
+    /// `served_methods` must be set.
+    pub decls: Decls,
+    /// `(trait index, atom index)` membership records in any order.
+    pub memberships: Vec<(TraitId, TypeId)>,
+    /// The shape-phase atom mints, in mint order.
+    pub mints: Vec<crate::universe::ReplayMint>,
 }
 
 /// Builds the declaration tables over every collected file of one package,
@@ -264,9 +305,37 @@ pub fn build<T>(
 where
     T: std::borrow::Borrow<Ast>,
 {
+    build_over(package, asts, resolutions, None)
+}
+
+/// [`build`](self::build) over a checked-ambient prefix: the pass starts
+/// from the served [`Decls`] instead of an empty one, the reserve and
+/// shape arms skip every served def's minting and shape solving (the
+/// serve installed those products), the served member's own impl items
+/// skip their instance declarations (the artifact's rows are installed),
+/// the served trait memberships and shape-phase mints apply between the
+/// reserve pass (which mints every file's def-named atoms first, so the
+/// mints continue the atom space where the declaring pass's impl arms
+/// did) and the shape pass (whose solving reads them), and every table
+/// the serve carries no rows for — aliases, consts, the solved
+/// span-keyed records — builds fresh over all files as in [`build`].
+#[must_use]
+pub fn build_over<T>(
+    package: &Package,
+    asts: &[T],
+    resolutions: &[Resolutions],
+    served: Option<ServedDecls>,
+) -> (Decls, Vec<Diagnostic>)
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let _ = resolutions;
     let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
-    let mut decls = Decls::default();
+    let served_prefix = served.is_some();
+    let (mut decls, memberships, mints) = match served {
+        Some(served) => (served.decls, served.memberships, served.mints),
+        None => (Decls::default(), Vec::new(), Vec::new()),
+    };
     let mut diags = Vec::new();
     for ast in &trees {
         for block in &ast.blocks {
@@ -275,15 +344,35 @@ where
             }
         }
     }
-    for ast in &trees {
+    for (trait_id, atom) in memberships {
+        let _ = decls.universe.impl_trait(trait_id, atom);
+    }
+    // The replay's failures are ignored like the memberships' above: the
+    // artifact's bytes are drift-gate-pinned, so a replay that cannot
+    // land is a corrupt artifact (a generation-side failure), never a
+    // run-path condition to diagnose.
+    for mint in &mints {
+        let _ = decls.universe.replay_mint(mint);
+    }
+    for (index, ast) in trees.iter().enumerate() {
+        let served_item = served_prefix && index == 0;
         for block in &ast.blocks {
             for item in &block.items {
-                shape_item(package, item, &mut decls, &mut diags);
+                shape_item(package, item, &mut decls, &mut diags, served_item);
             }
         }
     }
     package_coherence(&mut decls, &mut diags);
     (decls, diags)
+}
+
+/// Whether a def's plain declaration tables arrived pre-built from the
+/// checked-ambient artifact: the minting arms skip it, its products
+/// already installed by the serve. A user item duplicating a served name
+/// resolves to the served def and skips too — the fresh path skips it as
+/// well (the duplicate mint fails), so the outcome is the same.
+fn is_served(decls: &Decls, def: DefId) -> bool {
+    def.index() < decls.served_defs
 }
 
 /// The package-level coherence pass: one closure run over the instance
@@ -295,6 +384,14 @@ where
 /// First-error-only is the accepted tradeoff — per-declaration reporting
 /// stays complete, this pass catches only what declaration order hid.
 fn package_coherence(decls: &mut Decls, diags: &mut Vec<Diagnostic>) {
+    // Over a served prefix this stays the closure pass over the fresh
+    // rows alone: the artifact is hash-validated content whose clean
+    // generation ran the prefix's own declarations and closure against a
+    // byte-identical universe state, and the drift gate pins that byte
+    // identity, so re-proving the prefix's own pairs buys nothing. Every
+    // pair and cycle a fresh row takes part in still probes here (and
+    // the fresh row's own declaration probed it against the installed
+    // served rows first).
     let Err(err) = decls.instances.check_all(&mut decls.universe) else {
         return;
     };
@@ -385,12 +482,18 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
     };
     match &item.kind {
         ItemKind::Tag(t) => {
+            if is_served(decls, def) {
+                return;
+            }
             if let Some(id) = declare_unit_name(decls, &t.name.name) {
                 decls.atoms.insert(def, id);
                 decls.defs_of_atoms.insert(id, def);
             }
         },
         ItemKind::Struct(s) => {
+            if is_served(decls, def) {
+                return;
+            }
             if let Ok(id) = decls.universe.declare_struct(&s.name.name) {
                 decls.atoms.insert(def, id);
                 decls.defs_of_atoms.insert(id, def);
@@ -405,6 +508,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             // A duplicate name keeps the first def (reported at
             // collection); the name span proves this item owns the def.
             if package.def(def).span != e.name.span {
+                return;
+            }
+            if is_served(decls, def) {
                 return;
             }
             let generic = !e.generics.is_empty();
@@ -479,6 +585,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             );
         },
         ItemKind::Trait(t) => {
+            if is_served(decls, def) {
+                return;
+            }
             if let Ok(id) = decls.universe.declare_trait(&t.name.name) {
                 decls.traits.insert(def, id);
                 let mut names = Vec::new();
@@ -510,6 +619,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             }
         },
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
+            if is_served(decls, def) {
+                return;
+            }
             decls.fns.insert(def, Arc::new(FnSig::of(f)));
         },
         ItemKind::Import(_) | ItemKind::Local(_) | ItemKind::Impl(_) | ItemKind::Platform(_) => {},
@@ -523,6 +635,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
 /// declaration is the shape pass's work. Call sites check against each
 /// impl's own signature; a same-name second inherent impl never gets a
 /// registration (collection reports the duplicate and keeps the first).
+/// A served method's signature and impl-site arrived with the artifact.
 fn reserve_impl_fns(package: &Package, imp: &ImplDecl, impl_site: Span, decls: &mut Decls) {
     if imp.trait_ref.is_some() {
         return;
@@ -534,6 +647,9 @@ fn reserve_impl_fns(package: &Package, imp: &ImplDecl, impl_site: Span, decls: &
             .copied()
             .find(|&id| package.method(id).span == f.name.span)
         {
+            if method.index() < decls.served_methods {
+                continue;
+            }
             decls.inherent.insert(method, Arc::new(FnSig::of(f)));
             decls.inherent_impls.insert(method, impl_site);
         }
@@ -586,12 +702,24 @@ fn struct_fields_ast(members: &[StructMember]) -> Vec<FieldDecl> {
         .collect()
 }
 
-fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec<Diagnostic>) {
+/// `served_item` marks an item of the checked-ambient member itself: its
+/// impl items' instance declarations arrived installed with the artifact
+/// (rows, spans, memberships, mints), so the impl arm skips.
+fn shape_item(
+    package: &Package,
+    item: &Item,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+    served_item: bool,
+) {
     match &item.kind {
         ItemKind::Struct(s) => {
             let Some(def) = package.lookup_type(&s.name.name) else {
                 return
             };
+            if is_served(decls, def) {
+                return;
+            }
             let Some(&atom) = decls.atoms.get(&def) else {
                 return
             };
@@ -608,6 +736,9 @@ fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec
             else {
                 return
             };
+            if is_served(decls, def) {
+                return;
+            }
             if e.generics.is_empty() {
                 // Minted cases: each case's atom takes its payload as the
                 // struct field signature (positional slots for tuple
@@ -660,7 +791,11 @@ fn shape_item(package: &Package, item: &Item, decls: &mut Decls, diags: &mut Vec
                 let _ = decls.universe.set_enum_cases(atom, cases);
             }
         },
-        ItemKind::Impl(imp) => declare_instance(package, item, imp, decls, diags),
+        ItemKind::Impl(imp) => {
+            if !served_item {
+                declare_instance(package, item, imp, decls, diags);
+            }
+        },
         ItemKind::Tag(_)
         | ItemKind::TypeAlias(_)
         | ItemKind::Trait(_)
@@ -758,7 +893,11 @@ fn conv_expr(package: &Package, ty: &Type, decls: &mut Decls) -> Option<TypeExpr
             TypeExpr::Tuple(elements)
         },
         Type::Unit(_) => TypeExpr::Tuple(Vec::new()),
-        Type::Fn { .. } | Type::Ptr { .. } | Type::TypeKw(_) | Type::Foreign { .. } => return None,
+        // the comptime type-value atom (G1, G2): the `type` keyword's
+        // conversion form, so a `comptime t: type` parameter's solved
+        // binder type is the builtin atom
+        Type::TypeKw(_) => TypeExpr::Atom(TypeId::TYPE),
+        Type::Fn { .. } | Type::Ptr { .. } | Type::Foreign { .. } => return None,
     })
 }
 
@@ -936,8 +1075,10 @@ fn solve_written(
         | Type::Negation { .. }
         | Type::Fn { .. }
         | Type::Ptr { .. }
-        | Type::TypeKw(_)
         | Type::Foreign { .. } => return None,
+        // the comptime type-value atom (G1, G2), in the written-variable
+        // conversion context
+        Type::TypeKw(_) => decls.universe.atom_ty(TypeId::TYPE).ok()?,
     })
 }
 
@@ -1050,6 +1191,29 @@ fn declare_instance(
         };
         if let Some(&var) = vars.get(&param.name.name) {
             conditions.push(Condition::new(bound_trait, TypeExpr::atom(var)));
+        }
+    }
+
+    // The trait reference's arguments, solved over the impl's minted
+    // variables: the record a generic trait's default body reads to know
+    // its own variables' substitution at a site entering through this
+    // impl. A non-converting argument records nothing — the body check's
+    // own trait-reference diagnostics own that shape, and the lowerer
+    // refuses a missing record honestly.
+    if !trait_ref.args.is_empty() {
+        let mut solved_args = Vec::with_capacity(trait_ref.args.len());
+        let mut solved_all = true;
+        for arg in &trait_ref.args {
+            let Some(solved) = conv_node(package, arg, &vars, decls)
+                .and_then(|expr| decls.universe.solve(&expr).ok())
+            else {
+                solved_all = false;
+                break;
+            };
+            solved_args.push(solved);
+        }
+        if solved_all {
+            decls.trait_impl_args.insert(item.span, solved_args);
         }
     }
 

@@ -525,8 +525,9 @@ impl Gen<'_> {
 
     /// The union equality episode: whole-span equality over union
     /// operands (call against call, member against union from either
-    /// side, the unit-tag mirror, inequality), plus a match binder
-    /// comparing its member's payload. The two member functions are
+    /// side, the unit-tag mirror, inequality, a struct-payloaded
+    /// member's full field span), plus a match binder comparing its
+    /// member's payload. The two member functions are
     /// top-level declarations the episode stages before main's body.
     fn ep_union_equality(&mut self) {
         let v = self.lit(5);
@@ -554,7 +555,14 @@ impl Gen<'_> {
              ${{{n}}}\") }} }},"
         ));
         self.line("}");
-        self.drawn.union_equality += 6;
+        // a struct-payloaded member compares over its whole span:
+        // the members differ only in the payload's later field, so a
+        // first-field-only chain answers true and the oracle catches it
+        self.decl("fn pt_left() -> pt | none { pt { x: 1, y: 2 } }");
+        self.decl("fn pt_right() -> pt | none { pt { x: 1, y: 9 } }");
+        self.line("if pt_left() == pt_right() { println(\"bad\") } else { println(\"pt diff\") }");
+        self.line("if pt_left() == pt_left() { println(\"pt same\") }");
+        self.drawn.union_equality += 8;
         self.answer("same");
         if none {
             self.answer("hit");
@@ -573,6 +581,8 @@ impl Gen<'_> {
         } else {
             self.answer(&format!("binder {v}"));
         }
+        self.answer("pt diff");
+        self.answer("pt same");
     }
 
     /// The fork-join episodes: `par_map` over the drawn int list (a

@@ -378,13 +378,13 @@ fn a_dispatch_call_stages_nothing_for_an_impl_only_default() {
     );
 }
 
-/// A member's signature declares its receiver as its first parameter
-/// (F3): both call forms feed the receiver first and the trait dispatch
-/// keys on its type, so a signature with no `self` has no reachable call
-/// form — the declaration refuses at its own site, the trait member and
-/// the impl member alike.
+/// A trait member's signature declares its receiver as its first
+/// parameter (F3): dynamic dispatch is receiver-carried, so a trait
+/// signature with no `self` has no reachable call form and refuses at
+/// its own site (DS2021 narrows to trait members — an impl member
+/// without a receiver is the type-keyed static surface instead).
 #[test]
-fn a_member_without_a_receiver_refuses_at_both_declarations() {
+fn a_trait_member_without_a_receiver_refuses() {
     let source = concat!(
         "tag int\n",
         "trait shows {\n",
@@ -402,8 +402,9 @@ fn a_member_without_a_receiver_refuses_at_both_declarations() {
         .collect();
     assert_eq!(
         norecv.len(),
-        2,
-        "the trait member and the impl member each refuse: {rendered:?}"
+        1,
+        "the trait member alone refuses (its impl member agrees with the refused signature): \
+         {rendered:?}"
     );
     assert!(
         norecv[0].contains("member `show` declares its receiver as its first parameter"),
@@ -434,8 +435,8 @@ fn a_zero_parameter_member_call_checks_through_the_refused_signature() {
     let rendered = messages(&analyzed);
     assert_eq!(
         rendered.len(),
-        2,
-        "the two declaration refusals stand alone; the calls add nothing: {rendered:?}"
+        1,
+        "the trait member's refusal stands alone; the calls add nothing: {rendered:?}"
     );
     assert!(
         rendered.iter().all(|m| m.starts_with("DS2021")),
@@ -443,11 +444,11 @@ fn a_zero_parameter_member_call_checks_through_the_refused_signature() {
     );
 }
 
-/// An inherent member without a receiver is equally unreachable: the
-/// dot form feeds the receiver first, so the impl's own member
-/// declaration refuses.
+/// An inherent impl member may omit the receiver (the 2026-11-15
+/// ruling): the member is the type-keyed static surface, callable as
+/// `<type>.<member>()`, and its declaration checks clean.
 #[test]
-fn an_inherent_member_without_a_receiver_refuses() {
+fn an_inherent_member_without_a_receiver_checks_clean() {
     let source = concat!(
         "tag int\n",
         "struct counter { n: int }\n",
@@ -458,10 +459,8 @@ fn an_inherent_member_without_a_receiver_refuses() {
     let analyzed = analyze_source("inherent.ds", source);
     let rendered = messages(&analyzed);
     assert!(
-        rendered
-            .iter()
-            .any(|m| m.starts_with("DS2021") && m.contains("member `five`")),
-        "the inherent member refuses at its declaration: {rendered:?}"
+        rendered.is_empty(),
+        "the receiverless inherent member is legal: {rendered:?}"
     );
 }
 
@@ -526,5 +525,88 @@ fn omitted_defaulted_member_stays_clean() {
     assert!(
         rendered.is_empty(),
         "a member whose trait declares a default body may be omitted by the impl: {rendered:?}"
+    );
+}
+
+/// A member signature naming the trait's own generics checks its
+/// arguments against the dispatch's substitution: the receiver's solved
+/// instance fixes what the generic holds at the site (the impl's trait
+/// reference rewritten against the receiver), so an argument the
+/// substitution does not contain refuses — a freely bound generic once
+/// accepted any argument, for a spelled impl member and a defaulted one
+/// alike.
+#[test]
+fn member_arguments_check_against_the_substituted_trait_generics() {
+    let story = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "trait shows {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "trait tells[t: shows] {\n",
+        "  fn tell(self, other: t) -> string { other.show() }\n",
+        "}\n",
+        "impl shows for int {\n",
+        "  fn show(self) -> string { \"int!\" }\n",
+        "}\n",
+    );
+    let spelled = analyze_source(
+        "spelled.ds",
+        &format!(
+            "{story}{}",
+            concat!(
+                "impl tells[int] for string {\n",
+                "  fn tell(self, other: t) -> string { \"x\" }\n",
+                "}\n",
+            )
+        ),
+    );
+    assert!(
+        messages(&spelled)
+            .iter()
+            .any(|m| m.contains("unknown type `t`")),
+        "an impl member cannot name the trait's generic itself: {:?}",
+        messages(&spelled)
+    );
+    let defaulted = analyze_source(
+        "defaulted.ds",
+        &format!(
+            "{story}{}",
+            concat!(
+                "impl[u: shows] tells[u] for list[u] {\n",
+                "}\n",
+                "fn main() -> int {\n",
+                "  [3].tell(\"b\")\n",
+                "  0\n",
+                "}\n",
+            )
+        ),
+    );
+    assert!(
+        messages(&defaulted)
+            .iter()
+            .any(|m| m.contains("has type `string`, not contained in `int`")),
+        "the defaulted member's argument checks against the substituted generic: {:?}",
+        messages(&defaulted)
+    );
+    let matching = analyze_source(
+        "matching.ds",
+        &format!(
+            "{story}{}",
+            concat!(
+                "impl[u: shows] tells[u] for list[u] {\n",
+                "}\n",
+                "fn main() -> int {\n",
+                "  [3].tell(4)\n",
+                "  0\n",
+                "}\n",
+            )
+        ),
+    );
+    assert!(
+        messages(&matching).is_empty(),
+        "a contained argument checks clean: {:?}",
+        messages(&matching)
     );
 }

@@ -4,7 +4,11 @@
 # Runs one kernel at a time, alternating A,B,A,B... for `rounds` per side
 # (default 10), then prints per-kernel medians and the delta. One invocation
 # is one sample pair set; run under an exclusive flock with the machine idle
-# (same discipline as run.sh bench). Numbers are never committed.
+# (same discipline as run.sh bench). Numbers are never committed. Both
+# binaries run the cold path (`--no-cache`): neither side inherits or
+# writes a user cache, and the pair stays comparable with run.sh — the
+# script-cache key already separates the two builds, so an A/B of a
+# lowering change measures two different bytecodes, never one twice.
 
 set -u
 
@@ -36,7 +40,7 @@ times_bin() {
     bin=$1
     file=$2
     t0=$(date +%s%N)
-    "$bin" run "$file" >/dev/null 2>&1
+    "$bin" run --no-cache "$file" >/dev/null 2>&1
     status=$?
     t1=$(date +%s%N)
     if [ "$status" -ne 0 ]; then
@@ -54,10 +58,10 @@ median_of() {
 printf '%-12s %10s %10s %8s\n' KERNEL A_MS B_MS DELTA
 for name in $kernels; do
     file="$kdir/$name.ds"
-    : >"$TMPDIR/ab_A.$$" 2>/dev/null || : >/tmp/ab_A.$$
-    tmpA=$(ls "$TMPDIR/ab_A.$$" 2>/dev/null || printf '/tmp/ab_A.%s' "$$")
-    : >"$TMPDIR/ab_B.$$" 2>/dev/null || : >/tmp/ab_B.$$
-    tmpB=$(ls "$TMPDIR/ab_B.$$" 2>/dev/null || printf '/tmp/ab_B.%s' "$$")
+    : >"${TMPDIR:-/tmp}/ab_A.$$" 2>/dev/null || : >/tmp/ab_A.$$
+    tmpA=$(ls "${TMPDIR:-/tmp}/ab_A.$$" 2>/dev/null || printf '/tmp/ab_A.%s' "$$")
+    : >"${TMPDIR:-/tmp}/ab_B.$$" 2>/dev/null || : >/tmp/ab_B.$$
+    tmpB=$(ls "${TMPDIR:-/tmp}/ab_B.$$" 2>/dev/null || printf '/tmp/ab_B.%s' "$$")
     r=0
     while [ "$r" -lt "$rounds" ]; do
         ta=$(times_bin "$binA" "$file")

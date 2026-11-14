@@ -1,5 +1,5 @@
-// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15
-// purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, and `#[derive(clone)]` on structs, enums, and tags expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape), every call spelling reaches the one body, and each ruled refusal names its class
+// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15, the part-less shapes 2026-11-15
+// purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, and `#[derive(clone)]` on structs, enums, and tags expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape, the part-less struct included over its one reserved unit word), every call spelling reaches the one body, and each ruled refusal names its class
 // items:
 // point: stage: run
 // mark: stage: run
@@ -13,6 +13,7 @@
 // mystery-cell: stage: reject a name outside the ruled set names the ruled set [G1]
 // hash-cell: stage: run
 // clone-cell: stage: run
+// blank-cell: stage: run
 // to-json-cell: stage: reject a ruled family not yet implemented names itself and the ruled set [G1]
 // cb-cell: stage: reject a function-typed part refuses structural derivation, naming the part [G1, B9]
 // res: stage: typecheck
@@ -73,6 +74,12 @@ fn main() -> int {
   println(str(hc.hash()))
   const cc = clone_cell { v: 7 }.clone()
   println(str(cc.v))
+  const bc = blank_cell {}
+  println(bc.show())
+  println(str(bc.compare(blank_cell {})))
+  println(str(bc.hash()))
+  const bc2 = bc.clone()
+  println(str(bc2.hash()))
   0
 }
 
@@ -87,6 +94,9 @@ struct hash_cell { v: int }
 
 #[derive(clone)]
 struct clone_cell { v: int }
+
+#[derive(show, ord, hash, clone)]
+struct blank_cell {}
 
 #[derive(to_json)]
 struct to_json_cell { v: int }

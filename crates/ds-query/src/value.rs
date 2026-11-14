@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use ds_check::{
-    Analyzed, EffectRow, Effects,
+    Analyzed, EffectRow, Effects, ScopeFrame,
     linearity::{DropSite, LastUse, Move},
     resolve::{Package, Resolutions},
 };
@@ -66,6 +66,16 @@ pub struct BlockIndexOutput {
     /// Blocks in source order; every file has at least one (G3). Shared like
     /// the parse payload: a memo hit clones the arc, not the blocks.
     pub blocks: Arc<[BlockInfo]>,
+}
+
+/// Result of the [`ScopeIndex`](crate::QueryKey::ScopeIndex) query: one
+/// file's local scope frames, shared so a memo hit clones the arc, not
+/// the frames. Package-level declarations need no frames: they are the
+/// [`Resolve`](crate::QueryValue::Resolve) value's own table.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ScopeIndexOutput {
+    /// The file's scope frames in walk order.
+    pub frames: Arc<[ScopeFrame]>,
 }
 
 /// Result of the [`LinearityCheck`](crate::QueryKey::LinearityCheck)
@@ -204,11 +214,11 @@ impl PartialEq for ExpandedOutput {
 impl Eq for ExpandedOutput {}
 
 /// Result of the [`Resolve`](crate::QueryKey::Resolve) query: one
-/// package's collected namespace, per-file resolutions, and the
-/// derive-refusal, collection, and resolution diagnostics (G3) — the
-/// expansion's classes ride with the resolve half because the expanded
-/// trees are its input.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// package's collected namespace, per-file resolutions, reverse-edge
+/// index, and the derive-refusal, collection, and resolution diagnostics
+/// (G3) — the expansion's classes ride with the resolve half because the
+/// expanded trees are its input.
+#[derive(Clone, Debug)]
 pub struct ResolveOutput {
     /// The package namespace every file of the package declared into.
     pub package: Arc<Package>,
@@ -216,11 +226,30 @@ pub struct ResolveOutput {
     /// (parseable ones only; a file whose parse failed contributes no
     /// declarations and no uses).
     pub resolutions: Arc<[Resolutions]>,
+    /// The reverse edge of those tables: every use of each resolved
+    /// target, package grain, built in the same compute the tables are
+    /// (uses are fully materialized there, so a reference request is one
+    /// lookup instead of a scan of the package). Shared like the parse
+    /// payload: a memo hit clones the arc, not the index.
+    pub uses: Arc<ds_check::UseIndex>,
     /// Derive-refusal, duplicate-definition, and unknown-name
     /// diagnostics. Shared like the parse payload: memo hits clone the
     /// arc, not the diagnostics.
     pub diags: Arc<[Diagnostic]>,
 }
+
+impl PartialEq for ResolveOutput {
+    // The reverse-edge index is derived: it is a pure function of
+    // `resolutions`, which the equality below compares, so comparing the
+    // index too would walk the package twice.
+    fn eq(&self, other: &Self) -> bool {
+        self.package == other.package
+            && self.resolutions == other.resolutions
+            && self.diags == other.diags
+    }
+}
+
+impl Eq for ResolveOutput {}
 
 /// Result of the [`TypeOf`](crate::QueryKey::TypeOf) query: one
 /// definition's typed story, sliced out of the package check (B2).
@@ -402,6 +431,8 @@ pub enum QueryValue {
     /// Value of [`QueryKey::BlockSource`](crate::QueryKey::BlockSource): the
     /// block's source text.
     BlockSource(Arc<str>),
+    /// Value of [`QueryKey::ScopeIndex`](crate::QueryKey::ScopeIndex).
+    ScopeIndex(ScopeIndexOutput),
     /// Value of [`QueryKey::Expanded`](crate::QueryKey::Expanded).
     Expanded(ExpandedOutput),
     /// Value of [`QueryKey::Resolve`](crate::QueryKey::Resolve).

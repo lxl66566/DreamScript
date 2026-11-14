@@ -3,7 +3,9 @@
 //! path — the mmap loader hands the same `&Module` to the same install),
 //! install into the two-slot registry, and execute [BL-7, H6 item 5].
 
-use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, read_checked, write};
+use ds_mod::{
+    Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, read_checked, write,
+};
 use ds_vm::{
     ModuleRegistry, Value, Vm,
     abi::{
@@ -23,8 +25,7 @@ fn layout(slots: &[SlotType], params: usize, args: usize) -> FrameLayout {
 
 /// The corrected executable even/odd pair (the canonical fixture shape):
 /// slots [n, t, scratch, staged], bools via the pool, callees as real
-/// same-module FuncRefs (empty module names the enclosing module; the odd
-/// direction also exercises the own-name spelling).
+/// enclosing-module FuncRefs (dependency position 0, both directions).
 fn parity_module(depth: i64) -> Module {
     let even = Function::new(
         "even",
@@ -34,7 +35,7 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(1),
             Constant::Bool(true),
             Constant::FuncRef {
-                module: String::new(), // enclosing module: odd, table index 1
+                key: FuncRefKey::Dep(0), // enclosing module: odd, table index 1
                 func: 1,
             },
         ],
@@ -70,7 +71,7 @@ fn parity_module(depth: i64) -> Module {
             Constant::I64(1),
             Constant::Bool(false),
             Constant::FuncRef {
-                module: "mut".into(), // the own name also means same-module
+                key: FuncRefKey::Dep(0), // enclosing module: even, table index 0
                 func: 0,
             },
         ],
@@ -102,7 +103,7 @@ fn parity_module(depth: i64) -> Module {
         "main",
         layout(&[I64], 0, 1),
         vec![Constant::I64(depth), Constant::FuncRef {
-            module: String::new(),
+            key: FuncRefKey::Dep(0),
             func: 0,
         }],
         vec![
@@ -142,9 +143,8 @@ fn dsmod_round_trip_installs_and_runs_at_constant_stack() {
     // the loader filled the entry-descriptor word-0 placeholders at install
     for (position, f) in vm
         .registry()
-        .slots("mut")
+        .current_version("mut")
         .unwrap()
-        .current()
         .functions()
         .iter()
         .enumerate()
@@ -176,7 +176,7 @@ fn loader_reports_unresolved_funcrefs() {
         "bad",
         layout(&[I64], 0, 0),
         vec![Constant::FuncRef {
-            module: String::new(),
+            key: FuncRefKey::Dep(0),
             func: 9,
         }],
         vec![Uop::Funcf { frame_slots: 1 }],
@@ -187,7 +187,7 @@ fn loader_reports_unresolved_funcrefs() {
         vm.install_dsmod(module).unwrap_err(),
         ds_vm::LoadError::UnresolvedCallee {
             func: "bad".into(),
-            module: String::new(),
+            module: "m".into(),
             index: 9,
         }
     );
@@ -196,14 +196,15 @@ fn loader_reports_unresolved_funcrefs() {
         "foreign",
         layout(&[I64], 0, 0),
         vec![Constant::FuncRef {
-            module: "other".into(),
+            key: FuncRefKey::Dep(1), // the "other" dependency entry
             func: 0,
         }],
         vec![Uop::Funcf { frame_slots: 1 }],
     )
     .expect("valid function");
-    let module =
-        Module::new("m2", TargetClass::Bytecode, Hash128::compute(b"m2")).with_function(foreign);
+    let module = Module::new("m2", TargetClass::Bytecode, Hash128::compute(b"m2"))
+        .with_dep("other", Hash128::ZERO)
+        .with_function(foreign);
     assert_eq!(
         vm.install_dsmod(module).unwrap_err(),
         ds_vm::LoadError::UnresolvedCallee {
@@ -214,9 +215,9 @@ fn loader_reports_unresolved_funcrefs() {
     );
 }
 
-/// Cross-module FuncRefs: the caller's pool names a foreign module; the call
-/// resolves through the target's current slot, so installing a new version
-/// of the target redirects the next call [H6 item 5].
+/// Cross-module FuncRefs: the caller's pool addresses a dependency entry;
+/// the call resolves through the target's current slot, so installing a new
+/// version of the target redirects the next call [H6 item 5].
 #[test]
 fn cross_module_funcref_resolves_through_the_current_slot() {
     // std v1: double(n) = n + n; std v2: triple(n) = n + n + n. The
@@ -248,12 +249,12 @@ fn cross_module_funcref_resolves_through_the_current_slot() {
         .expect("valid function");
         Module::new("std", TargetClass::Bytecode, Hash128::compute(b"std")).with_function(f)
     };
-    // caller: main stages 5 and CALLs std.apply through a foreign FuncRef
+    // caller: main stages 5 and CALLs std.apply through the first dep entry
     let main = Function::new(
         "main",
         layout(&[I64], 0, 1),
         vec![Constant::I64(5), Constant::FuncRef {
-            module: "std".into(),
+            key: FuncRefKey::Dep(1), // the "std" dependency entry
             func: 0,
         }],
         vec![
@@ -268,7 +269,9 @@ fn cross_module_funcref_resolves_through_the_current_slot() {
     )
     .expect("valid function");
     let bytes = write(
-        &Module::new("app", TargetClass::Bytecode, Hash128::compute(b"app")).with_function(main),
+        &Module::new("app", TargetClass::Bytecode, Hash128::compute(b"app"))
+            .with_dep("std", Hash128::ZERO)
+            .with_function(main),
     );
     let app = read(&bytes).expect("parses");
 

@@ -10,7 +10,9 @@ use ds_abi::{
     SlotType::{Bool, I64},
     uop::Uop,
 };
-use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, read_checked, write};
+use ds_mod::{
+    Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, read_checked, write,
+};
 
 const SOURCE: &[u8] = b"module reader round trip\n";
 
@@ -78,7 +80,7 @@ fn fixture_bytes() -> Vec<u8> {
     .with_constant(Constant::Bool(true))
     .with_constant(Constant::Str("h\u{e9}llo reader".to_owned()))
     .with_constant(Constant::FuncRef {
-        module: "csv".to_owned(),
+        key: FuncRefKey::Dep(2), // the "csv" dependency entry
         func: 2,
     });
     for index in 0..FUNCTIONS {

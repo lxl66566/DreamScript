@@ -24,8 +24,8 @@
 //!   builtin staging) declare `SlotType::Raw`.
 
 use ds_vm::{
-    Const, FIBER_ROOT, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion, Trap, Value,
-    Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion,
+    Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, F64, I64, Raw, Ref, Tag},
@@ -89,22 +89,22 @@ fn pool() -> Vec<Const> {
         Const::Str("value: ".to_owned()),            // k11: the print (no-newline) prefix
         Const::Bool(true),                           // k12
         Const::Bool(false),                          // k13
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "cfg".into(),
             func: 1,
-        }, // k14: find_num
-        Const::FuncRef {
+        }), // k14: find_num
+        Const::FuncRef(ConstFuncRef::Named {
             module: "cfg".into(),
             func: 2,
-        }, // k15: get_port
-        Const::FuncRef {
+        }), // k15: get_port
+        Const::FuncRef(ConstFuncRef::Named {
             module: "cfg".into(),
             func: 3,
-        }, // k16: load
-        Const::FuncRef {
+        }), // k16: load
+        Const::FuncRef(ConstFuncRef::Named {
             module: "cfg".into(),
             func: 4,
-        }, // k17: default_config
+        }), // k17: default_config
         platform(OP_PRINTLN),                        // k18: println
         builtin(BUILTIN_STR_INT),                    // k19: str_int
         builtin(BUILTIN_STR_BOOL),                   // k20: str_bool
@@ -118,17 +118,17 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 fn platform(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: STD_NAME.into(),
         func: index,
-    }
+    })
 }
 
 fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
@@ -790,10 +790,10 @@ fn tail_called_span_returns_through_the_reused_frame() {
     ]);
     // the shared fixture pool's k14 names the "cfg" module; repoint it at
     // this module's own callee (function-table index 1)
-    caller.pool[14] = Const::FuncRef {
+    caller.pool[14] = Const::FuncRef(ConstFuncRef::Named {
         module: "t".into(),
         func: 1,
-    };
+    });
     let mut vm = Vm::new(registry("t", vec![caller, callee]));
     vm.capture_output();
     assert_eq!(vm.run("t", "tc", &[]), Ok(Value::Tag(tags::CONFIG)));
@@ -846,10 +846,10 @@ fn retspan_edges_trap_and_load_checks_reject() {
         Uop::Halt { slot: 0 },
     ]);
     // repoint the shared pool's k0 (an i64) at this module's wide callee
-    narrow.pool[0] = Const::FuncRef {
+    narrow.pool[0] = Const::FuncRef(ConstFuncRef::Named {
         module: "e".into(),
         func: 1,
-    };
+    });
     let mut vm = Vm::new(registry("e", vec![narrow, wide]));
     assert_eq!(
         vm.run("e", "narrow", &[]),

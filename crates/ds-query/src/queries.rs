@@ -13,6 +13,11 @@
 //! * `block_source` reads the parse result and the block index and slices out one block's text.
 //!   Downstream block-keyed queries depend on this value — not on the file — so a file edit that
 //!   leaves a block's text unchanged renews (not invalidates) that block's dependents.
+//! * `scope_index` reads the expanded and resolve values and runs the ds-check scope walk over the
+//!   file's tree — the arm member-test rule reads the resolved package, and derive-synthesized
+//!   items skip — keeping one frame per value scope the resolver pushes (with each binding's
+//!   visible-from offset) — the substrate completion's position slice reads, so the walk runs once
+//!   per file; an unparseable file answers empty frames.
 //! * `expanded` reads every registered file's parse (and the file-set input through
 //!   [`Ctx::file_count`]) and runs the ds-check derive expansion (G1): the one place the package's
 //!   trees expand, so every package-grain pass below checks the same synthesized impls. Package
@@ -22,8 +27,9 @@
 //!   over the expanded trees — expansion precedes resolution — so a derive-synthesized member
 //!   resolves like a hand-written one. Every registered file is the package, a file whose parse
 //!   failed contributes no declarations, and the value carries the namespace, per-file use tables,
-//!   and the expansion-refusal, collection, and resolution diagnostics; its dependency is the
-//!   expansion alone, so the query invalidates at file grain and on registration through it
+//!   their reverse-edge index (every use of each resolved target, built in the same compute the
+//!   tables are), and the expansion-refusal, collection, and resolution diagnostics; its dependency
+//!   is the expansion alone, so the query invalidates at file grain and on registration through it
 //!   (collection is package-wide, so any parse edit can change any resolution).
 //! * `checked_package` reads the resolve and expanded values, runs the ds-check bidirectional pass
 //!   (B2) over the expanded trees once, and carries the package's diagnostics plus every top-level
@@ -72,7 +78,7 @@ use crate::{
         AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
         ExpandedOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput,
         PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
-        TypeOfOutput,
+        ScopeIndexOutput, TypeOfOutput,
     },
 };
 
@@ -112,21 +118,55 @@ pub(crate) fn expanded(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
 /// resolution passes over the expanded trees (the `expanded` value's),
 /// so a derive-synthesized member resolves like a hand-written one; the
 /// value's diagnostics carry the expansion's refusal classes ahead of
-/// the collection and resolution ones. The [`PackageId`] key is the
-/// package grain — M2 has one package, every registered file, so the id
-/// is ignored until M7's package loading mints real identity.
+/// the collection and resolution ones. The value also carries the
+/// tables' reverse edge (`UseIndex::build` in the same compute): uses
+/// are fully materialized at this grain, so the def-to-uses index costs
+/// one walk here and every reference request after is one lookup. The
+/// [`PackageId`] key is the package grain — M2 has one package, every
+/// registered file, so the id is ignored until M7's package loading
+/// mints real identity.
 pub(crate) fn resolve(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::Resolve(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let expanded = ctx.get::<crate::query::Expanded>(package)?;
     let (package, resolutions, diags) = ds_check::resolve_package(&expanded.asts);
+    let uses = Arc::new(ds_check::UseIndex::build(&resolutions));
     let mut all = expanded.diags.to_vec();
     all.extend(diags);
     Ok(QueryValue::Resolve(ResolveOutput {
         package: Arc::new(package),
         resolutions: resolutions.into(),
+        uses,
         diags: all.into(),
+    }))
+}
+
+/// One file's local scope frames: the ds-check scope walk over the file's
+/// derive-expanded tree, reading the resolved package's declared types so
+/// arm patterns bind exactly as the resolver binds them (a bare arm
+/// identifier naming a constructor type or the predeclared `none` is a
+/// member test that binds nothing) and skipping derive-synthesized items,
+/// whose minted spans lie inside the attributed declaration. Package
+/// grain through the expansion and resolution like the resolve family:
+/// the dependency is the whole expansion plus the resolved package, so
+/// an edit anywhere re-derives this file's frames and renews them through
+/// frame equality when the walk repeats itself; a file whose parse failed
+/// contributes no tree and answers empty frames.
+pub(crate) fn scope_index(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::ScopeIndex(file) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let expanded = ctx.get::<crate::query::Expanded>(PackageId::new(0))?;
+    let resolved = ctx.get::<crate::query::Resolve>(PackageId::new(0))?;
+    let frames = expanded
+        .asts
+        .iter()
+        .find(|ast| ast.file == file)
+        .map(|ast| ds_check::scope::scope_frames(ast, &resolved.package))
+        .unwrap_or_default();
+    Ok(QueryValue::ScopeIndex(ScopeIndexOutput {
+        frames: frames.into(),
     }))
 }
 
@@ -398,12 +438,18 @@ pub(crate) fn package_effects(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryV
 /// The ambient member is the one file with a shortcut: when the content is
 /// the ambient source and the embedded blob verifies (source hash plus file
 /// id), the precompiled tree serves in place of the parse — a pure cache,
-/// every blob miss falling back to the fresh parse. The blob is a
-/// build-time constant, so the compute stays a pure function of exactly one
-/// input — the file's `FileContent` read through [`Ctx::file_content`];
-/// nothing else in the context is read. `ParseOutput::eq` (value.rs)
-/// compares only the source text on the strength of that purity: if this
-/// compute ever grows more inputs, that equality must widen with it.
+/// every blob miss falling back to the fresh parse. The served tree carries
+/// the derive expansion from artifact build time, so the `expanded`
+/// compute's pass over it is the identity (expansion consumes derive
+/// attributes, and an expanded tree has none) and its parse answers the
+/// same expanded trees a fresh parse would expand to; the blob miss parses
+/// pre-expansion and expands at query time, answering the same way. The
+/// blob is a build-time constant, so the compute stays a pure function of
+/// exactly one input — the file's `FileContent` read through
+/// [`Ctx::file_content`]; nothing else in the context is read.
+/// `ParseOutput::eq` (value.rs) compares only the source text on the
+/// strength of that purity: if this compute ever grows more inputs, that
+/// equality must widen with it.
 pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::ParseFile(file) = key else {
         return Err(QueryError::KindMismatch(key));

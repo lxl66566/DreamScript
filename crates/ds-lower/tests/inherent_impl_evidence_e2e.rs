@@ -15,7 +15,7 @@ use ds_abi::{SlotType, Uop};
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Constant, Hash128, read_checked, write};
+use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -119,33 +119,29 @@ fn two_instantiations_run_the_generic_member_shape() {
     );
 }
 
-/// The entering sites stage the serving member body's table index per
-/// the body's demand — the pair's whole area trailing the receiver (the
-/// serving body, then the follow words padded with the body itself once
-/// the chain ends at a concrete impl) — and the call is the ordinary
-/// CALL: an inherent impl has no instance word, so no CALLG exists at an
-/// inherent site, and the uop names the full staged count (the receiver
-/// plus the pair area).
+/// The entering sites stage one evidence word per the body's demand —
+/// the index of the chain object whose serving body the demand resolves
+/// to, trailing the receiver — and the call is the ordinary CALL: an
+/// inherent impl has no instance word, so no CALLG exists at an inherent
+/// site, and the uop names the full staged count (the receiver plus the
+/// chain word).
 #[test]
 fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
     let (_, lowered) = lower_probe();
     let main = lowered.function_index("main").expect("main is planned");
     let placed = lowered.placed("main").expect("main lowers");
     let pool = &lowered.module().functions()[main as usize].constants();
-    let int_body = i64::from(
-        lowered
-            .function_index("shows#int#show")
-            .expect("the int member body is planned"),
-    );
-    let string_body = i64::from(
-        lowered
-            .function_index("shows#string#show")
-            .expect("the string member body is planned"),
-    );
+    let int_body = lowered
+        .function_index("shows#int#show")
+        .expect("the int member body is planned");
+    let string_body = lowered
+        .function_index("shows#string#show")
+        .expect("the string member body is planned");
     // the staged evidence words immediately before each member CALL: one
-    // pair area per entering site, in call order (describe int, describe
-    // string, render int, render string) — the concrete serving bodies
-    // end their chains at once, so the follow words pad with the index
+    // chain word per entering site, in call order (describe int,
+    // describe string, render int, render string) — each chain names the
+    // concrete serving body and carries no tail (the concrete body
+    // demands nothing)
     let mut evidence: Vec<i64> = Vec::new();
     let mut pending: Vec<i64> = Vec::new();
     for op in placed {
@@ -165,16 +161,22 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
         pending.is_empty(),
         "no staged word survives past its call: {pending:?}"
     );
-    assert_eq!(
-        evidence,
-        vec![int_body; 3]
-            .into_iter()
-            .chain([string_body; 3])
-            .chain([int_body; 3])
-            .chain([string_body; 3])
-            .collect::<Vec<_>>(),
-        "each entering site stages the serving body its demand calls, follow words padded"
-    );
+    let chains = lowered.module().chains();
+    assert_eq!(evidence.len(), 4, "one chain word per entering site");
+    for (site, word) in evidence.iter().enumerate() {
+        let chain = chains
+            .get(usize::try_from(*word).expect("chain index fits usize"))
+            .expect("the staged word names a chain object");
+        let expected = if site % 2 == 0 { int_body } else { string_body };
+        assert_eq!(
+            chain.func, expected,
+            "site {site} stages the chain of its demand's serving body"
+        );
+        assert!(
+            chain.next.is_empty(),
+            "the concrete serving body demands nothing"
+        );
+    }
     // no dispatch uop exists at an inherent site
     let main_shape = shape(&lowered, "main");
     assert!(
@@ -183,10 +185,10 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
     );
 }
 
-/// The member body claims the pair's evidence area as trailing
-/// parameters: the declared receiver, then one I64 word per recorded
-/// demand plus its follow words, and the nested runtime dispatch reads
-/// the slot word from its frame through the sentinel CALLG.
+/// The member body claims the pair's evidence word as a trailing
+/// parameter: the declared receiver, then one I64 word per recorded
+/// demand, and the nested runtime dispatch reads the slot word from its
+/// frame through the sentinel CALLG.
 #[test]
 fn the_member_body_claims_its_evidence_parameter() {
     let (_, lowered) = lower_probe();
@@ -196,14 +198,14 @@ fn the_member_body_claims_its_evidence_parameter() {
     let function = &lowered.module().functions()[index as usize];
     assert_eq!(
         function.layout().params_len(),
-        4,
-        "the receiver plus the pair's slot and two follow words"
+        2,
+        "the receiver plus the pair's one chain word"
     );
     assert!(
-        function.layout().slots()[1..4]
+        function.layout().slots()[1..2]
             .iter()
             .all(|slot| *slot == SlotType::I64),
-        "the evidence area binds as trailing I64 parameters"
+        "the evidence word binds as the trailing I64 parameter"
     );
     let placed = lowered.placed("list[t]#describe").expect("the body lowers");
     let pool = &lowered.module().functions()[index as usize].constants();
@@ -211,7 +213,10 @@ fn the_member_body_claims_its_evidence_parameter() {
         .iter()
         .filter_map(|op| match op {
             PlacedOp::Uop(Uop::Callg { callee, .. }) => match &pool[usize::from(callee.0)] {
-                Constant::FuncRef { module, func } if module == "$evidence" => Some(*func),
+                Constant::FuncRef {
+                    key: FuncRefKey::Native(module),
+                    func,
+                } if module == "$evidence" => Some(*func),
                 _ => None,
             },
             _ => None,

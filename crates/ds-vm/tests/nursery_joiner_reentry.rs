@@ -12,7 +12,7 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Inst, Uop},
 };
-use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
+use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{ModuleRegistry, Platform, Trap, Value, Vm};
 
 fn func(
@@ -48,7 +48,7 @@ fn run_joiner_reentry(callee: u32, tail: Uop) -> Result<Value, Trap> {
             Constant::I64(0), // the joiner's pool id
             Constant::I64(1), // the resume payload
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 25,
             }, // fiber_resume
         ],
@@ -86,21 +86,21 @@ fn run_joiner_reentry(callee: u32, tail: Uop) -> Result<Value, Trap> {
         3,
         vec![
             Constant::FuncRef {
-                module: String::new(),
+                key: FuncRefKey::Dep(0),
                 func: 0,
             }, // 0: the f0 word
             Constant::I64(0), // 1
             Constant::I64(1), // 2: boundary mask
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 41,
             },
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 42,
             },
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: callee,
             },
         ],
@@ -179,7 +179,7 @@ fn boundary_survives_a_gone_joiner_trap_re_raise() {
         0,
         2,
         vec![Constant::I64(0), Constant::I64(1), Constant::FuncRef {
-            module: "builtin".into(),
+            key: FuncRefKey::Native("builtin".into()),
             func: 25,
         }],
         vec![
@@ -237,24 +237,24 @@ fn boundary_survives_a_gone_joiner_trap_re_raise() {
         3,
         vec![
             Constant::FuncRef {
-                module: String::new(),
+                key: FuncRefKey::Dep(0),
                 func: 0,
             }, // 0: the f0 word
             Constant::FuncRef {
-                module: String::new(),
+                key: FuncRefKey::Dep(0),
                 func: 1,
             }, // 1: the f1 word
             Constant::I64(1), // 2: boundary mask
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 41,
             },
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 42,
             },
             Constant::FuncRef {
-                module: "builtin".into(),
+                key: FuncRefKey::Native("builtin".into()),
                 func: 43,
             },
         ],

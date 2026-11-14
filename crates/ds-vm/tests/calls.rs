@@ -9,10 +9,9 @@
 //! deep CALLS recursion is bounded by the stack limit like every
 //! non-tail call.
 
-use std::sync::Arc;
-
 use ds_vm::{
-    Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FiberState, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
+    Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, Fn as FnSlot, I64, Ref},
@@ -119,10 +118,10 @@ fn direct_call_module() -> ModuleVersion {
         &[I64, I64, I64],
         1,
         1,
-        vec![Const::FuncRef {
+        vec![Const::FuncRef(ConstFuncRef::Named {
             module: "lib".into(),
             func: 0,
-        }],
+        })],
         &[
             Uop::Funcf { frame_slots: 3 },
             Uop::Mov { dst: 2, src: 0 }, // stage n in the arg area
@@ -137,15 +136,16 @@ fn direct_call_module() -> ModuleVersion {
 }
 
 /// The swap-time cache eviction: a hot-reload swap unstamps every CALL
-/// inline-cache entry, and the unstamped entries release their
-/// swapped-out versions' handles at the swap instead of lingering until
-/// eviction. After the first swap the retired version lives only in the
-/// registry's retiring slot, and after the second swap nowhere but this
-/// test's own handle — the strong count is the witness.
+/// inline-cache entry, and the unstamped entries stop naming their
+/// swapped-out versions' rows at the swap instead of lingering until
+/// eviction. After the first swap the retired version's row stays (the
+/// registry's retiring slot names it), and after the second swap the
+/// install sweep retires the row — the row is the version's single home,
+/// so the row's liveness is the whole witness.
 #[test]
 fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
     let mut reg = ModuleRegistry::new();
-    let v1 = reg.install(scaled_lib(2));
+    let v1_row = reg.install(scaled_lib(2));
     reg.install(direct_call_module());
     let mut vm = Vm::new(reg);
     assert_eq!(
@@ -153,21 +153,215 @@ fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
         Ok(Value::I64(42))
     );
     vm.install_module(scaled_lib(3));
-    assert_eq!(
-        Arc::strong_count(&v1),
-        2,
-        "the retiring slot plus this handle: the cache dropped its entry at the swap"
+    assert!(
+        vm.registry().version(v1_row).is_some(),
+        "the retiring slot names the row: the cache dropped its entry at the swap"
     );
     vm.install_module(scaled_lib(5));
-    assert_eq!(
-        Arc::strong_count(&v1),
-        1,
-        "the second swap retired v1 out of the registry, and nothing lingers for it"
+    assert!(
+        vm.registry().version(v1_row).is_none(),
+        "the second swap's sweep retired v1's row, and nothing lingers for it"
     );
     assert_eq!(
         vm.run("app", "apply", &[Value::I64(21)]),
         Ok(Value::I64(105)),
         "the swept site resolves through the current slot (the full lookup stays authoritative)"
+    );
+}
+
+/// The install-time sweep's precise retirement over the fiber pool: a
+/// version's row stays pinned while any fiber still names it — a spawned,
+/// never-entered fiber's resume point, a dead fiber's kept frames (the
+/// recycle door reads them) — and retires at the first install after the
+/// last namer is gone. The row's liveness is the witness.
+#[test]
+fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
+    let mut vm = Vm::new(ModuleRegistry::new());
+    let v1_row = vm.install_module(scaled_lib(2));
+    let child = vm
+        .spawn_fiber("lib", "scaled", &[Value::I64(21)])
+        .expect("the entry resolves");
+    // two swaps move v1's row out of every registry slot; the ready
+    // child's resume point still names it, so the sweep keeps the row
+    vm.install_module(scaled_lib(3));
+    vm.install_module(scaled_lib(5));
+    assert!(
+        vm.registry().version(v1_row).is_some(),
+        "the ready child's resume point pins the row"
+    );
+    // the child runs its entered version's body to completion
+    assert_eq!(
+        vm.resume_fiber(child, Value::I64(0)),
+        Ok(Value::I64(42)),
+        "the spawned fiber runs the version it was entered under"
+    );
+    // the completed child's kept frames still pin the row: the recycle
+    // door fires whatever banded deinit claims survived the death, so
+    // the frames must outlive the slot's reuse
+    vm.install_module(scaled_lib(7));
+    assert!(
+        vm.registry().version(v1_row).is_some(),
+        "the dead child's kept frames pin the row until its slot reuses"
+    );
+    // the next spawn recycles the dead slot (clearing its frames), so the
+    // install after it retires the row
+    let fresh = vm
+        .spawn_fiber("lib", "scaled", &[Value::I64(3)])
+        .expect("the spawn recycles the dead slot");
+    vm.install_module(scaled_lib(9));
+    assert!(
+        vm.registry().version(v1_row).is_none(),
+        "the recycled slot cleared the frames, so the sweep dropped the row"
+    );
+    assert_eq!(
+        vm.resume_fiber(fresh, Value::I64(0)),
+        Ok(Value::I64(21)),
+        "the fresh child runs the version current at its spawn"
+    );
+}
+
+/// The `lib` module for the parked-mid-chain sweep seam: `inner` parks at
+/// `fiber_yield` and multiplies its resumed payload by the scale constant;
+/// `outer` stages a marker local before CALLing `inner` and adds it to the
+/// answer — the caller frame's survival witness across a suspension.
+fn yield_lib(scale: i64) -> ModuleVersion {
+    let inner = def(
+        "inner",
+        &[I64, I64, I64, I64],
+        1,
+        1,
+        vec![
+            Const::I64(scale),
+            Const::FuncRef(ConstFuncRef::Named {
+                module: "builtin".into(),
+                func: native::BUILTIN_FIBER_YIELD,
+            }),
+        ],
+        &[
+            Uop::Funcf { frame_slots: 4 },
+            Uop::Mov { dst: 3, src: 0 }, // stage n as the yield's value
+            Uop::Call {
+                callee: k(1),
+                nargs: 1,
+            }, // parks; the payload lands on word 3
+            Uop::Kimm { dst: 2, kidx: k(0) },
+            Uop::MulI64 {
+                dst: 1,
+                lhs: 3,
+                rhs: 2,
+            }, // the entered version's scale
+            Uop::Ret { src: 1 },
+        ],
+    );
+    let outer = def(
+        "outer",
+        &[I64, I64, I64],
+        1,
+        1,
+        vec![
+            Const::I64(5),
+            Const::FuncRef(ConstFuncRef::Named {
+                module: "lib".into(),
+                func: 0,
+            }),
+        ],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 2, src: 0 },      // stage n for inner
+            Uop::Kimm { dst: 1, kidx: k(0) }, // the marker local, staged before the call
+            Uop::Call {
+                callee: k(1),
+                nargs: 1,
+            },
+            Uop::AddI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    );
+    ModuleVersion::new("lib", vec![inner, outer]).expect("valid lib module")
+}
+
+/// The simultaneous seam the entry-frame and dead-frame tests miss: a
+/// fiber parked at a yield inside a multi-frame chain keeps both marking
+/// sources live at once — its chain holds `outer`'s and `inner`'s frames,
+/// and its resume point names the entered version — and every install's
+/// sweep must mark through both. The second `lib` swap moves v1's row out
+/// of every registry slot, so the row's liveness is a real witness (only
+/// the parked child names it), and the resume answers in the entered
+/// version through its caller frame.
+#[test]
+fn an_install_pins_a_parked_mid_chain_fibers_frames_and_resume_point() {
+    let mut vm = Vm::new(ModuleRegistry::new());
+    let v1_row = vm.install_module(yield_lib(2));
+    let child = vm
+        .spawn_fiber("lib", "outer", &[Value::I64(21)])
+        .expect("the entry resolves");
+    // the first resume enters under v1, drives `outer` into `inner`, and
+    // parks at the yield handing out `inner`'s argument
+    assert_eq!(
+        vm.resume_fiber(child, Value::I64(0)),
+        Ok(Value::I64(21)),
+        "the drive parked at the yield inside the called callee"
+    );
+    assert_eq!(vm.fiber_state(child), Some(FiberState::Suspended));
+    // the hot swap moves v1's row to the retiring slot, and the
+    // unrelated module's install sweeps too — both must keep marking the
+    // parked child's row
+    vm.install_module(yield_lib(7));
+    vm.install_module(apply_module());
+    // the second `lib` swap moves v1's row out of every registry slot:
+    // only the parked child's frames and resume point name it now
+    vm.install_module(yield_lib(11));
+    assert!(
+        vm.registry().version(v1_row).is_some(),
+        "the parked child's kept frames and resume point pin the row"
+    );
+    // the resume continues in the entered version (scale 2, not the
+    // current 11) and unwinds through outer's kept frame — the marker
+    // staged before the call comes back with the answer: 100 * 2 + 5
+    assert_eq!(
+        vm.resume_fiber(child, Value::I64(100)),
+        Ok(Value::I64(205)),
+        "the resumed fiber multiplies in its entered version and returns through its caller frame"
+    );
+    // the completed child keeps its frames until its pool slot recycles
+    // (the recycle door's deinit firing), so its row pins on past this
+    // test — the dead-frames half is the entry-frame test's own tail
+}
+
+/// An install pins the versions a trapped drive's kept frames still name:
+/// the interrupted root keeps its frames, the sweep marks them, and the
+/// backtrace reads them through the pinned row; the row retires only
+/// after a later run resets the frames.
+#[test]
+fn an_install_pins_the_versions_a_trapped_runs_frames_still_name() {
+    let mut vm = Vm::new(ModuleRegistry::new());
+    let v1_row = vm.install_module(apply_module());
+    let word = Value::Fn(FuncRef::new(u32::MAX, 0));
+    assert!(
+        vm.run("app", "apply", &[word]).is_err(),
+        "the garbage word traps"
+    );
+    vm.install_module(apply_module());
+    vm.install_module(apply_module());
+    assert!(
+        vm.registry().version(v1_row).is_some(),
+        "the trapped drive's kept frames pin the row past the swap"
+    );
+    let frames = vm.backtrace();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].module, "app");
+    assert_eq!(frames[0].func, "apply");
+    // the next run resets the trapped drive's frames and traps again on
+    // the current version, so the install after it retires v1's row
+    assert!(vm.run("app", "apply", &[word]).is_err());
+    vm.install_module(apply_module());
+    assert!(
+        vm.registry().version(v1_row).is_none(),
+        "the reset run's frames named the current row, so the sweep freed v1's"
     );
 }
 
@@ -241,19 +435,17 @@ fn calls_recursion_through_a_fn_word_counts() {
     );
 }
 
-/// The RET handle take-back: a same-module return moves the caller's
-/// chain-entry handle back out as the restored Active and the popped
-/// callee entry's handle (the same version) takes its place, so a
-/// return moves no Arc count. The strong count is the witness: a
-/// recursion any depth deep, run twice (the second run clears the first
-/// run's kept entry frame), ends with exactly the registry's current
-/// slot, the run-entry hint, the root fiber's kept entry, and this
-/// test's own handle — a leaked handle per return would move the count
-/// by the recursion depth.
+/// The version-table call seams: every frame's chain entry carries the
+/// version's table row (a u32 name, the table owning the version's
+/// survival), so a call pushes no count and a return takes back nothing —
+/// the restored Active is the caller's own row. The single-home count
+/// witness (a drive's entry, call, return, and cache fills moving the
+/// row's count off one) is the vm.rs unit pin
+/// `the_tables_row_is_a_versions_single_home_across_drives`.
 #[test]
-fn same_module_returns_take_back_handles_without_leaking() {
+fn same_module_returns_take_back_rows_without_leaking() {
     let mut reg = ModuleRegistry::new();
-    let version = reg.install(recursion_version());
+    reg.install(recursion_version());
     let mut vm = Vm::new(reg);
     for _ in 0..2 {
         let word = recursion_word(&vm);
@@ -262,11 +454,6 @@ fn same_module_returns_take_back_handles_without_leaking() {
             Ok(Value::I64(60))
         );
     }
-    assert_eq!(
-        Arc::strong_count(&version),
-        4,
-        "current slot + run-entry hint + kept root entry + this handle, nothing per return"
-    );
 }
 
 /// CALLS has no tail variant: every recursion is an ordinary frame push,
@@ -524,10 +711,10 @@ fn caller_module(tail: bool) -> ModuleVersion {
         &[I64, I64],
         1,
         1,
-        vec![Const::FuncRef {
+        vec![Const::FuncRef(ConstFuncRef::Named {
             module: "lib".into(),
             func: 0,
-        }],
+        })],
         &[
             Uop::Funcf { frame_slots: 2 },
             Uop::Mov { dst: 1, src: 0 },
@@ -591,10 +778,10 @@ fn call_site_cache_keys_the_site_on_the_function_not_the_module() {
             &[I64, I64],
             1,
             1,
-            vec![Const::FuncRef {
+            vec![Const::FuncRef(ConstFuncRef::Named {
                 module: callee.into(),
                 func: 0,
-            }],
+            })],
             &[
                 Uop::Funcf { frame_slots: 2 },
                 Uop::Mov { dst: 1, src: 0 },
@@ -681,10 +868,10 @@ fn dispatch_tail_module() -> ModuleVersion {
                 Const::I64(1),
                 Const::I64(42),
                 Const::I64(7),
-                Const::FuncRef {
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "dmut".into(),
                     func: u32::from(!even), // the sibling
-                },
+                }),
                 Const::Bool(true),
                 Const::Bool(false),
             ],
@@ -741,10 +928,10 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
             vec![
                 Const::I64(42), // the evidence word
                 Const::I64(7),  // the instance word
-                Const::FuncRef {
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "dmut".into(),
                     func: callee,
-                },
+                }),
             ],
             &[
                 Uop::Funcf { frame_slots: 5 },
@@ -810,10 +997,10 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
         &[I64, I64, I64],
         1,
         2,
-        vec![Const::FuncRef {
+        vec![Const::FuncRef(ConstFuncRef::Named {
             module: "nowhere".into(),
             func: 0,
-        }],
+        })],
         &[
             Uop::Funcf { frame_slots: 3 },
             Uop::Mov { dst: 2, src: 0 },
@@ -839,11 +1026,13 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
 }
 
 /// The sentinel evidence FuncRef dispatches a dispatch tail from the
-/// frame's own evidence slot: the word staged there names the serving
-/// body, the transfer slides the staged words into it, and the recursion
-/// through the sentinel runs a million deep at a constant stack. `drive`
-/// and `step` share the shape [n, evidence, t, one, staged-n,
-/// staged-evidence] with the evidence word naming `step`'s table index.
+/// frame's own evidence slot: the word staged there names an
+/// evidence-chain object whose serving body is `step`, the transfer
+/// slides the staged words into it, and the recursion through the
+/// sentinel runs a million deep at a constant stack. `drive` and `step`
+/// share the shape [n, evidence, t, one, staged-n, staged-evidence] with
+/// the evidence word naming the chain (whose `func` is `step`'s table
+/// index, its demand-less body closing the chain).
 #[test]
 fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
     fn body() -> [Uop; 10] {
@@ -880,24 +1069,30 @@ fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
             vec![
                 Const::I64(0),
                 Const::I64(1),
-                Const::FuncRef {
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "$evidence".into(),
                     func: 1,
-                }, // the sentinel names evidence slot 1
+                }), // the sentinel names evidence slot 1
                 Const::Bool(true),
             ],
             &body(),
         )
     }
     let mut reg = ModuleRegistry::new();
+    let chains = vec![ds_mod::EvidenceChain {
+        func: 1, // `step`'s table index; its demand-less body closes the chain
+        next: Vec::new(),
+    }];
     reg.install(
         ModuleVersion::new("sent", vec![sentinel_def("drive"), sentinel_def("step")])
-            .expect("valid sent module"),
+            .expect("valid sent module")
+            .with_chains(chains)
+            .expect("valid chain table"),
     );
     let mut vm = Vm::new(reg);
-    // the evidence word 1 names `step`'s function-table index
+    // the evidence word 0 names the chain whose serving body is `step`
     assert_eq!(
-        vm.run("sent", "drive", &[Value::I64(1_000_000), Value::I64(1)]),
+        vm.run("sent", "drive", &[Value::I64(1_000_000), Value::I64(0)]),
         Ok(Value::Bool(true)),
         "the sentinel dispatch tail runs the named body"
     );
@@ -908,13 +1103,12 @@ fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
 
 /// The sentinel dispatch's exact arity contract (the P0 review repro's
 /// hand-assembled equivalent): a target claims its real parameters plus
-/// its evidence pairs' rider areas (slot plus two follow words per
-/// pair), and the caller stages its real arguments plus exactly one
-/// pair's area — so a gap of anything but zero or one rider area is an
-/// arity violation. The one-word-short receiver against a two-word
-/// `self` (gap 1, the missing word staged as an I64 rider the relaxed
-/// check read as a field word) must trap, never slide; the one-pair
-/// target (gap 3) keeps transferring.
+/// exactly its chain object's tail count, and the dispatch stages the
+/// real arguments plus those tail words itself — so a parameter count
+/// disagreeing with the chain's tail list is an arity violation. The
+/// one-word-short receiver against a two-word `self` (the missing word
+/// the relaxed check once read as a rider) must trap, never slide; the
+/// three-tail target (gap 3) keeps transferring.
 #[test]
 fn a_sentinel_dispatch_with_a_rider_eaten_gap_traps() {
     // the entry shape every probe shares: [evidence, receiver, r0, r1, r2]
@@ -926,10 +1120,14 @@ fn a_sentinel_dispatch_with_a_rider_eaten_gap_traps() {
             &[I64, I64, I64, I64, I64],
             1,
             4,
-            vec![Const::I64(42), Const::I64(7), Const::FuncRef {
-                module: "$evidence".into(),
-                func: 0,
-            }],
+            vec![
+                Const::I64(42),
+                Const::I64(7),
+                Const::FuncRef(ConstFuncRef::Named {
+                    module: "$evidence".into(),
+                    func: 0,
+                }),
+            ],
             &[
                 Uop::Funcf { frame_slots: 5 },
                 Uop::Kimm { dst: 1, kidx: k(0) },
@@ -956,24 +1154,36 @@ fn a_sentinel_dispatch_with_a_rider_eaten_gap_traps() {
         Uop::Ret { src: 0 },
     ]);
     let mut reg = ModuleRegistry::new();
+    let chains = vec![
+        ds_mod::EvidenceChain {
+            func: 1, // `pair`: four parameters, three tail chains
+            next: vec![1, 1, 1],
+        },
+        ds_mod::EvidenceChain {
+            func: 2, // `wide`: two parameters, no tails
+            next: Vec::new(),
+        },
+    ];
     reg.install(
         ModuleVersion::new("p0exact", vec![entry("ok"), pair, wide, entry("trap")])
-            .expect("valid p0exact module"),
+            .expect("valid p0exact module")
+            .with_chains(chains)
+            .expect("valid chain table"),
     );
     let mut vm = Vm::new(reg);
-    // the gap-3 shape transfers: one real argument plus the rider area
-    // sliding into the pair body's trailing evidence parameters
+    // the gap-3 shape transfers: one real argument plus the three tail
+    // words the dispatch stages sliding into the pair body's trailing
+    // evidence parameters
     assert_eq!(
-        vm.run("p0exact", "ok", &[Value::I64(1)]),
+        vm.run("p0exact", "ok", &[Value::I64(0)]),
         Ok(Value::I64(42)),
-        "the one-pair target takes its riders as its evidence parameters"
+        "the three-tail target takes its riders as its evidence parameters"
     );
-    // the gap-1 shape traps: the evidence word names `wide` (index 2),
-    // whose two-word `self` is one staged word short — the missing word
-    // sits staged as an I64 rider, exactly the word the relaxed check
-    // read as the receiver's second field word
+    // the gap-1 shape traps: the evidence word names the chain whose
+    // serving body is `wide` (index 2), whose two-word `self` is one
+    // staged word short — the chain carries no tail to fill it
     assert_eq!(
-        vm.run("p0exact", "trap", &[Value::I64(2)]),
+        vm.run("p0exact", "trap", &[Value::I64(1)]),
         Err(Trap::ArityMismatch {
             expected: 2,
             given: 1,
@@ -999,10 +1209,10 @@ fn a_generic_builtin_dispatch_tail_runs_and_returns() {
             vec![
                 Const::Str("four".into()),
                 Const::I64(ds_vm::abi::BuiltinInstance::Str as i64),
-                Const::FuncRef {
+                Const::FuncRef(ConstFuncRef::Named {
                     module: "builtin".into(),
                     func: 10, // len, the reserved generic slot
-                },
+                }),
             ],
             &[
                 Uop::Funcf { frame_slots: 3 },
@@ -1027,5 +1237,42 @@ fn a_generic_builtin_dispatch_tail_runs_and_returns() {
     assert!(
         !vm.objects().is_empty(),
         "the interned constant's abandoned count rides the root-tail corner"
+    );
+}
+
+/// The dead evidence sentinel traps loudly: a site entering a body whose
+/// demand's variable its branch never mentions stages `-1` — no chain
+/// object — for that demand, and the nested dispatch that reads it can
+/// only run under a narrowing that branch cannot satisfy, so a read
+/// names a checker gap and answers a structured trap, never a wrong
+/// body.
+#[test]
+fn a_dead_evidence_sentinel_read_traps_naming_the_slot() {
+    let entry = def(
+        "drive",
+        &[I64, I64],
+        1,
+        1,
+        vec![Const::FuncRef(ConstFuncRef::Named {
+            module: "$evidence".into(),
+            func: 0,
+        })],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Mov { dst: 1, src: 0 }, // a receiver word beside the sentinel
+            Uop::Callg {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    );
+    let mut reg = ModuleRegistry::new();
+    reg.install(ModuleVersion::new("dead", vec![entry]).expect("valid dead module"));
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("dead", "drive", &[Value::I64(-1)]),
+        Err(Trap::DeadEvidenceChain { slot: 0 }),
+        "the sentinel read answers a structured trap naming the slot"
     );
 }

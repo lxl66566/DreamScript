@@ -8,7 +8,9 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Uop},
 };
-use ds_mod::{Constant, Flags, Function, Hash128, Module, TargetClass, read, write};
+use ds_mod::{
+    Constant, EntryArg, Flags, FuncRefKey, Function, Hash128, Module, TargetClass, read, write,
+};
 
 /// xorshift64* PRNG: deterministic, no dependency, good enough for byte noise.
 struct Rng(u64);
@@ -129,16 +131,35 @@ fn random_module(u: &mut Unstructured) -> Module {
     let mut module = Module::new(name, target, random_hash(u));
     let bits = u8::arbitrary(u).unwrap_or(0) & Flags::KNOWN_BITS;
     module = module.with_flags(Flags::from_bits(bits).expect("masked to known bits"));
+    let mut dep_count = 0usize;
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
         module = module.with_dep(random_string(u, 8), random_hash(u));
+        dep_count += 1;
     }
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 9 {
-        module = module.with_constant(random_constant(u));
+        module = module.with_constant(random_constant(u, dep_count));
     }
     // Random-but-valid function bodies: full-validity random uops over the
     // whole set is a later fuzz target.
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 3 {
-        module = module.with_function(random_function(u));
+        module = module.with_function(random_function(u, dep_count));
+    }
+    // The blocks payload's tag table: dense first-use ids by construction.
+    for id in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
+        module = module.with_tag(random_string(u, 10), id);
+    }
+    // The entry table: index-prefixed names so rows stay distinct.
+    for index in 0..u8::arbitrary(u).unwrap_or(0) % 4 {
+        let args = (0..u8::arbitrary(u).unwrap_or(0) % 4)
+            .map(|_| match u8::arbitrary(u).unwrap_or(0) % 5 {
+                0 => EntryArg::Int,
+                1 => EntryArg::Float,
+                2 => EntryArg::Bool,
+                3 => EntryArg::OptionalInt,
+                _ => EntryArg::Foreign,
+            })
+            .collect();
+        module = module.with_entry(format!("e{index}{}", random_string(u, 8)), args);
     }
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 9 {
         let (a, b) = (
@@ -151,14 +172,22 @@ fn random_module(u: &mut Unstructured) -> Module {
     module
 }
 
-fn random_constant(u: &mut Unstructured) -> Constant {
-    match u8::arbitrary(u).unwrap_or(0) % 5 {
+fn random_constant(u: &mut Unstructured, dep_count: usize) -> Constant {
+    match u8::arbitrary(u).unwrap_or(0) % 6 {
         0 => Constant::I64(i64::arbitrary(u).unwrap_or(0)),
         1 => Constant::F64(f64::from_bits(u64::arbitrary(u).unwrap_or(0))),
         2 => Constant::Bool(bool::arbitrary(u).unwrap_or(false)),
         3 => Constant::Str(random_string(u, 16)),
+        4 => Constant::FuncRef {
+            // a position the header's dep list can address: 0 the
+            // enclosing module, n the n-1-th entry
+            key: FuncRefKey::Dep(u32::from(
+                u8::arbitrary(u).unwrap_or(0) % u8::try_from(dep_count + 1).expect("few deps"),
+            )),
+            func: u32::arbitrary(u).unwrap_or(0),
+        },
         _ => Constant::FuncRef {
-            module: random_string(u, 8),
+            key: FuncRefKey::Native(random_string(u, 8)),
             func: u32::arbitrary(u).unwrap_or(0),
         },
     }
@@ -166,7 +195,7 @@ fn random_constant(u: &mut Unstructured) -> Constant {
 
 /// A function whose body is always constructor-valid: a small uop subset
 /// with jump targets drawn below the body length.
-fn random_function(u: &mut Unstructured) -> Function {
+fn random_function(u: &mut Unstructured, dep_count: usize) -> Function {
     let slot_count = usize::from(u8::arbitrary(u).unwrap_or(0) % 9);
     let mut slots = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {
@@ -185,7 +214,7 @@ fn random_function(u: &mut Unstructured) -> Function {
         FrameLayout::new(slots, params_len, arg_area_len).expect("consistent by construction");
     let mut constants = Vec::new();
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
-        constants.push(random_constant(u));
+        constants.push(random_constant(u, dep_count));
     }
     let code_len = usize::from(u8::arbitrary(u).unwrap_or(0) % 15) + 1;
     let mut code = Vec::with_capacity(code_len);

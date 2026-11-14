@@ -17,7 +17,7 @@
 //! wildcards whose kinds vary by call site.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -35,10 +35,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// The shared pool, copied per function (the payload granularity): the

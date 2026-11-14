@@ -43,7 +43,8 @@
 //! results declare `Raw`; children spawn during the CALLG, so their pool ids number up from 1.
 
 use ds_vm::{
-    Const, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
+    Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -61,18 +62,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "pm").
 fn pm_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "pm".into(),
         func: index,
-    }
+    })
 }
 
 fn def(
@@ -1805,10 +1806,13 @@ fn nested_fork_joins_run_past_the_interlocks_own_depth_bar() {
     let depth = 2048u32;
     let mut fns = vec![deep_base_def()];
     for i in 1..=depth {
-        fns.push(deep_level_def(&format!("level_{i}"), Const::FuncRef {
-            module: "dp".into(),
-            func: i - 1,
-        }));
+        fns.push(deep_level_def(
+            &format!("level_{i}"),
+            Const::FuncRef(ConstFuncRef::Named {
+                module: "dp".into(),
+                func: i - 1,
+            }),
+        ));
     }
     let mut reg = ModuleRegistry::new();
     reg.install(ModuleVersion::new("dp", fns).expect("valid deep fixture"));

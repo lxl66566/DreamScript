@@ -5,8 +5,8 @@ use ds_abi::{
     uop::{ConstIdx, Uop},
 };
 use ds_mod::{
-    Constant, Flags, Function, FunctionError, Hash128, Module, TargetClass, read, read_checked,
-    read_mmap, write,
+    Constant, EntryArg, Flags, FuncRefKey, Function, FunctionError, Hash128, Module, TargetClass,
+    read, read_checked, read_mmap, write,
 };
 
 const SOURCE: &[u8] = b"fn even(n: int) -> Bool {\n  n == 0 || odd(n - 1)\n}\n";
@@ -41,8 +41,13 @@ fn sample_module() -> Module {
     .with_constant(Constant::Bool(false))
     .with_constant(Constant::Str("h\u{e9}llo \u{0} world".to_owned()))
     .with_constant(Constant::FuncRef {
-        module: "csv".to_owned(),
+        // "csv" is the second dependency entry, so position 2
+        key: FuncRefKey::Dep(2),
         func: 2,
+    })
+    .with_constant(Constant::FuncRef {
+        key: FuncRefKey::Native("builtin".to_owned()),
+        func: 7,
     })
     .with_debug_span(0, 24)
     .with_debug_span(24, 25)
@@ -76,7 +81,7 @@ fn round_trip_preserves_every_field() {
         Hash128::compute(b"csv package content")
     );
     assert_eq!(module.source_hash(), Hash128::compute(SOURCE));
-    assert_eq!(module.constants().len(), 7);
+    assert_eq!(module.constants().len(), 8);
     assert_eq!(module.constants()[0], Constant::I64(-42));
     assert_eq!(module.constants()[2], Constant::F64(3.25));
     assert_eq!(module.constants()[3], Constant::Bool(true));
@@ -86,8 +91,12 @@ fn round_trip_preserves_every_field() {
         Constant::Str("h\u{e9}llo \u{0} world".to_owned())
     );
     assert_eq!(module.constants()[6], Constant::FuncRef {
-        module: "csv".to_owned(),
+        key: FuncRefKey::Dep(2),
         func: 2
+    });
+    assert_eq!(module.constants()[7], Constant::FuncRef {
+        key: FuncRefKey::Native("builtin".to_owned()),
+        func: 7
     });
     // NaN payloads survive bit-exactly (NaN != NaN under derived equality).
     match &module.constants()[1] {
@@ -151,6 +160,46 @@ fn bl7_fields_default_pending_and_round_trip() {
 }
 
 #[test]
+fn tag_and_entry_tables_round_trip() {
+    // The blocks payload's version-3 tables: the name side of the tag
+    // ids and the run entries' per-parameter staging plans.
+    let module = sample_module()
+        .with_tag("none", 0)
+        .with_tag("int", 1)
+        .with_entry("main", vec![EntryArg::OptionalInt])
+        .with_entry("worker", vec![
+            EntryArg::Int,
+            EntryArg::Float,
+            EntryArg::Bool,
+            EntryArg::Foreign,
+        ]);
+    let bytes = write(&module);
+    let read_back = read(&bytes).expect("tables round trip");
+    assert_eq!(write(&read_back), bytes, "byte-stable across the read");
+    assert_eq!(read_back.tags().len(), 2);
+    assert_eq!(read_back.tag_id("none"), Some(0));
+    assert_eq!(read_back.tag_id("int"), Some(1));
+    assert_eq!(read_back.tag_id("zzz"), None);
+    assert_eq!(
+        read_back.entry_args("main"),
+        Some(&[EntryArg::OptionalInt][..])
+    );
+    assert_eq!(
+        read_back.entry_args("worker"),
+        Some(
+            &[
+                EntryArg::Int,
+                EntryArg::Float,
+                EntryArg::Bool,
+                EntryArg::Foreign
+            ][..]
+        )
+    );
+    assert_eq!(read_back.entry_args("nope"), None);
+    assert_eq!(read_back.entries().len(), 2);
+}
+
+#[test]
 fn strip_removes_debug_spans_section() {
     let plain = write(&sample_module());
     let stripped_bytes = write(&sample_module().stripped());
@@ -173,6 +222,8 @@ fn bytecode_target_and_empty_module_round_trip() {
     assert_eq!(read_back.target(), &TargetClass::Bytecode);
     assert_eq!(read_back.deps(), []);
     assert_eq!(read_back.constants(), []);
+    assert_eq!(read_back.tags(), []);
+    assert_eq!(read_back.entries(), []);
     assert_eq!(read_back.debug_spans(), None);
     assert_eq!(write(&read_back), bytes);
 
@@ -212,8 +263,8 @@ fn mmap_loader_round_trips_from_disk() {
 // public). Slots: r0 = n, r1 = compare bool, r2 = constant scratch, r3 =
 // the outgoing argument (the slide source the ABI derives as the arg-area
 // slot). Pool: k0 = 0i64, k1 = 1i64, k2 = the result bool, k3 = the
-// callee as a same-module FuncRef (empty module name, function index
-// within this module's blocks payload).
+// callee as an enclosing-module FuncRef (dependency position 0,
+// function index within this module's blocks payload).
 fn even_code() -> Vec<Uop> {
     vec![
         Uop::Funcf { frame_slots: 4 }, // 0
@@ -303,7 +354,7 @@ fn even_odd_two_function_module_round_trips() {
                     Constant::I64(1),
                     Constant::Bool(true),
                     Constant::FuncRef {
-                        module: String::new(),
+                        key: FuncRefKey::Dep(0),
                         func: 1,
                     },
                 ],
@@ -320,7 +371,7 @@ fn even_odd_two_function_module_round_trips() {
                     Constant::I64(1),
                     Constant::Bool(false),
                     Constant::FuncRef {
-                        module: String::new(),
+                        key: FuncRefKey::Dep(0),
                         func: 0,
                     },
                 ],
@@ -341,7 +392,7 @@ fn even_odd_two_function_module_round_trips() {
     assert_eq!(even.layout(), &even_odd_layout());
     assert_eq!(even.constants()[0], Constant::I64(0));
     assert_eq!(even.constants()[3], Constant::FuncRef {
-        module: String::new(),
+        key: FuncRefKey::Dep(0),
         func: 1
     });
     assert_eq!(odd.constants()[2], Constant::Bool(false));
@@ -423,12 +474,15 @@ fn builder_rejects_jump_escaping_the_body() {
 
 #[test]
 fn cross_module_funcref_round_trips() {
-    // A function whose pool mixes a cross-module ref (qualified callee in
-    // the "utils" dependency) and a same-module ref (empty module name);
-    // the module-level constants section carries one too.
+    // A function whose pool mixes two dependency-position refs (the
+    // "std" and "utils" dependency entries) and an enclosing-module
+    // ref (position 0); the module-level constants section carries one
+    // too.
     let module = Module::new("app", TargetClass::Bytecode, Hash128::ZERO)
+        .with_dep("std", Hash128::ZERO)
+        .with_dep("utils", Hash128::ZERO)
         .with_constant(Constant::FuncRef {
-            module: "std".to_owned(),
+            key: FuncRefKey::Dep(1), // the "std" entry
             func: 0,
         })
         .with_function(
@@ -437,11 +491,11 @@ fn cross_module_funcref_round_trips() {
                 FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 1).expect("layout"),
                 vec![
                     Constant::FuncRef {
-                        module: "utils".to_owned(),
+                        key: FuncRefKey::Dep(2), // the "utils" entry
                         func: 4,
                     },
                     Constant::FuncRef {
-                        module: String::new(),
+                        key: FuncRefKey::Dep(0),
                         func: 0,
                     },
                 ],
@@ -464,15 +518,15 @@ fn cross_module_funcref_round_trips() {
     let read_back = read(&bytes).expect("funcref module reads");
     assert_eq!(write(&read_back), bytes);
     assert_eq!(read_back.constants()[0], Constant::FuncRef {
-        module: "std".to_owned(),
+        key: FuncRefKey::Dep(1),
         func: 0
     });
     assert_eq!(read_back.functions()[0].constants()[0], Constant::FuncRef {
-        module: "utils".to_owned(),
+        key: FuncRefKey::Dep(2),
         func: 4
     });
     assert_eq!(read_back.functions()[0].constants()[1], Constant::FuncRef {
-        module: String::new(),
+        key: FuncRefKey::Dep(0),
         func: 0
     });
 }

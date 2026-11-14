@@ -5,19 +5,25 @@
 //! coherence, signature agreement) and the normal lowering. Nothing in
 //! the emission paths knows a derive exists.
 //!
-//! `show`, `ord`, `hash`, and `clone` are the landed families: `show`
-//! answers the construction spelling of the data; `ord` answers the
-//! field-order lexicographic comparison (never structural, float parts
-//! sorting through the explicit `total_compare` native the ambient's
-//! float impl carries); `hash` answers the field-order content fold
-//! over the wrap arithmetic (every part through a `hash` dispatch, the
-//! seed and mix the FNV-1a pair the content-hash natives hash under);
-//! `clone` answers the shallow duplicate, the construction over the
-//! borrowed receiver whose Ref parts dup through the placement pass —
-//! the one family whose body adds no runtime work beyond the count
-//! traffic. Every other name in the ruled set (`to_json`, `from_json`,
-//! `default`) parses and refuses with a checklist diagnostic naming it
-//! unimplemented; `==`
+//! `show`, `ord`, `hash`, `clone`, and `default` are the landed
+//! families: `show` answers the construction spelling of the data;
+//! `ord` answers the field-order lexicographic comparison (never
+//! structural, float parts sorting through the explicit
+//! `total_compare` native the ambient's float impl carries); `hash`
+//! answers the field-order content fold over the wrap arithmetic
+//! (every part through a `hash` dispatch, the seed and mix the FNV-1a
+//! pair the content-hash natives hash under); `clone` answers the
+//! shallow duplicate, the construction over the borrowed receiver
+//! whose Ref parts dup through the placement pass — the one family
+//! whose body adds no runtime work beyond the count traffic; `default`
+//! answers the receiverless construction (`fn default() -> Self` in
+//! the type's own impl, the 2026-11-15 ruling), one default per field
+//! keyed by the field's type expression — a bare type name a `default`
+//! dispatch, a tuple the per-element construction, an optional `none`,
+//! an application the empty construction — a part-less struct the
+//! unit-word construction, an enum its first unit case, a tag itself.
+//! Every other name in the ruled set (`to_json`, `from_json`) parses
+//! and refuses with a checklist diagnostic naming it unimplemented; `==`
 //! refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
@@ -37,7 +43,7 @@ use ds_parse::{
 pub const RULED_SET: &str = "hash, show, ord, clone, to_json, from_json, default";
 
 /// The families this round has not implemented yet, in ruling order.
-const UNIMPLEMENTED: &[&str] = &["to_json", "from_json", "default"];
+const UNIMPLEMENTED: &[&str] = &["to_json", "from_json"];
 
 /// The hash family's fold constants: FNV-1a's offset basis and prime,
 /// the same pair the builtin str/float/char hash natives hash under —
@@ -66,6 +72,36 @@ where
     expand_trees(&trees)
 }
 
+/// Expands the package's caller-owned trees by moving each one
+/// through: nothing clones, so the cold run path never pays the deep
+/// copy [`expand`] pays over its borrowed inputs. `preexpanded` marks,
+/// aligned with `asts`, the trees already derive-expanded (the ambient
+/// blob's decode); a marked tree must carry no derive attribute and
+/// passes through untouched — the mark asserts the artifact held its
+/// end of the contract, it never gates behavior, because expansion
+/// consumes derive attributes and a second expansion over a
+/// pre-expanded tree is the identity either way. Linear heads are
+/// collected over the whole package first, marked trees included, so a
+/// user derive over a linear ambient part refuses identically to the
+/// borrowed expansion.
+#[must_use]
+pub fn expand_owned(mut asts: Vec<Ast>, preexpanded: &[bool]) -> (Vec<Ast>, Vec<Diagnostic>) {
+    let trees: Vec<&Ast> = asts.iter().collect();
+    let linear = linear_heads(&trees);
+    let mut diags = Vec::new();
+    for (index, ast) in asts.iter_mut().enumerate() {
+        if preexpanded.get(index).copied().unwrap_or(false) {
+            debug_assert!(
+                !has_derive(ast),
+                "a pre-expanded tree carries no derive attribute"
+            );
+        } else if has_derive(ast) {
+            expand_tree_in_place(ast, &linear, &mut diags);
+        }
+    }
+    (asts, diags)
+}
+
 /// The expansion over the collected trees; see [`expand`].
 fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
     if !asts.iter().any(|ast| has_derive(ast)) {
@@ -81,25 +117,31 @@ fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
             continue;
         }
         let mut ast = ast.clone();
-        for block in &mut ast.blocks {
-            // Drain and rebuild: synthesized impls insert beside their
-            // attributed item without index arithmetic, so a derive late
-            // in the block is never shifted past the walk.
-            let mut rebuilt = Vec::with_capacity(block.items.len());
-            for item in block.items.drain(..) {
-                let (extra, strip) = expand_item(&item, &linear, &mut diags);
-                let mut item = item;
-                if strip {
-                    item.attrs.retain(|a| a.name.name != "derive");
-                }
-                rebuilt.push(item);
-                rebuilt.extend(extra);
-            }
-            block.items = rebuilt;
-        }
+        expand_tree_in_place(&mut ast, &linear, &mut diags);
         out.push(ast);
     }
     (out, diags)
+}
+
+/// The in-place expansion of one tree: consumed attributes stripped,
+/// their impls appended beside the attributed item.
+fn expand_tree_in_place(ast: &mut Ast, linear: &[String], diags: &mut Vec<Diagnostic>) {
+    for block in &mut ast.blocks {
+        // Drain and rebuild: synthesized impls insert beside their
+        // attributed item without index arithmetic, so a derive late
+        // in the block is never shifted past the walk.
+        let mut rebuilt = Vec::with_capacity(block.items.len());
+        for item in block.items.drain(..) {
+            let (extra, strip) = expand_item(&item, linear, diags);
+            let mut item = item;
+            if strip {
+                item.attrs.retain(|a| a.name.name != "derive");
+            }
+            rebuilt.push(item);
+            rebuilt.extend(extra);
+        }
+        block.items = rebuilt;
+    }
 }
 
 /// Whether any item of the file carries a derive attribute.
@@ -175,6 +217,10 @@ fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (
                     None => attr_consumed = false,
                 },
                 "clone" => match clone_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
+                },
+                "default" => match default_impl(item, attr, &mut mint, linear, diags) {
                     Some(impl_item) => extra.push(impl_item),
                     None => attr_consumed = false,
                 },
@@ -345,7 +391,7 @@ fn non_data_refused(attr: &Attribute) -> Diagnostic {
 /// `show`'s member: the receiver, no other parameter, `string` back.
 fn show_member(span: Span, mint: &mut Mint) -> Member {
     Member {
-        trait_name: "show",
+        trait_name: Some("show"),
         fn_name: "show",
         params: vec![self_param(span)],
         ret: name_type(mint, "string"),
@@ -726,7 +772,7 @@ fn ord_member(mint: &mut Mint) -> Member {
         default: None,
     };
     Member {
-        trait_name: "ord",
+        trait_name: Some("ord"),
         fn_name: "compare",
         params: vec![self_param(mint.span()), other],
         ret: name_type(mint, "int"),
@@ -1105,7 +1151,7 @@ fn hash_impl(
 /// receiver alone.
 fn hash_member(mint: &mut Mint) -> Member {
     Member {
-        trait_name: "hash",
+        trait_name: Some("hash"),
         fn_name: "hash",
         params: vec![self_param(mint.span())],
         ret: name_type(mint, "int"),
@@ -1269,11 +1315,12 @@ fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
 /// itself. A part whose type carries no impl fails at the synthesized
 /// call with the standard missing-impl diagnostic over the part's own
 /// span; a hand-written part impl answers through it. A part-less
-/// struct refuses: its `Self` carries no word, so the member's return
-/// would lower to a zero-width RETSPAN, which the ABI refuses by
-/// design (plain fns returning one share the hole). Refuses otherwise
-/// exactly like `hash`: a generic declaration at the attribute, a
-/// non-data declaration, a function-typed or `~Copyable` part.
+/// struct answers the empty construction — its `Self` spans the one
+/// reserved unit word, so the construction carries zero dispatches and
+/// the member's return keeps the ABI's one-word minimum. Refuses
+/// otherwise exactly like `hash`: a generic declaration at the
+/// attribute, a non-data declaration, a function-typed or `~Copyable`
+/// part.
 fn clone_impl(
     item: &Item,
     attr: &Attribute,
@@ -1302,10 +1349,6 @@ fn clone_impl(
                     StructMember::Deinit { .. } => None,
                 })
                 .collect();
-            if fields.is_empty() {
-                diags.push(partless_refused(attr.span));
-                return None;
-            }
             for field in &fields {
                 check_part(
                     &field.ty,
@@ -1359,25 +1402,411 @@ fn clone_impl(
     ))
 }
 
-/// The part-less struct refusal: the member's `Self` return carries no
-/// word, so its RETSPAN would be zero-width, which the ABI refuses.
-fn partless_refused(span: Span) -> Diagnostic {
-    Diagnostic::error(
-        ErrorCode::DeriveClonePartless,
-        "derive `clone` refuses a part-less struct [G1]",
-    )
-    .with_primary(span, "this struct's `Self` carries no word")
-    .with_note(
-        "the member's Self return would lower to a zero-width RETSPAN, which the ABI refuses by \
-         design; a value must occupy at least one word",
-    )
+/// Synthesizes `impl <decl> { fn default() -> Self { ... } }`: the
+/// receiverless construction (the 2026-11-15 ruling) — the member lives
+/// in the type's own impl with no receiver parameter, callable as
+/// `<type>.default()` through the type-keyed surface with no instance
+/// word. The struct body is the construction with one default per field
+/// keyed by the field's type expression — a bare type name the
+/// `<name>.default()` dispatch (the primitives carry their own ambient
+/// `default` members), a tuple the per-element construction, an
+/// optional `none`, an application the empty construction
+/// (`list[int]()`, `map[k, v]()`) — a part-less struct the unit-word
+/// construction `X { }`; the enum body is the first case, which must be
+/// a unit case; the tag body is the tag itself. A field whose type
+/// spells no construction key refuses at the attribute (a union naming
+/// the open ruling, a shape the key cannot reach naming itself), and so
+/// does an enum whose first case carries a payload or an enum with no
+/// cases; a field type the key reaches but whose construction the
+/// language refuses (a bare name carrying no `default` member, a
+/// one-argument head that is not the empty-construction shape) fails at
+/// the synthesized call with the standard diagnostic, the family
+/// precedent. Refuses otherwise exactly like `clone`: a generic
+/// declaration at the attribute, a non-data declaration, a
+/// function-typed or `~Copyable` part.
+fn default_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "default"));
+        return None;
+    }
+    let (name, generics, body) = match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "default",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            let body = match struct_default_body(&decl.name, &fields, mint) {
+                Ok(body) => body,
+                Err(refused) => {
+                    diags.push(part_refused(
+                        refused.span,
+                        "default",
+                        "field",
+                        &refused.name,
+                        &refused.because,
+                    ));
+                    return None;
+                },
+            };
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(body)])
+        },
+        ItemKind::Enum(decl) => {
+            let Some(case) = decl.cases.first() else {
+                diags.push(part_refused(
+                    attr.span,
+                    "default",
+                    "enum",
+                    &decl.name.name,
+                    "an enum with no cases has no default value",
+                ));
+                return None;
+            };
+            if !matches!(case.payload, EnumPayload::None) {
+                diags.push(part_refused(
+                    case.span,
+                    "default",
+                    "enum case",
+                    &case.name.name,
+                    "the family defaults to the first case, which must be a unit case",
+                ));
+                return None;
+            }
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(
+                path_expr(&case.name.name, mint.span()),
+            )])
+        },
+        ItemKind::Tag(decl) => {
+            let none: &[TypeParam] = &[];
+            (&decl.name, none, vec![expr_stmt(path_expr(
+                &decl.name.name,
+                mint.span(),
+            ))])
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            return None;
+        },
+    };
+    Some(impl_item(
+        attr,
+        name,
+        generics,
+        default_member(mint),
+        body,
+        mint,
+    ))
+}
+
+/// Why a written field type spells no default construction: the
+/// type-expression key refuses the shape at the attribute, never at the
+/// synthesized call.
+enum NoDefault {
+    /// `a | b`: no ruling picks a union's default member, so the family
+    /// refuses naming the ambiguity rather than inventing one.
+    Union,
+    /// A shape the key spells no construction for: a multi-segment
+    /// path, an intersection, a difference, a pointer, a foreign atom,
+    /// or the `type` keyword.
+    Unkeyed,
+    /// An application of more type arguments than any empty
+    /// construction spells.
+    Arity(usize),
+    /// A two-argument application whose head is not `map`: the
+    /// two-argument empty construction is the `map[k, v]()` spelling
+    /// alone (the grammar pins the form to that head).
+    NonMapPair,
+    /// A type argument the constructor brackets spell no key for (an
+    /// optional or a union inside the brackets).
+    Arg,
+}
+
+impl NoDefault {
+    /// The refusal's because-clause.
+    fn because(self) -> String {
+        match self {
+            Self::Union => "a union's default member is an open ruling — no member is canonical, \
+                            and the family invents none"
+                .to_owned(),
+            Self::Unkeyed => {
+                "the type-expression key spells no default construction for this shape".to_owned()
+            },
+            Self::Arity(count) => {
+                format!("the empty construction spells no application of {count} type arguments")
+            },
+            Self::NonMapPair => "a two-argument application constructs empty only through the \
+                                 `map[k, v]()` spelling"
+                .to_owned(),
+            Self::Arg => "the constructor brackets spell no key for this type argument".to_owned(),
+        }
+    }
+}
+
+/// One struct field whose type expression spells no default
+/// construction: the refusal carries the field and the rendered reason
+/// back to the attribute.
+struct RefusedField {
+    span: Span,
+    name: String,
+    because: String,
+}
+
+/// `default`'s member: receiverless, `Self` back — the type-keyed
+/// surface's own shape.
+fn default_member(mint: &mut Mint) -> Member {
+    Member {
+        trait_name: None,
+        fn_name: "default",
+        params: Vec::new(),
+        ret: name_type(mint, "Self"),
+    }
+}
+
+/// One field's default construction keyed by its type expression's
+/// shape: a bare type name dispatches `<name>.default()` through the
+/// receiverless surface; a tuple constructs per element; `t?` answers
+/// `none`; a one-argument application constructs empty (`list[int]`)
+/// and the two-argument `map` application likewise; a parenthesized
+/// type keys by its inner shape; the unit type answers the unit value.
+/// Every other shape refuses — a union names the open ruling, anything
+/// else names the unkeyed shape.
+fn default_value(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
+    match ty {
+        Type::Paren { inner, .. } => default_value(inner, mint),
+        Type::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
+                return Err(NoDefault::Unkeyed);
+            };
+            match args.as_slice() {
+                [] => Ok(type_keyed_call(&only.name, "default", mint)),
+                [arg] => {
+                    let index = bracket_arg(arg, mint)?;
+                    let recv_span = mint.span();
+                    let recv = path_expr(&only.name, recv_span);
+                    let callee = Expr::Index {
+                        span: mint.span(),
+                        recv: Box::new(recv),
+                        index: Box::new(index),
+                    };
+                    Ok(Expr::Call {
+                        span: mint.span(),
+                        callee: Box::new(callee),
+                        args: Vec::new(),
+                        trailing: None,
+                    })
+                },
+                [key, value] => {
+                    if only.name != "map" {
+                        return Err(NoDefault::NonMapPair);
+                    }
+                    let key = bracket_arg(key, mint)?;
+                    let value = bracket_arg(value, mint)?;
+                    let apply_span = mint.span();
+                    let head = Ident {
+                        span: mint.span(),
+                        name: only.name.clone(),
+                    };
+                    let callee = Expr::MapApply {
+                        span: apply_span,
+                        head,
+                        key: Box::new(key),
+                        value: Box::new(value),
+                    };
+                    Ok(Expr::Call {
+                        span: mint.span(),
+                        callee: Box::new(callee),
+                        args: Vec::new(),
+                        trailing: None,
+                    })
+                },
+                many => Err(NoDefault::Arity(many.len())),
+            }
+        },
+        Type::Tuple { items, .. } => {
+            let span = mint.span();
+            let elements = items
+                .iter()
+                .map(|item| default_value(item, mint))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::Tuple {
+                span,
+                items: elements,
+                trailing_comma: false,
+            })
+        },
+        Type::Unit(_) => Ok(Expr::Tuple {
+            span: mint.span(),
+            items: Vec::new(),
+            trailing_comma: false,
+        }),
+        Type::Optional { .. } => Ok(path_expr("none", mint.span())),
+        Type::Union { .. } => Err(NoDefault::Union),
+        _ => Err(NoDefault::Unkeyed),
+    }
+}
+
+/// One constructor-bracket type argument (the `t` of `list[t]`), the
+/// expression-position type spellings the brackets admit: a bare name,
+/// a nested one-argument application, the `map[k, v]` application, a
+/// parenthesized or tuple type, or a fn type — the checker's
+/// `ctor_type_arg` acceptance mirrored, so an empty construction the
+/// language cannot spell refuses here naming the argument.
+fn bracket_arg(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
+    match ty {
+        Type::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
+                return Err(NoDefault::Arg);
+            };
+            match args.as_slice() {
+                [] => Ok(path_expr(&only.name, mint.span())),
+                [arg] => {
+                    let index = bracket_arg(arg, mint)?;
+                    let recv_span = mint.span();
+                    let recv = path_expr(&only.name, recv_span);
+                    Ok(Expr::Index {
+                        span: mint.span(),
+                        recv: Box::new(recv),
+                        index: Box::new(index),
+                    })
+                },
+                [key, value] if only.name == "map" => {
+                    let key = bracket_arg(key, mint)?;
+                    let value = bracket_arg(value, mint)?;
+                    let span = mint.span();
+                    let head = Ident {
+                        span: mint.span(),
+                        name: only.name.clone(),
+                    };
+                    Ok(Expr::MapApply {
+                        span,
+                        head,
+                        key: Box::new(key),
+                        value: Box::new(value),
+                    })
+                },
+                _ => Err(NoDefault::Arg),
+            }
+        },
+        Type::Paren { inner, .. } => Ok(Expr::Paren {
+            span: mint.span(),
+            inner: Box::new(bracket_arg(inner, mint)?),
+        }),
+        Type::Tuple { items, .. } => {
+            let span = mint.span();
+            let elements = items
+                .iter()
+                .map(|item| bracket_arg(item, mint))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::Tuple {
+                span,
+                items: elements,
+                trailing_comma: false,
+            })
+        },
+        // The written type's own spans ride along, the hand-written
+        // spelling's discipline: the resolver walks them as type uses
+        // either way.
+        Type::Fn { .. } => Ok(Expr::FnType {
+            span: mint.span(),
+            ty: Box::new(ty.clone()),
+        }),
+        _ => Err(NoDefault::Arg),
+    }
+}
+
+/// The default member's struct body: the construction with one default
+/// per field keyed by the field's type expression; a part-less struct
+/// is the unit-word construction `X { }`. A field whose type spells no
+/// construction key refuses, naming the field and the shape.
+fn struct_default_body(
+    name: &Ident,
+    fields: &[&FieldDecl],
+    mint: &mut Mint,
+) -> Result<Expr, RefusedField> {
+    let path_span = mint.span();
+    let path = Path {
+        span: path_span,
+        segments: vec![Ident {
+            span: path_span,
+            name: name.name.clone(),
+        }],
+    };
+    let literal = fields
+        .iter()
+        .map(|field| {
+            let field_name = Ident {
+                span: mint.span(),
+                name: field.name.name.clone(),
+            };
+            let value = default_value(&field.ty, mint).map_err(|why| RefusedField {
+                span: field.span,
+                name: field.name.name.clone(),
+                because: why.because(),
+            })?;
+            Ok((field_name, Some(value)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::Struct {
+        span: mint.span(),
+        path,
+        fields: literal,
+    })
+}
+
+/// One type-keyed member call `<type>.<member>()`: the receiver is the
+/// bare type name at one minted span shared by the expression, the
+/// path, and the identifier (the use records key by the identifier's),
+/// and the call's own span mints after it.
+fn type_keyed_call(type_name: &str, member: &str, mint: &mut Mint) -> Expr {
+    let recv = path_expr(type_name, mint.span());
+    let name = Ident {
+        span: mint.span(),
+        name: member.to_owned(),
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Field {
+            span: mint.span(),
+            recv: Box::new(recv),
+            name,
+        }),
+        args: Vec::new(),
+        trailing: None,
+    }
 }
 
 /// `clone`'s member, spelled as its trait member spells it: the borrowed
 /// receiver alone, `Self` back.
 fn clone_member(mint: &mut Mint) -> Member {
     Member {
-        trait_name: "clone",
+        trait_name: Some("clone"),
         fn_name: "clone",
         params: vec![self_param(mint.span())],
         ret: name_type(mint, "Self"),
@@ -1385,9 +1814,11 @@ fn clone_member(mint: &mut Mint) -> Member {
 }
 
 /// The clone member's struct body: the construction with one `clone`
-/// dispatch per field, `X { f: self.f.clone(), ... }`. Every name the
-/// literal carries mints its own span (the struct path, each field
-/// name), because resolution records name uses by span.
+/// dispatch per field, `X { f: self.f.clone(), ... }`; a part-less
+/// struct's construction carries no field, so the duplicate is the
+/// fresh value over the receiver's reserved unit word alone. Every
+/// name the literal carries mints its own span (the struct path, each
+/// field name), because resolution records name uses by span.
 fn struct_clone_body(name: &Ident, fields: &[&FieldDecl], mint: &mut Mint) -> Expr {
     let path_span = mint.span();
     let path = Path {
@@ -1502,7 +1933,10 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
 /// name, its parameters (the receiver first, spelled as its trait
 /// member spells it), and its return type.
 struct Member {
-    trait_name: &'static str,
+    /// The trait the synthesized impl implements; `None` is the
+    /// receiverless inherent member (`default`), whose impl carries no
+    /// trait reference.
+    trait_name: Option<&'static str>,
     fn_name: &'static str,
     params: Vec<Param>,
     ret: Type,
@@ -1564,24 +1998,27 @@ fn impl_item(
     // A generic declaration derives per instantiation: the impl declares
     // the same parameters with the trait added to whatever bound the
     // declaration wrote, and the target applies them in order.
-    let impl_generics: Vec<TypeParam> = generics
-        .iter()
-        .map(|p| {
-            let bound = match &p.bound {
-                Some(written) => Some(Type::Intersect {
+    let impl_generics: Vec<TypeParam> = match member.trait_name {
+        Some(trait_name) => generics
+            .iter()
+            .map(|p| {
+                let bound = match &p.bound {
+                    Some(written) => Some(Type::Intersect {
+                        span: p.span,
+                        left: Box::new(written.clone()),
+                        right: Box::new(trait_type(mint, trait_name)),
+                    }),
+                    None => Some(trait_type(mint, trait_name)),
+                };
+                TypeParam {
                     span: p.span,
-                    left: Box::new(written.clone()),
-                    right: Box::new(trait_type(mint, member.trait_name)),
-                }),
-                None => Some(trait_type(mint, member.trait_name)),
-            };
-            TypeParam {
-                span: p.span,
-                name: p.name.clone(),
-                bound,
-            }
-        })
-        .collect();
+                    name: p.name.clone(),
+                    bound,
+                }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     // The target is a name use, so it mints its own span: two families
     // expanding one item each synthesize an impl, and the declaration's
     // own name span cannot serve both targets' use records.
@@ -1607,11 +2044,22 @@ fn impl_item(
             })
             .collect(),
     };
-    // The trait reference is a name use, so it mints its own span.
-    let trait_ident = Ident {
-        span: mint.span(),
-        name: member.trait_name.to_owned(),
-    };
+    // The trait reference is a name use, so it mints its own span; an
+    // inherent member's impl carries none.
+    let trait_ref = member.trait_name.map(|trait_name| {
+        let trait_ident = Ident {
+            span: mint.span(),
+            name: trait_name.to_owned(),
+        };
+        TypeRef {
+            span: trait_ident.span,
+            path: Path {
+                span: trait_ident.span,
+                segments: vec![trait_ident],
+            },
+            args: Vec::new(),
+        }
+    });
     // The member fn declaration mints one span for the declaration, the
     // fn name, and the body: two families expanding one attribute each
     // synthesize a member fn, the trait-member match is by name, and the
@@ -1638,17 +2086,13 @@ fn impl_item(
         span,
         attrs: Vec::new(),
         vis: None,
+        // The minted span rides the attributed declaration's bytes, so
+        // the synthesized mark keeps position queries out of it.
+        synthesized: true,
         kind: ItemKind::Impl(ImplDecl {
             span,
             generics: impl_generics,
-            trait_ref: Some(TypeRef {
-                span: trait_ident.span,
-                path: Path {
-                    span: trait_ident.span,
-                    segments: vec![trait_ident],
-                },
-                args: Vec::new(),
-            }),
+            trait_ref,
             target,
             fns: vec![fn_decl],
         }),

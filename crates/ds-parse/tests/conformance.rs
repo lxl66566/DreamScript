@@ -4,14 +4,12 @@
 //! fail at M2 type checking, not here), so a clean whole-file parse is the
 //! right M1 expectation for every file.
 
-use std::path::PathBuf;
-
 use ds_diag::Files;
 use ds_parse::parse;
 
 #[test]
 fn conformance_corpus_parses_cleanly() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let dir = ds_corpus_path::dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         panic!(
             "conformance corpus missing at {}; it landed on main alongside this crate",

@@ -4,12 +4,18 @@
 use crate::{
     FORMAT_VERSION, MAGIC,
     header::{SectionKind, TargetClass},
-    module::{Constant, DebugSpan, Function, Module, slot_tag},
+    module::{
+        Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
+        entry_arg_tag, slot_tag,
+    },
     varint::{put_uleb, uleb_len},
 };
 
 /// The blocks-section payload version this crate writes and reads.
-pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 1;
+/// Version 2 appends the module-level evidence-chain table after the
+/// function records; version 3 appends the tag table and the entry
+/// staging table after the chains.
+pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 3;
 
 /// Serializes `module` deterministically: equal modules produce equal
 /// bytes, and reading the output back yields a module that serializes to
@@ -24,7 +30,15 @@ pub fn write(module: &Module) -> Vec<u8> {
     let mut entries: Vec<(SectionKind, usize)> = Vec::with_capacity(5);
     entries.push((
         SectionKind::Blocks,
-        measure(|out| blocks_into(out, module.functions())),
+        measure(|out| {
+            blocks_into(
+                out,
+                module.functions(),
+                module.chains(),
+                module.tags(),
+                module.entries(),
+            );
+        }),
     ));
     entries.push((
         SectionKind::Constants,
@@ -89,7 +103,13 @@ pub fn write(module: &Module) -> Vec<u8> {
             "{kind} payload must start at its directory offset"
         );
         match kind {
-            SectionKind::Blocks => blocks_into(&mut out, module.functions()),
+            SectionKind::Blocks => blocks_into(
+                &mut out,
+                module.functions(),
+                module.chains(),
+                module.tags(),
+                module.entries(),
+            ),
             SectionKind::Constants => constants_into(&mut out, module.constants()),
             SectionKind::TypeMetadata | SectionKind::EffectRows => placeholder_into(&mut out),
             SectionKind::DebugSpans => {
@@ -204,10 +224,17 @@ fn placeholder_into<S: Sink>(out: &mut S) {
     out.uleb(0);
 }
 
-/// The blocks payload, version 1 (BL-7): per-function records over the
-/// BL-5 uop set and BL-6 frame layouts. See the crate docs for the byte
-/// layout.
-fn blocks_into<S: Sink>(out: &mut S, functions: &[Function]) {
+/// The blocks payload, version 3 (BL-7): per-function records over the
+/// BL-5 uop set and BL-6 frame layouts, then the module-level
+/// evidence-chain table, the tag table, and the entry staging table. See
+/// the crate docs for the byte layout.
+fn blocks_into<S: Sink>(
+    out: &mut S,
+    functions: &[Function],
+    chains: &[EvidenceChain],
+    tags: &[MemberTag],
+    entries: &[EntryPlan],
+) {
     out.push(BLOCKS_PAYLOAD_VERSION);
     out.uleb(uleb64(functions.len()));
     for function in functions {
@@ -230,6 +257,27 @@ fn blocks_into<S: Sink>(out: &mut S, functions: &[Function]) {
         // Entry-descriptor placeholder word pair [H1]: the loader fills the
         // tier pointers at install time; the bytes are zero on disk.
         out.put(&[0u8; 8]);
+    }
+    out.uleb(uleb64(chains.len()));
+    for chain in chains {
+        out.uleb(u64::from(chain.func));
+        out.uleb(uleb64(chain.next.len()));
+        for tail in &chain.next {
+            out.uleb(u64::from(*tail));
+        }
+    }
+    out.uleb(uleb64(tags.len()));
+    for tag in tags {
+        put_str(out, &tag.name);
+        out.uleb(u64::from(tag.id));
+    }
+    out.uleb(uleb64(entries.len()));
+    for entry in entries {
+        put_str(out, &entry.name);
+        out.uleb(uleb64(entry.args.len()));
+        for arg in &entry.args {
+            out.push(entry_arg_tag(*arg));
+        }
     }
 }
 
@@ -260,9 +308,18 @@ fn put_constant<S: Sink>(out: &mut S, constant: &Constant) {
             out.push(3);
             put_str(out, s);
         },
-        Constant::FuncRef { module, func } => {
+        Constant::FuncRef { key, func } => {
             out.push(4);
-            put_str(out, module);
+            match key {
+                FuncRefKey::Dep(position) => {
+                    out.push(0);
+                    out.uleb(u64::from(*position));
+                },
+                FuncRefKey::Native(name) => {
+                    out.push(1);
+                    put_str(out, name);
+                },
+            }
             out.uleb(u64::from(*func));
         },
     }

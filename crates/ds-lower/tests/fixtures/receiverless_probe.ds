@@ -1,0 +1,50 @@
+// purpose: the type-keyed static member surface (the 2026-11-15 ruling)
+// end to end — an inherent impl member without a receiver parameter is
+// callable through its bare type name, the call carries no instance
+// word and no evidence words, and the site dispatches as a plain local
+// call to the member body (a tail-position static call transfers
+// through the frame-reuse CALLT like any solved inherent callee).
+// items:
+// int: stage: run
+// string: stage: run
+// gauge: stage: run
+// maker: stage: run
+// maker-impl: stage: run
+// gauge-impl: stage: run
+// wrap: stage: run
+// main: stage: run
+
+tag int
+tag string
+tag gauge
+
+struct maker { n: int, label: string }
+
+extern fn println(s: string) -> ()
+
+impl maker {
+  fn fresh() -> maker { maker { n: 0, label: "fresh" } }
+  fn seeded(n: int, label: string) -> maker { maker { n: n, label: label } }
+  fn peek(self) -> int { maker.seeded(1, "peek").n - 1 + self.n }
+}
+
+impl gauge {
+  fn make() -> int { 3 }
+}
+
+// a free fn whose tail is a static call: the site transfers through
+// the frame-reuse CALLT like any solved inherent callee
+fn wrap() -> maker {
+  maker.seeded(4, "wrapped")
+}
+
+fn main() -> int {
+  const m = maker.fresh()
+  const g = gauge.make()
+  println(m.label)
+  println("peek=${m.peek()}")
+  println("seeded=${maker.seeded(9, "nine").n}")
+  println("wrapped=${wrap().n}")
+  println("gauge=${g}")
+  0
+}

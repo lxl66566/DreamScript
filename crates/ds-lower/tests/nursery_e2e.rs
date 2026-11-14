@@ -11,7 +11,7 @@ use ds_abi::Inst;
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
-use ds_mod::{Hash128, read_checked, write};
+use ds_mod::{FuncRefKey, Hash128, read_checked, write};
 use ds_parse::{parse, parse_script};
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -628,7 +628,10 @@ fn main() -> () {
             else {
                 continue;
             };
-            let ds_mod::Constant::FuncRef { module, func } = &f.constants()[usize::from(callee.0)]
+            let ds_mod::Constant::FuncRef {
+                key: FuncRefKey::Native(module),
+                func,
+            } = &f.constants()[usize::from(callee.0)]
             else {
                 continue;
             };

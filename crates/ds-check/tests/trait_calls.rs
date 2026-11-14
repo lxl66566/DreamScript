@@ -907,6 +907,181 @@ fn union_receiver_resolves_through_sibling_branches() {
     }
 }
 
+const GENERIC_UNION_HEAD_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl showable for string {\n",
+    "  fn show(self) -> string { \"s\" }\n",
+    "}\n",
+    "impl [t: showable] showable for int | list[t] {\n",
+    "  fn show(self) -> string { \"x\" }\n",
+    "}\n",
+    "fn calls(n: int, xs: list[string]) -> () {\n",
+    "  n.show()\n",
+    "  showable::show(xs)\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A decomposed generic union head solves its own conditions per branch:
+/// the `int` branch names no bound variable, so it solves unconditionally
+/// and its call site resolves with no staged evidence, while the
+/// `list[t]` branch keeps the `t` condition and its call site records
+/// the element's serving instance. The impl's requirement set is the
+/// union over branches, so a list site instantiating the condition
+/// still shows its evidence.
+#[test]
+fn generic_union_head_solves_conditions_per_branch() {
+    let (ast, analyzed) = analyze_source("generic_union_head.ds", GENERIC_UNION_HEAD_SOURCE);
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(
+        rendered.is_empty(),
+        "both branch call sites resolve: {rendered:?}"
+    );
+    let universe = &analyzed.decls.universe;
+    let spans = call_spans(&ast);
+    assert_eq!(spans.len(), 2, "the fixture makes two calls");
+    let int_site = &analyzed.checked.trait_calls[&spans[0]];
+    assert_eq!(universe.render(int_site.recv), "int");
+    assert_eq!(
+        universe.render(analyzed.decls.instances.head(int_site.instance).unwrap()),
+        "int",
+        "the unconditioned branch serves the int receiver"
+    );
+    assert!(
+        int_site.bounds.is_empty(),
+        "a branch naming no bound variable stages no evidence"
+    );
+    let list_site = &analyzed.checked.trait_calls[&spans[1]];
+    assert_eq!(universe.render(list_site.recv), "list[string]");
+    assert_eq!(
+        universe.render(analyzed.decls.instances.head(list_site.instance).unwrap()),
+        "list[$t#1]",
+        "the conditioned branch serves the list receiver"
+    );
+    let [(var, bound, served)] = list_site.bounds.as_slice() else {
+        panic!("the list site records its own branch's bound");
+    };
+    assert_eq!(*bound, int_site.trait_id, "the kept condition's trait");
+    assert_eq!(universe.atom_decl(*var).unwrap().name, "$t#1");
+    let served = served.expect("the string instance serves the element");
+    assert_eq!(
+        universe.render(analyzed.decls.instances.head(served).unwrap()),
+        "string",
+        "the substituted element's instance is the staged evidence"
+    );
+}
+
+const GENERIC_UNION_HEAD_MISS_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag unit\n",
+    "struct list[t]\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl [t: showable] showable for int | list[t] {\n",
+    "  fn show(self) -> string { \"x\" }\n",
+    "}\n",
+    "fn calls(xs: list[unit]) -> () {\n",
+    "  xs.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A branch head whose own condition is unsatisfiable at a call site
+/// still refuses with the bound-miss diagnostic naming the substituted
+/// element — the per-branch solving never papers over a missing proof.
+#[test]
+fn generic_union_head_branch_condition_miss_names_the_element() {
+    let (_ast, analyzed) = analyze_source("union_head_miss.ds", GENERIC_UNION_HEAD_MISS_SOURCE);
+    let detail = analyzed
+        .checked
+        .diags
+        .iter()
+        .find(|d| d.code.as_str() == "DS2013")
+        .expect("the call site refuses");
+    assert!(
+        detail
+            .message
+            .contains("no instance of `showable` for `unit`")
+            && detail
+                .message
+                .contains("the `showable` impl's bound is unsatisfied there"),
+        "the refusal names the branch's own unsolved bound: {}",
+        detail.message
+    );
+    assert!(
+        analyzed.checked.trait_calls.is_empty(),
+        "an unsatisfied branch records no dispatch"
+    );
+}
+
+const GENERIC_UNION_HEAD_UNION_RECV_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag string\n",
+    "struct list[t]\n",
+    "trait showable {\n",
+    "  fn show(self) -> string\n",
+    "}\n",
+    "impl showable for string {\n",
+    "  fn show(self) -> string { \"s\" }\n",
+    "}\n",
+    "impl [t: showable] showable for int | list[t] {\n",
+    "  fn show(self) -> string { \"x\" }\n",
+    "}\n",
+    "fn calls(u: int | list[string]) -> () {\n",
+    "  u.show()\n",
+    "  ()\n",
+    "}\n",
+);
+
+/// A union receiver over both branches of one decomposed generic head
+/// resolves through the covering group: the int branch is unconditioned,
+/// the list branch proves its own condition for the substituted element,
+/// and the recorded representative is the first branch with the written
+/// head intact.
+#[test]
+fn generic_union_head_union_receiver_resolves_through_the_covering_group() {
+    let (ast, analyzed) = analyze_source(
+        "union_head_union_recv.ds",
+        GENERIC_UNION_HEAD_UNION_RECV_SOURCE,
+    );
+    let rendered: Vec<String> = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(rendered.is_empty(), "the union site resolves: {rendered:?}");
+    let universe = &analyzed.decls.universe;
+    let spans = call_spans(&ast);
+    let site = &analyzed.checked.trait_calls[&spans[0]];
+    assert_eq!(universe.render(site.recv), "int | list[string]");
+    assert_eq!(
+        universe.render(analyzed.decls.instances.head(site.instance).unwrap()),
+        "int",
+        "the representative is the unconditioned first branch"
+    );
+    assert_eq!(
+        universe.render(analyzed.decls.instances.written(site.instance).unwrap()),
+        "int | list[$t#1]",
+        "the written head survived decomposition"
+    );
+    assert!(
+        site.bounds.is_empty(),
+        "the representative names no bound the union receiver could solve"
+    );
+}
+
 const DISTINCT_IMPLS_SOURCE: &str = concat!(
     "tag int\n",
     "tag string\n",

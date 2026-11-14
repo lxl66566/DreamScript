@@ -11,7 +11,7 @@
 //! rc_diag.rs under the diag feature.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, Raw, Ref},
@@ -29,10 +29,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// The shared pool, copied per function (the payload granularity): the

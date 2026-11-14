@@ -51,6 +51,7 @@
 
 #![warn(missing_docs)]
 
+mod arrowbudget;
 mod ast;
 mod convert;
 mod guardtail;

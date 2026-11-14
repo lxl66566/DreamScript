@@ -23,16 +23,32 @@ pub enum Constant {
     Bool(bool),
     /// UTF-8 string bytes.
     Str(String),
-    /// A qualified callee reference for CALL/CALLT pool operands: the
-    /// callee's module name and its function index within that module.
-    /// An empty `module` names the enclosing module itself (a same-module
-    /// ref). The loader resolves names to slots at install time.
+    /// A callee reference for CALL/CALLT pool operands: the module key
+    /// selecting the callee's module, plus the callee's function index
+    /// within that module's blocks payload. The loader resolves the key
+    /// at install time — a dependency position to the linked module, a
+    /// native name to its own table.
     FuncRef {
-        /// Callee module name; empty for the enclosing module.
-        module: String,
-        /// Callee function index within `module`'s blocks payload.
+        /// The callee's module key.
+        key: FuncRefKey,
+        /// The callee's function index within the addressed module's
+        /// blocks payload.
         func: u32,
     },
+}
+
+/// A FuncRef's module key (the format-v4 selector-led spelling): a uop
+/// dependency by position, or a native surface by its reserved name.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum FuncRefKey {
+    /// A uop dependency's position in the header's dependency list:
+    /// position 0 is the enclosing module itself, position `n` the
+    /// `n-1`-th dependency entry.
+    Dep(u32),
+    /// A native surface's name: the `builtin` core, the platform the
+    /// source's declaration names, or the runtime-evidence dispatch
+    /// sentinel — modules the loader resolves through their own tables.
+    Native(String),
 }
 
 /// A constants-pool dedupe key: the variant tag plus the value, with an f64
@@ -65,13 +81,97 @@ impl core::hash::Hash for Constant {
                 3u8.hash(state);
                 text.hash(state);
             },
-            Self::FuncRef { module, func } => {
+            Self::FuncRef { key, func } => {
                 4u8.hash(state);
-                module.hash(state);
+                key.hash(state);
                 func.hash(state);
             },
         }
     }
+}
+
+/// One evidence-chain object of the runtime-evidence seam [H3]: the
+/// serving body a staged evidence word names, plus one tail chain index
+/// per that body's own evidence demands (in the body's pair order). The
+/// staged words carry indices into the module's chain table; a nested
+/// runtime dispatch reads its frame's slot word, resolves the chain, and
+/// stages the tail objects' indices as the serving body's trailing
+/// evidence parameters — a static table read per hop, so depth is
+/// table-bounded, never frame-bounded.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EvidenceChain {
+    /// The serving body's function-table index within this module.
+    pub func: u32,
+    /// One chain-table index per the serving body's evidence pairs.
+    pub next: Vec<u32>,
+}
+
+/// How one run-entry parameter stages when a host hands the module its
+/// command arguments: one of the scalar word kinds the run surface
+/// stages, the two-word `int | none` union span, or a shape command
+/// arguments cannot stage (the refusal travels as a fact, so warm runs
+/// refuse identically to cold ones).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum EntryArg {
+    /// One i64 parameter word.
+    Int,
+    /// One f64 parameter word.
+    Float,
+    /// One bool parameter word.
+    Bool,
+    /// The `int | none` union span: a present value stages the int
+    /// member tag plus its word, an absent value the none member tag
+    /// plus a zero word.
+    OptionalInt,
+    /// A parameter shape command arguments cannot stage; the run reports
+    /// it.
+    Foreign,
+}
+
+/// The wire tag of one entry staging fact: Int=0, Float=1, Bool=2,
+/// OptionalInt=3, Foreign=4.
+pub(crate) const fn entry_arg_tag(arg: EntryArg) -> u8 {
+    match arg {
+        EntryArg::Int => 0,
+        EntryArg::Float => 1,
+        EntryArg::Bool => 2,
+        EntryArg::OptionalInt => 3,
+        EntryArg::Foreign => 4,
+    }
+}
+
+/// Parses an entry staging fact's wire tag; `None` for unknown tags.
+pub(crate) const fn entry_arg_from_tag(tag: u8) -> Option<EntryArg> {
+    match tag {
+        0 => Some(EntryArg::Int),
+        1 => Some(EntryArg::Float),
+        2 => Some(EntryArg::Bool),
+        3 => Some(EntryArg::OptionalInt),
+        4 => Some(EntryArg::Foreign),
+        _ => None,
+    }
+}
+
+/// One row of the module's tag table: a declared union member atom's
+/// name and its module-wide tag id. The code words carry the ids (tag
+/// tests and staged member words); this table is the name side, so a
+/// host can build `Value::Tag` arguments without the front end.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MemberTag {
+    /// The member atom's declared name.
+    pub name: String,
+    /// The module-wide tag id.
+    pub id: u8,
+}
+
+/// One recorded entry of the module's entry table: a top-level source
+/// lambda's binding name plus how each of its parameters stages.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EntryPlan {
+    /// The entry name.
+    pub name: String,
+    /// One staging fact per parameter, in parameter order.
+    pub args: Vec<EntryArg>,
 }
 
 /// A half-open byte-offset span `[start, end)` into the module source,
@@ -288,6 +388,14 @@ pub struct Module {
     pub(crate) ir_checksum: u32,
     pub(crate) constants: Vec<Constant>,
     pub(crate) functions: Vec<Function>,
+    /// The evidence-chain table [H3]: the staged evidence words index it,
+    /// the nested runtime dispatches walk it one hop per call.
+    pub(crate) chains: Vec<EvidenceChain>,
+    /// The tag table (member atom name to tag id), in first-use order.
+    pub(crate) tags: Vec<MemberTag>,
+    /// The recorded entry table: which top-level names are entries and
+    /// how each parameter stages.
+    pub(crate) entries: Vec<EntryPlan>,
     /// `None` means the module carries no debug-spans section.
     pub(crate) debug_spans: Option<Vec<DebugSpan>>,
 }
@@ -309,6 +417,9 @@ impl Module {
             ir_checksum: 0,
             constants: Vec::new(),
             functions: Vec::new(),
+            chains: Vec::new(),
+            tags: Vec::new(),
+            entries: Vec::new(),
             debug_spans: None,
         }
     }
@@ -422,6 +533,74 @@ impl Module {
         self
     }
 
+    /// The evidence-chain table, in stored order [H3].
+    #[must_use]
+    pub fn chains(&self) -> &[EvidenceChain] {
+        &self.chains
+    }
+
+    /// Appends one evidence-chain object; the caller validates the
+    /// function and tail indexes against the finished tables (the writer's
+    /// producer is the lowerer, the reader re-validates at parse).
+    #[must_use]
+    pub fn with_chain(mut self, chain: EvidenceChain) -> Self {
+        self.chains.push(chain);
+        self
+    }
+
+    /// The tag table (member atom name to module-wide tag id), in the
+    /// lowerer's first-use order.
+    #[must_use]
+    pub fn tags(&self) -> &[MemberTag] {
+        &self.tags
+    }
+
+    /// The module-wide tag id of a declared member atom name.
+    #[must_use]
+    pub fn tag_id(&self, name: &str) -> Option<u8> {
+        self.tags
+            .iter()
+            .find(|tag| tag.name == name)
+            .map(|tag| tag.id)
+    }
+
+    /// Appends one tag-table row; the caller keeps ids and names unique
+    /// (the lowerer's first-use assignment does by construction).
+    #[must_use]
+    pub fn with_tag(mut self, name: impl Into<String>, id: u8) -> Self {
+        self.tags.push(MemberTag {
+            name: name.into(),
+            id,
+        });
+        self
+    }
+
+    /// The recorded entry table, in the writer's declaration order.
+    #[must_use]
+    pub fn entries(&self) -> &[EntryPlan] {
+        &self.entries
+    }
+
+    /// One entry's per-parameter staging plan, when the table records the
+    /// name.
+    #[must_use]
+    pub fn entry_args(&self, entry: &str) -> Option<&[EntryArg]> {
+        self.entries
+            .iter()
+            .find(|plan| plan.name == entry)
+            .map(|plan| plan.args.as_slice())
+    }
+
+    /// Appends one entry-table row; the caller keeps names unique.
+    #[must_use]
+    pub fn with_entry(mut self, name: impl Into<String>, args: Vec<EntryArg>) -> Self {
+        self.entries.push(EntryPlan {
+            name: name.into(),
+            args,
+        });
+        self
+    }
+
     /// The debug spans, or `None` when the section is absent (stripped or
     /// never recorded).
     #[must_use]
@@ -453,7 +632,7 @@ mod tests {
         hash::{DefaultHasher, Hash, Hasher},
     };
 
-    use super::Constant;
+    use super::{Constant, FuncRefKey};
 
     fn hash_of(constant: &Constant) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -472,12 +651,33 @@ mod tests {
         );
         assert_eq!(
             hash_of(&Constant::FuncRef {
-                module: "m".to_owned(),
+                key: FuncRefKey::Dep(0),
                 func: 3
             }),
             hash_of(&Constant::FuncRef {
-                module: "m".to_owned(),
+                key: FuncRefKey::Dep(0),
                 func: 3
+            })
+        );
+        assert_eq!(
+            hash_of(&Constant::FuncRef {
+                key: FuncRefKey::Native("m".to_owned()),
+                func: 3
+            }),
+            hash_of(&Constant::FuncRef {
+                key: FuncRefKey::Native("m".to_owned()),
+                func: 3
+            })
+        );
+        // a dependency position and a native name never collide as keys
+        assert_ne!(
+            hash_of(&Constant::FuncRef {
+                key: FuncRefKey::Dep(1),
+                func: 0
+            }),
+            hash_of(&Constant::FuncRef {
+                key: FuncRefKey::Native("1".to_owned()),
+                func: 0
             })
         );
     }

@@ -865,11 +865,14 @@ fn byte_compare_fn(
 /// bytes (offset basis 14695981039346656037, prime 1099511628211, both
 /// wrapping in u64) — the same pair the derive's fold mixes through, so
 /// every primitive part hashes under one scheme.
+// the fold's answer is the full 64-bit pattern reinterpreted as the
+// content-hash word
+#[allow(clippy::cast_possible_wrap)]
 fn fnv1a(bytes: &[u8]) -> i64 {
-    let mut hash = 14695981039346656037u64;
+    let mut hash = 14_695_981_039_346_656_037u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
     }
     hash as i64
 }
@@ -2349,6 +2352,10 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// past the generic tail, and the string, char, and byte sort keys
 /// ([`BUILTIN_STR_COMPARE`], [`BUILTIN_CHAR_COMPARE`],
 /// [`BUILTIN_BYTE_COMPARE`]) append past it.
+// one flat registration table whose entry order is contract (the
+// reserved head and the compare natives' tail positions); splitting it
+// would only relocate entries between functions
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
     let fns = vec![

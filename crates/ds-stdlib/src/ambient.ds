@@ -136,6 +136,20 @@ impl clone for byte {
   fn clone(self) -> Self { self }
 }
 
+// The receiverless member's ambient slice (the 2026-11-15 ruling):
+// every primitive carries `default` in its own impl, callable as
+// `int.default()` through the type-keyed surface with no instance
+// word, so a `#[derive(default)]` field dispatches through its own
+// type's members like every other family. The char default is the NUL
+// code point and byte's the zero byte — the additive-identity
+// analogues of the int and float zeros.
+impl int { fn default() -> int { 0 } }
+impl float { fn default() -> float { 0.0 } }
+impl bool { fn default() -> bool { false } }
+impl string { fn default() -> string { "" } }
+impl char { fn default() -> char { '\0' } }
+impl byte { fn default() -> byte { b'\0' } }
+
 tag int
 tag float
 tag bool
@@ -169,6 +183,15 @@ struct config { host: string, port: int?, retries: int }
 
 // The fetch result; body extraction is consume.
 struct response
+
+// The comptime reflection vocabulary (G1, G2): the field record
+// `fields` answers — name, the field's type as a type value, and the
+// field's nominal tag name when its type is a bare atom (empty for
+// composite field types this round). The two builtins run inside
+// comptime functions only; the checker refuses calls elsewhere.
+struct field { name: string, type: type, tag: string }
+extern fn fields (t: type) -> list[field]
+extern fn type_name (t: type) -> string
 
 // The nursery demo's fixed page list.
 const urls = ["https://ds.dev", "https://example.org"]

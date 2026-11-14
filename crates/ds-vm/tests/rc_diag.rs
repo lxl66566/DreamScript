@@ -8,7 +8,7 @@
 #![cfg(feature = "diag")]
 
 use ds_vm::{
-    Const, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -18,10 +18,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 /// A pool FuncRef naming a builtin core native by its contract index.
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Inst]) -> FunctionDef {
@@ -60,10 +60,14 @@ fn registry() -> ModuleRegistry {
         ],
     );
     let mut main = main;
-    main.pool = vec![Const::Str("shared".into()), Const::I64(0), Const::FuncRef {
-        module: "rc".into(),
-        func: 1,
-    }];
+    main.pool = vec![
+        Const::Str("shared".into()),
+        Const::I64(0),
+        Const::FuncRef(ConstFuncRef::Named {
+            module: "rc".into(),
+            func: 1,
+        }),
+    ];
     let borrow = def("borrow", &[SlotType::Ref, SlotType::I64], 1, 1, &[
         Uop::Funcf { frame_slots: 2 }.into(),
         Uop::Kimm { dst: 1, kidx: k(0) }.into(),
@@ -893,10 +897,10 @@ fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
         builtin(ds_vm::native::BUILTIN_NURSERY_BOUNDARY),
         Const::I64(-1), // the mask contains every tag
         Const::Str("shared".into()),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "sd".into(),
             func: 0,
-        },
+        }),
         Const::I64(0),
     ];
     child.pool = vec![Const::I64(0)];

@@ -149,7 +149,7 @@ fn free_generic_calls_run_evidence_staged_and_answered() {
 fn free_generic_calls_stage_evidence_and_name_the_whole_count() {
     let lowered = lower_probe();
     // show_pair(1, 2): two argument words plus the (t, shows) pair's
-    // three evidence words — the ordinary CALL names all five
+    // one chain word — the ordinary CALL names all three
     let calls: Vec<u8> = ops_of(&lowered, "main")
         .iter()
         .filter_map(|op| match op {
@@ -158,10 +158,10 @@ fn free_generic_calls_stage_evidence_and_name_the_whole_count() {
         })
         .collect();
     assert!(
-        calls.contains(&5),
+        calls.contains(&3),
         "the generic call sites name the whole staged count: {calls:?}"
     );
-    // drive's tail: one argument word plus three evidence words on the
+    // drive's tail: one argument word plus the chain word on the
     // frame-reuse slide
     let tails: Vec<u8> = ops_of(&lowered, "drive")
         .iter()
@@ -172,8 +172,8 @@ fn free_generic_calls_stage_evidence_and_name_the_whole_count() {
         .collect();
     assert_eq!(
         tails,
-        vec![4],
-        "the generic tail transfers its evidence words"
+        vec![2],
+        "the generic tail transfers its evidence word"
     );
 }
 

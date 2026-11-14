@@ -67,6 +67,12 @@ pub struct Item {
     pub vis: Option<Vis>,
     /// What is declared.
     pub kind: ItemKind,
+    /// Whether an expansion minted this item over spans another
+    /// declaration owns (the derive expansion's impls): the bytes inside
+    /// the span name that declaration, so position queries skip the
+    /// item. Parsed items and the script-entry fold's `main` stay false
+    /// (their spans address their own bytes).
+    pub synthesized: bool,
     /// Comments before the item's first token.
     pub leading_trivia: Vec<Trivia>,
     /// The `///` run attached to this definition (G3): the maximal suffix

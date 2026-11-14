@@ -20,7 +20,7 @@ use ds_abi::{ConstIdx, Uop};
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
-use ds_mod::{Constant, Hash128, read_checked, write};
+use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
 use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
 
@@ -352,7 +352,10 @@ fn generic_dispatch_stages_evidence_and_dispatches_from_the_slot() {
     // field is the frame's evidence slot
     let sentinel = placed.iter().find_map(|op| match op {
         PlacedOp::Uop(Uop::Callg { callee, .. }) => match &pool[usize::from(callee.0)] {
-            Constant::FuncRef { module, func } if module == "$evidence" => Some(*func),
+            Constant::FuncRef {
+                key: FuncRefKey::Native(module),
+                func,
+            } if module == "$evidence" => Some(*func),
             _ => None,
         },
         _ => None,
@@ -382,33 +385,32 @@ fn generic_dispatch_stages_evidence_and_dispatches_from_the_slot() {
             _ => pending.clear(),
         }
     }
-    let int_body = i64::from(
-        lowered
-            .function_index("shows#int#show")
-            .expect("the int member body is planned"),
-    );
-    let string_body = i64::from(
-        lowered
-            .function_index("shows#string#show")
-            .expect("the string member body is planned"),
-    );
-    let list_body = i64::from(
-        lowered
-            .function_index("shows#list[t]#show")
-            .expect("the generic body is planned"),
-    );
+    let int_body = lowered
+        .function_index("shows#int#show")
+        .expect("the int member body is planned");
+    let string_body = lowered
+        .function_index("shows#string#show")
+        .expect("the string member body is planned");
     let instance = i64::from(2); // shows int, shows string, shows list[t]
-    assert_eq!(
-        evidence,
-        vec![vec![int_body, int_body, int_body, instance], vec![
-            string_body,
-            string_body,
-            string_body,
-            instance
-        ],],
-        "each site stages its serving body's area (follow words padded at the concrete end) then \
-         the declared instance; the generic body is {list_body}"
-    );
+    assert_eq!(evidence.len(), 2, "one staged span per entering site");
+    let chains = lowered.module().chains();
+    for (site, span) in evidence.iter().enumerate() {
+        assert_eq!(
+            span.len(),
+            2,
+            "the chain word then the instance trail the receiver"
+        );
+        assert_eq!(span[1], instance, "the declared instance rides last");
+        let chain = chains
+            .get(usize::try_from(span[0]).expect("chain index fits usize"))
+            .expect("the staged word names a chain object");
+        let expected = if site == 0 { int_body } else { string_body };
+        assert_eq!(chain.func, expected, "the chain names the serving body");
+        assert!(
+            chain.next.is_empty(),
+            "the concrete serving body demands nothing"
+        );
+    }
 }
 
 const DEFAULT_SOURCE: &str = include_str!("fixtures/trait_default_probe.ds");

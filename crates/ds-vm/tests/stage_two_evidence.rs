@@ -6,7 +6,7 @@
 use core::mem::size_of;
 
 use ds_vm::{
-    Const, FIBER_ROOT, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm, Word,
+    Const, ConstFuncRef, FIBER_ROOT, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm, Word,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -125,10 +125,10 @@ fn a_child_pushes_into_the_parent_list_and_both_heaps_drain() {
     use ds_vm::native::{BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH};
 
     fn builtin(index: u32) -> Const {
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "builtin".into(),
             func: index,
-        }
+        })
     }
     // main: a fresh list on the root heap, handed to the host (the
     // native's result overlays argument word 0)
@@ -352,10 +352,10 @@ fn a_trapped_child_is_walked_dead_and_both_heaps_drain() {
     };
 
     fn builtin(index: u32) -> Const {
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "builtin".into(),
             func: index,
-        }
+        })
     }
 
     // trap_parent: intern "shared" on the root heap, wrap the child in a
@@ -425,10 +425,10 @@ fn a_trapped_child_is_walked_dead_and_both_heaps_drain() {
         builtin(BUILTIN_NURSERY_OPEN),
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dw".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
         Const::I64(1),
         Const::Str("shared".into()),
@@ -499,10 +499,10 @@ fn a_cancel_cut_child_releases_its_kept_claims_at_the_cut() {
     };
 
     fn builtin(index: u32) -> Const {
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "builtin".into(),
             func: index,
-        }
+        })
     }
 
     // cut_parent: spawn the flag raiser first and the cut child second
@@ -578,14 +578,14 @@ fn a_cancel_cut_child_releases_its_kept_claims_at_the_cut() {
         builtin(BUILTIN_NURSERY_OPEN),
         builtin(BUILTIN_NURSERY_SPAWN),
         builtin(BUILTIN_NURSERY_BOUNDARY),
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dw2".into(),
             func: 2,
-        },
-        Const::FuncRef {
+        }),
+        Const::FuncRef(ConstFuncRef::Named {
             module: "dw2".into(),
             func: 1,
-        },
+        }),
         Const::I64(0),
         Const::I64(0),
         Const::I64(1),
@@ -681,10 +681,10 @@ fn a_completed_child_drains_via_its_own_exit_decs() {
         Uop::Ret { src: 1 }.into(),
     ]);
     let mut main = main;
-    main.pool = vec![Const::FuncRef {
+    main.pool = vec![Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: 20,
-    }];
+    })];
 
     // child(list): a kept string balanced by its own exit dec — the
     // completed door's honesty witness
@@ -749,7 +749,7 @@ fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
 
     let mut vm = Vm::new(ModuleRegistry::new());
     for _ in 0..24 {
-        let version = vm.install_module(loader_module());
+        vm.install_module(loader_module());
         let Value::Ref(root_word) = vm.run("rk", "load", &[]).expect("the root load serves") else {
             panic!("a string ref");
         };
@@ -770,8 +770,8 @@ fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
             vm.objects_of(child_word).str_at(child_word.id()),
             Ok("recycled constant")
         );
-        // each install hands its Arc back; nothing below holds a version
-        drop(version);
+        // each install answers the row; the table's row is the version's
+        // single home, so nothing below holds a version
     }
     // two live versions' pools times the loading fibers, minus what the
     // slot reuse dropped: without the reclamation doors this count climbs

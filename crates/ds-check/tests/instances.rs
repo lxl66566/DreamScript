@@ -178,6 +178,112 @@ fn unconditional_instances_record_trait_members_conditionals_do_not() {
 }
 
 #[test]
+fn per_branch_condition_solving_keeps_each_branchs_own_conditions() {
+    // `show for int | list[t] if show[t], eq[int]` decomposes with the
+    // `int` branch naming no bound variable — it solves the variable
+    // condition unconditionally — while the `list[t]` branch keeps it;
+    // a concrete condition names no variable and stays for every branch,
+    // and the declaration's requirement set is the union over branches.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let head = TypeExpr::atom(f.int).union(list_t.into());
+    let ids = f
+        .declare_conditional(f.show, head, vec![
+            Condition::new(f.show, TypeExpr::atom(t)),
+            Condition::new(f.eq, TypeExpr::atom(f.int)),
+        ])
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    let conds = f.env.conditions(ids[0]).unwrap();
+    assert_eq!(
+        conds.len(),
+        1,
+        "the int branch keeps the concrete condition alone"
+    );
+    assert_eq!(conds[0].trait_id, f.eq);
+    assert_eq!(f.universe.render(conds[0].ty), "int");
+    let conds = f.env.conditions(ids[1]).unwrap();
+    assert_eq!(conds.len(), 2, "the list[t] branch keeps both conditions");
+    assert_eq!(conds[0].trait_id, f.show);
+    assert_eq!(f.universe.render(conds[0].ty), "$t#1");
+    assert_eq!(conds[1].trait_id, f.eq);
+    // The declaration's full condition set is non-empty, so no branch
+    // records trait members: a conditional declaration's unconditional
+    // branch adds none either (the trait-as-type set stays conservative).
+    let show_ty = f.universe.solve(&TypeExpr::trait_ref(f.show)).unwrap();
+    let int_ty = f.ty(f.int);
+    assert!(!f.universe.contains(show_ty, int_ty));
+}
+
+#[test]
+fn per_branch_conditions_solve_at_call_sites() {
+    // Over `show for int | list[t] if show[t]` plus `show for string`: the
+    // int branch serves an int receiver with no bound to prove, the list
+    // branch serves `list[string]` once its own condition holds, and a
+    // `list[bool]` receiver misses the branch's own condition with the
+    // element named — a branch naming no bound variable never mints a
+    // raw-variable miss.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let head = TypeExpr::atom(f.int).union(list_t.into());
+    let ids = f
+        .declare_conditional(f.show, head, vec![Condition::new(
+            f.show,
+            TypeExpr::atom(t),
+        )])
+        .unwrap();
+    f.declare(f.show, TypeExpr::atom(f.string)).unwrap();
+    let int_ty = f.ty(f.int);
+    let string_ty = f.ty(f.string);
+    let bool_ty = f.ty(f.boolean);
+    let list_string = f.universe.apply_atom(list, &[string_ty]).unwrap();
+    let list_bool = f.universe.apply_atom(list, &[bool_ty]).unwrap();
+    let list_string_ty = f.universe.atom_ty(list_string).unwrap();
+    let list_bool_ty = f.universe.atom_ty(list_bool).unwrap();
+    let list_int = f.universe.apply_atom(list, &[int_ty]).unwrap();
+    let list_int_ty = f.universe.atom_ty(list_int).unwrap();
+    assert!(matches!(
+        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, int_ty),
+        ds_check::instance_solve::Resolution::Unique(id) if id == ids[0]
+    ));
+    // The unconditioned branch's own instance satisfies the list branch's
+    // element condition, so `list[int]` resolves through the same impl
+    // without any instance beyond the declaration's own branches.
+    assert!(matches!(
+        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_int_ty),
+        ds_check::instance_solve::Resolution::Unique(id) if id == ids[1]
+    ));
+    assert!(matches!(
+        ds_check::instance_solve::resolve(
+            &f.universe,
+            &f.env,
+            &[],
+            f.show,
+            list_string_ty
+        ),
+        ds_check::instance_solve::Resolution::Unique(id) if id == ids[1]
+    ));
+    match ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_bool_ty) {
+        ds_check::instance_solve::Resolution::BoundUnsat { bound, target, .. } => {
+            assert_eq!(bound, f.show);
+            let miss_ty = f.universe.set_ty(&target);
+            assert_eq!(
+                f.universe.render(miss_ty),
+                "bool",
+                "the miss names the substituted element, never a raw variable"
+            );
+        },
+        other => panic!("the list branch's own condition misses: {other:?}"),
+    }
+}
+
+#[test]
 fn non_atom_heads_normalize_or_reject() {
     let mut f = fixture();
     // (int | bool) - bool is not a written union: one branch, normalized to
@@ -211,7 +317,7 @@ fn non_atom_heads_normalize_or_reject() {
     assert_eq!(ids.len(), 1);
     assert_eq!(
         f.universe.render(f.env.head(ids[0]).unwrap()),
-        "none | bool | string"
+        "none | type | bool | string"
     );
     let err = f.declare(draw, TypeExpr::atom(f.boolean)).unwrap_err();
     let Error::InstanceOverlap { witness, .. } = &err else {
@@ -602,7 +708,9 @@ fn declare_and_accessors_reject_bad_ids() {
 #[test]
 fn exhaustive_lookup_unique_for_non_empty_queries() {
     let mut u = Universe::new();
-    let atoms: Vec<TypeId> = [TypeId::NONE]
+    // [none, type, a, b, c, d]: every universe carries the builtin `type`
+    // atom beside none (G1, G2), so the model accounts for it.
+    let atoms: Vec<TypeId> = [TypeId::NONE, TypeId::TYPE]
         .into_iter()
         .chain(
             ["a", "b", "c", "d"]
@@ -610,29 +718,29 @@ fn exhaustive_lookup_unique_for_non_empty_queries() {
                 .map(|name| u.declare_tag(name).unwrap()),
         )
         .collect();
-    assert_eq!(atoms.len(), 5);
+    assert_eq!(atoms.len(), 6);
     let marker = u.declare_trait("marker").unwrap();
     let ord = u.declare_trait("ord").unwrap();
 
     let mut env = InstanceEnv::new();
     let marker_ids = env
-        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[1])))
+        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[2])))
         .unwrap();
     assert_eq!(marker_ids.len(), 1);
     let marker_ids_b = env
-        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[2])))
+        .declare(&mut u, &InstanceDecl::new(marker, TypeExpr::atom(atoms[3])))
         .unwrap();
     assert_eq!(marker_ids_b.len(), 1);
 
     // ord heads: the singleton a, and the multi-atom complement of marker.
-    env.declare(&mut u, &InstanceDecl::new(ord, TypeExpr::atom(atoms[1])))
+    env.declare(&mut u, &InstanceDecl::new(ord, TypeExpr::atom(atoms[2])))
         .unwrap();
     env.declare(&mut u, &InstanceDecl::new(ord, TypeExpr::not(marker)))
         .unwrap();
 
     let singletons: Vec<_> = atoms.iter().map(|id| u.atom_ty(*id).unwrap()).collect();
     let mut all = vec![u.empty_ty()];
-    for bits in 1u64..=31 {
+    for bits in 1u64..=63 {
         let mut t = all[0];
         for (i, singleton) in singletons.iter().enumerate() {
             if bits & (1 << i) != 0 {
@@ -641,7 +749,7 @@ fn exhaustive_lookup_unique_for_non_empty_queries() {
         }
         all.push(t);
     }
-    assert_eq!(all.len(), 32);
+    assert_eq!(all.len(), 64);
 
     let id_of = |i: usize| ds_check::InstanceId::from_raw(u32::try_from(i).unwrap());
     let bits_of = |t: ds_check::Ty| -> u64 {
@@ -658,13 +766,13 @@ fn exhaustive_lookup_unique_for_non_empty_queries() {
         .collect();
 
     // Same-trait heads stay pairwise disjoint (declared in this order:
-    // marker a, marker b, ord a, ord ~marker over {none, a, b, c, d}).
+    // marker a, marker b, ord a, ord ~marker over {none, type, a, b, c, d}).
     let full = (1u64 << atoms.len()) - 1;
     let expected_heads = vec![
-        (marker, 1 << 1),
         (marker, 1 << 2),
-        (ord, 1 << 1),
-        (ord, full & !((1 << 1) | (1 << 2))),
+        (marker, 1 << 3),
+        (ord, 1 << 2),
+        (ord, full & !((1 << 2) | (1 << 3))),
     ];
     assert_eq!(head_bits, expected_heads);
     for (i, &(ta, ba)) in head_bits.iter().enumerate() {

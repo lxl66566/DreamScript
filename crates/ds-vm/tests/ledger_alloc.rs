@@ -28,7 +28,7 @@ use std::{
 };
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{I64, Raw, Ref},
@@ -103,10 +103,10 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 fn def(
@@ -181,10 +181,10 @@ fn fork_main_def(name: &str, callable: u32, capture: bool) -> FunctionDef {
         builtin(BUILTIN_LIST_NEW),  // k0
         builtin(BUILTIN_LIST_PUSH), // k1
         builtin(BUILTIN_PAR_MAP),   // k2
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "lb".into(),
             func: callable,
-        }, // k3 the closure header
+        }), // k3 the closure header
         Const::I64(BuiltinInstance::List as i64), // k4 the list evidence
         Const::Str("shared".into()), // k5
     ];
@@ -274,10 +274,10 @@ fn delivered_main_def(name: &str) -> FunctionDef {
         builtin(BUILTIN_LIST_NEW),  // k0
         builtin(BUILTIN_LIST_PUSH), // k1
         builtin(BUILTIN_PAR_MAP),   // k2
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "lb".into(),
             func: 2,
-        }, // k3 mint
+        }), // k3 mint
         Const::I64(BuiltinInstance::List as i64), // k4
     ];
     let elem = |pool: &mut Vec<Const>, word: i64| {

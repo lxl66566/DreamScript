@@ -25,7 +25,7 @@
 //! - per-fiber TCO: a tail-looping nursery child runs unbounded iterations at a constant segment.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberId, FiberState, FrameAnswer, FunctionDef, JoinOutcome,
+    ChildOutcome, Const, ConstFuncRef, FiberId, FiberState, FrameAnswer, FunctionDef, JoinOutcome,
     ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
@@ -44,18 +44,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "nb").
 fn nb_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "nb".into(),
         func: index,
-    }
+    })
 }
 
 fn def(
@@ -742,10 +742,10 @@ fn seam_parent_def(child: u32, mask: i64) -> FunctionDef {
             builtin(BUILTIN_NURSERY_OPEN),
             builtin(BUILTIN_NURSERY_SPAWN),
             builtin(BUILTIN_NURSERY_BOUNDARY),
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "sb".into(),
                 func: child,
-            },
+            }),
             Const::I64(mask),
         ],
         &[
@@ -818,10 +818,10 @@ fn seam_payload_parent_def(mask: i64) -> FunctionDef {
             builtin(BUILTIN_NURSERY_OPEN),
             builtin(BUILTIN_NURSERY_SPAWN),
             builtin(BUILTIN_NURSERY_BOUNDARY),
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: "sb".into(),
                 func: 1,
-            },
+            }),
             Const::I64(mask),
         ],
         &[

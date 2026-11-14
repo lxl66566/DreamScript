@@ -214,15 +214,15 @@ fn a_shape_refusal_reports_at_the_observing_literal() {
         concat!(
             "tag int\n",
             "tag string\n",
-            "struct outer { x: int | string }\n",
+            "struct outer { x: (int | string, int) }\n",
             "fn main() -> () {\n",
-            "  const box = outer { x: 1 }\n",
+            "  const box = outer { x: (1, 2) }\n",
             "  println(\"unreachable\")\n",
             "}\n",
             "extern fn println (msg: string) -> ()\n",
         ),
         "struct payload field",
-        "outer { x: 1 }",
+        "outer { x: (1, 2) }",
     );
 }
 
@@ -234,7 +234,7 @@ fn a_shape_refusal_through_a_parameter_reports_at_the_parameter() {
         concat!(
             "tag int\n",
             "tag string\n",
-            "struct outer { x: int | string }\n",
+            "struct outer { x: (int | string, int) }\n",
             "fn take(o: outer) -> int { 0 }\n",
             "fn main() -> () { println(\"unreachable\") }\n",
             "extern fn println (msg: string) -> ()\n",

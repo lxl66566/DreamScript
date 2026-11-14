@@ -4,8 +4,6 @@
 //! corpus file computes rows over constructs of later milestones
 //! (nursery, spawn, comptime) without panicking.
 
-use std::path::PathBuf;
-
 use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, effects_of};
 use ds_diag::Files;
 use ds_parse::parse;
@@ -247,9 +245,7 @@ fn top_level_pattern_bindings_share_the_initializer_row() {
 
 /// Every corpus file's rows, parse-standalone, no ambient table.
 fn corpus(name: &str) -> ds_check::Effects {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance")
-        .join(name);
+    let path = ds_corpus_path::file(name);
     let source = std::fs::read_to_string(&path).expect("corpus file");
     effects_of_files(&[(name, &source)], &DeclaredRows::new())
 }
@@ -343,7 +339,7 @@ fn ambient_declared_rows_flow_over_the_corpus() {
         "extern fn default_config () -> config\n",
         "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
     );
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/types_hybrid.ds");
+    let path = ds_corpus_path::file("types_hybrid.ds");
     let source = std::fs::read_to_string(&path).expect("corpus file");
     let declared = DeclaredRows::new()
         .with(

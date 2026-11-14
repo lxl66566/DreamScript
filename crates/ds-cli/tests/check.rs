@@ -25,8 +25,8 @@ fn ds_check(args: &[&str]) -> Output {
 /// count is the pin; every diagnostic must name an item staged away from
 /// `typecheck`, or the command would have failed.
 fn assert_corpus_clean(file: &str, noise: usize) {
-    let path = format!("../../conformance/{file}");
-    let out = ds_check(&["check", &path]);
+    let path = ds_corpus_path::file(file);
+    let out = ds_check(&["check", path.to_str().expect("corpus path is UTF-8")]);
     assert_eq!(out.status.code(), Some(0), "{file}");
     assert_eq!(out.stdout, [] as [u8; 0], "{file}");
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -45,10 +45,10 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 /// * types_hybrid: get_port's `pv is int` tension over the json atoms (two ordering errors) and
 ///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
 ///   propagation pair) — the io failure, `default_config`, and the config type ride the ambient.
-/// * generics: the reject item's intended overlap plus the m6 items (comptime `fields`/`type_name`,
-///   the derive engine behind `json for point` — its to_json refusal class surfaces through the
-///   expansion-aware resolve and print as staged noise); the expression-error epoch keeps each root
-///   alone (the unresolved `fields`' not-callable and iteration follow-ons no longer print).
+/// * generics: the reject item's intended overlap plus the derive engine behind `json for point`
+///   (its to_json refusal class surfaces through the expansion-aware resolve, and the uncovered
+///   instance follows); the comptime `fields`/`type_name` items now check clean under the ambient's
+///   reflection vocabulary.
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
 ///   wants narrowing); `read_config`/`default_config`/`load_rows` resolve through the ambient.
@@ -70,7 +70,7 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
-    assert_corpus_clean("generics_coherent_traits.ds", 7);
+    assert_corpus_clean("generics_coherent_traits.ds", 3);
     assert_corpus_clean("syntax_ts_heart.ds", 5);
     assert_corpus_clean("linearity_modes_rc.ds", 8);
     assert_corpus_clean("effects_nursery.ds", 0);
@@ -129,7 +129,8 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
 /// golden rendering: the overlap diagnostic the corpus header expects.
 #[test]
 fn the_generics_reject_item_prints_its_overlap() {
-    let out = ds_check(&["check", "../../conformance/generics_coherent_traits.ds"]);
+    let path = ds_corpus_path::file("generics_coherent_traits.ds");
+    let out = ds_check(&["check", path.to_str().expect("corpus path is UTF-8")]);
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8(out.stderr).unwrap().contains(
         "error[DS2006]: instance head `int | bool` intersects the `int` instance; witness value \
@@ -141,7 +142,12 @@ fn the_generics_reject_item_prints_its_overlap() {
 /// ambient is what makes the corpus check clean.
 #[test]
 fn without_the_ambient_the_corpus_names_stay_unresolved() {
-    let out = ds_check(&["check", "--no-ambient", "../../conformance/types_hybrid.ds"]);
+    let path = ds_corpus_path::file("types_hybrid.ds");
+    let out = ds_check(&[
+        "check",
+        "--no-ambient",
+        path.to_str().expect("corpus path is UTF-8"),
+    ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8(out.stderr)

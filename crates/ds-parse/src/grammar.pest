@@ -410,7 +410,10 @@ struct_body = { "{" ~ sp ~ (struct_member ~ (decl_sep ~ struct_member)* ~ decl_s
 // the conformance corpus); the record's comma form is canonical.
 decl_sep = _{ (sp ~ "," ~ sp) | nlreq }
 struct_member = _{ deinit_member | field_member }
-field_member = { ident ~ h ~ ":" ~ sp ~ type_expr }
+// A declared field name may be a keyword — the reflection record spells
+// one `type` (`struct field { name: string, type: type, tag: string }`),
+// the same legality a field access after `.` already carries.
+field_member = { field_name ~ h ~ ":" ~ sp ~ type_expr }
 deinit_member = { "deinit" ~ !ident_cont ~ sp ~ block_expr }
 
 enum_item = { kw_enum ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ sp ~ "{" ~ sp ~ (enum_case ~ (decl_sep ~ enum_case)* ~ decl_sep?)? ~ sp ~ "}" }

@@ -39,7 +39,7 @@
 use std::hint::black_box;
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble, native,
 };
@@ -208,10 +208,10 @@ fn registry(rebuild: bool, release_at_use: bool) -> ModuleRegistry {
             Const::I64(ITERATIONS),
             Const::Str("a".into()),
             Const::Str("b".into()),
-            Const::FuncRef {
+            Const::FuncRef(ConstFuncRef::Named {
                 module: native::BUILTIN_MODULE.into(),
                 func: native::BUILTIN_CONCAT,
-            },
+            }),
         ],
     );
     let main = if rebuild {

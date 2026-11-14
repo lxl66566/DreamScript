@@ -22,11 +22,12 @@
 //!   [`assemble`] encodes a uop body; module load decode-checks every word, cross-checks `FUNCF`
 //!   against the layout, and validates every pool access; the dispatcher decodes on dispatch (see
 //!   `vm`'s module docs for why no pre-decoded cache).
-//! - Callee addressing. The contract's FuncRef is "module index + function index"; this registry is
-//!   name-keyed until the M7 loading round's link table assigns module indices, so a pool FuncRef
-//!   carries the target module's name plus the function-table index (entry word 0), resolved
-//!   through the target's current slot [H6 item 5]. The dsmod loader maps the payload's `FuncRef`
-//!   constant kind onto these at install (see `loader`'s module docs).
+//! - Callee addressing. The contract's FuncRef is "module index + function index": a pool FuncRef
+//!   names an installed uop module by its registry id (the dsmod install resolves the payload's
+//!   dep-position key to the id; ids are per-VM first-install state, never serialized) plus the
+//!   function-table index (entry word 0), or a native surface by name (builtin, the platform, the
+//!   `$evidence` sentinel) resolved through its own table. Issue-time resolution reads the target's
+//!   current slot, so a hot-reload swap redirects the next call [H6 item 5].
 //! - Non-tail `CALL` pushes a frame through the call word: the callee's metadata word is written
 //!   into the caller's call word, so the callee's parameter slots overlay the caller's
 //!   outgoing-argument area with zero argument copying, and the stack grows by exactly the callee's
@@ -48,9 +49,16 @@
 //! - Entries. Every function carries a two-word [`ds_abi::EntryDescriptor`]; word 0 (the function's
 //!   table index, written once at module load and immutable after) is all that exists until the JIT
 //!   does. All calls route through [`ds_abi::EntryDescriptor::resolve`].
-//! - Modules. A two-slot module table [H6 item 5]: each module holds a current and at most one
-//!   retiring version; every call resolves through the current slot, so a swap redirects subsequent
-//!   calls immediately while live frames keep running their entered version's code and pool.
+//! - Loading. [`load_dsmod`] walks a root module's dep list depth-first through a caller-supplied
+//!   provider, installing dependencies before their dependent (deterministic first-install ids) and
+//!   validating every link's content hash against the installed slot or the fetched module's source
+//!   hash; the single-module install seam is [`crate::loader::install`].
+//! - Modules. A two-slot module table [H6 item 5] over a per-VM version table: each module holds a
+//!   current and at most one retiring version, both naming rows of an append-only table that owns
+//!   every version's survival; every call resolves through the current slot, so a swap redirects
+//!   subsequent calls immediately while live frames keep running their entered version's code and
+//!   pool — frames carry the row as a u32, and an install-time sweep retires rows nothing
+//!   references.
 //! - Backtraces. On a trap, [`Vm::backtrace`] reports each real frame plus its tail-chain elided
 //!   count [H2]; lazy materialization of elided frames from per-elision records is deferred to
 //!   per-fiber debug recording.
@@ -106,7 +114,9 @@
 pub const EVIDENCE_MODULE: &str = "$evidence";
 
 mod claims;
+pub mod comptime;
 pub mod fiber;
+pub mod load;
 pub mod loader;
 pub mod module;
 pub mod native;
@@ -122,12 +132,15 @@ pub mod vm;
 pub use ds_abi as abi;
 pub use ds_rt::{ArenaMisuse, ArenaStats};
 pub use fiber::{FIBER_ROOT, FiberId, FiberState};
+pub use load::load as load_dsmod;
 pub use loader::{LoadError, install as install_dsmod};
-pub use module::{Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion};
+pub use module::{
+    Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion, VersionIdx,
+};
 pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
 pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
 pub use platform::{Capability, Platform};
-pub use program::{Const, ConstKind, FunctionDef, assemble};
+pub use program::{Const, ConstFuncRef, ConstKind, FunctionDef, assemble};
 pub use value::{
     ARENA_CHUNK_LIMIT, ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word,
 };

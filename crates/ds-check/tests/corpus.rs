@@ -272,10 +272,12 @@ fn optional_sugar_is_union_none() {
 fn negated_marker_complement() {
     let mut c = corpus();
     let not_copyable = c.universe.solve(&TypeExpr::not(c.copyable)).unwrap();
-    // none plus every atom not implementing Copyable
+    // none, the builtin `type` atom (member of no trait), plus every atom
+    // not implementing Copyable
     let mut expected = c.universe.empty_ty();
     for name in [
         "none",
+        "type",
         "io_err",
         "missing",
         "bad_port",

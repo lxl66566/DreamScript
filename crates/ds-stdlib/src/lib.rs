@@ -12,9 +12,10 @@
 //!
 //! The ambient is data, three halves:
 //!
-//! * [`ambient_blob`]: the precompiled parse tree of the source member, behind the `ast-serde`
-//!   feature — a checked-in postcard artifact the cold-start seams decode in place of parsing the
-//!   member (a pure cache: every seam falls back to the fresh parse on any artifact miss).
+//! * [`ambient_blob`]: the precompiled expanded tree of the source member (the derive expansion
+//!   runs at artifact build time), behind the `ast-serde` feature — a checked-in postcard artifact
+//!   the cold-start seams decode in place of parsing the member (a pure cache: every seam falls
+//!   back to the fresh parse on any artifact miss).
 //!
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
@@ -66,7 +67,11 @@ use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps};
 #[cfg(feature = "ast-serde")]
 pub mod ambient_blob;
 #[cfg(feature = "ast-serde")]
+pub mod ambient_dsi;
+#[cfg(feature = "ast-serde")]
 pub use ambient_blob::{AmbientBlobError, ambient_ast};
+#[cfg(feature = "ast-serde")]
+pub use ambient_dsi::{AmbientDsiError, ServedAmbient, ambient_dsi};
 
 /// The world-capability attribution, built once per process.
 static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
@@ -115,6 +120,13 @@ pub const AMBIENT_FILE: &str = "std/ambient.ds";
 /// The ambient package member's text: the declarations of the M3 stdlib
 /// surface. Register it as a package member before the user's files.
 pub const AMBIENT_SOURCE: &str = include_str!("ambient.ds");
+
+/// The checked-in ambient dsmod artifact: a 16-byte build-identity
+/// header followed by the module bytes the `gen-ambient-dsmod` example
+/// writes (the ambient member lowered alone, the `lower_ambient`
+/// discipline). Raw bytes only — no feature, no dependency — the
+/// serving seam (the CLI run path) validates and decodes them.
+pub static AMBIENT_DSMOD: &[u8] = include_bytes!("ambient.dsmod");
 
 /// The declared rows, built once per process.
 static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {

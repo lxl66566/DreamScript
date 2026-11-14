@@ -27,8 +27,8 @@
 //! (the pool's root is id 0, spawns number up from 1).
 
 use ds_vm::{
-    Const, FIBER_ROOT, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FiberId, FiberState, FunctionDef, ModuleRegistry,
+    ModuleVersion, Trap, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -46,18 +46,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "fb").
 fn fb_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "fb".into(),
         func: index,
-    }
+    })
 }
 
 fn def(

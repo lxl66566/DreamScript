@@ -8,7 +8,7 @@
 //! ambients mirror the conformance gate so the measured work is the gate's
 //! work.
 
-use std::{path::PathBuf, time::Instant};
+use std::time::Instant;
 
 use ds_check::linearity::check;
 use ds_diag::Files;
@@ -191,7 +191,7 @@ fn main() {
         ("extraction_family.ds", EXTRACTION_AMBIENT),
         ("closures_surface.ds", CLOSURES_AMBIENT),
     ];
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+    let root = ds_corpus_path::dir();
     let mut inputs = Vec::new();
     for (name, ambient) in corpus {
         let source = std::fs::read_to_string(root.join(name)).unwrap();

@@ -14,8 +14,8 @@
 //! - a parked child of an uncancelled nursery resumes normally and lands (no new interference).
 
 use ds_vm::{
-    Const, FIBER_ROOT, FiberId, FiberState, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
-    ModuleVersion, NurseryId, Platform, Value, Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FiberId, FiberState, FrameAnswer, FunctionDef, JoinOutcome,
+    ModuleRegistry, ModuleVersion, NurseryId, Platform, Value, Vm,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble, native,
     native::{
@@ -29,18 +29,18 @@ fn k(idx: u16) -> ConstIdx {
 }
 
 fn builtin(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "builtin".into(),
         func: index,
-    }
+    })
 }
 
 /// A same-module callee by function-table index (the fixture module "yb").
 fn yb_ref(index: u32) -> Const {
-    Const::FuncRef {
+    Const::FuncRef(ConstFuncRef::Named {
         module: "yb".into(),
         func: index,
-    }
+    })
 }
 
 fn def(
@@ -83,10 +83,10 @@ fn observer_deinit() -> FunctionDef {
         ],
     );
     hook.pool = vec![
-        Const::FuncRef {
+        Const::FuncRef(ConstFuncRef::Named {
             module: "std".into(),
             func: 0,
-        },
+        }),
         Const::Bool(false),
     ];
     hook

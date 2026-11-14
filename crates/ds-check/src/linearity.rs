@@ -1315,6 +1315,12 @@ impl<'a> Lin<'a> {
                 self.borrow_args(args, trailing);
                 false
             },
+            Res::Dot(DotRes::Static { .. }) => {
+                // The type-keyed member call: the receiver is a type name,
+                // never a value use; the written arguments borrow.
+                self.borrow_args(args, trailing);
+                false
+            },
             _ => {
                 self.expr(recv, false);
                 self.borrow_args(args, trailing);
