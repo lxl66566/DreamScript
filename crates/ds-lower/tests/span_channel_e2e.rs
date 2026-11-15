@@ -12,13 +12,13 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Parse -> check -> lower -> round-trip -> run, returning `main`'s
 /// result value. Panics with the checker's renderings when the source
 /// does not check clean, and with the lowering error when it does not
 /// lower.
-fn runs(name: &str, source: &str) -> Value {
+fn runs(name: &str, source: &str) -> FrameAnswer {
     let mut files = Files::new();
     let id = files.add_source("probe.ds", source);
     let asts = [parse(&files, id).expect("the probe parses")];
@@ -43,7 +43,7 @@ fn runs(name: &str, source: &str) -> Value {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    let value = vm
+    let answer = vm
         .run(name, "main", &[])
         .unwrap_or_else(|trap| panic!("the probe runs: {trap:?}"));
     // the entry's own frame must end in a pure expression (a native tail
@@ -55,7 +55,7 @@ fn runs(name: &str, source: &str) -> Value {
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    value
+    answer
 }
 
 /// Same pipeline, expecting lowering to refuse with the exact message
@@ -147,7 +147,7 @@ fn record_elements_read_back_end_to_end() {
         )),
     );
     // 3 + 7 + 0 + 17: the two hits, the miss, and the bumped re-read
-    assert_eq!(out, Value::I64(27));
+    assert_eq!(out, FrameAnswer::one(Value::I64(27)));
 }
 
 /// Ref words inside a multi-word element: the push acquires one count
@@ -192,7 +192,7 @@ fn ref_words_inside_elements_balance() {
 ",
         )),
     );
-    assert_eq!(out, Value::I64(2));
+    assert_eq!(out, FrameAnswer::one(Value::I64(2)));
 }
 
 /// `unwrap_or` and `head`'s checked span ride the same channel: the
@@ -231,7 +231,7 @@ fn unwrap_or_and_head_read_wider_sides() {
 ",
         )),
     );
-    assert_eq!(out, Value::I64(11 + 5 + 9));
+    assert_eq!(out, FrameAnswer::one(Value::I64(11 + 5 + 9)));
 }
 
 /// The stride-aware copy closes over wider elements: `cons`'s head span
@@ -266,7 +266,7 @@ fn copy_closes_carry_wider_strides() {
         )),
     );
     // two = [3+4, 1+2]; joined repeats it; the tail keeps the last
-    assert_eq!(out, Value::I64(7 + 3 + 3 + 3));
+    assert_eq!(out, FrameAnswer::one(Value::I64(7 + 3 + 3 + 3)));
 }
 
 /// `Ref` words inside elements through the copy closes: each copied
@@ -295,7 +295,7 @@ fn copy_closes_balance_ref_words() {
         )),
     );
     // the prepended head reads 1, the joined tail's first 2
-    assert_eq!(out, Value::I64(3));
+    assert_eq!(out, FrameAnswer::one(Value::I64(3)));
 }
 
 /// for-in and membership bind whole element spans per step: the fetch
@@ -323,7 +323,7 @@ fn for_in_and_membership_bind_wider_elements() {
         )),
     );
     // 1*2 + 3*4, the hit adds 10, the field-2 mismatch stays a miss
-    assert_eq!(out, Value::I64(14 + 10));
+    assert_eq!(out, FrameAnswer::one(Value::I64(14 + 10)));
 }
 
 /// for-in over `Ref`-carrying elements: the handed-out count per `Ref`
@@ -346,7 +346,7 @@ fn for_in_balances_ref_words() {
         )),
     );
     // the first element's `a` and the second's `b`
-    assert_eq!(out, Value::I64(4));
+    assert_eq!(out, FrameAnswer::one(Value::I64(4)));
 }
 
 /// The reentrant combinators over wider elements: the hosted call hands
@@ -381,7 +381,7 @@ fn combinators_take_wider_elements_each_way() {
         )),
     );
     // lifted[2] = (5+10)*10+6; kept[0] = 34; the widths fold = 21
-    assert_eq!(out, Value::I64(156 + 34 + 21));
+    assert_eq!(out, FrameAnswer::one(Value::I64(156 + 34 + 21)));
 }
 
 /// The refusal openings that stay, each naming the seam that owns it —
@@ -396,11 +396,12 @@ fn the_remaining_openings_keep_honest_names() {
             "tag int\n",
             "tag string\n",
             "tag none\n",
+            "trait Copyable { }\n",
             "struct list[t]\n",
             "extern fn println (msg: string) -> ()\n",
             "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
             "extern fn list_len[t] (xs: list[t]) -> int\n",
-            "struct session { user: string\n",
+            "struct session: ~Copyable { user: string\n",
             "  deinit { println(\"freed ${self.user}\") }\n",
             "}\n",
             "fn main() -> int {\n",
@@ -420,7 +421,9 @@ fn the_remaining_openings_keep_honest_names() {
         &with_ambient(concat!(
             "extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 ",
-            "struct session { user: string
+            "trait Copyable { }
+",
+            "struct session: ~Copyable { user: string
 ",
             "  deinit { println(\"freed ${self.user}\") }
 ",
@@ -502,7 +505,7 @@ fn tuple_elements_read_back_end_to_end() {
         )),
     );
     // 1 + 2 + the miss + 4 + the ok arm's extracted string
-    assert_eq!(out, Value::I64(8));
+    assert_eq!(out, FrameAnswer::one(Value::I64(8)));
 }
 
 /// Ref words inside tuple elements: the push acquires one count per
@@ -533,7 +536,7 @@ fn tuple_elements_balance_ref_words() {
             "}\n",
         )),
     );
-    assert_eq!(out, Value::I64(2));
+    assert_eq!(out, FrameAnswer::one(Value::I64(2)));
 }
 
 /// for-in and membership over tuple elements: the loop binder receives
@@ -560,7 +563,7 @@ fn for_in_and_membership_bind_tuple_elements() {
         )),
     );
     // 1 + 2 + 3, the hit adds 10, the word-2 mismatch stays a miss
-    assert_eq!(out, Value::I64(16));
+    assert_eq!(out, FrameAnswer::one(Value::I64(16)));
 }
 
 /// The reentrant combinators over tuple elements: the hosted call hands
@@ -608,5 +611,41 @@ fn combinators_take_tuple_elements_each_way() {
         )),
     );
     // lifted[2] = 31; kept[0] = 2; the fold's first word = 6
-    assert_eq!(out, Value::I64(31 + 2 + 6));
+    assert_eq!(out, FrameAnswer::one(Value::I64(31 + 2 + 6)));
+}
+
+/// The root drive's host seam answers whole spans (the 2026-11-15
+/// span-answer ruling): a tuple-answering entry crosses with every word,
+/// never the head word alone.
+#[test]
+fn a_tuple_answering_entry_surfaces_whole_at_the_host() {
+    let out = runs(
+        "span_host_tuple",
+        &with_ambient(concat!("fn main() -> (int, int) {\n", "  (3, 4)\n", "}\n",)),
+    );
+    assert_eq!(out.as_slice(), &[Value::I64(3), Value::I64(4)]);
+}
+
+/// A widened answer — a union value whose span carries a tag word plus
+/// its region — crosses whole too: the host reads the tag, the payload
+/// survives, and the entry's RETSPAN width is the seam's width.
+#[test]
+fn a_widened_union_answer_surfaces_whole_at_the_host() {
+    let out = runs(
+        "span_host_wide",
+        &with_ambient(concat!(
+            "type opt = int | none\n",
+            "fn main() -> opt {\n",
+            "  const v: opt = 4\n",
+            "  v\n",
+            "}\n",
+        )),
+    );
+    let words = out.as_slice();
+    assert_eq!(words.len(), 2, "the widened span carries both words");
+    assert!(
+        matches!(words[0], Value::Tag(_)),
+        "the tag word leads the span, got {words:?}"
+    );
+    assert_eq!(words[1], Value::I64(4), "the member payload rides the tail");
 }

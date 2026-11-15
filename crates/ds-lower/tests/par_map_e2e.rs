@@ -69,7 +69,7 @@ fn the_wide_answer_site_lowers_round_trips_and_joins() {
     vm.capture_output();
     assert_eq!(
         vm.run("par_map_probe", "main", &[]),
-        Ok(ds_vm::Value::I64(0)),
+        Ok(ds_vm::FrameAnswer::one(ds_vm::Value::I64(0))),
         "main returns unit"
     );
     // the wide answers assemble in input order: element 0 the pair
@@ -196,7 +196,7 @@ fn a_capturing_closure_callable_lowers_round_trips_and_forks() {
     vm.capture_output();
     assert_eq!(
         vm.run("par_map_closure_probe", "main", &[]),
-        Ok(ds_vm::Value::I64(0)),
+        Ok(ds_vm::FrameAnswer::one(ds_vm::Value::I64(0))),
         "main returns unit"
     );
     // [1, 2, 3] through the closure capturing bias 10: 11, 12, 13

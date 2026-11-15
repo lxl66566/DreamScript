@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -61,7 +61,7 @@ fn split_get_concat_round_trip_through_the_list_object() {
     vm.capture_output();
     assert_eq!(
         vm.run("list_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the round trip's every leg matched"
     );
     assert_eq!(vm.captured_output(), b"n 6 beta ? csv alpha,beta,gamma\n");
@@ -74,11 +74,11 @@ fn ok_handler_transforms_the_ok_side_and_the_difference_flows() {
     let (mut vm, _) = build_vm();
     assert_eq!(
         vm.run("list_probe", "port_of", &[Value::Bool(true)]),
-        Ok(Value::I64(8080))
+        Ok(FrameAnswer::one(Value::I64(8080)))
     );
     assert_eq!(
         vm.run("list_probe", "port_of", &[Value::Bool(false)]),
-        Ok(Value::I64(0))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
 }
 
@@ -96,7 +96,7 @@ fn fs_list_reports_the_sorted_directory_names() {
     let staged = [vm.intern_str(dir.to_str().expect("a UTF-8 temp path"))];
     assert_eq!(
         vm.run("list_probe", "dir_report", &staged),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the listing had two names and a.ds first"
     );
     assert_eq!(vm.captured_output(), b"files 2 a.ds\n");
@@ -144,19 +144,19 @@ fn literals_build_and_read_back_every_element_kind() {
     let mut vm = build_lit_vm();
     assert_eq!(
         vm.run("lists_lit_probe", "literal_sums", &[]),
-        Ok(Value::I64(4))
+        Ok(FrameAnswer::one(Value::I64(4)))
     );
     // string elements are Ref words pushed the same way; concat joins a
     // literal onto a literal-built list
     assert_eq!(
         vm.run("lists_lit_probe", "literal_words", &[]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     // list[int]() is the bare list_new call; the empty literal types
     // against the declared return; [\"a\", \"b\"] carries two words
     assert_eq!(
         vm.run("lists_lit_probe", "fresh_and_empty", &[]),
-        Ok(Value::I64(2))
+        Ok(FrameAnswer::one(Value::I64(2)))
     );
 }
 
@@ -168,11 +168,11 @@ fn direct_list_push_runs_every_one_word_element_kind() {
     let mut vm = build_lit_vm();
     assert_eq!(
         vm.run("lists_lit_probe", "push_words", &[]),
-        Ok(Value::I64(2))
+        Ok(FrameAnswer::one(Value::I64(2)))
     );
     assert_eq!(
         vm.run("lists_lit_probe", "push_lists", &[]),
-        Ok(Value::I64(2))
+        Ok(FrameAnswer::one(Value::I64(2)))
     );
 }
 
@@ -184,7 +184,10 @@ fn direct_list_push_runs_every_one_word_element_kind() {
 fn join_leaves_the_heap_drained() {
     let (mut vm, _) = build_vm();
     vm.capture_output();
-    assert_eq!(vm.run("list_probe", "main", &[]), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("list_probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
     assert!(
         vm.objects().is_empty(),
         "the heap drains when the run ends ({} live)",

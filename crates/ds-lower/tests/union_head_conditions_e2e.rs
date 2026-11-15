@@ -23,7 +23,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The shared prelude every head story composes over: the primitive
 /// tags, the console extern, the trait, and the string impl that serves
@@ -160,7 +160,7 @@ fn the_unconditioned_branch_call_runs_with_no_evidence() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -227,7 +227,7 @@ fn the_conditioned_branch_stages_its_list_member_and_runs_the_body() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -267,7 +267,10 @@ fn int_element_and_nested_list_sites_stage_their_members_too() {
     let lowered = lower(name, Hash128::compute(source.as_bytes()), &asts, &analyzed)
         .expect("the int-element and nested list sites lower");
     let mut vm = run_lowered(&lowered, &source);
-    assert_eq!(vm.run(name, "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run(name, "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(vm.captured_output(), "x\nx\n".as_bytes());
     assert!(
         vm.objects().is_empty(),
@@ -318,7 +321,7 @@ fn the_conditioned_tuple_member_stages_and_runs_the_body() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -378,7 +381,7 @@ fn string_element_tuple_sites_stage_their_counts_and_drain() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -434,7 +437,7 @@ fn the_tuple_head_dispatches_through_its_own_tag() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -493,7 +496,7 @@ fn mixed_condition_heads_stage_every_member_shape() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -536,7 +539,7 @@ fn a_subunion_argument_respans_into_the_head() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -747,7 +750,7 @@ fn an_int_site_into_a_body_demanding_the_unions_bound_runs_green() {
     let mut vm = run_lowered(&lowered, source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

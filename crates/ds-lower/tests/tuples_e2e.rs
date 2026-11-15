@@ -17,7 +17,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the probe module once per test VM: parse -> check -> lower ->
 /// write -> read back -> install, with both native tables in place before
@@ -63,7 +63,10 @@ fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     // its slot while the const aliases still read the source)
     let mut vm = build_vm();
     vm.capture_output();
-    assert_eq!(vm.run("tuples_probe", "main", &[]), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("tuples_probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
     assert_eq!(
         vm.captured_output(),
         b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nvar true\n" as &[u8]

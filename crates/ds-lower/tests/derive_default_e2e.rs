@@ -18,12 +18,12 @@
 //! key refuse at the attribute.
 
 use ds_abi::Uop;
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
+use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/derive_default_probe.ds");
 
@@ -91,7 +91,7 @@ fn derived_default_answers_through_the_type_keyed_surface() {
     let mut vm = run_lowered("derive_default_probe", &lowered, SOURCE);
     assert_eq!(
         vm.run("derive_default_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main runs clean"
     );
     let stdout: &[u8] = concat!(
@@ -151,7 +151,7 @@ fn the_synthesized_bodies_carry_no_dispatch_uop() {
     let mut vm = run_lowered("partless_probe", &partless, PARTLESS);
     assert_eq!(
         vm.run("partless_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the part-less default constructs"
     );
 }

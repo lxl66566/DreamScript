@@ -194,6 +194,7 @@ pub fn linearity_check(
         res: resolutions.first(),
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
+        hole_runtime: &checked.hole_show_dispatches,
         out: Linearity::default(),
         state: FxHashMap::default(),
         undo: Vec::new(),
@@ -434,6 +435,9 @@ struct Lin<'a> {
     hole_dispatches: &'a FxHashMap<Span, TraitCall>,
     /// The same table for solved inherent dispatches.
     hole_inherents: &'a FxHashMap<Span, MethodId>,
+    /// Every dispatched hole's member (F6): the runtime-evidence form
+    /// records only here, so the receiver-mode read falls through to it.
+    hole_runtime: &'a FxHashMap<Span, MethodId>,
     out: Linearity,
     state: States,
     /// State writes made while walking the open branch, arm, or loop body,
@@ -987,7 +991,8 @@ impl<'a> Lin<'a> {
             .hole_dispatches
             .get(&span)
             .map(|call| call.method)
-            .or_else(|| self.hole_inherents.get(&span).copied())?;
+            .or_else(|| self.hole_inherents.get(&span).copied())
+            .or_else(|| self.hole_runtime.get(&span).copied())?;
         let sig = self.member_sig(method)?;
         Some(
             sig.params
@@ -1545,6 +1550,7 @@ mod tests {
             res: resolutions.first(),
             hole_dispatches: &checked.trait_calls,
             hole_inherents: &checked.inherent_calls,
+            hole_runtime: &checked.hole_show_dispatches,
             out: Linearity::default(),
             state: FxHashMap::from_iter([(place, State::Uninit)]),
             undo: Vec::new(),

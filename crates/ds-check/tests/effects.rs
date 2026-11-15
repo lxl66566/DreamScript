@@ -369,3 +369,60 @@ fn ambient_declared_rows_flow_over_the_corpus() {
     assert!(!cfg.contains(Effect::Error));
     assert_eq!(row_of(&effects, "same").render(), "trap | world");
 }
+
+/// A hole that staged an implicit `show` dispatch unions the dispatched
+/// member's row — the effect edge a written `.show()` call contributes,
+/// read from the checker's hole records (the walk is resolution-driven
+/// and no surface name sits behind the implicit call). The runtime form
+/// (a bound receiver's hole inside a generic body) and the solved form
+/// both union the trait member's row; a printable hole stays pure.
+#[test]
+fn implicit_hole_dispatch_unions_the_show_row() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "struct cell { v: int }\n",
+        "extern fn speak (t: string) -> ()\n",
+        "impl show for cell {\n",
+        "  fn show(self) -> string { speak(\"hi\")\n \"$self\" }\n",
+        "}\n",
+        "fn holed(c: cell) -> string { \"c=$c\" }\n",
+        "fn written(c: cell) -> string { c.show() }\n",
+        "fn printable(c: cell) -> string { \"v=${c.v}\" }\n",
+        "fn bound_holed[t: show](v: t) -> string { \"v=$v\" }\n",
+        "fn bound_written[t: show](v: t) -> string { v.show() }\n",
+    );
+    let mut registry = Files::new();
+    let file = registry.add_source("holes.ds", source);
+    let ast = parse(&registry, file).unwrap_or_else(|diags| panic!("parses: {diags:?}"));
+    let analyzed = ds_check::analyze(&registry, &[ast]);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "checks clean: {:#?}",
+        analyzed.checked.diags
+    );
+    let declared = DeclaredRows::new().with("speak", EffectRow::of(Effect::World));
+    let effects = ds_check::effects::effects_of_resolved(
+        &analyzed.asts[..],
+        &analyzed.package,
+        &analyzed.resolutions[..],
+        &analyzed.checked.hole_show_dispatches,
+        &declared,
+        &WorldCaps::new(),
+    );
+    // the hole unions the show impl body's row exactly as the written
+    // call does; the printable hole stays pure
+    assert_eq!(row_of(&effects, "holed").render(), "world");
+    assert_eq!(row_of(&effects, "written").render(), "world");
+    assert_eq!(row_of(&effects, "printable").render(), "pure");
+    // the bound-receiver forms agree: the implicit dispatch unions the
+    // trait member's row like the written bound call
+    assert_eq!(
+        row_of(&effects, "bound_holed").render(),
+        row_of(&effects, "bound_written").render()
+    );
+    assert_eq!(row_of(&effects, "bound_holed").render(), "world");
+}

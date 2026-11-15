@@ -19,7 +19,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the probe module once per test VM: parse -> check -> lower ->
 /// write -> read back -> install. Both native tables must precede the
@@ -103,7 +103,7 @@ fn a_fn_value_calls_through_its_slot() {
     vm.capture_output();
     assert_eq!(
         vm.run("lambda_e2e", "main", &[]),
-        Ok(Value::I64(34)),
+        Ok(FrameAnswer::one(Value::I64(34))),
         "4 + 10 + 9 + 5 + 6: the scalar, captured, and factory calls all land"
     );
     assert_eq!(
@@ -128,7 +128,10 @@ fn a_fn_value_calls_through_its_slot() {
 fn a_bare_lambda_argument_stages_and_calls() {
     let (mut vm, _) = build_vm();
     vm.capture_output();
-    assert_eq!(vm.run("lambda_e2e", "main", &[]), Ok(Value::I64(34)));
+    assert_eq!(
+        vm.run("lambda_e2e", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(34)))
+    );
     assert!(vm.captured_output().starts_with(b"f(3) = 4\napply = 10\n"));
 }
 
@@ -141,7 +144,10 @@ fn a_bare_lambda_argument_stages_and_calls() {
 fn a_capturing_lambda_builds_and_calls_a_closure() {
     let (mut vm, _) = build_vm();
     vm.capture_output();
-    assert_eq!(vm.run("lambda_e2e", "main", &[]), Ok(Value::I64(34)));
+    assert_eq!(
+        vm.run("lambda_e2e", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(34)))
+    );
     assert!(
         vm.captured_output()
             .starts_with(b"f(3) = 4\napply = 10\ntwice = 9\ngreet = hey!\n")
@@ -155,7 +161,10 @@ fn a_capturing_lambda_builds_and_calls_a_closure() {
 fn a_factory_closure_outlives_its_frame() {
     let (mut vm, _) = build_vm();
     vm.capture_output();
-    assert_eq!(vm.run("lambda_e2e", "main", &[]), Ok(Value::I64(34)));
+    assert_eq!(
+        vm.run("lambda_e2e", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(34)))
+    );
     assert!(
         vm.captured_output()
             .starts_with(b"f(3) = 4\napply = 10\ntwice = 9\ngreet = hey!\nfactory = 14\n")

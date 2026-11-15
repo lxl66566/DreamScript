@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the probe once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -57,7 +57,7 @@ fn string_plus_runs_as_the_concat_call_and_the_heap_drains() {
     vm.capture_output();
     assert_eq!(
         vm.run("string_add_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "every leg of the probe matched"
     );
     // each chain's staged borrows flushed after their calls, both
@@ -104,7 +104,7 @@ fn the_staged_borrow_seam_is_closed_and_every_shape_drains() {
     ] {
         assert_eq!(
             vm.run("string_add_probe", leg, &[]),
-            Ok(Value::Bool(true)),
+            Ok(FrameAnswer::one(Value::Bool(true))),
             "{leg} runs clean (the window pinned its staged words)"
         );
         assert!(

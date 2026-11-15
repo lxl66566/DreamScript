@@ -27,7 +27,7 @@ use ds_diag::{Files, human};
 use ds_lower::{PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds one probe module into a fresh VM, asserting the fixture
 /// checks clean so failures are the lowerer's.
@@ -88,7 +88,7 @@ fn value_tests_chain_and_reconcile_the_per_arm_states() {
     vm.capture_output();
     assert_eq!(
         vm.run("value_match_probe", "main", &[]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(
         vm.captured_output(),
@@ -535,7 +535,7 @@ fn guard_seams_read_through_the_scrutinees_name_and_fire_one_deinit() {
     vm.capture_output();
     assert_eq!(
         vm.run("value_match_guard_probe", "main", &[]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(
         vm.captured_output(),

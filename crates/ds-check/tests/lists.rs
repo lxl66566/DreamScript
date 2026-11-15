@@ -8,17 +8,17 @@ use ds_diag::Files;
 use ds_parse::parse;
 
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "struct page { url: string }\n",
-    "struct list[t]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "trait Copyable { }\n",
-    "struct link: ~Copyable { slot: int }\n",
-    "extern fn tweak (l: mut link) -> ()\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub struct page { url: string }\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub trait Copyable { }\n",
+    "pub struct link: ~Copyable { slot: int }\n",
+    "pub extern fn tweak (l: mut link) -> ()\n",
 );
 
 /// Type-checks `source` beside the list ambient, rendering every
@@ -44,12 +44,12 @@ fn literals_infer_elements_and_type_against_returns() {
     // inference without an expected type, containment against the declared
     // return, and the bidirectional read over the built list
     for source in [
-        "fn f() -> list[int] {\n  [1, 2, 3]\n}\n",
-        "fn f() -> list[string] {\n  [\"a\", \"b\"]\n}\n",
-        "const xs = [1, 2]\nfn f() -> int {\n  list_len(xs)\n}\n",
-        "fn f() -> list[int] {\n  []\n}\n",
-        "const xs = list[int]()\nfn f() -> int {\n  list_len(xs)\n}\n",
-        "fn f() -> int {\n  list_len(list[page]())\n}\n",
+        "pub fn f() -> list[int] {\n  [1, 2, 3]\n}\n",
+        "pub fn f() -> list[string] {\n  [\"a\", \"b\"]\n}\n",
+        "pub const xs = [1, 2]\nfn f() -> int {\n  list_len(xs)\n}\n",
+        "pub fn f() -> list[int] {\n  []\n}\n",
+        "pub const xs = list[int]()\nfn f() -> int {\n  list_len(xs)\n}\n",
+        "pub fn f() -> int {\n  list_len(list[page]())\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }
@@ -141,10 +141,10 @@ fn var_and_fresh_receivers_type_the_window() {
     // a var binding and a mut-window parameter carry the spelling's
     // exclusivity; a fresh rvalue is uniquely owned by construction [D2]
     for source in [
-        "fn f() -> int {\n  var xs = [1]\n  xs.list_push(2)\n  list_len(xs)\n}\n",
-        "fn f() -> int {\n  var xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n",
-        "fn fill(xs: mut list[int]) -> () {\n  xs.list_push(1)\n}\n",
-        "fn f() -> () {\n  list_push(list[page](), page { url: \"u\" })\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  xs.list_push(2)\n  list_len(xs)\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n",
+        "pub fn fill(xs: mut list[int]) -> () {\n  xs.list_push(1)\n}\n",
+        "pub fn f() -> () {\n  list_push(list[page](), page { url: \"u\" })\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }

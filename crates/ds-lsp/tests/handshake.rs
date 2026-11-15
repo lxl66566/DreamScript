@@ -117,7 +117,12 @@ async fn the_handshake_diagnoses_and_answers() {
         )
         .await;
         let reply = expect(&mut client, Wanted::Id(1)).await;
-        assert_eq!(reply["result"]["capabilities"]["textDocumentSync"], 1);
+        // The incremental test below pins the full sync options; here
+        // the kind alone answers the "which sync" question.
+        assert_eq!(
+            reply["result"]["capabilities"]["textDocumentSync"]["change"],
+            2
+        );
         assert_eq!(reply["result"]["capabilities"]["hoverProvider"], true);
         assert_eq!(reply["result"]["capabilities"]["definitionProvider"], true);
         assert_eq!(reply["result"]["capabilities"]["referencesProvider"], true);
@@ -864,6 +869,214 @@ async fn semantic_tokens_answer_over_the_wire() {
         )
         .await;
         let reply = expect(&mut client, Wanted::Id(3)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// The incremental-sync wire: ranged edits splice into the held
+/// document through the advertised sync kind, and the debounced
+/// publish coalesces a burst of change notifications into one
+/// publish (the last one's version tag) followed by silence; a
+/// rangeless change still replaces the whole text, and a save rides
+/// the same debounce.
+#[tokio::test]
+async fn incremental_sync_debounces_the_publish() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_incremental.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(1)).await;
+        let sync = &reply["result"]["capabilities"]["textDocumentSync"];
+        assert_eq!(sync["openClose"], true);
+        assert_eq!(sync["change"], 2);
+        assert_eq!(sync["save"], true);
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        // The document opens clean.
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": "const msg: string = \"hi\"\n",
+                }}),
+            ),
+        )
+        .await;
+        let published = expect(
+            &mut client,
+            Wanted::Method("textDocument/publishDiagnostics"),
+        )
+        .await;
+        assert_eq!(published["params"]["version"], 1);
+        assert!(
+            published["params"]["diagnostics"]
+                .as_array()
+                .expect("the diagnostics are a list")
+                .is_empty(),
+            "{}",
+            published["params"]["diagnostics"]
+        );
+
+        // A burst of three ranged edits inside one debounce window: the
+        // annotation breaks, then a leading comment line shifts the
+        // mismatch down, then the annotation on the moved line breaks a
+        // second binding.
+        let change = |version, range, text| {
+            json!({
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"range": range, "text": text}],
+            })
+        };
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didChange",
+                &change(
+                    2,
+                    json!({"start": {"line": 0, "character": 11}, "end": {"line": 0, "character": 17}}),
+                    "int",
+                ),
+            ),
+        )
+        .await;
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didChange",
+                &change(
+                    3,
+                    json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}),
+                    "// lead\n",
+                ),
+            ),
+        )
+        .await;
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didChange",
+                &change(
+                    4,
+                    json!({"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0}}),
+                    "const broken: string = 1\n",
+                ),
+            ),
+        )
+        .await;
+
+        // One publish lands after the window: the last version's tag,
+        // carrying both mismatches on their shifted lines.
+        let published = expect(
+            &mut client,
+            Wanted::Method("textDocument/publishDiagnostics"),
+        )
+        .await;
+        assert_eq!(published["params"]["uri"], uri);
+        assert_eq!(published["params"]["version"], 4);
+        let diags = published["params"]["diagnostics"]
+            .as_array()
+            .expect("the diagnostics are a list");
+        let lines: Vec<u64> = diags
+            .iter()
+            .map(|diag| diag["range"]["start"]["line"].as_u64().expect("a line"))
+            .collect();
+        assert_eq!(lines, [1, 2], "{diags:?}");
+
+        // No further publish follows inside another window: the burst
+        // coalesced into exactly one.
+        assert!(
+            timeout(Duration::from_millis(600), recv(&mut client))
+                .await
+                .is_err(),
+            "the burst published once"
+        );
+
+        // A rangeless change (the full-text client's path) replaces the
+        // whole document and publishes clean through the window.
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didChange",
+                &json!({
+                    "textDocument": {"uri": uri, "version": 5},
+                    "contentChanges": [{
+                        "text": "const msg: string = \"hi\"\n",
+                    }],
+                }),
+            ),
+        )
+        .await;
+        let published = expect(
+            &mut client,
+            Wanted::Method("textDocument/publishDiagnostics"),
+        )
+        .await;
+        assert_eq!(published["params"]["version"], 5);
+        assert!(
+            published["params"]["diagnostics"]
+                .as_array()
+                .expect("the diagnostics are a list")
+                .is_empty(),
+            "{}",
+            published["params"]["diagnostics"]
+        );
+
+        // A save asks for one fresh publish through the same window,
+        // untagged (a save carries no version).
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didSave",
+                &json!({"textDocument": {"uri": uri}}),
+            ),
+        )
+        .await;
+        let published = expect(
+            &mut client,
+            Wanted::Method("textDocument/publishDiagnostics"),
+        )
+        .await;
+        assert!(published["params"]["version"].is_null());
+        assert!(
+            published["params"]["diagnostics"]
+                .as_array()
+                .expect("the diagnostics are a list")
+                .is_empty(),
+            "{}",
+            published["params"]["diagnostics"]
+        );
+
+        send(
+            &mut client,
+            r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
         assert!(reply.get("error").is_none(), "{reply}");
         send(&mut client, &notification("exit", &json!({}))).await;
     })

@@ -13,13 +13,14 @@ use super::{
         Mov, Ref, Tag,
     },
     Uop::{
-        self, AddF64, AddI64, ArenaMark, ArenaRestore, Call as UCall, Callg as UCallg,
-        Calls as UCalls, Callt, Calltg as UCalltg, ClosureNew as UClosureNew, CvtF2I, CvtI2F,
-        DivF64, DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64,
-        Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr,
-        KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64,
-        NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat, StrCatArena, SubF64, SubI64, TagNew,
-        TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
+        self, AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64,
+        Call as UCall, Callg as UCallg, Calls as UCalls, Callt, Calltg as UCalltg,
+        ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr,
+        Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst,
+        Kimm as UKimm, Kstr as UKstr, KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64,
+        ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64,
+        ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot, WrapAddI64,
+        WrapMulI64, WrapSubI64,
     },
 };
 
@@ -122,6 +123,11 @@ impl Uop {
                 5 => r3!(WrapAddI64),
                 6 => r3!(WrapSubI64),
                 7 => r3!(WrapMulI64),
+                8 => r3!(ShlI64),
+                9 => r3!(ShrI64),
+                10 => r3!(BitAndI64),
+                11 => r3!(BitXorI64),
+                12 => r3!(BitOrI64),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             FloatArith => match minor {
@@ -344,6 +350,11 @@ impl Uop {
             GtI64 { .. } | GtF64 { .. } | UCalltg { .. } | WrapAddI64 { .. } => 5,
             WrapSubI64 { .. } | UCalls { .. } => 6,
             WrapMulI64 { .. } => 7,
+            ShlI64 { .. } => 8,
+            ShrI64 { .. } => 9,
+            BitAndI64 { .. } => 10,
+            BitXorI64 { .. } => 11,
+            BitOrI64 { .. } => 12,
         }
     }
 
@@ -359,6 +370,11 @@ impl Uop {
             | WrapAddI64 { dst, .. }
             | WrapSubI64 { dst, .. }
             | WrapMulI64 { dst, .. }
+            | ShlI64 { dst, .. }
+            | ShrI64 { dst, .. }
+            | BitAndI64 { dst, .. }
+            | BitXorI64 { dst, .. }
+            | BitOrI64 { dst, .. }
             | AddF64 { dst, .. }
             | SubF64 { dst, .. }
             | MulF64 { dst, .. }
@@ -444,6 +460,11 @@ impl Uop {
             | WrapAddI64 { lhs, rhs, .. }
             | WrapSubI64 { lhs, rhs, .. }
             | WrapMulI64 { lhs, rhs, .. }
+            | ShlI64 { lhs, rhs, .. }
+            | ShrI64 { lhs, rhs, .. }
+            | BitAndI64 { lhs, rhs, .. }
+            | BitXorI64 { lhs, rhs, .. }
+            | BitOrI64 { lhs, rhs, .. }
             | AddF64 { lhs, rhs, .. }
             | SubF64 { lhs, rhs, .. }
             | MulF64 { lhs, rhs, .. }

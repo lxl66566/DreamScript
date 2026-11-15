@@ -257,7 +257,11 @@ fn max_with_evidence(name: &str, evidence: ConstIdx) -> FunctionDef {
 }
 
 fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
-    vm.run("gn", func, args).expect("the fixture runs")
+    let answer = vm.run("gn", func, args).expect("the fixture runs");
+    let [word] = answer.as_slice() else {
+        panic!("the fixture answers one word")
+    };
+    *word
 }
 
 fn head_string(vm: &mut Vm, list: Value) -> String {

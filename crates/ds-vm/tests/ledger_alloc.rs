@@ -352,7 +352,7 @@ fn lb_registry() -> ModuleRegistry {
 /// Runs one fork main and checks the join answered the result list word.
 fn run_batch(vm: &mut Vm, func: &str) {
     let answer = vm.run("lb", func, &[]).expect("the batch lands");
-    let Value::Ref(_) = answer else {
+    let [Value::Ref(_)] = answer.as_slice() else {
         panic!("{func} must answer its result list word");
     };
 }
@@ -366,9 +366,11 @@ fn capture_children_answer_doubled() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut vm = Vm::new(lb_registry());
-    let Value::Ref(res) = vm.run("lb", "main_capture", &[]).expect("lands") else {
+    let answer = vm.run("lb", "main_capture", &[]).expect("lands");
+    let [Value::Ref(res)] = answer.as_slice() else {
         panic!("ref answer");
     };
+    let res = *res;
     let store = vm.objects_of(res);
     let elems = store.list_at(res.id()).expect("reads");
     assert_eq!(elems.len(), CHILDREN);

@@ -1,0 +1,66 @@
+// purpose: the shift and bitwise operators lower end to end through the
+// five IntArith uops — `<<` (SHLI64) and `>>` (SHRI64, arithmetic) with the
+// oversized-shift trap beside overflow and division by zero, and `&`/`^`/`|`
+// as total operations [B7]. The probe pins the value answers on both shift
+// directions, the sign-propagating right shift, the bitwise trio's table,
+// the frozen precedence rows, the compound and plain assignment stores, and
+// the trap edges (shift 64, shift -1). The `int | none` binding beside the
+// bitwise `|` expressions pins the checker's separation of the union-type
+// spelling from the operator.
+
+tag int
+tag bool
+tag none
+
+fn main() -> bool {
+  shift_values() && sign_right_shift() && bitwise_values() && precedence_rows() && accumulate(2) == 4 && union_beside_bits(5)
+}
+
+fn shift_values() -> bool {
+  1 << 0 == 1 && 1 << 10 == 1024 && 3 << 63 == 0 - 9223372036854775807 - 1 && 1024 >> 3 == 128 && 1 >> 63 == 0
+}
+
+fn sign_right_shift() -> bool {
+  const n = 0 - 16
+  n >> 2 == 0 - 4 && (0 - 1) >> 63 == 0 - 1
+}
+
+fn bitwise_values() -> bool {
+  (0xF0 & 0x0F) == 0 && (0xF0 ^ 0xFF) == 0x0F && (0xF0 | 0x0F) == 0xFF
+}
+
+fn precedence_rows() -> bool {
+  1 + 2 << 3 == 24 && 1 << 2 + 3 == 32 && (3 & 1 | 2) == 3 && (3 & 1 ^ 2) == 3 && (1 | 2 ^ 3 & 4) == 3 && 4 << 1 < 32
+}
+
+fn accumulate(rounds: int) -> int {
+  var acc = 1
+  var i = 0
+  while i < rounds {
+    acc <<= 2
+    acc >>= 1
+    i = i + 1
+  }
+  acc
+}
+
+fn union_beside_bits(x: int) -> bool {
+  const u: int | none = x
+  (x & 1 | 2) == 3 && !(u is none)
+}
+
+fn shl_past_width() -> int {
+  1 << 64
+}
+
+fn shr_past_width() -> int {
+  1 >> 64
+}
+
+fn shl_negative() -> int {
+  1 << -1
+}
+
+fn shr_negative() -> int {
+  1 >> -1
+}

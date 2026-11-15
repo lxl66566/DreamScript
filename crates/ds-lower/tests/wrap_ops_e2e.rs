@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Trap, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Trap, Value, Vm, loader, native};
 
 /// Builds the probe once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -54,13 +54,13 @@ fn wrap_ops_wrap_where_the_trapping_forms_trap() {
     let (mut vm, _) = build_vm();
     assert_eq!(
         vm.run("wrap_ops_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "every wrap edge answers modulo 2^64"
     );
     // unary `-%` over int-min wraps to int-min (the `0 -% a` lowering)
     assert_eq!(
         vm.run("wrap_ops_probe", "neg_of_min", &[]),
-        Ok(Value::I64(i64::MIN))
+        Ok(FrameAnswer::one(Value::I64(i64::MIN)))
     );
     // the contrast: the trapping `+` and unary `-` keep the cold edge
     assert_eq!(
@@ -167,7 +167,7 @@ fn wrap_plain_assignments_write_the_var_word_directly() {
     let mut vm = Vm::new(registry);
     assert_eq!(
         vm.run("wrap_store", "main", &[]),
-        Ok(Value::I64(20)),
+        Ok(FrameAnswer::one(Value::I64(20))),
         "8 +% 3 -% 1 *% 2 answers 20, the offer changing no behavior"
     );
 }

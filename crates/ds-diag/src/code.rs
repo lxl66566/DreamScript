@@ -189,6 +189,15 @@ error_codes! {
     ComptimeFenceRefusal => "DS2033", Type,
     /// The comptime evaluator's honest refusals: an argument shape it does not stage, a result it cannot embed, or a trap the fenced run raised.
     ComptimeEvalRefusal => "DS2034", Type,
+    /// A pooled fork-join child's body reaches a sibling-addressing fiber control native.
+    PooledControlNative => "DS2035", Type,
+    /// A pooled fork-join child's body reaches the world surface.
+    PooledWorldCall => "DS2036", Type,
+    /// The comptime fence's callee admission refuses a runtime callee: an impure effect row, a generic body's evidence seam, or a member call the slice plans no body for (G1).
+    ComptimeCalleeRefusal => "DS2037", Type,
+||||||| parent of f55bb44 (Land the union-default member annotation for the default derive)
+    /// The `#[default]` union-member annotation's refusals: a second annotated member of one union, an annotation no default derivation reads, or one outside an enum case (G1).
+    DeriveMemberAnnotation => "DS2038", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -228,6 +237,20 @@ error_codes! {
     PlatformNotProvided => "DS4012", Module,
     /// World-touching code with no platform declaration (H5, E1).
     PlatformMissing => "DS4013", Module,
+    /// ds.pkg manifest syntax or structure error: unknown key or section, duplicate key, malformed value, or a non-canonical spelling (H6).
+    PackageManifestMalformed => "DS4014", Module,
+    /// A declared dependency minimum names a version the provider does not offer of a name it knows (H6).
+    UnsatisfiableVersionBound => "DS4015", Module,
+    /// A package's content disagrees with a recorded or pinned blake3 hash (H6).
+    PackageHashMismatch => "DS4016", Module,
+    /// A private definition used from outside its defining file (G4).
+    PrivateUse => "DS4017", Module,
+    /// An import selects a name its target does not export to dependents (G4).
+    ImportNotExported => "DS4018", Module,
+    /// An import selects a name no member of the compile unit declares (G4).
+    ImportNameMissing => "DS4019", Module,
+    /// A visibility modifier on an item that declares no package name, or a re-export whose semantics land with cross-package linking (G4).
+    VisNoTarget => "DS4020", Module,
 }
 
 #[cfg(test)]
@@ -293,6 +316,11 @@ mod tests {
             ("ComptimeValueOutside", "DS2032", ErrorClass::Type),
             ("ComptimeFenceRefusal", "DS2033", ErrorClass::Type),
             ("ComptimeEvalRefusal", "DS2034", ErrorClass::Type),
+            ("PooledControlNative", "DS2035", ErrorClass::Type),
+            ("PooledWorldCall", "DS2036", ErrorClass::Type),
+            ("ComptimeCalleeRefusal", "DS2037", ErrorClass::Type),
+||||||| parent of f55bb44 (Land the union-default member annotation for the default derive)
+            ("DeriveMemberAnnotation", "DS2038", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
@@ -312,6 +340,13 @@ mod tests {
             ("PlatformUnknownCapability", "DS4011", ErrorClass::Module),
             ("PlatformNotProvided", "DS4012", ErrorClass::Module),
             ("PlatformMissing", "DS4013", ErrorClass::Module),
+            ("PackageManifestMalformed", "DS4014", ErrorClass::Module),
+            ("UnsatisfiableVersionBound", "DS4015", ErrorClass::Module),
+            ("PackageHashMismatch", "DS4016", ErrorClass::Module),
+            ("PrivateUse", "DS4017", ErrorClass::Module),
+            ("ImportNotExported", "DS4018", ErrorClass::Module),
+            ("ImportNameMissing", "DS4019", ErrorClass::Module),
+            ("VisNoTarget", "DS4020", ErrorClass::Module),
         ];
         assert_eq!(
             ErrorCode::ALL.len(),
@@ -328,7 +363,7 @@ mod tests {
     /// Machine checks the snapshot cannot express alone: every code string is
     /// a well-formed `DSnnnn`, its number sits inside its class's thousands
     /// range, strings are unique, `ALL` is strictly ascending, and the table
-    /// is terminal at DS4013.
+    /// is terminal at DS4020.
     #[test]
     fn all_codes_well_formed_in_range_unique_and_ascending() {
         let mut prev = 0;
@@ -349,6 +384,6 @@ mod tests {
             assert!(n > prev, "{code} ({n}) breaks ascending order after {prev}");
             prev = n;
         }
-        assert_eq!(prev, 4013, "the table's highest code is DS4013");
+        assert_eq!(prev, 4020, "the table's highest code is DS4020");
     }
 }

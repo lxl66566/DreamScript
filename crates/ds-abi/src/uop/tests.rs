@@ -48,6 +48,11 @@ fn samples() -> Vec<Uop> {
         MulI64,
         DivI64,
         ModI64,
+        ShlI64,
+        ShrI64,
+        BitAndI64,
+        BitXorI64,
+        BitOrI64,
         AddF64,
         SubF64,
         MulF64,
@@ -288,6 +293,46 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
                 rhs: 0,
             },
             0x17,
+        ),
+        (
+            ShlI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x18,
+        ),
+        (
+            ShrI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x19,
+        ),
+        (
+            BitAndI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x1a,
+        ),
+        (
+            BitXorI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x1b,
+        ),
+        (
+            BitOrI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 0,
+            },
+            0x1c,
         ),
         (
             AddF64 {
@@ -719,9 +764,10 @@ fn field_map_matches_the_module_doc_table() {
         0x22 MulF64, 0x23 DivF64, 0x30 EqI64, 0x31 NeqI64, 0x32 LtI64, 0x33 GeI64, 0x34 LeI64,
         0x35 GtI64, 0x40 EqF64, 0x41 NeqF64, 0x42 LtF64, 0x43 GeF64, 0x44 LeF64, 0x45 GtF64,
         0x50 EqBool, 0x51 NeqBool, 0xD0 EqStr, 0xD1 NeqStr, 0xD2 StrCat, 0xD4 StrCatArena,
-        0x15 WrapAddI64, 0x16 WrapSubI64, 0x17 WrapMulI64,
+        0x15 WrapAddI64, 0x16 WrapSubI64, 0x17 WrapMulI64, 0x18 ShlI64, 0x19 ShrI64,
+        0x1A BitAndI64, 0x1B BitXorI64, 0x1C BitOrI64,
     ]);
-    assert_eq!(cases.len(), 55, "one sentinel per variant");
+    assert_eq!(cases.len(), 60, "one sentinel per variant");
     for (uop, word) in cases {
         assert_eq!(uop.encode(0), Ok(word), "field map drift: {uop:?}");
     }
@@ -886,6 +932,15 @@ fn malformed_encodings_are_rejected() {
             "{word:08X}"
         );
     }
+    // unassigned minor inside IntArith (the five new variants stop at
+    // minor 0xC)
+    assert_eq!(
+        Uop::decode(0, 0x1d_00_00_00),
+        Err(DecodeError::UnknownOpcode {
+            major: 0x1,
+            minor: 0xd
+        })
+    );
     // unassigned minor inside the Ref major
     assert_eq!(
         Uop::decode(0, 0xd5_00_00_00),
@@ -1031,6 +1086,11 @@ fn effects_are_consistent_with_slot_operands() {
             | WrapAddI64 { dst, lhs, rhs }
             | WrapSubI64 { dst, lhs, rhs }
             | WrapMulI64 { dst, lhs, rhs }
+            | ShlI64 { dst, lhs, rhs }
+            | ShrI64 { dst, lhs, rhs }
+            | BitAndI64 { dst, lhs, rhs }
+            | BitXorI64 { dst, lhs, rhs }
+            | BitOrI64 { dst, lhs, rhs }
             | AddF64 { dst, lhs, rhs }
             | SubF64 { dst, lhs, rhs }
             | MulF64 { dst, lhs, rhs }

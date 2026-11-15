@@ -2,7 +2,9 @@
 //! dsmod file, or a .ds source compiled in-process through the source
 //! pipeline (parse, check, lower, install), with the script-mode dsmod
 //! cache consulted before that pipeline — resolving one entry function
-//! and reporting its result.
+//! and reporting its result. A .ds source with a `ds.pkg` beside it runs
+//! as a package: the manifest resolves over the store and the deps-first
+//! walk installs the linked graph before the root.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +20,7 @@ use ds_vm::{
 };
 
 use crate::{
+    package,
     run_cache::{RunCache, ServedPlan},
     source,
 };
@@ -48,7 +51,8 @@ pub struct RunArgs {
     /// Compile without the stdlib ambient package member (source files only)
     #[arg(long)]
     no_ambient: bool,
-    /// Run .ds sources without consulting the script-mode dsmod cache
+    /// Run .ds sources without consulting the script-mode caches (the
+    /// dsmod artifact and the checked-prefix `.dsi`)
     #[arg(long)]
     no_cache: bool,
 }
@@ -127,18 +131,69 @@ fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
     })
 }
 
-/// The source path: the script-mode dsmod cache first — a servable
-/// cached artifact installs without the front end — then the in-process
-/// compile exactly as before, caching what a later run of the same
-/// inputs can serve.
+/// The source path: a package-shaped root (a `ds.pkg` beside the source)
+/// takes the package path first; everything else is the script-mode
+/// dsmod cache first — a servable cached artifact installs without the
+/// front end — then the in-process compile exactly as before, caching
+/// what a later run of the same inputs can serve.
 fn run_source(args: &RunArgs) -> Result<PreparedRun> {
+    if let Some(graph) = package::open(&args.file, args.no_ambient)? {
+        return run_package(args, &graph);
+    }
     let cache = RunCache::discover(!args.no_cache, args.no_ambient);
+    let prefix = crate::dsi_cache::PrefixCache::discover(!args.no_cache, args.no_ambient);
     if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
         return run_cached(module, &plan, args);
     }
-    let compiled = source::compile(&args.file, &args.entry, args.no_ambient)?;
+    let compiled = source::compile(&args.file, &args.entry, args.no_ambient, Some(&prefix))?;
     cache.store(&args.entry, compiled.lowered.module());
     compile_source(args, compiled)
+}
+
+/// The package path: compile the root against the resolved graph, then
+/// install through the deps-first walk — `@std` and every linked package
+/// serving through the graph, dependencies before their dependent. The
+/// script cache stays out: the artifact's link table records identities
+/// the source text alone does not determine, so the plain key cannot pin
+/// them; package runs compile cold until the key folds dep identities.
+fn run_package(args: &RunArgs, graph: &package::Graph) -> Result<PreparedRun> {
+    let compiled = package::compile_root(&args.file, &args.entry, graph)?;
+    let name = compiled.name.clone();
+    let functions = compiled.lowered.functions().to_vec();
+    let int_member = compiled.lowered.tag("int");
+    let none_member = compiled.lowered.tag("none");
+    let entry_args = compiled.entry_args;
+    let mut registry = ModuleRegistry::new();
+    provide_platform(&mut registry);
+    let mut vm = Vm::new(registry);
+    // a member that fails to compile refuses through the walk's provider
+    // miss, so its failure rides the stash out of the provider closure
+    let failed = std::cell::RefCell::new(None);
+    let walk = vm.load(compiled.lowered.into_module(), |dep, _| {
+        match graph.serve(dep) {
+            Ok(module) => module,
+            Err(error) => {
+                *failed.borrow_mut() = Some(error);
+                None
+            },
+        }
+    });
+    if let Some(error) = failed.into_inner() {
+        return Err(error);
+    }
+    walk.map_err(|error| install_error(&name, functions.len(), &error))?;
+    Ok(PreparedRun {
+        staged: stage_source_args(
+            &name,
+            entry_args.as_deref(),
+            int_member,
+            none_member,
+            &args.args,
+        )?,
+        functions,
+        name,
+        vm,
+    })
 }
 
 /// The hit path: install the cached module and stage exactly as the
@@ -206,7 +261,9 @@ fn compile_source(args: &RunArgs, compiled: source::CompiledSource) -> Result<Pr
 /// failure tag (io, net, parse) is a failed run — the lowered
 /// unhandled-failure handler already printed the message — the `none`
 /// member of a checked read prints by name, and everything else prints
-/// like the dsmod path always did.
+/// like the dsmod path always did. The run answers the entry's whole
+/// word span, so a multi-word answer (a tuple, a widened span) prints
+/// one word per line instead of a truncated head.
 fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
     if prepared
         .vm
@@ -221,24 +278,28 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
         ));
     }
     match prepared.vm.run(&prepared.name, entry, &prepared.staged) {
-        Ok(value) => match value {
-            Value::Tag(tag) if tag == PLATFORM_IO_ERR => Err(anyhow!(
+        Ok(answer) => match answer.as_slice() {
+            // the failure tags and the checked read's `none` member ride
+            // the answer's head word
+            [Value::Tag(tag), ..] if *tag == PLATFORM_IO_ERR => Err(anyhow!(
                 "the run halted on an unhandled io failure (the message is on stdout)"
             )),
-            Value::Tag(tag) if tag == PLATFORM_NET_ERR => Err(anyhow!(
+            [Value::Tag(tag), ..] if *tag == PLATFORM_NET_ERR => Err(anyhow!(
                 "the run halted on an unhandled net failure (the message is on stdout)"
             )),
-            Value::Tag(tag) if tag == PLATFORM_PARSE_ERR => Err(anyhow!(
+            [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => Err(anyhow!(
                 "the run halted on an unhandled parse failure (the message is on stdout)"
             )),
             // The `none` member of a checked read is a plain result: print
             // its name, not the platform reservation's raw id.
-            Value::Tag(tag) if tag == PLATFORM_NONE => {
+            [Value::Tag(tag), ..] if *tag == PLATFORM_NONE => {
                 println!("none");
                 Ok(())
             },
-            value => {
-                print_value(&value);
+            _ => {
+                for value in answer.as_slice() {
+                    print_value(value);
+                }
                 Ok(())
             },
         },
@@ -491,6 +552,7 @@ fn describe_trap(trap: &Trap) -> String {
         },
         Trap::IntegerOverflow => "integer overflow".to_owned(),
         Trap::DivideByZero => "division by zero".to_owned(),
+        Trap::OversizedShift => "oversized shift".to_owned(),
         Trap::CvtOutOfRange => "float-to-int conversion out of range".to_owned(),
         Trap::UnknownFunction { module, func } => {
             format!("module `{module}` has no function `{func}`")

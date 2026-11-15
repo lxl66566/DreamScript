@@ -1,9 +1,9 @@
-//! The derive engine's first slice (G1): the meta-language is the
-//! language, so a derive attribute expands into an ordinary impl
-//! declaration — AST-level synthesis after parse, before resolution —
-//! and the synthesized impl flows through the normal checker (trait
-//! coherence, signature agreement) and the normal lowering. Nothing in
-//! the emission paths knows a derive exists.
+//! The derive engine (G1): the meta-language is the language, so a
+//! derive attribute expands into an ordinary impl declaration —
+//! AST-level synthesis after parse, before resolution — and the
+//! synthesized impl flows through the normal checker (trait coherence,
+//! signature agreement) and the normal lowering. Nothing in the
+//! emission paths knows a derive exists.
 //!
 //! `show`, `ord`, `hash`, `clone`, and `default` are the landed
 //! families: `show` answers the construction spelling of the data;
@@ -22,6 +22,14 @@
 //! dispatch, a tuple the per-element construction, an optional `none`,
 //! an application the empty construction — a part-less struct the
 //! unit-word construction, an enum its first unit case, a tag itself.
+//! A union's `#[default]` member annotation (the 2026-11-15 ruling)
+//! names the one member the family synthesizes over: the annotated
+//! enum defaults to that member's construction — a bare case the tag
+//! itself, a payloaded case the call over per-part defaults — a
+//! field's type spelling the annotated union answers the member's
+//! construction, a union over one enum's cases member-wise; no
+//! annotation keeps the ambiguity refusal, a second annotated member
+//! refusing as a duplicate.
 //! Every other name in the ruled set (`to_json`, `from_json`) parses
 //! and refuses with a checklist diagnostic naming it unimplemented; `==`
 //! refuses with the B9 diagnostic (equality is universal and never
@@ -61,7 +69,7 @@ const PRINTABLE: &[&str] = &["int", "float", "bool", "char", "string"];
 /// refused names keep the attribute and contribute a diagnostic. Files
 /// without derive attributes come back byte-identical (a plain clone).
 /// `asts` may hold shared trees (`Borrow<Ast>`, like
-/// [`check_resolved`](crate::type_of::check_resolved)): the query layer
+/// [`check_resolved`](ds_check::type_of::check_resolved)): the query layer
 /// expands its parse memos without cloning the trees.
 #[must_use]
 pub fn expand<T>(asts: &[T]) -> (Vec<Ast>, Vec<Diagnostic>)
@@ -92,10 +100,10 @@ pub fn expand_owned(mut asts: Vec<Ast>, preexpanded: &[bool]) -> (Vec<Ast>, Vec<
     for (index, ast) in asts.iter_mut().enumerate() {
         if preexpanded.get(index).copied().unwrap_or(false) {
             debug_assert!(
-                !has_derive(ast),
-                "a pre-expanded tree carries no derive attribute"
+                !has_expansion(ast),
+                "a pre-expanded tree carries no expansion work"
             );
-        } else if has_derive(ast) {
+        } else if has_expansion(ast) {
             expand_tree_in_place(ast, &linear, &mut diags);
         }
     }
@@ -104,7 +112,7 @@ pub fn expand_owned(mut asts: Vec<Ast>, preexpanded: &[bool]) -> (Vec<Ast>, Vec<
 
 /// The expansion over the collected trees; see [`expand`].
 fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
-    if !asts.iter().any(|ast| has_derive(ast)) {
+    if !asts.iter().any(|ast| has_expansion(ast)) {
         let cloned: Vec<Ast> = asts.iter().map(|ast| (*ast).clone()).collect();
         return (cloned, Vec::new());
     }
@@ -112,7 +120,7 @@ fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
     let mut diags = Vec::new();
     let mut out = Vec::with_capacity(asts.len());
     for &ast in asts {
-        if !has_derive(ast) {
+        if !has_expansion(ast) {
             out.push(ast.clone());
             continue;
         }
@@ -126,17 +134,29 @@ fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
 /// The in-place expansion of one tree: consumed attributes stripped,
 /// their impls appended beside the attributed item.
 fn expand_tree_in_place(ast: &mut Ast, linear: &[String], diags: &mut Vec<Diagnostic>) {
+    // The `#[default]` member annotations are declaration data of this
+    // file's enums, so the context collects once per tree ahead of the
+    // walk: a field key reads an annotation only when the annotated
+    // enum is declared in the same file (G4).
+    let unions = UnionDefaults::collect(
+        &ast.blocks
+            .iter()
+            .flat_map(|b| b.items.iter())
+            .collect::<Vec<_>>(),
+        diags,
+    );
     for block in &mut ast.blocks {
         // Drain and rebuild: synthesized impls insert beside their
         // attributed item without index arithmetic, so a derive late
         // in the block is never shifted past the walk.
         let mut rebuilt = Vec::with_capacity(block.items.len());
         for item in block.items.drain(..) {
-            let (extra, strip) = expand_item(&item, linear, diags);
+            let (extra, strip) = expand_item(&item, &unions, linear, diags);
             let mut item = item;
             if strip {
                 item.attrs.retain(|a| a.name.name != "derive");
             }
+            item.attrs.retain(|a| a.name.name != "default");
             rebuilt.push(item);
             rebuilt.extend(extra);
         }
@@ -144,12 +164,15 @@ fn expand_tree_in_place(ast: &mut Ast, linear: &[String], diags: &mut Vec<Diagno
     }
 }
 
-/// Whether any item of the file carries a derive attribute.
-fn has_derive(ast: &Ast) -> bool {
-    ast.blocks
-        .iter()
-        .flat_map(|b| b.items.iter())
-        .any(|i| i.attrs.iter().any(|a| a.name.name == "derive"))
+/// Whether any item of the file carries work the expansion owns: a
+/// derive attribute, a `#[default]` member annotation on an enum case,
+/// or a `#[default]` attribute on an item (which the expansion refuses
+/// — the annotation belongs inside an enum).
+fn has_expansion(ast: &Ast) -> bool {
+    ast.blocks.iter().flat_map(|b| b.items.iter()).any(|i| {
+        i.attrs.iter().any(|a| a.name.name == "derive" || a.name.name == "default")
+            || matches!(&i.kind, ItemKind::Enum(decl) if decl.cases.iter().any(|c| c.default.is_some()))
+    })
 }
 
 /// The names of struct/enum declarations whose supers carry a negated
@@ -177,7 +200,12 @@ fn linear_heads(asts: &[&Ast]) -> Vec<String> {
 /// Expands one item's derive attributes. Returns the synthesized impl
 /// items to insert after it and whether every derive argument was
 /// consumed (the attribute is then stripped).
-fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (Vec<Item>, bool) {
+fn expand_item(
+    item: &Item,
+    unions: &UnionDefaults,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> (Vec<Item>, bool) {
     let mut extra = Vec::new();
     let mut consumed = 0;
     let mut derive_attrs = 0;
@@ -188,6 +216,10 @@ fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (
     // span.
     let mut mint = Mint::new(item.span);
     for attr in &item.attrs {
+        if attr.name.name == "default" {
+            diags.push(misplaced_default(attr));
+            continue;
+        }
         if attr.name.name != "derive" {
             continue;
         }
@@ -220,7 +252,7 @@ fn expand_item(item: &Item, linear: &[String], diags: &mut Vec<Diagnostic>) -> (
                     Some(impl_item) => extra.push(impl_item),
                     None => attr_consumed = false,
                 },
-                "default" => match default_impl(item, attr, &mut mint, linear, diags) {
+                "default" => match default_impl(item, attr, &mut mint, unions, linear, diags) {
                     Some(impl_item) => extra.push(impl_item),
                     None => attr_consumed = false,
                 },
@@ -265,6 +297,19 @@ fn unknown(span: Span, name: &str) -> Diagnostic {
     )
     .with_primary(span, "not in the ruled set")
     .with_note(format!("the ruled set is: {RULED_SET}"))
+}
+
+/// A `#[default]` attribute on an item: the annotation belongs to an
+/// enum case, the union member a default derivation reads.
+fn misplaced_default(attr: &Attribute) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::DeriveMemberAnnotation,
+        "`#[default]` annotates an enum case, the union member a default derives over [G1]",
+    )
+    .with_primary(
+        attr.span,
+        "place the annotation on one case inside the enum",
+    )
 }
 
 fn eq_refused(span: Span) -> Diagnostic {
@@ -1402,6 +1447,286 @@ fn clone_impl(
     ))
 }
 
+// ---- the union-default member annotation (the 2026-11-15 ruling) ----
+
+/// One case of a collected enum, the `#[default]` annotation carried
+/// with it.
+struct AnnotatedCase {
+    /// Case name.
+    name: String,
+    /// The case's payload.
+    payload: EnumPayload,
+    /// The annotation's span, `None` when the case carries none.
+    default: Option<Span>,
+}
+
+/// One enum of the expanded file: its cases with their annotations and
+/// whether a default derivation names the union.
+struct AnnotatedEnum {
+    /// The enum's name.
+    name: String,
+    /// One entry per case, in declaration order.
+    cases: Vec<AnnotatedCase>,
+    /// A default derivation names this union: the enum derives
+    /// `default` itself, or a defaulting struct field or annotated
+    /// member's part spells it (transitively). An annotation nothing
+    /// reads refuses.
+    targeted: bool,
+}
+
+/// The per-file union-default context: the `#[default]` member
+/// annotations of this file's enums and the default targets a
+/// derivation reads them through. The annotation is declaration data,
+/// so the family reads it only inside the declaring file (G4) — a
+/// foreign union answers through its own `default` member, whatever
+/// derived it there.
+struct UnionDefaults {
+    /// One entry per declared enum, in declaration order.
+    enums: Vec<AnnotatedEnum>,
+}
+
+/// The members of a union type expression flattened, `None` when a
+/// side spells other than a bare single-segment name.
+fn union_members(ty: &Type) -> Option<Vec<String>> {
+    match ty {
+        Type::Paren { inner, .. } => union_members(inner),
+        Type::Union { left, right, .. } => {
+            let mut members = union_members(left)?;
+            members.extend(union_members(right)?);
+            Some(members)
+        },
+        Type::Path { path, args, .. } if args.is_empty() => match path.segments.as_slice() {
+            [only] => Some(vec![only.name.clone()]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether the item's derive attributes name the family.
+fn derives(item: &Item, family: &str) -> bool {
+    item.attrs.iter().any(|attr| {
+        attr.name.name == "derive"
+            && attr
+                .args
+                .iter()
+                .any(|arg| single_segment(arg) == Some(family))
+    })
+}
+
+impl UnionDefaults {
+    /// Collects the file's enum annotations and walks the default
+    /// targets, refusing the classes the annotation admits nowhere: a
+    /// second annotated member of one union, an annotation no default
+    /// derivation reads.
+    fn collect(items: &[&Item], diags: &mut Vec<Diagnostic>) -> Self {
+        let mut unions = Self {
+            enums: items
+                .iter()
+                .filter_map(|item| match &item.kind {
+                    ItemKind::Enum(decl) => Some(AnnotatedEnum {
+                        name: decl.name.name.clone(),
+                        cases: decl
+                            .cases
+                            .iter()
+                            .map(|case| AnnotatedCase {
+                                name: case.name.name.clone(),
+                                payload: case.payload.clone(),
+                                default: case.default,
+                            })
+                            .collect(),
+                        targeted: false,
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        };
+        // The target walk seeds from what a `default` derivation reads:
+        // a deriving enum names itself, a deriving struct's fields key
+        // their type expressions, and a newly reached union seeds its
+        // annotated member's payload parts — the parts the family
+        // inlines the same way.
+        let mut work: Vec<Type> = Vec::new();
+        for &item in items {
+            if !derives(item, "default") {
+                continue;
+            }
+            match &item.kind {
+                ItemKind::Enum(decl) => unions.reach(&decl.name.name, &mut work),
+                ItemKind::Struct(decl) => {
+                    for member in &decl.members {
+                        if let StructMember::Field(field) = member {
+                            work.push(field.ty.clone());
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        while let Some(ty) = work.pop() {
+            match &ty {
+                Type::Paren { inner, .. } => work.push((**inner).clone()),
+                Type::Tuple { items, .. } => work.extend(items.iter().cloned()),
+                Type::Path { path, args, .. } if args.is_empty() => {
+                    if let [only] = path.segments.as_slice() {
+                        unions.reach(&only.name, &mut work);
+                    }
+                },
+                Type::Union { .. } => {
+                    if let Some(members) = union_members(&ty)
+                        && let Some(owner) = unions.union_owner(&members)
+                    {
+                        unions.reach_index(owner, &mut work);
+                    }
+                },
+                _ => {},
+            }
+        }
+        unions.refuse_misuse(diags);
+        unions
+    }
+
+    /// Marks the named union a default target, seeding its annotated
+    /// member's payload parts when the mark is new.
+    fn reach(&mut self, name: &str, work: &mut Vec<Type>) {
+        if let Some(index) = self.enums.iter().position(|e| e.name == name) {
+            self.reach_index(index, work);
+        }
+    }
+
+    fn reach_index(&mut self, index: usize, work: &mut Vec<Type>) {
+        if self.enums[index].targeted {
+            return;
+        }
+        self.enums[index].targeted = true;
+        for case in &self.enums[index].cases {
+            if case.default.is_some() {
+                match &case.payload {
+                    EnumPayload::Tuple(types) => work.extend(types.iter().cloned()),
+                    EnumPayload::Struct(fields) => {
+                        work.extend(fields.iter().map(|field| field.ty.clone()));
+                    },
+                    EnumPayload::None => {},
+                }
+            }
+        }
+    }
+
+    /// The unique enum whose cases name every member, `None` when a
+    /// member spells no case or two enums claim one name.
+    fn union_owner(&self, members: &[String]) -> Option<usize> {
+        let mut owner: Option<usize> = None;
+        for member in members {
+            let mut found = None;
+            for (index, decl) in self.enums.iter().enumerate() {
+                if decl.cases.iter().any(|case| case.name == *member) {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(index);
+                }
+            }
+            let found = found?;
+            match owner {
+                None => owner = Some(found),
+                Some(previous) if previous == found => {},
+                Some(_) => return None,
+            }
+        }
+        owner
+    }
+
+    /// The union's default member: `Err` on the duplicate the
+    /// collection refused, `Ok(None)` when the union carries no
+    /// annotation (the ordinary dispatch answers), `Ok(Some)` the one
+    /// annotated member.
+    fn member(&self, name: &str) -> Result<Option<&AnnotatedCase>, NoDefault> {
+        let Some(index) = self.enums.iter().position(|e| e.name == name) else {
+            return Ok(None);
+        };
+        let annotated = self.annotated(index);
+        match annotated.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one)),
+            _ => Err(NoDefault::AlreadyRefused),
+        }
+    }
+
+    /// The union's annotated members: one entry per annotated case.
+    fn annotated(&self, index: usize) -> Vec<&AnnotatedCase> {
+        self.enums[index]
+            .cases
+            .iter()
+            .filter(|case| case.default.is_some())
+            .collect()
+    }
+
+    /// The annotation misuse the collection refuses: a duplicated
+    /// choice (two members of one union annotated) and an annotation
+    /// no default derivation reads.
+    fn refuse_misuse(&self, diags: &mut Vec<Diagnostic>) {
+        for (index, decl) in self.enums.iter().enumerate() {
+            let annotated = self.annotated(index);
+            if annotated.len() > 1 {
+                diags.push(duplicate_annotation(&decl.name, &annotated));
+            } else if let [one] = annotated.as_slice()
+                && !decl.targeted
+            {
+                diags.push(unread_annotation(
+                    one.default.expect("an annotated case carries the span"),
+                    &decl.name,
+                    &one.name,
+                ));
+            }
+        }
+    }
+}
+
+/// The second `#[default]` member annotation of one union: one member
+/// names the union's default, so a second choice is the duplicate the
+/// family refuses.
+fn duplicate_annotation(union: &str, annotated: &[&AnnotatedCase]) -> Diagnostic {
+    let first = annotated[0];
+    let second = annotated[1];
+    Diagnostic::error(
+        ErrorCode::DeriveMemberAnnotation,
+        format!(
+            "the union `{union}` carries {} `#[default]` member annotations; one member names the \
+             union's default [G1]",
+            annotated.len()
+        ),
+    )
+    .with_primary(
+        second.default.expect("an annotated case carries the span"),
+        "a second default member",
+    )
+    .with_secondary(
+        first.default.expect("an annotated case carries the span"),
+        format!("`{}` already carries the annotation", first.name),
+    )
+}
+
+/// An annotation no default derivation reads: the `#[default]` choice
+/// only a `default` family expansion consults, so a union nothing
+/// defaults over refuses it.
+fn unread_annotation(span: Span, union: &str, case: &str) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::DeriveMemberAnnotation,
+        format!(
+            "`#[default]` on the member `{case}` of the union `{union}` annotates a default \
+             derivation; none names the union [G1]"
+        ),
+    )
+    .with_primary(
+        span,
+        "derive `default` over the union or remove the annotation",
+    )
+    .with_note(
+        "the annotation reads inside its declaring file: a `#[derive(default)]` on the union, or \
+         a defaulting struct field spelling the union or its members",
+    )
+}
+
 /// Synthesizes `impl <decl> { fn default() -> Self { ... } }`: the
 /// receiverless construction (the 2026-11-15 ruling) — the member lives
 /// in the type's own impl with no receiver parameter, callable as
@@ -1413,7 +1738,9 @@ fn clone_impl(
 /// optional `none`, an application the empty construction
 /// (`list[int]()`, `map[k, v]()`) — a part-less struct the unit-word
 /// construction `X { }`; the enum body is the first case, which must be
-/// a unit case; the tag body is the tag itself. A field whose type
+/// a unit case — or, when one case carries the `#[default]` member
+/// annotation, that member's construction, payloaded cases included
+/// (the union-default ruling) — and the tag body is the tag itself. A field whose type
 /// spells no construction key refuses at the attribute (a union naming
 /// the open ruling, a shape the key cannot reach naming itself), and so
 /// does an enum whose first case carries a payload or an enum with no
@@ -1428,6 +1755,7 @@ fn default_impl(
     item: &Item,
     attr: &Attribute,
     mint: &mut Mint,
+    unions: &UnionDefaults,
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
@@ -1463,45 +1791,87 @@ fn default_impl(
                     diags,
                 )?;
             }
-            let body = match struct_default_body(&decl.name, &fields, mint) {
+            let body = match struct_default_body(&decl.name, &fields, mint, unions) {
                 Ok(body) => body,
                 Err(refused) => {
-                    diags.push(part_refused(
-                        refused.span,
-                        "default",
-                        "field",
-                        &refused.name,
-                        &refused.because,
-                    ));
+                    // A `None` because-clause rides the duplicate the
+                    // collection already refused; the refusal needs no
+                    // second diagnostic.
+                    if let Some(because) = refused.because {
+                        diags.push(part_refused(
+                            refused.span,
+                            "default",
+                            "field",
+                            &refused.name,
+                            &because,
+                        ));
+                    }
                     return None;
                 },
             };
             (&decl.name, decl.generics.as_slice(), vec![expr_stmt(body)])
         },
         ItemKind::Enum(decl) => {
-            let Some(case) = decl.cases.first() else {
-                diags.push(part_refused(
-                    attr.span,
-                    "default",
-                    "enum",
-                    &decl.name.name,
-                    "an enum with no cases has no default value",
-                ));
-                return None;
+            let annotated: Vec<usize> = decl
+                .cases
+                .iter()
+                .enumerate()
+                .filter_map(|(index, case)| case.default.map(|_| index))
+                .collect();
+            let body = match annotated.as_slice() {
+                // No annotation keeps the first-case rule.
+                [] => {
+                    let Some(case) = decl.cases.first() else {
+                        diags.push(part_refused(
+                            attr.span,
+                            "default",
+                            "enum",
+                            &decl.name.name,
+                            "an enum with no cases has no default value",
+                        ));
+                        return None;
+                    };
+                    if !matches!(case.payload, EnumPayload::None) {
+                        diags.push(part_refused(
+                            case.span,
+                            "default",
+                            "enum case",
+                            &case.name.name,
+                            "the family defaults to the first case, which must be a unit case",
+                        ));
+                        return None;
+                    }
+                    path_expr(&case.name.name, mint.span())
+                },
+                // The annotated member: its construction answers
+                // through the receiverless surface, the parts keyed by
+                // the family's ordinary per-part rules.
+                [index] => {
+                    let case = &decl.cases[*index];
+                    for (part, ty, span) in payload_parts(&case.payload, &case.name.name) {
+                        check_part(ty, span, "default", &part, "case part", linear, diags)?;
+                    }
+                    match case_default(&case.name.name, &case.payload, unions, mint) {
+                        Ok(body) => body,
+                        Err(why) => {
+                            if let Some(because) = why.refusal() {
+                                diags.push(part_refused(
+                                    case.span,
+                                    "default",
+                                    "case",
+                                    &case.name.name,
+                                    &because,
+                                ));
+                            }
+                            return None;
+                        },
+                    }
+                },
+                // The duplicate member annotation the collection
+                // refused; its diagnostic is the collection's.
+                _ => return None,
             };
-            if !matches!(case.payload, EnumPayload::None) {
-                diags.push(part_refused(
-                    case.span,
-                    "default",
-                    "enum case",
-                    &case.name.name,
-                    "the family defaults to the first case, which must be a unit case",
-                ));
-                return None;
-            }
-            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(
-                path_expr(&case.name.name, mint.span()),
-            )])
+            (&decl.name, decl.generics.as_slice(), vec![expr_stmt(body)])
         },
         ItemKind::Tag(decl) => {
             let none: &[TypeParam] = &[];
@@ -1529,8 +1899,9 @@ fn default_impl(
 /// type-expression key refuses the shape at the attribute, never at the
 /// synthesized call.
 enum NoDefault {
-    /// `a | b`: no ruling picks a union's default member, so the family
-    /// refuses naming the ambiguity rather than inventing one.
+    /// `a | b` naming no annotated member: no member is canonical, so
+    /// the family refuses naming the ambiguity rather than inventing
+    /// one — the `#[default]` member annotation names the choice.
     Union,
     /// A shape the key spells no construction for: a multi-segment
     /// path, an intersection, a difference, a pointer, a foreign atom,
@@ -1546,14 +1917,26 @@ enum NoDefault {
     /// A type argument the constructor brackets spell no key for (an
     /// optional or a union inside the brackets).
     Arg,
+    /// A duplicate member annotation the collection already refused:
+    /// the reading site refuses over it with no second diagnostic.
+    AlreadyRefused,
 }
 
 impl NoDefault {
+    /// The refusal's because-clause, `None` when the collection
+    /// already reported the duplicate this reading site refuses over.
+    fn refusal(self) -> Option<String> {
+        match self {
+            Self::AlreadyRefused => None,
+            _ => Some(self.because()),
+        }
+    }
+
     /// The refusal's because-clause.
     fn because(self) -> String {
         match self {
-            Self::Union => "a union's default member is an open ruling — no member is canonical, \
-                            and the family invents none"
+            Self::Union => "no union member is canonical; annotate one member with `#[default]` \
+                            or write the impl"
                 .to_owned(),
             Self::Unkeyed => {
                 "the type-expression key spells no default construction for this shape".to_owned()
@@ -1565,6 +1948,9 @@ impl NoDefault {
                                  `map[k, v]()` spelling"
                 .to_owned(),
             Self::Arg => "the constructor brackets spell no key for this type argument".to_owned(),
+            // The collection reported the duplicate; the because-clause
+            // never renders.
+            Self::AlreadyRefused => "a duplicate `#[default]` member annotation".to_owned(),
         }
     }
 }
@@ -1575,7 +1961,7 @@ impl NoDefault {
 struct RefusedField {
     span: Span,
     name: String,
-    because: String,
+    because: Option<String>,
 }
 
 /// `default`'s member: receiverless, `Self` back — the type-keyed
@@ -1597,15 +1983,22 @@ fn default_member(mint: &mut Mint) -> Member {
 /// type keys by its inner shape; the unit type answers the unit value.
 /// Every other shape refuses — a union names the open ruling, anything
 /// else names the unkeyed shape.
-fn default_value(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
+fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<Expr, NoDefault> {
     match ty {
-        Type::Paren { inner, .. } => default_value(inner, mint),
+        Type::Paren { inner, .. } => default_value(inner, mint, unions),
         Type::Path { path, args, .. } => {
             let [only] = path.segments.as_slice() else {
                 return Err(NoDefault::Unkeyed);
             };
             match args.as_slice() {
-                [] => Ok(type_keyed_call(&only.name, "default", mint)),
+                [] => match unions.member(&only.name) {
+                    // The bare name of a union this file annotates:
+                    // the member's construction answers over the
+                    // dispatch (the union-default ruling).
+                    Err(_) => Err(NoDefault::AlreadyRefused),
+                    Ok(None) => Ok(type_keyed_call(&only.name, "default", mint)),
+                    Ok(Some(case)) => case_default(&case.name, &case.payload, unions, mint),
+                },
                 [arg] => {
                     let index = bracket_arg(arg, mint)?;
                     let recv_span = mint.span();
@@ -1653,7 +2046,7 @@ fn default_value(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
             let span = mint.span();
             let elements = items
                 .iter()
-                .map(|item| default_value(item, mint))
+                .map(|item| default_value(item, mint, unions))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Tuple {
                 span,
@@ -1667,7 +2060,24 @@ fn default_value(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
             trailing_comma: false,
         }),
         Type::Optional { .. } => Ok(path_expr("none", mint.span())),
-        Type::Union { .. } => Err(NoDefault::Union),
+        Type::Union { .. } => {
+            // A union spelled over one enum's cases: the one annotated
+            // member names the union's default (the union-default
+            // ruling); every other spelling keeps the ambiguity
+            // refusal.
+            let members = union_members(ty).ok_or(NoDefault::Union)?;
+            let owner = unions.union_owner(&members).ok_or(NoDefault::Union)?;
+            match unions.member(&unions.enums[owner].name) {
+                Err(_) => Err(NoDefault::AlreadyRefused),
+                // The annotated member must sit among the field's own
+                // members: a choice outside the spelled union names no
+                // canonical member of it.
+                Ok(Some(case)) if members.contains(&case.name) => {
+                    case_default(&case.name, &case.payload, unions, mint)
+                },
+                Ok(None | Some(_)) => Err(NoDefault::Union),
+            }
+        },
         _ => Err(NoDefault::Unkeyed),
     }
 }
@@ -1741,6 +2151,75 @@ fn bracket_arg(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
     }
 }
 
+/// The annotated member's default construction (the union-default
+/// ruling): a bare case the case name itself, a tuple payload the call
+/// over per-part defaults, a struct payload the named-argument call —
+/// every part keyed by the family's ordinary per-part rules, a part
+/// spelling no construction refusing through them.
+fn case_default(
+    name: &str,
+    payload: &EnumPayload,
+    unions: &UnionDefaults,
+    mint: &mut Mint,
+) -> Result<Expr, NoDefault> {
+    // One minted span shared by the construction's path and its
+    // identifier: resolution records the case's name use at the
+    // identifier's span and lowering looks it up by the expression's.
+    let span = mint.span();
+    let callee = Path {
+        span,
+        segments: vec![Ident {
+            span,
+            name: name.to_owned(),
+        }],
+    };
+    match payload {
+        EnumPayload::None => Ok(Expr::Path { span, path: callee }),
+        EnumPayload::Tuple(items) => {
+            let args = items
+                .iter()
+                .map(|ty| {
+                    let value = default_value(ty, mint, unions)?;
+                    Ok(CallArg {
+                        span: mint.span(),
+                        name: None,
+                        value,
+                    })
+                })
+                .collect::<Result<Vec<_>, NoDefault>>()?;
+            Ok(Expr::Call {
+                span: mint.span(),
+                callee: Box::new(Expr::Path { span, path: callee }),
+                args,
+                trailing: None,
+            })
+        },
+        EnumPayload::Struct(fields) => {
+            let args = fields
+                .iter()
+                .map(|field| {
+                    let name = Ident {
+                        span: mint.span(),
+                        name: field.name.name.clone(),
+                    };
+                    let value = default_value(&field.ty, mint, unions)?;
+                    Ok(CallArg {
+                        span: mint.span(),
+                        name: Some(name),
+                        value,
+                    })
+                })
+                .collect::<Result<Vec<_>, NoDefault>>()?;
+            Ok(Expr::Call {
+                span: mint.span(),
+                callee: Box::new(Expr::Path { span, path: callee }),
+                args,
+                trailing: None,
+            })
+        },
+    }
+}
+
 /// The default member's struct body: the construction with one default
 /// per field keyed by the field's type expression; a part-less struct
 /// is the unit-word construction `X { }`. A field whose type spells no
@@ -1749,6 +2228,7 @@ fn struct_default_body(
     name: &Ident,
     fields: &[&FieldDecl],
     mint: &mut Mint,
+    unions: &UnionDefaults,
 ) -> Result<Expr, RefusedField> {
     let path_span = mint.span();
     let path = Path {
@@ -1765,10 +2245,10 @@ fn struct_default_body(
                 span: mint.span(),
                 name: field.name.name.clone(),
             };
-            let value = default_value(&field.ty, mint).map_err(|why| RefusedField {
+            let value = default_value(&field.ty, mint, unions).map_err(|why| RefusedField {
                 span: field.span,
                 name: field.name.name.clone(),
-                because: why.because(),
+                because: why.refusal(),
             })?;
             Ok((field_name, Some(value)))
         })

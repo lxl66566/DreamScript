@@ -3,7 +3,7 @@
 //! trap/backtrace behavior, and the float/conversion uops.
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         BIAS_J, ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, F64, I64},
@@ -96,7 +96,7 @@ fn sum_to_100_returns_5050() {
     let result = vm
         .run("mut", "sum_to", &[Value::I64(100)])
         .expect("sum_to runs");
-    assert_eq!(result, Value::I64(5050));
+    assert_eq!(result, FrameAnswer::one(Value::I64(5050)));
 }
 
 /// Mutual tail calls, the canonical ds-abi encoding
@@ -169,13 +169,13 @@ fn mutual_even_odd_at_ten_million_runs_at_constant_stack() {
     let depth = 10_000_000_i64;
     assert_eq!(
         vm.run("mut", "even", &[Value::I64(depth)]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(vm.max_stack_len(), 6);
     assert_eq!(vm.stack_len(), 2); // metadata word + result word after the root RET
     assert_eq!(
         vm.run("mut", "odd", &[Value::I64(depth)]),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
     assert_eq!(
         vm.max_stack_len(),
@@ -272,11 +272,17 @@ fn counter_version(get_value: i64) -> ModuleVersion {
 fn module_slot_swap_redirects_qualified_calls() {
     let mut vm = Vm::new(ModuleRegistry::new());
     let v1_row = vm.install_module(counter_version(1));
-    assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("counter", "get", &[]),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
 
     vm.install_module(counter_version(2));
     // the current slot now answers pool FuncRefs
-    assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(2)));
+    assert_eq!(
+        vm.run("counter", "get", &[]),
+        Ok(FrameAnswer::one(Value::I64(2)))
+    );
     // the retiring slot still names the previous version's table row
     let retiring = vm
         .registry()
@@ -289,7 +295,10 @@ fn module_slot_swap_redirects_qualified_calls() {
     // registry's own reachability and the sweep drops it, and the row is
     // the version's single home, so the version is gone
     vm.install_module(counter_version(3));
-    assert_eq!(vm.run("counter", "get", &[]), Ok(Value::I64(3)));
+    assert_eq!(
+        vm.run("counter", "get", &[]),
+        Ok(FrameAnswer::one(Value::I64(3)))
+    );
     assert!(vm.registry().version(v1_row).is_none());
 }
 
@@ -339,7 +348,10 @@ fn callt_wide_callee_receives_all_params_in_order() {
         ],
     );
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("wide", "g", &[]), Ok(Value::I64(91)));
+    assert_eq!(
+        vm.run("wide", "g", &[]),
+        Ok(FrameAnswer::one(Value::I64(91)))
+    );
     // the tail call still reuses the frame: both frames are 6 words
     assert_eq!(vm.max_stack_len(), 6);
 }
@@ -515,24 +527,27 @@ fn float_uops_execute_with_bit_structural_equality() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("f", "f64_ops", &[Value::F64(1.5), Value::F64(2.5)]),
-        Ok(Value::I64(1))
+        Ok(FrameAnswer::one(Value::I64(1)))
     );
     assert_eq!(
         vm.run("f", "f64_cmp", &[Value::F64(1.0), Value::F64(2.0)]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(
         vm.run("f", "f64_cmp", &[Value::F64(2.0), Value::F64(1.0)]),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
     assert_eq!(
         vm.run("f", "f64_nan", &[
             Value::F64(f64::NAN),
             Value::F64(f64::NAN)
         ]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
-    assert_eq!(vm.run("f", "icvt", &[Value::I64(3)]), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("f", "icvt", &[Value::I64(3)]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
 }
 
 /// The B7 trap edges: zero divide, MIN / -1, multiplication overflow, the
@@ -669,13 +684,25 @@ fn wrap_arith_arms_wrap_and_never_trap() {
     );
     let mut vm = Vm::new(reg);
     // MAX +% 1 wraps to MIN
-    assert_eq!(vm.run("wrap", "wadd", &[]), Ok(Value::I64(i64::MIN)));
+    assert_eq!(
+        vm.run("wrap", "wadd", &[]),
+        Ok(FrameAnswer::one(Value::I64(i64::MIN)))
+    );
     // MIN -% 1 wraps to MAX
-    assert_eq!(vm.run("wrap", "wsub", &[]), Ok(Value::I64(i64::MAX)));
+    assert_eq!(
+        vm.run("wrap", "wsub", &[]),
+        Ok(FrameAnswer::one(Value::I64(i64::MAX)))
+    );
     // MIN *% -1 wraps to MIN (the only value `x *% -1` cannot name)
-    assert_eq!(vm.run("wrap", "wmul_min", &[]), Ok(Value::I64(i64::MIN)));
+    assert_eq!(
+        vm.run("wrap", "wmul_min", &[]),
+        Ok(FrameAnswer::one(Value::I64(i64::MIN)))
+    );
     // MIN *% 2 wraps to zero
-    assert_eq!(vm.run("wrap", "wmul_two", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("wrap", "wmul_two", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }
 
 /// Entry-argument validation and HALT reporting.
@@ -687,7 +714,10 @@ fn run_entry_checks_and_halt_report_the_slot_value() {
         Uop::Halt { slot: 0 },
     ])]);
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("h", "main", &[]), Ok(Value::I64(42)));
+    assert_eq!(
+        vm.run("h", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(42)))
+    );
 
     let mut vm = Vm::new(sum_to_fixture());
     assert_eq!(

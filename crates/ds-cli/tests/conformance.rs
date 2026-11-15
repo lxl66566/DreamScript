@@ -4,8 +4,9 @@
 //! source mode, and the golden stdout — pinned from live runs — carries
 //! the observable behavior the M8 differential corpus must keep
 //! identical across tiers: the defaulted-parameter spellings, the
-//! list[record] checked reads, the transitive dispatch chain, and the
-//! E5 teardown deinit prints (their order deterministic across runs).
+//! list[record] checked reads, the transitive dispatch chain, the E5
+//! teardown deinit prints (their order deterministic across runs), and
+//! the tutorial's show-interpolation and receiverless-default answers.
 
 use std::{env, fs, path::PathBuf, process::Command};
 
@@ -112,4 +113,17 @@ fn a_recursive_nursery_block_drains_the_interlock_iteratively() {
     // recursion level; depth 2000 lands where the recursive driver
     // overflowed the process stack near depth 50
     run_golden("nursery_deep.ds", "three 0\ntwo-thousand 0\n0\n");
+}
+
+#[test]
+fn the_tutorial_surface_interpolates_and_defaults_end_to_end() {
+    // the show-carrying holes over a derived struct, a payloaded enum
+    // through the union, and an inherent member; the receiverless make
+    // and default spellings; the enum case constructor's named payload
+    // fields
+    run_golden(
+        "tutorial_surface.ds",
+        "derived shape { label: nut, weight: 3 } / shape { label: nut, weight: 3 }\nunion loud { \
+         volume: 7 }\ninherent gauge 4\ndefault 0 0 0\ncase true\n0\n",
+    );
 }

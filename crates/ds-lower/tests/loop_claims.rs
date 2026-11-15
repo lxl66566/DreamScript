@@ -21,7 +21,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PRELUDE: &str = "
 tag int
@@ -60,7 +60,7 @@ fn lower_inline(source: &str) -> Lowered {
 
 /// Runs one lowered module's `main` and asserts the golden stdout plus
 /// the drained heap (every count the discipline claimed balances).
-fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> Value {
+fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> FrameAnswer {
     let bytes = write(lowered.module());
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
@@ -152,7 +152,7 @@ fn main() -> int {{
     );
     assert_eq!(
         run_main(&lowered, &source, "seed\nseed\nseed\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -193,7 +193,7 @@ fn main() -> int {{
     );
     assert_eq!(
         run_main(&lowered, &source, "seed\nseedx\nseedxx\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -241,7 +241,7 @@ fn main() -> int {{
     );
     assert_eq!(
         run_main(&lowered, &source, "seed\nseedx\nseedxx\nseedxxx\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -304,5 +304,8 @@ fn main() -> int {{
         (1, 1),
         "one acquiring production for the carried word, one free borrow: {placed:?}"
     );
-    assert_eq!(run_main(&lowered, &source, ""), Value::I64(0));
+    assert_eq!(
+        run_main(&lowered, &source, ""),
+        FrameAnswer::one(Value::I64(0))
+    );
 }

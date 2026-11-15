@@ -8,7 +8,8 @@
 #![cfg(feature = "diag")]
 
 use ds_vm::{
-    Const, ConstFuncRef, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
+    Value, Vm,
     abi::{BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -223,7 +224,7 @@ fn a_map_of_strings_retains_and_frees_dec_per_element() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("rcm", "map_cycle", &[]),
-        Ok(Value::I64(2)),
+        Ok(FrameAnswer::one(Value::I64(2))),
         "the entry count answers two after the overwrite"
     );
     // every stored count dropped at the map's death: the heap holds
@@ -236,7 +237,7 @@ fn a_call_staging_dup_balances_and_the_heap_drains() {
     let mut vm = Vm::new(registry());
     assert_eq!(
         vm.run("rc", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the dup/drop pair balances through the call"
     );
     // main returns a scalar and every claimed count dropped: the freed
@@ -250,7 +251,7 @@ fn a_raised_count_is_observable_and_returns_to_one() {
     let text = vm.intern_str("x"); // the host's claim: rc 1
     assert_eq!(
         vm.run("rc", "witness", &[text]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the raised counts execute"
     );
     let Value::Ref(id) = text else {
@@ -531,7 +532,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("rcr", "reads", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "100 checked reads across 25 iterations ran clean under the tripwires"
     );
     assert!(
@@ -628,7 +629,7 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("rcc", "container_cycle", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the cons/read/drop cycle ran clean under the tripwires"
     );
     assert!(
@@ -731,7 +732,7 @@ fn tail_and_collect_copies_balance_per_element() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("rct", "copy_cycle", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the tail/collect copy cycle ran clean under the tripwires"
     );
     assert!(
@@ -807,7 +808,7 @@ fn a_spawn_copy_in_round_trips_one_captured_count() {
     );
     assert_eq!(
         vm.run("rs", "main", &[closure]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the spawn and boundary seams ran clean under the tripwires"
     );
     let Value::Ref(id) = captured else {
@@ -908,7 +909,7 @@ fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("sd", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the spawn, the two decs, and the boundary ran clean"
     );
     // the frame kept its intern and closure claims (hand-assembled: no
@@ -920,7 +921,7 @@ fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
     // death
     assert_eq!(
         vm.run("sd", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the root-reset drain frees the leftover pair cleanly"
     );
     assert_eq!(vm.objects().len(), 2, "the second round's own pair");

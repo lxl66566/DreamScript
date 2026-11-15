@@ -17,7 +17,7 @@
 use std::fs;
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -295,7 +295,7 @@ fn write_then_read_round_trips_byte_exact() {
     ];
     assert_eq!(
         vm.run("io", "roundtrip", &args),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the read-back payload equals the written contents"
     );
     // and the file on disk holds exactly the written bytes
@@ -315,7 +315,10 @@ fn write_file_truncates_an_existing_file() {
         string(&mut vm, path.to_str().unwrap()),
         string(&mut vm, "short"),
     ];
-    assert_eq!(vm.run("io", "roundtrip", &args), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("io", "roundtrip", &args),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
     assert_eq!(fs::read(&path).expect("readable"), b"short");
 }
 
@@ -328,7 +331,7 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     // the fixture halts on the tag word: the run result is the io_err tag
     assert_eq!(
         vm.run("io", "read_text", &args),
-        Ok(Value::Tag(PLATFORM_IO_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
     );
 
     // through `ask` the payload reaches the caller: the OS error message
@@ -337,7 +340,10 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     let mut vm = Vm::new(io_registry());
     vm.capture_output();
     let args = [string(&mut vm, missing.to_str().unwrap())];
-    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(PLATFORM_IO_ERR)));
+    assert_eq!(
+        vm.run("io", "ask", &args),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
+    );
     let printed = String::from_utf8_lossy(vm.captured_output()).into_owned();
     assert!(
         printed.starts_with("read_file ") && printed.contains("absent.txt"),
@@ -354,23 +360,31 @@ fn read_file_through_a_tail_call_delivers_the_full_span_to_the_caller() {
     let mut vm = Vm::new(io_registry());
     vm.capture_output();
     let args = [string(&mut vm, file.to_str().unwrap())];
-    assert_eq!(vm.run("io", "ask", &args), Ok(Value::Tag(PLATFORM_IO_OK)));
+    assert_eq!(
+        vm.run("io", "ask", &args),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_OK)))
+    );
     assert_eq!(vm.captured_output(), b"tail content\n");
 }
 
 #[test]
-fn a_root_tail_call_to_a_fallible_native_returns_the_head_word_only() {
-    // the RETSPAN root rule: only the span's head word survives a root
-    // return, so the payload is dropped and the tag word is the result
+fn a_root_tail_call_to_a_fallible_native_answers_the_whole_span() {
+    // the span-answer seam: a root tail call's two-word span crosses to
+    // the host whole, the payload word riding beside the tag
     let dir = tempfile::tempdir().expect("temp dir");
     let file = dir.path().join("root.txt");
-    fs::write(&file, b"dropped payload").expect("seed");
+    fs::write(&file, b"surviving payload").expect("seed");
     let mut vm = Vm::new(io_registry());
     let args = [string(&mut vm, file.to_str().unwrap())];
-    assert_eq!(
-        vm.run("io", "tail_read", &args),
-        Ok(Value::Tag(PLATFORM_IO_OK))
-    );
+    let answer = vm
+        .run("io", "tail_read", &args)
+        .expect("the tail read answers");
+    let [Value::Tag(tag), Value::Ref(word)] = answer.as_slice() else {
+        panic!("the whole span answers, got {answer:?}")
+    };
+    assert_eq!(*tag, PLATFORM_IO_OK);
+    let word = *word;
+    assert_eq!(vm.objects().str_at(word.id()), Ok("surviving payload"));
 }
 
 #[test]
@@ -382,10 +396,19 @@ fn file_exists_answers_both_ways() {
     let present = [string(&mut vm, file.to_str().unwrap())];
     let absent = [string(&mut vm, dir.path().join("no.txt").to_str().unwrap())];
     let itself = [string(&mut vm, dir.path().to_str().unwrap())];
-    assert_eq!(vm.run("io", "exists", &present), Ok(Value::Bool(true)));
-    assert_eq!(vm.run("io", "exists", &absent), Ok(Value::Bool(false)));
+    assert_eq!(
+        vm.run("io", "exists", &present),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
+    assert_eq!(
+        vm.run("io", "exists", &absent),
+        Ok(FrameAnswer::one(Value::Bool(false)))
+    );
     // a directory names an entry too
-    assert_eq!(vm.run("io", "exists", &itself), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("io", "exists", &itself),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
 }
 
 #[test]
@@ -397,9 +420,10 @@ fn fs_lists_sorted_entry_names() {
     let mut vm = Vm::new(io_registry());
     let args = [string(&mut vm, dir.path().to_str().unwrap())];
     let result = vm.run("io", "list_names", &args).expect("listing succeeds");
-    let Value::Ref(list) = result else {
+    let [Value::Ref(list)] = result.as_slice() else {
         panic!("the success payload is a list ref, got {result:?}");
     };
+    let list = *list;
     let elems = vm
         .objects()
         .list_at(list.id())
@@ -426,7 +450,7 @@ fn fs_lists_sorted_entry_names() {
     let args = [string(&mut vm, dir.path().join("nope").to_str().unwrap())];
     assert_eq!(
         vm.run("io", "list_names", &args),
-        Ok(Value::Tag(PLATFORM_IO_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
     );
 }
 
@@ -438,10 +462,13 @@ fn file_size_reports_bytes_and_io_err() {
     let mut vm = Vm::new(io_registry());
     let present = [string(&mut vm, file.to_str().unwrap())];
     let absent = [string(&mut vm, dir.path().join("gone").to_str().unwrap())];
-    assert_eq!(vm.run("io", "size", &present), Ok(Value::I64(1024)));
+    assert_eq!(
+        vm.run("io", "size", &present),
+        Ok(FrameAnswer::one(Value::I64(1024)))
+    );
     assert_eq!(
         vm.run("io", "size", &absent),
-        Ok(Value::Tag(PLATFORM_IO_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
     );
 }
 

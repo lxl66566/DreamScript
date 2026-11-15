@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -58,7 +58,7 @@ fn the_dispatch_golden_prints_every_arm_by_value() {
     vm.capture_output();
     assert_eq!(
         vm.run("dispatch_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

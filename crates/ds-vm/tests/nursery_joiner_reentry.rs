@@ -13,7 +13,7 @@ use ds_abi::{
     uop::{ConstIdx, Inst, Uop},
 };
 use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, write};
-use ds_vm::{ModuleRegistry, Platform, Trap, Value, Vm};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Trap, Vm};
 
 fn func(
     name: &str,
@@ -36,7 +36,7 @@ fn func(
 /// `fiber_resume(0, 1)` — target 0 is the joiner parked at main's
 /// `nursery_boundary` call — and dies after being re-entered by main's
 /// own entry-frame `RET`, all before the boundary drive finishes.
-fn run_joiner_reentry(callee: u32, tail: Uop) -> Result<Value, Trap> {
+fn run_joiner_reentry(callee: u32, tail: Uop) -> Result<FrameAnswer, Trap> {
     // f0: one body word plus a two-word Raw overlay; the child stages the
     // resume pair (joiner id, payload) and parks at the resume call
     let child = func(

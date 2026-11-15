@@ -60,7 +60,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The generated module's name (the run entry target).
 pub const MODULE_NAME: &str = "fze";
@@ -864,7 +864,7 @@ pub fn exercise(data: &[u8]) -> Drawn {
     vm.capture_output();
     assert_eq!(
         vm.run(MODULE_NAME, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(

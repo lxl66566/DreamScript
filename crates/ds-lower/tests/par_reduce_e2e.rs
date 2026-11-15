@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{FuncRefKey, Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The record's body decoded to instructions, one per pc.
 fn insts(function: &ds_mod::Function) -> Vec<Inst> {
@@ -70,7 +70,7 @@ fn the_fold_site_lowers_round_trips_and_folds() {
     vm.capture_output();
     assert_eq!(
         vm.run("par_reduce_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(vm.captured_output(), b"fold 12345\n");
@@ -203,7 +203,7 @@ fn main() -> () {
     vm.capture_output();
     assert_eq!(
         vm.run("closure_fold", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(vm.captured_output(), b"sum 36\n");
@@ -269,7 +269,7 @@ fn main() -> () {
     vm.capture_output();
     assert_eq!(
         vm.run("struct_fold", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(vm.captured_output(), b"folded 123 6\n");

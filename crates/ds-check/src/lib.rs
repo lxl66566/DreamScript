@@ -141,7 +141,6 @@
 pub mod atom;
 pub mod corpus;
 pub mod decls;
-pub mod derive;
 pub mod effects;
 pub mod error;
 pub mod expr;
@@ -152,6 +151,7 @@ pub mod instance_solve;
 pub mod linearity;
 mod pattern;
 pub mod platform;
+pub mod pooled;
 pub mod resolve;
 pub mod scope;
 pub mod type_of;
@@ -161,7 +161,6 @@ pub mod witness;
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
 pub use decls::{Decls, FnSig, GenericParam, ServedDecls, render_type};
-pub use derive::expand as expand_derives;
 pub use effects::{
     DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedMethodRow, effects_of,
 };
@@ -173,14 +172,16 @@ pub use instance::{
     Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId, ServedInstance,
 };
 pub use linearity::{BinderFact, DropSite, LastUse, Linearity, Move, check, linearity_check};
+pub use pooled::check_pooled_bodies;
 pub use resolve::{
     Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
-    UseIndex, resolve_package,
+    UseIndex, Vis, resolve_package,
 };
 pub use scope::{ScopeBinding, ScopeEntry, ScopeFrame, ScopeKind, scope_frames, visible_at};
 pub use type_of::{
-    Analyzed, Checked, GenericCallBounds, InherentCallBounds, TraitCall, TypedPackage, Val,
-    analyze, analyze_owned, analyze_resolved, analyze_served, check_resolved, type_check,
+    Analyzed, Checked, GenericCallBounds, HoleShowDispatches, InherentCallBounds, TraitCall,
+    TypedPackage, Val, analyze, analyze_owned, analyze_resolved, analyze_served, check_resolved,
+    type_check,
 };
 pub use universe::{ReplayMint, Ty, Universe};
 pub use witness::{Witness, WitnessField};

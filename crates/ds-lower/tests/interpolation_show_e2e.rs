@@ -1,16 +1,18 @@
 //! The show-carrying interpolation hole end to end [F6]: an operand whose
 //! type implements `show` — a derived struct, a payloaded enum, a
 //! union-typed binding through the sibling branches, a nested dispatch
-//! inside a derive-synthesized body, an inherent member — stages as the
-//! ordinary member-call dispatch a written `x.show()` uses, and the
-//! answered string concatenates into the STRCAT chain like any hole.
+//! inside a derive-synthesized body (the enum-binder and the
+//! struct-field spellings), an inherent member, a bound-type receiver
+//! through the frame's runtime evidence — stages as the ordinary
+//! member-call dispatch a written `x.show()` uses, and the answered
+//! string concatenates into the STRCAT chain like any hole.
 
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::lower;
+use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The shared declarations: the primitives, the console, and the show
 /// trait itself; every case derives or implements against these.
@@ -56,7 +58,10 @@ fn run_stdout(body: &str) -> String {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    assert_eq!(vm.run("inline", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("inline", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     String::from_utf8(vm.captured_output().to_vec()).expect("stdout is UTF-8")
 }
 
@@ -195,4 +200,93 @@ fn inherent_show_member_answers_the_hole() {
         "}\n",
     ));
     assert_eq!(stdout, "reading gauge[9] now\n");
+}
+
+/// The struct-field nesting composes: a derived body's field-read
+/// receiver addresses the field's own span even when the field
+/// occupies one word (the read place keys on the checked shape, never
+/// the raw width), so a derived outer over a derived inner answers the
+/// hole and the written call, and the two-level nesting composes
+/// beside the enum-binder form above.
+#[test]
+fn derived_struct_field_nesting_composes() {
+    let stdout = run_stdout(concat!(
+        "#[derive(show)]\n",
+        "struct inner { v: int }\n",
+        "#[derive(show)]\n",
+        "struct outer { i: inner }\n",
+        "#[derive(show)]\n",
+        "struct deep { m: outer }\n",
+        "fn main() -> int {\n",
+        "  const o = outer { i: inner { v: 7 } }\n",
+        "  const d = deep { m: outer { i: inner { v: 8 } } }\n",
+        "  println(\"o=$o\")\n",
+        "  println(o.show())\n",
+        "  println(\"d=$d\")\n",
+        "  0\n",
+        "}\n",
+    ));
+    assert_eq!(
+        stdout,
+        concat!(
+            "o=outer { i: inner { v: 7 } }\n",
+            "outer { i: inner { v: 7 } }\n",
+            "d=deep { m: outer { i: inner { v: 8 } } }\n",
+        )
+    );
+}
+
+/// A one-word struct-typed field reads as its span in every consuming
+/// seam: a hand-written body's hole over the field read, and a plain
+/// call argument taking the field by value — the same place the
+/// derived body's written dispatch stages.
+#[test]
+fn one_word_struct_field_reads_stage_everywhere() {
+    let stdout = run_stdout(concat!(
+        "struct inner { v: int }\n",
+        "struct outer { i: inner, n: int }\n",
+        "impl show for inner {\n",
+        "  fn show(self) -> string { \"i=${self.v}\" }\n",
+        "}\n",
+        "impl show for outer {\n",
+        "  fn show(self) -> string { \"outer[${self.i}] n=${self.n}\" }\n",
+        "}\n",
+        "fn take(x: inner) -> string { \"got ${x.v}\" }\n",
+        "fn main() -> int {\n",
+        "  const o = outer { i: inner { v: 3 }, n: 4 }\n",
+        "  println(\"o=$o\")\n",
+        "  println(take(o.i))\n",
+        "  0\n",
+        "}\n",
+    ));
+    assert_eq!(stdout, "o=outer[i=3] n=4\ngot 3\n");
+}
+
+/// A hole over a bound-type receiver runs through the frame's runtime
+/// evidence: `fn f[t: show]` interpolating `$v` records the member at
+/// the hole's span, the entering site stages the evidence word, and the
+/// synthetic dispatch resolves at runtime — directly from a concrete
+/// caller and through another generic frame whose own slot the chain
+/// slides.
+#[test]
+fn bound_receiver_hole_dispatches_on_runtime_evidence() {
+    let stdout = run_stdout(concat!(
+        "struct cell { v: int }\n",
+        "impl show for cell {\n",
+        "  fn show(self) -> string { \"cell(${self.v})\" }\n",
+        "}\n",
+        "impl show for int {\n",
+        "  fn show(self) -> string { \"n=${self}\" }\n",
+        "}\n",
+        "fn shown[t: show](v: t) -> string { \"v=$v\" }\n",
+        "fn relay[t: show](v: t) -> string { shown(v) }\n",
+        "fn main() -> int {\n",
+        "  const c = cell { v: 5 }\n",
+        "  println(shown(c))\n",
+        "  println(shown(7))\n",
+        "  println(relay(c))\n",
+        "  0\n",
+        "}\n",
+    ));
+    assert_eq!(stdout, concat!("v=cell(5)\n", "v=n=7\n", "v=cell(5)\n",));
 }

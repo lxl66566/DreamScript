@@ -303,6 +303,14 @@ impl Session {
                 .filter(|diag| touches(diag, self.file))
                 .cloned(),
         );
+        // The pooled-body refusal [E3]: combinator element bodies
+        // refuse the members a pooled drive cannot serve.
+        let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")?;
+        reports.extend(
+            ds_check::check_pooled_bodies(&analyzed.analyzed, self.db.declared_rows())
+                .into_iter()
+                .filter(|diag| touches(diag, self.file)),
+        );
         if reports.is_empty() {
             return Ok(true);
         }

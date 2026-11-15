@@ -10,8 +10,8 @@
 //! non-tail call.
 
 use ds_vm::{
-    Const, ConstFuncRef, FiberState, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FiberState, FrameAnswer, FuncRef, FunctionDef, ModuleRegistry,
+    ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, Fn as FnSlot, I64, Ref},
@@ -100,11 +100,14 @@ fn cross_module_calls_word_picks_up_hot_reload_swaps() {
         vm.registry().module_id("lib").expect("installed"),
         0,
     ));
-    assert_eq!(vm.run("app", "apply", &[word]), Ok(Value::I64(42)));
+    assert_eq!(
+        vm.run("app", "apply", &[word]),
+        Ok(FrameAnswer::one(Value::I64(42)))
+    );
     vm.install_module(scaled_lib(3));
     assert_eq!(
         vm.run("app", "apply", &[word]),
-        Ok(Value::I64(63)),
+        Ok(FrameAnswer::one(Value::I64(63))),
         "the staged word resolves through the module's current slot at call time"
     );
 }
@@ -150,7 +153,7 @@ fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("app", "apply", &[Value::I64(21)]),
-        Ok(Value::I64(42))
+        Ok(FrameAnswer::one(Value::I64(42)))
     );
     vm.install_module(scaled_lib(3));
     assert!(
@@ -164,7 +167,7 @@ fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
     );
     assert_eq!(
         vm.run("app", "apply", &[Value::I64(21)]),
-        Ok(Value::I64(105)),
+        Ok(FrameAnswer::one(Value::I64(105))),
         "the swept site resolves through the current slot (the full lookup stays authoritative)"
     );
 }
@@ -192,7 +195,7 @@ fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
     // the child runs its entered version's body to completion
     assert_eq!(
         vm.resume_fiber(child, Value::I64(0)),
-        Ok(Value::I64(42)),
+        Ok(FrameAnswer::one(Value::I64(42))),
         "the spawned fiber runs the version it was entered under"
     );
     // the completed child's kept frames still pin the row: the recycle
@@ -215,7 +218,7 @@ fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
     );
     assert_eq!(
         vm.resume_fiber(fresh, Value::I64(0)),
-        Ok(Value::I64(21)),
+        Ok(FrameAnswer::one(Value::I64(21))),
         "the fresh child runs the version current at its spawn"
     );
 }
@@ -303,7 +306,7 @@ fn an_install_pins_a_parked_mid_chain_fibers_frames_and_resume_point() {
     // parks at the yield handing out `inner`'s argument
     assert_eq!(
         vm.resume_fiber(child, Value::I64(0)),
-        Ok(Value::I64(21)),
+        Ok(FrameAnswer::one(Value::I64(21))),
         "the drive parked at the yield inside the called callee"
     );
     assert_eq!(vm.fiber_state(child), Some(FiberState::Suspended));
@@ -324,7 +327,7 @@ fn an_install_pins_a_parked_mid_chain_fibers_frames_and_resume_point() {
     // staged before the call comes back with the answer: 100 * 2 + 5
     assert_eq!(
         vm.resume_fiber(child, Value::I64(100)),
-        Ok(Value::I64(205)),
+        Ok(FrameAnswer::one(Value::I64(205))),
         "the resumed fiber multiplies in its entered version and returns through its caller frame"
     );
     // the completed child keeps its frames until its pool slot recycles
@@ -431,7 +434,7 @@ fn calls_recursion_through_a_fn_word_counts() {
     let word = recursion_word(&vm);
     assert_eq!(
         vm.run("rec", "f", &[word, Value::I64(3)]),
-        Ok(Value::I64(3))
+        Ok(FrameAnswer::one(Value::I64(3)))
     );
 }
 
@@ -451,7 +454,7 @@ fn same_module_returns_take_back_rows_without_leaking() {
         let word = recursion_word(&vm);
         assert_eq!(
             vm.run("rec", "f", &[word, Value::I64(60)]),
-            Ok(Value::I64(60))
+            Ok(FrameAnswer::one(Value::I64(60)))
         );
     }
 }
@@ -516,7 +519,10 @@ fn a_closure_call_receives_its_captures() {
         FuncRef::new(vm.registry().module_id("cl").expect("installed"), 0),
         vec![Value::I64(2), Value::I64(5)],
     );
-    assert_eq!(vm.run("cl", "main", &[closure]), Ok(Value::I64(11)));
+    assert_eq!(
+        vm.run("cl", "main", &[closure]),
+        Ok(FrameAnswer::one(Value::I64(11)))
+    );
 }
 
 /// A closure word in a Fn-classified slot (the callable-defaulted
@@ -559,7 +565,7 @@ fn a_closure_word_in_a_fn_slot_calls_through_calls() {
     );
     assert_eq!(
         vm.run("cd", "main", &[closure]),
-        Ok(Value::I64(42)),
+        Ok(FrameAnswer::one(Value::I64(42))),
         "the Fn slot reads the closure word by its kind: header FuncRef plus captures"
     );
 }
@@ -736,11 +742,14 @@ fn call_site_cache_redirects_after_a_target_swap() {
         reg.install(answer_lib(7));
         reg.install(caller_module(tail));
         let mut vm = Vm::new(reg);
-        assert_eq!(vm.run("app", "main", &[Value::I64(0)]), Ok(Value::I64(7)));
+        assert_eq!(
+            vm.run("app", "main", &[Value::I64(0)]),
+            Ok(FrameAnswer::one(Value::I64(7)))
+        );
         vm.install_module(answer_lib(9));
         assert_eq!(
             vm.run("app", "main", &[Value::I64(0)]),
-            Ok(Value::I64(9)),
+            Ok(FrameAnswer::one(Value::I64(9))),
             "the cached site re-resolves through the target's current slot"
         );
     }
@@ -801,13 +810,19 @@ fn call_site_cache_keys_the_site_on_the_function_not_the_module() {
             .expect("valid app module"),
     );
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("app", "f", &[Value::I64(10)]), Ok(Value::I64(11)));
+    assert_eq!(
+        vm.run("app", "f", &[Value::I64(10)]),
+        Ok(FrameAnswer::one(Value::I64(11)))
+    );
     assert_eq!(
         vm.run("app", "g", &[Value::I64(10)]),
-        Ok(Value::I64(12)),
+        Ok(FrameAnswer::one(Value::I64(12))),
         "the same-pc site in the sibling function resolves its own callee"
     );
-    assert_eq!(vm.run("app", "f", &[Value::I64(10)]), Ok(Value::I64(11)));
+    assert_eq!(
+        vm.run("app", "f", &[Value::I64(10)]),
+        Ok(FrameAnswer::one(Value::I64(11)))
+    );
 }
 
 // CALLTG fixtures (the dispatch tail call, H2's guarantee closure): the
@@ -893,7 +908,7 @@ fn dispatch_tails_slide_through_the_frame_reuse_transfer() {
     let depth = 10_000_000_i64;
     assert_eq!(
         vm.run("dmut", "deven", &[Value::I64(depth), Value::I64(42)]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the even side answers through the dispatch tail transfer"
     );
     // metadata word + call word + 8 slots, held constant across the 10^7
@@ -901,7 +916,7 @@ fn dispatch_tails_slide_through_the_frame_reuse_transfer() {
     assert_eq!(vm.max_stack_len(), 10);
     assert_eq!(
         vm.run("dmut", "dodd", &[Value::I64(depth), Value::I64(42)]),
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
         "the odd side answers through its own dispatch tail"
     );
     assert_eq!(vm.max_stack_len(), 10);
@@ -954,17 +969,17 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("app", "f", &[Value::I64(10)]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the first function's site dispatches into dmut's even body"
     );
     assert_eq!(
         vm.run("app", "g", &[Value::I64(9)]),
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
         "the same-pc sibling function resolves its own callee"
     );
     assert_eq!(
         vm.run("app", "f", &[Value::I64(10)]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the first site answers again after the sibling's run"
     );
     // a target swap bumps the generation: the cached row dies and the
@@ -987,7 +1002,7 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
     );
     assert_eq!(
         vm.run("app", "f", &[Value::I64(10)]),
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
         "the cached dispatch row falls back to the full lookup after the swap"
     );
     // an unresolvable callee traps, and keeps trapping: the failure was
@@ -1093,7 +1108,7 @@ fn a_runtime_evidence_dispatch_tail_transfers_from_the_frame_slot() {
     // the evidence word 0 names the chain whose serving body is `step`
     assert_eq!(
         vm.run("sent", "drive", &[Value::I64(1_000_000), Value::I64(0)]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the sentinel dispatch tail runs the named body"
     );
     // metadata + call word + 7 slots, constant across the million-deep
@@ -1176,7 +1191,7 @@ fn a_sentinel_dispatch_with_a_rider_eaten_gap_traps() {
     // evidence parameters
     assert_eq!(
         vm.run("p0exact", "ok", &[Value::I64(0)]),
-        Ok(Value::I64(42)),
+        Ok(FrameAnswer::one(Value::I64(42))),
         "the three-tail target takes its riders as its evidence parameters"
     );
     // the gap-1 shape traps: the evidence word names the chain whose
@@ -1231,7 +1246,7 @@ fn a_generic_builtin_dispatch_tail_runs_and_returns() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("gapp", "main", &[]),
-        Ok(Value::I64(4)),
+        Ok(FrameAnswer::one(Value::I64(4))),
         "the generic dispatch tail answers the string's length"
     );
     assert!(

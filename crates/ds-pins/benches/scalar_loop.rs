@@ -192,10 +192,13 @@ fn registry() -> ModuleRegistry {
 
 pub(crate) fn drive() -> Value {
     let mut vm = Vm::new(registry());
-    let got = vm.run("scalar_loop", "main", &[]).expect("the kernel runs");
+    let answer = vm.run("scalar_loop", "main", &[]).expect("the kernel runs");
+    let [got] = answer.as_slice() else {
+        panic!("the kernel answers one word");
+    };
     assert_eq!(
         got,
-        Value::I64(230_047_953),
+        &Value::I64(230_047_953),
         "the Lehmer loop accumulates the pinned sum"
     );
     assert!(
@@ -203,7 +206,7 @@ pub(crate) fn drive() -> Value {
         "the kernel claims nothing: {} live",
         vm.objects().len()
     );
-    got
+    *got
 }
 
 #[library_benchmark]

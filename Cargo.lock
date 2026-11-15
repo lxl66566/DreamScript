@@ -441,15 +441,18 @@ dependencies = [
  "ds-check",
  "ds-corpus-path",
  "ds-diag",
+ "ds-dsi",
  "ds-fmt",
  "ds-lower",
  "ds-lsp",
  "ds-meta",
  "ds-mod",
  "ds-parse",
+ "ds-pkg",
  "ds-query",
  "ds-stdlib",
  "ds-vm",
+ "postcard",
  "rustyline",
  "tempfile",
  "tokio",
@@ -465,6 +468,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "sonic-rs",
+]
+
+[[package]]
+name = "ds-dsi"
+version = "0.1.0"
+dependencies = [
+ "ds-check",
+ "ds-diag",
+ "ds-mod",
+ "ds-parse",
+ "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -485,6 +500,7 @@ dependencies = [
  "ds-abi",
  "ds-check",
  "ds-diag",
+ "ds-meta",
  "ds-mod",
  "ds-parse",
  "ds-vm",
@@ -513,6 +529,7 @@ name = "ds-meta"
 version = "0.1.0"
 dependencies = [
  "ds-check",
+ "ds-corpus-path",
  "ds-diag",
  "ds-lower",
  "ds-mod",
@@ -563,11 +580,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-pkg"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ds-diag",
+ "ds-mod",
+ "ds-vm",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "ds-query"
 version = "0.1.0"
 dependencies = [
  "ds-check",
  "ds-diag",
+ "ds-meta",
  "ds-parse",
  "ds-stdlib",
  "rustc-hash",
@@ -584,6 +614,8 @@ version = "0.1.0"
 dependencies = [
  "ds-check",
  "ds-diag",
+ "ds-dsi",
+ "ds-meta",
  "ds-mod",
  "ds-parse",
  "ds-stdlib",

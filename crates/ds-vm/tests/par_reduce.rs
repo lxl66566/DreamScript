@@ -32,8 +32,8 @@
 //! results declare `Raw`; children spawn during the CALLG, their pool ids numbering up from 1.
 
 use ds_vm::{
-    Const, ConstFuncRef, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FiberId, FiberState, FrameAnswer, FunctionDef, ModuleRegistry,
+    ModuleVersion, Trap, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -1098,7 +1098,10 @@ fn the_fold_applies_in_input_order() {
     let mut vm = Vm::new(pr_registry());
     // [1, 2, 3, 4, 5] folded by acc * 10 + b: the non-commutative
     // witness — 12345, not any permutation
-    assert_eq!(vm.run("pr", "main_order", &[]), Ok(Value::I64(12_345)));
+    assert_eq!(
+        vm.run("pr", "main_order", &[]),
+        Ok(FrameAnswer::one(Value::I64(12_345)))
+    );
     assert_children_dead(&vm, 5);
 }
 
@@ -1108,7 +1111,10 @@ fn a_yielding_element_folds_in_place_across_ten_runs() {
     // by the worklist; the fold still applies strictly in input order
     for _ in 0..10 {
         let mut vm = Vm::new(pr_registry());
-        assert_eq!(vm.run("pr", "main_yield", &[]), Ok(Value::I64(12_345)));
+        assert_eq!(
+            vm.run("pr", "main_yield", &[]),
+            Ok(FrameAnswer::one(Value::I64(12_345)))
+        );
         assert_children_dead(&vm, 5);
     }
 }
@@ -1119,7 +1125,7 @@ fn the_input_list_reads_back_untouched() {
     // input sum 60 * 100000 + the fold 1230
     assert_eq!(
         vm.run("pr", "main_untouched", &[]),
-        Ok(Value::I64(6_001_230))
+        Ok(FrameAnswer::one(Value::I64(6_001_230)))
     );
     assert_children_dead(&vm, 3);
 }
@@ -1131,10 +1137,13 @@ fn a_string_fold_balances_the_accumulator_counts() {
     // answer adopts (the child's completion count landing on the
     // joiner), each superseded word dec'd — the drain at teardown pins
     // the balance
-    let answer = vm.run("pr", "main_ref_chain", &[]);
-    let Value::Ref(id) = answer.expect("the string fold answers a Ref") else {
+    let answer = vm
+        .run("pr", "main_ref_chain", &[])
+        .expect("the string fold answers a Ref");
+    let [Value::Ref(id)] = answer.as_slice() else {
         panic!("the string fold answers a Ref word");
     };
+    let id = *id;
     assert_eq!(vm.objects_of(id).str_at(id.id()), Ok("123"));
     assert_children_dead(&vm, 3);
 }
@@ -1160,7 +1169,10 @@ fn a_nested_par_reduce_folds_through_the_parked_call_site() {
     // the drive frames stacking on the interlock's heap stack, the
     // seam's chain state folding inside — and the inner fold lands
     // identically to the hosted equivalent: add2(0, 7) = 7
-    assert_eq!(vm.run("pr", "main_nested", &[]), Ok(Value::I64(7)));
+    assert_eq!(
+        vm.run("pr", "main_nested", &[]),
+        Ok(FrameAnswer::one(Value::I64(7)))
+    );
     // the outer child plus the inner child are both dead at the boundary
     assert_children_dead(&vm, 2);
 }
@@ -1172,7 +1184,10 @@ fn an_inner_par_map_lands_inside_a_par_reduce_element() {
     // like the same-combinator nesting (the parked CALLG seam is the
     // shared mechanism), the inner answers assembling in order —
     // double1(7) = 14, folded onto 0
-    assert_eq!(vm.run("pr", "main_nested_map", &[]), Ok(Value::I64(14)));
+    assert_eq!(
+        vm.run("pr", "main_nested_map", &[]),
+        Ok(FrameAnswer::one(Value::I64(14)))
+    );
     // the outer child plus the inner child are both dead at the boundary
     assert_children_dead(&vm, 2);
 }
@@ -1195,7 +1210,10 @@ fn a_capturing_closure_folds_in_input_order() {
     // the closure capturing bias 5 folds [1, 2, 3] strictly in input
     // order: (0*10 + 1 + 5) = 6, then (6*10 + 2 + 5) = 67, then
     // (67*10 + 3 + 5) = 678
-    assert_eq!(vm.run("pr", "main_closure_fold", &[]), Ok(Value::I64(678)));
+    assert_eq!(
+        vm.run("pr", "main_closure_fold", &[]),
+        Ok(FrameAnswer::one(Value::I64(678)))
+    );
     assert_children_dead(&vm, 3);
 }
 
@@ -1223,7 +1241,7 @@ fn a_capturing_closure_folds_a_wide_pair_in_input_order() {
     // words whole, both order witnesses — (6, 1), (67, 3), (678, 6)
     assert_eq!(
         vm.run("pr", "main_wide_closure", &[]),
-        Ok(Value::I64(678_006))
+        Ok(FrameAnswer::one(Value::I64(678_006)))
     );
     assert_children_dead(&vm, 3);
 }
@@ -1235,10 +1253,13 @@ fn a_wide_fold_balances_the_accumulator_s_ref_counts() {
     // with the child's completion count on the joiner, each superseded
     // string dec'd at adoption — the final word carries exactly the
     // transferred count to the host, "1" -> "12" -> "123"
-    let answer = vm.run("pr", "main_wide_ref", &[]);
-    let Value::Ref(id) = answer.expect("the wide ref fold answers a Ref") else {
+    let answer = vm
+        .run("pr", "main_wide_ref", &[])
+        .expect("the wide ref fold answers a Ref");
+    let [Value::Ref(id)] = answer.as_slice() else {
         panic!("the wide ref fold answers a Ref word");
     };
+    let id = *id;
     let store = vm.objects_of(id);
     assert_eq!(
         store.rc_at(id.id()),
@@ -1266,5 +1287,8 @@ fn a_failing_wide_step_re_raises_with_the_owned_span_released() {
 #[test]
 fn an_empty_input_answers_the_init() {
     let mut vm = Vm::new(pr_registry());
-    assert_eq!(vm.run("pr", "main_empty", &[]), Ok(Value::I64(7)));
+    assert_eq!(
+        vm.run("pr", "main_empty", &[]),
+        Ok(FrameAnswer::one(Value::I64(7)))
+    );
 }

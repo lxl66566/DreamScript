@@ -7,7 +7,7 @@
 //! guarded.
 
 use ds_vm::{
-    Const, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{F64, I64, Ref},
@@ -168,17 +168,23 @@ fn fused_pairs_compute_and_keep_the_loaded_slot_readable() {
     let i = |v: i64| Value::I64(v);
     let f = |v: f64| Value::F64(v);
     // 7 + 3 = 10, then 7 + 10 = 17
-    assert_eq!(vm.run("f", "add_k", &[i(3)]), Ok(i(17)));
+    assert_eq!(vm.run("f", "add_k", &[i(3)]), Ok(FrameAnswer::one(i(17))));
     // 3 - 7 = -4, then 7 - (-4) = 11
-    assert_eq!(vm.run("f", "sub_k", &[i(3)]), Ok(i(11)));
+    assert_eq!(vm.run("f", "sub_k", &[i(3)]), Ok(FrameAnswer::one(i(11))));
     // 7 * 6 = 42, then 42 * 7 = 294
-    assert_eq!(vm.run("f", "mul_k", &[i(6)]), Ok(i(294)));
+    assert_eq!(vm.run("f", "mul_k", &[i(6)]), Ok(FrameAnswer::one(i(294))));
     // 30 % 7 = 2, then 2 + 7 = 9
-    assert_eq!(vm.run("f", "mod_k", &[i(30)]), Ok(i(9)));
+    assert_eq!(vm.run("f", "mod_k", &[i(30)]), Ok(FrameAnswer::one(i(9))));
     // 0.25 + 0.5 = 0.75, then 0.25 + 0.75 = 1.0
-    assert_eq!(vm.run("f", "fadd_k", &[f(0.5)]), Ok(f(1.0)));
+    assert_eq!(
+        vm.run("f", "fadd_k", &[f(0.5)]),
+        Ok(FrameAnswer::one(f(1.0)))
+    );
     // 0.5 * 0.25 = 0.125, then 0.125 * 0.25 = 0.03125
-    assert_eq!(vm.run("f", "fmul_k", &[f(0.5)]), Ok(f(0.03125)));
+    assert_eq!(
+        vm.run("f", "fmul_k", &[f(0.5)]),
+        Ok(FrameAnswer::one(f(0.03125)))
+    );
 }
 
 /// The arith may overwrite the loaded slot itself: the load's write, the
@@ -196,7 +202,10 @@ fn a_fused_pair_may_overwrite_the_loaded_slot() {
         Uop::Ret { src: 1 },
     ])]);
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("f", "acc", &[Value::I64(3)]), Ok(Value::I64(10)));
+    assert_eq!(
+        vm.run("f", "acc", &[Value::I64(3)]),
+        Ok(FrameAnswer::one(Value::I64(10)))
+    );
 }
 
 /// A fused arith's trap attributes to the arith's own pc — the backtrace
@@ -328,5 +337,8 @@ fn div_consumes_the_loaded_slot_without_fusing() {
         ],
     )]);
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("f", "div_k", &[Value::I64(14)]), Ok(Value::I64(2)));
+    assert_eq!(
+        vm.run("f", "div_k", &[Value::I64(14)]),
+        Ok(FrameAnswer::one(Value::I64(2)))
+    );
 }

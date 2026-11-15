@@ -8,13 +8,13 @@ use ds_diag::Files;
 use ds_parse::parse;
 
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "struct map[k, v]\n",
-    "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
-    "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
-    "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub struct map[k, v]\n",
+    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+    "pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "pub extern fn map_len[k, v] (m: map[k, v]) -> int\n",
 );
 
 /// Type-checks `source` beside the map ambient, rendering every
@@ -42,8 +42,9 @@ fn map_set_builds_through_var_receivers() {
     for source in [
         "fn f() -> int {\n  var m = map[string, string]()\n  map_set(m, \"host\", \
          \"localhost\")\n  map_len(m)\n}\n",
-        "fn f() -> int {\n  var m = map[int, string]()\n  m.map_set(1, \"one\")\n  map_len(m)\n}\n",
-        "fn f(m: mut map[string, string]) -> () {\n  map_set(m, \"host\", \"localhost\")\n}\n",
+        "pub fn f() -> int {\n  var m = map[int, string]()\n  m.map_set(1, \"one\")\n  \
+         map_len(m)\n}\n",
+        "pub fn f(m: mut map[string, string]) -> () {\n  map_set(m, \"host\", \"localhost\")\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }

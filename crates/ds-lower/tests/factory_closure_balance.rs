@@ -16,7 +16,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PREAMBLE: &str = "tag int
 tag string
@@ -63,7 +63,7 @@ fn lower_inline(source: &str) -> Lowered {
 /// Runs one lowered module's `main`, asserts the golden stdout, and
 /// holds the heap-drain tripwire: a scalar-returning program must have
 /// balanced every count it claimed.
-fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> Value {
+fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> FrameAnswer {
     let bytes = write(lowered.module());
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
@@ -107,7 +107,7 @@ fn a_factory_closure_in_a_loop_carried_const_drains() {
     let expected = (0..50).map(|i| i % 11 + i % 7).sum::<i64>();
     assert_eq!(
         run_main(&lowered, &source, ""),
-        Value::I64(expected),
+        FrameAnswer::one(Value::I64(expected)),
         "every iteration added its closure's answer"
     );
 }
@@ -127,7 +127,7 @@ fn a_closure_called_twice_dec_once_at_its_last_use() {
     let lowered = lower_inline(&source);
     assert_eq!(
         run_main(&lowered, &source, ""),
-        Value::I64(24),
+        FrameAnswer::one(Value::I64(24)),
         "3 + 4 + 8 + 9"
     );
 }
@@ -149,7 +149,10 @@ fn an_uncalled_factory_closure_drops_at_its_scope_end() {
 }}"
     );
     let lowered = lower_inline(&source);
-    assert_eq!(run_main(&lowered, &source, ""), Value::I64(0));
+    assert_eq!(
+        run_main(&lowered, &source, ""),
+        FrameAnswer::one(Value::I64(0))
+    );
 }
 
 /// The copy-out pair, pinned statically: the loop-carried factory
@@ -250,7 +253,7 @@ fn the_kernel_factory_shapes_drain() {
         + 200;
     assert_eq!(
         run_main(&lowered, &source, ""),
-        Value::I64(expected),
+        FrameAnswer::one(Value::I64(expected)),
         "the three factory loops answered their sums"
     );
 }

@@ -7,15 +7,17 @@
 //! builtins outside comptime functions), so the reflection table lives
 //! exactly as long as one evaluation.
 //!
-//! The table itself is a process global because the native calling
+//! The table itself is a thread-local slot because the native calling
 //! convention is a plain fn pointer with no capture: the evaluator
 //! installs its table before driving the VM and the guard it gets back
-//! restores the previous one when the evaluation ends. The records are
-//! the evaluator's projection of the checker's declaration tables (names
-//! and field shapes as plain data), so no checker type crosses this
-//! seam.
+//! restores the previous one when the evaluation ends. Thread scoping is
+//! what lets concurrently evaluating threads keep their own tables — a
+//! fenced run stays entirely on its calling thread, so no worker ever
+//! reads the slot. The records are the evaluator's projection of the
+//! checker's declaration tables (names and field shapes as plain data),
+//! so no checker type crosses this seam.
 
-use std::sync::{Mutex, MutexGuard};
+use std::cell::RefCell;
 
 use ds_abi::SlotType;
 
@@ -66,48 +68,39 @@ pub struct ComptimeType {
     pub fields: Vec<ComptimeField>,
 }
 
-/// The installed reflection table: the natives' whole view of the
-/// package's declared data.
-static REFLECTION: Mutex<Vec<ComptimeType>> = Mutex::new(Vec::new());
+// The installed reflection table: the natives' whole view of the
+// package's declared data, scoped to the evaluating thread.
+thread_local! {
+    static REFLECTION: RefCell<Vec<ComptimeType>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Installs `table` as the reflection the comptime natives answer from,
 /// answering the guard that restores the previous table when dropped.
 /// The evaluator holds the guard across one fenced run.
+#[must_use]
 pub fn set_reflection(table: Vec<ComptimeType>) -> ReflectionGuard {
-    let mut previous = REFLECTION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let restored = std::mem::replace(&mut *previous, table);
+    let restored = REFLECTION.with(|current| std::mem::replace(&mut *current.borrow_mut(), table));
     ReflectionGuard {
-        table: Mutex::new(restored),
+        table: Some(restored),
     }
 }
 
 /// The restore handle of one [`set_reflection`]: dropping it puts its
 /// table back, so evaluations nest and never leak a stale view.
 pub struct ReflectionGuard {
-    table: Mutex<Vec<ComptimeType>>,
+    table: Option<Vec<ComptimeType>>,
 }
 
 impl Drop for ReflectionGuard {
     fn drop(&mut self) {
-        let mut restored = self
-            .table
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let restored = std::mem::take(&mut *restored);
-        let mut current = REFLECTION
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *current = restored;
+        let restored = self.table.take().unwrap_or_default();
+        REFLECTION.with(|current| *current.borrow_mut() = restored);
     }
 }
 
-/// The reflection table lock, held across one native's body.
-fn reflection() -> MutexGuard<'static, Vec<ComptimeType>> {
-    REFLECTION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Runs `go` against the reflection table, one native's whole read.
+fn with_reflection<T>(go: impl FnOnce(&[ComptimeType]) -> T) -> T {
+    REFLECTION.with(|current| go(&current.borrow()))
 }
 
 /// `fields(t: type)`: one three-word record per declared field — name
@@ -125,19 +118,22 @@ fn fields_fn(
             actual: args.first().map_or(SlotType::I64, Value::slot_type),
         });
     };
-    let table = reflection();
-    let Some(entry) = table.get(usize::from(index)) else {
+    let fields = with_reflection(|table| {
+        table
+            .get(usize::from(index))
+            .map(|entry| entry.fields.clone())
+    });
+    let Some(fields) = fields else {
         return Err(Trap::UnknownInstance {
             evidence: i64::from(index),
         });
     };
-    let mut elems = Vec::with_capacity(entry.fields.len() * 3);
-    for field in &entry.fields {
+    let mut elems = Vec::with_capacity(fields.len() * 3);
+    for field in &fields {
         elems.push(heaps.new_str_part(&field.name));
         elems.push(Value::Tag(field.type_index));
         elems.push(heaps.new_str_part(&field.tag));
     }
-    drop(table);
     let stride = if elems.is_empty() { 0 } else { 3 };
     Ok(NativeResult::Word(heaps.new_list_strided(elems, stride)))
 }
@@ -155,12 +151,12 @@ fn type_name_fn(
             actual: args.first().map_or(SlotType::I64, Value::slot_type),
         });
     };
-    let table = reflection();
-    let name = table
-        .get(usize::from(index))
-        .map(|entry| entry.name.clone())
-        .unwrap_or_default();
-    drop(table);
+    let name = with_reflection(|table| {
+        table
+            .get(usize::from(index))
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default()
+    });
     Ok(NativeResult::Word(heaps.new_str_part(&name)))
 }
 
@@ -192,11 +188,10 @@ mod tests {
             fields: Vec::new(),
         }];
         let _guard = set_reflection(first);
-        {
-            let table = reflection();
+        with_reflection(|table| {
             assert_eq!(table.len(), 1);
             assert_eq!(table[0].name, "one");
-        }
+        });
         let second = vec![
             ComptimeType {
                 name: "a".to_owned(),
@@ -212,13 +207,14 @@ mod tests {
             },
         ];
         let guard = set_reflection(second);
-        let table = reflection();
-        assert_eq!(table.len(), 2);
-        assert_eq!(table[0].fields[0].name, "x");
-        drop(table);
+        with_reflection(|table| {
+            assert_eq!(table.len(), 2);
+            assert_eq!(table[0].fields[0].name, "x");
+        });
         drop(guard);
-        let table = reflection();
-        assert_eq!(table.len(), 1);
-        assert_eq!(table[0].name, "one");
+        with_reflection(|table| {
+            assert_eq!(table.len(), 1);
+            assert_eq!(table[0].name, "one");
+        });
     }
 }

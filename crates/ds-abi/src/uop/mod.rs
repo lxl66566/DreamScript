@@ -39,7 +39,7 @@
 //! |----------------------|-------------------------|----------|------------|------------|----------
 //! | Const (0x0)          | KIMM, KCONST, KSTR,   | dst slot | —          | —          | const idx
 //! |                      | KSTR_BORROW           |          |            |            |           |
-//! | IntArith (0x1)       | ADDI64 .. WRAPMULI64    | dst slot | lhs slot   | rhs slot   | —
+//! | IntArith (0x1)       | ADDI64 .. BITORI64      | dst slot | lhs slot   | rhs slot   | —
 //! | FloatArith (0x2)     | ADDF64 .. DIVF64        | dst slot | lhs slot   | rhs slot   | —
 //! | IntCmp (0x3)         | EQI64 .. GTI64          | dst slot | lhs slot   | rhs slot   | —
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
@@ -220,6 +220,23 @@ pub enum Uop {
     /// `0x1.7` — `slots[dst] = slots[lhs] *% slots[rhs]`, i64 wrapping
     /// modulo 2^64; never traps (B7's wrap set).
     WrapMulI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.8` — `slots[dst] = slots[lhs] << slots[rhs]`, i64 left shift;
+    /// traps when the shift amount leaves `0..64` (B7: shifts trap past
+    /// the bit width, wrapping stays the explicit operators).
+    ShlI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.9` — `slots[dst] = slots[lhs] >> slots[rhs]`, i64 arithmetic
+    /// (sign-propagating) right shift; traps when the shift amount
+    /// leaves `0..64` (B7).
+    ShrI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.A` — `slots[dst] = slots[lhs] & slots[rhs]`, i64 bitwise and;
+    /// a total operation, never traps (B7).
+    BitAndI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.B` — `slots[dst] = slots[lhs] ^ slots[rhs]`, i64 bitwise xor;
+    /// a total operation, never traps (B7).
+    BitXorI64 { dst: u8, lhs: u8, rhs: u8 },
+    /// `0x1.C` — `slots[dst] = slots[lhs] | slots[rhs]`, i64 bitwise or; a
+    /// total operation, never traps (B7).
+    BitOrI64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x2.0` — `slots[dst] = slots[lhs] + slots[rhs]`, f64.
     AddF64 { dst: u8, lhs: u8, rhs: u8 },
     /// `0x2.1` — `slots[dst] = slots[lhs] - slots[rhs]`, f64.

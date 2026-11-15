@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/trait_default_riders_probe.ds");
 
@@ -64,7 +64,7 @@ fn defaults_stage_inside_real_args_with_riders_trailing() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("trait_default_riders_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

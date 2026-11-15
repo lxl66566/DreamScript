@@ -22,7 +22,9 @@ tag io_error
 extern fn close(fd: raw_fd) -> ()
 extern fn to_u32_le(move b: bytes) -> u32
 
-struct file: ~Copyable {
+// `pub` opens the type to the gate's ambient stub, whose open/read_exact
+// signatures name it [G4]
+pub struct file: ~Copyable {
   fd: raw_fd
   deinit { close(self.fd) }
 }

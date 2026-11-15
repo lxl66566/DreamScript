@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -61,7 +61,7 @@ fn the_extraction_family_runs_both_arms() {
     vm.capture_output();
     assert_eq!(
         vm.run("extraction_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "every extraction leg matched"
     );
     assert_eq!(
@@ -86,11 +86,11 @@ fn tail_position_family_calls_return_their_value() {
     let mut vm = build_vm();
     assert_eq!(
         vm.run("extraction_probe", "tail_port", &[Value::Bool(true)]),
-        Ok(Value::I64(9))
+        Ok(FrameAnswer::one(Value::I64(9)))
     );
     assert_eq!(
         vm.run("extraction_probe", "tail_port", &[Value::Bool(false)]),
-        Ok(Value::I64(5))
+        Ok(FrameAnswer::one(Value::I64(5)))
     );
 }
 
@@ -104,7 +104,7 @@ fn the_degenerate_legs_drain_the_heap() {
     vm.capture_output();
     assert_eq!(
         vm.run("extraction_probe", "deg_report", &[]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert!(
         vm.objects().is_empty(),

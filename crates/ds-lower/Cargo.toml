@@ -24,6 +24,8 @@ ds-parse = { path = "../ds-parse" }
 [dev-dependencies]
 criterion.workspace = true
 ds-vm     = { path = "../ds-vm" }
+# the derive-expanding analyze entries the e2e tests run raw sources through
+ds-meta   = { path = "../ds-meta" }
 
 [[bench]]
 name    = "lower"

@@ -1,7 +1,9 @@
 // The stdlib ambient: the checked-declaration layer of the stdlib (the
 // runtime half is the ds-vm builtin core plus the platform handler the
 // host installs behind the platform declaration below). Registered as a package member
-// before the user's sources; the package namespace is two [G3, F9] —
+// before the user's sources; every declaration is `pub` [G4] because
+// the member's names are the std's surface to other files, not a private
+// file. The package namespace is two [G3, F9] —
 // types and values — so `struct map` and `fn map` coexist, and a name may
 // be redeclared by a corpus file only in the other namespace. The
 // fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
@@ -18,11 +20,11 @@
 // inside what it provides.
 platform "std" provides <console, fsys, net, time>
 
-trait Copyable { }
+pub trait Copyable { }
 
 // The show derive's target (G1, F6): one member answering the
 // construction spelling; `#[derive(show)]` synthesizes the impl.
-trait show {
+pub trait show {
   fn show(self) -> string
 }
 // The primitives carry show themselves, so a generic derive
@@ -54,7 +56,7 @@ impl show for string {
 // total comparison the trapping `<`/`>` cannot spell), and string,
 // char, and byte through their own compare natives (the UTF-8 byte
 // order, the Unicode scalar order, and the u8 order).
-trait ord {
+pub trait ord {
   fn compare(self, other: Self) -> int
 }
 impl ord for int {
@@ -89,7 +91,7 @@ impl ord for byte {
 // float through the fold native (which normalizes -0.0 to +0.0 and
 // every NaN payload to the one canonical NaN, the bit-structural
 // equality B9 pins).
-trait hash {
+pub trait hash {
   fn hash(self) -> int
 }
 impl hash for int {
@@ -117,7 +119,7 @@ impl hash for byte {
 // included), so the derived body is a construction over the borrowed
 // receiver whose Ref parts dup through the placement pass — a count
 // bump per reference, never a deep copy (C4).
-trait clone {
+pub trait clone {
   fn clone(self) -> Self
 }
 impl clone for int {
@@ -153,43 +155,43 @@ impl string { fn default() -> string { "" } }
 impl char { fn default() -> char { '\0' } }
 impl byte { fn default() -> byte { b'\0' } }
 
-tag int
-tag float
-tag bool
-tag string
-tag char
+pub tag int
+pub tag float
+pub tag bool
+pub tag string
+pub tag char
 // The b'x' literal's atom [F6]: its own u8 width class, outside
 // the int conversion family.
-tag byte
-tag bytes
-tag u32
+pub tag byte
+pub tag bytes
+pub tag u32
 
-struct list[t]
-struct map[k, v]
+pub struct list[t]
+pub struct map[k, v]
 
 // The failure taxonomy of the fallible natives: the platform tags the
 // runtime discriminants answer (io_err for the file surface, parse_err
 // for the pure readers). net_err keeps the record's own two-case shape.
-tag io_err
-tag parse_err
-enum net_err {
+pub tag io_err
+pub tag parse_err
+pub enum net_err {
   timeout
   refused
 }
 
 // A text row: keyed lookup over strings.
-type row = map[string, string]
+pub type row = map[string, string]
 
 // The config record (the optional port is the tutorial's b14 extraction
 // shape; an int constructs in). The reader/fallback externs that answered
 // it are gone from the ambient — no native answered them — so a package
 // wanting them declares its own externs over this shape.
-struct config { host: string, port: int?, retries: int }
+pub struct config { host: string, port: int?, retries: int }
 
 // An opaque response value. The fetch/consume externs that answered it
 // are gone from the ambient — no native answered them — so a package
 // wanting them declares its own externs over this shape.
-struct response
+pub struct response
 
 // The comptime reflection vocabulary (G1, G2): the one record `fields`
 // answers over declared data — a struct's fields and an enum's cases
@@ -200,70 +202,70 @@ struct response
 // own minted atom, or none when the case constructs bare), and its own
 // constructor tag name. The two builtins run inside comptime functions
 // only; the checker refuses calls elsewhere.
-struct field { name: string, type: type, tag: string }
-extern fn fields (t: type) -> list[field]
-extern fn type_name (t: type) -> string
+pub struct field { name: string, type: type, tag: string }
+pub extern fn fields (t: type) -> list[field]
+pub extern fn type_name (t: type) -> string
 
 // The nursery demo's fixed page list.
-const urls = ["https://ds.dev", "https://example.org"]
+pub const urls = ["https://ds.dev", "https://example.org"]
 
-extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
-extern fn cons[t] (x: t, xs: list[t]) -> list[t]
-extern fn head[t] (xs: list[t]) -> t?
-extern fn tail[t] (xs: list[t]) -> list[t]
-extern fn list_new[t] () -> list[t]
-extern fn list_len[t] (xs: list[t]) -> int
-extern fn list_get[t] (xs: list[t], i: int) -> t | none
-extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
-extern fn list_push[t] (xs: mut list[t], x: t) -> ()
-extern fn map_new[k, v] () -> map[k, v]
-extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
-extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
-extern fn map_len[k, v] (m: map[k, v]) -> int
-extern fn join (parts: list[string], sep: string) -> string
-extern fn len[t] (xs: t) -> int
-extern fn trim (s: string) -> string
-extern fn parse_int (s: string) -> int | parse_err
-extern fn split (s: string, sep: char) -> list[string]
-extern fn substring (s: string, start: int, end: int) -> string
-extern fn concat (a: string, b: string) -> string
-extern fn to_upper (s: string) -> string
-extern fn to_lower (s: string) -> string
-extern fn char_at (s: string, i: int) -> string
-extern fn collect[t] (xs: list[t]) -> list[t]
-extern fn first[t] (xs: list[t]) -> t?
-extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
-extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
-extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
-extern fn str[t] (v: t) -> string
-extern fn total_compare (a: float, b: float) -> int
-extern fn str_compare (a: string, b: string) -> int
-extern fn char_compare (a: char, b: char) -> int
-extern fn byte_compare (a: byte, b: byte) -> int
-extern fn str_hash (s: string) -> int
-extern fn float_hash (f: float) -> int
-extern fn char_hash (c: char) -> int
-extern fn println (msg: string) -> ()
-extern fn print (msg: string) -> ()
-extern fn read_file (path: string) -> string | io_err
-extern fn write_file (path: string, contents: string) -> ()
-extern fn file_exists (path: string) -> bool
-extern fn fs_list (dir: string) -> list[string]
-extern fn file_size (path: string) -> int
-extern fn net_connect (host: string, port: int) -> int
-extern fn net_send (conn: int, data: string) -> ()
-extern fn net_recv (conn: int, max_bytes: int) -> string
-extern fn net_close (conn: int) -> ()
-extern fn http_get (url: string) -> string
-extern fn parse_json (text: string) -> string
-extern fn cancel[t] (e: t) -> ()
-extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
-extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]
+pub extern fn head[t] (xs: list[t]) -> t?
+pub extern fn tail[t] (xs: list[t]) -> list[t]
+pub extern fn list_new[t] () -> list[t]
+pub extern fn list_len[t] (xs: list[t]) -> int
+pub extern fn list_get[t] (xs: list[t], i: int) -> t | none
+pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+pub extern fn map_new[k, v] () -> map[k, v]
+pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+pub extern fn map_len[k, v] (m: map[k, v]) -> int
+pub extern fn join (parts: list[string], sep: string) -> string
+pub extern fn len[t] (xs: t) -> int
+pub extern fn trim (s: string) -> string
+pub extern fn parse_int (s: string) -> int | parse_err
+pub extern fn split (s: string, sep: char) -> list[string]
+pub extern fn substring (s: string, start: int, end: int) -> string
+pub extern fn concat (a: string, b: string) -> string
+pub extern fn to_upper (s: string) -> string
+pub extern fn to_lower (s: string) -> string
+pub extern fn char_at (s: string, i: int) -> string
+pub extern fn collect[t] (xs: list[t]) -> list[t]
+pub extern fn first[t] (xs: list[t]) -> t?
+pub extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
+pub extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+pub extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+pub extern fn str[t] (v: t) -> string
+pub extern fn total_compare (a: float, b: float) -> int
+pub extern fn str_compare (a: string, b: string) -> int
+pub extern fn char_compare (a: char, b: char) -> int
+pub extern fn byte_compare (a: byte, b: byte) -> int
+pub extern fn str_hash (s: string) -> int
+pub extern fn float_hash (f: float) -> int
+pub extern fn char_hash (c: char) -> int
+pub extern fn println (msg: string) -> ()
+pub extern fn print (msg: string) -> ()
+pub extern fn read_file (path: string) -> string | io_err
+pub extern fn write_file (path: string, contents: string) -> ()
+pub extern fn file_exists (path: string) -> bool
+pub extern fn fs_list (dir: string) -> list[string]
+pub extern fn file_size (path: string) -> int
+pub extern fn net_connect (host: string, port: int) -> int
+pub extern fn net_send (conn: int, data: string) -> ()
+pub extern fn net_recv (conn: int, max_bytes: int) -> string
+pub extern fn net_close (conn: int) -> ()
+pub extern fn http_get (url: string) -> string
+pub extern fn parse_json (text: string) -> string
+pub extern fn cancel[t] (e: t) -> ()
+pub extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+pub extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 // The E4 extraction family: calls type locally against the checked
 // receiver (unwrap_or's fallback is eager, unwrap_or_else's lambda runs
 // only on the none side), composed with `?` for early exits.
-extern fn unwrap_or[t] (x: t?, y: t) -> t
-extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
-extern fn ok_or[t, e] (x: t?, err: e) -> t | e
-extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
-extern fn max[t] (a: t, b: t) -> t
+pub extern fn unwrap_or[t] (x: t?, y: t) -> t
+pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
+pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e
+pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
+pub extern fn max[t] (a: t, b: t) -> t

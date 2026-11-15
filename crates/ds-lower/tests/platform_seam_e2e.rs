@@ -10,7 +10,7 @@ use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{
-    LoadError, ModuleRegistry, Platform, Value, Vm, loader,
+    FrameAnswer, LoadError, ModuleRegistry, Platform, Value, Vm, loader,
     native::{self, BUILTIN_MODULE},
     platform::{Capability, OP_FILE_SIZE, STD_NAME},
 };
@@ -101,7 +101,7 @@ fn a_platform_under_the_declared_name_serves_the_world_calls() {
     let staged = [vm.intern_str("Cargo.toml")];
     assert_eq!(
         vm.run("platform_seam", "size", &staged),
-        Ok(Value::I64(size)),
+        Ok(FrameAnswer::one(Value::I64(size))),
         "the fsys op answered through the platform's span"
     );
     assert_eq!(vm.captured_output(), b"");

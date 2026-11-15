@@ -1,4 +1,11 @@
-//! # ds-meta: the comptime evaluator [M6, G1, G2]
+//! # ds-meta: the meta layer [M6, G1, G2]
+//!
+//! The derive engine, the comptime evaluator, and the analyze entries
+//! that apply the expansion live here: a derive attribute expands into
+//! an ordinary impl declaration after parse ([`derive::expand`]), and
+//! the expanding [`analyze`] entries fold its refusals into the
+//! checker's bundle ahead of the resolution classes, so raw trees enter
+//! through this crate and every downstream pass sees only expanded ones.
 //!
 //! Comptime-marked calls evaluate at compile time as ordinary code on
 //! the same uop VM: the evaluator lowers the package's comptime
@@ -7,13 +14,17 @@
 //! arguments through it, recording the answers the runtime lowering
 //! embeds at the call sites ([`ds_lower::ComptimeValues`]).
 //!
-//! The fence is the install seam: the evaluator's registry serves the
-//! package's platform name with an empty provides list and the comptime
-//! reflection natives under their reserved module, so a world-touching
-//! call inside a comptime function refuses at the slice's install — a
-//! compile error naming the capability, never a runtime trap
-//! (`ComptimeFenceRefusal`). The pure builtin core serves everything
-//! else the lowered subset reaches.
+//! The fence is the admission plus the install seam: an ordinary
+//! runtime callee admits by its own solved effect row (the 2026-11-15
+//! ruling) — an empty row admits the callee's body into the slice, any
+//! effect refusing with `ComptimeCalleeRefusal` naming the comptime
+//! function, the callee, and the call — and the registry still serves
+//! the package's platform name with an empty provides list and the
+//! comptime reflection natives under their reserved module, so a
+//! world-touching call the rows cannot attribute refuses at the
+//! slice's install — a compile error naming the capability, never a
+//! runtime trap (`ComptimeFenceRefusal`). The pure builtin core serves
+//! everything else the lowered subset reaches.
 //!
 //! Reflection is static over tags-as-data: the evaluator projects the
 //! checker's declaration tables into the VM's reflection store (one
@@ -21,9 +32,9 @@
 //! case — name, type index, tag name), the `fields`/`type_name` natives
 //! answer from it, and nothing of it reaches a runtime module (G2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use ds_check::{Analyzed, DefId, DotRes, Res, Ty, TypeExpr, TypeId};
+use ds_check::{Analyzed, DefId, DotRes, Res, Ty, TypeExpr, TypeId, type_of::analyze_resolved};
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_lower::{ComptimeConst, ComptimeValues};
 use ds_mod::Hash128;
@@ -38,43 +49,121 @@ use ds_vm::{
     platform::Platform,
 };
 
+pub mod derive;
+
+pub use derive::{expand as expand_derives, expand_owned};
+
+/// The full bidirectional check over raw trees with the derive
+/// expansion applied first: the checker's
+/// [`analyze`](ds_check::type_of::analyze) over the expanded trees, the
+/// expansion's refusals folded into the bundle ahead of the resolution
+/// classes, so a derive-carrying package answers exactly as it always
+/// did. A package with no derive attribute expands to an identical
+/// clone. `asts` may hold shared trees (`Borrow<Ast>`): the query layer
+/// expands its parse memos without cloning the trees.
+pub fn analyze<T>(files: &ds_diag::Files, asts: &[T]) -> Analyzed
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    // The trees arrive borrowed, so they copy once into the owned
+    // shape; a caller holding the trees by value takes `analyze_owned`
+    // and skips this copy.
+    let owned: Vec<Ast> = asts
+        .iter()
+        .map(|ast| std::borrow::Borrow::borrow(ast).clone())
+        .collect();
+    analyze_owned(files, owned, &[])
+}
+
+/// The ownership variant of [`analyze`] for the cold run path: the
+/// caller hands the package's trees by value, with `preexpanded` marks
+/// aligned with them (a marked tree already carries its derive
+/// expansion — the ambient blob's decode), and the expansion moves
+/// every tree through without cloning, so the bundle adopts the moved
+/// trees. An unmarked tree expands exactly like [`analyze`] expands it.
+pub fn analyze_owned(files: &ds_diag::Files, asts: Vec<Ast>, preexpanded: &[bool]) -> Analyzed {
+    let (asts, mut diags) = expand_owned(asts, preexpanded);
+    let (package, resolutions, resolve_diags) = ds_check::resolve_package(&asts);
+    diags.extend(resolve_diags);
+    analyze_resolved(
+        files,
+        asts.into(),
+        package.into(),
+        resolutions.into(),
+        diags,
+    )
+}
+
+/// The served variant of [`analyze_owned`] behind a checked-ambient
+/// artifact: the ambient member's tree arrives first (marked in
+/// `preexpanded`, the blob discipline) with its namespace,
+/// per-file resolutions, and declaration-side prefix pre-served, and
+/// the user trees after it expand like [`analyze_owned`] expands them,
+/// the expansion's refusals folded ahead of the served resolution
+/// classes.
+pub fn analyze_served(
+    files: &ds_diag::Files,
+    asts: Vec<Ast>,
+    preexpanded: &[bool],
+    package: ds_check::Package,
+    resolutions: Vec<ds_check::Resolutions>,
+    served: ds_check::ServedDecls,
+) -> Analyzed {
+    let (asts, diags) = expand_owned(asts, preexpanded);
+    ds_check::type_of::analyze_served(files, asts, package, resolutions, served, diags)
+}
+
 /// Evaluates every comptime call in the package: the answers keyed by
 /// each call's span, or the diagnostics that refuse the evaluation. The
 /// `module_name` and `source_hash` are the runtime module's own — the
-/// slice is the same package's comptime half.
+/// slice is the same package's comptime half. `effects` is the
+/// package's solved effect rows, the same computation the caller's
+/// platform check read (ambient externs carry their declared rows
+/// there), so the fence's admission reads the one row source of truth.
 ///
 /// # Errors
 ///
-/// One diagnostic per honest refusal: a world-touching call inside a
-/// comptime function (the fence), a call into the runtime half of the
-/// package, an argument shape the round does not stage, a result it
-/// cannot embed, or a trap the fenced run raised.
+/// One diagnostic per honest refusal: a runtime callee the fence
+/// refuses (an impure row, a generic body, a member call), a
+/// world-touching call the rows cannot attribute (the install seam), an
+/// argument shape the round does not stage, a result it cannot embed,
+/// or a trap the fenced run raised.
 pub fn evaluate(
     module_name: &str,
     source_hash: Hash128,
     asts: &[Ast],
     analyzed: &Analyzed,
+    effects: &ds_check::Effects,
 ) -> Result<ComptimeValues, Vec<Diagnostic>> {
     let sites = collect_sites(asts, analyzed);
     if sites.is_empty() {
         return Ok(ComptimeValues::default());
     }
     let fns = comptime_functions(asts, analyzed);
+    let mut admission = Admission::new(asts, analyzed, effects);
+    if let Some(diagnostic) = admission.check(&fns) {
+        return Err(vec![diagnostic]);
+    }
     let mut reflection = Reflection::new(analyzed);
-    let slice = ds_lower::lower_comptime_slice(module_name, source_hash, asts, analyzed).map_err(
-        |error| {
-            let diagnostic = Diagnostic::error(
-                ErrorCode::ComptimeEvalRefusal,
-                format!("the comptime functions do not lower: {error}"),
-            );
-            match error.span() {
-                Some(span) => {
-                    vec![diagnostic.with_primary(span, "outside the comptime slice's contract")]
-                },
-                None => vec![diagnostic],
-            }
-        },
-    )?;
+    let slice = ds_lower::lower_comptime_slice(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        admission.admitted(),
+    )
+    .map_err(|error| {
+        let diagnostic = Diagnostic::error(
+            ErrorCode::ComptimeEvalRefusal,
+            format!("the comptime functions do not lower: {error}"),
+        );
+        match error.span() {
+            Some(span) => {
+                vec![diagnostic.with_primary(span, "outside the comptime slice's contract")]
+            },
+            None => vec![diagnostic],
+        }
+    })?;
     // the fenced VM exists before the staging: a scalar comptime
     // parameter stages a plain literal word, and a string literal
     // argument interns into the VM's root heap (the host-facing staging
@@ -140,11 +229,12 @@ pub fn evaluate(
             continue;
         };
         match vm.run(module_name, &function.name, &staged) {
-            Ok(value) => {
-                // the call's own checked type gates the list embed (the
-                // runtime lowering stages each element literal from it)
+            Ok(answer) => {
+                // the call's own checked type gates the embed (the runtime
+                // lowering stages each element literal from it); the host
+                // seam answers the span whole, so every word reaches here
                 let call_ty = analyzed.checked.expr_types.get(&site.span).map(|v| v.ty);
-                match embed(value, call_ty, analyzed, &vm) {
+                match embed(answer.as_slice(), call_ty, analyzed, &vm) {
                     Ok(constant) => values.insert(site.span, constant),
                     Err(message) => diags.push(
                         Diagnostic::error(ErrorCode::ComptimeEvalRefusal, message)
@@ -276,6 +366,421 @@ fn comptime_functions(asts: &[Ast], analyzed: &Analyzed) -> Vec<ComptimeFn> {
         });
     }
     fns
+}
+
+/// The fence's callee admission (the 2026-11-15 ruling): an ordinary
+/// runtime callee admits by its own solved row — an empty (pure) row
+/// admits the callee's body into the slice, any impure row refusing at
+/// the fence naming the comptime fn, the callee, and the call. The rows
+/// are the effects pass's solved fixpoint, so a direct callee's row
+/// already carries its transitive closure: one impure reach anywhere
+/// behind a callee refuses that callee here. A pure-row callee still
+/// refuses when the slice cannot plan what it reaches — a generic
+/// body's evidence seam, a member call the slice plans no body for, a
+/// binding shape no module function lowers — each an honest residual of
+/// this round. The slice's lowering keeps its belt refusal for the
+/// shapes this walk does not match (a fn-value indirection), and the
+/// install seam keeps the world refusal (DS2033's capability
+/// diagnostic) behind the admission.
+struct Admission<'a> {
+    analyzed: &'a Analyzed,
+    effects: &'a ds_check::Effects,
+    /// One plannable ordinary fn per def: its file and its lambda body.
+    bodies: HashMap<DefId, (usize, &'a Expr)>,
+    /// The comptime declarations the walk starts from: def, file, body.
+    roots: Vec<(DefId, usize, &'a Expr)>,
+    /// The admitted defs, in first-admit order — the slice's plan set.
+    admitted: Vec<DefId>,
+    /// Per-def admission state: present while a def is walked (a cycle
+    /// admits, the fenced VM's stack bounding it), the value marking a
+    /// finished admission.
+    states: HashMap<DefId, bool>,
+    /// Every struct whose declaration carries a `deinit` member (C5):
+    /// the slice plans no hooks, so a literal of one refuses at the
+    /// fence — the hook's side effects cannot silently skip at comptime.
+    deinits: HashSet<DefId>,
+}
+
+impl<'a> Admission<'a> {
+    fn new(asts: &'a [Ast], analyzed: &'a Analyzed, effects: &'a ds_check::Effects) -> Self {
+        let mut bodies = HashMap::default();
+        let mut roots = Vec::new();
+        let mut deinits = HashSet::default();
+        for ast in asts {
+            for item in items_of(ast) {
+                let ItemKind::Struct(decl) = &item.kind else {
+                    continue;
+                };
+                if !decl
+                    .members
+                    .iter()
+                    .any(|member| matches!(member, ds_parse::StructMember::Deinit { .. }))
+                {
+                    continue;
+                }
+                if let Some(def) = analyzed.package.lookup_type(&decl.name.name) {
+                    deinits.insert(def);
+                }
+            }
+        }
+        for (index, ast) in asts.iter().enumerate() {
+            for item in items_of(ast) {
+                let ItemKind::Local(local) = &item.kind else {
+                    continue;
+                };
+                let ds_parse::Pattern::Binding { name, .. } = &local.pat else {
+                    continue;
+                };
+                let Expr::Lambda { params, .. } = &local.init else {
+                    continue;
+                };
+                let Some(def) = analyzed.package.lookup(&name.name) else {
+                    continue;
+                };
+                if params
+                    .iter()
+                    .any(|p| matches!(p.mode, ParamMode::Comptime(_)))
+                {
+                    roots.push((def, index, &local.init));
+                } else if !local.mutable && is_runtime_fn(def, analyzed) {
+                    bodies.insert(def, (index, &local.init));
+                }
+            }
+        }
+        Self {
+            analyzed,
+            effects,
+            bodies,
+            roots,
+            admitted: Vec::new(),
+            states: HashMap::default(),
+            deinits,
+        }
+    }
+
+    /// The slice's plan set: every pure-row callee the walk admitted.
+    fn admitted(&self) -> &[DefId] {
+        &self.admitted
+    }
+
+    /// Walks every comptime fn's reaches; the first refusal wins.
+    fn check(&mut self, fns: &[ComptimeFn]) -> Option<Diagnostic> {
+        let analyzed = self.analyzed;
+        let roots = self.roots.clone();
+        for (def, file, body) in roots {
+            let Some(owner) = fns.iter().find(|f| f.def == def) else {
+                continue;
+            };
+            let res = &analyzed.resolutions[file];
+            let mut found: Option<Diagnostic> = None;
+            walk_expr(body, &mut |expr: &Expr| {
+                if found.is_some() {
+                    return;
+                }
+                if let Some(diagnostic) = self.deinit_literal(expr, res, owner, None) {
+                    found = Some(diagnostic);
+                    return;
+                }
+                for (span, _, target) in reaches(res, expr) {
+                    if let Target::Fn(callee) = target
+                        && is_runtime_fn(callee, analyzed)
+                        && let Err(diagnostic) = self.admit(owner, callee, span)
+                    {
+                        found = Some(diagnostic);
+                        return;
+                    }
+                }
+            });
+            if let Some(diagnostic) = found {
+                return Some(diagnostic);
+            }
+        }
+        None
+    }
+
+    /// Admits one ordinary callee: row-pure and slice-plannable, its own
+    /// reaches admitting the same way (the rows close the loop, so a
+    /// cycle only re-enters a def already proven pure).
+    fn admit(&mut self, owner: &ComptimeFn, def: DefId, span: Span) -> Result<(), Diagnostic> {
+        if self.states.contains_key(&def) {
+            return Ok(()); // admitted, or a cycle re-entering a walk in progress
+        }
+        self.states.insert(def, false);
+        let analyzed = self.analyzed;
+        let name = analyzed.package.def(def).name.clone();
+        if analyzed
+            .decls
+            .fns
+            .get(&def)
+            .is_some_and(|sig| !sig.generics.is_empty())
+        {
+            return Err(self.refusal(
+                owner,
+                span,
+                def,
+                format!(
+                    "the comptime function `{}` reaches the generic function `{name}`, whose \
+                     one-body evidence seam is the runtime module's this round",
+                    owner.name
+                ),
+            ));
+        }
+        let Some(row) = self.effects.of(def) else {
+            return Err(self.refusal(
+                owner,
+                span,
+                def,
+                format!(
+                    "the comptime function `{}` reaches `{name}`, whose effect row the fence \
+                     cannot read; the callee refuses here",
+                    owner.name
+                ),
+            ));
+        };
+        if !row.is_pure() {
+            let origin = self.origin(def);
+            let origin_clause = (origin != def).then(|| {
+                let origin_name = analyzed.package.def(origin).name.clone();
+                format!(" — the row turns impure at `{origin_name}` first")
+            });
+            let message = format!(
+                "the comptime function `{}` reaches `{name}`, whose effect row is `{}`; the \
+                 comptime fence admits only callees with a pure row{}",
+                owner.name,
+                row.render(),
+                origin_clause.as_deref().unwrap_or("")
+            );
+            let mut diagnostic = self.refusal(owner, span, def, message);
+            if origin != def {
+                diagnostic = diagnostic.with_secondary(
+                    analyzed.package.def(origin).span,
+                    "the row's first impure hop",
+                );
+            }
+            return Err(diagnostic);
+        }
+        let Some((file, body)) = self.bodies.get(&def).copied() else {
+            return Err(self.refusal(
+                owner,
+                span,
+                def,
+                format!(
+                    "the comptime function `{}` reaches `{name}`, whose body the comptime slice \
+                     cannot plan (a `var`-bound callee refuses here)",
+                    owner.name
+                ),
+            ));
+        };
+        let res = &analyzed.resolutions[file];
+        let mut found: Option<Diagnostic> = None;
+        walk_expr(body, &mut |expr: &Expr| {
+            if found.is_some() {
+                return;
+            }
+            if let Some(diagnostic) = self.deinit_literal(expr, res, owner, Some(&name)) {
+                found = Some(diagnostic);
+                return;
+            }
+            for (use_span, member, target) in reaches(res, expr) {
+                match target {
+                    Target::Fn(callee) => {
+                        if is_runtime_fn(callee, analyzed)
+                            && let Err(diagnostic) = self.admit(owner, callee, use_span)
+                        {
+                            found = Some(diagnostic);
+                            return;
+                        }
+                    },
+                    Target::Member => {
+                        found = Some(self.refusal(
+                            owner,
+                            use_span,
+                            def,
+                            format!(
+                                "the comptime function `{}` reaches the member call `{member}` \
+                                 inside `{name}`, and the comptime slice plans no impl bodies \
+                                 this round",
+                                owner.name
+                            ),
+                        ));
+                        return;
+                    },
+                }
+            }
+        });
+        if let Some(diagnostic) = found {
+            return Err(diagnostic);
+        }
+        self.states.insert(def, true);
+        self.admitted.push(def);
+        Ok(())
+    }
+
+    /// One struct literal of a deinit-carrying struct (C5): the slice
+    /// plans no deinit hooks, so the value's death would silently skip
+    /// the hook inside the fence — the literal refuses here, inside the
+    /// comptime fn's own body or inside the helper `via` names.
+    fn deinit_literal(
+        &self,
+        expr: &Expr,
+        res: &ds_check::Resolutions,
+        owner: &ComptimeFn,
+        via: Option<&str>,
+    ) -> Option<Diagnostic> {
+        let Expr::Struct { path, span, .. } = expr else {
+            return None;
+        };
+        let head = path.segments.first()?;
+        let def = match res.get(head.span) {
+            Some(Res::Def(def)) => *def,
+            _ => return None,
+        };
+        if !self.deinits.contains(&def) {
+            return None;
+        }
+        let name = self.analyzed.package.def(def).name.clone();
+        let inside = match via {
+            Some(helper) => format!(" inside `{helper}`"),
+            None => String::new(),
+        };
+        Some(
+            Diagnostic::error(
+                ErrorCode::ComptimeEvalRefusal,
+                format!(
+                    "the comptime function `{}` reaches a deinit-carrying `{name}` \
+                     construction{inside}, and the comptime slice plans no deinit hooks; \
+                     deinit-carrying parts refuse inside the fence",
+                    owner.name
+                ),
+            )
+            .with_primary(*span, "this construction")
+            .with_secondary(owner.span, "the comptime function"),
+        )
+    }
+
+    /// One refusal over the shared code: the call's span primary, the
+    /// comptime fn and the callee secondary.
+    fn refusal(
+        &self,
+        owner: &ComptimeFn,
+        span: Span,
+        callee: DefId,
+        message: String,
+    ) -> Diagnostic {
+        Diagnostic::error(ErrorCode::ComptimeCalleeRefusal, message)
+            .with_primary(span, "this call")
+            .with_secondary(owner.span, "the comptime function")
+            .with_secondary(self.analyzed.package.def(callee).span, "the callee")
+    }
+
+    /// The row's first impure hop: drilling through body order, the
+    /// first impure use of each pure-named caller names the next hop,
+    /// and a definition whose own body holds no impure use (its
+    /// impurity is intrinsic) or a revisited definition is the hop.
+    fn origin(&self, def: DefId) -> DefId {
+        let analyzed = self.analyzed;
+        let mut visited = vec![def];
+        let mut def = def;
+        loop {
+            let Some((file, body)) = self.bodies.get(&def).copied() else {
+                return def;
+            };
+            let res = &analyzed.resolutions[file];
+            let mut next: Option<DefId> = None;
+            walk_expr(body, &mut |expr: &Expr| {
+                if next.is_some() {
+                    return;
+                }
+                for (_, _, target) in reaches(res, expr) {
+                    if let Target::Fn(callee) = target
+                        && is_runtime_fn(callee, analyzed)
+                        && self.effects.of(callee).is_some_and(|row| !row.is_pure())
+                    {
+                        next = Some(callee);
+                        return;
+                    }
+                }
+            });
+            match next {
+                None => return def,
+                Some(callee) => {
+                    if visited.contains(&callee) {
+                        return def;
+                    }
+                    visited.push(callee);
+                    def = callee;
+                },
+            }
+        }
+    }
+}
+
+/// One named reach of an expression node: a path segment's or dot-name's
+/// resolution. A free fn (or a const binding of one) is a def reach; a
+/// registered member call is a member reach; everything else (a local, a
+/// handler, a bare name) reaches nothing.
+#[derive(Clone, Copy)]
+enum Target {
+    /// The resolved free-fn def.
+    Fn(DefId),
+    /// A registered member call: trait or inherent candidates, or the
+    /// qualified `Trait::f` escape hatch.
+    Member,
+}
+
+/// The reaches of one expression node, in source order.
+fn reaches<'n>(res: &ds_check::Resolutions, expr: &'n Expr) -> Vec<(Span, &'n str, Target)> {
+    let mut out = Vec::new();
+    match expr {
+        Expr::Path { path, .. } => {
+            for seg in &path.segments {
+                match res.get(seg.span) {
+                    Some(Res::Def(def)) => {
+                        out.push((seg.span, seg.name.as_str(), Target::Fn(*def)));
+                    },
+                    Some(Res::TraitMethod(_)) => {
+                        out.push((seg.span, seg.name.as_str(), Target::Member));
+                    },
+                    _ => {},
+                }
+            }
+        },
+        Expr::Field { name, .. } => match res.get(name.span) {
+            Some(Res::Def(def)) => out.push((name.span, name.name.as_str(), Target::Fn(*def))),
+            Some(Res::Dot(DotRes::Free { func, .. })) => {
+                out.push((name.span, name.name.as_str(), Target::Fn(*func)));
+            },
+            Some(
+                Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. }) | Res::TraitMethod(_),
+            ) => {
+                out.push((name.span, name.name.as_str(), Target::Member));
+            },
+            _ => {},
+        },
+        _ => {},
+    }
+    out
+}
+
+/// Whether a resolved callee is the package's runtime half: a declared
+/// free fn with a typed value (an extern carries none, so the pure
+/// builtin core and the world surface stay the install seam's own
+/// classes) that no parameter marks comptime — exactly the functions
+/// the slice plans only when the admission names them. A case
+/// constructor is a value construction, not a call into the runtime
+/// half.
+fn is_runtime_fn(def: DefId, analyzed: &Analyzed) -> bool {
+    if analyzed.decls.cases.get(&def).is_some() {
+        return false;
+    }
+    let Some(sig) = analyzed.decls.fns.get(&def) else {
+        return false;
+    };
+    analyzed.checked.def_types.contains_key(&def)
+        && !sig
+            .params
+            .iter()
+            .any(|p| matches!(p.mode, ParamMode::Comptime(_)))
 }
 
 /// The reflection projection: declared atoms and enums to reflection
@@ -437,13 +942,13 @@ impl<'a> Reflection<'a> {
     }
 
     /// One staged type argument: the reflection index of the single type
-    /// name the argument spells.
+    /// name the argument spells (parentheses read through, a pure
+    /// spelling of the same form).
     fn stage_type(&mut self, arg: &Expr) -> Result<u8, String> {
-        let Expr::Path { path, .. } = arg else {
+        let Expr::Path { path, .. } = unparen(arg) else {
             return Err(
-                "a comptime argument names a declared type this round; anything else (a \
-                 parenthesized name, a local, an application like list[int]) is the evaluator's \
-                 residual"
+                "a comptime argument names a declared type this round; anything else (a local, an \
+                 application like list[int], a type-typed value) is the evaluator's residual"
                     .to_owned(),
             );
         };
@@ -484,6 +989,17 @@ impl<'a> Reflection<'a> {
     }
 }
 
+/// The expression inside any parentheses around it: a parenthesized
+/// spelling of a staged form is the same form, so both staging doors read
+/// through it. Nested parens flatten; the wrapped shape keeps its own
+/// staging rule.
+fn unparen(mut expr: &Expr) -> &Expr {
+    while let Expr::Paren { inner, .. } = expr {
+        expr = inner;
+    }
+    expr
+}
+
 /// The scalar kind one comptime parameter's annotation names, when it
 /// names one of the four atoms the evaluator stages as a literal word.
 enum ScalarKind {
@@ -513,11 +1029,12 @@ fn scalar_annotation(annotation: Option<&ds_parse::Type>) -> Option<ScalarKind> 
 }
 
 /// One plain scalar literal staged as its word, a string interning into
-/// the VM's root heap (the host-facing staging discipline).
+/// the VM's root heap (the host-facing staging discipline). Parentheses
+/// read through: a plain literal in parens stages as the same literal.
 fn stage_literal(vm: &mut Vm, kind: ScalarKind, arg: &Expr) -> Result<Value, String> {
     const SHAPE: &str = "a scalar comptime parameter takes a plain literal of its annotation; \
-                         anything else (a parenthesized literal, a name, an interpolated or \
-                         suffixed literal) refuses here";
+                         anything else (a name, an interpolated or suffixed literal) refuses here";
+    let arg = unparen(arg);
     match (kind, arg) {
         (
             ScalarKind::Int,
@@ -571,19 +1088,45 @@ fn parse_int_word(text: &str) -> Option<i64> {
     i64::from_str_radix(digits, radix).ok()
 }
 
+/// The embeddable answer vocabulary, one clause for every embed refusal.
+const EMBEDDABLE: &str = "the embeddable answers are int, float, bool, string, a list over \
+                          embeddable elements, and a tuple over embeddable scalars; a comptime \
+                          function answering anything else refuses here";
+
 /// One embedded answer: the embeddable results are the scalar atoms,
-/// string, and a list over embeddable elements (staged at the call site
-/// as the list literal a user would have written).
+/// string, a list over embeddable elements, and a tuple over embeddable
+/// scalars (each staged at the call site as the literal a user would
+/// have written). Every answer embeds over the call's own checked type —
+/// a scalar answer whose call site checks as anything wider (a tuple, a
+/// unit, a wider union) refuses here, never the lowering, and a
+/// multi-word answer embeds only as a tuple whose arity and element
+/// types match the call's checked tuple element for element.
 fn embed(
-    value: Value,
+    words: &[Value],
     call_ty: Option<Ty>,
     analyzed: &Analyzed,
     vm: &Vm,
 ) -> Result<ComptimeConst, String> {
+    if words.len() > 1 {
+        return embed_tuple(words, call_ty, analyzed, vm);
+    }
+    let value = words
+        .first()
+        .copied()
+        .expect("a drive answer carries a word");
     match value {
-        Value::I64(word) => Ok(ComptimeConst::Int(word)),
-        Value::F64(word) => Ok(ComptimeConst::Float(word)),
-        Value::Bool(word) => Ok(ComptimeConst::Bool(word)),
+        Value::I64(word) => {
+            gate_scalar_answer(call_ty, "int", analyzed)?;
+            Ok(ComptimeConst::Int(word))
+        },
+        Value::F64(word) => {
+            gate_scalar_answer(call_ty, "float", analyzed)?;
+            Ok(ComptimeConst::Float(word))
+        },
+        Value::Bool(word) => {
+            gate_scalar_answer(call_ty, "bool", analyzed)?;
+            Ok(ComptimeConst::Bool(word))
+        },
         Value::Ref(word) => {
             let objects = vm.objects();
             if let Ok((elems, stride)) = objects.list_parts(word.id()) {
@@ -592,15 +1135,136 @@ fn embed(
             let text = objects
                 .str_at(word.id())
                 .map_err(|_| "the answer is not a string".to_owned())?;
+            gate_scalar_answer(call_ty, "string", analyzed)?;
             Ok(ComptimeConst::Str(text.to_owned()))
         },
-        Value::Tag(_) | Value::Fn(_) | Value::Arena(_) => Err("the embeddable answers are int, \
-                                                               float, bool, string, and a list \
-                                                               over embeddable elements; a \
-                                                               comptime function answering \
-                                                               anything else refuses here"
-            .to_owned()),
+        Value::Tag(_) | Value::Fn(_) | Value::Arena(_) => Err(EMBEDDABLE.to_owned()),
     }
+}
+
+/// One scalar answer's gate: the call's checked type must be exactly the
+/// scalar atom the answer is, so a wider return (a tuple's head word, a
+/// unit word) refuses at the embed instead of recording a truncated
+/// answer the runtime lowering cannot stage.
+fn gate_scalar_answer(call_ty: Option<Ty>, atom: &str, analyzed: &Analyzed) -> Result<(), String> {
+    let names = |ty: Ty| -> Option<String> {
+        let members = analyzed.decls.universe.members(ty);
+        match members {
+            [only] => analyzed
+                .decls
+                .universe
+                .atom_decl(*only)
+                .ok()
+                .map(|decl| decl.name.clone()),
+            _ => None,
+        }
+    };
+    let spelled = call_ty.and_then(names);
+    match spelled.as_deref() {
+        Some(name) if name == atom => Ok(()),
+        _ => {
+            let rendered = call_ty.map(|ty| analyzed.decls.universe.render(ty));
+            let where_ = rendered.map_or_else(
+                || "the call's own type".to_owned(),
+                |ty| format!("the call's checked type `{ty}`"),
+            );
+            Err(format!(
+                "a scalar answer embeds only over its own scalar type at the call; {where_} is \
+                 wider, so the scalar's word does not embed there — {EMBEDDABLE}"
+            ))
+        },
+    }
+}
+
+/// One tuple element's own atom name: the elements of a solved tuple type
+/// are single atoms (solving distributes products over unions
+/// element-wise), so the per-element gate reads the atom's declaration
+/// directly.
+fn tuple_elem_name(elem: TypeId, analyzed: &Analyzed) -> Option<String> {
+    analyzed
+        .decls
+        .universe
+        .atom_decl(elem)
+        .ok()
+        .map(|decl| decl.name.clone())
+}
+
+/// One multi-word answer: embeddable only as a tuple over the four
+/// scalar atoms, the call's own checked type a tuple of the same arity
+/// with each element gated against its position's element type word for
+/// word — the runtime lowering stages the tuple literal a user would
+/// have written from exactly these facts.
+fn embed_tuple(
+    words: &[Value],
+    call_ty: Option<Ty>,
+    analyzed: &Analyzed,
+    vm: &Vm,
+) -> Result<ComptimeConst, String> {
+    let rendered = call_ty.map(|ty| analyzed.decls.universe.render(ty));
+    let elems = call_ty.and_then(|ty| {
+        let [only] = analyzed.decls.universe.members(ty) else {
+            return None;
+        };
+        match analyzed
+            .decls
+            .universe
+            .atom_decl(*only)
+            .map(|decl| decl.kind.clone())
+        {
+            Ok(ds_check::AtomKind::Tuple(elems)) => Some(elems),
+            _ => None,
+        }
+    });
+    let Some(elems) = elems else {
+        let where_ = rendered.map_or_else(
+            || "the call's own type".to_owned(),
+            |ty| format!("the call's checked type `{ty}`"),
+        );
+        return Err(format!(
+            "a multi-word answer embeds only as a tuple over scalars at the call; {where_} is not \
+             a tuple type — {EMBEDDABLE}"
+        ));
+    };
+    if elems.len() != words.len() {
+        let where_ = rendered.map_or_else(
+            || "the call's own type".to_owned(),
+            |ty| format!("the call's checked type `{ty}`"),
+        );
+        return Err(format!(
+            "a multi-word answer embeds only as a tuple of the same arity at the call; {where_} \
+             takes {} element(s), the answer carries {words_len} — {EMBEDDABLE}",
+            elems.len(),
+            words_len = words.len(),
+        ));
+    }
+    let mut items = Vec::with_capacity(words.len());
+    for (word, elem) in words.iter().zip(&elems) {
+        let name = tuple_elem_name(*elem, analyzed);
+        let item = match (word, name.as_deref()) {
+            (Value::I64(word), Some("int")) => ComptimeConst::Int(*word),
+            (Value::F64(word), Some("float")) => ComptimeConst::Float(*word),
+            (Value::Bool(word), Some("bool")) => ComptimeConst::Bool(*word),
+            (Value::Ref(word), Some("string")) => ComptimeConst::Str(
+                vm.objects()
+                    .str_at(word.id())
+                    .map_err(|_| "the answer is not a string".to_owned())?
+                    .to_owned(),
+            ),
+            _ => {
+                let where_ = rendered.map_or_else(
+                    || "the call's own type".to_owned(),
+                    |ty| format!("the call's checked type `{ty}`"),
+                );
+                return Err(format!(
+                    "a tuple answer embeds one scalar per element over its own element type at \
+                     the call; {where_} names an element the answer's word does not match — \
+                     {EMBEDDABLE}"
+                ));
+            },
+        };
+        items.push(item);
+    }
+    Ok(ComptimeConst::Tuple(items))
 }
 
 /// One list answer: embeddable when every element is one embeddable word
@@ -694,8 +1358,8 @@ fn fence_diagnostic(error: &LoadError, fns: &[ComptimeFn], sites: &[CallSite]) -
             ErrorCode::ComptimeFenceRefusal,
             format!(
                 "the comptime function `{func}` calls `{module}`, which the comptime slice does \
-                 not carry; a comptime function may call the pure builtins and other comptime \
-                 functions this round"
+                 not carry; a comptime function may call the pure builtins, other comptime \
+                 functions, and the pure-row helpers the fence admits this round"
             ),
         )
         .with_primary(

@@ -7,19 +7,19 @@ use ds_diag::FileId;
 use ds_query::{BlockId, Db, DefId, LinearityCheck, PackageId, QueryKey, Resolve};
 
 const CLEAN: &str = concat!(
-    "trait Copyable { }\n",
-    "struct handle: ~Copyable {\n",
+    "pub trait Copyable { }\n",
+    "pub struct handle: ~Copyable {\n",
     "  fd: int\n",
     "}\n",
-    "extern fn open_handle (p: string) -> handle\n",
-    "extern fn take_handle (move h: handle) -> int\n",
+    "pub extern fn open_handle (p: string) -> handle\n",
+    "pub extern fn take_handle (move h: handle) -> int\n",
     "##\n",
-    "fn good(p: string) -> int {\n",
+    "pub fn good(p: string) -> int {\n",
     "  const h = open_handle(p)\n",
     "  take_handle(h)\n",
     "}\n",
     "##\n",
-    "fn bad(p: string) -> int {\n",
+    "pub fn bad(p: string) -> int {\n",
     "  const h = open_handle(p)\n",
     "  take_handle(h)\n",
     "  take_handle(h)\n",
@@ -39,15 +39,15 @@ fn def(file: u32, block: u32) -> DefId {
 /// expansion appends the synthesized impl beside the struct, so the
 /// affine pass walks its member body like a hand-written one.
 const DERIVED: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait show {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait show {\n",
     "  fn show(self) -> string\n",
     "}\n",
     "#[derive(show)]\n",
-    "struct point { x: int, y: int }\n",
+    "pub struct point { x: int, y: int }\n",
     "##\n",
-    "fn plain() -> int { 1 }\n",
+    "pub fn plain() -> int { 1 }\n",
 );
 
 /// The linear layer declared in another file: the package expansion
@@ -55,13 +55,13 @@ const DERIVED: &str = concat!(
 /// body exists and the block answers no facts — the same refusal the
 /// resolve value carries.
 const LINEAR_DECL: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait Copyable { }\n",
-    "trait show {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub trait show {\n",
     "  fn show(self) -> string\n",
     "}\n",
-    "struct cell: ~Copyable {\n",
+    "pub struct cell: ~Copyable {\n",
     "  n: int\n",
     "}\n",
 );
@@ -70,12 +70,12 @@ const LINEAR_DECL: &str = concat!(
 /// a derive over it accepts and the expansion appends the synthesized
 /// impl beside the cross-file struct.
 const COPYABLE_DECL: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait show {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait show {\n",
     "  fn show(self) -> string\n",
     "}\n",
-    "struct cell { n: int }\n",
+    "pub struct cell { n: int }\n",
 );
 
 /// The accepting mirror of the refused derive: the struct in the second

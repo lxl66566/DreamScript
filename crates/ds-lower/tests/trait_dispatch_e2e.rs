@@ -22,7 +22,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/trait_dispatch_probe.ds");
 
@@ -120,7 +120,7 @@ fn two_impls_dispatch_through_the_same_call_site_shapes() {
     let mut vm = run_lowered(&source, &lowered);
     assert_eq!(
         vm.run("trait_dispatch_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -296,7 +296,7 @@ fn two_instantiations_run_through_one_generic_body() {
     let mut vm = run_lowered(GENERIC_SOURCE, &lowered);
     assert_eq!(
         vm.run("generic_impl_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -456,7 +456,7 @@ fn every_dispatch_spelling_stages_the_trait_declared_default() {
     let mut vm = run_lowered(&source, &lowered);
     assert_eq!(
         vm.run("trait_default_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -530,7 +530,7 @@ fn a_full_impl_checks_and_runs_end_to_end() {
     let mut vm = run_lowered(source, &lowered);
     assert_eq!(
         vm.run("full_impl", "main", &[]),
-        Ok(Value::I64(20)),
+        Ok(FrameAnswer::one(Value::I64(20))),
         "main answers 8 + 12 through both members"
     );
     assert!(

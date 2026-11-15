@@ -6,7 +6,8 @@
 use core::mem::size_of;
 
 use ds_vm::{
-    Const, ConstFuncRef, FIBER_ROOT, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm, Word,
+    Const, ConstFuncRef, FIBER_ROOT, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion,
+    Value, Vm, Word,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -55,16 +56,18 @@ fn the_intern_map_serves_every_drive_one_counted_object() {
     let first = vm
         .run("oe", "main", &[])
         .expect("the first drive completes");
-    let Value::Ref(id1) = first else {
+    let [Value::Ref(id1)] = first.as_slice() else {
         panic!("a string reference, got {first:?}");
     };
+    let id1 = *id1;
     assert_eq!(vm.objects().rc_at(id1.id()), Ok(1));
     let second = vm
         .run("oe", "main", &[])
         .expect("the second drive completes");
-    let Value::Ref(id2) = second else {
+    let [Value::Ref(id2)] = second.as_slice() else {
         panic!("a string reference, got {second:?}");
     };
+    let id2 = *id2;
     assert_eq!(
         id2, id1,
         "one VM-global intern map: the hit path reuses the object"
@@ -98,7 +101,7 @@ fn a_dropped_kstr_constant_fully_drains() {
     reg.install(ModuleVersion::new("oe", vec![cycle]).expect("valid fixture module"));
     let mut vm = Vm::new(reg);
     let first = vm.run("oe", "cycle", &[]).expect("the drive completes");
-    assert_eq!(first, Value::I64(0));
+    assert_eq!(first, FrameAnswer::one(Value::I64(0)));
     assert!(
         vm.objects().is_empty(),
         "the dec to zero frees the object and unbinds the intern entry"
@@ -109,7 +112,7 @@ fn a_dropped_kstr_constant_fully_drains() {
     let second = vm
         .run("oe", "cycle", &[])
         .expect("the second drive completes");
-    assert_eq!(second, Value::I64(0));
+    assert_eq!(second, FrameAnswer::one(Value::I64(0)));
     assert!(vm.objects().is_empty(), "the second cycle drains too");
 }
 
@@ -200,9 +203,11 @@ fn a_child_pushes_into_the_parent_list_and_both_heaps_drain() {
     let mut reg = ModuleRegistry::new();
     reg.install(ModuleVersion::new("sx", vec![main, child, drop_it]).expect("valid module"));
     let mut vm = Vm::new(reg);
-    let Value::Ref(list) = vm.run("sx", "main", &[]).expect("the root lands a list") else {
+    let answer = vm.run("sx", "main", &[]).expect("the root lands a list");
+    let [Value::Ref(list)] = answer.as_slice() else {
         panic!("a list ref");
     };
+    let list = *list;
     assert_eq!(list.fiber(), FIBER_ROOT);
     let child_id = vm
         .spawn_fiber("sx", "child", &[Value::Ref(list)])
@@ -286,18 +291,21 @@ fn kstr_loads_serve_per_fiber_copies_across_switches() {
     let mut reg = ModuleRegistry::new();
     reg.install(ModuleVersion::new("kx", vec![main, eqfn]).expect("valid module"));
     let mut vm = Vm::new(reg);
-    let Value::Ref(root_word) = vm.run("kx", "main", &[]).expect("the root loads") else {
+    let answer = vm.run("kx", "main", &[]).expect("the root loads");
+    let [Value::Ref(root_word)] = answer.as_slice() else {
         panic!("a string ref");
     };
+    let root_word = *root_word;
     let child_id = vm
         .spawn_fiber("kx", "main", &[])
         .expect("spawn the child loader");
-    let Value::Ref(child_word) = vm
+    let answer = vm
         .resume_fiber(child_id, Value::I64(0))
-        .expect("the child loads")
-    else {
+        .expect("the child loads");
+    let [Value::Ref(child_word)] = answer.as_slice() else {
         panic!("a string ref");
     };
+    let child_word = *child_word;
     assert_eq!(root_word.fiber(), FIBER_ROOT);
     assert_eq!(child_word.fiber(), child_id);
     assert_ne!(
@@ -318,7 +326,7 @@ fn kstr_loads_serve_per_fiber_copies_across_switches() {
             Value::Ref(root_word),
             Value::Ref(child_word)
         ]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "cross-heap string comparison answers by content"
     );
     assert_eq!(
@@ -326,7 +334,7 @@ fn kstr_loads_serve_per_fiber_copies_across_switches() {
             Value::Ref(child_word),
             Value::Ref(root_word)
         ]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "in either operand order"
     );
 }
@@ -473,7 +481,7 @@ fn a_trapped_child_is_walked_dead_and_both_heaps_drain() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("dw", "trap_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands"
     );
     assert!(
@@ -646,7 +654,7 @@ fn a_cancel_cut_child_releases_its_kept_claims_at_the_cut() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("dw2", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the flag raiser's cancel out and the parent lands"
     );
     assert!(
@@ -707,9 +715,11 @@ fn a_completed_child_drains_via_its_own_exit_decs() {
     let mut reg = ModuleRegistry::new();
     reg.install(ModuleVersion::new("dw3", vec![main, child]).expect("valid module"));
     let mut vm = Vm::new(reg);
-    let Value::Ref(list) = vm.run("dw3", "main", &[]).expect("the root lands a list") else {
+    let answer = vm.run("dw3", "main", &[]).expect("the root lands a list");
+    let [Value::Ref(list)] = answer.as_slice() else {
         panic!("a list ref");
     };
+    let list = *list;
     let child_id = vm
         .spawn_fiber("dw3", "child", &[Value::Ref(list)])
         .expect("spawn the completing child");
@@ -750,16 +760,19 @@ fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
     let mut vm = Vm::new(ModuleRegistry::new());
     for _ in 0..24 {
         vm.install_module(loader_module());
-        let Value::Ref(root_word) = vm.run("rk", "load", &[]).expect("the root load serves") else {
+        let answer = vm.run("rk", "load", &[]).expect("the root load serves");
+        let [Value::Ref(root_word)] = answer.as_slice() else {
             panic!("a string ref");
         };
+        let root_word = *root_word;
         let child_id = vm.spawn_fiber("rk", "load", &[]).expect("spawn the loader");
-        let Value::Ref(child_word) = vm
+        let answer = vm
             .resume_fiber(child_id, Value::I64(0))
-            .expect("the child load serves")
-        else {
+            .expect("the child load serves");
+        let [Value::Ref(child_word)] = answer.as_slice() else {
             panic!("a string ref");
         };
+        let child_word = *child_word;
         assert_eq!(root_word.fiber(), FIBER_ROOT);
         assert_eq!(
             child_word.fiber(),

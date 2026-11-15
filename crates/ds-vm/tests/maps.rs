@@ -272,7 +272,11 @@ fn bogus() -> FunctionDef {
 }
 
 fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
-    vm.run("mp", func, args).expect("the fixture runs")
+    let answer = vm.run("mp", func, args).expect("the fixture runs");
+    let [word] = answer.as_slice() else {
+        panic!("the fixture answers one word")
+    };
+    *word
 }
 
 fn count_of(vm: &mut Vm, map: Value) -> i64 {

@@ -13,7 +13,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the
@@ -125,7 +125,10 @@ fn runs(source: &str) -> String {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    assert_eq!(vm.run("run_probe", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("run_probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     String::from_utf8_lossy(vm.captured_output()).into_owned()
 }
 
@@ -139,7 +142,7 @@ fn a_defaulted_call_stages_its_literal_default() {
     vm.capture_output();
     assert_eq!(
         vm.run("call_staging", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

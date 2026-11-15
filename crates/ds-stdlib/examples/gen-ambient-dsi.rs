@@ -9,11 +9,13 @@
 //! runs, and the ambient must check and resolve clean on its own for the
 //! artifact to write.
 
-use ds_stdlib::ambient_dsi;
+use ds_dsi::artifact_bytes;
+use ds_mod::Hash128;
+use ds_stdlib::{AMBIENT_SOURCE, ambient_dsi};
 
 fn main() {
     let artifact = ambient_dsi::generate();
-    let bytes = ambient_dsi::artifact_bytes(&artifact);
+    let bytes = artifact_bytes(Hash128::compute(AMBIENT_SOURCE.as_bytes()), &artifact);
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ambient.dsi");
     std::fs::write(&out, &bytes).expect("writing the checked-ambient artifact");
     println!(

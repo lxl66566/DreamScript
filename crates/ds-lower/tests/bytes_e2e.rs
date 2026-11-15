@@ -17,7 +17,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The declaration prelude every case shares.
 const PRELUDE: &str = concat!(
@@ -65,7 +65,10 @@ fn run_stdout(body: &str) -> String {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    assert_eq!(vm.run("inline", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("inline", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     String::from_utf8(vm.captured_output().to_vec()).expect("stdout is UTF-8")
 }
 

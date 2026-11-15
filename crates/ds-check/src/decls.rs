@@ -290,6 +290,10 @@ pub struct ServedDecls {
     pub memberships: Vec<(TraitId, TypeId)>,
     /// The shape-phase atom mints, in mint order.
     pub mints: Vec<crate::universe::ReplayMint>,
+    /// The count of leading trees the prefix covers: the rebuild below
+    /// walks exactly these, and the caller aligns one served resolution
+    /// table per covered tree ahead of the fresh ones.
+    pub files: usize,
 }
 
 /// Builds the declaration tables over every collected file of one package,
@@ -331,7 +335,11 @@ where
 {
     let _ = resolutions;
     let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
-    let served_prefix = served.is_some();
+    let served_files = served.as_ref().map_or(0, |s| s.files);
+    assert!(
+        served_files <= trees.len(),
+        "a served prefix cannot cover more trees than the caller passed"
+    );
     let (mut decls, memberships, mints) = match served {
         Some(served) => (served.decls, served.memberships, served.mints),
         None => (Decls::default(), Vec::new(), Vec::new()),
@@ -355,15 +363,204 @@ where
         let _ = decls.universe.replay_mint(mint);
     }
     for (index, ast) in trees.iter().enumerate() {
-        let served_item = served_prefix && index == 0;
+        let served_item = index < served_files;
         for block in &ast.blocks {
             for item in &block.items {
                 shape_item(package, item, &mut decls, &mut diags, served_item);
             }
         }
     }
+    rebuild_solved_records(&trees[..served_files], package, &mut decls);
     package_coherence(&mut decls, &mut diags);
     (decls, diags)
+}
+
+/// Rebuilds the solved span-keyed records of the served prefix's impl
+/// items — the trait-reference arguments and the generic inherent
+/// bounds — over the served trees and the replayed universe. The serve
+/// skips these items' instance declarations (the artifact's rows are
+/// installed), and no served table carries the records, so the
+/// declaration arms' own derivations replay here: each generic
+/// parameter maps to the variable atom the mint log replayed, its
+/// unique name reconstructed through the counter sequence the
+/// declaring pass minted under (the served prefix is one leading run
+/// of files, so the sequence restarts where that pass started), and
+/// every solve lands on the handle the set log's intern-order replay
+/// already answers. A written expression that names anything but a
+/// minted variable or a declared atom records nothing — solving it
+/// could read a mid-growth state the replay cannot reproduce, so the
+/// artifact's clean generation refuses such a prefix outright (the
+/// drift gate's served-vs-fresh record comparison).
+fn rebuild_solved_records(trees: &[&Ast], package: &Package, decls: &mut Decls) {
+    let mut var_seq = 0u32;
+    for tree in trees {
+        for block in &tree.blocks {
+            for item in &block.items {
+                let ItemKind::Impl(imp) = &item.kind else {
+                    continue;
+                };
+                let mut vars = FxHashMap::default();
+                // The trait arm mints only once the referenced trait
+                // resolves (the declaring pass returns before the mint
+                // otherwise), and records its arguments only when the
+                // head converted — the same control flow, mirrored.
+                let record = if let Some(trait_ref) = &imp.trait_ref {
+                    let [trait_only] = trait_ref.path.segments.as_slice() else {
+                        continue;
+                    };
+                    let Some(owner) = package.lookup_type(&trait_only.name) else {
+                        continue;
+                    };
+                    if !decls.traits.contains_key(&owner) {
+                        continue;
+                    }
+                    for param in &imp.generics {
+                        var_seq += 1;
+                        minted_var(&param.name.name, var_seq, decls, &mut vars);
+                    }
+                    if conv_node(package, &imp.target, &vars, decls).is_none() {
+                        continue;
+                    }
+                    if trait_ref.args.is_empty()
+                        || !trait_ref
+                            .args
+                            .iter()
+                            .all(|arg| names_atoms_only(package, arg, &vars, decls))
+                    {
+                        continue;
+                    }
+                    let mut solved_args = Vec::with_capacity(trait_ref.args.len());
+                    let mut solved_all = true;
+                    for arg in &trait_ref.args {
+                        let Some(solved) = conv_node(package, arg, &vars, decls)
+                            .and_then(|expr| decls.universe.solve(&expr).ok())
+                        else {
+                            solved_all = false;
+                            break;
+                        };
+                        solved_args.push(solved);
+                    }
+                    solved_all.then_some(Record::Args(solved_args))
+                // The inherent arm mints only for a generic impl and
+                // records only when the head and bounds solve.
+                } else {
+                    if imp.generics.is_empty() {
+                        continue;
+                    }
+                    for param in &imp.generics {
+                        var_seq += 1;
+                        minted_var(&param.name.name, var_seq, decls, &mut vars);
+                    }
+                    if !names_atoms_only(package, &imp.target, &vars, decls) {
+                        continue;
+                    }
+                    let Some(head_expr) = conv_node(package, &imp.target, &vars, decls) else {
+                        continue;
+                    };
+                    let Ok(head) = decls.universe.solve(&head_expr) else {
+                        continue;
+                    };
+                    let mut conditions = Vec::new();
+                    for param in &imp.generics {
+                        let Some(bound) = &param.bound else { continue };
+                        let Some(bound_trait) = trait_of_type(package, bound, decls) else {
+                            continue;
+                        };
+                        let Some(&var) = vars.get(&param.name.name) else {
+                            continue;
+                        };
+                        if let Ok(ty) = decls.universe.atom_ty(var) {
+                            conditions.push(Condition::new(bound_trait, ty));
+                        }
+                    }
+                    (!conditions.is_empty()).then_some(Record::Inherent { head, conditions })
+                };
+                match record {
+                    Some(Record::Args(args)) => {
+                        decls.trait_impl_args.insert(item.span, args);
+                    },
+                    Some(Record::Inherent { head, conditions }) => {
+                        decls
+                            .inherent_impl_bounds
+                            .insert(item.span, InherentBounds { head, conditions });
+                    },
+                    None => {},
+                }
+            }
+        }
+    }
+}
+
+/// What one rebuilt impl item records.
+enum Record {
+    /// The solved trait-reference arguments.
+    Args(Vec<Ty>),
+    /// The solved inherent head and its bounds.
+    Inherent {
+        /// The solved head pattern.
+        head: Ty,
+        /// One condition per declared bound.
+        conditions: Vec<Condition<Ty>>,
+    },
+}
+
+/// Maps one impl generic parameter to the variable atom the mint log
+/// replayed, through the unique name the declaring pass minted it
+/// under — `#counter` over the parameter's name, the counter this
+/// rebuild reconstructs. A name the replay does not carry leaves the
+/// parameter unmapped, as a mint that failed left it.
+fn minted_var(name: &str, seq: u32, decls: &Decls, vars: &mut FxHashMap<String, TypeId>) {
+    let unique = format!("${name}#{seq}");
+    if let Some(var) = decls.universe.atom_by_name(&unique) {
+        vars.insert(name.to_owned(), var);
+    }
+}
+
+/// Whether a written type the rebuild solves names only minted
+/// variables and declared atoms, positionally: the expressions whose
+/// solving a later declaration cannot widen, so the replay answers
+/// exactly what the declaring pass solved. A trait spelled as a set,
+/// an alias, a negation, and every other non-atom form name state the
+/// replay does not carry.
+fn names_atoms_only(
+    package: &Package,
+    ty: &Type,
+    vars: &FxHashMap<String, TypeId>,
+    decls: &Decls,
+) -> bool {
+    use ds_parse::Type as Written;
+    match ty {
+        Written::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
+                return false;
+            };
+            let known = vars.contains_key(&only.name)
+                || package
+                    .lookup_type(&only.name)
+                    .is_some_and(|def| decls.atoms.get(&def).is_some());
+            known
+                && args
+                    .iter()
+                    .all(|arg| names_atoms_only(package, arg, vars, decls))
+        },
+        Written::Optional { inner, .. } | Written::Paren { inner, .. } => {
+            names_atoms_only(package, inner, vars, decls)
+        },
+        Written::TypeKw(_) | Written::Unit(_) => true,
+        Written::Union { left, right, .. } => {
+            names_atoms_only(package, left, vars, decls)
+                && names_atoms_only(package, right, vars, decls)
+        },
+        Written::Tuple { items, .. } => items
+            .iter()
+            .all(|item| names_atoms_only(package, item, vars, decls)),
+        Written::Intersect { .. }
+        | Written::Difference { .. }
+        | Written::Negation { .. }
+        | Written::Fn { .. }
+        | Written::Ptr { .. }
+        | Written::Foreign { .. } => false,
+    }
 }
 
 /// Whether a def's plain declaration tables arrived pre-built from the

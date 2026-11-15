@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -70,7 +70,7 @@ fn an_annotated_const_binds_each_member_through_the_union_region() {
     vm.capture_output();
     assert_eq!(
         vm.run("union_const", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(
@@ -125,7 +125,10 @@ fn a_bare_argument_re_spans_into_the_parameter_region_at_the_call() {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    assert_eq!(vm.run("union_bare", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("union_bare", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(
         String::from_utf8_lossy(vm.captured_output()),
         "1 1 2\n",

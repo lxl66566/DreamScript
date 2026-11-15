@@ -5,12 +5,12 @@
 //! diagnostic — the fence itself for world-touching calls, the evaluator
 //! for the rest.
 
-use ds_check::analyze;
+use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, analyze, effects};
 use ds_diag::{Diagnostic, Files};
 use ds_meta::evaluate;
 use ds_mod::Hash128;
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Vm, loader};
 
 const AMBIENT: &str = concat!(
     "tag int\n",
@@ -33,13 +33,30 @@ fn source(body: &str) -> String {
     format!("{AMBIENT}{body}")
 }
 
+/// The package's solved rows over the checked trees, with the world
+/// externs carrying their declared rows — the same shape the CLI's
+/// compile seam hands the evaluator, so the admission reads the one
+/// row source of truth.
+fn rows_of(asts: &[ds_parse::Ast], analyzed: &ds_check::Analyzed) -> effects::Effects {
+    effects::effects_of_resolved(
+        asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        &analyzed.checked.hole_show_dispatches,
+        &DeclaredRows::new()
+            .with("println", EffectRow::of(Effect::World))
+            .with("read_file", EffectRow::of(Effect::World)),
+        &WorldCaps::new(),
+    )
+}
+
 /// Runs one source through check, evaluation, and the runtime module:
 /// parse -> analyze -> evaluate -> lower-with-answers -> write -> read
 /// -> install -> run, asserting every stage before the run so failures
 /// name their own seam.
-fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let (asts, analyzed, hash) = checked(name, source);
-    let values = evaluate(name, hash, &asts, &analyzed)
+    let values = evaluate(name, hash, &asts, &analyzed, &rows_of(&asts, &analyzed))
         .map_err(|diags| rendered(&diags))
         .expect("the comptime evaluation answers");
     let lowered =
@@ -87,7 +104,7 @@ fn rendered(diags: &[Diagnostic]) -> String {
 /// The evaluation's diagnostics rendered with their codes.
 fn evaluate_refused(name: &str, source: &str) -> String {
     let (asts, analyzed, hash) = checked(name, source);
-    match evaluate(name, hash, &asts, &analyzed) {
+    match evaluate(name, hash, &asts, &analyzed, &rows_of(&asts, &analyzed)) {
         Ok(_) => panic!("the evaluation refuses"),
         Err(diags) => rendered(&diags),
     }
@@ -325,6 +342,21 @@ fn a_list_answer_through_a_wider_return_type_refuses() {
 }
 
 #[test]
+fn a_tuple_answer_embeds_at_the_call() {
+    let out = output_of(&source(concat!(
+        "struct point { x: int, y: int }\n",
+        "fn pair(comptime t: type) -> (int, int) {\n",
+        "  (7, 8)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  var (a, b) = pair(point)\n",
+        "  println(\"${a + b}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "15\n");
+}
+
+#[test]
 fn an_int_literal_argument_stages() {
     let out = output_of(&source(concat!(
         "struct page { title: string }\n",
@@ -376,15 +408,42 @@ fn type_and_scalar_arguments_stage_in_one_call() {
 }
 
 #[test]
-fn a_parenthesized_literal_argument_refuses_at_the_staging() {
+fn a_parenthesized_literal_argument_stages() {
+    let out = output_of(&source(concat!(
+        "fn greet(comptime name: string) -> string {\n",
+        "  \"hello, \" + name\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(greet((\"ds\")))\n",
+        "}\n",
+    )));
+    assert_eq!(out, "hello, ds\n");
+}
+
+#[test]
+fn a_parenthesized_type_name_argument_stages() {
+    let out = output_of(&source(concat!(
+        "struct point { x: int }\n",
+        "fn schema(comptime t: type) -> string {\n",
+        "  type_name(t)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(schema((point)))\n",
+        "}\n",
+    )));
+    assert_eq!(out, "point\n");
+}
+
+#[test]
+fn an_interpolated_literal_argument_refuses_at_the_staging() {
     let rendered = evaluate_refused(
-        "paren_literal",
+        "hole_arg",
         &source(concat!(
             "fn greet(comptime name: string) -> string {\n",
             "  name\n",
             "}\n",
             "fn main() -> () {\n",
-            "  println(greet((\"ds\")))\n",
+            "  println(greet(\"${\"ds\"}\"))\n",
             "}\n",
         )),
     );
@@ -456,11 +515,11 @@ fn the_fence_refuses_a_file_call() {
 }
 
 #[test]
-fn a_runtime_helper_call_refuses_at_the_slice() {
+fn a_trap_row_helper_refuses_at_the_fence() {
     let rendered = evaluate_refused(
         "helper",
         &source(concat!(
-            "struct point { x: int }\n",
+            "struct point { x: int, y: int }\n",
             "fn double(n: int) -> int { n * 2 }\n",
             "fn sized(comptime t: type) -> int {\n",
             "  double(4)\n",
@@ -471,20 +530,215 @@ fn a_runtime_helper_call_refuses_at_the_slice() {
         )),
     );
     assert!(
-        rendered.contains("may call the pure builtins and other comptime functions"),
-        "the slice names its contract: {rendered}"
+        rendered.contains("DS2037") && rendered.contains("`double`") && rendered.contains("`trap`"),
+        "the admission names the impure row: {rendered}"
     );
 }
 
 #[test]
-fn a_non_type_argument_refuses_at_the_staging() {
+fn a_ufcs_trap_row_helper_refuses_at_the_fence() {
     let rendered = evaluate_refused(
-        "bad_arg",
+        "helper_ufcs",
+        &source(concat!(
+            "fn double(n: int) -> int { n * 2 }\n",
+            "fn sized(comptime t: type) -> int {\n",
+            "  4.double()\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${sized(int)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2037") && rendered.contains("`double`") && rendered.contains("`trap`"),
+        "the admission names the ufcs helper's row too: {rendered}"
+    );
+}
+
+#[test]
+fn a_pure_row_helper_admits_and_embeds_its_answer() {
+    let out = output_of(&source(concat!(
+        "struct point { x: int }\n",
+        "fn quoted(s: string) -> string {\n",
+        "  if s == \"\" { \"<>\" } else { s }\n",
+        "}\n",
+        "fn label(comptime t: type) -> string {\n",
+        "  const n = type_name(t)\n",
+        "  quoted(n)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(label(point))\n",
+        "}\n",
+    )));
+    assert_eq!(out, "point\n");
+}
+
+#[test]
+fn a_zero_parameter_pure_helper_admits() {
+    let out = output_of(&source(concat!(
+        "struct point { x: int }\n",
+        "fn blank() -> string { \"\" }\n",
+        "fn frame(comptime t: type) -> string {\n",
+        "  const n = type_name(t)\n",
+        "  n + blank()\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(frame(point))\n",
+        "}\n",
+    )));
+    assert_eq!(out, "point\n");
+}
+
+#[test]
+fn a_world_row_helper_refuses_at_the_fence() {
+    let rendered = evaluate_refused(
+        "helper_world",
         &source(concat!(
             "struct point { x: int }\n",
-            "fn sized(comptime t: type) -> int { 0 }\n",
+            "fn shout(s: string) -> () {\n",
+            "  println(s)\n",
+            "}\n",
+            "fn banner(comptime t: type) -> string {\n",
+            "  const n = type_name(t)\n",
+            "  shout(n)\n",
+            "  n\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(banner(point))\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2037") && rendered.contains("`shout`") && rendered.contains("`world`"),
+        "the admission names the world row's helper: {rendered}"
+    );
+}
+
+#[test]
+fn a_transitively_impure_helper_refuses_naming_the_first_hop() {
+    let rendered = evaluate_refused(
+        "helper_reach",
+        &source(concat!(
+            "struct point { x: int }\n",
+            "fn emit(s: string) -> () {\n",
+            "  println(s)\n",
+            "}\n",
+            "fn announce(s: string) -> string {\n",
+            "  emit(s)\n",
+            "  s\n",
+            "}\n",
+            "fn herald(comptime t: type) -> string {\n",
+            "  const n = type_name(t)\n",
+            "  announce(n)\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(herald(point))\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2037")
+            && rendered.contains("`announce`")
+            && rendered.contains("`world`")
+            && rendered.contains("the row turns impure at `emit`"),
+        "the admission names the callee and drills to the first impure hop: {rendered}"
+    );
+}
+
+#[test]
+fn a_string_concat_helper_refuses_on_the_trap_row() {
+    // the effects pass rows every `+` as trapping without solved operand
+    // types, so even the pure-at-runtime string concat carries `trap`
+    // and refuses at the fence this round
+    let rendered = evaluate_refused(
+        "helper_concat",
+        &source(concat!(
+            "struct point { x: int }\n",
+            "fn indent(s: string) -> string { s + \"  \" }\n",
+            "fn layout(comptime t: type) -> string {\n",
+            "  const n = type_name(t)\n",
+            "  indent(n)\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(layout(point))\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2037") && rendered.contains("`indent`") && rendered.contains("`trap`"),
+        "the over-approximated trap row refuses honestly: {rendered}"
+    );
+}
+
+#[test]
+fn a_member_call_inside_a_pure_helper_refuses_at_the_fence() {
+    let rendered = evaluate_refused(
+        "helper_member",
+        &source(concat!(
+            "struct point { x: int }\n",
+            "struct cell { v: int }\n",
+            "impl cell {\n",
+            "  fn peek(self) -> int { self.v }\n",
+            "}\n",
+            "fn reader(c: cell) -> int {\n",
+            "  c.peek()\n",
+            "}\n",
+            "fn probe(comptime t: type) -> int {\n",
+            "  reader(cell { v: 7 })\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${probe(point)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2037")
+            && rendered.contains("`peek`")
+            && rendered.contains("plans no impl bodies"),
+        "the dispatch residual names the slice's planning boundary: {rendered}"
+    );
+}
+
+#[test]
+fn a_deinit_carrying_helper_refuses_at_the_slice() {
+    let rendered = evaluate_refused(
+        "helper_deinit",
+        &source(concat!(
+            "struct res: ~Copyable {\n",
+            "  id: int\n",
+            "  deinit { println(\"dying\") }\n",
+            "}\n",
+            "fn use_res() -> int {\n",
+            "  const r = res { id: 1 }\n",
+            "  r.id\n",
+            "}\n",
+            "fn probe(comptime t: type) -> int {\n",
+            "  use_res()\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${probe(int)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2034")
+            && rendered.contains("deinit-carrying")
+            && rendered.contains("inside `use_res`"),
+        "the deinit-carrying helper refuses at the fence: {rendered}"
+    );
+}
+
+#[test]
+fn a_name_argument_refuses_at_the_staging() {
+    let rendered = evaluate_refused(
+        "name_arg",
+        &source(concat!(
+            "fn ruler(comptime n: int) -> string {\n",
+            "  \"n\"\n",
+            "}\n",
             "fn other() -> () {\n",
-            "  println(\"${sized((point))}\")\n",
+            "  var width = 4\n",
+            "  println(ruler(width))\n",
             "}\n",
             "fn main() -> () {\n",
             "  println(\"done\")\n",
@@ -492,7 +746,81 @@ fn a_non_type_argument_refuses_at_the_staging() {
         )),
     );
     assert!(
-        rendered.contains("a comptime argument names a declared type"),
+        rendered.contains("a plain literal of its annotation"),
         "the staging names its shape: {rendered}"
     );
+}
+
+#[test]
+fn concurrent_evaluations_keep_their_own_reflection() {
+    // two packages whose answers differ, each driven on its own thread:
+    // the natives read the evaluating thread's own table, so an
+    // interleaved evaluation never swaps another package's reflection
+    let bodies = [
+        concat!(
+            "struct point { x: int, y: int }\n",
+            "fn schema(comptime t: type) -> string {\n",
+            "  var s = \"\"\n",
+            "  for f in fields(t) {\n",
+            "    s += f.name + \"-\" + type_name(f.type)\n",
+            "  }\n",
+            "  s\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(schema(point))\n",
+            "}\n",
+        ),
+        concat!(
+            "enum shape {\n",
+            "  dot\n",
+            "  boxed(int)\n",
+            "}\n",
+            "fn cases(comptime t: type) -> string {\n",
+            "  var s = \"\"\n",
+            "  for c in fields(t) {\n",
+            "    s += c.name + \"/\" + c.tag\n",
+            "  }\n",
+            "  s\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(cases(shape))\n",
+            "}\n",
+        ),
+    ];
+    let answers = ["x-inty-int", "dot/dotboxed/boxed"];
+    let threads: Vec<_> = bodies
+        .iter()
+        .zip(answers)
+        .map(|(body, answer)| {
+            let body = (*body).to_owned();
+            let answer = answer.to_owned();
+            std::thread::spawn(move || {
+                for _ in 0..12 {
+                    let out = output_of(&source(&body));
+                    assert_eq!(out, format!("{answer}\n"));
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("the concurrent evaluations finish");
+    }
+}
+
+/// A tuple answer over a string element embeds word for word: the string
+/// interns into the fenced VM's root heap and re-embeds as the literal a
+/// user would have written.
+#[test]
+fn a_tuple_answer_over_a_string_embeds_at_the_call() {
+    let out = output_of(&source(concat!(
+        "struct page { title: string }\n",
+        "fn label(comptime t: type) -> (string, int) {\n",
+        "  (type_name(t), 1)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  var (s, n) = label(page)\n",
+        "  println(\"${s} ${n}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "page 1\n");
 }

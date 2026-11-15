@@ -6,9 +6,9 @@
 //! not the analyzer's own, and the guard names that misuse; a file
 //! whose items carry no derive lowers as before.
 
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
+use ds_meta::analyze;
 use ds_mod::Hash128;
 use ds_parse::parse;
 
@@ -429,9 +429,9 @@ fn an_unconsumed_attribute_refuses_at_lowering() {
 /// for (a bare name carrying no `default` member, a one-argument head
 /// that is not the empty-construction shape) fails at the synthesized
 /// call with the standard diagnostic (the family precedent), and the
-/// attribute-level classes — a union naming the open ruling, the shapes
-/// spelling no key, a payloaded or empty enum, a generic declaration —
-/// refuse naming the part or the declaration.
+/// attribute-level classes — a union naming its un-annotated
+/// ambiguity, the shapes spelling no key, a payloaded or empty enum, a
+/// generic declaration — refuse naming the part or the declaration.
 #[test]
 fn the_default_family_refuses_its_boundaries() {
     let missing = concat!(
@@ -477,8 +477,8 @@ fn the_default_family_refuses_its_boundaries() {
         "an empty enum has no default value: {one}"
     );
 
-    // a union field: the family refuses naming the open ruling rather
-    // than inventing a member
+    // a union field: the family refuses naming the ambiguity rather
+    // than inventing a member, pointing at the member annotation
     let union_field = concat!(
         "tag int\n",
         "tag string\n",
@@ -490,7 +490,7 @@ fn the_default_family_refuses_its_boundaries() {
         panic!("one union-field refusal: {rendered:?}")
     };
     assert!(
-        one.contains("a union's default member is an open ruling"),
+        one.contains("no union member is canonical; annotate one member with `#[default]`"),
         "a union field names the ambiguity instead of inventing a member: {one}"
     );
 

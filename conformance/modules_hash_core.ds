@@ -2,7 +2,7 @@
 // purpose: ds.pkg manifest as the lock, selective and conditional imports, linear sqlite handle binding
 // items:
 // ds-pkg-manifest: stage: unresolved: ds.pkg is manifest syntax parsed by ds-pkg (M7), never ds-parse [H6]
-// import-std-csv: stage: m7
+// import-std-csv: stage: reject @std exports no name reader
 // import-schema: stage: m7
 // import-fs-conditional: stage: m7
 // sqlite3-open: stage: m7

@@ -17,15 +17,15 @@ const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 /// `log`/`default_config`/`get` externs are the corpus file's own (the
 /// ambient shed its dead declarations).
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag float\n",
-    "tag string\n",
-    "tag io_err\n",
-    "struct list[t]\n",
-    "struct map[k, v]\n",
-    "struct config { host: string, port: int?, retries: int }\n",
-    "fn read_file(path: string) -> string { \"\" }\n",
-    "fn parse_json(text: string) -> string { \"\" }\n",
+    "pub tag int\n",
+    "pub tag float\n",
+    "pub tag string\n",
+    "pub tag io_err\n",
+    "pub struct list[t]\n",
+    "pub struct map[k, v]\n",
+    "pub struct config { host: string, port: int?, retries: int }\n",
+    "pub fn read_file(path: string) -> string { \"\" }\n",
+    "pub fn parse_json(text: string) -> string { \"\" }\n",
 );
 
 struct Fixture {
@@ -124,15 +124,15 @@ fn file_of(fixture: &Fixture, index: usize) -> FileId {
 #[test]
 fn collects_every_declaration_kind() {
     let f = resolve_one(concat!(
-        "tag unit_one\n",
-        "struct rec { a: unit_one }\n",
-        "enum choice { yes, no }\n",
-        "type alias_one = unit_one\n",
-        "trait pretty { fn show(self) -> unit_one }\n",
-        "fn plain(x: unit_one) -> unit_one { x }\n",
-        "extern fn foreign(x: unit_one) -> unit_one\n",
-        "const binding = 1\n",
-        "var mutable_binding = 2\n",
+        "pub tag unit_one\n",
+        "pub struct rec { a: unit_one }\n",
+        "pub enum choice { yes, no }\n",
+        "pub type alias_one = unit_one\n",
+        "pub trait pretty { fn show(self) -> unit_one }\n",
+        "pub fn plain(x: unit_one) -> unit_one { x }\n",
+        "pub extern fn foreign(x: unit_one) -> unit_one\n",
+        "pub const binding = 1\n",
+        "pub var mutable_binding = 2\n",
         "impl rec { fn helper(self) -> unit_one { self.a } }\n",
     ));
     for (name, kind) in [
@@ -209,17 +209,17 @@ fn duplicate_definitions_name_both_spans() {
 #[test]
 fn locals_shadow_and_nest() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "const one = ()\n",
-        "fn outer(x: t) -> t {\n",
+        "pub tag t\n",
+        "pub const one = ()\n",
+        "pub fn outer(x: t) -> t {\n",
         "  const y = x\n",
         "  {\n",
         "    const x = y\n",
         "    x\n",
         "  }\n",
         "}\n",
-        "fn rec(n: t) -> t { rec(n) }\n",
-        "fn shadow(one: t) -> t { one }\n",
+        "pub fn rec(n: t) -> t { rec(n) }\n",
+        "pub fn shadow(one: t) -> t { one }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -256,9 +256,9 @@ fn same_scope_redefinition_is_an_error() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag t\n",
-            "fn dup_params(x: t, x: t) -> t { x }\n",
-            "fn dup_locals() -> t {\n",
+            "pub tag t\n",
+            "pub fn dup_params(x: t, x: t) -> t { x }\n",
+            "pub fn dup_locals() -> t {\n",
             "  const a = t\n",
             "  const a = a\n",
             "  a\n",
@@ -279,10 +279,10 @@ fn same_scope_redefinition_is_an_error() {
 #[test]
 fn ufcs_free_functions_win() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "trait len_t { fn len(self) -> t }\n",
-        "fn len(xs: t) -> t { xs }\n",
-        "fn caller(xs: t) -> t { xs.len() }\n",
+        "pub tag t\n",
+        "pub trait len_t { fn len(self) -> t }\n",
+        "pub fn len(xs: t) -> t { xs }\n",
+        "pub fn caller(xs: t) -> t { xs.len() }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -302,11 +302,11 @@ fn ufcs_free_functions_win() {
 #[test]
 fn ufcs_method_tier_registers_candidates() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "trait ord { fn cmp(self, other: Self) -> t }\n",
-        "trait show { fn cmp(self) -> t }\n",
+        "pub tag t\n",
+        "pub trait ord { fn cmp(self, other: Self) -> t }\n",
+        "pub trait show { fn cmp(self) -> t }\n",
         "impl ord for t { fn cmp(self, other: Self) -> t { t } }\n",
-        "fn caller(x: t) -> t { x.cmp(x) }\n",
+        "pub fn caller(x: t) -> t { x.cmp(x) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -334,9 +334,9 @@ fn ufcs_unresolved_lists_tiers_in_order() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag t\n",
-            "fn len(xs: t) -> t { xs }\n",
-            "fn caller(xs: t) -> t { xs.lenn() }\n",
+            "pub tag t\n",
+            "pub fn len(xs: t) -> t { xs }\n",
+            "pub fn caller(xs: t) -> t { xs.lenn() }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -363,12 +363,12 @@ fn ufcs_unresolved_lists_tiers_in_order() {
 #[test]
 fn trait_path_qualification_resolves_directly() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "trait ord { fn cmp(self, other: Self) -> t }\n",
-        "trait empty { }\n",
-        "fn caller(x: t) -> t { ord::cmp(x, x) }\n",
-        "fn not_trait(x: t) -> t { t::cmp(x, x) }\n",
-        "fn no_member(x: t) -> t { empty::cmp(x, x) }\n",
+        "pub tag t\n",
+        "pub trait ord { fn cmp(self, other: Self) -> t }\n",
+        "pub trait empty { }\n",
+        "pub fn caller(x: t) -> t { ord::cmp(x, x) }\n",
+        "pub fn not_trait(x: t) -> t { t::cmp(x, x) }\n",
+        "pub fn no_member(x: t) -> t { empty::cmp(x, x) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     let file = file_of(&f, 0);
@@ -404,10 +404,11 @@ fn trait_path_qualification_resolves_directly() {
 #[test]
 fn two_file_mutual_references_resolve() {
     // Intra-package cycles are legal [G3]: resolution is name lookup over
-    // the complete tables, not dependency ordering.
+    // the complete tables, not dependency ordering. The cross-file names
+    // are `pub` — a private name is its defining file's alone [G4].
     let f = fixture(&[
-        ("a.ds", "tag t\nfn even(n: t) -> t { odd(n) }\n"),
-        ("b.ds", "fn odd(n: t) -> t { even(n) }\n"),
+        ("a.ds", "pub tag t\npub fn even(n: t) -> t { odd(n) }\n"),
+        ("b.ds", "pub fn odd(n: t) -> t { even(n) }\n"),
     ]);
     assert_eq!(f.collect, Vec::new());
     for index in 0..2 {
@@ -429,11 +430,11 @@ fn unknown_names_suggest_nearest() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag t\n",
-            "tag string\n",
-            "fn read_file(p: string) -> string { p }\n",
-            "fn typo() -> t { red_file() }\n",
-            "fn typo_type(x: strng) -> t { t }\n",
+            "pub tag t\n",
+            "pub tag string\n",
+            "pub fn read_file(p: string) -> string { p }\n",
+            "pub fn typo() -> t { red_file() }\n",
+            "pub fn typo_type(x: strng) -> t { t }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -465,9 +466,9 @@ fn unknown_names_suggest_nearest() {
 #[test]
 fn handler_forms_resolve_without_names() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "fn h(e: t) -> t { e.err((x: t) -> t { x }) }\n",
-        "fn k(e: t) -> t { e.ok((x: t) -> t { x }) }\n",
+        "pub tag t\n",
+        "pub fn h(e: t) -> t { e.err((x: t) -> t { x }) }\n",
+        "pub fn k(e: t) -> t { e.ok((x: t) -> t { x }) }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -486,10 +487,10 @@ fn handler_forms_resolve_without_names() {
 #[test]
 fn bare_field_access_and_punning() {
     let f = resolve_one(concat!(
-        "tag t\n",
-        "struct rec { got: t }\n",
-        "fn bare(p: rec) -> t { p.got }\n",
-        "fn punned(got: t) -> rec { rec { got } }\n",
+        "pub tag t\n",
+        "pub struct rec { got: t }\n",
+        "pub fn bare(p: rec) -> t { p.got }\n",
+        "pub fn punned(got: t) -> rec { rec { got } }\n",
     ));
     let (uses, diags) = f.resolve(0);
     assert!(diags.is_empty(), "{diags:?}");
@@ -515,9 +516,9 @@ fn patterns_bind_scopes_and_flag_duplicates() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag t\n",
-            "tag stop\n",
-            "fn m(x: t) -> t {\n",
+            "pub tag t\n",
+            "pub tag stop\n",
+            "pub fn m(x: t) -> t {\n",
             "  match x {\n",
             "    a | a => a,\n",
             "    b => {\n",
@@ -546,10 +547,10 @@ fn type_variables_scope_to_their_generics() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag u\n",
-            "fn id[t](x: t) -> t { x }\n",
-            "fn dup_tparams[t, t](x: t) -> t { x }\n",
-            "fn outside(y: t) -> u { u }\n",
+            "pub tag u\n",
+            "pub fn id[t](x: t) -> t { x }\n",
+            "pub fn dup_tparams[t, t](x: t) -> t { x }\n",
+            "pub fn outside(y: t) -> u { u }\n",
         ),
     )]);
     assert_eq!(f.collect, Vec::new());
@@ -648,12 +649,12 @@ fn conformance_types_hybrid_resolves_fully() {
 #[test]
 fn same_named_struct_and_function_coexist() {
     let f = resolve_one(concat!(
-        "tag int\n",
-        "struct page { body: int }\n",
-        "fn page(other: page) -> int { other.body }\n",
-        "fn brace(n: int) -> page { page { body: n } }\n",
-        "fn ufcs(n: int) -> int { n.page() }\n",
-        "const bare = page\n",
+        "pub tag int\n",
+        "pub struct page { body: int }\n",
+        "pub fn page(other: page) -> int { other.body }\n",
+        "pub fn brace(n: int) -> page { page { body: n } }\n",
+        "pub fn ufcs(n: int) -> int { n.page() }\n",
+        "pub const bare = page\n",
     ));
     let src = f.source(0);
     let file = file_of(&f, 0);
@@ -685,11 +686,11 @@ fn same_named_struct_and_function_coexist() {
 #[test]
 fn call_form_collision_is_an_ambiguity_error() {
     let f = resolve_one(concat!(
-        "tag int\n",
-        "tag page\n",
-        "fn page(n: int) -> int { n }\n",
-        "const bare = page\n",
-        "fn caller(n: int) -> int { page(n) }\n",
+        "pub tag int\n",
+        "pub tag page\n",
+        "pub fn page(n: int) -> int { n }\n",
+        "pub const bare = page\n",
+        "pub fn caller(n: int) -> int { page(n) }\n",
     ));
     let src = f.source(0);
     let file = file_of(&f, 0);
@@ -721,11 +722,11 @@ fn call_form_collision_is_an_ambiguity_error() {
 #[test]
 fn constructor_positions_resolve_against_types() {
     let f = resolve_one(concat!(
-        "tag int\n",
-        "struct page { body: int }\n",
-        "struct list[t]\n",
-        "fn make() -> list[page] { list[page]() }\n",
-        "fn pat(p: page | int) -> int { match p { page { body } => body, n => n } }\n",
+        "pub tag int\n",
+        "pub struct page { body: int }\n",
+        "pub struct list[t]\n",
+        "pub fn make() -> list[page] { list[page]() }\n",
+        "pub fn pat(p: page | int) -> int { match p { page { body } => body, n => n } }\n",
     ));
     let src = f.source(0);
     let file = file_of(&f, 0);
@@ -756,7 +757,7 @@ fn duplicate_inherent_methods_report_both_spans() {
     let f = fixture(&[(
         "t.ds",
         concat!(
-            "tag unit_one\n",
+            "pub tag unit_one\n",
             "impl unit_one { fn m(self) -> unit_one { self } }\n",
             "impl unit_one { fn m(self) -> unit_one { self } }\n",
         ),
@@ -771,9 +772,9 @@ fn duplicate_inherent_methods_report_both_spans() {
     );
 
     let shared = resolve_one(concat!(
-        "tag unit_one\n",
-        "trait a { fn m(self) -> unit_one }\n",
-        "trait b { fn m(self) -> unit_one }\n",
+        "pub tag unit_one\n",
+        "pub trait a { fn m(self) -> unit_one }\n",
+        "pub trait b { fn m(self) -> unit_one }\n",
     ));
     assert!(shared.collect.is_empty(), "{:?}", shared.collect);
     assert_eq!(
@@ -791,9 +792,9 @@ fn inherent_methods_key_by_owner_type() {
     // the owner travels as its name — so an impl may sit in a file added
     // before the target type's own file [G3].
     let f = resolve_one(concat!(
-        "tag unit_one\n",
-        "struct a { v: unit_one }\n",
-        "struct b { v: unit_one }\n",
+        "pub tag unit_one\n",
+        "pub struct a { v: unit_one }\n",
+        "pub struct b { v: unit_one }\n",
         "impl a { fn m(self) -> unit_one { self.v } }\n",
         "impl b { fn m(self) -> unit_one { self.v } }\n",
     ));
@@ -828,9 +829,9 @@ fn enclosing_finds_the_covering_use() {
         (
             "a.ds",
             concat!(
-                "tag t\n",
-                "fn f(x: t) -> t { x }\n",
-                "fn caller(x: t) -> t { f(x) }\n",
+                "pub tag t\n",
+                "pub fn f(x: t) -> t { x }\n",
+                "pub fn caller(x: t) -> t { f(x) }\n",
             ),
         ),
         ("b.ds", "fn other(y: t) -> t { y }\n"),
@@ -889,13 +890,13 @@ fn enclosing_finds_the_covering_use() {
 #[test]
 fn use_index_keys_on_target_identity_not_name() {
     let f = resolve_one(concat!(
-        "const x = 1\n",
-        "fn first(x: int) -> int { x }\n",
-        "fn second() -> int {\n",
+        "pub const x = 1\n",
+        "pub fn first(x: int) -> int { x }\n",
+        "pub fn second() -> int {\n",
         "  const x = 2\n",
         "  x\n",
         "}\n",
-        "fn third() -> int { x }\n",
+        "pub fn third() -> int { x }\n",
     ));
     let (uses, _) = f.resolve(0);
     let index = UseIndex::build(&[uses]);
@@ -943,11 +944,11 @@ fn use_index_spans_files_and_the_first_file_s_uses() {
 #[test]
 fn use_index_covers_method_and_dot_uses() {
     let f = resolve_one(concat!(
-        "trait pretty { fn show(self) -> int { 1 } }\n",
-        "fn free(n: int) -> int { n }\n",
-        "const one = free(1)\n",
-        "const two = 1.free()\n",
-        "const three = pretty::show(2)\n",
+        "pub trait pretty { fn show(self) -> int { 1 } }\n",
+        "pub fn free(n: int) -> int { n }\n",
+        "pub const one = free(1)\n",
+        "pub const two = 1.free()\n",
+        "pub const three = pretty::show(2)\n",
     ));
     let (uses, _) = f.resolve(0);
     let index = UseIndex::build(&[uses]);

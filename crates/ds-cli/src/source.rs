@@ -1,7 +1,7 @@
 //! The source pipeline behind `ds run <file.ds>` and `ds build`: one .ds
 //! file through parse, the static story ([`ds_check::analyze`], the stdlib
-//! ambient registered first), the platform check ([`ds_check::check_platform`]),
-//! and lowering ([`ds_lower::lower`]) to a
+//! ambient registered first) with its affine walk gate, the platform check
+//! ([`ds_check::check_platform`]), and lowering ([`ds_lower::lower`]) to a
 //! ds-mod module — stopping where each subcommand needs it. The module
 //! carries the source's blake3 hash, so [`ds_mod::read_checked`] verifies
 //! what this pipeline records.
@@ -12,12 +12,19 @@
 //! natives, early exits, interpolation, and tail positions. Constructs
 //! outside it fail with a structured diagnostic naming the construct and
 //! the seam it needs.
+//!
+//! Package mode runs the same pipeline with the caller's framing: a
+//! resolved package's member (or a package-shaped root) names its module
+//! directly, and the resolved graph's dep identities ride in, so the
+//! dep-list writer records real content for the names the source text
+//! alone cannot determine.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use ds_check::{Analyzed, Ty};
 use ds_diag::{Diagnostic, ErrorCode, Files, render};
+use ds_dsi::ServedPrefix;
 use ds_lower::{ComptimeValues, LowerError, Lowered, lower_with_comptime, lower_with_served};
 use ds_mod::{EntryArg, EntryPlan, Hash128};
 use ds_parse::{ItemKind, Pattern, parse, parse_script};
@@ -53,21 +60,129 @@ pub struct CompiledSource {
 ///
 /// File reads, syntax and checker diagnostics, and lowering failures
 /// (each named and located).
-pub fn compile(path: &Path, entry: &str, no_ambient: bool) -> Result<CompiledSource> {
+pub fn compile(
+    path: &Path,
+    entry: &str,
+    no_ambient: bool,
+    prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+) -> Result<CompiledSource> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    compile_text(path, &source, entry, no_ambient, true)
+    let inputs = Inputs {
+        name: script_module_name(path)?,
+        display: path.display().to_string(),
+        main_required: true,
+        dep_content: &NO_DEPS,
+    };
+    compile_text(&inputs, &source, entry, no_ambient, true, prefix_cache)
+}
+
+/// The dep identities a plain script supplies: none — every name but the
+/// ambient records the zero marker, the link the load walk's validation
+/// refuses until package resolution supplies the content.
+static NO_DEPS: BTreeMap<String, Hash128> = BTreeMap::new();
+
+/// One compile's framing: the module name and the path diagnostics render
+/// (a script's file stem and path, a package module's link name and
+/// member path), the dep identities package resolution supplies for the
+/// writer, and whether the run contract's `main` entry is required (a
+/// script or package root requires one; a package member serves its
+/// members and waives the check).
+struct Inputs<'a> {
+    name: String,
+    display: String,
+    main_required: bool,
+    dep_content: &'a BTreeMap<String, Hash128>,
+}
+
+/// Compiles one package-shaped root over source text. `name` is the
+/// module's name (the script rule, its file stem), `display` the path
+/// diagnostics render, and `dep_content` the resolved graph's
+/// identities, which the writer records for names the source text alone
+/// cannot determine. The run contract's `main` entry is required, the
+/// script rule.
+///
+/// # Errors
+///
+/// A reserved or empty module name, and every pipeline failure
+/// [`compile`] reports.
+pub fn compile_package(
+    name: &str,
+    display: &str,
+    source: &str,
+    entry: &str,
+    no_ambient: bool,
+    dep_content: &BTreeMap<String, Hash128>,
+) -> Result<CompiledSource> {
+    compile_framed(name, display, source, entry, no_ambient, true, dep_content)
+}
+
+/// Compiles one resolved package's single source member: the module
+/// serves under the package's link name, its own recorded imports
+/// validate against the same graph through the caller's `dep_content`,
+/// and the run contract's `main` entry check is waived — an installed
+/// member serves its members and never runs as an entry.
+///
+/// # Errors
+///
+/// A reserved or empty module name, and every pipeline failure
+/// [`compile`] reports.
+pub fn compile_member(
+    name: &str,
+    display: &str,
+    source: &str,
+    no_ambient: bool,
+    dep_content: &BTreeMap<String, Hash128>,
+) -> Result<CompiledSource> {
+    compile_framed(
+        name,
+        display,
+        source,
+        "main",
+        no_ambient,
+        false,
+        dep_content,
+    )
+}
+
+/// The shared framing behind the two package shapes.
+fn compile_framed(
+    name: &str,
+    display: &str,
+    source: &str,
+    entry: &str,
+    no_ambient: bool,
+    main_required: bool,
+    dep_content: &BTreeMap<String, Hash128>,
+) -> Result<CompiledSource> {
+    if name.is_empty() {
+        return Err(anyhow!("the package module has no name"));
+    }
+    if RESERVED_MODULES.contains(&name) {
+        return Err(anyhow!(
+            "`{name}` is a reserved native module name (`builtin`, `std`); the package cannot \
+             serve under it"
+        ));
+    }
+    let inputs = Inputs {
+        name: name.to_owned(),
+        display: display.to_owned(),
+        main_required,
+        dep_content,
+    };
+    compile_text(&inputs, source, entry, no_ambient, true, None)
 }
 
 /// The compile pipeline over source text (`compile` after its read):
 /// `allow_serve` switches the ambient dsmod splice off, the fresh
 /// lowering baseline the artifact gates compare against.
 fn compile_text(
-    path: &Path,
+    inputs: &Inputs<'_>,
     source: &str,
     entry: &str,
     no_ambient: bool,
     allow_serve: bool,
+    prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
 ) -> Result<CompiledSource> {
     let mut files = Files::new();
     // The trees move into the analyzer, one pre-expansion mark per tree:
@@ -75,50 +190,81 @@ fn compile_text(
     // other tree expands at run time.
     let mut asts = Vec::new();
     let mut preexpanded = Vec::new();
-    // The checked-ambient artifact's serve, when it verifies against this
-    // registration (source hash plus file id): the ambient's resolve half
-    // and declaration prefix arrive pre-built, so the analyze collects,
-    // resolves, and declares only the user file. Every miss falls back to
-    // the fresh compute — the artifact is a pure cache.
-    let mut served = None;
+    // The registration the prefix pins: the ambient first, the entry
+    // file after it.
+    let mut ids = Vec::new();
     if !no_ambient {
         let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let (ast, expanded) = ambient_tree(&files, id);
         asts.push(ast);
         preexpanded.push(expanded);
-        served = ds_stdlib::ambient_dsi(id).ok();
+        ids.push(id);
     }
     // The given file is the entry: script mode folds its top-level
     // statements into a synthesized `main` (the ambient stays
     // pure-declaration, like every imported file).
-    let id = files.add_source(path.to_string_lossy().into_owned(), source);
+    let id = files.add_source(inputs.display.clone(), source);
     asts.push(match parse_script(&files, id) {
         Ok(ast) => ast,
         Err(diags) => return Err(reject(&files, &diags, "the source has syntax errors")),
     });
     preexpanded.push(false);
-    // The ambient's solved effect rows ride beside the served analyze:
-    // the effects pass seeds them and walks only the user tree.
+    ids.push(id);
+    let name = inputs.name.clone();
+    // Two serve tiers, each a pure cache with the fresh compute as the
+    // canonical fallback: the user cache's composed prefix first — the
+    // whole program's front-end half (the ambient member plus this
+    // member), one artifact per source under `$DS_CACHE` — then the
+    // ambient's own checked-in artifact — the ambient's half alone, the
+    // user file collecting, resolving, and declaring fresh. Every miss
+    // falls back to the tier below and finally to the fully fresh
+    // analyze.
+    let mut served = None;
     let mut served_rows = None;
+    if let Some(cache) = prefix_cache {
+        served = cache.lookup(&name, source, &ids);
+    }
+    if served.is_none() && !no_ambient {
+        served = ds_stdlib::ambient_dsi(ids[0]).ok();
+    }
     let analyzed = match served {
-        Some(served) => {
-            let ds_stdlib::ServedAmbient {
+        Some(prefix) => {
+            let ServedPrefix {
                 package,
                 resolutions,
                 decls,
                 effect_defs,
                 effect_methods,
-            } = served;
-            served_rows = Some((effect_defs, effect_methods));
-            ds_check::analyze_served(&files, asts, &preexpanded, package, resolutions, decls)
+            } = prefix;
+            served_rows = Some((resolutions.len(), effect_defs, effect_methods));
+            ds_meta::analyze_served(&files, asts, &preexpanded, package, resolutions, decls)
         },
-        None => ds_check::analyze_owned(&files, asts, &preexpanded),
+        None => ds_meta::analyze_owned(&files, asts, &preexpanded),
     };
     if !analyzed.checked.diags.is_empty() {
         return Err(reject(
             &files,
             &analyzed.checked.diags,
             "the source does not check clean",
+        ));
+    }
+    // The affine walk (C1, C5): the same pass `ds check` and `ds repl`
+    // consult before committing, refusing here before anything lowers
+    // or runs. Lowering derives its move and deinit placement from this
+    // walk's facts, which hold only over a clean one — a moved-then-used
+    // value would lower code whose deinit fires twice.
+    let linear = ds_check::linearity_check(
+        &analyzed.asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        &analyzed.decls,
+        &analyzed.checked,
+    );
+    if !linear.diags.is_empty() {
+        return Err(reject(
+            &files,
+            &linear.diags,
+            "the source fails the linearity check",
         ));
     }
     // Every later pass walks the analyzer's own trees: derive attributes
@@ -141,19 +287,23 @@ fn compile_text(
     // ambient's solved rows and walks only the user tree (the ambient's
     // subgraph cannot reach a user definition, so the answers agree).
     let effects = match served_rows {
-        Some((effect_defs, effect_methods)) => ds_check::effects::effects_of_resolved_served(
-            &asts[1..],
-            &analyzed.package,
-            &analyzed.resolutions[1..],
-            &effect_defs,
-            &effect_methods,
-            rows,
-            caps,
-        ),
+        Some((served_files, effect_defs, effect_methods)) => {
+            ds_check::effects::effects_of_resolved_served(
+                &asts[served_files..],
+                &analyzed.package,
+                &analyzed.resolutions[served_files..],
+                &analyzed.checked.hole_show_dispatches,
+                &effect_defs,
+                &effect_methods,
+                rows,
+                caps,
+            )
+        },
         None => ds_check::effects::effects_of_resolved(
             asts,
             &analyzed.package,
             &analyzed.resolutions,
+            &analyzed.checked.hole_show_dispatches,
             rows,
             caps,
         ),
@@ -166,30 +316,60 @@ fn compile_text(
             "the source fails the platform check",
         ));
     }
-    let name = module_name(path)?;
+    // The pooled-body refusal [E3]: a fork-join combinator's element
+    // body refuses the members a pooled drive cannot serve — the
+    // sibling-addressing fiber control natives and the world surface —
+    // unconditionally, so legality never depends on the host's pool
+    // opt-in.
+    let pooled = ds_check::check_pooled_bodies(&analyzed, rows);
+    if !pooled.is_empty() {
+        return Err(reject(
+            &files,
+            &pooled,
+            "the source fails the pooled-body check",
+        ));
+    }
+    let name = inputs.name.clone();
     let source_hash = Hash128::compute(source.as_bytes());
     // The comptime evaluator (G1): comptime calls run on the fenced VM
     // here, their answers embedding at the call sites below — a package
     // with no comptime call evaluates nothing.
-    let comptime = ds_meta::evaluate(&name, source_hash, asts, &analyzed)
+    let comptime = ds_meta::evaluate(&name, source_hash, asts, &analyzed, &effects)
         .map_err(|diags| reject(&files, &diags, "the source fails the comptime fence"))?;
     // The ambient's impl bodies splice in from the checked-in dsmod when
     // it verifies against this build; every miss (identity, format,
     // name, source hash, splice boundary, plan disagreement) falls back
     // to lowering them here, whose answer is the canonical one.
     let served = if !no_ambient && allow_serve { crate::ambient_dsmod::serve() } else { None };
-    let lowered = lower_via_serve(&name, source_hash, asts, &analyzed, served, &comptime)
-        .map_err(|error| lower_error(&files, &error))?;
+    let lowered = lower_via_serve(
+        inputs.main_required,
+        &name,
+        source_hash,
+        asts,
+        &analyzed,
+        served,
+        &comptime,
+    )
+    .map_err(|error| lower_error(&files, &error))?;
     // every top-level lambda is a candidate `--entry` name, so the whole
     // table rides the artifact and any of them serves a warm run; this
-    // run's entry takes its own slice
+    // run's entry takes its own slice. The dep list rides the header the
+    // same way: the artifact names the source's imports, so a load walk
+    // over it resolves its deps without re-deriving them from source.
     let entries = entry_plans(asts, &analyzed);
     let entry_args = entries
         .iter()
         .find(|plan| plan.name == entry)
         .map(|plan| plan.args.clone());
+    let deps = dep_list(&asts[usize::from(!no_ambient)..], inputs.dep_content);
+    // A clean, fully lowered compile persists its own prefix for the
+    // next run of the same source; every failure inside is silent (the
+    // compile already succeeded, the next run falls back).
+    if let Some(cache) = prefix_cache {
+        cache.store(&name, source, &ids, &analyzed, &effects, rows, caps);
+    }
     Ok(CompiledSource {
-        lowered: lowered.with_entry_plans(entries),
+        lowered: lowered.with_deps(deps).with_entry_plans(entries),
         name,
         entry_args,
     })
@@ -213,6 +393,7 @@ fn ambient_tree(files: &Files, id: ds_diag::FileId) -> (ds_parse::Ast, bool) {
 /// serve is a pure cache, never correctness-load-bearing. Both paths
 /// embed the comptime evaluator's answers at the call sites.
 fn lower_via_serve(
+    main_required: bool,
     name: &str,
     source_hash: Hash128,
     asts: &[ds_parse::Ast],
@@ -220,12 +401,23 @@ fn lower_via_serve(
     served: Option<Vec<ds_mod::Function>>,
     comptime: &ComptimeValues,
 ) -> Result<Lowered, LowerError> {
+    if main_required {
+        if let Some(served) = served
+            && let Ok(lowered) =
+                lower_with_served(name, source_hash, asts, analyzed, served, comptime)
+        {
+            return Ok(lowered);
+        }
+        return lower_with_comptime(name, source_hash, asts, analyzed, comptime);
+    }
+    // the member shape: the library lowering, the same served splice
     if let Some(served) = served
-        && let Ok(lowered) = lower_with_served(name, source_hash, asts, analyzed, served, comptime)
+        && let Ok(lowered) =
+            ds_lower::lower_library(name, source_hash, asts, analyzed, Some(served), comptime)
     {
         return Ok(lowered);
     }
-    lower_with_comptime(name, source_hash, asts, analyzed, comptime)
+    ds_lower::lower_library(name, source_hash, asts, analyzed, None, comptime)
 }
 
 /// Renders every diagnostic to stderr and summarizes the report as one
@@ -251,9 +443,9 @@ fn lower_error(files: &Files, error: &LowerError) -> anyhow::Error {
     }
 }
 
-/// The module name: the file's stem. `builtin` and `std` are reserved
-/// for the native modules.
-fn module_name(path: &Path) -> Result<String> {
+/// The script rule's module name: the file's stem. `builtin` and `std`
+/// are reserved for the native modules.
+pub(crate) fn script_module_name(path: &Path) -> Result<String> {
     let name = path
         .file_stem()
         .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
@@ -343,11 +535,80 @@ fn arg_plans(analyzed: &Analyzed, params: &[Ty]) -> Vec<EntryArg> {
         .collect()
 }
 
+/// The module's dep list, recorded from the source's import declarations
+/// into the header's link table (G3.5): one entry per linked name in
+/// declaration order — the plain list the load walk consumes, so a built
+/// artifact names its deps and a walk over it never re-derives them from
+/// source.
+///
+/// An `@`-sigil path links its package stem with the sigil kept
+/// (`@std/csv` links `@std`): the sigil space is the registry's package
+/// space, a package is one module this round (G3.5's single-member
+/// ruling), and the member path stays a within-package selector the load
+/// link does not carry. A bare path links the path as written. Aliases
+/// and selective lists are spellings inside the source; a conditional
+/// import records unconditionally (the artifact may run under the
+/// condition's target). The content hash is the linked module's source
+/// hash: the ambient member's for `@std` — the checked-in @std dsmod
+/// serves under exactly that identity — the caller-supplied identity for
+/// a name package resolution pinned, and the zero marker for every name
+/// whose content nothing supplies; a zero link names a dep at no pinned
+/// content, which the load walk's validation refuses.
+fn dep_list(asts: &[ds_parse::Ast], dep_content: &BTreeMap<String, Hash128>) -> Vec<ds_mod::Dep> {
+    let mut deps: Vec<ds_mod::Dep> = Vec::new();
+    for ast in asts {
+        for block in &ast.blocks {
+            for item in &block.items {
+                let ItemKind::Import(import) = &item.kind else {
+                    continue;
+                };
+                let mut name = String::new();
+                if import.path.at_sign {
+                    // the package stem carries the sigil; later segments
+                    // are member selectors, not link names
+                    name.push('@');
+                    name.push_str(&import.path.segments[0].name);
+                } else {
+                    for (at, segment) in import.path.segments.iter().enumerate() {
+                        if at > 0 {
+                            name.push('/');
+                        }
+                        name.push_str(&segment.name);
+                    }
+                }
+                if deps.iter().any(|dep| dep.name == name) {
+                    continue;
+                }
+                let content_hash = if name == "@std" {
+                    Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())
+                } else {
+                    dep_content.get(&name).copied().unwrap_or(Hash128::ZERO)
+                };
+                deps.push(ds_mod::Dep { name, content_hash });
+            }
+        }
+    }
+    deps
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::collections::BTreeMap;
 
-    use super::compile_text;
+    use ds_vm::abi::{ConstIdx, FrameLayout, SlotType, SlotType::I64, uop::Uop};
+
+    use super::{Inputs, NO_DEPS, compile_package, compile_text};
+
+    /// One script's compile framing: the module name and display path the
+    /// script rule derives.
+    fn script_inputs(name: &str) -> Inputs<'static> {
+        Inputs {
+            name: name.to_owned(),
+            display: format!("{name}.ds"),
+            main_required: true,
+            dep_content: &NO_DEPS,
+        }
+    }
 
     /// The user program the served-vs-fresh gate runs: every seam where
     /// the ambient's bodies participate — the derive families
@@ -370,8 +631,15 @@ mod tests {
     /// output of `main` on a fresh VM (the ambient's world natives need
     /// the std platform installed first, the run path's own order).
     fn compile_and_run(allow_serve: bool) -> (Vec<u8>, Vec<u8>) {
-        let compiled = compile_text(Path::new("gate.ds"), GATE, "main", false, allow_serve)
-            .expect("the gate program compiles");
+        let compiled = compile_text(
+            &script_inputs("gate"),
+            GATE,
+            "main",
+            false,
+            allow_serve,
+            None,
+        )
+        .expect("the gate program compiles");
         let bytes = ds_mod::write(compiled.lowered.module());
         let mut registry = ds_vm::ModuleRegistry::new();
         registry.install_platform(ds_vm::Platform::std());
@@ -403,7 +671,7 @@ mod tests {
     #[test]
     fn the_serve_installs_the_artifacts_bodies() {
         let served = crate::ambient_dsmod::serve().expect("the artifact serves");
-        let compiled = compile_text(Path::new("gate.ds"), GATE, "main", false, true)
+        let compiled = compile_text(&script_inputs("gate"), GATE, "main", false, true, None)
             .expect("the gate program compiles");
         let functions = compiled.lowered.functions();
         assert!(
@@ -434,6 +702,7 @@ mod tests {
         let mut served = crate::ambient_dsmod::serve().expect("the artifact serves");
         served.swap(0, 1);
         let spliced = super::lower_via_serve(
+            true,
             "simple",
             ds_mod::Hash128::compute(SIMPLE.as_bytes()),
             &analyzed.asts,
@@ -454,5 +723,224 @@ mod tests {
             ds_mod::write(fresh.module()),
             "the fallback answers the fresh module"
         );
+    }
+
+    // ---- the dep-list writer (G3.5's link table) ----
+
+    /// The ambient member's source hash: the @std module's content
+    /// identity the writer records and the checked-in artifact carries.
+    fn std_hash() -> ds_mod::Hash128 {
+        ds_mod::Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())
+    }
+
+    /// The @std module the walk serves: the checked-in artifact's dsmod
+    /// payload (past its 16-byte build-identity header), carrying the
+    /// linked name and the ambient source hash.
+    fn std_artifact() -> ds_mod::Module {
+        ds_mod::read(&ds_stdlib::AMBIENT_DSMOD[16..]).expect("the embedded @std artifact reads")
+    }
+
+    fn layout(slots: &[SlotType], params: usize, args: usize) -> FrameLayout {
+        FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout")
+    }
+
+    /// A one-function module whose `main` returns a constant: bodies are
+    /// irrelevant to walk order, so the hand-built root is this shape
+    /// (the load-walk tests' own leaf).
+    fn leaf(name: &str, source: &[u8], answer: i64) -> ds_mod::Module {
+        let main = ds_mod::Function::new(
+            "main",
+            layout(&[I64], 0, 0),
+            vec![ds_mod::Constant::I64(answer)],
+            vec![
+                Uop::Funcf { frame_slots: 1 },
+                Uop::Kimm {
+                    dst: 0,
+                    kidx: ConstIdx(0),
+                },
+                Uop::Ret { src: 0 },
+            ],
+        )
+        .expect("valid function");
+        ds_mod::Module::new(
+            name,
+            ds_mod::TargetClass::Bytecode,
+            ds_mod::Hash128::compute(source),
+        )
+        .with_function(main)
+    }
+
+    /// A fresh VM with the default std platform, the run path's own order.
+    fn fresh_vm() -> ds_vm::Vm {
+        let mut registry = ds_vm::ModuleRegistry::new();
+        registry.install_platform(ds_vm::Platform::std());
+        ds_vm::Vm::new(registry)
+    }
+
+    /// A source importing two @std members builds one dep entry — the
+    /// sigil package stem, single-member packages this round — at the
+    /// ambient's content hash; write -> read keeps the list, and a walk
+    /// over the built artifact installs @std first and the module last,
+    /// the same ids a hand-built root carrying the same dep assigns.
+    #[test]
+    fn a_built_module_s_recorded_dep_list_round_trips_the_walk() {
+        const APP: &str = "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n7\n}\n";
+        let compiled =
+            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+        let recorded = compiled.lowered.module().deps().to_vec();
+        assert_eq!(
+            recorded,
+            vec![ds_mod::Dep {
+                name: "@std".to_owned(),
+                content_hash: std_hash(),
+            }],
+            "both @std member imports link the package stem once"
+        );
+
+        // write -> read: the recorded list is the artifact's own fact
+        let bytes = ds_mod::write(compiled.lowered.module());
+        let built = ds_mod::read(&bytes).expect("the written module reads back");
+        assert_eq!(built.deps(), recorded.as_slice());
+
+        // the walk over the built artifact, the provider serving the
+        // checked-in @std dsmod
+        let mut vm = fresh_vm();
+        let served = std_artifact();
+        vm.load(built, |name, _| (name == "@std").then(|| served.clone()))
+            .expect("the built module loads over the served @std");
+        assert_eq!(vm.registry().module_id("@std"), Some(0));
+        assert_eq!(vm.registry().module_id("app"), Some(1));
+
+        // the hand-built root: the same list a test assembles by hand
+        // assigns the same ids
+        let mut vm = fresh_vm();
+        let served = std_artifact();
+        vm.load(
+            leaf("app", APP.as_bytes(), 7).with_dep("@std", std_hash()),
+            |name, _| (name == "@std").then(|| served.clone()),
+        )
+        .expect("the hand-built root loads");
+        assert_eq!(vm.registry().module_id("@std"), Some(0));
+        assert_eq!(vm.registry().module_id("app"), Some(1));
+    }
+
+    /// A recorded link whose content disagrees refuses the walk as today:
+    /// the provider serves @std at a drifted hash and the refusal names
+    /// the hash the writer recorded.
+    #[test]
+    fn a_stale_hash_in_the_recorded_list_refuses_as_today() {
+        const APP: &str = "import @std/io\n\nfn main() -> int {\n7\n}\n";
+        let compiled =
+            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+        let bytes = ds_mod::write(compiled.lowered.module());
+        let built = ds_mod::read(&bytes).expect("the written module reads back");
+        let mut vm = ds_vm::Vm::new(ds_vm::ModuleRegistry::new());
+        let served = leaf("@std", b"drifted-std", 1);
+        assert_eq!(
+            vm.load(built, |name, _| (name == "@std").then(|| served.clone()))
+                .unwrap_err(),
+            ds_vm::LoadError::HashMismatch {
+                dep: "@std".to_owned(),
+                dependent: "app".to_owned(),
+                linked: std_hash(),
+                found: Some(ds_mod::Hash128::compute(b"drifted-std")),
+            }
+        );
+        assert_eq!(vm.registry().module_id("app"), None);
+    }
+
+    /// An import naming the enclosing module's own name records a
+    /// self-named entry, which the walk resolves against the module's own
+    /// install and never fetches: a provider answering nothing still
+    /// loads, and the entry runs.
+    #[test]
+    fn a_self_named_recorded_entry_stays_local() {
+        const APP: &str = "import app\n\nfn main() -> int {\n7\n}\n";
+        let compiled =
+            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+        assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
+            name: "app".to_owned(),
+            content_hash: ds_mod::Hash128::ZERO,
+        }]);
+        let bytes = ds_mod::write(compiled.lowered.module());
+        let built = ds_mod::read(&bytes).expect("the written module reads back");
+        let mut vm = fresh_vm();
+        vm.load(built, |_, _| None)
+            .expect("the self-named entry never reaches the provider");
+        assert_eq!(vm.registry().module_id("app"), Some(0));
+        assert_eq!(
+            vm.run("app", "main", &[]),
+            Ok(ds_vm::FrameAnswer::one(ds_vm::Value::I64(7)))
+        );
+    }
+
+    /// A user-package import the compile cannot resolve records the zero
+    /// marker — a name linked at no pinned content — and the walk refuses
+    /// it as a provider miss this round: no package resolution exists to
+    /// serve or validate it.
+    #[test]
+    fn an_unresolved_package_import_records_a_zero_link_the_walk_refuses() {
+        const APP: &str =
+            "import acme/pipeline/schema (row, parse_row)\n\nfn main() -> int {\n7\n}\n";
+        let compiled =
+            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+        assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
+            name: "acme/pipeline/schema".to_owned(),
+            content_hash: ds_mod::Hash128::ZERO,
+        }]);
+        let bytes = ds_mod::write(compiled.lowered.module());
+        let built = ds_mod::read(&bytes).expect("the written module reads back");
+        let mut vm = ds_vm::Vm::new(ds_vm::ModuleRegistry::new());
+        assert_eq!(
+            vm.load(built, |_, _| None).unwrap_err(),
+            ds_vm::LoadError::ProviderMiss {
+                dep: "acme/pipeline/schema".to_owned(),
+                dependent: "app".to_owned(),
+            }
+        );
+    }
+
+    /// The identities package resolution supplies enter the writer: a
+    /// linked name the map pins records that identity, and a name outside
+    /// the map still records the zero marker.
+    #[test]
+    fn supplied_identities_enter_the_link_table() {
+        const APP: &str = "import @lib/helper (twice)\nimport @other\n\nfn main() -> int {\n7\n}\n";
+        let identity = ds_mod::Hash128::compute(b"the lib member's text");
+        let dep_content = BTreeMap::from([("@lib".to_owned(), identity)]);
+        let compiled = compile_package("@app", "@app/main.ds", APP, "main", false, &dep_content)
+            .expect("compiles");
+        assert_eq!(compiled.lowered.module().deps(), [
+            ds_mod::Dep {
+                name: "@lib".to_owned(),
+                content_hash: identity,
+            },
+            ds_mod::Dep {
+                name: "@other".to_owned(),
+                content_hash: ds_mod::Hash128::ZERO,
+            },
+        ]);
+    }
+
+    /// The wider import shapes record their plain linked name: an alias
+    /// and a condition are spellings inside the source (the packages
+    /// round owns their semantics), so the list carries the name each
+    /// declaration links and nothing else.
+    #[test]
+    fn aliased_and_conditional_imports_record_their_plain_linked_name() {
+        const APP: &str = "import acme/pipeline/fs as pio\nimport acme/pipeline/io if os == \
+                           \"windows\"\n\nfn main() -> int {\n7\n}\n";
+        let compiled =
+            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+        assert_eq!(compiled.lowered.module().deps(), [
+            ds_mod::Dep {
+                name: "acme/pipeline/fs".to_owned(),
+                content_hash: ds_mod::Hash128::ZERO,
+            },
+            ds_mod::Dep {
+                name: "acme/pipeline/io".to_owned(),
+                content_hash: ds_mod::Hash128::ZERO,
+            },
+        ]);
     }
 }

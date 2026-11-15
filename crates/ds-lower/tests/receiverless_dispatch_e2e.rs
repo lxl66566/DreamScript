@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/receiverless_probe.ds");
 
@@ -74,7 +74,7 @@ fn the_type_keyed_member_calls_answer_end_to_end() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("receiverless_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main runs clean"
     );
     let stdout: &[u8] = concat!(

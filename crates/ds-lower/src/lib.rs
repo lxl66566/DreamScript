@@ -63,7 +63,7 @@ use std::{
 use ds_abi::{RcOp, Uop};
 use ds_check::{Analyzed, Condition, TraitId, render_type};
 use ds_diag::Span;
-use ds_mod::{EntryPlan, Hash128, Module, TargetClass};
+use ds_mod::{Dep, EntryPlan, Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
 use func::{BodyId, EvidenceEnv, FnLower, Plan};
@@ -159,6 +159,20 @@ impl Lowered {
         self
     }
 
+    /// Records the module's dependency list into the header (G3.5's link
+    /// table), so a built artifact names its linked deps and a load walk
+    /// over it resolves without re-deriving the list from source.
+    /// Lowering itself produces no cross-module links (natives are named,
+    /// the ambient's impl bodies inline), so the compile seam owns the
+    /// list: it collects the source's import declarations.
+    #[must_use]
+    pub fn with_deps(mut self, deps: Vec<Dep>) -> Self {
+        self.module = deps.into_iter().fold(self.module, |module, dep| {
+            module.with_dep(dep.name, dep.content_hash)
+        });
+        self
+    }
+
     /// One function's placed op sequence: the runnable uops plus the
     /// placed RC ops (dup/drop) at their exact positions — the artifact
     /// the M4 placement contract pins and the VM seam will splice in. A
@@ -202,10 +216,10 @@ impl Lowered {
 
 /// One embedded comptime answer, as the runtime module materializes it
 /// at the call site (G1): the evaluator's recorded constant. The
-/// embeddable results are the scalar atoms, string, and a list over
-/// embeddable elements (the literal a user would have written) — a
-/// comptime function answering anything else refuses at the evaluator,
-/// never here.
+/// embeddable results are the scalar atoms, string, a list over
+/// embeddable elements, and a tuple over embeddable scalars (each the
+/// literal a user would have written) — a comptime function answering
+/// anything else refuses at the evaluator, never here.
 #[derive(Clone, Debug)]
 pub enum ComptimeConst {
     /// A string answer.
@@ -218,6 +232,8 @@ pub enum ComptimeConst {
     Bool(bool),
     /// A list answer over embeddable elements, in order.
     List(Vec<ComptimeConst>),
+    /// A tuple answer over embeddable scalar elements, in order.
+    Tuple(Vec<ComptimeConst>),
 }
 
 /// How the round lowers: the ordinary program mode, or the REPL's
@@ -268,6 +284,10 @@ impl ComptimeValues {
 /// `comptime` selects the evaluator's slice or embeds its recorded
 /// answers at the call sites, and `mode` carries the REPL session's
 /// resumed-frame facts.
+// the slice's admitted callee set is a ninth lowering input beside the
+// run's own eight; bundling them would invent a config struct for one
+// call path
+#[allow(clippy::too_many_arguments)]
 fn lower_module(
     module_name: &str,
     source_hash: Hash128,
@@ -275,6 +295,7 @@ fn lower_module(
     analyzed: &Analyzed,
     main_required: bool,
     served: Option<Vec<ds_mod::Function>>,
+    admitted: &[ds_check::DefId],
     comptime: func::ComptimeRun<'_>,
     mode: LowerMode,
 ) -> Result<Lowered, LowerError> {
@@ -293,7 +314,7 @@ fn lower_module(
         for block in &ast.blocks {
             for item in &block.items {
                 refuse_derive(item)?;
-                plan_item(item, &mut plan, analyzed, slice);
+                plan_item(item, &mut plan, analyzed, slice, admitted);
             }
         }
     }
@@ -334,6 +355,15 @@ fn lower_module(
         &analyzed.decls,
         &analyzed.checked,
     );
+    // the walk's own refusals gate the facts: placement over a violating
+    // walk is unsound (a moved-then-used value's deinit would fire twice),
+    // so a package the walk reports refuses here the same way an unchecked
+    // one does — the embedder's backstop when no CLI gate ran first
+    if !lin.diags.is_empty() {
+        return Err(LowerError::NotLinear {
+            count: lin.diags.len(),
+        });
+    }
     let (functions, placed, facts, shapes) = lower_all(
         &mut plan,
         analyzed,
@@ -406,6 +436,7 @@ pub fn lower_in_mode(
         analyzed,
         true,
         None,
+        &[],
         func::ComptimeRun::Runtime(&empty),
         mode,
     )
@@ -437,6 +468,7 @@ pub fn lower_ambient(
         analyzed,
         false,
         None,
+        &[],
         func::ComptimeRun::Runtime(&empty),
         LowerMode::Program,
     )
@@ -465,18 +497,53 @@ pub fn lower_with_comptime(
         analyzed,
         true,
         None,
+        &[],
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
     )
 }
 
-/// The comptime slice the evaluator compiles for its fenced run: exactly
-/// the package's comptime functions, lowered as ordinary locals — a
-/// comptime function calling another is a plain intra-module call there,
-/// and calls into runtime functions refuse (the slice's table never
-/// holds them). No `main` is required and no deinit hooks plan (binding
-/// a deinit-carrying struct inside a comptime function refuses at the
-/// hook's claim).
+/// The library lowering for a module that serves members instead of
+/// running: [`lower_with_comptime`]'s lowering with the run contract's
+/// `main` entry check waived, `served` splicing pre-lowered ambient
+/// bodies over the planned prefix exactly as [`lower_with_served`] does —
+/// an installed module's callers reach its members and never its entry.
+///
+/// # Errors
+///
+/// [`lower_with_served`]'s and [`lower_with_comptime`]'s; never
+/// [`LowerError::NoMain`].
+pub fn lower_library(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[Ast],
+    analyzed: &Analyzed,
+    served: Option<Vec<ds_mod::Function>>,
+    values: &ComptimeValues,
+) -> Result<Lowered, LowerError> {
+    lower_module(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        false,
+        served,
+        &[],
+        func::ComptimeRun::Runtime(values),
+        LowerMode::Program,
+    )
+}
+
+/// The comptime slice the evaluator compiles for its fenced run: the
+/// package's comptime functions plus the ordinary helpers whose defs
+/// `admitted` names (the evaluator's row-based admission pass, G1), all
+/// lowered as ordinary locals — a comptime function calling another, or
+/// an admitted helper, is a plain intra-module call there, and calls
+/// into runtime functions the set does not name refuse (the slice's
+/// table never holds them). No `main` is required and no deinit hooks
+/// plan (the evaluator's admission refuses a deinit-carrying construction
+/// before the slice lowers, so no value inside the fence ever expects a
+/// hook).
 ///
 /// # Errors
 ///
@@ -488,6 +555,7 @@ pub fn lower_comptime_slice(
     source_hash: Hash128,
     asts: &[Ast],
     analyzed: &Analyzed,
+    admitted: &[ds_check::DefId],
 ) -> Result<Lowered, LowerError> {
     lower_module(
         module_name,
@@ -496,6 +564,7 @@ pub fn lower_comptime_slice(
         analyzed,
         false,
         None,
+        admitted,
         func::ComptimeRun::Slice,
         LowerMode::Program,
     )
@@ -532,6 +601,7 @@ pub fn lower_with_served(
         analyzed,
         true,
         Some(served),
+        &[],
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
     )
@@ -626,8 +696,15 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 /// generic one its single ONE body with the runtime-evidence demands its
 /// bounds collect [H3]. Everything else is skipped; comptime functions
 /// are the evaluator's slice — the runtime module plans none of them and
-/// the slice plans nothing else.
-fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed, slice: bool) {
+/// the slice plans nothing else beyond the pure-row helpers `admitted`
+/// names (the evaluator's own admission pass, G1).
+fn plan_item(
+    item: &Item,
+    plan: &mut Plan,
+    analyzed: &Analyzed,
+    slice: bool,
+    admitted: &[ds_check::DefId],
+) {
     if let ItemKind::Impl(imp) = &item.kind {
         if !slice {
             plan_impl(item, imp, plan, analyzed);
@@ -664,8 +741,10 @@ fn plan_item(item: &Item, plan: &mut Plan, analyzed: &Analyzed, slice: bool) {
     let comptime_fn = params
         .iter()
         .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)));
-    if comptime_fn != slice {
-        return; // the runtime module and the comptime slice split here
+    if comptime_fn != slice && !(slice && admitted.contains(&def)) {
+        return; // the runtime module and the comptime slice split here; an
+        // admitted helper is the slice's one exception, a pure-row callee
+        // the evaluator's admission pass named for this slice
     }
     if !generics.is_empty() {
         // The ONE generic body [H3]: a free generic fn lowers once,

@@ -7,7 +7,7 @@ use ds_mod::{
     Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, read_checked, write,
 };
 use ds_vm::{
-    ModuleRegistry, Value, Vm,
+    FrameAnswer, ModuleRegistry, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64},
@@ -155,16 +155,19 @@ fn dsmod_round_trip_installs_and_runs_at_constant_stack() {
     // main CALLs even(1e6); the mutual CALLT chain must run at constant
     // stack: main's frame is 3 words, even/odd frames 6, so the high-water
     // mark is exactly the 7 words of one main frame plus one callee frame
-    assert_eq!(vm.run("mut", "main", &[]), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("mut", "main", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
     assert_eq!(vm.max_stack_len(), 7);
     // the same loaded module answers the odd direction
     assert_eq!(
         vm.run("mut", "odd", &[Value::I64(1_000_001)]),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(
         vm.run("mut", "even", &[Value::I64(1_000_001)]),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
 }
 
@@ -278,10 +281,16 @@ fn cross_module_funcref_resolves_through_the_current_slot() {
     let mut vm = Vm::new(ModuleRegistry::new());
     vm.install_dsmod(std_version(1)).expect("std v1 installs");
     vm.install_dsmod(app).expect("app installs");
-    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(10)));
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(10)))
+    );
     // swapping std's slot redirects the SAME FuncRef to the new version
     vm.install_dsmod(std_version(2)).expect("std v2 swaps in");
-    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(15)));
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(15)))
+    );
 }
 
 #[test]

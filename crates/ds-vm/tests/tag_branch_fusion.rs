@@ -11,8 +11,8 @@
 //! unfused.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberState, FunctionDef, JoinOutcome, ModuleRegistry, ModuleVersion,
-    NurseryId, Trap, Value, Vm,
+    ChildOutcome, Const, FiberState, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
+    ModuleVersion, NurseryId, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Ref, Tag},
@@ -131,11 +131,20 @@ fn fused_pairs_take_their_branch_and_keep_the_bool_dst_readable() {
     ]);
     let mut vm = Vm::new(reg);
     // tag 7 against 7 holds: the pair jumps, the probe reads the true
-    assert_eq!(vm.run("tf", "hit_pair", &[]), Ok(Value::I64(20)));
+    assert_eq!(
+        vm.run("tf", "hit_pair", &[]),
+        Ok(FrameAnswer::one(Value::I64(20)))
+    );
     // tag 7 against 135 fails: the pair falls through, the probe folds the false in
-    assert_eq!(vm.run("tf", "miss_pair", &[]), Ok(Value::I64(110)));
+    assert_eq!(
+        vm.run("tf", "miss_pair", &[]),
+        Ok(FrameAnswer::one(Value::I64(110)))
+    );
     // tag 0 against 0 holds: the zero discriminant is an ordinary tag
-    assert_eq!(vm.run("tf", "hit_zero", &[]), Ok(Value::I64(20)));
+    assert_eq!(
+        vm.run("tf", "hit_zero", &[]),
+        Ok(FrameAnswer::one(Value::I64(20)))
+    );
 }
 
 /// The match-dispatch loop shape the census measured the family on: the
@@ -189,12 +198,12 @@ fn the_match_dispatch_pair_runs_each_iteration() {
     // zero trips: the very first compare pair is the exit
     assert_eq!(
         vm.run("tf", "tag_loop", &[Value::I64(0)]),
-        Ok(Value::I64(0))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
     // four iterations, the arm guard held each one: 4
     assert_eq!(
         vm.run("tf", "tag_loop", &[Value::I64(4)]),
-        Ok(Value::I64(4))
+        Ok(FrameAnswer::one(Value::I64(4)))
     );
 }
 
@@ -275,7 +284,7 @@ fn a_fused_backward_branch_observes_cancellation() {
         // branch ever lost the observation point)
         assert_eq!(
             vm.resume_fiber(spinning, Value::I64(0)),
-            Ok(Value::Tag(PLATFORM_CANCELLED))
+            Ok(FrameAnswer::one(Value::Tag(PLATFORM_CANCELLED)))
         );
         assert_eq!(vm.fiber_state(spinning), Some(FiberState::Dead));
         assert_eq!(
@@ -389,7 +398,10 @@ fn a_branch_testing_another_slot_stays_unfused() {
     )]);
     let mut vm = Vm::new(reg);
     // the tag test held, but the branch tested slot 4 (false) and fell through
-    assert_eq!(vm.run("tf", "cond_mismatch", &[]), Ok(Value::I64(10)));
+    assert_eq!(
+        vm.run("tf", "cond_mismatch", &[]),
+        Ok(FrameAnswer::one(Value::I64(10)))
+    );
 }
 
 /// A JMPIF_NOT consuming the tag test's dst never fuses (the census
@@ -412,7 +424,10 @@ fn jmpif_not_consuming_the_tag_dst_stays_unfused() {
         Uop::Ret { src: 2 },
     ])]);
     let mut vm = Vm::new(reg);
-    assert_eq!(vm.run("tf", "jmpifnot_dst", &[]), Ok(Value::I64(10)));
+    assert_eq!(
+        vm.run("tf", "jmpifnot_dst", &[]),
+        Ok(FrameAnswer::one(Value::I64(10)))
+    );
 }
 
 /// TAGTEST_NOT never fuses — no kernel stream carries the uop, so the
@@ -436,5 +451,8 @@ fn tag_test_not_never_fuses() {
     ])]);
     let mut vm = Vm::new(reg);
     // the inverted test failed, so the adjacent JMPIF fell through
-    assert_eq!(vm.run("tf", "not_pair", &[]), Ok(Value::I64(10)));
+    assert_eq!(
+        vm.run("tf", "not_pair", &[]),
+        Ok(FrameAnswer::one(Value::I64(10)))
+    );
 }

@@ -1,0 +1,40 @@
+// source: tutorial audit pass 2026-11-15
+// purpose: the tutorial's recently landed surface pinned end to end: show-carrying interpolation holes (derived, union, and inherent-member receivers), receiverless impl members, the default family's spellings, and the enum case constructor's named payload fields
+// items:
+// shape: stage: run
+// tone: stage: run
+// gauge: stage: run
+// gauge-impl: stage: run
+// spot: stage: run
+// picked: stage: run
+// main: stage: run
+
+#[derive(show)]
+struct shape { label: string, weight: int }
+
+#[derive(show)]
+enum tone { quiet, loud { volume: int } }
+
+struct gauge { level: int }
+
+impl gauge {
+  fn make(level: int) -> gauge { gauge { level: level } }
+  fn show(self) -> string { "gauge ${self.level}" }
+}
+
+#[derive(default)]
+struct spot { x: int, y: int }
+
+enum picked { some { v: int }, skip }
+
+fn main() -> () {
+  const s = shape { label: "nut", weight: 3 }
+  println("derived $s / ${s.show()}")
+  const t: tone = loud(7)
+  println("union $t")
+  const g = gauge.make(4)
+  println("inherent $g")
+  const d = spot.default()
+  println("default ${d.x} ${d.y} ${int.default()}")
+  println("case ${some(v: 9) == some(9)}")
+}

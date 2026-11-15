@@ -21,9 +21,14 @@ pub fn dir() -> PathBuf {
 }
 
 /// One file in the corpus: `file("types_hybrid.ds")`.
+///
+/// Panics like [`dir`] when nothing holds the file: the compile-time
+/// checkout must carry the named file, not only the directory — a stale
+/// cross-lane bake of another worktree's corpus lacks files this lane
+/// added, so the file-level check keeps the fallback honest.
 #[must_use]
 pub fn file(name: &str) -> PathBuf {
-    dir().join(name)
+    resolve(&format!("../../conformance/{name}"))
 }
 
 /// Resolves `rel`, a manifest-relative path in the tests'

@@ -18,12 +18,12 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the result, the golden stdout, and
 /// the heap drain (every staged, adopted, and copy-in count balanced).
-fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let mut files = Files::new();
     let file_name = format!("{name}.ds");
     let id = files.add_source(&file_name, source);
@@ -57,7 +57,11 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
 /// golden bytes, and drains the heap.
 fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
     let (vm, got) = run_source(name, source);
-    assert_eq!(got, Ok(result), "the block argument answers");
+    assert_eq!(
+        got,
+        Ok(FrameAnswer::one(result)),
+        "the block argument answers"
+    );
     assert_eq!(vm.captured_output(), stdout, "the golden stdout");
     assert!(
         vm.objects().is_empty(),

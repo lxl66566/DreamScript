@@ -9,7 +9,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/multiword_instantiation_probe.ds");
 
@@ -63,7 +63,7 @@ fn the_concrete_spelling_answers_over_whole_element_spans() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("multiword_instantiation_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

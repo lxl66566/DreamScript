@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -84,7 +84,7 @@ fn a_strict_sub_union_binds_assigns_and_joins_through_the_wide_region() {
     vm.capture_output();
     assert_eq!(
         vm.run("widen_span", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

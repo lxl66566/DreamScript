@@ -9,7 +9,8 @@
 //! the frame that hosted them).
 
 use ds_vm::{
-    Const, ConstKind, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstKind, FrameAnswer, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion,
+    Value, Vm,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -82,7 +83,7 @@ fn a_borrow_load_serves_the_pinned_object_across_claimant_churn() {
     let got = vm.run("kstr_borrow", "main", &[]);
     assert_eq!(
         got,
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the borrow and acquire load one object"
     );
     assert!(

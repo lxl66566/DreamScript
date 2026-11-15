@@ -59,6 +59,35 @@ pub(crate) fn offset(files: &Files, file: FileId, pos: lsp::Position) -> u32 {
     byte
 }
 
+/// The new text of one range-bearing change applied to `source`: the
+/// range's positions (UTF-16 code-unit columns) fold onto byte offsets
+/// through the same clamping as every other position, so an in-bounds
+/// range splices exactly the covered characters, while an inverted
+/// range is refused.
+pub(crate) fn apply_change(
+    source: &str,
+    range: lsp::Range,
+    new_text: &str,
+) -> Result<String, String> {
+    // The range addresses the text as the client sees it, so the line
+    // index is scratch-local: the registry's own copy is untouched
+    // until the spliced result replaces it.
+    let mut files = Files::new();
+    let file = files.add_source("change", source);
+    let start = offset(&files, file, range.start);
+    let end = offset(&files, file, range.end);
+    if start > end {
+        return Err(format!(
+            "a change range ends before it starts: {start} > {end}"
+        ));
+    }
+    let mut out = String::with_capacity(source.len() + new_text.len());
+    out.push_str(&source[..start as usize]);
+    out.push_str(new_text);
+    out.push_str(&source[end as usize..]);
+    Ok(out)
+}
+
 /// The LSP range of one span, folded into the file's current bounds (a
 /// span that predates an edit degrades to the end, like the render
 /// paths).
@@ -469,5 +498,100 @@ mod tests {
             ],
             "the platform block carries no symbol name"
         );
+    }
+
+    #[test]
+    fn range_changes_splice_the_covered_characters() {
+        let out = apply_change(
+            "const one = 1\n",
+            lsp::Range::new(lsp::Position::new(0, 6), lsp::Position::new(0, 9)),
+            "value",
+        )
+        .expect("the range is in bounds");
+        assert_eq!(out, "const value = 1\n");
+        // An empty range inserts.
+        let out = apply_change(
+            "ab\n",
+            lsp::Range::new(lsp::Position::new(0, 1), lsp::Position::new(0, 1)),
+            "X",
+        )
+        .expect("an empty range inserts");
+        assert_eq!(out, "aXb\n");
+        // An empty new text deletes, spanning lines included.
+        let out = apply_change(
+            "one\ntwo\nthree\n",
+            lsp::Range::new(lsp::Position::new(0, 2), lsp::Position::new(2, 5)),
+            "",
+        )
+        .expect("the range spans lines");
+        assert_eq!(out, "on\n");
+    }
+
+    #[test]
+    fn multibyte_ranges_count_utf16_units() {
+        // `const flag = "` is 15 characters, so the rocket occupies
+        // UTF-16 units 15..17 across bytes 15..19.
+        let out = apply_change(
+            "const flag = \"\u{1f680} hi\"\n",
+            lsp::Range::new(lsp::Position::new(0, 15), lsp::Position::new(0, 15)),
+            "x",
+        )
+        .expect("the insertion sits on the rocket's start");
+        assert_eq!(out, "const flag = \"x\u{1f680} hi\"\n");
+        // The full two-unit range deletes the rocket whole.
+        let out = apply_change(
+            "a\u{1f680}b\n",
+            lsp::Range::new(lsp::Position::new(0, 1), lsp::Position::new(0, 3)),
+            "",
+        )
+        .expect("the rocket covers two units");
+        assert_eq!(out, "ab\n");
+        // A position inside the surrogate pair clamps to the rocket's
+        // start, never into its bytes.
+        let out = apply_change(
+            "\u{1f680}x",
+            lsp::Range::new(lsp::Position::new(0, 1), lsp::Position::new(0, 1)),
+            "y",
+        )
+        .expect("an inside-pair position clamps");
+        assert_eq!(out, "y\u{1f680}x");
+    }
+
+    #[test]
+    fn out_of_bounds_ranges_clamp_into_the_document() {
+        // A line past the end lands on the last line and a character
+        // past its end on the line's end, so the append lands at the
+        // document's very end.
+        let out = apply_change(
+            "ab\n",
+            lsp::Range::new(lsp::Position::new(9, 9), lsp::Position::new(9, 9)),
+            "z",
+        )
+        .expect("the position clamps");
+        assert_eq!(out, "ab\nz");
+    }
+
+    #[test]
+    fn inverted_ranges_are_refused() {
+        let result = apply_change(
+            "ab\n",
+            lsp::Range::new(lsp::Position::new(0, 2), lsp::Position::new(0, 1)),
+            "x",
+        );
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn crlf_ranges_stay_terminator_aware() {
+        // Line 0 of `one\r\n` ends at byte 3 (the terminator stays
+        // out of the line), so the delete joins the lines without
+        // touching the surviving terminator.
+        let out = apply_change(
+            "one\r\ntwo\r\n",
+            lsp::Range::new(lsp::Position::new(0, 3), lsp::Position::new(1, 0)),
+            "",
+        )
+        .expect("the range is in bounds");
+        assert_eq!(out, "onetwo\r\n");
     }
 }

@@ -43,11 +43,14 @@ clap       = { version = "4", features = ["derive"] }
 ds-diag    = { path = "crates/ds-diag" }
 ds-parse   = { path = "crates/ds-parse" }
 ds-check   = { path = "crates/ds-check" }
+ds-meta    = { path = "crates/ds-meta" }
 ds-lower   = { path = "crates/ds-lower" }
 ds-query   = { path = "crates/ds-query" }
 ds-mod     = { path = "crates/ds-mod" }
+ds-pkg     = { path = "crates/ds-pkg" }
 ds-vm      = { path = "crates/ds-vm" }
 ds-stdlib  = { path = "crates/ds-stdlib" }
+ds-dsi     = { path = "crates/ds-dsi" }
 # dev-only: run-time corpus resolution for the conformance gates
 ds-corpus-path = { path = "crates/ds-corpus-path" }
 

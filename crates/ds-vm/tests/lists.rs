@@ -175,7 +175,11 @@ fn glue() -> FunctionDef {
 }
 
 fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
-    vm.run("li", func, args).expect("the fixture runs")
+    let answer = vm.run("li", func, args).expect("the fixture runs");
+    let [word] = answer.as_slice() else {
+        panic!("the fixture answers one word")
+    };
+    *word
 }
 
 /// Runs `count` over a list-value argument.

@@ -16,7 +16,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/transitive_impl_probe.ds");
 
@@ -70,7 +70,7 @@ fn transitive_chains_run_through_one_body_per_member() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("transitive_impl_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -226,7 +226,7 @@ fn a_body_demanding_two_members_runs_at_depth_zero() {
     };
     assert_eq!(
         vm.run("two_demand_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -320,7 +320,7 @@ fn a_lambda_collected_demand_runs_at_depth_zero() {
     };
     assert_eq!(
         vm.run("lambda_demand_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -367,7 +367,10 @@ fn lands(source: &str, stdout: &[u8]) {
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
     vm.capture_output();
-    assert_eq!(vm.run("probe", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(vm.captured_output(), stdout);
     assert!(
         vm.objects().is_empty(),

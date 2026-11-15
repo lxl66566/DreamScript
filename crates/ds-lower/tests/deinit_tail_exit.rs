@@ -14,7 +14,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::{parse, parse_script};
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const ATOMS: &str = concat!(
     "tag int\n",
@@ -48,7 +48,7 @@ fn source(body: &str) -> String {
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the check is clean so failures are
 /// the lowerer's or the VM's.
-fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let mut files = Files::new();
     let file_name = format!("{name}.ds");
     let id = files.add_source(&file_name, source);
@@ -72,7 +72,7 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
 }
 
 /// Installs one lowered module and runs its `main` with captured stdout.
-fn install_and_run(name: &str, module: ds_mod::Module) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn install_and_run(name: &str, module: ds_mod::Module) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let mut registry = ModuleRegistry::new();
     registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
     registry.install_platform(Platform::std());
@@ -86,7 +86,7 @@ fn install_and_run(name: &str, module: ds_mod::Module) -> (Vm, Result<Value, ds_
 /// One acceptance: the run result and the printed golden.
 fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
     let (vm, got) = run_source(name, source);
-    assert_eq!(got, Ok(result), "the run result");
+    assert_eq!(got, Ok(FrameAnswer::one(result)), "the run result");
     assert_eq!(vm.captured_output(), stdout, "the golden stdout");
 }
 
@@ -295,7 +295,11 @@ fn a_script_entry_call_final_transfers_cleanly() {
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the module round-trips");
     let (vm, got) = install_and_run("deinit_tail_script", module);
-    assert_eq!(got, Ok(Value::I64(0)), "the unit entry result");
+    assert_eq!(
+        got,
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "the unit entry result"
+    );
     assert_eq!(
         vm.captured_output(),
         concat!("have 7\n", "dying 7\n", "called\n").as_bytes(),

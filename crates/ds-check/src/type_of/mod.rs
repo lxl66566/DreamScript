@@ -125,6 +125,13 @@ enum HoleShow {
 /// substituted type at the site (`None` when none serves it uniquely).
 pub type InherentCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>)>;
 
+/// Every interpolation hole that staged an implicit `show` dispatch,
+/// keyed by the hole's own span: the dispatched member (the solved trait
+/// member, the inherent method, or the trait member an in-scope
+/// assumption answers — the runtime-evidence form). The effects pass and
+/// the lowering's demand walk take the table by this name.
+pub type HoleShowDispatches = FxHashMap<Span, MethodId>;
+
 /// The per-call-site runtime-evidence record of a call into a free
 /// generic fn's body: one entry per trait-bound generic parameter whose
 /// substitution solved — the parameter's minted variable atom, its
@@ -164,6 +171,15 @@ pub struct Checked {
     /// environment statically resolved, keyed by the call's span (B6).
     /// The lowering pass mints the CALLG evidence word from it.
     pub trait_calls: FxHashMap<Span, TraitCall>,
+    /// Every interpolation hole that staged an implicit `show` dispatch,
+    /// keyed by the hole's own span (F6): the dispatched member (the
+    /// solved trait member, the inherent method, or the trait member an
+    /// in-scope assumption answers — the runtime-evidence form). The
+    /// affine pass reads the receiver mode here and the effects pass
+    /// unions the dispatched member's row; the lowering's synthetic call
+    /// resolves through this record when no solved instance sits beside
+    /// it.
+    pub hole_show_dispatches: HoleShowDispatches,
     /// The selected inherent method of every inherent-impl dot-call whose
     /// owner covers the receiver, keyed by the call's own span (F3). The
     /// lowering pass resolves the impl item through the declaration
@@ -264,16 +280,18 @@ pub struct TypedPackage {
 /// copying the namespace — and a consumer holding the bundle keeps the
 /// universe its `Ty`s were minted by alive.
 ///
-/// The check runs over the derive-expanded trees (G1): consumed derive
-/// attributes became ordinary impl items, and [`Analyzed::asts`] carries
-/// exactly the trees every table was built over, so the lowering pass
-/// consumes those, never the caller's originals (a package with no
-/// derive attribute expands to an identical clone). `asts` may hold
-/// shared trees (`Borrow<Ast>`, like [`check_resolved`]): the query
-/// layer analyzes its parse memos without cloning the trees. Expansion
-/// precedes resolution (the landed ruling), and the split below lets a
-/// caller that already resolved through a memo hand that memo's own
-/// expanded trees and resolution in instead of resolving again.
+/// The check runs over the derive-expanded trees (G1): the trees the
+/// caller hands in are the ones every table is built over, and
+/// [`Analyzed::asts`] carries them back, so the lowering pass consumes
+/// those, never the caller's originals. Expansion precedes resolution
+/// (the landed ruling) and belongs to the meta layer: a caller with
+/// raw trees expands through the derive engine's analyze entries
+/// (`ds_meta::analyze`, over shared trees) and hands the expanded trees
+/// in. `asts` may hold shared trees (`Borrow<Ast>`, like
+/// [`check_resolved`]): the query layer analyzes its parse memos without
+/// cloning the trees, and the split below lets a caller that already
+/// resolved through a memo hand that memo's own expanded trees and
+/// resolution in instead of resolving again.
 pub fn analyze<T>(files: &Files, asts: &[T]) -> Analyzed
 where
     T: std::borrow::Borrow<Ast>,
@@ -285,25 +303,23 @@ where
         .iter()
         .map(|ast| std::borrow::Borrow::borrow(ast).clone())
         .collect();
-    analyze_owned(files, owned, &[])
+    analyze_owned(files, owned)
 }
 
 /// The ownership variant of [`analyze`] for the cold run path: the
-/// caller hands the package's trees by value, with `preexpanded` marks
-/// aligned with them (a marked tree already carries its derive
-/// expansion — the ambient blob's decode), and the expansion moves
-/// every tree through without cloning, so the bundle adopts the moved
-/// trees. An unmarked tree expands exactly like [`analyze`] expands it.
-pub fn analyze_owned(files: &Files, asts: Vec<Ast>, preexpanded: &[bool]) -> Analyzed {
-    let (asts, mut diags) = crate::derive::expand_owned(asts, preexpanded);
+/// caller hands the package's derive-expanded trees by value, so the
+/// bundle adopts the moved trees. The expansion itself belongs to the
+/// meta layer: a caller with raw trees expands through
+/// `ds_meta::analyze_owned` (the derive engine and the expanding
+/// analyze entries live there) and hands the result here unchanged.
+pub fn analyze_owned(files: &Files, asts: Vec<Ast>) -> Analyzed {
     let (package, resolutions, resolve_diags) = crate::resolve_package(&asts);
-    diags.extend(resolve_diags);
     analyze_resolved(
         files,
         asts.into(),
         package.into(),
         resolutions.into(),
-        diags,
+        resolve_diags,
     )
 }
 
@@ -332,6 +348,7 @@ pub fn analyze_resolved(
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
+        hole_show_dispatches: checked.hole_show_dispatches,
         inherent_calls: checked.inherent_calls,
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
@@ -347,35 +364,40 @@ pub fn analyze_resolved(
 }
 
 /// [`analyze_owned`] behind a checked-ambient artifact: the ambient
-/// member's tree arrives first (marked in `preexpanded`, the blob
+/// member's tree arrives first (already derive-expanded, the blob
 /// discipline), its namespace, per-file resolutions, and declaration-side
-/// prefix pre-served from the artifact, and the user trees after it. The
-/// user trees collect and resolve against the served namespace exactly as
-/// [`analyze_owned`] would — their diagnostics in the same walk
-/// order, the served member's own resolution diagnostics carried by the
-/// artifact's clean-generation gate — and every check pass then runs
-/// fresh over the full tree list: this artifact slice serves none of the
-/// hard tables or body facts, so the ambient's signatures, instances, and
-/// bodies check against the blob-served trees as always, only against
-/// the served universe and namespace. The served prefix's ids hold by the
-/// mint-determinism pin, so user ids continue after it exactly as in a
-/// fresh analyze.
+/// prefix pre-served from the artifact, and the user trees after it,
+/// every tree pre-expanded by the caller. `diags` seeds the
+/// diagnostics collected ahead of this analyze — the derive
+/// expansion's over the trees, when the caller expanded through the
+/// meta layer — ahead of the same walk order [`analyze_owned`]
+/// produces. The user trees collect and resolve against the served
+/// namespace exactly as [`analyze_owned`] would, and every check pass
+/// then runs fresh over the full tree list: this artifact slice serves
+/// none of the hard tables or body facts, so the ambient's signatures,
+/// instances, and bodies check against the blob-served trees as always,
+/// only against the served universe and namespace. The served prefix's
+/// ids hold by the mint-determinism pin, so user ids continue after it
+/// exactly as in a fresh analyze.
 pub fn analyze_served(
     files: &Files,
     asts: Vec<Ast>,
-    preexpanded: &[bool],
     package: Package,
-    resolutions: Resolutions,
+    resolutions: Vec<Resolutions>,
     served: decls::ServedDecls,
+    diags: Vec<Diagnostic>,
 ) -> Analyzed {
-    let (asts, mut diags) = crate::derive::expand_owned(asts, preexpanded);
+    let mut diags = diags;
     let mut package = package;
-    for ast in &asts[1..] {
+    assert!(
+        resolutions.len() <= asts.len(),
+        "one served resolution table per leading served tree, at most one per tree"
+    );
+    for ast in &asts[resolutions.len()..] {
         diags.extend(package.add_file(ast));
     }
-    let mut tables = Vec::with_capacity(asts.len());
-    tables.push(resolutions);
-    for ast in &asts[1..] {
+    let mut tables = resolutions;
+    for ast in &asts[tables.len()..] {
         let (uses, mut file_diags) = package.resolve(ast);
         tables.push(uses);
         diags.append(&mut file_diags);
@@ -389,6 +411,7 @@ pub fn analyze_served(
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
+        hole_show_dispatches: checked.hole_show_dispatches,
         inherent_calls: checked.inherent_calls,
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
@@ -462,6 +485,7 @@ where
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
+    let mut hole_show_dispatches: FxHashMap<Span, MethodId> = FxHashMap::default();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
             files,
@@ -479,6 +503,7 @@ where
             inherent_call_bounds: &mut inherent_call_bounds,
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
+            hole_show_dispatches: &mut hole_show_dispatches,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -505,6 +530,7 @@ where
         expr_types,
         generic_calls,
         trait_calls,
+        hole_show_dispatches,
         inherent_calls,
         inherent_call_bounds,
         generic_call_bounds,
@@ -580,6 +606,7 @@ struct Bodies<'a> {
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
+    hole_show_dispatches: &'a mut FxHashMap<Span, MethodId>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
     /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
@@ -1609,15 +1636,20 @@ impl Bodies<'_> {
     /// One hole's `show` proof (F6): the candidate selection a written
     /// `.show()` runs — trait owners through the solved-instance
     /// environment (a union receiver through its covering sibling group),
-    /// inherent owners by coverage — with the survivor's dispatch
+    /// inherent owners by coverage, an in-scope assumption through the
+    /// frame's runtime-evidence form — with the survivor's dispatch
     /// recorded at the hole's own span, exactly where a written call's
     /// span records it, so the lowering stages the ordinary member call.
     /// The survivor's registered signature must be the family's shape:
-    /// the receiver alone, `string` back. An in-scope assumption's
-    /// runtime-evidence dispatch has no surface spelling to record, so
-    /// the hole refuses naming the explicit call.
+    /// the receiver alone, `string` back. Every dispatched hole records
+    /// its member in `hole_show_dispatches` (the affine and effects
+    /// passes' seam); a solved instance or an inherent owner records
+    /// beside it as a written call does, while the assumption form
+    /// records alone — its dispatch resolves at runtime through the
+    /// evidence slot the entering site stages.
     fn hole_show_dispatch(&mut self, span: Span, ty: Ty, string_ty: Ty) -> HoleShow {
         let mut survivors: Vec<MethodId> = Vec::new();
+        let mut runtime: Vec<MethodId> = Vec::new();
         let mut ambiguous = None;
         for &candidate in self.package.method_candidates("show") {
             let Some(sig) = self.member_sig(candidate) else {
@@ -1637,17 +1669,8 @@ impl Bodies<'_> {
                         continue;
                     };
                     if self.assumption_covers(trait_id, ty) {
-                        self.error(
-                            ErrorCode::TypeMismatch,
-                            format!(
-                                "interpolation hole has type `{}` whose `show` answers through a \
-                                 generic bound; spell the dispatch inside the hole [F6]",
-                                self.decls.universe.render(ty)
-                            ),
-                            span,
-                            "no solved instance here",
-                        );
-                        return HoleShow::Reported;
+                        runtime.push(candidate);
+                        continue;
                     }
                     match self.instance_resolution(trait_id, ty) {
                         Resolution::Unique(_) | Resolution::Covered(_) => {
@@ -1670,9 +1693,10 @@ impl Bodies<'_> {
             self.instance_ambiguity(trait_id, ty, &candidates, span);
             return HoleShow::Reported;
         }
-        match survivors.as_slice() {
-            [only] => {
+        match (survivors.as_slice(), runtime.as_slice()) {
+            ([only], []) => {
                 self.record_solved_dispatch(*only, ty, span);
+                self.hole_show_dispatches.insert(span, *only);
                 self.expr_types.insert(span, Val {
                     ty: string_ty,
                     diverges: false,
@@ -1680,14 +1704,23 @@ impl Bodies<'_> {
                 });
                 HoleShow::Dispatched
             },
-            [] => HoleShow::Refused,
-            _ => {
+            ([], [only]) => {
+                self.hole_show_dispatches.insert(span, *only);
+                self.expr_types.insert(span, Val {
+                    ty: string_ty,
+                    diverges: false,
+                    poisoned: false,
+                });
+                HoleShow::Dispatched
+            },
+            ([], []) => HoleShow::Refused,
+            (survivors, runtime) => {
                 self.error(
                     ErrorCode::AmbiguousCall,
                     format!(
                         "the interpolation hole's `show` is ambiguous between {} owners; write \
                          the dispatch inside the hole and qualify it [F3, F6]",
-                        survivors.len()
+                        survivors.len() + runtime.len()
                     ),
                     span,
                     "ambiguous implicit dispatch",

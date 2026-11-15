@@ -16,7 +16,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -119,7 +119,7 @@ fn for_in_and_membership_run_over_lists_and_the_heap_drains() {
     vm.capture_output();
     assert_eq!(
         vm.run("list_for_in", "main", &[]),
-        Ok(Value::I64(40)),
+        Ok(FrameAnswer::one(Value::I64(40))),
         "the run's final answer"
     );
     // 10 rounds of the 4-element scan each answer one hit

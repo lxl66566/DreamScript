@@ -739,9 +739,10 @@ fn interpolation_refusal_notes_name_the_remedy() {
 }
 
 /// A hole whose operand carries `show` checks clean (F6): the derived
-/// impl, the hand-written trait impl, the inherent member, and a
-/// whole-union head all answer; a bound-variable receiver refuses
-/// naming the explicit spelling.
+/// impl, the hand-written trait impl, the inherent member, a
+/// whole-union head, and a bound-variable receiver (the assumption's
+/// runtime-evidence dispatch) all answer; a boundless type variable
+/// keeps the standard refusal.
 #[test]
 fn interpolation_accepts_show_carrying_operands() {
     clean(concat!(
@@ -775,23 +776,32 @@ fn interpolation_accepts_show_carrying_operands() {
         "}\n",
         "fn f(x: int | io_err) -> string { \"${x}\" }\n",
     ));
-    // the runtime-evidence form has no surface spelling to record; the
-    // variable renders under its minted internal name, so the stable
-    // tail is the assertion
-    let bound = check(concat!(
+    // the assumption-answered form checks clean: the hole records the
+    // member and the lowering resolves the dispatch through the frame's
+    // runtime-evidence slot
+    clean(concat!(
         "trait show {\n",
         "  fn show(self) -> string\n",
         "}\n",
         "fn f[t: show](v: t) -> string { \"$v\" }\n",
     ));
-    assert_eq!(bound.len(), 1);
+    // a boundless type variable names no assumption and no instance
+    // serves it: the standard F6 refusal, the variable rendering under
+    // its minted internal name
+    let boundless = check(concat!(
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "fn f[t](v: t) -> string { \"$v\" }\n",
+    ));
+    assert_eq!(boundless.len(), 1);
     assert!(
-        bound[0].starts_with("DS2001 interpolation hole has type `$t#")
-            && bound[0].ends_with(
-                "whose `show` answers through a generic bound; spell the dispatch inside the hole \
-                 [F6]"
+        boundless[0].starts_with("DS2001 interpolation hole has type `$t#")
+            && boundless[0].ends_with(
+                "the printable primitives (bool, char, float, int, string) convert implicitly, \
+                 every other type carries `show` [F6]"
             ),
-        "the bound-variable hole refuses naming the explicit spelling: {bound:?}"
+        "the boundless variable hole keeps the standard refusal: {boundless:?}"
     );
 }
 

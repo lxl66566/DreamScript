@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = "
 tag int
@@ -88,7 +88,7 @@ fn checked_read_hits_and_misses_stay_balanced_across_iterations() {
     vm.capture_output();
     assert_eq!(
         vm.run("checked_read_balance", "main", &[]),
-        Ok(Value::I64(100)),
+        Ok(FrameAnswer::one(Value::I64(100))),
         "every iteration answered one hit and one miss per collection"
     );
     assert_eq!(vm.captured_output(), b"seen 100\n");

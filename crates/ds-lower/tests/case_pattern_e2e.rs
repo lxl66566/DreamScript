@@ -22,7 +22,7 @@ use ds_diag::{Files, human};
 use ds_lower::{PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds one probe module into a fresh VM, asserting the fixture
 /// checks clean so failures are the lowerer's or the VM's.
@@ -68,7 +68,7 @@ fn acceptance(name: &str, source: &str, stdout: &str) {
     vm.capture_output();
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(vm.captured_output(), stdout.as_bytes());

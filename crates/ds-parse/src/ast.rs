@@ -346,12 +346,15 @@ pub struct EnumDecl {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnumCase {
-    /// Span of the case.
+    /// Span of the case, annotation included.
     pub span: Span,
     /// Case name.
     pub name: Ident,
     /// Tuple payload types, struct payload fields, or none.
     pub payload: EnumPayload,
+    /// The `#[default]` member annotation (the union-default ruling):
+    /// the annotation's span, `None` when the case carries none.
+    pub default: Option<Span>,
 }
 
 /// The payload of an enum case.

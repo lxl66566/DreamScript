@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{FuncRefKey, Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The record's body decoded to instructions, one per pc.
 fn insts(function: &ds_mod::Function) -> Vec<Inst> {
@@ -99,7 +99,7 @@ fn len_dispatches_string_and_list_receivers_distinctly() {
     vm.capture_output();
     assert_eq!(
         vm.run("generic_len_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(

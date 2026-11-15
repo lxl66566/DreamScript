@@ -12,9 +12,10 @@ use std::{
 /// The workspace crates whose code turns source text into module bytes,
 /// ds-vm deliberately absent (it executes the artifact but never shapes
 /// it) alongside the lsp/repl/fmt subcommands.
-const BYTECODE_CRATES: [&str; 8] = [
+const BYTECODE_CRATES: [&str; 9] = [
     "ds-abi",
     "ds-check",
+    "ds-meta",
     "ds-diag",
     "ds-lower",
     "ds-mod",
@@ -24,12 +25,14 @@ const BYTECODE_CRATES: [&str; 8] = [
 ];
 
 /// The ds-cli sources on the run path itself.
-const RUN_PATH_FILES: [&str; 5] = [
+const RUN_PATH_FILES: [&str; 7] = [
     "main.rs",
     "run.rs",
     "run_cache.rs",
+    "dsi_cache.rs",
     "source.rs",
     "ambient_dsmod.rs",
+    "package.rs",
 ];
 
 /// The generated artifact inside a digested tree: its own bytes fold the

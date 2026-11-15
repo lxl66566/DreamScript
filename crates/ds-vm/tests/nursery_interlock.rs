@@ -19,8 +19,8 @@
 //!   deterministically.
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, NurseryId,
+    NurseryState, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{I64, Raw},
@@ -216,7 +216,10 @@ fn count_chain(depth: u32) -> ModuleRegistry {
 #[test]
 fn a_two_level_boundary_chain_delivers_end_to_end() {
     let mut vm = Vm::new(boundary_chain(2));
-    assert_eq!(vm.run("ic", "level_2", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("ic", "level_2", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     for id in 0..=1 {
         assert_eq!(
             vm.nursery_state(NurseryId(id)),
@@ -232,7 +235,10 @@ fn a_two_level_boundary_chain_delivers_end_to_end() {
 #[test]
 fn a_three_level_boundary_chain_delivers_end_to_end() {
     let mut vm = Vm::new(boundary_chain(3));
-    assert_eq!(vm.run("ic", "level_3", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("ic", "level_3", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     for id in 0..=2 {
         assert_eq!(
             vm.nursery_state(NurseryId(id)),
@@ -248,12 +254,18 @@ fn a_three_level_boundary_chain_delivers_end_to_end() {
 #[test]
 fn a_count_join_chain_surfaces_each_levels_count() {
     let mut vm = Vm::new(count_chain(2));
-    assert_eq!(vm.run("ic", "count_level_2", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("ic", "count_level_2", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     // the inner trap raised only its own nursery's flag
     assert_eq!(vm.nursery_cancelled(NurseryId(1)), Some(true));
     assert_eq!(vm.nursery_cancelled(NurseryId(0)), Some(false));
     let mut vm = Vm::new(count_chain(1));
-    assert_eq!(vm.run("ic", "count_level_1", &[]), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("ic", "count_level_1", &[]),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
 }
 
 /// The deep chain: a generated depth-1024 boundary chain lands — the
@@ -262,7 +274,10 @@ fn a_count_join_chain_surfaces_each_levels_count() {
 #[test]
 fn a_deep_chain_lands_without_growing_the_rust_stack() {
     let mut vm = Vm::new(boundary_chain(1024));
-    assert_eq!(vm.run("ic", "level_1024", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("ic", "level_1024", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }
 
 /// The module for the interlock-cycle refusal: root joins N1 (its drive

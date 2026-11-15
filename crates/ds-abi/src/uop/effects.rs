@@ -5,12 +5,12 @@
 use super::{
     Uop,
     Uop::{
-        AddF64, AddI64, ArenaMark, ArenaRestore, Call, Callg, Calls, Callt, Calltg, ClosureNew,
-        CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64,
-        GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64,
-        LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, StrCat,
-        StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64,
-        WrapSubI64,
+        AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64, Call, Callg,
+        Calls, Callt, Calltg, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64,
+        EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr,
+        KstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64,
+        NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew,
+        TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -26,7 +26,8 @@ pub enum Major {
     /// 0x0 — constant loads: KIMM, KCONST (`a` = dst, `d` = pool index).
     Const = 0x0,
     /// 0x1 — i64 arithmetic: ADDI64 .. MODI64 trapping, WRAPADDI64 ..
-    /// WRAPMULI64 wrapping (B7's wrap set).
+    /// WRAPMULI64 wrapping (B7's wrap set), SHLI64/SHRI64 trapping past
+    /// the bit width, BITAND/BITXOR/BITOR total (B7).
     IntArith = 0x1,
     /// 0x2 — f64 arithmetic: ADDF64, SUBF64, MULF64, DIVF64.
     FloatArith = 0x2,
@@ -151,7 +152,12 @@ impl Uop {
             | ModI64 { .. }
             | WrapAddI64 { .. }
             | WrapSubI64 { .. }
-            | WrapMulI64 { .. } => Major::IntArith,
+            | WrapMulI64 { .. }
+            | ShlI64 { .. }
+            | ShrI64 { .. }
+            | BitAndI64 { .. }
+            | BitXorI64 { .. }
+            | BitOrI64 { .. } => Major::IntArith,
             AddF64 { .. } | SubF64 { .. } | MulF64 { .. } | DivF64 { .. } => Major::FloatArith,
             EqI64 { .. }
             | NeqI64 { .. }
@@ -230,6 +236,11 @@ impl Uop {
             | WrapAddI64 { lhs, rhs, .. }
             | WrapSubI64 { lhs, rhs, .. }
             | WrapMulI64 { lhs, rhs, .. }
+            | ShlI64 { lhs, rhs, .. }
+            | ShrI64 { lhs, rhs, .. }
+            | BitAndI64 { lhs, rhs, .. }
+            | BitXorI64 { lhs, rhs, .. }
+            | BitOrI64 { lhs, rhs, .. }
             | AddF64 { lhs, rhs, .. }
             | SubF64 { lhs, rhs, .. }
             | MulF64 { lhs, rhs, .. }
@@ -270,6 +281,11 @@ impl Uop {
             | WrapAddI64 { dst, .. }
             | WrapSubI64 { dst, .. }
             | WrapMulI64 { dst, .. }
+            | ShlI64 { dst, .. }
+            | ShrI64 { dst, .. }
+            | BitAndI64 { dst, .. }
+            | BitXorI64 { dst, .. }
+            | BitOrI64 { dst, .. }
             | AddF64 { dst, .. }
             | SubF64 { dst, .. }
             | MulF64 { dst, .. }

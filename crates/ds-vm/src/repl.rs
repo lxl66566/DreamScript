@@ -54,7 +54,7 @@ use crate::{
     fiber::{FIBER_ROOT, FiberState, ResumePoint},
     native::BUILTIN_REPL_PARK,
     value::{Value, Word},
-    vm::{Active, CallInfo, DriveOutcome, Vm},
+    vm::{Active, CallInfo, DriveOutcome, FrameAnswer, Vm},
 };
 
 /// Why [`splice_park`] cannot rewrite a module.
@@ -221,13 +221,14 @@ fn answer_span(code: &[u32]) -> Option<AnswerSpan> {
 /// submission's answer word, or the entry frame completed (a defensive
 /// outcome — the spliced body has no live exit path, so a completion
 /// means hand-assembled code reached the dead region).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ReplOutcome {
     /// The fiber parked at the seam's call; the answer word rides here.
     Parked(Value),
-    /// The entry frame completed anyway; the frame is gone and the caller
-    /// must rebuild before the next submission.
-    Died(Value),
+    /// The entry frame completed anyway; its whole answer span rides
+    /// here, and the frame is gone so the caller must rebuild before the
+    /// next submission.
+    Died(FrameAnswer),
 }
 
 /// The pre-step state a trapped submission's rollback restores to: where
@@ -548,10 +549,12 @@ impl Vm {
                 self.host_release();
                 Ok(ReplOutcome::Parked(value))
             },
-            Ok(DriveOutcome::Died(value)) => {
+            Ok(DriveOutcome::Died(answer)) => {
                 self.host_release();
-                self.host_delivery(&value);
-                Ok(ReplOutcome::Died(value))
+                for value in answer.as_slice() {
+                    self.host_delivery(value);
+                }
+                Ok(ReplOutcome::Died(answer))
             },
             // a host-level drive passes no boundary and answers no
             // reentry frame

@@ -16,7 +16,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/inherent_impl_probe.ds");
 
@@ -108,7 +108,7 @@ fn inherent_calls_run_end_to_end() {
     let mut vm = run_lowered(&source, &lowered);
     assert_eq!(
         vm.run("inherent_impl_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -196,7 +196,7 @@ fn a_mut_self_receiver_reseats_its_window() {
     let mut vm = run_lowered(source, &lowered);
     assert_eq!(
         vm.run("mut_self", "main", &[]),
-        Ok(Value::I64(12)),
+        Ok(FrameAnswer::one(Value::I64(12))),
         "the window re-seats inside the body; the caller's copy keeps 1"
     );
     let main = shape(&lowered, "main");
@@ -233,7 +233,7 @@ fn an_omitted_defaulted_member_parameter_stages_the_literal_default() {
     let mut vm = run_lowered(source, &lowered);
     assert_eq!(
         vm.run("defaulted_member", "main", &[]),
-        Ok(Value::I64(4)),
+        Ok(FrameAnswer::one(Value::I64(4))),
         "the omitted default stages: ticks 1 + default 3"
     );
 }
@@ -269,7 +269,7 @@ fn a_member_tail_recursion_runs_three_million_deep_at_constant_stack() {
     let mut vm = run_lowered(source, &lowered);
     assert_eq!(
         vm.run("member_tail", "main", &[]),
-        Ok(Value::I64(7)),
+        Ok(FrameAnswer::one(Value::I64(7))),
         "the loop answers the base case's field read"
     );
     assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");
@@ -307,7 +307,7 @@ fn mutual_member_tails_run_one_million_deep_at_constant_stack() {
     let mut vm = run_lowered(source, &lowered);
     assert_eq!(
         vm.run("member_mutual", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "even at a million depth"
     );
     assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");

@@ -22,7 +22,7 @@ use std::{
 };
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -403,10 +403,11 @@ fn silent_server(listener: TcpListener) {
     });
 }
 
-fn payload_string(vm: &mut Vm, result: Value) -> String {
-    let Value::Ref(id) = result else {
+fn payload_string(vm: &mut Vm, result: &FrameAnswer) -> String {
+    let [Value::Ref(id)] = result.as_slice() else {
         panic!("the payload is a string ref, got {result:?}");
     };
+    let id = *id;
     vm.objects()
         .str_at(id.id())
         .expect("the payload names a string")
@@ -427,7 +428,7 @@ fn tcp_round_trips_against_a_local_listener() {
     let result = vm
         .run("net", "echo", &args)
         .expect("the golden round trip succeeds");
-    assert_eq!(payload_string(&mut vm, result), data);
+    assert_eq!(payload_string(&mut vm, &result), data);
 }
 
 #[test]
@@ -446,7 +447,7 @@ fn an_orderly_close_recvs_the_empty_string() {
     let result = vm
         .run("net", "recv_payload", &args)
         .expect("connect, recv, close succeed");
-    assert_eq!(payload_string(&mut vm, result), "", "close yields empty");
+    assert_eq!(payload_string(&mut vm, &result), "", "close yields empty");
 }
 
 #[test]
@@ -457,7 +458,7 @@ fn a_refused_port_yields_the_net_err_message() {
     let result = vm
         .run("net", "connect_payload", &args)
         .expect("the span overlays without a trap");
-    let message = payload_string(&mut vm, result);
+    let message = payload_string(&mut vm, &result);
     // Only the OS message text is locale-dependent; the operation+target
     // prefix and the `(os error N)` code suffix are stable. WSAECONNREFUSED
     // is 10061, ECONNREFUSED is 111.
@@ -484,7 +485,7 @@ fn a_silent_socket_times_out_within_the_bound() {
         .run("net", "recv_payload", &args)
         .expect("the timeout is a net_err, never a trap");
     let elapsed = started.elapsed();
-    let message = payload_string(&mut vm, result);
+    let message = payload_string(&mut vm, &result);
     assert_eq!(message, "net_recv 0: timed out after 200ms");
     assert!(
         elapsed < Duration::from_secs(5),
@@ -500,7 +501,7 @@ fn https_and_other_schemes_are_rejected_without_sockets() {
         .run("net", "fetch", &https)
         .expect("rejection is a net_err, not a trap");
     assert_eq!(
-        payload_string(&mut vm, result),
+        payload_string(&mut vm, &result),
         "http_get https://example.com/path: https unsupported at this platform tier (no TLS)"
     );
     let ftp = [string(&mut vm, "ftp://example.com/path")];
@@ -508,7 +509,7 @@ fn https_and_other_schemes_are_rejected_without_sockets() {
         .run("net", "fetch", &ftp)
         .expect("rejection is a net_err, not a trap");
     assert_eq!(
-        payload_string(&mut vm, result),
+        payload_string(&mut vm, &result),
         "http_get ftp://example.com/path: unsupported URL scheme (http:// only)"
     );
 }
@@ -525,7 +526,7 @@ fn http_get_serves_the_local_body() {
     let result = vm
         .run("net", "fetch", &url)
         .expect("the local exchange succeeds");
-    assert_eq!(payload_string(&mut vm, result), BODY);
+    assert_eq!(payload_string(&mut vm, &result), BODY);
     let head = request
         .recv_timeout(Duration::from_secs(5))
         .expect("the server saw the request");
@@ -558,7 +559,7 @@ fn http_get_rejects_an_over_cap_response() {
         .run("net", "fetch", &args)
         .expect("the cap is a net_err, not a trap");
     let expected = format!("http_get {url}: response exceeds the 1 MiB cap");
-    assert_eq!(payload_string(&mut vm, result), expected);
+    assert_eq!(payload_string(&mut vm, &result), expected);
 }
 
 #[test]
@@ -574,17 +575,17 @@ fn a_stale_handle_is_unknown_after_close() {
     let result = vm
         .run("net", "stale_send", &args)
         .expect("the stale send is a net_err, not a trap");
-    let message = payload_string(&mut vm, result);
+    let message = payload_string(&mut vm, &result);
     assert_eq!(message, "net_send 0: unknown connection 0");
     // and a close of the same handle fails the same way
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(0)]),
-        Ok(Value::Tag(PLATFORM_NET_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NET_ERR)))
     );
     // a handle that was never opened too
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(999)]),
-        Ok(Value::Tag(PLATFORM_NET_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NET_ERR)))
     );
 }
 
@@ -602,7 +603,7 @@ fn dropping_the_vm_closes_the_open_connection() {
     let args = [string(&mut vm, "127.0.0.1"), Value::I64(i64::from(port))];
     assert_eq!(
         vm.run("net", "leak", &args),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the leak fixture connects without closing"
     );
     drop(vm);
@@ -623,12 +624,18 @@ fn connection_handles_are_vm_state_not_run_state() {
     let mut vm = Vm::new(net_registry());
     let a = [string(&mut vm, "127.0.0.1"), Value::I64(i64::from(port_a))];
     let b = [string(&mut vm, "127.0.0.1"), Value::I64(i64::from(port_b))];
-    assert_eq!(vm.run("net", "leak", &a), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("net", "leak", &a),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     // the table survives the run boundary: ids keep counting up
-    assert_eq!(vm.run("net", "leak", &b), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("net", "leak", &b),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
     // and closing the second handle succeeds
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(1)]),
-        Ok(Value::Tag(PLATFORM_IO_OK))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_OK)))
     );
 }

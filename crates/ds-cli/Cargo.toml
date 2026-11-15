@@ -21,11 +21,15 @@ workspace = true
 anyhow.workspace    = true
 clap.workspace      = true
 ds-check.workspace  = true
+ds-dsi.workspace    = true
 ds-diag             = { workspace = true, features = ["json"] }
 ds-query.workspace  = true
 ds-stdlib = { workspace = true, features = ["ast-serde"] }
 ds-mod.workspace    = true
 ds-vm.workspace     = true
+# the `$DS_CACHE` root's one authority (the script-mode cache and the
+# package store share it)
+ds-pkg.workspace    = true
 ds-lower = { path = "../ds-lower" }
 ds-meta  = { path = "../ds-meta" }
 ds-lsp   = { path = "../ds-lsp" }
@@ -45,6 +49,8 @@ rustyline = "19.0.0"
 [dev-dependencies]
 # run-time corpus resolution for the conformance-reading tests
 ds-corpus-path.workspace = true
+# the prefix-cache gates' served-vs-fresh tree comparison
+postcard = { workspace = true }
 
 [build-dependencies]
 # the build identity the cache key folds (see build.rs)

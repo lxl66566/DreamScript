@@ -11,15 +11,15 @@ use ds_diag::Files;
 use ds_parse::parse;
 
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "struct list[t]\n",
-    "struct map[k, v]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
-    "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub struct list[t]\n",
+    "pub struct map[k, v]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+    "pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
 );
 
 /// Type-checks `source` beside the ambient, rendering every diagnostic as
@@ -44,12 +44,12 @@ fn check(source: &str) -> Vec<String> {
 fn fn_typed_arguments_construct_and_inhabit_bindings() {
     for source in [
         // the empty constructors carry the fn-typed element/value
-        "fn inc(x: int) -> int { x + 1 }\nconst fns = list[fn(int) -> int]()\n",
-        "const m = map[string, fn(int) -> int]()\n",
+        "pub fn inc(x: int) -> int { x + 1 }\nconst fns = list[fn(int) -> int]()\n",
+        "pub const m = map[string, fn(int) -> int]()\n",
         // nesting composes through the inner application
-        "const n = list[list[fn() -> int]]()\n",
+        "pub const n = list[list[fn() -> int]]()\n",
         // a named fn value inhabits the fn-typed binding
-        "fn inc(x: int) -> int { x + 1 }\nconst g: fn(int) -> int = inc\n",
+        "pub fn inc(x: int) -> int { x + 1 }\nconst g: fn(int) -> int = inc\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }

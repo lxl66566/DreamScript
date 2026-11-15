@@ -13,12 +13,12 @@
 //! byte part through its own impl, and a union-typed binding
 //! dispatching through the sibling branches of the one written head.
 
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
+use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/derive_hash_probe.ds");
 
@@ -81,7 +81,7 @@ fn derived_hash_answers_through_every_call_spelling() {
             Value::F64(na),
             Value::F64(nb)
         ]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -117,7 +117,7 @@ fn the_expansion_appends_one_impl_per_derive() {
     let id = files.add_source("derive_hash_probe.ds", SOURCE);
     let asts = [parse(&files, id).expect("the fixture parses")];
     let original = asts[0].blocks.iter().flat_map(|b| b.items.iter()).count();
-    let (expanded, diags) = ds_check::expand_derives(&asts);
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
     assert!(diags.is_empty(), "no derive refusals: {diags:?}");
     let grown = expanded[0]
         .blocks

@@ -26,6 +26,14 @@ pub enum LowerError {
     /// The package still carries checker diagnostics.
     #[error("the package carries {count} checker diagnostics; lower only clean packages")]
     NotChecked { count: usize },
+    /// The package's affine walk reports violations: the move and deinit
+    /// placement lowering derives from that walk's facts hold only over a
+    /// clean one, so a moved-then-used value refuses here instead of
+    /// lowering code whose deinit could fire twice at runtime.
+    #[error(
+        "the package carries {count} linear-use violations; lower only linearly clean packages"
+    )]
+    NotLinear { count: usize },
     /// A function record was rejected by the ds-mod builder.
     #[error("the function record was rejected: {0}")]
     Build(String),

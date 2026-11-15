@@ -1,14 +1,17 @@
 //! The `ds build` subcommand: compile one .ds source to a dsmod module
 //! (parse, check, lower, write) — the artifact loads through the existing
 //! `ds run <file.dsmod>` path and `read_mmap`, and its header carries the
-//! source's blake3 hash, which [`ds_mod::read_checked`] verifies.
+//! source's blake3 hash, which [`ds_mod::read_checked`] verifies. A
+//! source with a `ds.pkg` beside it builds as a package: the manifest
+//! resolves over the store, and the artifact's link table records the
+//! resolved graph's identities.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
 
-use crate::source;
+use crate::{package, source};
 
 /// The `ds build` surface: one source file, one output module.
 #[derive(Debug, Args)]
@@ -30,7 +33,11 @@ pub struct BuildArgs {
 /// blake3 over bytes the module already commits to. The written bytes are
 /// verified against the module value in debug builds instead.
 pub fn build(args: &BuildArgs) -> Result<()> {
-    let compiled = source::compile(&args.file, "main", args.no_ambient)?;
+    let prefix = crate::dsi_cache::PrefixCache::discover(true, args.no_ambient);
+    let compiled = match package::open(&args.file, args.no_ambient)? {
+        Some(graph) => package::compile_root(&args.file, "main", &graph)?,
+        None => source::compile(&args.file, "main", args.no_ambient, Some(&prefix))?,
+    };
     let module = compiled.lowered.module();
     let bytes = ds_mod::write(module);
     verify_written(&bytes, module);

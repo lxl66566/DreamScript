@@ -2690,9 +2690,9 @@ fn drive_fibers(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape: &mut 
         for _ in 0..=rng.below(3) {
             let payload = stage_host_word(vm, rng, SlotType::Raw);
             match vm.resume_fiber(id, payload) {
-                Ok(value) => {
+                Ok(answer) => {
                     shape.resumed += 1;
-                    if matches!(value, Value::Ref(_)) {
+                    if matches!(answer.as_slice(), [Value::Ref(_)]) {
                         shape.resumed_ref += 1;
                     }
                 },

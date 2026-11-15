@@ -18,7 +18,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/free_generic_probe.ds");
 
@@ -118,7 +118,7 @@ fn free_generic_calls_run_evidence_staged_and_answered() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("free_generic_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -245,7 +245,7 @@ fn a_lone_callee_demand_collects_into_the_calling_frame() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -308,7 +308,7 @@ fn callee_demands_propagate_through_mutually_recursive_callers() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

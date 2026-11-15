@@ -10,7 +10,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -65,7 +65,7 @@ fn a_written_fn_type_narrows_and_calls_through() {
     vm.capture_output();
     assert_eq!(
         vm.run("is_fn", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(
@@ -121,7 +121,7 @@ fn a_covering_union_test_folds_true_and_runs() {
     vm.capture_output();
     assert_eq!(
         vm.run("is_union", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

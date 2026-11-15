@@ -417,7 +417,13 @@ field_member = { field_name ~ h ~ ":" ~ sp ~ type_expr }
 deinit_member = { "deinit" ~ !ident_cont ~ sp ~ block_expr }
 
 enum_item = { kw_enum ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ sp ~ "{" ~ sp ~ (enum_case ~ (decl_sep ~ enum_case)* ~ decl_sep?)? ~ sp ~ "}" }
-enum_case = { ident ~ case_payload? }
+// The union-default member annotation (the 2026-11-15 ruling): exactly
+// the `#[default]` spelling annotates one enum case — the `default`
+// derive family's member choice. The grammar pins the spelling, so any
+// other attribute on a case is a syntax error rather than a silent
+// drop, and one case carries at most one annotation.
+case_default = { "#" ~ "[" ~ sp ~ "default" ~ !ident_cont ~ sp ~ "]" }
+enum_case = { (case_default ~ sp)? ~ ident ~ case_payload? }
 case_payload = _{ case_tuple | case_struct }
 case_tuple = { h ~ "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
 case_struct = { h ~ "{" ~ sp ~ (field_member ~ (sp ~ "," ~ sp ~ field_member)* ~ sp ~ ","?)? ~ sp ~ "}" }

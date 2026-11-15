@@ -240,7 +240,11 @@ pub(crate) fn drive(rebuild: bool, release_at_use: bool) -> Value {
     // Vm::new installs the builtin core (concat's native table), so the
     // rebuild kernel's pool FuncRef resolves
     let mut vm = Vm::new(registry(rebuild, release_at_use));
-    vm.run("loop_claims", "main", &[]).expect("the kernel runs")
+    let answer = vm.run("loop_claims", "main", &[]).expect("the kernel runs");
+    let [got] = answer.as_slice() else {
+        panic!("the kernel answers one word");
+    };
+    *got
 }
 
 #[library_benchmark]

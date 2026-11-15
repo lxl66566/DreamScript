@@ -18,19 +18,19 @@ fn check(source: &str) -> (ds_check::Checked, ds_check::Linearity) {
 
 /// The shared vocabulary of the linear cases.
 const PRELUDE: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "struct handle: ~Copyable {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub struct handle: ~Copyable {\n",
     "  fd: int\n",
     "  deinit { drop_handle(self.fd) }\n",
     "}\n",
-    "extern fn open_handle (p: string) -> handle\n",
-    "extern fn drop_handle (fd: int) -> ()\n",
-    "extern fn take_handle (move h: handle) -> int\n",
-    "extern fn share_handle (h: handle) -> int\n",
-    "extern fn window_handle (h: mut handle) -> int\n",
+    "pub extern fn open_handle (p: string) -> handle\n",
+    "pub extern fn drop_handle (fd: int) -> ()\n",
+    "pub extern fn take_handle (move h: handle) -> int\n",
+    "pub extern fn share_handle (h: handle) -> int\n",
+    "pub extern fn window_handle (h: mut handle) -> int\n",
 );
 
 fn case(body: &str) -> (ds_check::Checked, ds_check::Linearity) {
@@ -49,7 +49,7 @@ fn expect_one(lin: &ds_check::Linearity) -> &Diagnostic {
 #[test]
 fn moved_then_used_renders_the_two_span_golden() {
     let body = concat!(
-        "fn go(p: string) -> int {\n",
+        "pub fn go(p: string) -> int {\n",
         "  const h = open_handle(p)\n",
         "  take_handle(h)\n",
         "  take_handle(h)\n",
@@ -266,18 +266,18 @@ fn a_reinitialized_var_in_a_loop_reexecutes_cleanly() {
 #[test]
 fn deinit_on_a_copyable_struct_is_ill_formed_and_twice_is_rejected() {
     let source = concat!(
-        "tag int\n",
-        "trait Copyable { }\n",
-        "struct a {\n",
+        "pub tag int\n",
+        "pub trait Copyable { }\n",
+        "pub struct a {\n",
         "  x: int\n",
         "  deinit { drop_int(self.x) }\n",
         "}\n",
-        "struct b: ~Copyable {\n",
+        "pub struct b: ~Copyable {\n",
         "  x: int\n",
         "  deinit { drop_int(self.x) }\n",
         "  deinit { drop_int(self.x) }\n",
         "}\n",
-        "extern fn drop_int (x: int) -> ()\n",
+        "pub extern fn drop_int (x: int) -> ()\n",
     );
     let (checked, _) = check(source);
     assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
@@ -318,10 +318,10 @@ extern fn take_wrapper (move w: wrapper) -> int
 #[test]
 fn linear_generic_parameter_flows_from_the_marker_bound() {
     let source = concat!(
-        "tag int\n",
-        "trait Copyable { }\n",
-        "extern fn take[t] (move x: t) -> int\n",
-        "fn go[t: ~Copyable](move x: t) -> int {\n",
+        "pub tag int\n",
+        "pub trait Copyable { }\n",
+        "pub extern fn take[t] (move x: t) -> int\n",
+        "pub fn go[t: ~Copyable](move x: t) -> int {\n",
         "  take(x)\n",
         "  take(x)\n",
         "}\n",
@@ -335,12 +335,12 @@ fn linear_generic_parameter_flows_from_the_marker_bound() {
 #[test]
 fn a_copyable_generic_parameter_flows_from_the_default() {
     let source = concat!(
-        "tag int\n",
-        "fn go[t](x: t) -> int {\n",
+        "pub tag int\n",
+        "pub fn go[t](x: t) -> int {\n",
         "  take(x)\n",
         "  take(x)\n",
         "}\n",
-        "extern fn take[t] (move x: t) -> int\n",
+        "pub extern fn take[t] (move x: t) -> int\n",
     );
     let (_, lin) = check(source);
     assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
@@ -756,7 +756,7 @@ fn cross_file_top_level_consumption_is_order_independent() {
     let a = files.add_source(
         "a.ds",
         concat!(
-            "fn go() -> int {\n",
+            "pub fn go() -> int {\n",
             "  take_handle(shared)\n",
             "  take_handle(shared)\n",
             "  0\n",
@@ -765,7 +765,7 @@ fn cross_file_top_level_consumption_is_order_independent() {
     );
     let b = files.add_source(
         "b.ds",
-        &format!("{PRELUDE}const shared = open_handle(\"x\")\n"),
+        &format!("{PRELUDE}pub const shared = open_handle(\"x\")\n"),
     );
     let ast_a = parse(&files, a).unwrap_or_else(|d| panic!("a parses: {d:?}"));
     let ast_b = parse(&files, b).unwrap_or_else(|d| panic!("b parses: {d:?}"));

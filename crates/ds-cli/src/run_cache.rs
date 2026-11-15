@@ -1,6 +1,7 @@
 //! The script-mode dsmod cache behind `ds run <file.ds>`: the CLI-owned
-//! key fold, the `$DS_CACHE` root, the mmap hit path, and the
-//! temp-plus-rename write. The cache never fails a run: a root that
+//! key fold, the mmap hit path, and the temp-plus-rename write, over the
+//! `$DS_CACHE` root ds-pkg resolves (the one authority the package store
+//! shares). The cache never fails a run: a root that
 //! cannot resolve, an artifact that cannot be read or validated, and a
 //! write that cannot land are all silent falls back to the in-process
 //! source pipeline.
@@ -52,7 +53,7 @@ impl RunCache {
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
-            root: enabled.then(resolve_root).flatten(),
+            root: enabled.then(ds_pkg::store::cache_root).flatten(),
             ambient: (!no_ambient).then(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
             debug,
         };
@@ -162,9 +163,13 @@ impl RunCache {
     /// - the entry source hash;
     /// - the ambient identity: the stdlib ambient's text hash when its impl bodies lower into the
     ///   module, a marker byte when `--no-ambient` compiles without it;
-    /// - each linked dep's content hash in link order: a script lowers into one module (natives are
-    ///   named and the ambient's impl bodies inline), so the list is empty today; the loading
-    ///   round's dep hashes fold here without touching the other components;
+    /// - each linked dep's content hash in link order: the dep-list writer records the source's
+    ///   imports into the header, but this round every recorded hash is a pure function of
+    ///   components already folded — the source hash determines the imports, the ambient identity
+    ///   determines @std's hash, every other name records the zero marker — so folding them adds no
+    ///   key entropy, and the lookup side cannot derive dep content without the front end (the key
+    ///   must be computable before the artifact is read). The fold lands when package resolution
+    ///   produces dep identities the source text alone does not determine;
     /// - the dsmod format version: the reader refuses foreign versions anyway, and folding it
     ///   re-keys instead of paying the refused read;
     /// - the build identity: a build-time digest of the compiler crates' source trees (the package
@@ -184,7 +189,8 @@ impl RunCache {
                 hasher.update(&[0]);
             },
         }
-        // no linked deps yet; their content hashes will fold right here
+        // no dep identity beyond the folded components yet (see `key`'s
+        // doc); resolved dep hashes fold right here when they exist
         hasher.update(&0u64.to_le_bytes());
         hasher.update(&[FORMAT_VERSION]);
         fold_str(&mut hasher, BUILD_ID);
@@ -285,7 +291,7 @@ fn entry_staging<'a>(module: &'a Module, entry: &str) -> EntryStaging<'a> {
 
 /// Folds one length-prefixed UTF-8 component so adjacent
 /// variable-length components cannot splice.
-fn fold_str(hasher: &mut blake3::Hasher, text: &str) {
+pub(crate) fn fold_str(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
 }
@@ -297,43 +303,4 @@ fn module_stem(path: &Path) -> Option<String> {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty())
-}
-
-/// `$DS_CACHE` wins (an empty value means unset); without it the per-OS
-/// user cache directory is the default.
-fn resolve_root() -> Option<PathBuf> {
-    if let Some(set) = std::env::var_os("DS_CACHE") {
-        if !set.is_empty() {
-            return Some(PathBuf::from(set));
-        }
-    }
-    default_root()
-}
-
-/// The default cache root, std-only: `%LOCALAPPDATA%\ds\cache` on
-/// Windows, `~/Library/Caches/ds` on macOS, and `$XDG_CACHE_HOME`
-/// (absolute only) or `~/.cache` plus `ds` elsewhere. A machine naming
-/// no home directory runs uncached.
-fn default_root() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("ds").join("cache"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches/ds"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        match std::env::var_os("XDG_CACHE_HOME") {
-            Some(dir) if !dir.is_empty() && Path::new(&dir).is_absolute() => {
-                Some(PathBuf::from(dir).join("ds"))
-            },
-            _ => std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").join("ds")),
-        }
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        None
-    }
 }

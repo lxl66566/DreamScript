@@ -1,13 +1,14 @@
 [package]
-name       = "ds-meta"
-version    = "0.1.0"
-edition    = "2024"
-rust-version = "1.85"
-license    = "MIT OR Apache-2.0"
-repository = "https://github.com/lxl66566/DreamScript"
-keywords   = ["dreamscript", "language", "compiler"]
-categories = ["compilers"]
-description = "The DreamScript comptime evaluator: comptime calls run as ordinary code on the same uop VM in a world-fenced context (M6)"
+name         = "ds-meta"
+description  = "The DreamScript meta layer: the derive engine, the derive-expanding analyze entries, and the comptime evaluator on the same uop VM in a world-fenced context (M6)"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace       = true
+repository.workspace    = true
+keywords.workspace      = true
+categories.workspace    = true
+readme.workspace       = true
 
 [lints]
 workspace = true
@@ -19,3 +20,7 @@ ds-check  = { workspace = true }
 ds-lower  = { workspace = true }
 ds-mod    = { workspace = true }
 ds-vm     = { workspace = true }
+
+[dev-dependencies]
+# run-time corpus resolution for the derive conformance gate
+ds-corpus-path.workspace = true

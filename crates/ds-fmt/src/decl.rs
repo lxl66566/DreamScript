@@ -317,6 +317,15 @@ fn write_enum(ctx: &Ctx, out: &mut String, base: usize, e: &EnumDecl) {
 }
 
 fn write_enum_case(ctx: &Ctx, out: &mut String, base: usize, c: &EnumCase) {
+    if let Some(span) = c.default {
+        out.push_str("#[default]");
+        if ctx.one_line(span) {
+            out.push(' ');
+        } else {
+            out.push('\n');
+            push_indent(out, base);
+        }
+    }
     out.push_str(&c.name.name);
     match &c.payload {
         EnumPayload::None => {},

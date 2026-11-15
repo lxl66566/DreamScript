@@ -7,8 +7,9 @@ use crate::hash::Hash128;
 /// Derives the cache location of a module artifact:
 /// `<cache_root>/ir/<target_triple>/<hex-hash>.dsmod` (G3.5).
 ///
-/// Pure function: resolving the `$DS_CACHE` root is the CLI layer's job,
-/// not this crate's. `source_hash` is the caller-computed cache key
+/// Pure function: resolving the `$DS_CACHE` root is the caller's job
+/// (ds-pkg's store is the one authority both caches share), not this
+/// crate's. `source_hash` is the caller-computed cache key
 /// (blake3 over source and dependency hashes).
 #[must_use]
 pub fn cache_path(cache_root: &Path, target_triple: &str, source_hash: Hash128) -> PathBuf {

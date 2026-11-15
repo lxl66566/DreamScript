@@ -26,7 +26,7 @@ use ds_diag::Files;
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The shared trait story: two monomorphic member bodies and one generic
 /// impl over `list[t]` whose body iterates its elements, so a probe can
@@ -292,7 +292,7 @@ fn lands_and_runs(source: &str, stdout: &[u8]) {
     vm.capture_output();
     assert_eq!(
         vm.run("refusal", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main lands"
     );
     assert_eq!(vm.captured_output(), stdout, "the run prints its golden");
@@ -659,7 +659,7 @@ fn an_uncalled_free_generic_fn_lowers_once_and_never_runs() {
     vm.capture_output();
     assert_eq!(
         vm.run("inert", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the uncalled body never touches the run"
     );
     assert_eq!(vm.captured_output(), b"m\n");

@@ -16,10 +16,13 @@
 //!
 //! # Capabilities of this slice
 //!
-//! Full-text synchronization (the client ships the whole document per
-//! edit; no incremental deltas), diagnostics from the package-grain query
+//! Incremental synchronization (a change notification's ranged edits
+//! spliced into the held document through the LSP UTF-16 position
+//! columns, a rangeless change replacing the whole text, so full-text
+//! clients ride the same path), diagnostics from the package-grain query
 //! values (parse, resolve, check, linearity, platform classes) published
-//! on open and change, hover over the checked expression types rendered
+//! on open and on the trailing edge of a short debounce window after
+//! change and save, hover over the checked expression types rendered
 //! through the analysis universe with the enclosing definition's effect
 //! row, go-to-definition through the resolution side table, completion of
 //! the names visible at the position through the scope-index query
@@ -84,8 +87,11 @@
 //!   expression at the position.
 //! * Ambient stdlib names resolve (the ambient registers first), but the ambient file has no client
 //!   URI, so definitions pointing into it answer none.
-//! * No debounce: every open and change re-queries and publishes. The engine's memoization is the
-//!   latency story for now.
+//! * Change and save notifications defer their diagnostics publish through a short trailing
+//!   debounce window, so the memoized queries recompute at most once per window; the edits
+//!   themselves apply immediately, so a request mid-window answers the client's current text. Save
+//!   notifications carry no content (the synced text is authoritative), and a change for a document
+//!   never opened syncs nothing (the protocol orders `didOpen` first).
 
 #![warn(missing_docs)]
 
@@ -134,11 +140,19 @@ enum Request {
         text: String,
         reply: Reply<FileId>,
     },
-    /// A document's whole content replaced (did_change; did_close ships
-    /// an empty text).
+    /// A document's whole content replaced (did_close ships the empty
+    /// close text).
     Set {
         path: PathBuf,
         text: String,
+        reply: Reply<()>,
+    },
+    /// A document's didChange content array: each change in array order,
+    /// a ranged one spliced into the held text through the LSP UTF-16
+    /// position columns, a rangeless one replacing it whole.
+    Edit {
+        path: PathBuf,
+        changes: Vec<lsp::TextDocumentContentChangeEvent>,
         reply: Reply<()>,
     },
     /// The document's diagnostics.
@@ -350,6 +364,34 @@ impl Session {
     fn set(&mut self, path: &Path, text: &str) -> Result<(), QueryError> {
         if let Some(file) = self.docs.get(path).map(|doc| doc.file) {
             return self.db.set_file_content(file, text);
+        }
+        Ok(())
+    }
+
+    /// Applies a didChange content array to the document: each change
+    /// in array order — a range-bearing one splices into the held text
+    /// through the LSP UTF-16 position columns, a rangeless one
+    /// replaces the whole content (full-text clients ride the same
+    /// command). A change for a document never opened syncs nothing
+    /// (the protocol orders `didOpen` first).
+    fn edit(
+        &mut self,
+        path: &Path,
+        changes: &[lsp::TextDocumentContentChangeEvent],
+    ) -> Result<(), String> {
+        let Some(file) = self.docs.get(path).map(|doc| doc.file) else {
+            return Ok(());
+        };
+        for change in changes {
+            let new_text = match change.range {
+                Some(range) => {
+                    convert::apply_change(self.db.files().source(file), range, &change.text)?
+                },
+                None => change.text.clone(),
+            };
+            self.db
+                .set_file_content(file, &new_text)
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -1108,6 +1150,14 @@ fn handle(request: Request, session: &mut Session) {
                 guarded(move || session.set(&path, &text).map_err(|error| error.to_string()));
             reply.send(answer).ok();
         },
+        Request::Edit {
+            path,
+            changes,
+            reply,
+        } => {
+            let answer = guarded(move || session.edit(&path, &changes));
+            reply.send(answer).ok();
+        },
         Request::Diagnostics { path, reply } => {
             let answer = guarded(move || {
                 session.file(&path).map_or_else(
@@ -1359,6 +1409,131 @@ mod tests {
         session.set(Path::new("a.ds"), "").expect("the close runs");
         let again = open(&mut session, "a.ds", "const one = 2\n");
         assert_eq!(a, again);
+    }
+
+    /// One ranged change splices into the held document and a rangeless
+    /// change replaces the whole text, so diagnostics track the edit.
+    #[test]
+    fn incremental_edits_move_the_diagnostics() {
+        let mut session = Session::new();
+        let file = open(&mut session, "a.ds", "const one: string = \"hi\"\n");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the source opens clean"
+        );
+        let edit = |line, start, end, text: &str| lsp::TextDocumentContentChangeEvent {
+            range: Some(lsp::Range::new(
+                lsp::Position::new(line, start),
+                lsp::Position::new(line, end),
+            )),
+            range_length: None,
+            text: text.to_owned(),
+        };
+        // `string` sits at columns 12..18: replacing it with `int`
+        // mismatches the string initializer.
+        session
+            .edit(Path::new("a.ds"), &[edit(0, 11, 17, "int")])
+            .expect("the edit applies");
+        let diags = session.diagnostics(file).expect("the pass runs");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        // An inverted range is refused instead of spliced.
+        assert!(
+            session
+                .edit(Path::new("a.ds"), &[edit(0, 5, 2, "x")])
+                .is_err(),
+            "an inverted range is refused"
+        );
+        // A rangeless change replaces the whole text (the full-text
+        // client's path) and the mismatch clears.
+        session
+            .edit(Path::new("a.ds"), &[lsp::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "const one: string = \"hi\"\n".to_owned(),
+            }])
+            .expect("the change applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the rangeless change replaced the whole text"
+        );
+    }
+
+    /// The content array applies in order: an insertion shifts what a
+    /// later change's range addresses.
+    #[test]
+    fn the_change_array_applies_in_order() {
+        let mut session = Session::new();
+        let file = open(&mut session, "a.ds", "const one: string = \"hi\"\n");
+        let edit = |line, start, end, text: &str| lsp::TextDocumentContentChangeEvent {
+            range: Some(lsp::Range::new(
+                lsp::Position::new(line, start),
+                lsp::Position::new(line, end),
+            )),
+            range_length: None,
+            text: text.to_owned(),
+        };
+        // First the annotation breaks on line 0, then a leading comment
+        // line shifts the mismatch down: each range addresses the text
+        // as it stands when its change applies.
+        session
+            .edit(Path::new("a.ds"), &[
+                edit(0, 11, 17, "int"),
+                edit(0, 0, 0, "// lead\n"),
+            ])
+            .expect("the edits apply");
+        let diags = session.diagnostics(file).expect("the pass runs");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].range.start.line, 1);
+    }
+
+    /// A multibyte document edits through UTF-16 columns: an insert
+    /// before an astral character never lands inside its bytes, and the
+    /// character's own two-column range deletes it whole.
+    #[test]
+    fn incremental_edits_count_utf16_columns() {
+        let mut session = Session::new();
+        let file = open(&mut session, "a.ds", "const flag: string = \"\u{1f680}\"\n");
+        let edit = |line, start, end, text: &str| lsp::TextDocumentContentChangeEvent {
+            range: Some(lsp::Range::new(
+                lsp::Position::new(line, start),
+                lsp::Position::new(line, end),
+            )),
+            range_length: None,
+            text: text.to_owned(),
+        };
+        // The literal opens at column 21, so the rocket occupies UTF-16
+        // columns 22..24: an insert at 22 lands before it, and slicing
+        // inside its bytes would fail the parse outright.
+        session
+            .edit(Path::new("a.ds"), &[edit(0, 22, 22, "x")])
+            .expect("the insert applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the string literal stays whole"
+        );
+        // The insert moved the rocket to columns 23..25, so its own
+        // two-column range deletes it whole and leaves a clean literal.
+        session
+            .edit(Path::new("a.ds"), &[edit(0, 23, 25, "")])
+            .expect("the delete applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the rocket deleted whole leaves a clean literal"
+        );
+    }
+
+    /// A change for a document never opened syncs nothing (the protocol
+    /// orders `didOpen` first).
+    #[test]
+    fn edits_for_never_opened_documents_sync_nothing() {
+        let mut session = Session::new();
+        session
+            .edit(Path::new("b.ds"), &[lsp::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "const one = 1\n".to_owned(),
+            }])
+            .expect("a change before any open syncs nothing");
     }
 
     /// Hover answers the checked type at the position, rendered through

@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -85,7 +85,7 @@ fn for_over_a_range_runs_every_step_and_in_tests_both_edges() {
     vm.capture_output();
     assert_eq!(
         vm.run("range_for", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     // acc: 1 (single step) + 10 (1..5) + 15 (1..=5) = 26; hits: 2 * 26

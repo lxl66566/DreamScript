@@ -13,7 +13,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{FuncRefKey, Hash128, read_checked, write};
 use ds_parse::{parse, parse_script};
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The record's body decoded to instructions, one per pc.
 fn insts(function: &ds_mod::Function) -> Vec<Inst> {
@@ -29,22 +29,22 @@ fn insts(function: &ds_mod::Function) -> Vec<Inst> {
 }
 
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "enum net_err {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub enum net_err {\n",
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "struct list[t]\n",
-    "extern fn list_new[t] () -> list[t]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "extern fn str_int (x: int) -> string\n",
-    "extern fn println (msg: string) -> ()\n",
-    "extern fn cancel[t] (e: t) -> ()\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_new[t] () -> list[t]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn str_int (x: int) -> string\n",
+    "pub extern fn println (msg: string) -> ()\n",
+    "pub extern fn cancel[t] (e: t) -> ()\n",
 );
 
 /// Lowers one source against the ambient, round-trips it, and installs
@@ -93,7 +93,11 @@ fn run_main(source: &str, script: bool) -> (Vm, String) {
     let (mut vm, _) = build_vm(source, script);
     vm.capture_output();
     let out = vm.run("probe", "main", &[]);
-    assert_eq!(out, Ok(Value::I64(0)), "main returns unit");
+    assert_eq!(
+        out,
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns unit"
+    );
     let text = String::from_utf8(vm.captured_output().to_vec()).expect("utf-8 stdout");
     (vm, text)
 }

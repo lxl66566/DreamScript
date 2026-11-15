@@ -68,6 +68,10 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   self-contained under the ambient (the corpus README's run stage documents their placement).
 /// * nursery_surface: zero noise — the nursery items are self-contained under the ambient (the net
 ///   failure taxonomy and the cancel seam are ambient-owned).
+/// * tutorial_surface: zero noise — the interpolation and receiverless-default items are
+///   self-contained under the ambient (the derive traits and `println` beside the primitives).
+/// * shift_bitwise: the one error is the file's own reject item (the float `&` operand); the value,
+///   precedence, and trap-edge items are self-contained under the ambient.
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("types_hybrid.ds", 4);
@@ -124,6 +128,12 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // zero noise — the nursery teardown items are self-contained under
     // the ambient (E5, the drain-doors round)
     assert_corpus_clean("teardown_deinit.ds", 0);
+    // zero noise — the tutorial's recently landed interpolation and
+    // receiverless-default items are self-contained under the ambient
+    assert_corpus_clean("tutorial_surface.ds", 0);
+    // the one error is the file's own reject item (the float `&`
+    // operand the integer table refuses)
+    assert_corpus_clean("shift_bitwise.ds", 1);
 }
 
 /// The intended rejection prints as noise under the ambient and pins its

@@ -13,7 +13,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const ATOMS: &str = concat!(
     "tag int\n",
@@ -42,7 +42,7 @@ fn source(body: &str) -> String {
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the check is clean so failures are
 /// the lowerer's or the VM's.
-fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let mut files = Files::new();
     let file_name = format!("{name}.ds");
     let id = files.add_source(&file_name, source);
@@ -77,7 +77,7 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
 /// dec-to-alloc pairing balanced).
 fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
     let (vm, got) = run_source(name, source);
-    assert_eq!(got, Ok(result), "the run result");
+    assert_eq!(got, Ok(FrameAnswer::one(result)), "the run result");
     assert_eq!(vm.captured_output(), stdout, "the golden stdout");
     assert!(
         vm.objects().is_empty(),

@@ -17,7 +17,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/trait_default_body_probe.ds");
 
@@ -70,7 +70,7 @@ fn omitted_defaulted_dispatches_into_the_declared_default_body() {
     let mut vm = run_lowered(&lowered, SOURCE);
     assert_eq!(
         vm.run("trait_default_body_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -427,7 +427,7 @@ fn a_concrete_trait_var_substitution_runs_through_the_default_body() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -480,7 +480,7 @@ fn an_impl_var_trait_substitution_chains_transitively() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -553,7 +553,7 @@ fn a_default_body_calling_an_omitted_sibling_chains_the_siblings_default() {
     let mut vm = run_lowered(&lowered, source);
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

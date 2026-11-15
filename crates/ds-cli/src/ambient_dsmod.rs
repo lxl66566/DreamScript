@@ -35,7 +35,7 @@ use ds_mod::{Function, Hash128, read};
 pub(crate) const AMBIENT_MODULE_NAME: &str = "@std";
 
 /// The artifact header's size in bytes: the build identity's fold.
-const HEADER: usize = 16;
+pub(crate) const HEADER: usize = 16;
 
 /// The artifact's bytes for one generated module: the build identity's
 /// fold ahead of the module's own bytes, the `.ast`/`.dsi` header
@@ -67,7 +67,7 @@ pub(crate) fn generate_module() -> Module {
     let mut files = ds_diag::Files::new();
     let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
     let ast = ds_parse::parse(&files, id).expect("the ambient parses");
-    let analyzed = ds_check::analyze_owned(&files, vec![ast], &[false]);
+    let analyzed = ds_meta::analyze_owned(&files, vec![ast], &[false]);
     assert!(
         analyzed.checked.diags.is_empty(),
         "the ambient does not check clean: {:?}",

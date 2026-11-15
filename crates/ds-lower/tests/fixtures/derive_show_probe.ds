@@ -5,7 +5,9 @@
 // generic function's bound dispatch (CALLG over the impl member body,
 // the runtime-evidence form over the one-word tag receiver). A
 // union-typed binding dispatches through the sibling branches of the
-// one written head.
+// one written head. A derived struct over a derived struct-field part
+// composes: the outer body's written dispatch over the one-word field
+// read stages the inner body, so the nesting answers both spellings.
 // items:
 // int: stage: run
 // string: stage: run
@@ -14,6 +16,8 @@
 // point: stage: run
 // mark: stage: run
 // flag: stage: run
+// inner: stage: run
+// outer: stage: run
 // render: stage: run
 // main: stage: run
 
@@ -35,6 +39,12 @@ enum mark { miss, hit(int), span { from: int, to: int } }
 #[derive(show)]
 tag flag
 
+#[derive(show)]
+struct inner { v: int }
+
+#[derive(show)]
+struct outer { i: inner }
+
 fn render[t: show](v: t) -> string { v.show() }
 
 fn main() -> int {
@@ -52,5 +62,8 @@ fn main() -> int {
   const u2: mark = hit(3)
   println(u1.show())
   println(u2.show())
+  const o = outer { i: inner { v: 6 } }
+  println("o=$o")
+  println(o.show())
   0
 }

@@ -14,7 +14,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64},
@@ -224,7 +224,7 @@ fn bench_sum_to(c: &mut Criterion) {
         let mut vm = Vm::new(sum_to_fixture());
         assert_eq!(
             vm.run("mut", "sum_to", &[Value::I64(n)]),
-            Ok(Value::I64(n * (n + 1) / 2)),
+            Ok(FrameAnswer::one(Value::I64(n * (n + 1) / 2))),
             "the fixture sums before it is timed"
         );
         group.bench_function(label, |b| {
@@ -280,7 +280,7 @@ fn bench_module_dispatch(c: &mut Criterion) {
         let mut vm = Vm::new(dispatch_loop_fixture());
         assert_eq!(
             vm.run("driver", "drive", &[Value::I64(calls)]),
-            Ok(Value::I64(calls * 2)),
+            Ok(FrameAnswer::one(Value::I64(calls * 2))),
             "the fixture dispatches before it is timed"
         );
         group.bench_function(label, |b| {
@@ -303,7 +303,7 @@ fn bench_run_setup(c: &mut Criterion) {
     let mut vm = Vm::new(trivial_fixture());
     assert_eq!(
         vm.run("mut", "trivial", &[Value::I64(7)]),
-        Ok(Value::I64(7)),
+        Ok(FrameAnswer::one(Value::I64(7))),
         "the fixture answers before it is timed"
     );
     group.bench_function("trivial_run", |b| {

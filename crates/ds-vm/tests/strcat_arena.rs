@@ -11,8 +11,8 @@
 //! unboundedly.
 
 use ds_vm::{
-    ArenaMisuse, ArenaPackError, Const, ConstKind, FunctionDef, ModuleBuildError, ModuleRegistry,
-    ModuleVersion, Value, Vm,
+    ArenaMisuse, ArenaPackError, Const, ConstKind, FrameAnswer, FunctionDef, ModuleBuildError,
+    ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{RcOp, SlotType, uop::Uop},
     assemble,
 };
@@ -121,7 +121,7 @@ fn a_designated_concat_serves_and_equates_across_domains() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("strcat_arena", "main", &[]),
-        Ok(Value::I64(1)),
+        Ok(FrameAnswer::one(Value::I64(1))),
         "the arena word equates across domains and differs from other text"
     );
     assert!(

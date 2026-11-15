@@ -1,0 +1,24 @@
+[package]
+name         = "ds-dsi"
+description = "DreamScript's checked-prefix artifact: the pre-resolved, pre-declared front-end half a cold compile serves"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace  = true
+readme.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ds-check = { workspace = true }
+ds-diag  = { workspace = true, features = ["ast-serde"] }
+ds-parse = { workspace = true, features = ["ast-serde"] }
+# the artifact header's hash and the payload's embedded written types
+# (ds-parse's serde surface, on like the AST blob's)
+ds-mod   = { workspace = true }
+serde    = { workspace = true }
+postcard = { workspace = true }

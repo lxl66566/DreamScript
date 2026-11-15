@@ -7,12 +7,12 @@
 //! runtime-evidence CALLG form) all answer through the one synthesized
 //! body with identical output.
 
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
+use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/derive_show_probe.ds");
 
@@ -67,7 +67,7 @@ fn derived_show_answers_through_every_call_spelling() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("derive_show_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -80,8 +80,10 @@ fn derived_show_answers_through_every_call_spelling() {
             "hit(3)\n",
             "miss\n",
             "span { from: 2, to: 9 }\n",
-            "miss\n",   // the full-union binding u1: mark
-            "hit(3)\n", // the full-union binding u2: mark
+            "miss\n",                          // the full-union binding u1: mark
+            "hit(3)\n",                        // the full-union binding u2: mark
+            "o=outer { i: inner { v: 6 } }\n", // the hole over the derived field nesting
+            "outer { i: inner { v: 6 } }\n",   // the written outer call agrees
         )
         .as_bytes(),
         "the direct, qualified, and generic call spellings agree"
@@ -98,14 +100,14 @@ fn the_expansion_appends_one_impl_per_derive() {
     let id = files.add_source("derive_show_probe.ds", SOURCE);
     let asts = [parse(&files, id).expect("the fixture parses")];
     let original = asts[0].blocks.iter().flat_map(|b| b.items.iter()).count();
-    let (expanded, diags) = ds_check::expand_derives(&asts);
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
     assert!(diags.is_empty(), "no derive refusals: {diags:?}");
     let grown = expanded[0]
         .blocks
         .iter()
         .flat_map(|b| b.items.iter())
         .count();
-    assert_eq!(grown, original + 3, "one impl per derive attribute");
+    assert_eq!(grown, original + 5, "one impl per derive attribute");
     assert!(
         expanded[0]
             .blocks

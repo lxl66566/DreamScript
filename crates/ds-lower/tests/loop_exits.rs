@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Lowers, installs, and runs one probe, returning the captured output
 /// split into lines.
@@ -48,7 +48,7 @@ fn run_probe(source: &str) -> Vec<String> {
     vm.capture_output();
     assert_eq!(
         vm.run("loop_exit", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     String::from_utf8_lossy(vm.captured_output())

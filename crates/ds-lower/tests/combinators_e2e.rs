@@ -19,7 +19,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{FuncRefKey, Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The record's body decoded to instructions, one per pc.
 fn insts(function: &ds_mod::Function) -> Vec<Inst> {
@@ -120,7 +120,7 @@ fn combinators_run_reentrant_bodies_over_both_element_types() {
     vm.capture_output();
     assert_eq!(
         vm.run("combinators_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns unit"
     );
     assert_eq!(
@@ -283,7 +283,7 @@ fn main() -> int {
     vm.capture_output();
     assert_eq!(
         vm.run("combinator_balance", "main", &[]),
-        Ok(Value::I64(38 * 25)),
+        Ok(FrameAnswer::one(Value::I64(38 * 25))),
         "every iteration answered the mapped, filtered, and folded counts"
     );
     assert_eq!(vm.captured_output(), b"seen 950\n");
@@ -372,7 +372,7 @@ fn main() -> int {
     let (mut vm, lowered) = run_inline("non_root_combinator_tail", source);
     assert_eq!(
         vm.run("non_root_combinator_tail", "main", &[]),
-        Ok(Value::I64(2)),
+        Ok(FrameAnswer::one(Value::I64(2))),
         "the wrapper's in-place combinator tail answers the element count"
     );
     let shout = shape(&lowered, "shout");
@@ -399,7 +399,7 @@ fn main() -> int {
     let (mut vm, lowered) = run_inline("root_generic_tail", source);
     assert_eq!(
         vm.run("root_generic_tail", "main", &[]),
-        Ok(Value::I64(4)),
+        Ok(FrameAnswer::one(Value::I64(4))),
         "the transfer runs the one body and returns its result"
     );
     let main = shape(&lowered, "main");
@@ -492,7 +492,7 @@ fn main() -> int {
     vm.capture_output();
     assert_eq!(
         vm.run("capturing_combinators", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "every closure-driven combinator answers"
     );
     assert_eq!(
@@ -536,7 +536,10 @@ fn main() -> int {
   a + b
 }";
     let (mut vm, _) = run_inline("wider_answer", source);
-    assert_eq!(vm.run("wider_answer", "main", &[]), Ok(Value::I64(4 + 220)));
+    assert_eq!(
+        vm.run("wider_answer", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(4 + 220)))
+    );
     // the wider answers' counts and both lists died with the frame
     assert!(vm.objects().is_empty(), "the heap drains");
 }
@@ -573,7 +576,7 @@ fn main() -> int {
     assert_eq!(
         vm.run("partition_one_word", "main", &[]),
         // yes=2, no=2, long=3, short=1, both empty sides 0
-        Ok(Value::I64(2231)),
+        Ok(FrameAnswer::one(Value::I64(2231))),
         "both sides answer at their lengths"
     );
     assert_eq!(
@@ -616,7 +619,7 @@ fn main() -> int {
     // hot holds the x>1 points (y 20+30), cold the one x=1 point
     assert_eq!(
         vm.run("partition_stride", "main", &[]),
-        Ok(Value::I64(5001))
+        Ok(FrameAnswer::one(Value::I64(5001)))
     );
     assert!(vm.objects().is_empty(), "the heap drains");
 }
@@ -646,7 +649,10 @@ fn main() -> int {
 }";
     let (mut vm, _) = run_inline("partition_refs", source);
     // shouted = alpha+gamma both glued with "!": 12 chars, short = 2
-    assert_eq!(vm.run("partition_refs", "main", &[]), Ok(Value::I64(122)));
+    assert_eq!(
+        vm.run("partition_refs", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(122)))
+    );
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 
@@ -778,7 +784,9 @@ fn main() -> int {
     let (mut vm, _) = run_inline("reduce_span", source);
     assert_eq!(
         vm.run("reduce_span", "main", &[]),
-        Ok(Value::I64(300_000 + 30_600 + 600 + 16 + 7)),
+        Ok(FrameAnswer::one(Value::I64(
+            300_000 + 30_600 + 600 + 16 + 7
+        ))),
         "the folded record answers through its fields, the named-fn UFCS fold agrees, and the \\
          empty list answers its init"
     );
@@ -856,7 +864,7 @@ fn main() -> int {
     // handed the empty fold's borrowed init out under its own count
     assert_eq!(
         vm.run("reduce_ref_balance", "main", &[]),
-        Ok(Value::I64(25 * (9 + 3 + 3))),
+        Ok(FrameAnswer::one(Value::I64(25 * (9 + 3 + 3)))),
         "every fold answered its merged text, hits, and the empty handout"
     );
     assert!(
@@ -900,7 +908,7 @@ fn main() -> int {
     // hot holds the a>1 pairs (b 20+30), cold the one a=1 pair
     assert_eq!(
         vm.run("partition_tuples", "main", &[]),
-        Ok(Value::I64(5001))
+        Ok(FrameAnswer::one(Value::I64(5001)))
     );
     assert!(vm.objects().is_empty(), "the heap drains");
 }

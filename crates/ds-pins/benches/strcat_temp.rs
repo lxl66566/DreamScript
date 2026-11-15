@@ -159,14 +159,17 @@ fn registry(serving: bool) -> ModuleRegistry {
 
 pub(crate) fn drive(serving: bool) -> Value {
     let mut vm = Vm::new(registry(serving));
-    let got = vm.run("strcat_temp", "main", &[]).expect("the kernel runs");
-    assert_eq!(got, Value::I64(ITERATIONS), "the loop ran to completion");
+    let answer = vm.run("strcat_temp", "main", &[]).expect("the kernel runs");
+    let [got] = answer.as_slice() else {
+        panic!("the kernel answers one word");
+    };
+    assert_eq!(got, &Value::I64(ITERATIONS), "the loop ran to completion");
     assert!(
         vm.objects().is_empty(),
         "the kernel's counts balance: {} live",
         vm.objects().len()
     );
-    got
+    *got
 }
 
 #[library_benchmark]

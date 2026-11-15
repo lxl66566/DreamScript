@@ -8,7 +8,7 @@
 //! or the predeclared `none` binds nothing), the derive-synthesized
 //! frame skip, and the half-open frame boundary pin here too.
 
-use ds_check::{Package, ScopeKind, expand_derives, scope_frames, visible_at};
+use ds_check::{Package, ScopeKind, scope_frames, visible_at};
 use ds_diag::{FileId, Files};
 use ds_parse::parse;
 
@@ -287,59 +287,6 @@ fn spans_carry_the_declaring_file() {
     assert_eq!(of("n"), FileId::new(1));
     assert_eq!(of("f"), FileId::new(1));
     assert_eq!(of("int"), FileId::new(0));
-}
-
-/// A derived declaration's own positions answer its declaration scope
-/// only: the synthesized impl frames mint their spans inside the
-/// declaration, so none of their binders answers there, and same-named
-/// package value declarations stay unshadowed.
-#[test]
-fn derived_declaration_positions_answer_no_synthesized_binders() {
-    let source = concat!(
-        "const h = 1\n",
-        "const seed = 2\n",
-        "#[derive(hash, show)] struct Point { x: int, y: int }\n",
-    );
-    let mut files = Files::new();
-    let mut asts = Vec::new();
-    for (name, src) in [("a.ds", "tag int\n"), ("m.ds", source)] {
-        let file = files.add_source(name, src);
-        let ast =
-            parse(&files, file).unwrap_or_else(|diags| panic!("{name} should parse: {diags:?}"));
-        asts.push(ast);
-    }
-    let (asts, diags) = expand_derives(&asts);
-    assert!(diags.is_empty(), "the derives expand: {diags:?}");
-    let mut package = Package::new();
-    for ast in &asts {
-        let diags = package.add_file(ast);
-        assert!(diags.is_empty(), "unexpected collect diags: {diags:?}");
-    }
-    let frames = scope_frames(&asts[1], &package);
-    // Every position of the derived declaration — the attribute, the
-    // fields, the braces — answers the declaration scope only.
-    let start = at(source, "#[derive", 0, 0);
-    let end = at(source, "}", 0, 1);
-    for offset in start..=end {
-        let entries = visible_at(&frames, &package, asts[0].file, offset);
-        let locals: Vec<_> = entries
-            .iter()
-            .filter(|entry| matches!(entry.kind, ScopeKind::Let | ScopeKind::Param))
-            .collect();
-        assert!(locals.is_empty(), "at {offset}: {locals:?}");
-        let kind = |name: &str| {
-            entries
-                .iter()
-                .find(|entry| entry.name == name)
-                .unwrap_or_else(|| panic!("at {offset}: `{name}` answers: {:?}", names(&entries)))
-                .kind
-        };
-        // The minted binders (self, h, seed, ...) suppress nothing: the
-        // same-named package value declarations answer.
-        assert_eq!(kind("h"), ScopeKind::Const);
-        assert_eq!(kind("seed"), ScopeKind::Const);
-        assert_eq!(kind("Point"), ScopeKind::Struct);
-    }
 }
 
 /// A bare arm identifier naming a constructor type is a member test that

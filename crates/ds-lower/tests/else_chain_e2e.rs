@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The checked surface these probes need beyond the grammar.
 const PRELUDE: &str = "tag int
@@ -19,7 +19,7 @@ const PRELUDE: &str = "tag int
 
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the result.
-fn run_source(name: &str, source: &str) -> Result<Value, ds_vm::Trap> {
+fn run_source(name: &str, source: &str) -> Result<FrameAnswer, ds_vm::Trap> {
     let mut files = Files::new();
     let file_name = format!("{name}.ds");
     let id = files.add_source(&file_name, source);
@@ -66,11 +66,11 @@ fn dispatch(branches: usize, probe: i64) -> String {
 fn an_80_branch_dispatch_runs_clean() {
     assert_eq!(
         run_source("else_chain", &dispatch(80, 7)),
-        Ok(Value::I64(7))
+        Ok(FrameAnswer::one(Value::I64(7)))
     );
     // The catchall answers past the last case.
     assert_eq!(
         run_source("else_chain_catchall", &dispatch(80, 500)),
-        Ok(Value::I64(79))
+        Ok(FrameAnswer::one(Value::I64(79)))
     );
 }

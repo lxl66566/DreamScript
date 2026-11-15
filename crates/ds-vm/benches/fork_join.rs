@@ -4,10 +4,14 @@
 //! cost — against the candidate parallel backends' per-element dispatch
 //! overhead over the same trivial element body: youpipe's fused scoped
 //! pipeline and std's scoped threads (the naive bracket of any
-//! hand-rolled work-stealing pool's spawn/steal/wakeup floor). The M5
-//! backend decision reads these numbers, so the bench is the decision's
-//! reproducible record: per-child and per-element costs are the totals'
-//! difference over the 64-element span.
+//! hand-rolled work-stealing pool's spawn/steal/wakeup floor), plus the
+//! landed worker pool's own pair — the trivial slice under the pool
+//! (the ownership-transfer overhead per child) and the heavy-body pair
+//! where the pool's parallelism pays (the acceptance witness: real
+//! speedup with byte-identical answers). The M5 backend decision reads
+//! these numbers, so the bench is the decision's reproducible record:
+//! per-child and per-element costs are the totals' difference over the
+//! 64-element span.
 
 use std::hint::black_box;
 
@@ -21,6 +25,12 @@ use ds_vm::{
 
 /// The elements one measurement run forks over.
 const ELEMENTS: u32 = 64;
+
+/// The heavy element body's iteration count: sized so one element runs
+/// well past the pool's per-child transfer cost (~200k dispatched uops),
+/// making the heavy pair's delta a parallelism measurement, not a
+/// dispatch-overhead one.
+const HEAVY_ITERATIONS: i64 = 20_000;
 
 fn k(idx: u16) -> ConstIdx {
     ConstIdx(idx)
@@ -45,16 +55,73 @@ fn passthrough_def() -> FunctionDef {
     }
 }
 
-/// `() -> i64 Ref`: `par_map` over `elems` i64s through the passthrough
-/// callable; the result list's word answers, nothing else runs.
-fn par_main_def(name: &str, elems: &[i64]) -> FunctionDef {
+/// `(x: i64) -> i64`: the heavy element body — `HEAVY_ITERATIONS` loop
+/// turns of `acc = (acc + i) * x`, the loop carried through taken
+/// backward branches (the same shape any lowered loop produces).
+fn heavy_def() -> FunctionDef {
+    FunctionDef {
+        name: "heavy".into(),
+        layout: FrameLayout::new(
+            vec![
+                SlotType::I64,
+                SlotType::I64,
+                SlotType::I64,
+                SlotType::Bool,
+                SlotType::I64,
+                SlotType::I64,
+            ],
+            1,
+            0,
+        )
+        .expect("valid fixture layout"),
+        pool: vec![Const::I64(0), Const::I64(1), Const::I64(HEAVY_ITERATIONS)],
+        code: assemble(&[
+            Uop::Funcf { frame_slots: 6 },    // pc0
+            Uop::Kimm { dst: 1, kidx: k(0) }, // pc1  acc = 0
+            Uop::Kimm { dst: 2, kidx: k(0) }, // pc2  i = 0
+            Uop::Kimm { dst: 4, kidx: k(2) }, // pc3  N
+            Uop::Kimm { dst: 5, kidx: k(1) }, // pc4  one
+            Uop::LtI64 {
+                dst: 3,
+                lhs: 2,
+                rhs: 4,
+            }, // pc5  i < N
+            Uop::JmpifNot {
+                cond: 3,
+                target: 11,
+            }, // pc6
+            Uop::WrapAddI64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 2,
+            }, // pc7  acc +%= i
+            Uop::WrapMulI64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 0,
+            }, // pc8  acc *%= x
+            Uop::AddI64 {
+                dst: 2,
+                lhs: 2,
+                rhs: 5,
+            }, // pc9  i += 1
+            Uop::Jmp { target: 5 },           // pc10 the back edge
+            Uop::Ret { src: 1 },              // pc11
+        ])
+        .expect("fixture body encodes"),
+    }
+}
+
+/// `() -> i64 Ref`: `par_map` over `elems` i64s through the `callable`
+/// function; the result list's word answers, nothing else runs.
+fn par_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
     let mut pool = vec![
         builtin(BUILTIN_LIST_NEW),
         builtin(BUILTIN_LIST_PUSH),
         builtin(BUILTIN_PAR_MAP),
         Const::FuncRef(ConstFuncRef::Named {
             module: "bm".into(),
-            func: 2, // the passthrough callable
+            func: callable,
         }),
         Const::I64(BuiltinInstance::List as i64),
     ];
@@ -104,9 +171,11 @@ fn fork_registry(elems: &[i64]) -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     reg.install(
         ModuleVersion::new("bm", vec![
-            par_main_def("main", elems),
-            par_main_def("main_empty", &[]),
+            par_main_def("main", elems, 3),
+            par_main_def("main_heavy", elems, 4),
+            par_main_def("main_empty", &[], 3),
             passthrough_def(),
+            heavy_def(),
         ])
         .expect("valid bench module"),
     );
@@ -149,6 +218,40 @@ fn fork_join_backend(c: &mut Criterion) {
                 }
                 total
             }))
+        });
+    });
+    // the landed worker pool: the trivial slice under the pool isolates
+    // the ownership-transfer overhead per child (expected above the
+    // sequential slice — the price of the parallel tier's dispatch),
+    // and the heavy pair is the acceptance witness — the same program,
+    // the same answers, the pool dividing the element bodies across
+    // workers
+    let mut pool = Vm::new(fork_registry(&elems));
+    pool.enable_fork_pool();
+    group.bench_function("vm_pool_slice_64_children", |b| {
+        b.iter(|| {
+            black_box(pool.run("bm", "main", &[]).expect("the pooled join lands"));
+        });
+    });
+    let mut heavy_seq = Vm::new(fork_registry(&elems));
+    group.bench_function("vm_seq_heavy_64_children", |b| {
+        b.iter(|| {
+            black_box(
+                heavy_seq
+                    .run("bm", "main_heavy", &[])
+                    .expect("the heavy join lands"),
+            );
+        });
+    });
+    let mut heavy_pool = Vm::new(fork_registry(&elems));
+    heavy_pool.enable_fork_pool();
+    group.bench_function("vm_pool_heavy_64_children", |b| {
+        b.iter(|| {
+            black_box(
+                heavy_pool
+                    .run("bm", "main_heavy", &[])
+                    .expect("the pooled heavy join lands"),
+            );
         });
     });
     group.finish();

@@ -18,7 +18,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PRELUDE: &str = "
 tag int
@@ -180,7 +180,7 @@ fn a_head_reset_loop_var_dec_once_per_iteration_and_drains() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("loop_reset_double_kill", "main", &[]),
-        Ok(Value::I64(2)),
+        Ok(FrameAnswer::one(Value::I64(2))),
         "both iterations run clean (the second head rollover decs a live object)"
     );
     assert_eq!(vm.captured_output(), b"xx\n");
@@ -201,7 +201,7 @@ fn the_strings_kernel_outer_reset_shape_drains_the_heap() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("loop_reset_double_kill", "main", &[]),
-        Ok(Value::I64(206_350)),
+        Ok(FrameAnswer::one(Value::I64(206_350))),
         "the kernel shape answers"
     );
     assert_eq!(vm.captured_output(), b"result: 206350 4000\n");
@@ -225,7 +225,7 @@ fn an_append_only_carried_var_keeps_its_balanced_rollover() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("loop_reset_double_kill", "main", &[]),
-        Ok(Value::I64(5)),
+        Ok(FrameAnswer::one(Value::I64(5))),
         "the append-only loop answers"
     );
     assert_eq!(vm.captured_output(), b"xxxxx\n");

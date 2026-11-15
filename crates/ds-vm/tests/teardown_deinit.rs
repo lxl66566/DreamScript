@@ -14,8 +14,8 @@
 //! name.
 
 use ds_vm::{
-    Const, ConstFuncRef, FIBER_ROOT, FiberId, FunctionDef, ModuleRegistry, ModuleVersion, Platform,
-    Value, Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FiberId, FrameAnswer, FunctionDef, ModuleRegistry,
+    ModuleVersion, Platform, Value, Vm,
     abi::{ConstIdx, FrameLayout, Inst, RcOp, SlotType, uop::Uop},
     assemble, native,
 };
@@ -241,7 +241,7 @@ fn a_cancel_cut_child_fires_its_kept_deinit_at_the_cut() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands"
     );
     assert_eq!(
@@ -370,7 +370,7 @@ fn a_trapped_child_fires_its_kept_deinit_at_the_death_walk() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "trap_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands"
     );
     assert_eq!(
@@ -525,7 +525,7 @@ fn a_teardown_hook_that_dies_refuses_and_the_drain_still_empties() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the refused hook ends the pass and the boundary still lands"
     );
     assert_eq!(
@@ -686,7 +686,7 @@ fn a_looping_teardown_hook_under_a_raised_flag_refuses_at_the_back_edge() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the looping hook refused at its back edge and the teardown stayed bounded"
     );
     assert_eq!(
@@ -926,7 +926,7 @@ fn a_teardown_hook_that_spawns_refuses_and_the_drain_still_empties() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the refused spawn ends the pass and the boundary still lands"
     );
     assert_eq!(
@@ -1178,7 +1178,7 @@ fn a_teardown_hook_that_joins_refuses_and_the_drive_stays_silent() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the refused join ends the pass and the boundary still lands"
     );
     assert_eq!(
@@ -1266,7 +1266,7 @@ fn a_trapped_root_fires_its_kept_deinit_at_the_next_runs_reset() {
     );
     assert_eq!(
         vm.run("dwh", "ok_root", &[]),
-        Ok(Value::I64(7)),
+        Ok(FrameAnswer::one(Value::I64(7))),
         "the next run lands"
     );
     assert_eq!(
@@ -1433,7 +1433,7 @@ fn two_kept_deinits_fire_in_directory_order_across_repeated_runs() {
         let mut vm = registry(version);
         assert_eq!(
             vm.run("dwh", "cut_parent", &[]),
-            Ok(Value::I64(0)),
+            Ok(FrameAnswer::one(Value::I64(0))),
             "the boundary lands"
         );
         vm
@@ -1684,7 +1684,7 @@ fn an_int_only_claim_fires_once_at_the_cut_and_the_recycle_stays_silent() {
         let mut vm = band_cut_module(cut_child.clone(), marker_deinit(), None);
         assert_eq!(
             vm.run("dwh", "cut_parent", &[]),
-            Ok(Value::I64(0)),
+            Ok(FrameAnswer::one(Value::I64(0))),
             "both boundaries land"
         );
         assert_eq!(
@@ -1772,7 +1772,7 @@ fn a_dead_claim_with_an_outstanding_borrow_fires_only_its_ordinary_death() {
     let mut vm = band_cut_module(cut_child, observer_deinit(), None);
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "both boundaries land"
     );
     assert_eq!(
@@ -1850,7 +1850,7 @@ fn a_moved_claim_stays_silent_at_the_cut() {
     let mut vm = band_cut_module(cut_child, marker_deinit(), Some(mover));
     assert_eq!(
         vm.run("dwh", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands"
     );
     assert_eq!(
@@ -1978,7 +1978,7 @@ fn an_int_only_trapped_child_fires_at_the_death_marking() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dwh", "trap_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands"
     );
     assert_eq!(
@@ -2071,7 +2071,7 @@ fn an_int_only_root_claim_fires_at_the_next_runs_reset() {
     );
     assert_eq!(
         vm.run("dwh", "ok_root", &[]),
-        Ok(Value::I64(7)),
+        Ok(FrameAnswer::one(Value::I64(7))),
         "the next run lands"
     );
     assert_eq!(
@@ -2241,7 +2241,7 @@ fn a_recycle_door_over_a_live_spawner_returns_to_the_spawner() {
     let mut vm = registry(version);
     assert_eq!(
         vm.run("dws", "trap_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the takeover returns to the spawner's frames and the parent lands"
     );
     assert_eq!(

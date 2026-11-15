@@ -28,12 +28,12 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Runs one source end to end: parse -> check -> lower -> write -> read
 /// back -> install -> run, asserting the result, the golden stdout, and
 /// the heap drain (every staged, adopted, and copy-in count balanced).
-fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
+fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>) {
     let mut files = Files::new();
     let file_name = format!("{name}.ds");
     let id = files.add_source(&file_name, source);
@@ -67,7 +67,11 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<Value, ds_vm::Trap>) {
 /// golden bytes, and drains the heap.
 fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
     let (vm, got) = run_source(name, source);
-    assert_eq!(got, Ok(result), "the callable surface answers");
+    assert_eq!(
+        got,
+        Ok(FrameAnswer::one(result)),
+        "the callable surface answers"
+    );
     assert_eq!(vm.captured_output(), stdout, "the golden stdout");
     assert!(
         vm.objects().is_empty(),
@@ -411,7 +415,7 @@ fn main() -> int { relay(21) }
         "the proven count-free callee word tail-transfers: {relay:?}"
     );
     let (vm, got) = run_source("proven_scalar_tail", SOURCE);
-    assert_eq!(got, Ok(Value::I64(42)));
+    assert_eq!(got, Ok(FrameAnswer::one(Value::I64(42))));
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 
@@ -437,7 +441,7 @@ fn main() -> int { relay(41) }
         "the non-capturing lambda word is the proven scalar: {relay:?}"
     );
     let (vm, got) = run_source("noncap_lambda_tail", SOURCE);
-    assert_eq!(got, Ok(Value::I64(42)));
+    assert_eq!(got, Ok(FrameAnswer::one(Value::I64(42))));
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 
@@ -468,7 +472,7 @@ fn main() -> int { relay(double, 21) }
         "the in-place tail returns its result: {relay:?}"
     );
     let (vm, got) = run_source("callable_param_tail", SOURCE);
-    assert_eq!(got, Ok(Value::I64(42)));
+    assert_eq!(got, Ok(FrameAnswer::one(Value::I64(42))));
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 
@@ -494,7 +498,7 @@ fn main() -> int { relay(20) }
         "the closure's Ref word keeps the in-place CALLS tail: {relay:?}"
     );
     let (vm, got) = run_source("capturing_lambda_tail", SOURCE);
-    assert_eq!(got, Ok(Value::I64(40)));
+    assert_eq!(got, Ok(FrameAnswer::one(Value::I64(40))));
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 

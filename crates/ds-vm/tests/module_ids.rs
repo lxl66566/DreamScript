@@ -10,8 +10,8 @@
 //! the one hazard, a foreign word silently aliasing another registry's
 //! module, is recorded, not hidden.
 use ds_vm::{
-    Const, ConstFuncRef, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Platform, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FuncRef, FunctionDef, ModuleRegistry, ModuleVersion,
+    Platform, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{Fn as FnSlot, I64},
@@ -196,8 +196,14 @@ fn module_bytes_run_identically_under_either_sibling_install_order() {
     // only constraint; the siblings are free to reorder
     assert_eq!(vm1.registry().module_id("a"), Some(0));
     assert_eq!(vm2.registry().module_id("a"), Some(1), "ids are per-VM");
-    assert_eq!(vm1.run("main", "f", &[Value::I64(21)]), Ok(Value::I64(-42)));
-    assert_eq!(vm2.run("main", "f", &[Value::I64(21)]), Ok(Value::I64(-42)));
+    assert_eq!(
+        vm1.run("main", "f", &[Value::I64(21)]),
+        Ok(FrameAnswer::one(Value::I64(-42)))
+    );
+    assert_eq!(
+        vm2.run("main", "f", &[Value::I64(21)]),
+        Ok(FrameAnswer::one(Value::I64(-42)))
+    );
 }
 
 /// Native module names never enter the id space: the builtin core and the
@@ -264,7 +270,7 @@ fn native_names_never_enter_the_id_space() {
             .expect("uop modules enter the id space"),
         0,
     ));
-    assert_eq!(vm.run("m", "mint", &[]), Ok(expected));
+    assert_eq!(vm.run("m", "mint", &[]), Ok(FrameAnswer::one(expected)));
     assert_eq!(
         vm.run("m", "mint_native", &[]),
         Err(Trap::UnknownCallee {
@@ -293,12 +299,18 @@ fn a_foreign_word_aliases_the_other_registry_s_module_silently() {
         vm1.registry().module_id("a").expect("installed"),
         0,
     ));
-    assert_eq!(vm1.run("app", "apply", &[word]), Ok(Value::I64(42)));
+    assert_eq!(
+        vm1.run("app", "apply", &[word]),
+        Ok(FrameAnswer::one(Value::I64(42)))
+    );
     // the same word under a registry where id 0 is `b`: the call reaches
     // negate, silently — no trap, no wrong-slot diagnostic
     let mut vm2 = Vm::new(ModuleRegistry::new());
     vm2.install_module(b_module());
     vm2.install_module(a_module());
     vm2.install_module(apply_module());
-    assert_eq!(vm2.run("app", "apply", &[word]), Ok(Value::I64(-21)));
+    assert_eq!(
+        vm2.run("app", "apply", &[word]),
+        Ok(FrameAnswer::one(Value::I64(-21)))
+    );
 }

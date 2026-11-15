@@ -107,7 +107,7 @@ pub(crate) fn expanded(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
         return Err(QueryError::KindMismatch(key));
     };
     let asts = package_asts(ctx)?;
-    let (asts, diags) = ds_check::expand_derives(&asts);
+    let (asts, diags) = ds_meta::expand_derives(&asts);
     Ok(QueryValue::Expanded(ExpandedOutput {
         asts: asts.into(),
         diags: diags.into(),
@@ -414,17 +414,23 @@ pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue,
 /// per-file resolutions (built over the same trees) instead of re-running
 /// collection and resolution per file. Package grain like `resolve` — its
 /// dependencies are the resolve and expanded values, and the declared-row
-/// and capability tables are fixed database inputs.
+/// and capability tables are fixed database inputs. The analyzed value's
+/// checked tables ride along, so an interpolation hole that staged an
+/// implicit `show` dispatch unions the dispatched member's row — the
+/// walk is resolution-driven and no surface name sits behind the
+/// implicit call.
 pub(crate) fn package_effects(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::PackageEffects(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let resolved = ctx.get::<crate::query::Resolve>(package)?;
     let expanded = ctx.get::<crate::query::Expanded>(package)?;
+    let analyzed = ctx.get::<crate::query::Analyzed>(package)?;
     let effects = ds_check::effects::effects_of_resolved(
         &expanded.asts[..],
         &resolved.package,
         &resolved.resolutions,
+        &analyzed.analyzed.checked.hole_show_dispatches,
         ctx.declared_rows(),
         ctx.world_caps(),
     );

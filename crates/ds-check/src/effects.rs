@@ -85,6 +85,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     platform::WorldCaps,
     resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
+    type_of::HoleShowDispatches,
 };
 
 /// One named effect. The vocabulary is the record's set: `error` (B5, E4)
@@ -449,14 +450,25 @@ const fn traps_assign(op: AssignOp) -> bool {
 /// resolution failure leaves the failing name contributing nothing, and
 /// rows are computed whatever the file's items check like. The package is
 /// every tree passed here, in order (G3). `T: Borrow<Ast>` lets callers
-/// pass owned trees or shared arcs (Borrow is the reflexive bound).
+/// pass owned trees or shared arcs (Borrow is the reflexive bound). No
+/// check ran, so no implicit hole dispatch record exists: a hole over a
+/// `show`-carrying operand contributes only its operand's own row here;
+/// callers that checked pass their records through
+/// [`effects_of_resolved`](self::effects_of_resolved).
 #[must_use]
 pub fn effects_of<T>(asts: &[T], declared: &DeclaredRows, world: &WorldCaps) -> Effects
 where
     T: std::borrow::Borrow<Ast>,
 {
     let (package, resolutions, _) = crate::resolve::resolve_package(asts);
-    effects_of_resolved(asts, &package, &resolutions, declared, world)
+    effects_of_resolved(
+        asts,
+        &package,
+        &resolutions,
+        &FxHashMap::default(),
+        declared,
+        world,
+    )
 }
 
 /// Computes the package's effect rows over an already collected and
@@ -465,12 +477,19 @@ where
 /// [`check_resolved`](crate::type_of::check_resolved). Same contract as
 /// [`effects_of`], which collects and resolves the trees first; callers
 /// holding a resolve result pass it in instead of re-running the pass per
-/// file.
+/// file. `holes` carries the checker's implicit hole dispatch records
+/// ([`Checked::hole_show_dispatches`](crate::type_of::Checked::hole_show_dispatches)):
+/// a hole that staged a `show` dispatch unions the dispatched member's
+/// row, the edge a written `.show()` call contributes — the walk is
+/// resolution-driven and no surface name sits behind the implicit call,
+/// so the record is the only source of the edge. Callers that have not
+/// type-checked pass an empty map, accepting the miss.
 #[must_use]
 pub fn effects_of_resolved<T>(
     asts: &[T],
     package: &Package,
     resolutions: &[Resolutions],
+    holes: &HoleShowDispatches,
     declared: &DeclaredRows,
     world: &WorldCaps,
 ) -> Effects
@@ -478,7 +497,15 @@ where
     T: std::borrow::Borrow<Ast>,
 {
     let mut graph = HashMap::new();
-    let exprs = graph_of(asts, package, resolutions, declared, world, &mut graph);
+    let exprs = graph_of(
+        asts,
+        package,
+        resolutions,
+        holes,
+        declared,
+        world,
+        &mut graph,
+    );
     let solved = solve(&graph);
     let expr_rows = finalize_expr_rows(exprs, &solved);
     assemble(package, &solved, expr_rows)
@@ -516,7 +543,15 @@ where
     let mut graph = HashMap::new();
     // The method-half serve reads the solved method nodes only; the
     // walk's per-span table is dropped unused.
-    let _ = graph_of(asts, package, resolutions, declared, world, &mut graph);
+    let _ = graph_of(
+        asts,
+        package,
+        resolutions,
+        &FxHashMap::default(),
+        declared,
+        world,
+        &mut graph,
+    );
     let solved = solve(&graph);
     package
         .methods()
@@ -550,6 +585,7 @@ pub fn effects_of_resolved_served<T>(
     user_asts: &[T],
     package: &Package,
     user_resolutions: &[Resolutions],
+    holes: &HoleShowDispatches,
     served_defs: &[DefEffects],
     served_methods: &[ServedMethodRow],
     declared: &DeclaredRows,
@@ -577,6 +613,7 @@ where
         user_asts,
         package,
         user_resolutions,
+        holes,
         declared,
         world,
         &mut seeds,
@@ -599,6 +636,7 @@ fn graph_of<T>(
     asts: &[T],
     package: &Package,
     resolutions: &[Resolutions],
+    holes: &HoleShowDispatches,
     declared: &DeclaredRows,
     world: &WorldCaps,
     graph: &mut HashMap<Node, Info>,
@@ -625,6 +663,7 @@ where
             declared,
             world,
             res,
+            holes,
             graph: &mut *graph,
             exprs: &mut exprs,
             pending: Vec::new(),
@@ -745,6 +784,12 @@ struct Walker<'a, 'g> {
     declared: &'a DeclaredRows,
     world: &'a WorldCaps,
     res: &'a Resolutions,
+    /// The checker's implicit hole dispatch records (F6): one entry per
+    /// interpolation hole that staged a `show` dispatch, naming the
+    /// dispatched member whose row the hole unions — no resolved name
+    /// sits behind the implicit call, so this record is the edge's only
+    /// source.
+    holes: &'a HoleShowDispatches,
     graph: &'g mut HashMap<Node, Info>,
     /// Finished per-expression accumulators, keyed by span: the table's
     /// pre-fixpoint form, shared across the package's files (spans carry
@@ -1115,13 +1160,32 @@ impl Walker<'_, '_> {
     }
 
     /// Interpolation: expression holes walk; `$x` holes are value uses.
+    /// A hole that staged an implicit `show` dispatch unions the
+    /// dispatched member's row — the edge the written call's resolved
+    /// name contributes.
     fn string(&mut self, parts: &[StrPart], mask: EffectRow) {
         for part in parts {
             match part {
                 StrPart::Text { .. } => {},
-                StrPart::Expr { expr, .. } => self.expr(expr, mask),
-                StrPart::Ident { name, .. } => self.use_res(name.span, mask),
+                StrPart::Expr { span, expr } => {
+                    self.expr(expr, mask);
+                    self.hole_edge(*span, mask);
+                },
+                StrPart::Ident { span, name } => {
+                    self.use_res(name.span, mask);
+                    self.hole_edge(*span, mask);
+                },
             }
+        }
+    }
+
+    /// One hole's implicit dispatch edge: the member the checker's
+    /// record names (a solved instance, an inherent owner, or a trait
+    /// member whose row unions every impl body — the written bound
+    /// call's own over-approximation); no record, no edge.
+    fn hole_edge(&mut self, span: Span, mask: EffectRow) {
+        if let Some(&method) = self.holes.get(&span) {
+            self.edge(Node::Method(method), mask);
         }
     }
 

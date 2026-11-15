@@ -17,7 +17,7 @@ use ds_diag::{Files, human};
 use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -86,7 +86,7 @@ fn a_strict_subset_union_return_dispatches_members_into_the_return_span() {
     vm.capture_output();
     assert_eq!(
         vm.run("return_span", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(
@@ -182,7 +182,7 @@ fn a_unit_tag_return_over_an_optional_carrying_struct_member_stays_kind_true() {
     vm.capture_output();
     assert_eq!(
         vm.run("optional_return_span", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

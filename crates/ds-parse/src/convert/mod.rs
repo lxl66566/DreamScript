@@ -1132,8 +1132,10 @@ impl Ctx {
                     let cspan = self.span(&c);
                     let mut cname = None;
                     let mut payload = EnumPayload::None;
+                    let mut default = None;
                     for cc in inner(&c) {
                         match cc.as_rule() {
+                            Rule::case_default => default = Some(self.span(&cc)),
                             Rule::ident => cname = Some(self.ident(cc)),
                             Rule::case_tuple => {
                                 let mut types = Vec::new();
@@ -1158,6 +1160,7 @@ impl Ctx {
                         span: cspan,
                         name: cname.unwrap_or_else(|| self.bad_ident(cspan)),
                         payload,
+                        default,
                     });
                 },
                 _ => {},

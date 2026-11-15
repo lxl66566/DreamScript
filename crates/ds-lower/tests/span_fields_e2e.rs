@@ -8,7 +8,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Parse -> check -> lower -> round-trip -> run, returning the captured
 /// stdout of `main`. Panics with the checker's renderings when the
@@ -41,7 +41,7 @@ fn runs(name: &str, source: &str) -> String {
     vm.capture_output();
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     String::from_utf8_lossy(vm.captured_output()).into_owned()
@@ -246,8 +246,9 @@ fn the_refusal_openings_keep_their_honest_names() {
         concat!(
             "tag int\n",
             "tag string\n",
+            "trait Copyable { }\n",
             "extern fn println (msg: string) -> ()\n",
-            "struct session { user: string\n",
+            "struct session: ~Copyable { user: string\n",
             "  deinit { println(\"freed ${self.user}\") }\n",
             "}\n",
             "struct holder { inner: session, mark: int }\n",

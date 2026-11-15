@@ -15,7 +15,7 @@
 //! words stage arguments first.
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, Inst, RcOp, SlideError, SlotType,
         SlotType::{Bool, I64, Raw, Ref, Tag},
@@ -333,9 +333,10 @@ fn string(vm: &mut Vm, text: &str) -> Value {
 /// Runs a fixture and reads the string content of its `Ref` result.
 fn run_str(vm: &mut Vm, func: &str, args: &[Value]) -> String {
     let result = vm.run("st", func, args).expect("the fixture runs");
-    let Value::Ref(id) = result else {
+    let [Value::Ref(id)] = result.as_slice() else {
         panic!("a string ref, got {result:?}");
     };
+    let id = *id;
     vm.objects()
         .str_at(id.id())
         .expect("the result names a string object")
@@ -345,9 +346,10 @@ fn run_str(vm: &mut Vm, func: &str, args: &[Value]) -> String {
 /// Runs a fixture and reads the parts of its list-object result.
 fn run_parts(vm: &mut Vm, func: &str, args: &[Value]) -> Vec<String> {
     let result = vm.run("st", func, args).expect("the fixture runs");
-    let Value::Ref(list) = result else {
+    let [Value::Ref(list)] = result.as_slice() else {
         panic!("a list ref, got {result:?}");
     };
+    let list = *list;
     vm.objects()
         .list_at(list.id())
         .expect("the result names a list object")
@@ -369,9 +371,18 @@ fn len_counts_chars_not_bytes() {
     let ascii = [string(&mut vm, "hello")];
     let utf8 = [string(&mut vm, "héllo")];
     let empty = [string(&mut vm, "")];
-    assert_eq!(vm.run("st", "measure", &ascii), Ok(Value::I64(5)));
-    assert_eq!(vm.run("st", "measure", &utf8), Ok(Value::I64(5)));
-    assert_eq!(vm.run("st", "measure", &empty), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("st", "measure", &ascii),
+        Ok(FrameAnswer::one(Value::I64(5)))
+    );
+    assert_eq!(
+        vm.run("st", "measure", &utf8),
+        Ok(FrameAnswer::one(Value::I64(5)))
+    );
+    assert_eq!(
+        vm.run("st", "measure", &empty),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }
 
 /// The generic `len` dispatches its ONE body on the evidence word: the
@@ -414,9 +425,15 @@ fn len_dispatches_the_one_body_on_the_evidence_word() {
     reg.install(ModuleVersion::new("st", vec![def]).expect("valid fixture module"));
     let mut vm = Vm::new(reg);
     let args = [string(&mut vm, "alpha;beta;gamma")];
-    assert_eq!(vm.run("st", "count_list", &args), Ok(Value::I64(3)));
+    assert_eq!(
+        vm.run("st", "count_list", &args),
+        Ok(FrameAnswer::one(Value::I64(3)))
+    );
     let args = [string(&mut vm, "solo")];
-    assert_eq!(vm.run("st", "count_list", &args), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("st", "count_list", &args),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
 }
 
 /// A CALLG site must stage the callee's whole constraint list: an overlay
@@ -504,9 +521,10 @@ fn concat_joins_two_strings_into_a_fresh_object() {
     let mut vm = Vm::new(st_registry());
     let args = [string(&mut vm, "foo"), string(&mut vm, "bar")];
     let result = vm.run("st", "glue", &args).expect("the fixture runs");
-    let Value::Ref(id) = result else {
+    let [Value::Ref(id)] = result.as_slice() else {
         panic!("a string ref, got {result:?}");
     };
+    let id = *id;
     assert_eq!(
         vm.objects().str_at(id.id()),
         Ok("foobar"),
@@ -542,18 +560,21 @@ fn parse_int_answers_the_success_int_and_the_parse_err_span() {
     let mut vm = Vm::new(st_registry());
     // success: the payload int returns
     let args = [string(&mut vm, "-42")];
-    assert_eq!(vm.run("st", "parse", &args), Ok(Value::I64(-42)));
+    assert_eq!(
+        vm.run("st", "parse", &args),
+        Ok(FrameAnswer::one(Value::I64(-42)))
+    );
     // failure: the run result is the parse_err tag word
     let args = [string(&mut vm, "12x")];
     assert_eq!(
         vm.run("st", "parse", &args),
-        Ok(Value::Tag(PLATFORM_PARSE_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
     );
     // strict: no implicit whitespace trim
     let args = [string(&mut vm, " 42")];
     assert_eq!(
         vm.run("st", "parse", &args),
-        Ok(Value::Tag(PLATFORM_PARSE_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
     );
     // and the payload reaches the caller: the failure payload names the
     // input text, so the golden stdout is the input verbatim
@@ -562,7 +583,7 @@ fn parse_int_answers_the_success_int_and_the_parse_err_span() {
     let args = [string(&mut vm, "not-a-number")];
     assert_eq!(
         vm.run("st", "ask_parse", &args),
-        Ok(Value::Tag(PLATFORM_PARSE_ERR))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
     );
     assert_eq!(vm.captured_output(), b"not-a-number\n");
 }
@@ -683,7 +704,10 @@ fn repeated_char_indexed_access_serves_one_boundary_map() {
         assert_eq!(run_str(&mut vm, "pick", &args), want.to_string());
     }
     // and len agrees over the same map after it exists
-    assert_eq!(vm.run("st", "measure", &[text]), Ok(Value::I64(4)));
+    assert_eq!(
+        vm.run("st", "measure", &[text]),
+        Ok(FrameAnswer::one(Value::I64(4)))
+    );
 }
 
 /// KSTR over the pool-const intern cache: two loads of one pool constant
@@ -719,7 +743,7 @@ fn kstr_pool_consts_share_one_object_and_the_cache_claim_releases() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("st", "shared_k", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the two loads of one pool constant are one object"
     );
     assert!(
@@ -727,7 +751,10 @@ fn kstr_pool_consts_share_one_object_and_the_cache_claim_releases() {
         "no claim outlives the drive: the heap drained"
     );
     // the refill of the second run releases again
-    assert_eq!(vm.run("st", "shared_k", &[]), Ok(Value::Bool(true)));
+    assert_eq!(
+        vm.run("st", "shared_k", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
     assert!(vm.objects().is_empty());
 }
 

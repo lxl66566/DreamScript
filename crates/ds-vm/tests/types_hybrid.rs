@@ -24,8 +24,8 @@
 //!   builtin staging) declare `SlotType::Raw`.
 
 use ds_vm::{
-    Const, ConstFuncRef, FIBER_ROOT, FunctionDef, ModuleBuildError, ModuleRegistry, ModuleVersion,
-    Trap, Value, Vm,
+    Const, ConstFuncRef, FIBER_ROOT, FrameAnswer, FunctionDef, ModuleBuildError, ModuleRegistry,
+    ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlideError, SlotType,
         SlotType::{Bool, F64, I64, Raw, Ref, Tag},
@@ -630,7 +630,7 @@ fn run_main(probe: impl FnOnce(&mut Vm) -> Vec<Value>, stdout: &str, same: bool)
     let args = probe(&mut vm);
     assert_eq!(
         vm.run("cfg", "main", &args),
-        Ok(Value::Bool(same)),
+        Ok(FrameAnswer::one(Value::Bool(same))),
         "the run result is the `same` comparison"
     );
     assert_eq!(
@@ -685,7 +685,7 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
                 b: fn(&mut Vm) -> Vec<Value>,
                 av: i64,
                 bv: i64,
-                expect: Result<Value, Trap>| {
+                expect: Result<FrameAnswer, Trap>| {
         let mut vm = Vm::new(cfg_registry());
         let mut args = a(&mut vm);
         args.extend(b(&mut vm));
@@ -701,7 +701,7 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
         |v| probe_num(v, 8080),
         8080,
         8080,
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
     );
     // differing i64 payload
     case(
@@ -709,7 +709,7 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
         |v| probe_num(v, 80),
         8080,
         80,
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
     );
     // member mismatch: p_num against p_str
     case(
@@ -717,7 +717,7 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
         |v| probe_str(v, "8080"),
         8080,
         0,
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
     );
     // string payloads compare by content
     case(
@@ -725,17 +725,23 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
         |v| probe_str(v, "ab"),
         0,
         0,
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
     );
     case(
         |v| probe_str(v, "ab"),
         |v| probe_str(v, "cd"),
         0,
         0,
-        Ok(Value::Bool(false)),
+        Ok(FrameAnswer::one(Value::Bool(false))),
     );
     // unit members: both p_none
-    case(probe_none, probe_none, 0, 0, Ok(Value::Bool(true)));
+    case(
+        probe_none,
+        probe_none,
+        0,
+        0,
+        Ok(FrameAnswer::one(Value::Bool(true))),
+    );
 }
 
 #[test]
@@ -746,13 +752,14 @@ fn interpolation_chain_uses_print_and_the_float_conversion() {
     // report body halts on its input; the golden is the stdout
     assert_eq!(
         vm.run("cfg", "report", &[Value::F64(2.5)]),
-        Ok(Value::F64(2.5))
+        Ok(FrameAnswer::one(Value::F64(2.5)))
     );
     assert_eq!(vm.captured_output(), b"value: 2.5\n");
 }
 
 /// RETSPAN mechanics under CALLT: the tail-callee's span lands on the
-/// original caller's overlay words (the frame is reused, never repointed).
+/// original caller's overlay words (the frame is reused, never repointed),
+/// and the root drive answers the whole span to its host.
 #[test]
 // caller/callee pairs are the point of every slide test
 #[allow(clippy::similar_names)]
@@ -796,9 +803,19 @@ fn tail_called_span_returns_through_the_reused_frame() {
     });
     let mut vm = Vm::new(registry("t", vec![caller, callee]));
     vm.capture_output();
-    assert_eq!(vm.run("t", "tc", &[]), Ok(Value::Tag(tags::CONFIG)));
-    // the frame was reused at the same base; only the head word survives
-    // the root RET, so the stack is the metadata word plus the result
+    // the whole span answers: the tag, the summed payload (8079 from the
+    // caller's three staged constants), and the trailing kimm word
+    assert_eq!(
+        vm.run("t", "tc", &[]),
+        Ok(FrameAnswer::many(vec![
+            Value::Tag(tags::CONFIG),
+            Value::I64(8079),
+            Value::I64(3),
+        ]))
+    );
+    // the frame was reused at the same base; the root RET keeps only the
+    // head word on the stack (the span's whole answer rides the death
+    // value), so the stack is the metadata word plus the result
     assert_eq!(vm.stack_len(), 2);
 }
 
@@ -818,7 +835,10 @@ fn tail_call_to_a_native_prints_and_returns_the_unit_word() {
     let mut vm = Vm::new(registry("t", vec![body]));
     vm.capture_output();
     let msg = vm.intern_str("done");
-    assert_eq!(vm.run("t", "printer", &[msg]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("t", "printer", &[msg]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(vm.captured_output(), b"done\n");
 }
 

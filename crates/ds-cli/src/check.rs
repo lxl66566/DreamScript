@@ -27,8 +27,8 @@ use clap::{Args, ValueEnum};
 use ds_check::{DefKind, corpus};
 use ds_diag::{Diagnostic, LabelStyle, render};
 use ds_query::{
-    BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile, PlatformCheck,
-    QueryError, Resolve, TypeOf,
+    Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageId, ParseFile,
+    PlatformCheck, QueryError, Resolve, TypeOf,
 };
 
 /// The `ds check` surface: the package's source files and the diagnostic
@@ -150,6 +150,15 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
             diag: diag.clone(),
             fatal: !exempt(&scopes, diag),
         });
+    }
+
+    // The pooled-body refusal [E3]: fork-join combinator element bodies
+    // refuse the members a pooled drive cannot serve, never gated by
+    // the host's pool opt-in.
+    let analyzed = query(db.get::<Analyzed>(PackageId::new(0)), "analyzed")?;
+    for diag in ds_check::check_pooled_bodies(&analyzed.analyzed, db.declared_rows()) {
+        let fatal = !exempt(&scopes, &diag);
+        reports.push(Report { diag, fatal });
     }
 
     // Source order per file: the focus span of each diagnostic, pass order

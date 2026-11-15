@@ -286,6 +286,23 @@ fn a_trap_prints_the_backtrace_summary() {
     assert!(err.contains("div::main at pc 3"), "stderr: {err}");
 }
 
+/// A script whose shift leaves the bit width behaves identically on
+/// both sides of the trap: `ds check` accepts it (the types are sound;
+/// the shift amount is a runtime fact), and `ds run` prints the trap
+/// like division by zero does.
+#[test]
+fn an_oversized_shift_checks_clean_and_traps_at_run() {
+    let path = env::temp_dir().join("ds-cli-run-shift-trap.ds");
+    fs::write(&path, "fn main() -> int { 1 << 64 }\n").expect("the source writes");
+    let (ok, _, err) = ds_run(&["check", path.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the trapping script checks clean: {err}");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(!ok, "a trapped run exits nonzero");
+    assert_eq!(out, "", "stdout stays clean");
+    assert!(err.contains("trap: oversized shift"), "stderr: {err}");
+}
+
 #[test]
 fn corrupted_bytes_exit_nonzero_with_a_diagnostic() {
     let mut bytes = write(&parity_module(4));
@@ -385,5 +402,31 @@ fn run_refuses_an_order_hidden_overlap_at_check() {
     assert!(
         err.contains("the source does not check clean"),
         "the refusal names the check stage: {err}"
+    );
+}
+
+#[test]
+fn run_refuses_a_moved_then_used_value_at_the_linearity_gate() {
+    // The affine walk's refusals gate the run exactly as they gate
+    // `ds check`: a `~Copyable` value moved into a call and used again
+    // never lowers, so its deinit cannot fire twice at runtime.
+    let (ok, out, err) = ds_run(&[
+        "run",
+        "--no-ambient",
+        "tests/fixtures/negative/ds3001_moved_then_used.ds",
+    ]);
+    assert!(!ok, "a moved-then-used script exits nonzero");
+    assert_eq!(out, "", "nothing executes");
+    assert!(
+        err.contains("DS3001"),
+        "the move reports at the linearity gate: {err}"
+    );
+    assert!(
+        err.contains("used again here after move"),
+        "the two-span pair renders: {err}"
+    );
+    assert!(
+        err.contains("the source fails the linearity check"),
+        "the refusal names the stage: {err}"
     );
 }

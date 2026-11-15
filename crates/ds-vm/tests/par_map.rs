@@ -43,8 +43,8 @@
 //! results declare `Raw`; children spawn during the CALLG, so their pool ids number up from 1.
 
 use ds_vm::{
-    Const, ConstFuncRef, FiberId, FiberState, FunctionDef, ModuleRegistry, ModuleVersion, Trap,
-    Value, Vm,
+    Const, ConstFuncRef, FiberId, FiberState, FrameAnswer, FunctionDef, ModuleRegistry,
+    ModuleVersion, Trap, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
@@ -1730,7 +1730,10 @@ fn assert_children_dead(vm: &Vm, count: u32) {
 fn answers_assemble_in_input_order() {
     let mut vm = Vm::new(pm_registry());
     // [1, 2, 3, 4, 5] doubled: first 2, last 10, len 5 -> 2 * 1000 + 10 * 10 + 5
-    assert_eq!(vm.run("pm", "main_order", &[]), Ok(Value::I64(2105)));
+    assert_eq!(
+        vm.run("pm", "main_order", &[]),
+        Ok(FrameAnswer::one(Value::I64(2105)))
+    );
     assert_children_dead(&vm, 5);
 }
 
@@ -1740,7 +1743,10 @@ fn a_yielding_element_lands_in_place_across_ten_runs() {
     // by the worklist; the assembly order is spawn order regardless
     for _ in 0..10 {
         let mut vm = Vm::new(pm_registry());
-        assert_eq!(vm.run("pm", "main_yield", &[]), Ok(Value::I64(2105)));
+        assert_eq!(
+            vm.run("pm", "main_yield", &[]),
+            Ok(FrameAnswer::one(Value::I64(2105)))
+        );
         assert_children_dead(&vm, 5);
     }
 }
@@ -1751,7 +1757,7 @@ fn the_input_list_reads_back_untouched() {
     // input sum 60 * 100000 + (20 * 1000 + 60 * 10 + 3)
     assert_eq!(
         vm.run("pm", "main_untouched", &[]),
-        Ok(Value::I64(6_020_603))
+        Ok(FrameAnswer::one(Value::I64(6_020_603)))
     );
     assert_children_dead(&vm, 3);
 }
@@ -1775,7 +1781,10 @@ fn a_nested_par_map_lands_through_the_parked_call_site() {
     // drive frames stacking on the interlock's heap stack — and the
     // inner answers assemble identically to the hosted equivalent:
     // doubles applied inside (7 -> 14), the outer checksum reading it
-    assert_eq!(vm.run("pm", "main_nested", &[]), Ok(Value::I64(14_141)));
+    assert_eq!(
+        vm.run("pm", "main_nested", &[]),
+        Ok(FrameAnswer::one(Value::I64(14_141)))
+    );
     // the outer child plus the inner child are both dead at the boundary
     assert_children_dead(&vm, 2);
 }
@@ -1821,7 +1830,7 @@ fn nested_fork_joins_run_past_the_interlocks_own_depth_bar() {
     // level_i(0) == i: every level's plus-one landed in nesting order
     assert_eq!(
         vm.run("dp", &entry, &[Value::I64(0)]),
-        Ok(Value::I64(i64::from(depth)))
+        Ok(FrameAnswer::one(Value::I64(i64::from(depth))))
     );
     for id in 1..=depth {
         assert_eq!(
@@ -1860,7 +1869,10 @@ fn a_non_closure_ref_word_refuses_at_the_spawn() {
 #[test]
 fn an_empty_input_answers_the_empty_list() {
     let mut vm = Vm::new(pm_registry());
-    assert_eq!(vm.run("pm", "main_empty", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("pm", "main_empty", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }
 
 #[test]
@@ -1871,7 +1883,7 @@ fn wide_answers_assemble_in_input_order() {
     // -> 2 * 100000 + 3 * 10000 + 10 * 100 + 15 * 10 + 5
     assert_eq!(
         vm.run("pm", "main_wide_order", &[]),
-        Ok(Value::I64(231_155))
+        Ok(FrameAnswer::one(Value::I64(231_155)))
     );
     assert_children_dead(&vm, 5);
 }
@@ -1884,7 +1896,7 @@ fn a_yielding_element_lands_its_wide_answer_in_place_across_ten_runs() {
         let mut vm = Vm::new(pm_registry());
         assert_eq!(
             vm.run("pm", "main_wide_yield", &[]),
-            Ok(Value::I64(231_155))
+            Ok(FrameAnswer::one(Value::I64(231_155)))
         );
         assert_children_dead(&vm, 5);
     }
@@ -1896,7 +1908,7 @@ fn the_wide_input_list_reads_back_untouched() {
     // input sum 15 * 1000000 + 231155
     assert_eq!(
         vm.run("pm", "main_wide_untouched", &[]),
-        Ok(Value::I64(15_231_155))
+        Ok(FrameAnswer::one(Value::I64(15_231_155)))
     );
     assert_children_dead(&vm, 5);
 }
@@ -1909,10 +1921,13 @@ fn the_completion_span_ref_words_balance_at_the_join() {
     // takes the list's own edge count, and the joiner's single dec
     // lands each string at exactly the result list's edge — the host
     // holds the list, so every count is observable here
-    let answer = vm.run("pm", "main_ref_span", &[]);
-    let Ok(Value::Ref(res)) = answer else {
+    let answer = vm
+        .run("pm", "main_ref_span", &[])
+        .expect("the ref fork answers the list");
+    let [Value::Ref(res)] = answer.as_slice() else {
         panic!("the ref fork answers the result list word");
     };
+    let res = *res;
     let store = vm.objects_of(res);
     let elems = store.list_at(res.id()).expect("the result list reads");
     assert_eq!(elems.len(), 6, "three two-word answers");
@@ -1976,7 +1991,7 @@ fn a_capturing_closure_forks_and_assembles_in_input_order() {
     // len 5 -> 12 * 1000 + 20 * 10 + 5
     assert_eq!(
         vm.run("pm", "main_closure_order", &[]),
-        Ok(Value::I64(12_205))
+        Ok(FrameAnswer::one(Value::I64(12_205)))
     );
     assert_children_dead(&vm, 5);
 }
@@ -1989,7 +2004,7 @@ fn a_capturing_closure_answers_wide_spans_in_input_order() {
     // -> 12 * 100000 + 3 * 10000 + 20 * 100 + 15 * 10 + 5
     assert_eq!(
         vm.run("pm", "main_wide_closure", &[]),
-        Ok(Value::I64(1_232_155))
+        Ok(FrameAnswer::one(Value::I64(1_232_155)))
     );
     assert_children_dead(&vm, 5);
 }
@@ -1998,18 +2013,26 @@ fn a_capturing_closure_answers_wide_spans_in_input_order() {
 fn the_captured_ref_words_balance_at_the_join() {
     let mut vm = Vm::new(pm_registry());
     // the probe hands the interned word out first: count one, host-held
-    let Ok(Value::Ref(id)) = vm.run("pm", "main_kstr_probe", &[]) else {
+    let probe = vm
+        .run("pm", "main_kstr_probe", &[])
+        .expect("the probe answers the interned word");
+    let [Value::Ref(id)] = probe.as_slice() else {
         panic!("the probe answers the interned word");
     };
+    let id = *id;
     assert_eq!(vm.objects_of(id).rc_at(id.id()), Ok(1));
     // the balance main: the closure captures the word (one edge count),
     // three children fork through it — each copy-in acquires one count
     // claimed for the child, each child's own exit dec releases it —
     // and the closure word and result list release before the answer
     // rides out. The count reads exactly the host-held one
-    let Ok(Value::Ref(seen)) = vm.run("pm", "main_ref_balance", &[]) else {
+    let balance = vm
+        .run("pm", "main_ref_balance", &[])
+        .expect("the balance main answers the word");
+    let [Value::Ref(seen)] = balance.as_slice() else {
         panic!("the balance main answers the captured word");
     };
+    let seen = *seen;
     assert_eq!(seen, id, "the interned text names one word");
     // exactly two counts: the probe's host-held one plus the balance
     // main's delivered word (the host never releases) — a stranded
@@ -2022,9 +2045,13 @@ fn the_captured_ref_words_balance_at_the_join() {
 fn a_first_failure_releases_the_outstanding_captured_words() {
     let mut vm = Vm::new(pm_registry());
     // the probe holds the word: count one
-    let Ok(Value::Ref(id)) = vm.run("pm", "main_kstr_probe", &[]) else {
+    let probe = vm
+        .run("pm", "main_kstr_probe", &[])
+        .expect("the probe answers the interned word");
+    let [Value::Ref(id)] = probe.as_slice() else {
         panic!("the probe answers the interned word");
     };
+    let id = *id;
     assert_eq!(vm.objects_of(id).rc_at(id.id()), Ok(1));
     // element 0 lands (its exit dec ran); element 1 dies trapped at the
     // division — its captured copy releases at the death walk; element 2
@@ -2039,6 +2066,9 @@ fn a_first_failure_releases_the_outstanding_captured_words() {
     // closure word's birth count among them); a fresh entry's reset
     // drains them — the closure frees, its capture edge decs, and the
     // count reads exactly the host-held one: no child copy stranded
-    assert_eq!(vm.run("pm", "main_empty", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("pm", "main_empty", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(vm.objects_of(id).rc_at(id.id()), Ok(1));
 }

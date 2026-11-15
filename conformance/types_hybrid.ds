@@ -12,8 +12,10 @@
 // kv: stage: run
 // same: stage: run
 
-// the json value family: bare and payload cases minted by one enum [B3]
-enum json {
+// the json value family: bare and payload cases minted by one enum [B3];
+// `pub` opens the value to the gate's ambient stub, whose parse_json
+// names it [G4]
+pub enum json {
   json_null
   json_bool
   json_num { value: float }

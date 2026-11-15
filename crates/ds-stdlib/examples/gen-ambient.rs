@@ -16,7 +16,7 @@ fn main() {
     let mut files = Files::new();
     let file = files.add_source(AMBIENT_FILE, AMBIENT_SOURCE);
     let ast = ds_parse::parse(&files, file).expect("the ambient parses");
-    let (expanded, diags) = ds_check::expand_derives(&[&ast]);
+    let (expanded, diags) = ds_meta::expand_derives(&[&ast]);
     assert!(
         diags.is_empty(),
         "the ambient's derives refuse to expand: {diags:?}"

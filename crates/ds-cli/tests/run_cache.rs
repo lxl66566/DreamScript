@@ -3,13 +3,14 @@
 //! reproduces the cold output byte for byte, an edit re-keys, a corrupt
 //! artifact falls back and is repaired, a failing program writes
 //! nothing, an unusable cache root still runs, the off switch forces
-//! the cold path, and a parameterized entry — staging from the
+//! the cold path, a parameterized entry — staging from the
 //! artifact's recorded entry plan and member-tag table — serves warm
-//! with arguments staged identically to the cold path, while an entry
-//! spelling the artifact records no plan for (a synthesized member)
-//! stays cold. Every spawn points `DS_CACHE` at a private temp directory
-//! with the debug observable on, so the tests prove which path a run
-//! took without timing it.
+//! with arguments staged identically to the cold path, an entry spelling
+//! the artifact records no plan for (a synthesized member) stays cold,
+//! and both artifact writers record the dep list a deps-first load walk
+//! resolves over the cached artifact. Every spawn points `DS_CACHE` at
+//! a private temp directory with the debug observable on, so the tests
+//! prove which path a run took without timing it.
 
 use std::{
     env, fs,
@@ -241,6 +242,47 @@ fn a_checking_failure_writes_nothing() {
 }
 
 #[test]
+fn a_linearity_violation_refuses_and_writes_nothing() {
+    // The affine gate refuses before the compile that would cache, so a
+    // moved-then-used script never produces an artifact and the next run
+    // refuses through the same gate instead of serving one.
+    let cache = cache_dir("linear");
+    let source = source_file(
+        "linear",
+        concat!(
+            "struct res: ~Copyable { n: int }\n",
+            "fn take (move r: res) -> int { r.n }\n",
+            "fn main() -> () {\n",
+            "  const r = res { n: 5 }\n",
+            "  const a = take(r)\n",
+            "  const b = take(r)\n",
+            "}\n",
+        ),
+    );
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(!ok, "the moved-then-used run refuses");
+    assert_eq!(out, "", "nothing executes");
+    assert!(err.contains("DS3001"), "the move renders: {err}");
+    assert!(
+        err.contains("the source fails the linearity check"),
+        "the refusal names the stage: {err}"
+    );
+    assert!(
+        artifacts(&cache).is_empty(),
+        "a refused compile never writes an artifact"
+    );
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(!ok, "the repeat run refuses, never a served artifact");
+    assert_eq!(out, "", "nothing executes");
+    assert!(err.contains("DS3001"), "{err}");
+    assert!(
+        artifacts(&cache).is_empty(),
+        "the refused script never writes an artifact"
+    );
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn an_unusable_cache_root_still_runs() {
     // a cache root below an ordinary file: no directory can be created
     // there and no artifact can be read — the run must not notice
@@ -443,5 +485,75 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
         err.contains("module `absent` has no function `nope`"),
         "the hit path reports the missing entry as before: {err}"
     );
+    let _ = fs::remove_dir_all(&cache);
+}
+
+/// Both artifact writers record the dep list a load walk resolves: a
+/// source importing two @std members leaves one recorded entry — the
+/// @-sigil package stem at the ambient's content identity — in both the
+/// script-cache artifact and `ds build`'s output, and the deps-first
+/// walk over the cached artifact serves @std from the checked-in dsmod
+/// ahead of the dependent and runs its entry.
+#[test]
+fn both_writers_record_the_dep_list_a_walk_resolves() {
+    const IMPORT_MAIN: &str =
+        "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n  7\n}\n";
+    let cache = cache_dir("deps");
+    let source = source_file("deps", IMPORT_MAIN);
+
+    let (ok, _, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(ok, "the importing run succeeds (stderr: {err})");
+    let written = artifacts(&cache);
+    assert_eq!(written.len(), 1, "exactly one artifact lands");
+    let recorded = ds_mod::read(&fs::read(&written[0]).expect("the artifact reads"))
+        .expect("the artifact decodes")
+        .deps()
+        .to_vec();
+    assert_eq!(
+        recorded,
+        vec![ds_mod::Dep {
+            name: "@std".to_owned(),
+            content_hash: ds_mod::Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()),
+        }],
+        "both member imports link the package stem once at the ambient identity"
+    );
+
+    let built = source
+        .parent()
+        .expect("the source dir")
+        .join("deps-built.dsmod");
+    let (ok, _, err) = ds_run(&cache, &[
+        "build",
+        &run_path(&source),
+        "--out",
+        built.to_str().expect("UTF-8"),
+    ]);
+    assert!(ok, "ds build succeeds (stderr: {err})");
+    assert_eq!(
+        ds_mod::read(&fs::read(&built).expect("the built artifact reads"))
+            .expect("the built artifact decodes")
+            .deps(),
+        recorded.as_slice(),
+        "ds build records the same dep list"
+    );
+
+    // the walk over the cached artifact: @std installs ahead of the
+    // dependent at the identity the entry recorded
+    let mut registry = ds_vm::ModuleRegistry::new();
+    registry.install_platform(ds_vm::Platform::std());
+    let mut vm = ds_vm::Vm::new(registry);
+    let served =
+        ds_mod::read(&ds_stdlib::AMBIENT_DSMOD[16..]).expect("the embedded @std artifact reads");
+    let module = ds_mod::read(&fs::read(&written[0]).expect("the artifact reads"))
+        .expect("the artifact decodes");
+    vm.load(module, |name, _| (name == "@std").then(|| served.clone()))
+        .expect("the cached artifact loads over the served @std");
+    assert_eq!(vm.registry().module_id("@std"), Some(0));
+    assert_eq!(vm.registry().module_id("deps"), Some(1));
+    assert_eq!(
+        vm.run("deps", "main", &[]),
+        Ok(ds_vm::FrameAnswer::one(ds_vm::Value::I64(7)))
+    );
+
     let _ = fs::remove_dir_all(&cache);
 }

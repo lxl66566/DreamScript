@@ -134,6 +134,13 @@ pub struct Db {
 }
 
 impl Db {
+    /// The declared effect rows the database's passes read (E1): the
+    /// ambient table fixed at construction.
+    #[must_use]
+    pub fn declared_rows(&self) -> &ds_check::DeclaredRows {
+        &self.declared_rows
+    }
+
     /// Creates an empty database with the computes for
     /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`],
     /// [`QueryKey::BlockSource`], [`QueryKey::Expanded`],

@@ -21,7 +21,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const PRELUDE: &str = "
 tag int
@@ -138,7 +138,7 @@ fn native_calls_inside_fn_frames_balance_their_borrow_windows() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("native_frame_balance", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the fn-frame native calls answer"
     );
     assert_eq!(vm.captured_output(), b"ab!\ncd!\nef?\nalpha!\n");
@@ -218,7 +218,7 @@ fn a_fn_frame_tail_native_call_lowers_in_place_but_main_keeps_the_transfer() {
     let mut vm = run_lowered(&lowered, &source);
     assert_eq!(
         vm.run("native_frame_balance", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the tail shapes run"
     );
     assert_eq!(vm.captured_output(), b"ab!\ndone\n");

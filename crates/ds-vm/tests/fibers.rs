@@ -27,7 +27,7 @@
 //! (the pool's root is id 0, spawns number up from 1).
 
 use ds_vm::{
-    Const, ConstFuncRef, FIBER_ROOT, FiberId, FiberState, FunctionDef, ModuleRegistry,
+    Const, ConstFuncRef, FIBER_ROOT, FiberId, FiberState, FrameAnswer, FunctionDef, ModuleRegistry,
     ModuleVersion, Trap, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
@@ -478,7 +478,10 @@ fn two_fibers_ping_pong_through_resume_and_yield() {
     assert_eq!((a, b), (FiberId(1), FiberId(2)));
     // root resumes a (seed 1); a resumes b; b yields back to a; ... the
     // thread 1, 3, ..., 21 alternates a<->b eleven times before a stops
-    assert_eq!(vm.run("fb", "main", &[]), Ok(Value::I64(21)));
+    assert_eq!(
+        vm.run("fb", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(21)))
+    );
     assert_eq!(vm.fiber_state(FIBER_ROOT), Some(FiberState::Dead));
     assert_eq!(vm.fiber_state(a), Some(FiberState::Dead));
     // b is parked at its yield with a (dead) resumer: a leftover, not a leak
@@ -494,9 +497,10 @@ fn a_fiber_completing_switches_back_with_its_final_value() {
     assert_eq!(child, FiberId(1));
     let joined = vm.run("fb", "join_main", &[]).expect("join runs");
     // the child's final value — a string Ref — rode the parked resume call
-    let Value::Ref(id) = joined else {
+    let [Value::Ref(id)] = joined.as_slice() else {
         panic!("a string ref, got {joined:?}");
     };
+    let id = *id;
     assert_eq!(vm.objects_of(id).str_at(id.id()), Ok("done"));
     assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
 }
@@ -506,7 +510,10 @@ fn a_root_yielding_under_run_bounces_with_the_none_tag() {
     let mut vm = Vm::new(fb_registry());
     // run drives to completion: the root's yield is answered with the bare
     // PLATFORM_NONE tag and the root branches on it
-    assert_eq!(vm.run("fb", "bounce_main", &[]), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("fb", "bounce_main", &[]),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
     assert_eq!(vm.fiber_state(FIBER_ROOT), Some(FiberState::Dead));
 }
 
@@ -519,7 +526,7 @@ fn a_tail_looping_fiber_never_grows_its_segment() {
     // a Ready fiber's first entry drops the payload
     assert_eq!(
         vm.resume_fiber(spin, Value::I64(0)),
-        Ok(Value::I64(1_000_000))
+        Ok(FrameAnswer::one(Value::I64(1_000_000)))
     );
     // per-fiber TCO: the high-water is the entry frame, one chunk, held
     assert_eq!(vm.fiber_max_len(spin), Some(8));
@@ -534,7 +541,10 @@ fn deep_recursion_grows_by_chunk_append_with_stable_addresses() {
         .spawn_fiber("fb", "deep", &[Value::I64(401)])
         .expect("spawn deep");
     // descends 401 -> 200, then parks mid-recursion at its yield
-    assert_eq!(vm.resume_fiber(deep, Value::I64(0)), Ok(Value::I64(200)));
+    assert_eq!(
+        vm.resume_fiber(deep, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(200)))
+    );
     assert_eq!(vm.fiber_state(deep), Some(FiberState::Suspended));
     let fp = vm.fiber_top_fp(deep).expect("parked with live frames");
     let addr = vm.fiber_word_addr(deep, fp).expect("the top frame's base");
@@ -544,7 +554,10 @@ fn deep_recursion_grows_by_chunk_append_with_stable_addresses() {
         "the descent to depth 200 already crossed a chunk boundary"
     );
     // continue to zero: ~400 frames total, grown by appended chunks
-    assert_eq!(vm.resume_fiber(deep, Value::I64(0)), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.resume_fiber(deep, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(vm.fiber_state(deep), Some(FiberState::Dead));
     assert!(
         vm.fiber_chunk_count(deep).is_some_and(|c| c > chunks),
@@ -569,16 +582,25 @@ fn a_switch_round_trip_copies_no_words() {
         .spawn_fiber("fb", "echo", &[Value::I64(5)])
         .expect("spawn echo");
     // first entry yields 5 (the host payload is dropped: the fiber is Ready)
-    assert_eq!(vm.resume_fiber(echo, Value::I64(0)), Ok(Value::I64(5)));
+    assert_eq!(
+        vm.resume_fiber(echo, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(5)))
+    );
     let fp = vm.fiber_top_fp(echo).expect("parked with live frames");
     let addr = vm.fiber_word_addr(echo, fp).expect("top frame base");
     let chunks = vm.fiber_chunk_count(echo).expect("segment exists");
     // park and re-enter: the same frame must sit at the same address
-    assert_eq!(vm.resume_fiber(echo, Value::I64(9)), Ok(Value::I64(9)));
+    assert_eq!(
+        vm.resume_fiber(echo, Value::I64(9)),
+        Ok(FrameAnswer::one(Value::I64(9)))
+    );
     assert_eq!(vm.fiber_word_addr(echo, fp), Some(addr));
     assert_eq!(vm.fiber_chunk_count(echo), Some(chunks));
     // and the fiber completes: 11 rides the last switch in, RET completes
-    assert_eq!(vm.resume_fiber(echo, Value::I64(11)), Ok(Value::I64(11)));
+    assert_eq!(
+        vm.resume_fiber(echo, Value::I64(11)),
+        Ok(FrameAnswer::one(Value::I64(11)))
+    );
     assert_eq!(vm.fiber_state(echo), Some(FiberState::Dead));
 }
 
@@ -650,9 +672,10 @@ fn a_delivered_ref_keeps_one_transferred_count_over_a_dead_child() {
     let delivered = vm
         .resume_fiber(child, Value::I64(0))
         .expect("the child completes");
-    let Value::Ref(id) = delivered else {
+    let [Value::Ref(id)] = delivered.as_slice() else {
         panic!("a string ref, got {delivered:?}");
     };
+    let id = *id;
     assert_eq!(vm.fiber_state(child), Some(FiberState::Dead));
     assert_eq!(vm.objects().rc_at(id.id()), Ok(1));
     assert_eq!(vm.objects().str_at(id.id()), Ok("done"));

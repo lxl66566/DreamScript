@@ -127,7 +127,11 @@ fn registry(borrowing: bool) -> ModuleRegistry {
 
 pub(crate) fn drive(borrowing: bool) -> Value {
     let mut vm = Vm::new(registry(borrowing));
-    vm.run("string_temp", "main", &[]).expect("the kernel runs")
+    let answer = vm.run("string_temp", "main", &[]).expect("the kernel runs");
+    let [got] = answer.as_slice() else {
+        panic!("the kernel answers one word");
+    };
+    *got
 }
 
 #[library_benchmark]

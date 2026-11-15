@@ -11,18 +11,18 @@ use ds_diag::Files;
 use ds_parse::parse;
 
 const AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "tag missing\n",
-    "tag bad_port\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
-    "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
-    "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
-    "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
-    "struct list[t]\n",
-    "fn zero() -> int {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag missing\n",
+    "pub tag bad_port\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
+    "pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
+    "pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
+    "pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
+    "pub struct list[t]\n",
+    "pub fn zero() -> int {\n",
     "  0\n",
     "}\n",
 );
@@ -50,10 +50,10 @@ fn unwrap_or_types_t_none_to_t_and_checks_eagerly() {
     // the extracted type is the receiver minus none, the fallback meets
     // it, and the plain-name spelling carries the same rule
     for source in [
-        "const x = list_get([1, 2], 0)\nfn f() -> int {\n  x.unwrap_or(0)\n}\n",
+        "pub const x = list_get([1, 2], 0)\nfn f() -> int {\n  x.unwrap_or(0)\n}\n",
         "fn f(present: bool) -> int {\n  const x = if present {\n    1\n  } else {\n    none\n  \
          }\n  x.unwrap_or(2)\n}\n",
-        "fn f(x: int?) -> int {\n  unwrap_or(x, 3)\n}\n",
+        "pub fn f(x: int?) -> int {\n  unwrap_or(x, 3)\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }
@@ -113,9 +113,9 @@ fn ok_or_unions_the_new_member_for_the_propagation() {
     // the produced union is exactly t plus the error's members, and `?`
     // composes with it against the declared return
     for source in [
-        "fn f(x: int?) -> int | missing {\n  x.ok_or(missing)?\n}\n",
-        "fn f(x: int?) -> int {\n  x.ok_or(missing).err((_: missing) => 0)\n}\n",
-        "fn f(x: int?) -> int | missing | bad_port {\n  x.ok_or(missing)?\n}\n",
+        "pub fn f(x: int?) -> int | missing {\n  x.ok_or(missing)?\n}\n",
+        "pub fn f(x: int?) -> int {\n  x.ok_or(missing).err((_: missing) => 0)\n}\n",
+        "pub fn f(x: int?) -> int | missing | bad_port {\n  x.ok_or(missing)?\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }
@@ -131,7 +131,8 @@ fn map_err_follows_the_handler_rules() {
     // the annotated parameter handles, the remainder flows, and the
     // handler's result unions in
     for source in [
-        "fn f(x: int | missing) -> int | bad_port {\n  x.map_err((e: missing) => bad_port)\n}\n",
+        "pub fn f(x: int | missing) -> int | bad_port {\n  x.map_err((e: missing) => \
+         bad_port)\n}\n",
         "fn f(x: int | missing) -> int {\n  x.map_err((e: missing) => bad_port).err((_: bad_port) \
          => 0)\n}\n",
     ] {

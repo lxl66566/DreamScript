@@ -60,10 +60,14 @@
 //! Bare field accesses (`x.f` without a call) are struct-owned and
 //! type-directed — the checker resolves them. `.err(h)`/`.ok(h)` are
 //! decided surface handler forms [section 10 item 2], not names, and are
-//! recorded as [`Res::Handler`]. Imports (G4) are M7: their aliases do not
-//! enter the namespace yet. Multi-segment paths beyond `Trait::f` are
-//! module paths, also M7. Enum case tails (`net_err::timeout`) resolve
-//! their head; case-name existence is the checker's.
+//! recorded as [`Res::Handler`]. Imports (G4) declare no namespace names:
+//! the resolver validates an `@`-sigil import's selected symbols against
+//! the package's `pub` surface (a missing or non-`pub` selection
+//! refuses), while every other import stays declarative for the link
+//! walk, its condition a source-internal spelling until the target model
+//! lands. Multi-segment paths beyond `Trait::f` are module paths, still
+//! open. Enum case tails (`net_err::timeout`) resolve their head;
+//! case-name existence is the checker's.
 //!
 //! # Example
 //!
@@ -172,13 +176,45 @@ impl DefKind {
     }
 }
 
-/// One package-level definition: name, kind, and defining name span.
+/// The visibility tier of one package-level definition (G4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vis {
+    /// Private: the defining file alone sees the name.
+    Private,
+    /// `pub(pkg)`: every file of the package sees it; the `.dsi` omits it.
+    Pkg,
+    /// `pub`: dependents see it through imports; the `.dsi` entry.
+    Pub,
+}
+
+impl Vis {
+    /// The tier a declaration's modifier spells: absent is private (G4).
+    #[must_use]
+    pub const fn of(vis: Option<ds_parse::Vis>) -> Self {
+        match vis {
+            None => Self::Private,
+            Some(ds_parse::Vis::Pub(_)) => Self::Pub,
+            Some(ds_parse::Vis::PubPkg(_)) => Self::Pkg,
+        }
+    }
+
+    /// Whether the tier opens the name to dependents (the `.dsi` gate).
+    #[must_use]
+    pub const fn exported(self) -> bool {
+        matches!(self, Self::Pub)
+    }
+}
+
+/// One package-level definition: name, kind, visibility, and defining
+/// name span.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Def {
     /// The declared name.
     pub name: String,
     /// What the declaration defines.
     pub kind: DefKind,
+    /// The declared visibility tier (G4).
+    pub vis: Vis,
     /// Span of the defining name occurrence; carries the file.
     pub span: Span,
 }
@@ -643,37 +679,60 @@ impl Package {
     }
 
     fn collect_item(&mut self, item: &Item, diags: &mut Vec<Diagnostic>) {
+        let vis = Vis::of(item.vis);
+        if let Some(modifier) = item.vis.filter(|_| {
+            matches!(
+                item.kind,
+                ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Platform(_)
+            )
+        }) {
+            // An import re-exports (`pub import`) and an impl or platform
+            // declaration names no package-level name, so a modifier there
+            // names nothing this round: re-export lands with cross-package
+            // linking, and impl members carry no namespace slot.
+            let pkg = matches!(modifier, ds_parse::Vis::PubPkg(_))
+                .then(|| "(pkg)")
+                .unwrap_or("");
+            diags.push(
+                Diagnostic::error(
+                    ErrorCode::VisNoTarget,
+                    format!("`pub{pkg}` names no package-level definition here"),
+                )
+                .with_primary(modifier.span(), "the visibility modifier"),
+            );
+        }
         match &item.kind {
             ItemKind::Import(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
                 let kind = if local.mutable { DefKind::Var } else { DefKind::Const };
-                self.collect_pattern_defs(&local.pat, kind, diags);
+                self.collect_pattern_defs(&local.pat, kind, vis, diags);
             },
             ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
-                self.declare(&f.name, DefKind::Fn, diags);
+                self.declare(&f.name, DefKind::Fn, vis, diags);
             },
             ItemKind::Struct(s) => {
-                self.declare(&s.name, DefKind::Struct, diags);
+                self.declare(&s.name, DefKind::Struct, vis, diags);
             },
             ItemKind::Enum(e) => {
-                self.declare(&e.name, DefKind::Enum, diags);
+                self.declare(&e.name, DefKind::Enum, vis, diags);
                 // Generic enums keep the opaque atom: their case names do
                 // not mint yet (substitution over minted case shapes is
-                // future work), so they collect no defs.
+                // future work), so they collect no defs. A case carries
+                // its enum's tier: the case is the enum's own surface.
                 if e.generics.is_empty() {
                     for case in &e.cases {
-                        self.declare(&case.name, DefKind::Case, diags);
+                        self.declare(&case.name, DefKind::Case, vis, diags);
                     }
                 }
             },
             ItemKind::Tag(t) => {
-                self.declare(&t.name, DefKind::Tag, diags);
+                self.declare(&t.name, DefKind::Tag, vis, diags);
             },
             ItemKind::TypeAlias(a) => {
-                self.declare(&a.name, DefKind::TypeAlias, diags);
+                self.declare(&a.name, DefKind::TypeAlias, vis, diags);
             },
             ItemKind::Trait(t) => {
-                let id = self.declare(&t.name, DefKind::Trait, diags);
+                let id = self.declare(&t.name, DefKind::Trait, vis, diags);
                 for member in &t.members {
                     if let TraitMember::Fn(f) = member {
                         self.register_method(&f.name, MethodOwner::Trait(id), diags);
@@ -696,8 +755,14 @@ impl Package {
     /// Declares one name into its kind's namespace (F9); a duplicate
     /// WITHIN that namespace reports both spans and keeps the first
     /// definition — the same name in the other namespace coexists.
-    fn declare(&mut self, name: &Ident, kind: DefKind, diags: &mut Vec<Diagnostic>) -> DefId {
-        self.declare_name(&name.name, name.span, kind, diags)
+    fn declare(
+        &mut self,
+        name: &Ident,
+        kind: DefKind,
+        vis: Vis,
+        diags: &mut Vec<Diagnostic>,
+    ) -> DefId {
+        self.declare_name(&name.name, name.span, kind, vis, diags)
     }
 
     fn declare_name(
@@ -705,6 +770,7 @@ impl Package {
         name: &str,
         span: Span,
         kind: DefKind,
+        vis: Vis,
         diags: &mut Vec<Diagnostic>,
     ) -> DefId {
         let names =
@@ -725,6 +791,7 @@ impl Package {
         self.defs.push(Def {
             name: name.to_owned(),
             kind,
+            vis,
             span,
         });
         names.insert(name.to_owned(), id);
@@ -769,9 +836,15 @@ impl Package {
     /// Top-level binding patterns declare one def per bound name, through
     /// the shared binder walker so pun fields and case sub-patterns
     /// declare like any other binder shape.
-    fn collect_pattern_defs(&mut self, pat: &Pattern, kind: DefKind, diags: &mut Vec<Diagnostic>) {
+    fn collect_pattern_defs(
+        &mut self,
+        pat: &Pattern,
+        kind: DefKind,
+        vis: Vis,
+        diags: &mut Vec<Diagnostic>,
+    ) {
         for (span, name) in crate::pattern::pattern_binders(pat) {
-            self.declare_name(name, span, kind, diags);
+            self.declare_name(name, span, kind, vis, diags);
         }
     }
 }
@@ -801,7 +874,8 @@ enum ArmTag {
 impl FileResolver<'_> {
     fn item(&mut self, item: &Item) {
         match &item.kind {
-            ItemKind::Import(_) | ItemKind::Tag(_) | ItemKind::Platform(_) => {},
+            ItemKind::Import(imp) => self.import(imp),
+            ItemKind::Tag(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
                 // A top-level binding declares a PACKAGE def [G3], not a
                 // local: the initializer and annotation resolve here, the
@@ -891,7 +965,14 @@ impl FileResolver<'_> {
                     for arg in &trait_ref.args {
                         self.type_(arg);
                     }
-                    self.path_use(&trait_ref.path);
+                    // The trait reference is a type use: the type
+                    // namespace owns it, so a same-named value (a free
+                    // `fn show` beside `trait show`) never claims the
+                    // head.
+                    match trait_ref.path.segments.as_slice() {
+                        [head] => self.type_name_use(head),
+                        _ => self.path_use(&trait_ref.path),
+                    }
                 }
                 // An impl's members spell the self type `Self` [F2, record
                 // 6.1], trait and inherent alike.
@@ -1143,6 +1224,74 @@ impl FileResolver<'_> {
         }
     }
 
+    /// Refuses a use crossing the private tier's file boundary (G4): a
+    /// private name is its defining file's alone. The resolution still
+    /// records, keeping the refusal the single diagnostic the later
+    /// passes see (the collision precedent).
+    fn enforce_vis(&mut self, span: Span, def: DefId) {
+        let def_decl = self.package.def(def);
+        if def_decl.vis == Vis::Private && def_decl.span.file != span.file {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::PrivateUse,
+                    format!("`{}` is private to its defining file [G4]", def_decl.name),
+                )
+                .with_primary(span, "used outside the defining file")
+                .with_secondary(def_decl.span, "defined private here"),
+            );
+        }
+    }
+
+    /// Records one use of a package definition behind the private tier's
+    /// file boundary.
+    fn def_use(&mut self, span: Span, def: DefId) {
+        self.enforce_vis(span, def);
+        self.uses.push((span, Res::Def(def)));
+    }
+
+    /// One import declaration (G4): an `@std` import's selections validate
+    /// against the exported surface — the compile unit's merged namespace
+    /// serves the `@std` member this round — while every other path
+    /// (bare or sigiled) stays declarative for the link walk (the
+    /// dep-list records it and the graph validates the link). A
+    /// condition is a source-internal spelling the target model will
+    /// evaluate; until then the import records and links as written.
+    fn import(&mut self, imp: &ds_parse::ImportDecl) {
+        if !imp.path.at_sign || imp.path.segments.first().is_none_or(|s| s.name != "std") {
+            return;
+        }
+        for sel in &imp.select {
+            let Some(def) = self.package.lookup(&sel.name.name) else {
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportNameMissing,
+                        format!(
+                            "`{}` names no definition the imported surface exports [G4]",
+                            sel.name.name
+                        ),
+                    )
+                    .with_primary(sel.span, "no such exported name"),
+                );
+                continue;
+            };
+            if !self.package.def(def).vis.exported() {
+                let def_span = self.package.def(def).span;
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportNotExported,
+                        format!(
+                            "`{}` is `pub(pkg)` or private in its package; only `pub` names \
+                             export                              [G4]",
+                            sel.name.name
+                        ),
+                    )
+                    .with_primary(sel.span, "not exported to dependents")
+                    .with_secondary(def_span, "declared here"),
+                );
+            }
+        }
+    }
+
     /// A plain identifier use: locals shadow package names, the value
     /// namespace comes next, and the type namespace last — a bare tag is a
     /// value-producing constructor, and a struct/enum/trait name reached
@@ -1151,19 +1300,19 @@ impl FileResolver<'_> {
     /// (B4), not a package name; the checker types it directly, so it
     /// records nothing here.
     fn name_use(&mut self, name: &Ident) {
-        let res = if let Some(bind) = self.lookup_local(&name.name) {
-            Res::Local { bind }
-        } else if let Some(def) = self.package.lookup_value(&name.name) {
-            Res::Def(def)
-        } else if let Some(def) = self.package.lookup_type(&name.name) {
-            Res::Def(def)
-        } else if name.name == "none" {
+        if let Some(bind) = self.lookup_local(&name.name) {
+            self.uses.push((name.span, Res::Local { bind }));
             return;
-        } else {
+        }
+        if let Some(def) = self
+            .package
+            .lookup_value(&name.name)
+            .or_else(|| self.package.lookup_type(&name.name))
+        {
+            self.def_use(name.span, def);
+        } else if name.name != "none" {
             self.unknown_name(name, self.shadowing_candidates());
-            return;
-        };
-        self.uses.push((name.span, res));
+        }
     }
 
     /// The callee of a call form (F9): locals first (an indirect call of a
@@ -1176,7 +1325,7 @@ impl FileResolver<'_> {
             self.uses.push((name.span, Res::Local { bind }));
             return;
         }
-        let res = match (
+        match (
             self.package.lookup_value(&name.name),
             self.package.lookup_type(&name.name),
         ) {
@@ -1185,19 +1334,16 @@ impl FileResolver<'_> {
                 // Still record the value declaration so the checker types
                 // the call through and the ambiguity stays the single
                 // diagnostic; the error is fatal.
-                Res::Def(value)
+                self.def_use(name.span, value);
             },
-            (Some(value), None) => Res::Def(value),
-            (None, Some(ty)) => Res::Def(ty),
+            (Some(value), None) => self.def_use(name.span, value),
+            (None, Some(ty)) => self.def_use(name.span, ty),
             (None, None) => {
-                if name.name == "none" {
-                    return;
+                if name.name != "none" {
+                    self.unknown_name(name, self.callable_candidates());
                 }
-                self.unknown_name(name, self.callable_candidates());
-                return;
             },
-        };
-        self.uses.push((name.span, res));
+        }
     }
 
     /// A call-form name present in both namespaces: DS2014, naming both
@@ -1335,7 +1481,7 @@ impl FileResolver<'_> {
                     self.diags.push(diag);
                     return;
                 };
-                self.uses.push((head.span, Res::Def(def)));
+                self.def_use(head.span, def);
                 self.uses.push((method.span, Res::TraitMethod(id)));
             },
             _ => {
@@ -1356,7 +1502,7 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => {
                 if let Some(def) = self.package.lookup_type(&only.name) {
-                    self.uses.push((only.span, Res::Def(def)));
+                    self.def_use(only.span, def);
                 } else if only.name != "none" {
                     let candidates = self.type_candidates();
                     self.unknown_name_at(only, candidates, "struct");
@@ -1474,6 +1620,7 @@ impl FileResolver<'_> {
         if let Some(func) = self.package.lookup_value(&name.name) {
             // Capability parameters have no syntax yet, so the receiver
             // feeds parameter 0 — the first data parameter [F3].
+            self.enforce_vis(name.span, func);
             self.uses
                 .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
             return;
@@ -1551,14 +1698,13 @@ impl FileResolver<'_> {
     }
 
     fn type_name_use(&mut self, name: &Ident) {
-        let res = if let Some(bind) = self.lookup_type_var(&name.name) {
-            Res::Local { bind }
+        if let Some(bind) = self.lookup_type_var(&name.name) {
+            self.uses.push((name.span, Res::Local { bind }));
         } else if let Some(def) = self.package.lookup_type(&name.name) {
-            Res::Def(def)
+            self.def_use(name.span, def);
         } else if name.name == "none" {
             // `none` is the universe's distinguished unit atom [B4], not a
             // package declaration; the checker solves it directly.
-            return;
         } else if name.name == "self" {
             // `self` as a type name is retired; the receiver type is
             // spelled `Self` [F2, record 6.1].
@@ -1573,13 +1719,10 @@ impl FileResolver<'_> {
                     with: "Self".to_owned(),
                 }),
             );
-            return;
         } else {
             let candidates = self.type_candidates();
             self.unknown_name_at(name, candidates, "type");
-            return;
-        };
-        self.uses.push((name.span, res));
+        }
     }
 
     // ---- patterns ----------------------------------------------------------
@@ -1613,7 +1756,7 @@ impl FileResolver<'_> {
                 ArmTag::Binding => self.bind(name, or_rebind),
                 ArmTag::BuiltinNone => {},
                 ArmTag::Def(def) => {
-                    self.uses.push((name.span, Res::Def(def)));
+                    self.def_use(name.span, def);
                 },
             },
             // Pattern paths are item references, not locals.
@@ -1677,7 +1820,7 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => {
                 if let Some(def) = self.package.lookup_type(&only.name) {
-                    self.uses.push((only.span, Res::Def(def)));
+                    self.def_use(only.span, def);
                 } else {
                     let candidates = candidates();
                     self.unknown_name_at(only, candidates, "pattern");
@@ -1686,7 +1829,7 @@ impl FileResolver<'_> {
             // The tail is a case name; case tables are the checker's.
             [head, _case] => {
                 if let Some(def) = self.package.lookup_type(&head.name) {
-                    self.uses.push((head.span, Res::Def(def)));
+                    self.def_use(head.span, def);
                 } else {
                     let candidates = candidates();
                     self.unknown_name_at(head, candidates, "pattern");

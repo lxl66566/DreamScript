@@ -11,7 +11,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Lowers one inline source through the full pipeline, asserting the
 /// check is clean so failures are the lowerer's.
@@ -41,7 +41,7 @@ fn lower_inline(source: &str) -> Lowered {
 
 /// Runs one lowered module's `main` on the tier-1 VM and asserts the
 /// golden stdout — the placement pass must not change observable behavior.
-fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> Value {
+fn run_main(lowered: &Lowered, source: &str, stdout: &str) -> FrameAnswer {
     let bytes = write(lowered.module());
     let module = read_checked(&bytes, source.as_bytes()).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
@@ -141,7 +141,10 @@ fn aliasing_places_one_drop_at_the_last_use_in_both_orders() {
             matches!(before, PlacedOp::Uop(Uop::Call { .. })),
             "the drop follows the last use's call: {before:?}"
         );
-        assert_eq!(run_main(&lowered, source, stdout), Value::I64(0));
+        assert_eq!(
+            run_main(&lowered, source, stdout),
+            FrameAnswer::one(Value::I64(0))
+        );
     }
 }
 
@@ -195,7 +198,7 @@ fn a_shared_call_argument_dups_at_the_call_and_the_callee_drops_at_its_last_use(
     // main's totals stay exactly one inc and one dec
     assert_eq!(
         run_main(&lowered, CALL_SOURCE, "shared\nshared\ndone\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -254,7 +257,7 @@ fn a_wildcard_const_binding_discards_and_keeps_alias_deaths() {
             "kept
 "
         ),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -317,7 +320,10 @@ fn a_last_use_drop_sits_immediately_before_the_next_string_allocation() {
                 .any(|op| matches!(op, PlacedOp::Uop(Uop::Kstr { .. }))),
         "every literal loads as a count-free borrow"
     );
-    assert_eq!(run_main(&lowered, REUSE_SOURCE, ""), Value::Bool(false));
+    assert_eq!(
+        run_main(&lowered, REUSE_SOURCE, ""),
+        FrameAnswer::one(Value::Bool(false))
+    );
 }
 
 /// Determinism: the same input lowers to the identical placed sequence,
@@ -413,7 +419,10 @@ fn designated_temporaries_carry_zero_rc_ops() {
                 .all(|op| !matches!(op, PlacedOp::Uop(Uop::Kstr { .. }))),
         "every literal in the frame is a borrow load: {placed:?}"
     );
-    assert_eq!(run_main(&lowered, ZERO_RC_SOURCE, "done\n"), Value::I64(0));
+    assert_eq!(
+        run_main(&lowered, ZERO_RC_SOURCE, "done\n"),
+        FrameAnswer::one(Value::I64(0))
+    );
 }
 
 const ESCAPE_SOURCE: &str = "
@@ -473,7 +482,7 @@ fn escaping_and_carried_literals_keep_their_counts() {
     );
     assert_eq!(
         run_main(&lowered, ESCAPE_SOURCE, "stored\nstored\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -554,7 +563,7 @@ fn designated_loop_concats_serve_from_the_arena() {
     );
     assert_eq!(
         run_main(&lowered, LOOP_STRCAT_SOURCE, "<0>\n<1>\nhit\n<2>\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -595,7 +604,7 @@ fn a_back_edge_carried_concat_keeps_its_count() {
     );
     assert_eq!(
         run_main(&lowered, CARRY_STRCAT_SOURCE, "aaaaaaaaaaaaaaaa\n"),
-        Value::I64(0)
+        FrameAnswer::one(Value::I64(0))
     );
 }
 
@@ -662,7 +671,10 @@ fn one_entry_zero_serves_every_unit_value_in_the_frame() {
         }),
         "no later op writes the canonical unit word: {placed:?}"
     );
-    assert_eq!(run_main(&lowered, CANONICAL_UNIT_SOURCE, ""), Value::I64(5));
+    assert_eq!(
+        run_main(&lowered, CANONICAL_UNIT_SOURCE, ""),
+        FrameAnswer::one(Value::I64(5))
+    );
 }
 
 const DIRECT_SCALAR_STORE_SOURCE: &str = "
@@ -715,7 +727,7 @@ fn scalar_stores_write_the_var_word_directly() {
     );
     assert_eq!(
         run_main(&lowered, DIRECT_SCALAR_STORE_SOURCE, ""),
-        Value::I64(7)
+        FrameAnswer::one(Value::I64(7))
     );
 }
 
@@ -755,7 +767,7 @@ fn computed_scalar_stores_write_the_var_word_directly() {
     );
     assert_eq!(
         run_main(&lowered, DIRECT_COMPUTED_STORE_SOURCE, ""),
-        Value::I64(2)
+        FrameAnswer::one(Value::I64(2))
     );
 }
 
@@ -829,7 +841,7 @@ fn scalar_arguments_write_their_overlay_words_directly() {
     );
     assert_eq!(
         run_main(&lowered, DIRECT_ARG_STAGING_SOURCE, ""),
-        Value::I64(15)
+        FrameAnswer::one(Value::I64(15))
     );
 }
 
@@ -868,7 +880,7 @@ fn a_later_computing_argument_keeps_the_earlier_staging_mov() {
     );
     assert_eq!(
         run_main(&lowered, DEFERRED_ARG_STAGING_SOURCE, ""),
-        Value::I64(5)
+        FrameAnswer::one(Value::I64(5))
     );
 }
 
@@ -905,7 +917,7 @@ fn a_tail_transfer_argument_keeps_its_staging_mov() {
     );
     assert_eq!(
         run_main(&lowered, TAIL_ARG_STAGING_SOURCE, ""),
-        Value::I64(4)
+        FrameAnswer::one(Value::I64(4))
     );
 }
 
@@ -939,6 +951,6 @@ fn callable_value_arguments_write_their_overlay_words_directly() {
     );
     assert_eq!(
         run_main(&lowered, DIRECT_CALLS_STAGING_SOURCE, ""),
-        Value::I64(6)
+        FrameAnswer::one(Value::I64(6))
     );
 }

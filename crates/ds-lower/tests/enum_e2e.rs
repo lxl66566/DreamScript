@@ -9,7 +9,7 @@ use ds_diag::Files;
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install.
@@ -47,7 +47,7 @@ fn minted_cases_construct_dispatch_and_compare() {
     vm.capture_output();
     assert_eq!(
         vm.run("enum_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "of(10) == of(10) over the minted payload case"
     );
     assert_eq!(

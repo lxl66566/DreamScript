@@ -1,0 +1,68 @@
+// source: todo item 62 (the 2026-11-15 tutorial audit's shift and bitwise landing)
+// purpose: the five int operators answer over values, the sign-propagating right shift, the bitwise trio, the frozen precedence rows, and the compound stores, with the trap-edge functions bound as run items; the float operand is the reject [B7]
+// items:
+// shl-values: stage: run
+// shr-arithmetic: stage: run
+// bitwise-trio: stage: run
+// precedence-rows: stage: run
+// compound-stores: stage: run
+// union-beside-bits: stage: run
+// shl-past-width: stage: run
+// shr-past-width: stage: run
+// shl-negative: stage: run
+// float-bit: stage: reject `&` needs integers over a float operand [B7]
+// main: stage: run
+
+fn shl_values() -> int {
+  (1 << 0) + (1 << 10) + (3 << 63) + (1 >> 63)
+}
+
+fn shr_arithmetic() -> int {
+  const n = 0 - 16
+  (n >> 2) + ((0 - 1) >> 63)
+}
+
+fn bitwise_trio() -> int {
+  (0xF0 & 0x0F) + (0xF0 ^ 0xFF) + (0xF0 | 0x0F)
+}
+
+fn precedence_rows() -> bool {
+  (1 + 2 << 3 == 24) && (1 << 2 + 3 == 32) && ((3 & 1 | 2) == 3) && ((1 | 2 ^ 3 & 4) == 3) && (4 << 1 < 32)
+}
+
+fn compound_stores() -> int {
+  var acc = 1
+  acc <<= 2
+  acc >>= 1
+  acc
+}
+
+fn union_beside_bits(x: int) -> bool {
+  const u: int | none = x
+  (x & 1 | 2) == 3 && !(u is none)
+}
+
+fn shl_past_width() -> int {
+  1 << 64
+}
+
+fn shr_past_width() -> int {
+  1 >> 64
+}
+
+fn shl_negative() -> int {
+  1 << -1
+}
+
+fn float_bit(a: float) -> float {
+  a & 3.0
+}
+
+fn main() -> () {
+  println("shl ${shl_values()}")
+  println("shr ${shr_arithmetic()}")
+  println("bits ${bitwise_trio()}")
+  println("precedence ${precedence_rows()}")
+  println("compound ${compound_stores()}")
+  println("union ${union_beside_bits(5)}")
+}

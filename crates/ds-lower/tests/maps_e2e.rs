@@ -12,7 +12,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the map fixture once per test VM: parse -> check -> lower ->
 /// write -> read back -> install. Both native tables must precede the
@@ -62,7 +62,7 @@ fn construct_set_get_round_trip_through_the_map_object() {
     vm.capture_output();
     assert_eq!(
         vm.run("map_probe", "main", &[]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the round trip's every leg matched"
     );
     assert_eq!(vm.captured_output(), b"n 2 host example miss ?\n");

@@ -5,7 +5,8 @@
 
 use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass};
 use ds_vm::{
-    Const, FunctionDef, LoadError, ModuleRegistry, ModuleSlots, ModuleVersion, Value, Vm,
+    Const, FrameAnswer, FunctionDef, LoadError, ModuleRegistry, ModuleSlots, ModuleVersion, Value,
+    Vm,
     abi::{ConstIdx, FrameLayout, SlotType, SlotType::I64, uop::Uop},
     assemble,
 };
@@ -357,7 +358,7 @@ fn a_self_named_dep_entry_resolves_locally_and_is_never_fetched() {
     let mut vm = Vm::new(ModuleRegistry::new());
     vm.load(module, |_, _| None)
         .expect("the self-named entry never reaches the provider");
-    assert_eq!(vm.run("m", "go", &[]), Ok(Value::I64(7)));
+    assert_eq!(vm.run("m", "go", &[]), Ok(FrameAnswer::one(Value::I64(7))));
 }
 
 /// A loaded dependent runs across its dep edge, and a later swap of the
@@ -370,10 +371,16 @@ fn a_dep_swap_redirects_a_loaded_dependent_with_the_id_stable() {
     let mut vm = Vm::new(ModuleRegistry::new());
     vm.load(app, serving(vec![v1])).expect("loads over v1");
     let id = vm.registry().module_id("lib").expect("lib installed");
-    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(15)));
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(15)))
+    );
     // the same FuncRef keeps resolving through the name's current slot
     vm.install_dsmod(inc_module(b"lib-v2", 100))
         .expect("v2 swaps in");
-    assert_eq!(vm.run("app", "main", &[]), Ok(Value::I64(105)));
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(105)))
+    );
     assert_eq!(vm.registry().module_id("lib"), Some(id));
 }

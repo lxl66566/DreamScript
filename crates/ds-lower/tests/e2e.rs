@@ -10,7 +10,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, lower};
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::{parse, parse_script};
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install.
@@ -77,7 +77,7 @@ fn run_main(probe: fn(&mut Vm, &Lowered) -> Vec<Value>, stdout: &str, same: bool
     let args = probe(&mut vm, &lowered);
     assert_eq!(
         vm.run("types_hybrid", "main", &args),
-        Ok(Value::Bool(same)),
+        Ok(FrameAnswer::one(Value::Bool(same))),
         "the run result is the `same` comparison"
     );
     assert_eq!(
@@ -132,7 +132,7 @@ fn structural_eq_fails_on_a_differing_payload() {
 fn structural_eq_across_unions_covers_members_and_payloads() {
     let case = |a: fn(&mut Vm, &Lowered) -> Vec<Value>,
                 b: fn(&mut Vm, &Lowered) -> Vec<Value>|
-     -> Result<Value, ds_vm::Trap> {
+     -> Result<FrameAnswer, ds_vm::Trap> {
         let (mut vm, lowered) = build_vm();
         let mut args = a(&mut vm, &lowered);
         args.extend(b(&mut vm, &lowered));
@@ -141,29 +141,32 @@ fn structural_eq_across_unions_covers_members_and_payloads() {
     // same member, same payload
     assert_eq!(
         case(|v, l| probe_num(v, l, 8080), |v, l| probe_num(v, l, 8080)),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     // differing i64 payload
     assert_eq!(
         case(|v, l| probe_num(v, l, 8080), |v, l| probe_num(v, l, 80)),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
     // member mismatch: p_num against p_str
     assert_eq!(
         case(|v, l| probe_num(v, l, 8080), |v, l| probe_str(v, l, "8080")),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
     // string payloads compare by content
     assert_eq!(
         case(|v, l| probe_str(v, l, "ab"), |v, l| probe_str(v, l, "ab")),
-        Ok(Value::Bool(true))
+        Ok(FrameAnswer::one(Value::Bool(true)))
     );
     assert_eq!(
         case(|v, l| probe_str(v, l, "ab"), |v, l| probe_str(v, l, "cd")),
-        Ok(Value::Bool(false))
+        Ok(FrameAnswer::one(Value::Bool(false)))
     );
     // unit members
-    assert_eq!(case(probe_none, probe_none), Ok(Value::Bool(true)));
+    assert_eq!(
+        case(probe_none, probe_none),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
 }
 
 #[test]
@@ -172,7 +175,7 @@ fn interpolation_chain_uses_print_and_the_float_conversion() {
     vm.capture_output();
     assert_eq!(
         vm.run("types_hybrid", "report", &[Value::F64(2.5)]),
-        Ok(Value::F64(2.5))
+        Ok(FrameAnswer::one(Value::F64(2.5)))
     );
     assert_eq!(vm.captured_output(), b"value: 2.5\n");
 }
@@ -188,7 +191,7 @@ fn tail_recursion_runs_a_million_deep_at_constant_stack() {
             Value::I64(1_000_000),
             Value::I64(0)
         ]),
-        Ok(Value::I64(1_000_000))
+        Ok(FrameAnswer::one(Value::I64(1_000_000)))
     );
     assert_eq!(vm.stack_len(), 2, "the metadata word plus the result");
 }
@@ -265,7 +268,10 @@ fn integer_compound_remainder_assign_runs() {
     registry.install_platform(Platform::std());
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
-    assert_eq!(vm.run("inline", "main", &[]), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.run("inline", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
 }
 
 #[test]
@@ -343,5 +349,8 @@ fn a_binding_tail_lowers_and_returns_unit() {
     registry.install_platform(Platform::std());
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
-    assert_eq!(vm.run("script", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("script", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }

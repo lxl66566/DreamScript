@@ -15,7 +15,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, Lowered, PlacedOp, lower};
 use ds_mod::{Constant, Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = concat!(
     "tag int\n",
@@ -114,7 +114,7 @@ fn multi_atom_tests_run_and_narrow_end_to_end() {
     vm.capture_output();
     assert_eq!(
         vm.run("is_union", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     assert_eq!(

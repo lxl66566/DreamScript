@@ -15,7 +15,7 @@ use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// The ambient every probe shares.
 const PRELUDE: &str = concat!(
@@ -58,7 +58,7 @@ fn runs(name: &str, source: &str) -> String {
     vm.capture_output();
     assert_eq!(
         vm.run(name, "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the unit entry result"
     );
     String::from_utf8_lossy(vm.captured_output()).into_owned()

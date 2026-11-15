@@ -276,7 +276,7 @@ fn cut_once() -> Vm {
     ]);
     assert_eq!(
         vm.run("yb", "cut_parent", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "the boundary unions the cancel out and the parent lands — the join completed"
     );
     vm
@@ -335,7 +335,10 @@ fn an_uncancelled_parked_child_resumes_normally_and_lands() {
         .spawn_fiber_in(n, "yb", "yield_land", &[Value::I64(41)])
         .expect("spawn");
     // the host drive parks the child at its first yield (payload 41)
-    assert_eq!(vm.resume_fiber(child, Value::I64(0)), Ok(Value::I64(41)));
+    assert_eq!(
+        vm.resume_fiber(child, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(41)))
+    );
     assert_eq!(vm.fiber_state(child), Some(FiberState::Suspended));
     // the join bounces it through its second park and it lands
     assert_eq!(

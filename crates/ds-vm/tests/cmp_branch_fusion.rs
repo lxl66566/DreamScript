@@ -9,8 +9,8 @@
 //! intervening RC word breaking the pair.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberState, FunctionDef, JoinOutcome, ModuleRegistry, ModuleVersion,
-    NurseryId, Trap, Value, Vm,
+    ChildOutcome, Const, FiberState, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
+    ModuleVersion, NurseryId, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, F64, I64, Ref},
@@ -158,13 +158,31 @@ fn fused_pairs_take_their_branch_and_keep_the_bool_dst_readable() {
     let i = |v: i64| Value::I64(v);
     let f = |v: f64| Value::F64(v);
     // 5 < 10 holds: the pair falls through, the probe folds the true in
-    assert_eq!(vm.run("cf", "lt_pair", &[i(5), i(10)]), Ok(i(110)));
+    assert_eq!(
+        vm.run("cf", "lt_pair", &[i(5), i(10)]),
+        Ok(FrameAnswer::one(i(110)))
+    );
     // 15 < 10 fails: the fused branch jumps, the probe reads false
-    assert_eq!(vm.run("cf", "lt_pair", &[i(15), i(10)]), Ok(i(20)));
-    assert_eq!(vm.run("cf", "eq_pair", &[i(10), i(10)]), Ok(i(110)));
-    assert_eq!(vm.run("cf", "eq_pair", &[i(9), i(10)]), Ok(i(20)));
-    assert_eq!(vm.run("cf", "gtf_pair", &[f(2.75), f(2.5)]), Ok(i(110)));
-    assert_eq!(vm.run("cf", "gtf_pair", &[f(2.5), f(2.5)]), Ok(i(20)));
+    assert_eq!(
+        vm.run("cf", "lt_pair", &[i(15), i(10)]),
+        Ok(FrameAnswer::one(i(20)))
+    );
+    assert_eq!(
+        vm.run("cf", "eq_pair", &[i(10), i(10)]),
+        Ok(FrameAnswer::one(i(110)))
+    );
+    assert_eq!(
+        vm.run("cf", "eq_pair", &[i(9), i(10)]),
+        Ok(FrameAnswer::one(i(20)))
+    );
+    assert_eq!(
+        vm.run("cf", "gtf_pair", &[f(2.75), f(2.5)]),
+        Ok(FrameAnswer::one(i(110)))
+    );
+    assert_eq!(
+        vm.run("cf", "gtf_pair", &[f(2.5), f(2.5)]),
+        Ok(FrameAnswer::one(i(20)))
+    );
 }
 
 /// The loop-head shape the census measured the family on: the fused pair
@@ -197,9 +215,15 @@ fn the_loop_head_pair_runs_each_iteration() {
     ])]);
     let mut vm = Vm::new(reg);
     // zero trips: the very first pair is the exit
-    assert_eq!(vm.run("cf", "lt_loop", &[Value::I64(0)]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("cf", "lt_loop", &[Value::I64(0)]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     // four taken iterations then the exit: 0 + 1 + 2 + 3
-    assert_eq!(vm.run("cf", "lt_loop", &[Value::I64(4)]), Ok(Value::I64(6)));
+    assert_eq!(
+        vm.run("cf", "lt_loop", &[Value::I64(4)]),
+        Ok(FrameAnswer::one(Value::I64(6)))
+    );
 }
 
 /// `() -> int`: 1 / 0 — dies trapped, raising the nursery's cancel flag.
@@ -278,7 +302,7 @@ fn a_fused_backward_branch_observes_cancellation() {
         // branch ever lost the observation point)
         assert_eq!(
             vm.resume_fiber(spinning, Value::I64(0)),
-            Ok(Value::Tag(PLATFORM_CANCELLED))
+            Ok(FrameAnswer::one(Value::Tag(PLATFORM_CANCELLED)))
         );
         assert_eq!(vm.fiber_state(spinning), Some(FiberState::Dead));
         assert_eq!(
@@ -390,7 +414,7 @@ fn a_branch_testing_another_slot_stays_unfused() {
     // 1 < 10 is true, but the branch tested slot 4 (false) and jumped
     assert_eq!(
         vm.run("cf", "cond_mismatch", &[Value::I64(1), Value::I64(10)]),
-        Ok(Value::I64(20))
+        Ok(FrameAnswer::one(Value::I64(20)))
     );
 }
 
@@ -415,6 +439,6 @@ fn jmpif_consuming_the_compare_dst_stays_unfused() {
     let mut vm = Vm::new(reg);
     assert_eq!(
         vm.run("cf", "jmpif_dst", &[Value::I64(1), Value::I64(10)]),
-        Ok(Value::I64(20))
+        Ok(FrameAnswer::one(Value::I64(20)))
     );
 }

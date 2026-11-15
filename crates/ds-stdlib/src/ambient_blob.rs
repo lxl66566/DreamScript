@@ -105,7 +105,7 @@ mod tests {
         let mut files = ds_diag::Files::new();
         let file = files.add_source(crate::AMBIENT_FILE, crate::AMBIENT_SOURCE);
         let ast = ds_parse::parse(&files, file).expect("the ambient parses");
-        let (expanded, diags) = ds_check::expand_derives(&[&ast]);
+        let (expanded, diags) = ds_meta::expand_derives(&[&ast]);
         assert!(diags.is_empty(), "the ambient derives refuse: {diags:?}");
         let bytes = postcard::to_allocvec(&expanded[0]).expect("the AST serializes");
         assert_eq!(
@@ -146,7 +146,7 @@ mod tests {
             !carries_derive,
             "the artifact's trees ship pre-expanded, so no derive attribute remains"
         );
-        let (reexpanded, diags) = ds_check::expand_derives(&[&decoded]);
+        let (reexpanded, diags) = ds_meta::expand_derives(&[&decoded]);
         assert!(diags.is_empty(), "an expanded tree re-expands clean");
         let again = postcard::to_allocvec(&reexpanded[0]).expect("the tree serializes");
         let before = postcard::to_allocvec(&decoded).expect("the tree serializes");
@@ -169,9 +169,9 @@ mod tests {
         let user = files.add_source("point.ds", user_source);
         let user_ast = ds_parse::parse(&files, user).expect("the user source parses");
         let served = ambient_ast(ambient).expect("the verified artifact decodes");
-        let owned = ds_check::analyze_owned(&files, vec![served, user_ast.clone()], &[true, false]);
+        let owned = ds_meta::analyze_owned(&files, vec![served, user_ast.clone()], &[true, false]);
         let fresh_ambient = ds_parse::parse(&files, ambient).expect("the ambient parses");
-        let fresh = ds_check::analyze(&files, &[fresh_ambient, user_ast]);
+        let fresh = ds_meta::analyze(&files, &[fresh_ambient, user_ast]);
         assert_eq!(
             owned.checked.diags, fresh.checked.diags,
             "the served path checks the same package"

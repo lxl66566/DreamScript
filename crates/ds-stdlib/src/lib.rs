@@ -75,7 +75,9 @@ pub mod ambient_dsi;
 #[cfg(feature = "ast-serde")]
 pub use ambient_blob::{AmbientBlobError, ambient_ast};
 #[cfg(feature = "ast-serde")]
-pub use ambient_dsi::{AmbientDsiError, ServedAmbient, ambient_dsi};
+pub use ambient_dsi::ambient_dsi;
+#[cfg(feature = "ast-serde")]
+pub use ds_dsi::{PrefixDsiError, ServedPrefix};
 
 /// The world-capability attribution, built once per process.
 static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {

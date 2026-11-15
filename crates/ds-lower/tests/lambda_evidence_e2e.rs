@@ -15,7 +15,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Constant, FuncRefKey, Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const MAP_PROBE: &str = include_str!("fixtures/generic_lambda_map_probe.ds");
 const FILTER_PROBE: &str = include_str!("fixtures/generic_lambda_filter_probe.ds");
@@ -112,7 +112,7 @@ fn two_instantiations_run_the_lambda_evidence_shape() {
     let mut vm = run_lowered(MAP_PROBE, &lowered);
     assert_eq!(
         vm.run("probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -253,7 +253,7 @@ fn a_filter_predicate_demands_evidence_through_its_own_lambda() {
     let mut vm = run_lowered(FILTER_PROBE, &lowered);
     assert_eq!(
         vm.run("probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(
@@ -292,7 +292,7 @@ fn nested_lambdas_stage_evidence_transitively() {
     let mut vm = run_lowered(NESTED_PROBE, &lowered);
     assert_eq!(
         vm.run("probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

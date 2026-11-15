@@ -110,9 +110,9 @@ Acceptance: generics_coherent_traits.ds runs including `schema(comptime T)`; use
 
 ### M7 — Modules, packages, FFI, tooling
 
-Goal: the ecosystem layer and the five tooling commitments; every item below is open (the platform seam has landed).
+Goal: the ecosystem layer and the five tooling commitments; the platform seam, the visibility file-grain and import-surface slice, and the `ds info` `.dsi` rendering have landed (cross-package name binding, the condition evaluation, and `pub import` re-export remain open).
 
-- Visibility and interfaces [G3, G4]: `pub(pkg)`/`pub` privacy, selective, aliased and conditional imports, `.dsi` via `ds info`, cross-package cycle link errors.
+- Visibility and interfaces [G3, G4]: the file-grain `private`/`pub(pkg)`/`pub` tiers and `@std` import selection validation are landed; cross-package name binding, aliased module references, conditional-import evaluation, `pub import` re-export, and cross-package cycle link errors remain open.
 - Loading [G3.5]: header-dep-list loading, the `$DS_CACHE` mmap hit path, `ds build --exe`, sub-10ms cold startup; the link-table spelling lands in the record first.
 - Packages [H6]: manifests as the lock, MVS resolution, the content-addressed store, script mode with `ds save`, the optional `ds link` linker.
 - Registry [H6]: a metadata-only git index at a local path or remote URL, content-addressed verified fetch.

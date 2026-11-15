@@ -9,7 +9,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -55,7 +55,7 @@ fn the_written_bytes_read_back_through_the_platform_spans() {
     vm.capture_output();
     assert_eq!(
         vm.run("file_natives", "main", &staged),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the round trip's every leg succeeded and the payload words matched"
     );
     assert_eq!(vm.captured_output(), b"size 11\n");
@@ -71,7 +71,7 @@ fn a_failed_read_prints_the_message_and_halts_on_the_tag() {
     vm.capture_output();
     assert_eq!(
         vm.run("file_natives", "fail_read", &staged),
-        Ok(Value::Tag(native::PLATFORM_IO_ERR)),
+        Ok(FrameAnswer::one(Value::Tag(native::PLATFORM_IO_ERR))),
         "the handler halts on the discriminant, the run result is the tag"
     );
     let out = String::from_utf8_lossy(vm.captured_output()).into_owned();

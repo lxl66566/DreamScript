@@ -108,6 +108,9 @@ pub enum Trap {
     IntegerOverflow,
     /// DIVI64/MODI64 with a zero divisor [B7].
     DivideByZero,
+    /// SHLI64/SHRI64 with a shift amount outside `0..64` [B7: shifts
+    /// trap past the bit width; wrapping stays the explicit operators].
+    OversizedShift,
     /// CVTF2I on a NaN or a value outside the i64 range [B7].
     CvtOutOfRange,
     /// A run entry resolved through no current module slot.
@@ -716,11 +719,13 @@ enum RetOutcome {
 
 /// A callable's whole answer span, the fiber-boundary result channel:
 /// the reentry frame of a hosted call (`Vm::call_hosted`) returns it to
-/// its Rust-side driver, and a spawned child's completion rides it
-/// through the nursery ledger (`ChildOutcome::Completed`) — up to four
-/// words inline (every lowered lambda's answer today; the per-element
-/// combinator loop must not pay an allocation), the heap buffer the
-/// wide fallback.
+/// its Rust-side driver, a spawned child's completion rides it through
+/// the nursery ledger (`ChildOutcome::Completed`), and a root drive's
+/// death value carries it to its host (`Vm::run`,
+/// `Vm::resume_fiber`-style entries) so a multi-word answer crosses
+/// whole — up to four words inline (every lowered lambda's answer
+/// today; the per-element combinator loop must not pay an allocation),
+/// the heap buffer the wide fallback.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FrameAnswer {
     /// The span's first `n` words, `n` = the span's width.
@@ -808,8 +813,11 @@ impl FrameAnswer {
 /// drive's reentry frame returned, or it parked at a cross-nursery join
 /// whose drive the host must run first.
 pub(crate) enum DriveOutcome {
-    /// The current fiber's entry frame returned or `HALT`ed.
-    Died(Value),
+    /// The current fiber's entry frame returned or `HALT`ed: its whole
+    /// answer span — one word for a scalar body, the RETSPAN's width for a
+    /// multi-word return — so a host seam reads tuples and widened spans
+    /// whole, never a truncated head word.
+    Died(FrameAnswer),
     /// The current fiber yielded with no in-language resumer.
     Yielded(Value),
     /// A nested reentrant call's synthetic frame returned: the answer's
@@ -1629,6 +1637,48 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     x.checked_rem(y).ok_or(Trap::IntegerOverflow)
 }
 
+/// SHLI64/SHRI64/BITAND/BITXOR/BITORI64 [B7]: the shift amounts trap
+/// outside the 0..64 window (no wrap form exists, so both carry a trap
+/// edge like the trapping arithmetic), `>>` is the arithmetic
+/// (sign-propagating) shift, and the bitwise trio is total. The dispatch
+/// reaches this through its one range arm over the five opcodes.
+fn shift_bitwise_word(
+    stack: &mut Segment,
+    op: u8,
+    dst: u8,
+    lhs: u8,
+    rhs: u8,
+    fp: usize,
+    slots: &[SlotType],
+    body_len: usize,
+) -> Result<(), Trap> {
+    let (x, y) = (
+        read_i64(stack, fp, lhs, slots, body_len)?,
+        read_i64(stack, fp, rhs, slots, body_len)?,
+    );
+    let value = match op {
+        OP_SHL_I64 => {
+            let Some(shift) = u32::try_from(y).ok().filter(|&y| y < 64) else {
+                return Err(Trap::OversizedShift);
+            };
+            Value::I64(x << shift)
+        },
+        OP_SHR_I64 => {
+            let Some(shift) = u32::try_from(y).ok().filter(|&y| y < 64) else {
+                return Err(Trap::OversizedShift);
+            };
+            // Rust's i64 `>>` is arithmetic: the sign bit propagates,
+            // the shape B7 freezes
+            Value::I64(x >> shift)
+        },
+        OP_BITAND_I64 => Value::I64(x & y),
+        OP_BITXOR_I64 => Value::I64(x ^ y),
+        OP_BITOR_I64 => Value::I64(x | y),
+        _ => unreachable!("the range arm partitions the quintet"),
+    };
+    write_slot(stack, fp, dst, slots, body_len, value)
+}
+
 // The peek-next load-op fusion [BL-4, the opcode census' ranked leader]:
 // a constant load whose immediately following word is one of the measured
 // census arith pairs consuming the loaded slot runs both uops inside the
@@ -2169,6 +2219,11 @@ const OP_MOD_I64: u8 = 0x14;
 const OP_WRAPADD_I64: u8 = 0x15;
 const OP_WRAPSUB_I64: u8 = 0x16;
 const OP_WRAPMUL_I64: u8 = 0x17;
+const OP_SHL_I64: u8 = 0x18;
+const OP_SHR_I64: u8 = 0x19;
+const OP_BITAND_I64: u8 = 0x1a;
+const OP_BITXOR_I64: u8 = 0x1b;
+const OP_BITOR_I64: u8 = 0x1c;
 const OP_ADD_F64: u8 = 0x20;
 const OP_SUB_F64: u8 = 0x21;
 const OP_MUL_F64: u8 = 0x22;
@@ -2836,7 +2891,7 @@ impl Vm {
     ///
     /// [`Trap::UnknownCallee`] with module `fiber` when `fiber` is absent
     /// or not parked at a switch point; the execution traps otherwise.
-    pub fn resume_fiber(&mut self, fiber: FiberId, payload: Value) -> Result<Value, Trap> {
+    pub fn resume_fiber(&mut self, fiber: FiberId, payload: Value) -> Result<FrameAnswer, Trap> {
         if !self.pool.get(fiber.index()).is_some_and(Fiber::resumable) {
             return Err(Trap::UnknownCallee {
                 module: "fiber".into(),
@@ -2848,12 +2903,22 @@ impl Vm {
         let outcome = self.execute_host_step(active, pc, usize::MAX);
         self.host_release();
         match outcome {
-            Ok(DriveOutcome::Died(v) | DriveOutcome::Yielded(v)) => {
-                // the drive-ended fiber's answer crosses to the host; the
-                // fiber itself keeps its remaining claims (interrupted
-                // drives keep their frames, and their ledgers, whole)
+            Ok(DriveOutcome::Died(answer)) => {
+                // the drive-ended fiber's whole answer span crosses to the
+                // host; the fiber itself keeps its remaining claims
+                // (interrupted drives keep their frames, and their ledgers,
+                // whole)
+                for value in answer.as_slice() {
+                    self.host_delivery(value);
+                }
+                Ok(answer)
+            },
+            Ok(DriveOutcome::Yielded(v)) => {
+                // a yield parks with one word; the fiber itself keeps its
+                // remaining claims (interrupted drives keep their frames,
+                // and their ledgers, whole)
                 self.host_delivery(&v);
-                Ok(v)
+                Ok(FrameAnswer::one(v))
             },
             // a host-level drive passes no boundary, so no reentry frame
             // exists to return through
@@ -3225,15 +3290,17 @@ impl Vm {
         }
         // the sequential drive's own tails, in spawn order: the death
         // walk for a fiber the worker left non-Dead (a trapped child
-        // keeps its frames — hooks first, then the claim drain), the
+        // keeps its frames — hooks first, then the claim drain around
+        // the held payload, its claims crossing to the joiner), the
         // ledger write, and the first-failure flag
+        let joiner = frame.joiner.map(|(fiber, _)| fiber);
         for (child, outcome) in ledger {
             if self.pool[child.index()].state != FiberState::Dead {
-                self.fire_teardown_hooks(child, &[]);
-                self.drain_claims_except(child, &[]);
-                let fiber = &mut self.pool[child.index()];
-                fiber.state = FiberState::Dead;
-                fiber.resume = None;
+                let held = outcome
+                    .as_ref()
+                    .map(Self::payload_words)
+                    .unwrap_or_default();
+                self.child_death_walk(child, &held, joiner);
             }
             let outcome = outcome.unwrap_or(ChildOutcome::Cancelled);
             if matches!(outcome, ChildOutcome::Trapped(_)) {
@@ -3243,6 +3310,41 @@ impl Vm {
         }
         frame.cursor = frame.children.len();
         true
+    }
+
+    /// The `Ref` words a trapped outcome's cancel payload carries — the
+    /// words that ride the trap's delivery past a death walk, their counts
+    /// held back from the drain and their claims routed to the joiner.
+    fn payload_words(outcome: &ChildOutcome) -> Vec<RefId> {
+        match outcome {
+            ChildOutcome::Trapped(Trap::NurseryCancelled { payload }) => payload
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Ref(word) => Some(*word),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The trapped-child death walk every drive's tail shares [E5]: the
+    /// kept frames' deinit pass with the payload words held back, the
+    /// claim drain around them, each held word's claim crossing to the
+    /// joiner (the trap's delivery lands its counts there), and the Dead
+    /// marking.
+    fn child_death_walk(&mut self, child: FiberId, held: &[RefId], joiner: Option<FiberId>) {
+        self.fire_teardown_hooks(child, held);
+        self.drain_claims_except(child, held);
+        for &word in held {
+            self.claims[child.index()].release(word);
+            if let Some(target) = joiner {
+                self.claims[target.index()].acquire(word);
+            }
+        }
+        let fiber = &mut self.pool[child.index()];
+        fiber.state = FiberState::Dead;
+        fiber.resume = None;
     }
 
     /// Drives one frame's remaining children in spawn order, each to death
@@ -3309,27 +3411,12 @@ impl Vm {
             // released, routed to each word's own heap (the one
             // cross-heap count channel of a death [E5])
             if self.pool[child.index()].state != FiberState::Dead {
-                let held: Vec<RefId> = match self.nurseries[frame.nursery.index()].outcome(child) {
-                    Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => payload
-                        .iter()
-                        .filter_map(|value| match value {
-                            Value::Ref(word) => Some(*word),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                self.fire_teardown_hooks(child, &held);
-                self.drain_claims_except(child, &held);
-                for &word in &held {
-                    self.claims[child.index()].release(word);
-                    if let Some((target, _)) = frame.joiner {
-                        self.claims[target.index()].acquire(word);
-                    }
-                }
-                let fiber = &mut self.pool[child.index()];
-                fiber.state = FiberState::Dead;
-                fiber.resume = None;
+                let held = self.nurseries[frame.nursery.index()]
+                    .outcome(child)
+                    .as_ref()
+                    .map(Self::payload_words)
+                    .unwrap_or_default();
+                self.child_death_walk(child, &held, frame.joiner.map(|(fiber, _)| fiber));
             }
             frame.cursor += 1;
         }
@@ -3793,7 +3880,7 @@ impl Vm {
         let frame = self.push_drive_frame(req.nursery, Some((req.joiner, req.resume_pc)), req.seam);
         let (mut active, mut pc) = match self.nursery_drive_run(frame) {
             NurseryDriveEnd::Face(_) => unreachable!("a join seam frames a delivery"),
-            NurseryDriveEnd::Gone(value) => return Ok(DriveOutcome::Died(value)),
+            NurseryDriveEnd::Gone(value) => return Ok(DriveOutcome::Died(FrameAnswer::one(value))),
             NurseryDriveEnd::Raised(trap, at) => return Err((trap, at)),
             NurseryDriveEnd::Entered(a, at) => (a, at),
         };
@@ -3807,7 +3894,9 @@ impl Vm {
                     );
                     match self.nursery_drive_run(frame) {
                         NurseryDriveEnd::Face(_) => unreachable!("a join seam frames a delivery"),
-                        NurseryDriveEnd::Gone(value) => return Ok(DriveOutcome::Died(value)),
+                        NurseryDriveEnd::Gone(value) => {
+                            return Ok(DriveOutcome::Died(FrameAnswer::one(value)))
+                        },
                         NurseryDriveEnd::Raised(trap, at) => return Err((trap, at)),
                         NurseryDriveEnd::Entered(a, at) => {
                             active = a;
@@ -4136,11 +4225,15 @@ impl Vm {
     /// The running fiber completed at its entry frame answering the
     /// whole span `answer` (a RETSPAN or a tail native's span/total):
     /// the span rides the nursery ledger whole, the head word alone
-    /// reaching a live resumer (the resume channel stays one word) and
-    /// the drive's death value.
-    fn complete_current_span(&mut self, answer: FrameAnswer) -> Option<(Active, CodePc)> {
+    /// reaching a live resumer (the resume channel stays one word). The
+    /// caller keeps the span for the drive's death value — the host
+    /// seam's whole answer.
+    fn complete_current_span(&mut self, answer: &FrameAnswer) -> Option<(Active, CodePc)> {
         let head = answer.as_slice().first().copied().unwrap_or(Value::I64(0));
-        self.die_current(head, ChildOutcome::Completed(answer))
+        // the record clones the inline span so the caller keeps the words
+        // for the drive's death value; the clone runs once per entry-frame
+        // completion, never per call, so the hot seams stay untouched
+        self.die_current(head, ChildOutcome::Completed(answer.clone()))
     }
 
     /// The running fiber observed its nursery's cancel flag at a taken
@@ -4451,15 +4544,17 @@ impl Vm {
         if parked_here { Some(self.switch_in(joiner, value)) } else { None }
     }
 
-    /// Runs an entry function to its `HALT` or entry-frame `RET` and reports
-    /// the resulting value: the root fiber's drive to completion [E2]. The
-    /// root's execution state resets per run (other pool fibers keep their
-    /// state); on a `Trap` the state is kept for [`Vm::backtrace`]. A root
-    /// that yields to the host (it has no in-language resumer) is re-entered
-    /// with the bare `PLATFORM_NONE` tag as the yield's answer — a `run`
-    /// entry drives to completion; interactive stepping is
-    /// [`Vm::resume_fiber`].
-    pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<Value, Trap> {
+    /// Runs an entry function to its `HALT` or entry-frame `RET`/`RETSPAN`
+    /// and reports the resulting answer span: the root fiber's drive to
+    /// completion [E2]. A multi-word answer (a tuple, a widened span)
+    /// crosses whole — one word per span word, never a truncated head.
+    /// The root's execution state resets per run (other pool fibers keep
+    /// their state); on a `Trap` the state is kept for [`Vm::backtrace`].
+    /// A root that yields to the host (it has no in-language resumer) is
+    /// re-entered with the bare `PLATFORM_NONE` tag as the yield's
+    /// answer — a `run` entry drives to completion; interactive stepping
+    /// is [`Vm::resume_fiber`].
+    pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<FrameAnswer, Trap> {
         self.trap_pc = None;
         let (version, func_id) = self.resolve_entry(module, func, args)?;
         let frame_size = self.registry.pinned(version).functions()[func_id as usize]
@@ -4492,11 +4587,14 @@ impl Vm {
         let mut pc = CodePc(0);
         loop {
             match self.execute_host_step(active, pc, usize::MAX) {
-                Ok(DriveOutcome::Died(value)) => {
+                Ok(DriveOutcome::Died(answer)) => {
                     self.host_release();
-                    // the completed root's answer crosses to the host
-                    self.host_delivery(&value);
-                    return Ok(value);
+                    // the completed root's whole answer span crosses to
+                    // the host, one delivered word per span word
+                    for value in answer.as_slice() {
+                        self.host_delivery(value);
+                    }
+                    return Ok(answer);
                 },
                 Ok(DriveOutcome::Yielded(_)) => {
                     let (a, p) = self.switch_in(FIBER_ROOT, Value::Tag(PLATFORM_NONE));
@@ -5563,7 +5661,9 @@ impl Vm {
                                     continue 'transfer;
                                 },
                                 None => {
-                                    return Ok(DriveOutcome::Died(Value::Tag(PLATFORM_CANCELLED)))
+                                    return Ok(DriveOutcome::Died(FrameAnswer::one(Value::Tag(
+                                        PLATFORM_CANCELLED,
+                                    ))))
                                 },
                             }
                         }
@@ -5993,6 +6093,17 @@ impl Vm {
                             Value::I64(x.wrapping_mul(y)),
                         )
                         .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    // the shift and bitwise quintet stays out of the
+                    // hot loop's match shape: one range arm hands the
+                    // word to [`shift_bitwise_word`], so the five extra
+                    // opcode arms never re-lower the dispatch's
+                    // neighbors (the pin bake caught them costing ~1% Ir
+                    // on every kernel)
+                    OP_SHL_I64..=OP_BITOR_I64 => {
+                        shift_bitwise_word(&mut self.stack, byte, fa, fb, fc, fp, slots, body_len)
+                            .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
                     OP_ADD_F64 => {
@@ -6873,16 +6984,17 @@ impl Vm {
                                 self.arena_frame_close(fp);
                                 let mut st = stack_state!();
                                 match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                                    RetOutcome::Root(v) => {
+                                    RetOutcome::Root(_) => {
                                         // the native's whole span answer rides the
-                                        // completion channel; `v` is its head word
-                                        match self.complete_current_span(answer) {
+                                        // completion channel to a live resumer and
+                                        // the drive's death value whole
+                                        match self.complete_current_span(&answer) {
                                             Some((a, at)) => {
                                                 active = a;
                                                 pc = at;
                                                 continue 'transfer;
                                             },
-                                            None => return Ok(DriveOutcome::Died(v)),
+                                            None => return Ok(DriveOutcome::Died(answer)),
                                         }
                                     },
                                     RetOutcome::Boundary(_) => {
@@ -7625,19 +7737,19 @@ impl Vm {
                         self.arena_frame_close(fp);
                         let mut st = stack_state!();
                         match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                            RetOutcome::Root(v) => {
+                            RetOutcome::Root(_) => {
                                 // the entry frame answers with its whole span:
                                 // it rides the completion channel (a RETSPAN
-                                // at the root, or a tail native's span/total),
-                                // `v` the head word reaching a live resumer
-                                // and the drive's death value
-                                match self.complete_current_span(answer) {
+                                // at the root, or a tail native's span/total)
+                                // to a live resumer, and the drive's death
+                                // value carries it whole
+                                match self.complete_current_span(&answer) {
                                     Some((a, at)) => {
                                         active = a;
                                         pc = at;
                                         continue 'transfer;
                                     },
-                                    None => return Ok(DriveOutcome::Died(v)),
+                                    None => return Ok(DriveOutcome::Died(answer)),
                                 }
                             },
                             RetOutcome::Boundary(_) => return Ok(DriveOutcome::Frame(answer)),
@@ -7668,7 +7780,7 @@ impl Vm {
                                     pc = at;
                                     continue 'transfer;
                                 },
-                                None => return Ok(DriveOutcome::Died(v)),
+                                None => return Ok(DriveOutcome::Died(FrameAnswer::one(v))),
                             },
                             RetOutcome::Boundary(v) => {
                                 return Ok(DriveOutcome::Frame(FrameAnswer::one(v)))
@@ -7750,19 +7862,19 @@ impl Vm {
                         self.arena_frame_close(fp);
                         let mut st = stack_state!();
                         match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                            RetOutcome::Root(v) => {
+                            RetOutcome::Root(_) => {
                                 // the entry frame answers with its whole span:
                                 // it rides the completion channel (a RETSPAN
-                                // at the root, or a tail native's span/total),
-                                // `v` the head word reaching a live resumer
-                                // and the drive's death value
-                                match self.complete_current_span(answer) {
+                                // at the root, or a tail native's span/total)
+                                // to a live resumer, and the drive's death
+                                // value carries it whole
+                                match self.complete_current_span(&answer) {
                                     Some((a, at)) => {
                                         active = a;
                                         pc = at;
                                         continue 'transfer;
                                     },
-                                    None => return Ok(DriveOutcome::Died(v)),
+                                    None => return Ok(DriveOutcome::Died(answer)),
                                 }
                             },
                             RetOutcome::Boundary(_) => return Ok(DriveOutcome::Frame(answer)),
@@ -7797,7 +7909,7 @@ impl Vm {
                                 pc = at;
                                 continue 'transfer;
                             },
-                            None => return Ok(DriveOutcome::Died(value)),
+                            None => return Ok(DriveOutcome::Died(FrameAnswer::one(value))),
                         }
                     },
                     // Major 0xE: the placed RC pair (C4). Load decode-checks
@@ -8111,9 +8223,10 @@ mod tests {
                 "{arith:?} consumes the loaded dst and fuses"
             );
         }
-        // the negatives: DIVI64 (unmeasured), the wrap trio (new minors,
-        // never census-measured), the wrong-kind follower, a
-        // non-consuming arith, an RC word between, and the code end
+        // the negatives: DIVI64 (unmeasured), the wrap trio and the
+        // shift/bitwise five (new minors, never census-measured), the
+        // wrong-kind follower, a non-consuming arith, an RC word
+        // between, and the code end
         let negatives = [
             Uop::DivI64 {
                 dst: 0,
@@ -8131,6 +8244,31 @@ mod tests {
                 rhs: 1,
             },
             Uop::WrapMulI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::ShlI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::ShrI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::BitAndI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::BitXorI64 {
+                dst: 0,
+                lhs: 2,
+                rhs: 1,
+            },
+            Uop::BitOrI64 {
                 dst: 0,
                 lhs: 2,
                 rhs: 1,
@@ -8299,7 +8437,10 @@ mod tests {
         let mut vm = Vm::new(ModuleRegistry::new());
         let v1 = vm.install_module(fixture(2));
         for _ in 0..8 {
-            assert_eq!(vm.run("m", "f", &[Value::I64(21)]), Ok(Value::I64(42)));
+            assert_eq!(
+                vm.run("m", "f", &[Value::I64(21)]),
+                Ok(FrameAnswer::one(Value::I64(42)))
+            );
         }
         assert_eq!(
             vm.registry.row_arc_count(v1),
@@ -8319,7 +8460,10 @@ mod tests {
         // the next run resets the root's kept entry frame onto the
         // current row, so the install after it retires v1's row — and the
         // row was the version's single home, so its count reads 0
-        assert_eq!(vm.run("m", "f", &[Value::I64(21)]), Ok(Value::I64(105)));
+        assert_eq!(
+            vm.run("m", "f", &[Value::I64(21)]),
+            Ok(FrameAnswer::one(Value::I64(105)))
+        );
         vm.install_module(fixture(7));
         assert_eq!(vm.registry.row_arc_count(v1), 0);
         assert!(vm.registry.version(v1).is_none());

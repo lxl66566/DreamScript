@@ -6,12 +6,12 @@
 //! body as an int. A many-case single-family enum keeps the mint far
 //! inside its span budget.
 
-use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
+use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 const SOURCE: &str = include_str!("fixtures/derive_combined_probe.ds");
 
@@ -64,7 +64,7 @@ fn both_families_answer_through_one_attribute() {
     let mut vm = run_lowered(&lowered);
     assert_eq!(
         vm.run("derive_combined_probe", "main", &[]),
-        Ok(Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0))),
         "main returns its declared int"
     );
     assert_eq!(

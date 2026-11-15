@@ -24,21 +24,21 @@ use ds_parse::{Ast, Item, ItemKind, parse};
 /// ownership of them; the log/default_config/get externs are the corpus
 /// file's own (the ambient shed its dead declarations).
 const TYPES_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag float\n",
-    "tag string\n",
-    "tag bool\n",
-    "tag io_err\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "struct map[k, v]\n",
-    "struct config { host: string, port: int?, retries: int }\n",
-    "struct field { name: string, type: type, tag: string }\n",
-    "extern fn fields (t: type) -> list[field]\n",
-    "extern fn type_name (t: type) -> string\n",
-    "extern fn read_file (path: string) -> string | io_err\n",
-    "extern fn parse_json (text: string) -> json | io_err\n",
-    "extern fn str[t] (v: t) -> string\n",
+    "pub tag int\n",
+    "pub tag float\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag io_err\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub struct map[k, v]\n",
+    "pub struct config { host: string, port: int?, retries: int }\n",
+    "pub struct field { name: string, type: type, tag: string }\n",
+    "pub extern fn fields (t: type) -> list[field]\n",
+    "pub extern fn type_name (t: type) -> string\n",
+    "pub extern fn read_file (path: string) -> string | io_err\n",
+    "pub extern fn parse_json (text: string) -> json | io_err\n",
+    "pub extern fn str[t] (v: t) -> string\n",
 );
 
 /// Ambient stdlib stubs per the linearity_modes_rc list: modes included,
@@ -47,46 +47,50 @@ const TYPES_AMBIENT: &str = concat!(
 /// its dead declarations); open/read_exact stay stub-only absence
 /// stand-ins so the affine pass sees the moves they stage.
 const LINEARITY_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag char\n",
-    "tag bool\n",
-    "tag string\n",
-    "type u32 = int\n",
-    "trait Copyable { }\n",
-    "struct bytes: ~Copyable { len: int }\n",
-    "struct list[t]\n",
-    "extern fn open (path: string) -> file\n",
-    "extern fn read_exact (f: mut file, n: int) -> bytes\n",
-    "extern fn split (s: string, sep: char) -> list[string]\n",
-    "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
-    "extern fn collect[r] (xs: list[r]) -> list[r]\n",
-    "extern fn len[t] (xs: t) -> int\n",
+    "pub tag int\n",
+    "pub tag char\n",
+    "pub tag bool\n",
+    "pub tag string\n",
+    "pub type u32 = int\n",
+    "pub trait Copyable { }\n",
+    "pub struct bytes: ~Copyable { len: int }\n",
+    "pub struct list[t]\n",
+    "pub extern fn open (path: string) -> file\n",
+    "pub extern fn read_exact (f: mut file, n: int) -> bytes\n",
+    "pub extern fn split (s: string, sep: char) -> list[string]\n",
+    "pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+    "pub extern fn collect[r] (xs: list[r]) -> list[r]\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
 );
 
 /// Ambient for the linearity negative suite: types only, everything else
 /// the file declares itself.
-const LINEARITY_NEG_AMBIENT: &str = concat!("tag int\n", "tag string\n", "trait Copyable { }\n",);
+const LINEARITY_NEG_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+);
 
 /// The minimal shared vocabulary for the corpus-wide affine sweep: every
 /// file declares its own data types.
 const SWEEP_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag float\n",
-    "tag string\n",
-    "tag bool\n",
-    "tag char\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "struct map[k, v]\n",
+    "pub tag int\n",
+    "pub tag float\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag char\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub struct map[k, v]\n",
 );
 
 /// Ambient stdlib stubs per the generics_coherent_traits list.
 const GENERICS_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "trait ord {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub trait ord {\n",
     "  fn compare(self, other: Self) -> int\n",
     "}\n",
     "impl ord for int {\n",
@@ -94,75 +98,79 @@ const GENERICS_AMBIENT: &str = concat!(
     "    if self < other { -1 } else if self > other { 1 } else { 0 }\n",
     "  }\n",
     "}\n",
-    "struct list[t]\n",
-    "struct field { name: string, type: type, tag: string }\n",
-    "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
-    "extern fn head[t] (xs: list[t]) -> t?\n",
-    "extern fn tail[t] (xs: list[t]) -> list[t]\n",
-    "extern fn join (parts: list[string], sep: string) -> string\n",
-    "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
-    "extern fn str[t] (v: t) -> string\n",
-    "extern fn fields (t: type) -> list[field]\n",
-    "extern fn type_name (t: type) -> string\n",
+    "pub struct list[t]\n",
+    "pub struct field { name: string, type: type, tag: string }\n",
+    "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
+    "pub extern fn head[t] (xs: list[t]) -> t?\n",
+    "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
+    "pub extern fn join (parts: list[string], sep: string) -> string\n",
+    "pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
+    "pub extern fn str[t] (v: t) -> string\n",
+    "pub extern fn fields (t: type) -> list[field]\n",
+    "pub extern fn type_name (t: type) -> string\n",
 );
 
 /// Ambient for pattern_dispatch: the primitives, println, and the
 /// success-typed read_file against the ambient-owned failure taxonomy
 /// (the net cases feed the file's or-pattern demo).
 const PATTERN_DISPATCH_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "tag io_err\n",
-    "enum net_err {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag io_err\n",
+    "pub enum net_err {\n",
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "trait Copyable { }\n",
-    "struct config { host: string, port: int?, retries: int }\n",
-    "extern fn read_file (path: string) -> string | io_err\n",
-    "extern fn println (msg: string) -> ()\n",
+    "pub trait Copyable { }\n",
+    "pub struct config { host: string, port: int?, retries: int }\n",
+    "pub extern fn read_file (path: string) -> string | io_err\n",
+    "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs per the tuples_surface list: the primitives,
 /// the list type, and the one list length read the tuple items build
 /// against.
 const TUPLES_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
 );
 
 /// Ambient stdlib stubs for nursery_surface: the primitives, the shared
 /// list type with its mutation and read externs, the ambient-owned net
 /// failure taxonomy, and the generic cancel seam the nursery items name.
 const NURSERY_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "enum net_err {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub enum net_err {\n",
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "extern fn len[t] (xs: t) -> int\n",
-    "extern fn str[t] (v: t) -> string\n",
-    "extern fn println (msg: string) -> ()\n",
-    "extern fn cancel[t] (e: t) -> ()\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
+    "pub extern fn str[t] (v: t) -> string\n",
+    "pub extern fn println (msg: string) -> ()\n",
+    "pub extern fn cancel[t] (e: t) -> ()\n",
 );
 
 /// Ambient stdlib stubs for closures_surface: the primitives alone; the
 /// items carry their own fn-typed parameters and lambdas.
-const CLOSURES_AMBIENT: &str = concat!("tag int\n", "tag string\n", "trait Copyable { }\n");
+const CLOSURES_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n"
+);
 
 /// Ambient for inherent_impls: the primitives alone; the file owns its
 /// receiver types and their impls.
-const INHERENT_AMBIENT: &str = concat!("tag int\n", "trait Copyable { }\n");
+const INHERENT_AMBIENT: &str = concat!("pub tag int\n", "pub trait Copyable { }\n");
 
 /// Ambient for toplevel_consumption: the primitives plus the Copyable
 /// marker the file's linear struct subtracts — and one top-level consumer
@@ -171,111 +179,123 @@ const INHERENT_AMBIENT: &str = concat!("tag int\n", "trait Copyable { }\n");
 /// consuming a later file's, typed under the binding's home-file
 /// resolutions).
 const TOPLEVEL_AMBIENT: &str = concat!(
-    "tag int\n",
-    "trait Copyable { }\n",
-    "const echo = digest_of(far_seed)\n",
+    "pub tag int\n",
+    "pub trait Copyable { }\n",
+    "pub const echo = digest_of(far_seed)\n",
 );
 
 /// Ambient stdlib stubs per the lists_surface list: the checked list
 /// reads the literal and the constructor build against.
 const LISTS_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
-    "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
-    "extern fn tail[t] (xs: list[t]) -> list[t]\n",
-    "extern fn collect[t] (xs: list[t]) -> list[t]\n",
-    "extern fn join (parts: list[string], sep: string) -> string\n",
-    "extern fn println (msg: string) -> ()\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
+    "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
+    "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
+    "pub extern fn collect[t] (xs: list[t]) -> list[t]\n",
+    "pub extern fn join (parts: list[string], sep: string) -> string\n",
+    "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs per the maps_surface list: the checked map reads
 /// the constructor and builder calls build against (the `get` spelling is
 /// the corpus file's own extern — the ambient shed its dead declarations).
 const MAPS_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "trait Copyable { }\n",
-    "struct map[k, v]\n",
-    "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
-    "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
-    "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub trait Copyable { }\n",
+    "pub struct map[k, v]\n",
+    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+    "pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "pub extern fn map_len[k, v] (m: map[k, v]) -> int\n",
 );
 /// Ambient for extraction_family: the primitives, the collection reads,
 /// the family's own extern spellings, and the ambient-owned config the
 /// b14 spellings extract over (the `get` extern is the corpus file's
 /// own).
 const EXTRACTION_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag bool\n",
-    "tag char\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "struct map[k, v]\n",
-    "struct config { host: string, port: int?, retries: int }\n",
-    "extern fn println (msg: string) -> ()\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
-    "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
-    "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
-    "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag char\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub struct map[k, v]\n",
+    "pub struct config { host: string, port: int?, retries: int }\n",
+    "pub extern fn println (msg: string) -> ()\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
+    "pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
+    "pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
+    "pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
 );
 
 /// Ambient stdlib stubs for trait_defaults: the primitives, `len` (the
 /// word receiver's field read feeds it), and `println`; the file owns
 /// its trait, both impls, and the receiver types.
 const TRAIT_DEFAULTS_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait Copyable { }\n",
-    "extern fn len[t] (xs: t) -> int\n",
-    "extern fn println (msg: string) -> ()\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
+    "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs for records_lists: the ambient list surface the
 /// pushed records and checked reads build against.
 const RECORDS_LISTS_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
-    "extern fn println (msg: string) -> ()\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs for transitive_dispatch: the primitives, the
 /// list type (the generic impl heads name it), and `println`; the file
 /// owns both traits and the four impls.
 const TRANSITIVE_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "trait Copyable { }\n",
-    "struct list[t]\n",
-    "extern fn println (msg: string) -> ()\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub extern fn println (msg: string) -> ()\n",
+);
+
+/// Ambient stdlib stubs for shift_bitwise: the int/float primitives,
+/// the `none` tag the union spelling names beside the bitwise `|`, and
+/// `println`.
+const SHIFT_BITWISE_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag float\n",
+    "pub tag bool\n",
+    "pub tag string\n",
+    "pub tag none\n",
+    "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs for teardown_deinit: the ambient-owned net
 /// failure taxonomy, the generic cancel seam, and `println`; the file
 /// owns its deinit-carrying `resource`.
 const TEARDOWN_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "enum net_err {\n",
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub enum net_err {\n",
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "trait Copyable { }\n",
-    "extern fn println (msg: string) -> ()\n",
-    "extern fn cancel[t] (e: t) -> ()\n",
+    "pub trait Copyable { }\n",
+    "pub extern fn println (msg: string) -> ()\n",
+    "pub extern fn cancel[t] (e: t) -> ()\n",
 );
 
 fn items_of(ast: &Ast) -> Vec<&Item> {
@@ -482,144 +502,6 @@ fn generics_diagnostics_stay_in_later_milestone_items() {
             "diagnostic in `{stage}`: {} {}",
             diag.code.as_str(),
             diag.message
-        );
-    }
-}
-
-/// Ambient for the derive slice: the show, ord, hash, and clone traits
-/// the derives target beside the primitives' own impls (ord's int
-/// directly, string, char, and byte through their compare natives;
-/// hash's int mixing its own word; clone's int answering itself), the
-/// compare and hash externs those impls call, and the Copyable marker
-/// (the file's `res` names the marker in its supers).
-const DERIVES_AMBIENT: &str = concat!(
-    "tag int\n",
-    "tag string\n",
-    "tag char\n",
-    "tag byte\n",
-    "trait Copyable { }\n",
-    "trait show {\n",
-    "  fn show(self) -> string\n",
-    "}\n",
-    "trait ord {\n",
-    "  fn compare(self, other: Self) -> int\n",
-    "}\n",
-    "impl ord for int {\n",
-    "  fn compare(self, other: Self) -> int {\n",
-    "    if self < other { -1 } else if self > other { 1 } else { 0 }\n",
-    "  }\n",
-    "}\n",
-    "impl ord for string {\n",
-    "  fn compare(self, other: Self) -> int { str_compare(self, other) }\n",
-    "}\n",
-    "impl ord for char {\n",
-    "  fn compare(self, other: Self) -> int { char_compare(self, other) }\n",
-    "}\n",
-    "impl ord for byte {\n",
-    "  fn compare(self, other: Self) -> int { byte_compare(self, other) }\n",
-    "}\n",
-    "trait hash {\n",
-    "  fn hash(self) -> int\n",
-    "}\n",
-    "impl hash for int {\n",
-    "  fn hash(self) -> int { self }\n",
-    "}\n",
-    "trait clone {\n",
-    "  fn clone(self) -> Self\n",
-    "}\n",
-    "impl clone for int {\n",
-    "  fn clone(self) -> Self { self }\n",
-    "}\n",
-    "extern fn str[t] (v: t) -> string\n",
-    "extern fn str_compare (a: string, b: string) -> int\n",
-    "extern fn char_compare (a: char, b: char) -> int\n",
-    "extern fn byte_compare (a: byte, b: byte) -> int\n",
-    "extern fn println (s: string) -> ()\n",
-);
-
-#[test]
-fn derives_rejects_carry_the_ruled_refusal_classes() {
-    let rejects = gate("../../conformance/derives.ds", DERIVES_AMBIENT);
-    let expected: &[(&str, &str, &str)] = &[
-        (
-            "eq-cell",
-            "DS2027",
-            "`==` is universal structural equality and is never derived [B9]",
-        ),
-        (
-            "mystery-cell",
-            "DS2025",
-            "`mystery` is not a derive name [G1]",
-        ),
-        (
-            "to-json-cell",
-            "DS2024",
-            "derive `to_json` is ruled but not implemented yet [G1]",
-        ),
-        (
-            "cb-cell",
-            "DS2026",
-            "derive `show` refuses the field `cb`: a function-typed part compares and shows as no \
-             structural value [G1, B9]",
-        ),
-        (
-            "holder",
-            "DS2026",
-            "derive `show` refuses the field `kept`: `res` declares the `~Copyable` linear layer \
-             [G1, B9]",
-        ),
-        (
-            "not-data",
-            "DS2028",
-            "a derive applies to a struct, enum, or tag declaration [G1]",
-        ),
-        (
-            "gen-cell",
-            "DS2029",
-            "derive `show` refuses a generic declaration [G1]",
-        ),
-    ];
-    assert_eq!(rejects.len(), expected.len(), "one reject per class");
-    for ((id, _what, diag), (want_id, code, message)) in rejects.iter().zip(expected) {
-        assert_eq!(id, want_id, "the reject items align with the header");
-        assert_eq!(diag.code.as_str(), *code, "{id}");
-        assert_eq!(diag.message, *message, "{id}");
-    }
-}
-
-#[test]
-fn derives_run_items_check_clean_with_synthesized_impls() {
-    // The show, ord, hash, and clone derives synthesize their impls and
-    // every run item checks clean beside the ambient's own traits;
-    // `res` (the linear declaration the holder reject names)
-    // typechecks on its own.
-    let path = ds_corpus_path::resolve("../../conformance/derives.ds");
-    let source = std::fs::read_to_string(&path).unwrap();
-    let stages = stages(&source);
-    let mut files = Files::new();
-    let amb = files.add_source("ambient.ds", DERIVES_AMBIENT);
-    let cor = files.add_source("corpus.ds", &source);
-    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
-    let checked = type_check(&files, &asts);
-    let items = items_of(&asts[1]);
-    for (item, stage) in items.iter().zip(stages.iter()) {
-        if stage.stage != "run" && stage.stage != "typecheck" {
-            continue;
-        }
-        let item_diags: Vec<&ds_diag::Diagnostic> = checked
-            .diags
-            .iter()
-            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
-            .collect();
-        assert!(
-            item_diags.is_empty(),
-            "item `{}` must check clean, got:\n{}",
-            stage.id,
-            item_diags
-                .iter()
-                .map(|d| format!("{} {}", d.code.as_str(), d.message))
-                .collect::<Vec<_>>()
-                .join("\n")
         );
     }
 }
@@ -955,7 +837,7 @@ fn affine_diagnostics_stay_in_reject_or_later_milestone_items() {
         ("../../conformance/inherent_impls.ds", INHERENT_AMBIENT),
         (
             "../../conformance/toplevel_consumption.ds",
-            concat!("tag int\n", "trait Copyable { }\n"),
+            concat!("pub tag int\n", "pub trait Copyable { }\n"),
         ),
     ];
     for (corpus, ambient) in corpus {
@@ -1199,6 +1081,55 @@ fn transitive_dispatch_items_check_clean() {
         rejects.is_empty(),
         "the transitive dispatch surface declares no reject item"
     );
+}
+
+/// shift_bitwise.ds: the shift and bitwise round — every item (the
+/// value, sign, precedence, compound-store, and union-beside-bits rows
+/// and the trap-edge functions) checks clean, and the one rejection is
+/// the float `&` operand the integer table refuses [B7]; the runs and
+/// the oversized-shift traps live in the ds-lower shift_bitwise e2e
+/// suite.
+#[test]
+fn shift_bitwise_items_check_with_the_float_rejection() {
+    let rejects = gate("../../conformance/shift_bitwise.ds", SHIFT_BITWISE_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "float-bit");
+    assert!(
+        what.contains("needs integers"),
+        "the reject text names the rule"
+    );
+    assert_eq!(diag.code.as_str(), "DS2001");
+    assert!(
+        diag.message.contains("`&` needs integers"),
+        "the float operand rejection: {}",
+        diag.message
+    );
+
+    // every other item checks clean under the same stubs
+    let path = ds_corpus_path::resolve("../../conformance/shift_bitwise.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", SHIFT_BITWISE_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
 }
 
 /// teardown_deinit.ds: the E5 teardown round — every item (the

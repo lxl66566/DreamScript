@@ -15,7 +15,7 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -92,7 +92,7 @@ fn success_typed_fallible_natives_extract_through_every_spelling() {
     vm.capture_output();
     assert_eq!(
         vm.run("fallible_union_probe", "main", &[good, unparsable, absent]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "every extraction leg matched"
     );
     assert_eq!(
@@ -323,7 +323,7 @@ fn main(path: string, missing: string) -> bool {
     let absent = vm.intern_str(missing.to_str().expect("a UTF-8 temp path"));
     assert_eq!(
         vm.run("fallible_respelled", "main", &[good, absent]),
-        Ok(Value::Bool(true)),
+        Ok(FrameAnswer::one(Value::Bool(true))),
         "the failure bit constructs the signature's own error member"
     );
     assert!(

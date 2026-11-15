@@ -390,7 +390,7 @@ fn a_child_trapped_before_join_cancels_the_rest() {
         .expect("spawn late looper");
     assert_eq!(
         vm.resume_fiber(late, Value::I64(0)),
-        Ok(Value::Tag(PLATFORM_CANCELLED))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_CANCELLED)))
     );
     assert_eq!(vm.fiber_state(late), Some(FiberState::Dead));
     // the join collects all three from the ledger in spawn order
@@ -414,7 +414,10 @@ fn bare_host_spawns_route_into_the_live_root_nursery() {
         .spawn_fiber("nb", "plain", &[Value::I64(7)])
         .expect("bare spawn");
     assert_eq!(vm.fiber_nursery(detached), None);
-    assert_eq!(vm.resume_fiber(detached, Value::I64(0)), Ok(Value::I64(7)));
+    assert_eq!(
+        vm.resume_fiber(detached, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(7)))
+    );
     // a live root nursery: the same bare spawn is born its child
     let n = vm.open_root_nursery();
     let routed = vm
@@ -450,7 +453,10 @@ fn the_debug_join_native_answers_the_failed_count() {
     // in-language: the joiner parks at nursery_join, the dispatcher drives
     // the children (first failure cancels the rest), and the count rides
     // the re-entry back to the parked call
-    assert_eq!(vm.resume_fiber(joiner, Value::I64(0)), Ok(Value::I64(1)));
+    assert_eq!(
+        vm.resume_fiber(joiner, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(1)))
+    );
     assert_eq!(vm.fiber_state(joiner), Some(FiberState::Dead));
     assert_eq!(vm.fiber_state(failing), Some(FiberState::Dead));
     assert_eq!(vm.nursery_state(n), Some(NurseryState::Dead));
@@ -467,7 +473,10 @@ fn the_debug_join_native_answers_zero_when_all_join() {
         .expect("spawn");
     vm.spawn_fiber_in(n, "nb", "plain", &[Value::I64(4)])
         .expect("spawn");
-    assert_eq!(vm.resume_fiber(joiner, Value::I64(0)), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.resume_fiber(joiner, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     assert_eq!(
         vm.nursery_state(n),
         Some(NurseryState::Dead),
@@ -506,7 +515,7 @@ fn a_bogus_nursery_id_bounces_the_none_tag() {
     // answer and the fiber returns it
     assert_eq!(
         vm.resume_fiber(joiner, Value::I64(0)),
-        Ok(Value::Tag(PLATFORM_NONE))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NONE)))
     );
 }
 
@@ -521,7 +530,10 @@ fn teardown_cuts_a_parked_child_at_its_resume_under_the_flag() {
         .spawn_fiber_in(n, "nb", "loop_forever", &[])
         .expect("spawn looper");
     // park the first child mid-flight at its yield
-    assert_eq!(vm.resume_fiber(half, Value::I64(0)), Ok(Value::I64(5)));
+    assert_eq!(
+        vm.resume_fiber(half, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(5)))
+    );
     assert_eq!(vm.fiber_state(half), Some(FiberState::Suspended));
     // teardown: the flag goes up first, then each child in spawn order —
     // the parked one is cut at its next resume (never resuming: its
@@ -883,7 +895,10 @@ fn seam_vm(child: u32, mask: i64) -> Vm {
 #[test]
 fn the_boundary_seam_answers_a_clean_join_span() {
     let mut vm = seam_vm(1, 1);
-    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("sb", "seam_parent", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
 }
 
 /// A cancel child's payload unions out at the boundary: the span answers
@@ -892,7 +907,10 @@ fn the_boundary_seam_answers_a_clean_join_span() {
 #[test]
 fn the_boundary_seam_unions_a_cancelled_payload_out() {
     let mut vm = seam_vm(2, 1 << SEAM_TAG);
-    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::Tag(SEAM_TAG)));
+    assert_eq!(
+        vm.run("sb", "seam_parent", &[]),
+        Ok(FrameAnswer::one(Value::Tag(SEAM_TAG)))
+    );
 }
 
 /// A payloaded cancel span unions out whole: the mask admits the member
@@ -902,7 +920,10 @@ fn the_boundary_seam_unions_a_cancelled_payload_out() {
 #[test]
 fn a_payloaded_cancel_span_unions_out_whole() {
     let mut vm = seam_payload_vm(1 << SEAM_TAG);
-    assert_eq!(vm.run("sb", "seam_parent", &[]), Ok(Value::I64(42)));
+    assert_eq!(
+        vm.run("sb", "seam_parent", &[]),
+        Ok(FrameAnswer::one(Value::I64(42)))
+    );
 }
 
 /// A payloaded span outside the staged mask refuses whole: the trap

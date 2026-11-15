@@ -6,6 +6,7 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, PoisonError, mpsc},
+    time::Duration,
 };
 
 use rustc_hash::FxHashMap;
@@ -15,31 +16,57 @@ use tower_lsp::{
     lsp_types::{
         self as lsp, CompletionOptions, CompletionParams, CompletionResponse,
         DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
-        DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-        Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeParams,
-        InitializeResult, InitializedParams, MarkupContent, MarkupKind, OneOf,
-        PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams,
-        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        DidSaveTextDocumentParams, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
+        DocumentOnTypeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
+        GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+        HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+        MarkupContent, MarkupKind, OneOf, PrepareRenameResponse, ReferenceParams, RenameOptions,
+        RenameParams, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
         SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
         ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
-        TextDocumentSyncKind, WorkDoneProgressOptions, WorkspaceEdit,
+        TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
+        WorkDoneProgressOptions, WorkspaceEdit,
     },
 };
 
 use crate::{RenameAnswer, Request, spawn_worker};
+
+/// The trailing window coalescing rapid change and save notifications:
+/// the memoized queries recompute at most once per window. Editor
+/// typing bursts run far under it, so the publish lands one window
+/// after the last notification.
+const DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// One document's server-side state: the lock ordering concurrent
+/// change notifications for the document, and the publish gate with
+/// its debounce generation.
+#[derive(Default)]
+struct DocState {
+    /// Held across one document's change application, so concurrent
+    /// didChange notifications apply their edits in arrival order.
+    changes: AsyncMutex<()>,
+    /// The publish gate plus the debounce generation counting every
+    /// scheduled publish: only the newest schedule survives its window.
+    publish: AsyncMutex<Publish>,
+}
+
+/// The publish gate of one document: the last version tag shipped to
+/// the client (a publish tagged older than it drops, so the client's
+/// markers stay monotonic) and the debounce generation.
+#[derive(Default)]
+struct Publish {
+    last: Option<i32>,
+    generation: u64,
+}
 
 /// The language server: one command channel into the engine's worker
 /// thread plus the client handle.
 pub(crate) struct Backend {
     client: Client,
     tx: mpsc::Sender<Request>,
-    /// The last published version per document URI, one gate per
-    /// document: concurrent change handlers serialize their publishes
-    /// through the gate, and a publish tagged older than one already
-    /// shipped is dropped (the worker's FIFO keeps the diagnostic
-    /// content right; the gate keeps the client's markers monotonic).
-    published: Mutex<FxHashMap<lsp::Url, Arc<AsyncMutex<Option<i32>>>>>,
+    /// The per-document state, one entry per URI the server has ever
+    /// held (a close keeps its entry; a reopen reuses it).
+    docs: Mutex<FxHashMap<lsp::Url, Arc<DocState>>>,
 }
 
 impl Backend {
@@ -48,8 +75,16 @@ impl Backend {
         Self {
             client,
             tx: spawn_worker(),
-            published: Mutex::new(FxHashMap::default()),
+            docs: Mutex::new(FxHashMap::default()),
         }
+    }
+
+    /// The document's state entry.
+    fn state(&self, uri: &lsp::Url) -> Arc<DocState> {
+        let mut docs = self.docs.lock().unwrap_or_else(PoisonError::into_inner);
+        docs.entry(uri.clone())
+            .or_insert_with(|| Arc::new(DocState::default()))
+            .clone()
     }
 
     /// Sends one command to the worker and awaits its reply. The worker
@@ -60,15 +95,7 @@ impl Backend {
         T: Send + 'static,
         F: FnOnce(oneshot::Sender<Result<T, String>>) -> Request,
     {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(make(tx))
-            .map_err(|_| internal("the engine worker stopped"))?;
-        match rx.await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(message)) => Err(internal(&message)),
-            Err(_) => Err(internal("the engine worker dropped a reply")),
-        }
+        call_tx(&self.tx, make).await
     }
 
     /// The decoded on-disk path of one document URI: this server syncs
@@ -77,18 +104,6 @@ impl Backend {
     /// table, so paths that are not valid UTF-8 keep round-tripping.
     fn path_of(uri: &lsp::Url) -> Option<PathBuf> {
         uri.to_file_path().ok()
-    }
-
-    /// The publish gate of one document URI.
-    fn gate(&self, uri: &lsp::Url) -> Arc<AsyncMutex<Option<i32>>> {
-        let mut published = self
-            .published
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        published
-            .entry(uri.clone())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
-            .clone()
     }
 
     /// Logs a rejected or unopenable document and returns.
@@ -101,46 +116,112 @@ impl Backend {
             .await;
     }
 
-    /// Collects the document's diagnostics from the worker and publishes
-    /// them (publishing an empty set clears the client's old markers,
-    /// which is also the close story) through the document's publish
-    /// gate: a publish tagged older than the last shipped one is dropped.
-    async fn publish(&self, uri: lsp::Url, version: Option<i32>) {
-        let Some(path) = Self::path_of(&uri) else {
-            self.reject("publishing", &uri).await;
-            return;
+    /// Publishes the document's diagnostics now, superseding any
+    /// scheduled publish (the generation bump retires its timer). Open
+    /// and close ride this path: both are once-per-event notifications.
+    async fn publish_now(&self, uri: &lsp::Url, version: Option<i32>) {
+        let state = self.state(uri);
+        let mut gate = state.publish.lock().await;
+        gate.generation += 1;
+        ship(&self.client, &self.tx, &mut gate, uri, version).await;
+    }
+
+    /// Schedules the document's diagnostics publish at the trailing
+    /// edge of the debounce window: every change or save notification
+    /// bumps the generation, so only the newest notification's timer
+    /// fires and a typing burst pulls the memoized queries once. The
+    /// edits themselves already applied — notifications defer the
+    /// diagnostics pull alone — so a request arriving mid-window
+    /// answers the client's current text.
+    async fn schedule_publish(&self, uri: &lsp::Url, version: Option<i32>) {
+        let state = self.state(uri);
+        let generation = {
+            let mut gate = state.publish.lock().await;
+            gate.generation += 1;
+            gate.generation
         };
-        let gate = self.gate(&uri);
-        let mut gate = gate.lock().await;
-        if !publishable(*gate, version) {
-            return;
-        }
-        match self
-            .call(|reply| Request::Diagnostics { path, reply })
-            .await
-        {
-            Ok(diags) => {
-                self.client.publish_diagnostics(uri, diags, version).await;
-                // A close's untagged publish resets the gate, so a
-                // reopen's version numbering starts fresh.
-                *gate = version;
-            },
-            Err(error) => {
-                self.client
-                    .log_message(
-                        lsp::MessageType::ERROR,
-                        format!("diagnostics failed: {error}"),
-                    )
-                    .await;
-            },
-        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let uri = uri.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(DEBOUNCE).await;
+            let mut gate = state.publish.lock().await;
+            // A newer notification rescheduled this document's publish.
+            if gate.generation != generation {
+                return;
+            }
+            ship(&client, &tx, &mut gate, &uri, version).await;
+        });
+    }
+}
+
+/// Sends one command to the worker and awaits its reply. The worker
+/// outlives every single command (only `shutdown` ends it), so a
+/// dropped channel is a server bug, not a client-visible state.
+async fn call_tx<T, F>(tx: &mpsc::Sender<Request>, make: F) -> jsonrpc::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(oneshot::Sender<Result<T, String>>) -> Request,
+{
+    let (reply, rx) = oneshot::channel();
+    tx.send(make(reply))
+        .map_err(|_| internal("the engine worker stopped"))?;
+    match rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(message)) => Err(internal(&message)),
+        Err(_) => Err(internal("the engine worker dropped a reply")),
+    }
+}
+
+/// Pulls the document's diagnostics from the worker and publishes them
+/// (publishing an empty set clears the client's old markers, which is
+/// also the close story) through the held gate: a publish tagged older
+/// than the last shipped one is dropped (the worker's FIFO keeps the
+/// diagnostic content right; the gate keeps the client's markers
+/// monotonic).
+async fn ship(
+    client: &Client,
+    tx: &mpsc::Sender<Request>,
+    gate: &mut Publish,
+    uri: &lsp::Url,
+    version: Option<i32>,
+) {
+    let Some(path) = Backend::path_of(uri) else {
+        client
+            .log_message(
+                lsp::MessageType::WARNING,
+                format!("publishing refused: {uri} is not an open file:// document"),
+            )
+            .await;
+        return;
+    };
+    if !publishable(gate.last, version) {
+        return;
+    }
+    match call_tx(tx, |reply| Request::Diagnostics { path, reply }).await {
+        Ok(diags) => {
+            client
+                .publish_diagnostics(uri.clone(), diags, version)
+                .await;
+            // A close's untagged publish resets the gate, so a reopen's
+            // version numbering starts fresh.
+            gate.last = version;
+        },
+        Err(error) => {
+            client
+                .log_message(
+                    lsp::MessageType::ERROR,
+                    format!("diagnostics failed: {error}"),
+                )
+                .await;
+        },
     }
 }
 
 /// Whether one publish may go out given the document's last published
 /// version: a version-tagged publish at or after the last shipped one
 /// goes out while an older tag is dropped, and an untagged publish (the
-/// close's clear) always goes out.
+/// close's clear, a save's refresh) always goes out.
 fn publishable(last: Option<i32>, version: Option<i32>) -> bool {
     match (last, version) {
         (Some(last), Some(version)) => version >= last,
@@ -161,10 +242,17 @@ impl LanguageServer for Backend {
     async fn initialize(&self, _params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                // The client ships the whole document per change; the
-                // engine's set_source swap is the incremental story.
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                // Incremental sync: a change notification's ranged edits
+                // splice into the held document, a rangeless change
+                // replaces it whole, and save notifications ride the
+                // debounced publish.
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..TextDocumentSyncOptions::default()
+                    },
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -236,7 +324,7 @@ impl LanguageServer for Backend {
         if opened.await.is_err() {
             return;
         }
-        self.publish(doc.uri, Some(doc.version)).await;
+        self.publish_now(&doc.uri, Some(doc.version)).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -245,20 +333,37 @@ impl LanguageServer for Backend {
             self.reject("changing", &doc.uri).await;
             return;
         };
-        // Full sync: one whole-document change per notification, the
-        // last one winning should a client batch.
-        let Some(change) = params.content_changes.into_iter().next_back() else {
-            return;
-        };
-        let changed = self.call(move |reply| Request::Set {
-            path,
-            text: change.text,
-            reply,
-        });
-        if changed.await.is_err() {
+        if params.content_changes.is_empty() {
             return;
         }
-        self.publish(doc.uri, Some(doc.version)).await;
+        let uri = doc.uri.clone();
+        // The change lock keeps concurrent notifications for one
+        // document in arrival order, so a client's ordered edits apply
+        // in order.
+        let state = self.state(&uri);
+        let changes = state.changes.lock().await;
+        let edited = self.call(move |reply| Request::Edit {
+            path,
+            changes: params.content_changes,
+            reply,
+        });
+        if edited.await.is_err() {
+            return;
+        }
+        drop(changes);
+        self.schedule_publish(&uri, Some(doc.version)).await;
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri;
+        if Self::path_of(&uri).is_none() {
+            self.reject("saving", &uri).await;
+            return;
+        }
+        // The synced content is already current (this server owns the
+        // incremental splices, so a client shipping text anyway is
+        // ignored): a save asks for one fresh diagnostics publish.
+        self.schedule_publish(&uri, None).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -276,7 +381,7 @@ impl LanguageServer for Backend {
         if closed.await.is_err() {
             return;
         }
-        self.publish(uri, None).await;
+        self.publish_now(&uri, None).await;
     }
 
     async fn goto_definition(
