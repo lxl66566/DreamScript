@@ -158,7 +158,7 @@ fn lambda_bodies_and_holes_contribute_in_place() {
     let effects = rows(
         concat!(
             "extern fn read (u: int) -> int\n",
-            "fn lam(xs: int) -> int { xs.map((x) => x + 1).head() }\n",
+            "fn lam(xs: int) -> int { xs.map((x) => x + 1).first() }\n",
             "fn s(x: int) -> string { \"v=${read(x)}\" }\n",
         ),
         &declared,
@@ -329,16 +329,28 @@ fn generics_rows_match_the_record() {
     let effects = corpus("generics_coherent_traits.ds");
     assert!(row_of(&effects, "push").is_pure());
     assert!(row_of(&effects, "pop").is_pure());
-    // p.to_json() unions every impl body; the list impl's `+` traps.
-    assert_eq!(row_of(&effects, "js").render(), "trap");
+    // js names the m6 derive's to_json, which has no bodies this round,
+    // so its row stays pure; schema's string `+` traps.
+    assert!(row_of(&effects, "js").is_pure());
     assert_eq!(row_of(&effects, "schema").render(), "trap");
 }
 
 #[test]
 fn ambient_declared_rows_flow_over_the_corpus() {
     let ambient = concat!(
+        "pub tag io_err\n",
+        "pub tag parse_err\n",
+        "pub enum json {\n",
+        "  json_null\n",
+        "  json_bool { value: bool }\n",
+        "  json_int { value: int }\n",
+        "  json_float { value: float }\n",
+        "  json_string { value: string }\n",
+        "  json_array { items: list[json] }\n",
+        "  json_object { fields: map[string, json] }\n",
+        "}\n",
         "extern fn read_file (path: string) -> string | io_err\n",
-        "extern fn parse_json (text: string) -> json | io_err\n",
+        "extern fn parse_json (text: string) -> json | parse_err\n",
         "extern fn str[t] (v: t) -> string\n",
         "extern fn log (msg: string) -> ()\n",
         "extern fn default_config () -> config\n",
@@ -351,10 +363,7 @@ fn ambient_declared_rows_flow_over_the_corpus() {
             "read_file",
             EffectRow::of(Effect::World) | EffectRow::of(Effect::Error),
         )
-        .with(
-            "parse_json",
-            EffectRow::of(Effect::World) | EffectRow::of(Effect::Error),
-        )
+        .with("parse_json", EffectRow::of(Effect::Error))
         .with("log", EffectRow::of(Effect::World));
     let effects = effects_of_files(
         &[("ambient.ds", ambient), ("corpus.ds", &source)],

@@ -149,8 +149,9 @@ fn mut_parameters_re_store_and_read_back() {
 /// A `move` parameter consumes its argument: the deinit fires exactly
 /// once at the callee's own scope end (after the body's reads, before
 /// the caller resumes), in the named and the UFCS spelling, and an
-/// in-body re-seat fires the incoming value's hook at the assignment
-/// plus the replacement's at the scope end.
+/// in-body re-seat through a `var` local fires the incoming value's
+/// hook at the assignment plus the replacement's at the scope end
+/// (the parameter itself is not re-assignable).
 #[test]
 fn move_parameters_fire_the_deinit_once_in_the_callee() {
     let source = source(concat!(
@@ -161,8 +162,9 @@ fn move_parameters_fire_the_deinit_once_in_the_callee() {
         "}\n",
         "\n",
         "fn swap(move r: res) -> int {\n",
-        "  r = res { id: 99 }\n",
-        "  r.id\n",
+        "  var s = r\n",
+        "  s = res { id: 99 }\n",
+        "  s.id\n",
         "}\n",
         "\n",
         "fn main() -> int {\n",

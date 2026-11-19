@@ -1468,6 +1468,107 @@ fn same_name_inherent_methods_select_by_owner() {
 }
 
 #[test]
+fn mut_self_member_calls_share_the_const_receiver_gate() {
+    // The D2/C3 exclusivity gate is per mut window, not per call
+    // spelling: a `mut self` member — trait or inherent — rejects a
+    // `const` receiver exactly like the free-function spelling, while a
+    // `var` receiver and a fresh value pass.
+    assert_eq!(
+        check(concat!(
+            "struct point { x: int, y: int }\n",
+            "trait bump { fn bump(mut self) -> int }\n",
+            "impl bump for point {\n",
+            "  fn bump(mut self) -> int { 1 }\n",
+            "}\n",
+            "fn f() -> int {\n",
+            "  const p = point { x: 1, y: 2 }\n",
+            "  p.bump()\n",
+            "}\n",
+        )),
+        ["DS3006 `p` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]"]
+    );
+    assert_eq!(
+        check(concat!(
+            "struct point { x: int, y: int }\n",
+            "impl point { fn bump(mut self) -> int { 1 } }\n",
+            "fn f() -> int {\n",
+            "  const p = point { x: 1, y: 2 }\n",
+            "  p.bump()\n",
+            "}\n",
+        )),
+        ["DS3006 `p` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]"]
+    );
+    clean(concat!(
+        "struct point { x: int, y: int }\n",
+        "trait bump { fn bump(mut self) -> int }\n",
+        "impl bump for point {\n",
+        "  fn bump(mut self) -> int { 1 }\n",
+        "}\n",
+        "fn f() -> int {\n",
+        "  var p = point { x: 1, y: 2 }\n",
+        "  p.bump()\n",
+        "}\n",
+    ));
+    clean(concat!(
+        "struct point { x: int, y: int }\n",
+        "trait bump { fn bump(mut self) -> int }\n",
+        "impl bump for point {\n",
+        "  fn bump(mut self) -> int { 1 }\n",
+        "}\n",
+        "fn f() -> int { point { x: 1, y: 2 }.bump() }\n",
+    ));
+}
+
+#[test]
+fn only_mut_parameters_are_reassignable() {
+    // C3 has exactly two re-assignable carriers: `var` bindings and `mut`
+    // parameter windows. `move` transfers once and `comptime` is a
+    // compile-time value, so assignments to them reject like a borrow
+    // parameter's — in fn and lambda position alike.
+    let expected = ["DS2001 assignment needs a `var` binding; `const` bindings are immutable [C3]"];
+    assert_eq!(
+        check(concat!(
+            "struct point { x: int, y: int }\n",
+            "fn bump(move p: point) -> point {\n",
+            "  p = point { x: 1, y: 2 }\n",
+            "  p\n",
+            "}\n",
+        )),
+        expected
+    );
+    assert_eq!(
+        check(concat!(
+            "struct point { x: int, y: int }\n",
+            "fn bump(comptime p: int) -> int {\n",
+            "  p = 2\n",
+            "  p\n",
+            "}\n",
+        )),
+        expected
+    );
+    assert_eq!(
+        check(concat!(
+            "struct point { x: int, y: int }\n",
+            "fn bump() -> int {\n",
+            "  const f = (move p: point) -> int {\n",
+            "    p = point { x: 1, y: 2 }\n",
+            "    p.x\n",
+            "  }\n",
+            "  f(point { x: 0, y: 0 })\n",
+            "}\n",
+        )),
+        expected
+    );
+    clean(concat!(
+        "struct point { x: int, y: int }\n",
+        "fn bump(mut p: point) -> point {\n",
+        "  p = point { x: 1, y: 2 }\n",
+        "  p\n",
+        "}\n",
+    ));
+}
+
+#[test]
 fn top_level_destructuring_patterns_type_their_binders() {
     // A top-level tuple/struct-pun pattern declares package defs whose
     // types memoize like any single-name binding [G3] — uses far from the
@@ -1831,4 +1932,104 @@ fn a_value_tested_arm_subtracts_nothing_from_the_remainder() {
         "  0\n",
         "}\n",
     ));
+}
+
+/// A literal-`true` while whose body cannot break keeps the body's own
+/// diverge flag: the loop never completes normally, so a `return` tail
+/// inside it leaves through the return — the function body's tail check
+/// once failed the whole loop as a `()` value.
+#[test]
+fn while_true_return_diverges() {
+    clean("fn go() -> int {\n  while true { return 1 }\n}\n");
+}
+
+/// The same loop with a `break` inside keeps its unit value reachable:
+/// the break path exits the loop normally, so the missing int tail still
+/// refuses. A `for` body's break binds the `for`, never an enclosing
+/// while-true, so the for variant stays diverging.
+#[test]
+fn while_true_break_keeps_the_unit_tail() {
+    let diags = check("fn go() -> int {\n  while true { break }\n}\n");
+    assert!(
+        diags.iter().any(|m| m.starts_with("DS2001")),
+        "the break path keeps the loop's unit value: {diags:?}"
+    );
+    let diags =
+        check("fn go() -> int {\n  while true {\n    if true { break }\n    return 1\n  }\n}\n");
+    assert!(
+        diags.iter().any(|m| m.starts_with("DS2001")),
+        "a conditional break keeps the loop's unit value: {diags:?}"
+    );
+    clean("fn go() -> int {\n  while true {\n    for i in 0..3 { break }\n    return 1\n  }\n}\n");
+}
+
+/// The for loop and a non-`true` condition never diverge: zero iterations
+/// (or a false condition) complete the loop with its unit value, so an
+/// early `return` inside the body cannot stand in for the fn's own tail.
+#[test]
+fn for_and_guarded_while_keep_the_unit_tail() {
+    let diags = check("fn go() -> int {\n  for i in 0..10 { return i }\n}\n");
+    assert!(
+        diags.iter().any(|m| m.starts_with("DS2001")),
+        "the for body's return never diverges the for: {diags:?}"
+    );
+    let diags = check("fn go() -> int {\n  while false { return 1 }\n}\n");
+    assert!(
+        diags.iter().any(|m| m.starts_with("DS2001")),
+        "a false condition completes the loop with unit: {diags:?}"
+    );
+}
+
+/// A `return` in a value-consumed position refuses at the checker (the
+/// early exit is a statement [F2]): a block whose value feeds a binding,
+/// an argument, or a join arm has no answer for the consuming slot, so
+/// the seam never reaches the lowerer's dead-answer path. The statement
+/// spellings — including a narrow inside a value block's head — stay
+/// clean.
+#[test]
+fn value_position_returns_refuse_with_the_statement_ruling() {
+    const MSG: &str = "DS2039 `return` is a statement; this position consumes the block's value, \
+                       so the exit has no answer to feed it";
+    // the if-arm const initializer that once checked clean and trapped
+    assert_eq!(
+        check(
+            "fn f(n: int) -> int | io_err {\n  const x = if n > 0 { n } else { return io_err }\n  \
+             x\n}\n"
+        ),
+        [MSG]
+    );
+    assert_eq!(
+        check(
+            "fn f(n: int) -> int | io_err {\n  const x = if n > 0 { return io_err } else { 1 }\n  \
+             x\n}\n"
+        ),
+        [MSG]
+    );
+    // a value match arm, a bare block initializer, and a direct value slot
+    assert_eq!(
+        check(
+            "fn f(n: int) -> int | io_err {\n  const x = match n { 0 => return io_err, _ => 1 }\n  x\n}\n"
+        ),
+        [MSG]
+    );
+    assert_eq!(
+        check(
+            "fn f(n: int) -> int | io_err {\n  const x = { if n > 0 { n } else { return io_err } \
+             }\n  x\n}\n"
+        ),
+        [MSG]
+    );
+    assert_eq!(
+        check("fn f(n: int) -> int | io_err {\n  const x = return io_err\n  x\n}\n"),
+        [MSG]
+    );
+    // statement spellings stay clean: the bare statement, the body tail,
+    // the loop body, and the narrow inside a value block's head (the
+    // decode route the from_json synthesis rides)
+    clean("fn f(n: int) -> int | io_err {\n  if n < 0 { return io_err }\n  n\n}\n");
+    clean("fn f(n: int) -> int | io_err { return io_err }\n");
+    clean("fn f(n: int) -> int | io_err {\n  while true { return io_err }\n  0\n}\n");
+    clean(
+        "fn pick(n: int) -> int | io_err { n }\nfn f(n: int) -> int | io_err {\n  const o = if n > 0 {\n    1\n  } else {\n    const r = pick(n)\n    if r is io_err { return io_err }\n    r\n  }\n  o\n}\n",
+    );
 }

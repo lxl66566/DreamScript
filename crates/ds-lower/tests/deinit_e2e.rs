@@ -540,3 +540,31 @@ fn a_ref_word_aliased_borrow_keeps_the_plain_count_discipline() {
         concat!("alpha\n", "alpha\n", "bye alpha\n").as_bytes(),
     );
 }
+
+/// A value block's tail read of a deinit value stages the claim past the
+/// block's scope end: the scope once fired the hook before the consumer
+/// read the value (and the binder's re-registration fired it again), so
+/// the block tail's answer now keeps the claim armed until its owning
+/// consumer's death — the hook fires once, after the value's last read,
+/// in the ordinary binding order.
+#[test]
+fn a_value_blocks_tail_read_fires_the_claim_at_the_consumers_death() {
+    let source = source(concat!(
+        "fn mk(n: int) -> res { res { id: n } }\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  const r = {\n",
+        "    var v = mk(7)\n",
+        "    v\n",
+        "  }\n",
+        "  println(\"kept ${r.id}\")\n",
+        "  0\n",
+        "}\n",
+    ));
+    acceptance(
+        "deinit_block_tail_claim",
+        &source,
+        Value::I64(0),
+        b"kept 7\ndying 7\n",
+    );
+}

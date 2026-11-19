@@ -759,7 +759,8 @@ fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
 
     let mut vm = Vm::new(ModuleRegistry::new());
     for _ in 0..24 {
-        vm.install_module(loader_module());
+        vm.install_module(loader_module())
+            .expect("the swap installs");
         let answer = vm.run("rk", "load", &[]).expect("the root load serves");
         let [Value::Ref(root_word)] = answer.as_slice() else {
             panic!("a string ref");

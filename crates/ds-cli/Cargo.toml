@@ -30,6 +30,9 @@ ds-vm.workspace     = true
 # the `$DS_CACHE` root's one authority (the script-mode cache and the
 # package store share it)
 ds-pkg.workspace    = true
+# the H5 binding face: `ds bind` loads an installed artifact library and
+# enumerates its C symbols (no loader crate — dependency-free by design)
+ds-ffi.workspace    = true
 ds-lower = { path = "../ds-lower" }
 ds-meta  = { path = "../ds-meta" }
 ds-lsp   = { path = "../ds-lsp" }

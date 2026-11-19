@@ -7,7 +7,7 @@ use ds_check::{
     linearity::{DropSite, LastUse, Move},
     resolve::{Package, Resolutions},
 };
-use ds_diag::{Diagnostic, Span};
+use ds_diag::{Diagnostic, LabelStyle, Span};
 use ds_parse::Ast;
 
 use crate::{facts::BlockFacts, key::BlockId};
@@ -100,19 +100,31 @@ pub struct LinearityOutput {
     pub last_uses: Arc<[LastUse]>,
 }
 
+/// One label's comparison fact: file, byte range, primary-ness.
+type LabelSig = (u32, u32, u32, bool);
+
 /// Compare two diagnostic lists by the facts their identity rests on:
-/// code plus span set. Labels and notes are derived, so equal codes and
-/// spans mean equal values.
+/// code plus, per label, file, span, and primary-ness. Labels' texts and
+/// notes are derived, but the same byte range in another file — or a
+/// primary/secondary swap, which moves a fact between blocks — is a
+/// different fact, so a memo holding the old list must renew.
 fn same_diags(left: &[Diagnostic], right: &[Diagnostic]) -> bool {
-    fn sig(diags: &[Diagnostic]) -> Vec<(String, Vec<(u32, u32)>)> {
+    fn sig(diags: &[Diagnostic]) -> Vec<(&str, Vec<LabelSig>)> {
         diags
             .iter()
             .map(|d| {
                 (
-                    d.code.to_string(),
+                    d.code.as_str(),
                     d.labels
                         .iter()
-                        .map(|l| (l.span.start, l.span.end))
+                        .map(|l| {
+                            (
+                                l.span.file.as_u32(),
+                                l.span.start,
+                                l.span.end,
+                                matches!(l.style, LabelStyle::Primary),
+                            )
+                        })
                         .collect(),
                 )
             })
@@ -182,6 +194,22 @@ impl PartialEq for PackageLinearityOutput {
 
 impl Eq for PackageLinearityOutput {}
 
+impl PackageLinearityOutput {
+    /// The walk's rows as the checker's own pass result: the handoff an
+    /// embedder that lowers from the queries passes to the lowerer's
+    /// precomputed-facts seam, so a round that already paid the gate's
+    /// walk never pays the lowerer's backstop re-walk.
+    #[must_use]
+    pub fn rows(&self) -> ds_check::Linearity {
+        ds_check::Linearity {
+            diags: self.diags.to_vec(),
+            moves: self.moves.to_vec(),
+            drops: self.drops.to_vec(),
+            last_uses: self.last_uses.to_vec(),
+        }
+    }
+}
+
 /// Result of the [`Expanded`](crate::QueryKey::Expanded) query: the
 /// package's parse memos' trees through the derive expansion (G1), shared
 /// so every package-grain pass checks the same synthesized impls without
@@ -195,8 +223,10 @@ impl Eq for PackageLinearityOutput {}
 #[derive(Clone, Debug)]
 pub struct ExpandedOutput {
     /// The expanded trees, position-aligned with the package's parseable
-    /// files (a file whose parse failed contributes no tree).
-    pub asts: Arc<[Ast]>,
+    /// files (a file whose parse failed contributes no tree). Shared
+    /// handles one apiece, so the ambient's resident tree serves to
+    /// every session and compute without a clone.
+    pub asts: Arc<[Arc<Ast>]>,
     /// Derive-refusal diagnostics: unimplemented or unknown derive names,
     /// un-derivable parts, and the B9 equality refusal. Shared like the
     /// parse payload: memo hits clone the arc, not the diagnostics.
@@ -417,6 +447,16 @@ pub struct PlatformCheckOutput {
     pub diags: Arc<[Diagnostic]>,
 }
 
+/// Result of the [`PooledCheck`](crate::QueryKey::PooledCheck) query: the
+/// pooled-body refusal diagnostics (E3) of one package, shared like the
+/// resolve payload so memo hits clone the arc, not the diagnostics.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PooledCheckOutput {
+    /// The package's pooled-body refusal diagnostics, source order not
+    /// guaranteed (the caller sorts).
+    pub diags: Arc<[Diagnostic]>,
+}
+
 /// Computed value of one query, stored in the memo table.
 ///
 /// `non_exhaustive` because later milestones add their payload variants
@@ -457,4 +497,45 @@ pub enum QueryValue {
     /// the package's platform-check diagnostics, shared like the resolve
     /// payload.
     PlatformCheck(PlatformCheckOutput),
+    /// Value of [`QueryKey::PooledCheck`](crate::QueryKey::PooledCheck):
+    /// the package's pooled-body refusal diagnostics, shared like the
+    /// resolve payload.
+    PooledCheck(PooledCheckOutput),
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_diag::{Diagnostic, ErrorCode, FileId, Span};
+
+    use super::same_diags;
+
+    fn span(file: u32, start: u32, end: u32) -> Span {
+        Span::new(FileId::new(file), start, end)
+    }
+
+    fn moved(file: u32) -> Diagnostic {
+        Diagnostic::error(ErrorCode::MovedThenUsed, "used after move".to_owned())
+            .with_primary(span(file, 10, 11), "used again")
+            .with_secondary(span(file, 0, 1), "moved here")
+    }
+
+    /// A diagnostic's byte offsets alone are not its identity: the same
+    /// range in another file is another fact, so a memo comparing the old
+    /// and new lists must renew instead of serving the stale label.
+    #[test]
+    fn a_same_range_diagnostic_in_another_file_differs() {
+        assert!(same_diags(&[moved(0)], &[moved(0)]));
+        assert!(!same_diags(&[moved(0)], &[moved(1)]));
+    }
+
+    /// A primary/secondary swap moves the fact between blocks (the slice
+    /// keys on primary spans), so the lists differ even at identical
+    /// ranges in the same file.
+    #[test]
+    fn a_primary_secondary_swap_differs() {
+        let swapped = Diagnostic::error(ErrorCode::MovedThenUsed, "used after move".to_owned())
+            .with_primary(span(0, 0, 1), "moved here")
+            .with_secondary(span(0, 10, 11), "used again");
+        assert!(!same_diags(&[moved(0)], &[swapped]));
+    }
 }

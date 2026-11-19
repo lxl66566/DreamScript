@@ -482,10 +482,12 @@ fn consume_mode_parameter_left_live_drops_at_the_body_end() {
 }
 
 #[test]
-fn borrow_mode_parameter_stays_non_moving_across_consuming_calls() {
-    // C2: a borrow-mode parameter is a caller-retained window, so its
-    // consuming call-argument uses never move it statically; the M4
-    // runtime rc==1 uniqueness check owns this seam.
+fn borrow_mode_parameter_escaping_a_consuming_call_rejects() {
+    // C2: a borrow-mode parameter is a caller-retained window, so a
+    // consuming call-argument use would hand out an ownership the window
+    // does not hold — a double deinit at runtime. Each consuming call
+    // reports the escape; the binding itself never moves and owes no
+    // drop, the window's end is not its death.
     let (_, lin) = case(concat!(
         "  const twice = (h: handle) -> int {\n",
         "    take_handle(h)\n",
@@ -494,12 +496,105 @@ fn borrow_mode_parameter_stays_non_moving_across_consuming_calls() {
         "  }\n",
         "  twice(open_handle(p))\n",
     ));
-    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(lin.diags.len(), 2, "{:#?}", lin.diags);
+    assert!(
+        lin.diags.iter().all(|d| d.code.as_str() == "DS3005"
+            && d.message
+                == "value `h` is borrowed for this call; a `~Copyable` value cannot escape its \
+                    window [C2]"),
+        "{:#?}",
+        lin.diags
+    );
     assert!(lin.moves.is_empty(), "windows never move");
     assert!(
         lin.drops.is_empty(),
         "the caller retains the value, so the callee owes no drop"
     );
+}
+
+#[test]
+fn a_borrowed_linear_parameter_cannot_escape_by_return() {
+    // The window's value is the caller's; returning it hands the caller
+    // a second ownership of one `~Copyable` value — a double deinit at
+    // runtime — so the escape rejects at the return [C2].
+    let source = format!("{PRELUDE}fn id(h: handle) -> handle {{ h }}\n");
+    let (checked, lin) = check(&source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3005");
+    assert_eq!(
+        diag.message,
+        "value `h` is borrowed for this call; a `~Copyable` value cannot escape its window [C2]"
+    );
+    assert_eq!(diag.labels.len(), 2, "the escape is a two-span shape");
+    assert_eq!(diag.labels[0].label, "escape of a borrowed value");
+    assert_eq!(diag.labels[1].label, "borrowed here");
+}
+
+#[test]
+fn a_borrowed_linear_parameter_capture_stays_clean_at_the_checker() {
+    // A capture of a borrowed `~Copyable` window is not an escape here:
+    // the deinit-carrying-capture channel is the lowerer's DS4009
+    // refusal (pinned in ds-lower's deinit suite, the closure object's
+    // death dispatching no hook), so the walk stays silent and the
+    // window never moves.
+    let (checked, lin) = case(concat!(
+        "  const peek = (h: handle) -> int {\n",
+        "    const f = () => share_handle(h)\n",
+        "    f()\n",
+        "  }\n",
+        "  peek(open_handle(p))\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(lin.moves.is_empty(), "windows never move");
+}
+
+#[test]
+fn a_borrowed_linear_parameter_cannot_escape_into_a_literal() {
+    // A struct-literal field (here through punning) consumes its value:
+    // storing the window's value out is the same transfer [C1, C2].
+    let source = format!(
+        "{PRELUDE}struct holder {{\n  h: handle\n}}\nfn boxed(h: handle) -> holder {{\n  holder \
+         {{ h }}\n}}\n"
+    );
+    let (checked, lin) = check(&source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3005");
+}
+
+#[test]
+fn a_mut_window_parameter_cannot_escape_either() {
+    // The `mut` window is as call-scoped as the borrow: its value cannot
+    // leave the call [C2].
+    let (_, lin) = case(concat!(
+        "  const use = (h: mut handle) -> int {\n",
+        "    take_handle(h)\n",
+        "    0\n",
+        "  }\n",
+        "  use(open_handle(p))\n",
+    ));
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3005");
+}
+
+#[test]
+fn copyable_window_parameters_flow_out_freely() {
+    // Copyability is the dividing line: a copyable parameter's value
+    // copies out of every consuming position, so returning it and
+    // feeding it to a consuming call stay clean.
+    let source = concat!(
+        "pub tag int\n",
+        "pub tag string\n",
+        "pub trait Copyable { }\n",
+        "pub fn id(s: string) -> string { s }\n",
+        "pub extern fn len (s: string) -> int\n",
+        "pub fn both(s: string) -> int { len(s) + len(s) }\n",
+    );
+    let (checked, lin) = check(source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
 }
 
 #[test]
@@ -821,4 +916,187 @@ fn deeply_nested_loops_finish() {
 enum Kind {
     For,
     While,
+}
+
+/// A type-keyed static member call walks its arguments per the member's
+/// own signature, exactly like the free spelling (C2): the check
+/// converged to one member, so a `move` parameter consumes — before, the
+/// walk borrowed the argument unconditionally, the use-after-move behind
+/// it stayed live, and the scope exit recorded a second drop beside the
+/// parameter's own deinit.
+#[test]
+fn static_member_call_move_parameter_consumes() {
+    let source = format!(
+        "{PRELUDE}struct point {{ x: int, y: int }}\nimpl point {{\n  fn make(move h: handle) -> \
+         point {{ point {{ x: h.fd, y: 0 }} }}\n}}\npub fn go(p: string) -> int {{\n  const h = \
+         open_handle(p)\n  const q = point.make(h)\n  take_handle(h)\n}}\n"
+    );
+    let (checked, lin) = check(&source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `h` is no longer usable");
+    assert_eq!(diag.labels[0].label, "moved here");
+    assert_eq!(diag.labels[1].label, "used again here after move");
+}
+
+/// The borrow-default half of the same tier: a receiverless member with
+/// borrow parameters keeps every argument live, so the later use checks
+/// clean and the scope exit drop stays the single death.
+#[test]
+fn static_member_call_borrow_parameter_stays_live() {
+    let source = format!(
+        "{PRELUDE}struct point {{ x: int, y: int }}\nimpl point {{\n  fn share(h: handle) -> int \
+         {{ h.fd }}\n}}\npub fn go(p: string) -> int {{\n  const h = open_handle(p)\n  const n = \
+         point.share(h)\n  share_handle(h)\n}}\n"
+    );
+    let (checked, lin) = check(&source);
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(
+        lin.diags.is_empty(),
+        "a borrowed static-member argument stays live: {:#?}",
+        lin.diags
+    );
+}
+
+/// The served-prefix walk's equivalence contract: the walk a compile
+/// runs over `[served prefix, own files]` must answer exactly the one
+/// plain walk over the same trees — the park installs the prefix's
+/// definition-place states and last-use entries (a member use of a
+/// served binding overwrites the parked entry, never adds a second row)
+/// and prepends the parked rows in walk order. The second compile over
+/// the same park must answer the same: a first member's moves never
+/// leak into the park (the snapshot sits at the file boundary), and a
+/// parked dead binding stays dead for every later member.
+#[test]
+fn the_served_prefix_walk_answers_the_one_walk_per_compile() {
+    /// One compile over `[prefix, member]`: the plain one walk and the
+    /// served split, over a park the first compile fills and the second
+    /// installs.
+    fn both_ways(
+        prefix: &str,
+        park: &ds_check::Park<ds_check::ServedLinearity>,
+        member: &str,
+    ) -> (ds_check::Linearity, ds_check::Linearity) {
+        let mut files = Files::new();
+        let a = files.add_source("prefix.ds", prefix);
+        let b = files.add_source("member.ds", member);
+        let asts = [
+            parse(&files, a).unwrap_or_else(|d| panic!("prefix parses: {d:?}")),
+            parse(&files, b).unwrap_or_else(|d| panic!("member parses: {d:?}")),
+        ];
+        let ds_check::Analyzed {
+            asts,
+            package,
+            resolutions,
+            decls,
+            checked,
+            ..
+        } = ds_check::analyze(&files, &asts);
+        assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+        let plain = linearity::linearity_check(&asts, &package, &resolutions, &decls, &checked);
+        let served = linearity::linearity_check_served(
+            &asts,
+            &package,
+            &resolutions,
+            &decls,
+            &checked,
+            1,
+            park,
+        );
+        (plain, served)
+    }
+
+    /// The two walks answer the same rows in the same order.
+    fn assert_same(plain: &ds_check::Linearity, served: &ds_check::Linearity, tag: &str) {
+        assert_eq!(plain.diags, served.diags, "diags match ({tag})");
+        assert_eq!(plain.moves, served.moves, "moves match ({tag})");
+        assert_eq!(plain.drops, served.drops, "drops match ({tag})");
+        assert_eq!(plain.last_uses, served.last_uses, "last uses match ({tag})");
+        assert!(!plain.moves.is_empty(), "the fixture moves ({tag})");
+        assert!(!plain.drops.is_empty(), "the fixture drops ({tag})");
+        assert!(
+            !plain.last_uses.is_empty(),
+            "the fixture tracks uses ({tag})"
+        );
+    }
+
+    // The served prefix's stand-in: top-level bindings moved and borrowed
+    // inside the prefix itself, and bodies exercising the loop join, the
+    // branch join, a lambda capture, and a scope-exit drop.
+    let prefix = format!(
+        "{PRELUDE}{}",
+        concat!(
+            "pub const held = open_handle(\"held\")\n",
+            "pub const held_other = open_handle(\"other\")\n",
+            "pub const held2 = open_handle(\"two\")\n",
+            "pub const taken = take_handle(held)\n",
+            "pub const probe = share_handle(held_other)\n",
+            "pub fn walk(p: string) -> int {\n",
+            "  const h = open_handle(p)\n",
+            "  var total = 0\n",
+            "  while total < 3 {\n",
+            "    total = total + share_handle(held2)\n",
+            "  }\n",
+            "  take_handle(h)\n",
+            "}\n",
+            "pub fn branchy(p: string) -> int {\n",
+            "  const h = open_handle(p)\n",
+            "  if share_handle(h) > 1 { 1 } else { 2 }\n",
+            "}\n",
+            "pub fn capture(p: string) -> int {\n",
+            "  const h = open_handle(p)\n",
+            "  const f = () -> int { take_handle(h) }\n",
+            "  f()\n",
+            "}\n",
+        )
+    );
+    // The first member: borrows a binding the prefix used (the parked
+    // last-use entry must be overwritten, not duplicated), consumes a
+    // binding the prefix only borrowed (a fresh move row whose binder
+    // names a prefix span), and leaves its own value to a scope-exit
+    // drop.
+    let first = concat!(
+        "pub fn main() -> int {\n",
+        "  const mine = open_handle(\"mine\")\n",
+        "  const again = share_handle(held_other)\n",
+        "  take_handle(held2)\n",
+        "  share_handle(mine)\n",
+        "}\n",
+    );
+    // The second member: uses a binding the prefix moved — the parked
+    // dead state must surface the same two-span refusal the one walk
+    // reports, proving the boundary state rides the park.
+    let second = concat!(
+        "pub fn main() -> int {\n",
+        "  const fresh = open_handle(\"b\")\n",
+        "  share_handle(held)\n",
+        "  take_handle(fresh)\n",
+        "}\n",
+    );
+
+    let park = ds_check::Park::new();
+    let (plain_first, served_first) = both_ways(&prefix, &park, first);
+    assert_same(&plain_first, &served_first, "the filling walk");
+    // One row per binder: the member's borrow of `held_other` overwrote
+    // the prefix's own use rather than adding a second row beside it.
+    let mut binders: Vec<_> = served_first.last_uses.iter().map(|u| u.binder).collect();
+    let rows = binders.len();
+    binders.sort_unstable_by_key(|span| (span.file.as_u32(), span.start));
+    binders.dedup();
+    assert_eq!(binders.len(), rows, "one last-use row per binder");
+    assert!(
+        served_first
+            .last_uses
+            .iter()
+            .any(|u| { u.binder.file.as_u32() != u.at.file.as_u32() }),
+        "a member use of a prefix binding rides the merged rows"
+    );
+
+    let (plain_second, served_second) = both_ways(&prefix, &park, second);
+    assert_same(&plain_second, &served_second, "the installed walk");
+    assert!(
+        !plain_second.diags.is_empty(),
+        "the parked dead binding surfaces for the second member"
+    );
 }

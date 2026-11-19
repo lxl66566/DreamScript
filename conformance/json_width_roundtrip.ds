@@ -1,0 +1,24 @@
+// source: the json width vocabulary's conformance round 2026-11-19 (todo item 75's seed clause, riding the 2026-11-19 width-representation ruling and its construction surface)
+// purpose: byte/char/u32/bytes fields round-trip through both json derive families with their edge values — byte and u32 as json numbers (255 and 0 beside 4294967295 and 0, the u32 words built through the `u32.of(x)` conversion), char as its one-character string (a multi-byte scalar), bytes as its number array (the empty payload beside a spelled high byte b'\u{ff}'), and a wrong-width or wrong-shape value answering parse_err on the decode (a byte past 255, a u32 past 4294967295, a two-character string where char reads)
+// items:
+// packet: stage: run
+// read: stage: run
+// main: stage: run
+
+#[derive(from_json, to_json)]
+struct packet { kind: byte, serial: u32, mark: char, payload: bytes }
+
+fn read(text: string) -> json {
+  const j = parse_json(text)
+  if j is parse_err { json_null } else { j }
+}
+
+fn main() -> () {
+  println(packet.to_json(packet { kind: b'\u{ff}', serial: u32.of(4294967295), mark: 'é', payload: bytes_of([b'\u{0}', b'\u{ff}']) }).to_json())
+  println(packet.to_json(packet { kind: b'\0', serial: u32.of(0), mark: 'q', payload: bytes_of(list[byte]()) }).to_json())
+  const back = packet.from_json(read("{\"kind\": 0, \"serial\": 4294967295, \"mark\": \"é\", \"payload\": [0, 255]}"))
+  if back is parse_err { println("parse_err") } else { println(packet.to_json(back).to_json()) }
+  println("${packet.from_json(read("{\"kind\": 0, \"serial\": 4294967296, \"mark\": \"q\", \"payload\": []}")) is parse_err}")
+  println("${packet.from_json(read("{\"kind\": 256, \"serial\": 0, \"mark\": \"q\", \"payload\": []}")) is parse_err}")
+  println("${packet.from_json(read("{\"kind\": 0, \"serial\": 0, \"mark\": \"ab\", \"payload\": []}")) is parse_err}")
+}

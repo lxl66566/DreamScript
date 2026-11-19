@@ -104,7 +104,7 @@ fn passes(source: &str) -> (Records, Records) {
     assert!(declare_diags.is_empty(), "the source declares clean");
     let fresh = Records::of(&decls);
     decls.served_defs = u32::try_from(package.len()).expect("def count fits u32");
-    decls.served_methods = u32::try_from(package.methods().len()).expect("method count fits");
+    decls.served_methods = u32::try_from(package.methods().count()).expect("method count fits");
     decls.trait_impl_args.clear();
     decls.inherent_impl_bounds.clear();
     let served = ServedDecls {

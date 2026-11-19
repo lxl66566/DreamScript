@@ -4,14 +4,16 @@
 //! the provider answers name@version exactly (the load walk's provider
 //! discipline), the winning declarer's pin validates the fetched content,
 //! and the resolved graph — one version per name this round — serializes
-//! as the byte-stable lock.
+//! as the byte-stable lock. The graph's native artifacts fold the same
+//! way: one identity per artifact name, every declarer's pin agreeing,
+//! the manifest texts (artifacts inside) carrying them into the lock.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ds_mod::Hash128;
 
 use crate::{
-    manifest::{DepBound, Manifest},
+    manifest::{ArtifactBound, DepBound, Manifest},
     version::Version,
 };
 
@@ -96,6 +98,21 @@ pub enum ResolveError {
         /// The cycle's names, the repeated name first and last.
         cycle: Vec<String>,
     },
+    /// One artifact name pinned at two identities across the graph —
+    /// one version per name this round, multi-version coexistence a
+    /// listed residual.
+    ArtifactConflict {
+        /// The conflicting artifact name.
+        name: String,
+        /// The pin already recorded.
+        pinned: ArtifactBound,
+        /// The disagreeing bound.
+        found: ArtifactBound,
+        /// The manifest that recorded the pin.
+        dependent: String,
+        /// The manifest that declared the disagreement.
+        declarer: String,
+    },
     /// The provider's fetch refused hard: the fetched content failed its
     /// own verification or the provider's storage could not be read.
     /// The hook owns the message; the refusal names the demand it
@@ -150,6 +167,19 @@ impl core::fmt::Display for ResolveError {
             Self::Cycle { cycle } => {
                 write!(f, "cross-package dependency cycle: {}", cycle.join(" -> "))
             },
+            Self::ArtifactConflict {
+                name,
+                pinned,
+                found,
+                dependent,
+                declarer,
+            } => write!(
+                f,
+                "artifact `{name}` pinned at two identities: `{dependent}` pinned {} for {} \
+                 (blake3:{}), `{declarer}` declares {} for {} (blake3:{}); one version per name \
+                 this round",
+                pinned.ver, pinned.target, pinned.hash, found.ver, found.target, found.hash
+            ),
             Self::Refused {
                 name,
                 version,
@@ -171,12 +201,14 @@ pub struct ResolvedPackage {
     pub manifest: Manifest,
 }
 
-/// A finished resolution: the root manifest plus every resolved dependency,
-/// name-keyed in canonical order.
+/// A finished resolution: the root manifest, every resolved dependency
+/// name-keyed in canonical order, and the graph's folded artifacts —
+/// one identity per name, every declarer's pin agreeing.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     root: Manifest,
     deps: BTreeMap<String, ResolvedPackage>,
+    artifacts: BTreeMap<String, ArtifactBound>,
 }
 
 impl Resolved {
@@ -190,6 +222,14 @@ impl Resolved {
     #[must_use]
     pub fn deps(&self) -> &BTreeMap<String, ResolvedPackage> {
         &self.deps
+    }
+
+    /// The graph's native artifacts, name-keyed in canonical order: the
+    /// root's and every resolved dependency's declarations folded, one
+    /// version per name.
+    #[must_use]
+    pub fn artifacts(&self) -> &BTreeMap<String, ArtifactBound> {
+        &self.artifacts
     }
 
     /// The lock: every manifest of the resolved graph (root included),
@@ -242,6 +282,10 @@ impl Resolved {
 /// fetched at most once (a name holds one pending queue entry; a further
 /// raise while queued updates the demand the fetch reads).
 ///
+/// A version carries its pre-release and build segments inline (a
+/// copyable value), so a refusal naming several of them is large; the
+/// resolution walk is a cold path, so the size rides.
+#[allow(clippy::result_large_err)]
 /// # Errors
 ///
 /// [`ResolveError::MissingPackage`] when the provider serves nothing for a
@@ -250,9 +294,10 @@ impl Resolved {
 /// version is unoffered, [`ResolveError::HashMismatch`] when one
 /// `(name, version)` carries two pins or the fetched content disagrees
 /// with the winning pin, [`ResolveError::Refused`] when the provider's
-/// fetch fails its own verification or cannot read its storage, and
-/// [`ResolveError::Cycle`] when the final graph carries a cross-package
-/// cycle.
+/// fetch fails its own verification or cannot read its storage,
+/// [`ResolveError::ArtifactConflict`] when one artifact name carries two
+/// identities across the graph, and [`ResolveError::Cycle`] when the
+/// final graph carries a cross-package cycle.
 pub fn resolve(
     root: &Manifest,
     mut fetch: impl FnMut(&str, &Version) -> Fetched,
@@ -262,12 +307,14 @@ pub fn resolve(
         demands: BTreeMap::new(),
         pins: BTreeMap::new(),
         resolved: BTreeMap::new(),
+        artifacts: BTreeMap::new(),
         queue: VecDeque::new(),
         queued: BTreeSet::new(),
     };
     for (name, bound) in &root.deps {
         walk.record(&root.name, name, *bound)?;
     }
+    walk.record_artifacts(&root.name, &root.artifacts)?;
     while let Some(name) = walk.queue.pop_front() {
         walk.queued.remove(&name);
         let (demanded, dependent) = walk
@@ -327,6 +374,7 @@ pub fn resolve(
                 for (dep, bound) in &provided.manifest.deps {
                     walk.record(&name, dep, *bound)?;
                 }
+                walk.record_artifacts(&name, &provided.manifest.artifacts)?;
                 walk.resolved.insert(name, ResolvedPackage {
                     version: demanded,
                     content_hash: pinned,
@@ -339,6 +387,11 @@ pub fn resolve(
     Ok(Resolved {
         root: root.clone(),
         deps: walk.resolved,
+        artifacts: walk
+            .artifacts
+            .into_iter()
+            .map(|(name, (bound, _))| (name, bound))
+            .collect(),
     })
 }
 
@@ -354,6 +407,9 @@ struct Walk {
     pins: BTreeMap<(String, Version), (Hash128, String)>,
     /// The manifest at each name's current demanded version.
     resolved: BTreeMap<String, ResolvedPackage>,
+    /// The graph's folded artifacts: each name's agreed bound and the
+    /// first declarer that recorded it (the conflict refusal's dependent).
+    artifacts: BTreeMap<String, (ArtifactBound, String)>,
     /// Names whose demand needs a (re)fetch, in first-raise order; a name
     /// holds at most one pending entry, so one pop means one fetch per
     /// demand raise.
@@ -368,6 +424,7 @@ impl Walk {
     /// when its demanded maximum rose. A bound naming the root package
     /// records nothing — the cycle check reads the final graph's edges,
     /// where the bound already appears.
+    #[allow(clippy::result_large_err)]
     fn record(&mut self, dependent: &str, name: &str, bound: DepBound) -> Result<(), ResolveError> {
         if name == self.root {
             return Ok(());
@@ -399,12 +456,44 @@ impl Walk {
         Ok(())
     }
 
+    /// Records one manifest's artifact declarations: the first declarer of
+    /// a name pins it, and a later declarer's disagreement refuses — one
+    /// version per name this round, the dep walk's one-slot rule over
+    /// exact pins instead of declared minima.
+    #[allow(clippy::result_large_err)]
+    fn record_artifacts(
+        &mut self,
+        dependent: &str,
+        artifacts: &BTreeMap<String, ArtifactBound>,
+    ) -> Result<(), ResolveError> {
+        for (name, bound) in artifacts {
+            match self.artifacts.get(name) {
+                Some((pinned, first)) if *pinned != *bound => {
+                    return Err(ResolveError::ArtifactConflict {
+                        name: name.clone(),
+                        pinned: pinned.clone(),
+                        found: bound.clone(),
+                        dependent: first.clone(),
+                        declarer: dependent.to_owned(),
+                    });
+                },
+                Some(_) => {},
+                None => {
+                    self.artifacts
+                        .insert(name.clone(), (bound.clone(), dependent.to_owned()));
+                },
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses cross-package cycles over the final graph — the root's deps
     /// plus every resolved manifest's deps, neighbors in name order, an
     /// explicit stack (a long dep chain grows the heap, not the call
     /// stack). The root itself is a node like any other, so a dep naming
     /// it (from the root's own list or a resolved manifest's) closes a
     /// cycle here; a superseded manifest's root-dep retired with it.
+    #[allow(clippy::result_large_err)]
     fn refuse_cycles(&self, root: &Manifest) -> Result<(), ResolveError> {
         let deps_of = |name: &str| -> Option<&BTreeMap<String, DepBound>> {
             if name == root.name {

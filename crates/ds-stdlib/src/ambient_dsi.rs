@@ -6,12 +6,59 @@
 //! the decode and serve, the drift-gate views) living in [`ds_dsi`],
 //! the format both the ambient and a user package's compile share.
 
+use std::sync::Arc;
+
+use ds_check::{DefId, IdTable, Park};
 use ds_dsi::{PrefixDsi, PrefixDsiError, ServedPrefix};
 use ds_mod::Hash128;
+use ds_parse::LocalDecl;
 
 /// The embedded artifact: source-hash header plus the postcard-encoded
 /// tables.
 static DSI: &[u8] = include_bytes!("ambient.dsi");
+
+/// The artifact's decoded payload, decoded once per process: the bytes
+/// address no caller state, so a process that serves the same ambient
+/// repeatedly (a package graph's member compiles, a query session) pays
+/// the postcard decode once. A decode failure stays cached with it: a
+/// drifted artifact answers every caller with the same miss it answers
+/// today, only without re-decoding the bytes per call.
+static ARTIFACT: std::sync::OnceLock<Result<PrefixDsi, PrefixDsiError>> =
+    std::sync::OnceLock::new();
+
+/// The artifact's converted namespace and declaration tables, converted
+/// once per process beside the decode: every serve installs the same
+/// shared bases (the package's base tier and the shared resolution
+/// tables among them), so a member compile's teardown drops refcounts
+/// instead of the rows and a later serve never rebuilds the conversion.
+/// A conversion failure stays cached with it, exactly like the decode's.
+static TABLES: Park<Result<ds_dsi::ServedTables, PrefixDsiError>> = Park::new();
+
+/// The ambient's shared const rows, built once per process from the
+/// resident tree over the served namespace: every bodied fn is a
+/// const-of-lambda binding, so the rows carry whole fn bodies and
+/// cloning them per member compile dominated the reserve walk's cost
+/// and the bundle's teardown. Built from the blob's tree when it
+/// verifies; a blob miss leaves the base absent and the reserve walk
+/// rebuilds the rows exactly as before (the artifacts are a pure cache,
+/// so both miss together in practice).
+static CONSTS: Park<Arc<IdTable<DefId, Arc<LocalDecl>>>> = Park::new();
+
+/// The ambient's parked affine walk, the fill-later [`Park`] kind:
+/// filled by the first member compile that runs it over the served tree
+/// and installed by every later one — the walk's rows name spans and
+/// the serve's own definition ids (each serve rebuilds the namespace
+/// identically), so one process walks the ambient tree once instead of
+/// once per member compile.
+static LINEARITY: Park<ds_check::ServedLinearity> = Park::new();
+
+/// The ambient serve's affine-walk park cell: the run path hands it to
+/// the checker's served walk, which fills it on the first compile and
+/// installs it after.
+#[must_use]
+pub fn ambient_linearity() -> &'static Park<ds_check::ServedLinearity> {
+    &LINEARITY
+}
 
 /// Generates the artifact from the current ambient source: parse,
 /// derive-expansion, collect and resolve, the declaration phase alone
@@ -33,14 +80,14 @@ pub fn generate() -> PrefixDsi {
     let (uses, mut file_diags) = package.resolve(&tree);
     resolve_diags.append(&mut file_diags);
     let tables = vec![uses];
-    let (decls, decl_diags) = ds_check::decls::build(&package, &[&tree], &tables);
+    let (decls, decl_diags) = ds_check::decls::build(&package, &[tree.as_ref()], &tables);
     assert!(
         decl_diags.is_empty(),
         "the ambient does not declare clean: {decl_diags:?}"
     );
     let analyzed = ds_check::analyze_resolved(
         &files,
-        std::sync::Arc::from(vec![tree]),
+        Arc::from(vec![tree]),
         package.into(),
         tables.into(),
         resolve_diags,
@@ -82,9 +129,18 @@ pub fn generate() -> PrefixDsi {
 /// [`PrefixDsiError`]: a stale header, a foreign file id, or a corrupt
 /// payload — all of them cache misses, never source problems.
 pub fn ambient_dsi(file: ds_diag::FileId) -> Result<ServedPrefix, PrefixDsiError> {
-    ds_dsi::decode_dsi(DSI, Hash128::compute(crate::AMBIENT_SOURCE.as_bytes()), &[
-        file,
-    ])
+    let artifact = ARTIFACT.get_or_init(|| {
+        ds_dsi::decode_prefix(DSI, Hash128::compute(crate::AMBIENT_SOURCE.as_bytes()))
+    });
+    let artifact = artifact.as_ref().map_err(Clone::clone)?;
+    let tables = TABLES.get_or_init(|| ds_dsi::convert_tables(artifact));
+    let tables = tables.as_ref().map_err(Clone::clone)?;
+    let mut served = ds_dsi::serve_prefix_tables(artifact, &[file], tables)?;
+    if let Ok(tree) = crate::ambient_ast(file) {
+        let consts = CONSTS.get_or_init(|| ds_check::decls::consts_base(&tree, &served.package));
+        served.decls.decls.consts.install_base(Arc::clone(consts));
+    }
+    Ok(served)
 }
 
 #[cfg(test)]
@@ -101,12 +157,15 @@ mod tests {
     /// served ambient's trait tables), a written trait impl and an
     /// inherent impl (instances and methods continuing the ambient's id
     /// spaces), and calls into ambient functions and traits.
-    const USER: &str = "#[derive(show, hash)]\nstruct point { x: int, y: int }\n\nenum tone \
-                        {\nwarm\ncool\n}\n\ntrait local { fn m(self) -> int }\n\nimpl local for \
-                        tone {\nfn m(self) -> int { 3 }\n}\n\nimpl point {\nfn norm(self) -> int \
-                        { (self.x * self.x + self.y * self.y) }\n}\n\nfn main() -> () {\nconst p \
-                        = point { x: 3, y: 4 }\nconst t = warm\nprintln(\"${p.show()} ${p.norm()} \
-                        ${t.m()} ${max(1, 2)}\")\n}\n";
+    const USER: &str =
+        "#[derive(show, hash)]\nstruct point { x: int, y: int }\n\nenum tone \
+         {\nwarm\ncool\n}\n\ntrait local { fn m(self) -> int }\n\nimpl local for tone {\nfn \
+         m(self) -> int { 3 }\n}\n\nimpl point {\nfn norm(self) -> int { (self.x * self.x + \
+         self.y * self.y) }\n}\n\nstruct wrap { v: json }\n\nfn main() -> () {\nconst p = point { \
+         x: 3, y: 4 }\nconst t = warm\nconst w = wrap { v: json_null }\nconst j = \
+         parse_json(\"[1,{\\\"k\\\":true}]\")\nif j is parse_err {\nprintln(\"bad\")\n} else \
+         {\nprintln(\"${to_json(j)}\")\n}\nprintln(\"${p.show()} ${p.norm()} ${t.m()} ${max(1, \
+         2)}\")\n}\n";
 
     /// The embedded artifact must byte-match a fresh generation over the
     /// current source: any grammar, checker, resolution, effects, or
@@ -152,7 +211,7 @@ mod tests {
         let served = super::ambient_dsi(ambient).expect("the artifact verifies");
         let served_run = ds_meta::analyze_served(
             &files,
-            vec![served_tree, user_ast.clone()],
+            vec![served_tree, std::sync::Arc::new(user_ast.clone())],
             &[true, false],
             served.package,
             served.resolutions,
@@ -166,7 +225,14 @@ mod tests {
 
         // The fresh path over the same sources.
         let fresh_tree = ds_parse::parse(&files, ambient).expect("the ambient parses");
-        let fresh_run = ds_meta::analyze_owned(&files, vec![fresh_tree, user_ast], &[false, false]);
+        let fresh_run = ds_meta::analyze_owned(
+            &files,
+            vec![
+                std::sync::Arc::new(fresh_tree),
+                std::sync::Arc::new(user_ast),
+            ],
+            &[false, false],
+        );
         assert!(
             fresh_run.checked.diags.is_empty(),
             "the fresh run must check clean: {:?}",
@@ -178,8 +244,8 @@ mod tests {
             "both runs check the same program clean"
         );
         for (served_tree, fresh_tree) in served_run.asts.iter().zip(fresh_run.asts.iter()) {
-            let served_bytes = postcard::to_allocvec(served_tree).expect("serializes");
-            let fresh_bytes = postcard::to_allocvec(fresh_tree).expect("serializes");
+            let served_bytes = postcard::to_allocvec(served_tree.as_ref()).expect("serializes");
+            let fresh_bytes = postcard::to_allocvec(fresh_tree.as_ref()).expect("serializes");
             assert_eq!(
                 served_bytes, fresh_bytes,
                 "the trees must answer identically"
@@ -214,6 +280,12 @@ mod tests {
             gates::instance_rows(&fresh_run),
             "the instance rows must match"
         );
+        assert_eq!(
+            gates::const_rows(&served_run),
+            gates::const_rows(&fresh_run),
+            "the top-level binding rows must match (the served base and the fresh clones)"
+        );
+        assert_ne!(gates::const_rows(&served_run), Vec::new());
 
         // The serve must actually install its prefix: a marker regression
         // would rebuild everything fresh over the served tables and still
@@ -295,6 +367,36 @@ mod tests {
         assert!(matches!(error, PrefixDsiError::FileMismatch));
     }
 
+    /// Every serve of the decoded artifact installs the same shared
+    /// tables: the postcard decode and conversion run once per process,
+    /// so every member compile binds the ambient the first did — the
+    /// namespace and resolutions answer equal, and the solved effect
+    /// rows answer as one shared handle (a rebuilt row set would compare
+    /// equal too, so the share is pinned by identity).
+    #[test]
+    fn every_serve_answers_the_same_tables() {
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source(crate::AMBIENT_FILE, crate::AMBIENT_SOURCE);
+        let first = super::ambient_dsi(file).expect("the artifact verifies");
+        let second = super::ambient_dsi(file).expect("the memoized decode serves");
+        assert_eq!(
+            first.package, second.package,
+            "the rebuilt namespace answers the first serve's"
+        );
+        assert_eq!(
+            first.resolutions, second.resolutions,
+            "the rebuilt resolutions answer the first serve's"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first.effect_defs, &second.effect_defs),
+            "the solved effect rows are one shared handle across serves"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first.effect_methods, &second.effect_methods),
+            "the solved method rows are one shared handle across serves"
+        );
+    }
+
     /// A user program colliding with the served ambient keeps the fresh
     /// path's diagnostics: a redeclared ambient name still reports the
     /// duplicate at collection, and a user impl whose head overlaps a
@@ -314,7 +416,7 @@ mod tests {
         let served = super::ambient_dsi(ambient).expect("the artifact verifies");
         let served_run = ds_meta::analyze_served(
             &files,
-            vec![served_tree, user_ast.clone()],
+            vec![served_tree, std::sync::Arc::new(user_ast.clone())],
             &[true, false],
             served.package,
             served.resolutions,
@@ -326,7 +428,14 @@ mod tests {
         );
 
         let fresh_tree = ds_parse::parse(&files, ambient).expect("the ambient parses");
-        let fresh_run = ds_meta::analyze_owned(&files, vec![fresh_tree, user_ast], &[false, false]);
+        let fresh_run = ds_meta::analyze_owned(
+            &files,
+            vec![
+                std::sync::Arc::new(fresh_tree),
+                std::sync::Arc::new(user_ast),
+            ],
+            &[false, false],
+        );
         assert_eq!(
             served_run.checked.diags, fresh_run.checked.diags,
             "the served run answers the fresh run's collision diagnostics"

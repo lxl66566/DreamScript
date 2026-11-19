@@ -146,9 +146,11 @@ pub mod error;
 pub mod expr;
 pub mod extraction;
 pub mod id_table;
+pub mod import;
 pub mod instance;
 pub mod instance_solve;
 pub mod linearity;
+pub mod park;
 mod pattern;
 pub mod platform;
 pub mod pooled;
@@ -168,14 +170,21 @@ pub use error::Error;
 pub use expr::TypeExpr;
 pub use extraction::Extraction;
 pub use id_table::{DenseId, IdTable};
+pub use import::{
+    ConstFact, ForeignEntry, ForeignKind, ImportGraph, ImportSurface, MemberSurface, TypeFact,
+};
 pub use instance::{
     Condition, InherentBounds, InstanceBody, InstanceDecl, InstanceEnv, InstanceId, ServedInstance,
 };
-pub use linearity::{BinderFact, DropSite, LastUse, Linearity, Move, check, linearity_check};
+pub use linearity::{
+    BinderFact, DropSite, LastUse, Linearity, Move, ServedLinearity, check, linearity_check,
+    linearity_check_served,
+};
+pub use park::Park;
 pub use pooled::check_pooled_bodies;
 pub use resolve::{
-    Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, Package, Res, Resolutions,
-    UseIndex, Vis, resolve_package,
+    Def, DefId, DefKind, DotRes, MethodDecl, MethodId, MethodOwner, ModuleId, Package, PackageBase,
+    Res, Resolutions, UseIndex, Vis, resolve_package, resolve_package_linked,
 };
 pub use scope::{ScopeBinding, ScopeEntry, ScopeFrame, ScopeKind, scope_frames, visible_at};
 pub use type_of::{

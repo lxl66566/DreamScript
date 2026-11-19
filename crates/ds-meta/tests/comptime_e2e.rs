@@ -60,7 +60,7 @@ fn run_source(name: &str, source: &str) -> (Vm, Result<FrameAnswer, ds_vm::Trap>
         .map_err(|diags| rendered(&diags))
         .expect("the comptime evaluation answers");
     let lowered =
-        ds_lower::lower_with_comptime(name, hash, &asts, &analyzed, &values).expect("lowers");
+        ds_lower::lower_with_comptime(name, hash, &asts, &analyzed, None, &values).expect("lowers");
     let bytes = ds_mod::write(lowered.module());
     let module = ds_mod::read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
@@ -299,6 +299,39 @@ fn an_empty_list_answer_embeds() {
     assert_eq!(out, "count: 0\n");
 }
 
+/// A trapping comptime body over a still-live `fields` record list: the
+/// element words' claims left the frame with the list's adoption, so the
+/// trapped fiber's drain at the fence's next comptime site sees a
+/// balanced store — the trap surfaces as its own diagnostic and the
+/// compiler answers instead of panicking on the unbalanced frame.
+#[test]
+fn a_trap_over_a_live_fields_list_refuses_cleanly() {
+    let rendered = evaluate_refused(
+        "fields_trap",
+        &source(concat!(
+            "struct page { title: string, views: int }\n",
+            "fn boom(comptime t: type) -> int {\n",
+            "  var n = 0\n",
+            "  for f in fields(t) {\n",
+            "    n += 1\n",
+            "    var d = 0\n",
+            "    n = n / d\n",
+            "  }\n",
+            "  n\n",
+            "}\n",
+            "fn ok(comptime t: type) -> string { \"ok\" }\n",
+            "fn main() -> () {\n",
+            "  println(\"${boom(page)}\")\n",
+            "  println(ok(page))\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2034") && rendered.contains("trapped"),
+        "the trap surfaces as the comptime fence's diagnostic: {rendered}"
+    );
+}
+
 #[test]
 fn a_multi_word_element_list_refuses_at_the_embed() {
     let rendered = evaluate_refused(
@@ -332,6 +365,37 @@ fn a_list_answer_through_a_wider_return_type_refuses() {
             "fn main() -> () {\n",
             "  const xs = maybe(page)\n",
             "  println(\"built\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("the embeddable answers"),
+        "the embed names the literal vocabulary: {rendered}"
+    );
+}
+
+/// The from_json shape's blocking seam: a comptime fn walking a
+/// target's fields can build the value inside the fence, but its call
+/// cannot answer a constructed struct to runtime code — the answer
+/// must embed as the literal a user would write, and the embed
+/// vocabulary carries the scalars, their lists, and scalar tuples
+/// alone, so the constructed struct refuses at the call site.
+#[test]
+fn a_struct_answer_refuses_at_the_embed() {
+    let rendered = evaluate_refused(
+        "struct_answer",
+        &source(concat!(
+            "struct point { x: int, y: int }\n",
+            "fn make(comptime t: type) -> point {\n",
+            "  var n = 0\n",
+            "  for f in fields(t) {\n",
+            "    n += 1\n",
+            "  }\n",
+            "  point { x: n, y: 0 }\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  const p = make(point)\n",
+            "  println(\"${p.x}\")\n",
             "}\n",
         )),
     );
@@ -515,43 +579,57 @@ fn the_fence_refuses_a_file_call() {
 }
 
 #[test]
-fn a_trap_row_helper_refuses_at_the_fence() {
-    let rendered = evaluate_refused(
-        "helper",
-        &source(concat!(
-            "struct point { x: int, y: int }\n",
-            "fn double(n: int) -> int { n * 2 }\n",
-            "fn sized(comptime t: type) -> int {\n",
-            "  double(4)\n",
-            "}\n",
-            "fn main() -> () {\n",
-            "  println(\"${sized(point)}\")\n",
-            "}\n",
-        )),
-    );
-    assert!(
-        rendered.contains("DS2037") && rendered.contains("`double`") && rendered.contains("`trap`"),
-        "the admission names the impure row: {rendered}"
-    );
+fn a_trap_row_helper_admits_and_embeds_its_answer() {
+    // int arithmetic rows `trap` (B7's default), and a row of `trap`
+    // alone admits (the 2026-11-17 amendment): the helper's body joins
+    // the fenced evaluation and its answer embeds at the call site
+    let out = output_of(&source(concat!(
+        "struct point { x: int, y: int }\n",
+        "fn double(n: int) -> int { n * 2 }\n",
+        "fn sized(comptime t: type) -> int {\n",
+        "  double(4)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(\"${sized(point)}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "8\n");
 }
 
 #[test]
-fn a_ufcs_trap_row_helper_refuses_at_the_fence() {
+fn a_ufcs_trap_row_helper_admits_and_embeds_its_answer() {
+    let out = output_of(&source(concat!(
+        "fn double(n: int) -> int { n * 2 }\n",
+        "fn sized(comptime t: type) -> int {\n",
+        "  4.double()\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(\"${sized(int)}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "8\n");
+}
+
+#[test]
+fn a_hit_trap_inside_an_admitted_callee_reports_the_comptime_error() {
+    // the trap-only row admits the callee at the fence; the trap the
+    // fenced run then hits (1/0) surfaces as the comptime call's own
+    // compile error — a structured diagnostic, never a panic
     let rendered = evaluate_refused(
-        "helper_ufcs",
+        "helper_hits_trap",
         &source(concat!(
-            "fn double(n: int) -> int { n * 2 }\n",
-            "fn sized(comptime t: type) -> int {\n",
-            "  4.double()\n",
+            "fn inv(n: int) -> int { 1 / n }\n",
+            "fn probe(comptime t: type) -> int {\n",
+            "  inv(0)\n",
             "}\n",
             "fn main() -> () {\n",
-            "  println(\"${sized(int)}\")\n",
+            "  println(\"${probe(int)}\")\n",
             "}\n",
         )),
     );
     assert!(
-        rendered.contains("DS2037") && rendered.contains("`double`") && rendered.contains("`trap`"),
-        "the admission names the ufcs helper's row too: {rendered}"
+        rendered.contains("DS2034") && rendered.contains("trapped"),
+        "the hit trap names the comptime call: {rendered}"
     );
 }
 
@@ -640,34 +718,29 @@ fn a_transitively_impure_helper_refuses_naming_the_first_hop() {
         rendered.contains("DS2037")
             && rendered.contains("`announce`")
             && rendered.contains("`world`")
-            && rendered.contains("the row turns impure at `emit`"),
-        "the admission names the callee and drills to the first impure hop: {rendered}"
+            && rendered.contains("the row turns refusing at `emit`"),
+        "the admission names the callee and drills to the first refusing hop: {rendered}"
     );
 }
 
 #[test]
-fn a_string_concat_helper_refuses_on_the_trap_row() {
+fn a_string_concat_helper_admits_on_the_over_approximated_trap_row() {
     // the effects pass rows every `+` as trapping without solved operand
-    // types, so even the pure-at-runtime string concat carries `trap`
-    // and refuses at the fence this round
-    let rendered = evaluate_refused(
-        "helper_concat",
-        &source(concat!(
-            "struct point { x: int }\n",
-            "fn indent(s: string) -> string { s + \"  \" }\n",
-            "fn layout(comptime t: type) -> string {\n",
-            "  const n = type_name(t)\n",
-            "  indent(n)\n",
-            "}\n",
-            "fn main() -> () {\n",
-            "  println(layout(point))\n",
-            "}\n",
-        )),
-    );
-    assert!(
-        rendered.contains("DS2037") && rendered.contains("`indent`") && rendered.contains("`trap`"),
-        "the over-approximated trap row refuses honestly: {rendered}"
-    );
+    // types, so the total string concat carries `trap` — the honest
+    // over-approximation the trap-only admission now absorbs: the helper
+    // evaluates inside the fence and its answer embeds
+    let out = output_of(&source(concat!(
+        "struct point { x: int }\n",
+        "fn indent(s: string) -> string { s + \"  \" }\n",
+        "fn layout(comptime t: type) -> string {\n",
+        "  const n = type_name(t)\n",
+        "  indent(n)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(layout(point))\n",
+        "}\n",
+    )));
+    assert_eq!(out, "point  \n");
 }
 
 #[test]

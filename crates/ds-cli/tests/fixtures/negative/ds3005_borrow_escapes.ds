@@ -1,0 +1,10 @@
+// One borrowed-parameter escape [C2]: a `~Copyable` window's value
+// returns out of its call, which would hand the caller a second
+// ownership of one value — the escape rejects at the return.
+
+tag string
+trait Copyable { }
+struct handle: ~Copyable {
+  name: string
+}
+fn id(h: handle) -> handle { h }

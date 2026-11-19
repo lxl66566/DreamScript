@@ -12,7 +12,7 @@ use ds_parse::parse;
 use ds_vm::{
     FrameAnswer, LoadError, ModuleRegistry, Platform, Value, Vm, loader,
     native::{self, BUILTIN_MODULE},
-    platform::{Capability, OP_FILE_SIZE, STD_NAME},
+    platform::{Capability, OP_FILE_SIZE, OP_HTTPS_GET, STD_NAME},
 };
 
 /// The probe lowered to a module: parse -> check -> lower -> write ->
@@ -134,4 +134,67 @@ fn an_unprovided_capability_refuses_at_install() {
 #[test]
 fn the_default_platform_name_is_std() {
     assert_eq!(STD_NAME, "std");
+}
+
+/// The tls capability's own module: the package declares the https op's
+/// extern itself (no ambient spelling exists — the net face's
+/// `http_get` routes https URLs onto the tier), lowered through the
+/// same parse -> check -> lower -> round-trip pipeline as the probe.
+fn tls_module() -> ds_mod::Module {
+    let source = include_str!("fixtures/platform_seam_tls.ds");
+    let mut files = Files::new();
+    let id = files.add_source("platform_seam_tls.ds", source);
+    let asts = [parse(&files, id).expect("the fixture parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the fixture checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "platform_seam_tls",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the fixture lowers");
+    let bytes = write(lowered.module());
+    read(&bytes).expect("the module round-trips")
+}
+
+/// The tls capability's call-site validation (H5.5's 2026-11-17
+/// ruling): an https call site's FuncRef validates against the host's
+/// tls membership at install — a tls-omitting platform under the
+/// declaration's name refuses with the structured capability error, the
+/// existing refusal diagnostic.
+#[test]
+fn an_omitted_tls_capability_refuses_the_https_call_site_at_install() {
+    let mut registry = bare_registry();
+    registry.install_platform(Platform::new("std", &[Capability::Net]));
+    let error = loader::install(&mut registry, tls_module())
+        .map(|_| ())
+        .expect_err("the tls-omitting platform refuses the https call site");
+    assert!(
+        matches!(
+            &error,
+            LoadError::UnprovidedPlatformOp {
+                platform, capability, index, ..
+            } if platform == "std" && capability == "tls" && *index == OP_HTTPS_GET
+        ),
+        "the install error names the unprovided tls capability: {error:?}"
+    );
+}
+
+/// The default platform selects the tls capability: the same https call
+/// site installs clean (the run itself is the ds-vm TLS fixtures' domain).
+#[test]
+fn the_std_platform_serves_the_https_call_site() {
+    let mut registry = bare_registry();
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, tls_module()).expect("the std platform serves the https op");
 }

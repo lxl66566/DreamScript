@@ -9,8 +9,8 @@
 //! intervening RC word breaking the pair.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberState, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
-    ModuleVersion, NurseryId, Trap, Value, Vm,
+    ChildOutcome, Const, FiberState, FrameAnswer, FramePc, FunctionDef, JoinOutcome,
+    ModuleRegistry, ModuleVersion, NurseryId, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, F64, I64, Ref},
@@ -383,7 +383,7 @@ fn an_intervening_rc_word_breaks_the_pair_and_still_executes() {
     );
     // the trap is the second RCDEC at pc 5 — the branch between ran as its
     // own dispatch
-    assert_eq!(vm.backtrace()[0].pc, CodePc(5));
+    assert_eq!(vm.backtrace()[0].pc, FramePc::At(CodePc(5)));
 }
 
 /// A JMPIF_NOT adjacent to the compare but testing a different slot never

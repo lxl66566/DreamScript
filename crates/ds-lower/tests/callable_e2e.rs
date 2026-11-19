@@ -1239,3 +1239,29 @@ fn main() -> int {{
         b"",
     );
 }
+
+/// A closure capturing an interpolation temporary: the capture is a
+/// migration point, so the captured StrCat result keeps its counted
+/// spelling and the construction acquires its own count — previously
+/// the capture staging ran no placement bookkeeping, the arena serving
+/// survived to finalization, and ClosureNew trapped ArenaHandoff at
+/// runtime. The spawn seam shares the same staging, so its captures
+/// migrate the same way.
+#[test]
+fn a_closure_capturing_an_interpolation_temporary_answers_counted() {
+    acceptance(
+        "capture_arena",
+        &format!(
+            "{PRELUDE}
+fn main() -> int {{
+  const k = \"VALUE-${{1 + 2}}-AAAAAAAAAAAAAAAAAAAA\"
+  const f = () => k
+  println(\"${{f()}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"VALUE-3-AAAAAAAAAAAAAAAAAAAA\n" as &[u8],
+    );
+}

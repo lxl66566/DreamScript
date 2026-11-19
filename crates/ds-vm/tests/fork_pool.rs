@@ -17,7 +17,7 @@
 //! - the hardened boundary: a mid-flight mint then trap and a cancel carrying its own minted `Ref`
 //!   word (the death walk's held-back payload and its claim routing to the joiner), deep
 //!   in-language recursion and a 2048-level nested combinator chain inside a pooled child (the
-//!   worker's own interlock stack), a `fiber_yield` bounce and the own-nursery join refusal
+//!   worker's own interlock stack), a suspension-request park and the own-nursery join refusal
 //!   (identical between drives), counted `Ref` elements in the entry span (the gate's fallback),
 //!   and a nested `par_reduce` on a worker.
 //! - the out-of-contract divergences pinned honestly per drive: a `fiber_resume` of a host-parked
@@ -37,9 +37,9 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_LIST_GET, BUILTIN_LIST_LEN,
-        BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
-        BUILTIN_NURSERY_OPEN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_STR_INT, PLATFORM_NONE,
+        BUILTIN_FIBER_RESUME, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
+        BUILTIN_LIST_PUSH, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN,
+        BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_STR_INT, PLATFORM_NONE,
     },
 };
 
@@ -801,33 +801,35 @@ fn deep_rec_def() -> FunctionDef {
     )
 }
 
-/// `(x: int) -> int`: parks at `fiber_yield`; the drive's bare-tag
-/// bounce overlays the call's answer, and the tag test reports whether
-/// the none tag arrived — 1 when it did, 0 otherwise.
-fn yielder_def() -> FunctionDef {
+/// `(x: int) -> int`: parks at its one-shot backward branch (the
+/// join/teardown driver's resume is preemption-shaped: it bounces the
+/// fiber back in identically on both drives) and answers 1 after the
+/// bounce.
+fn parking_def() -> FunctionDef {
+    // pool k0=one, k1=two, k2=zero
     def(
-        "yielder",
-        &[I64, I64, Bool, Raw],
+        "parking",
+        &[I64, I64, Bool, I64],
         1,
-        1,
-        vec![builtin(BUILTIN_FIBER_YIELD), Const::I64(0), Const::I64(1)],
+        0,
+        vec![Const::I64(1), Const::I64(2), Const::I64(0)],
         &[
             Uop::Funcf { frame_slots: 4 },
-            Uop::Mov { dst: 3, src: 0 },
-            Uop::Call {
-                callee: k(0),
-                nargs: 1,
+            Uop::Kimm { dst: 1, kidx: k(2) }, // zero the counter
+            Uop::Kimm { dst: 3, kidx: k(0) }, // one
+            Uop::AddI64 {
+                dst: 1,
+                lhs: 1,
+                rhs: 3,
             },
-            Uop::TagTest {
+            Uop::Kimm { dst: 3, kidx: k(1) }, // two
+            Uop::LtI64 {
                 dst: 2,
-                src: 3,
-                tag: PLATFORM_NONE,
+                lhs: 1,
+                rhs: 3,
             },
-            Uop::Jmpif { cond: 2, target: 8 },
-            Uop::Kimm { dst: 0, kidx: k(1) },
-            Uop::Jmp { target: 9 },
-            Uop::Jmp { target: 9 },
-            Uop::Kimm { dst: 0, kidx: k(2) },
+            Uop::Jmpif { cond: 2, target: 3 }, // the one-shot park point
+            Uop::Kimm { dst: 0, kidx: k(0) },  // answer 1
             Uop::Ret { src: 0 },
         ],
     )
@@ -1306,7 +1308,7 @@ fn deep_level_def(name: &str, callable: Const) -> FunctionDef {
 /// 7 main_ref_capture, 8 main_single, 9 doubles, 10 fold, 11 wide_pairs,
 /// 12 wordy, 13 guard, 14 nested_fn, 15 biased, 16 string_capture,
 /// 17 mint_trap, 18 cancel_wordy, 19 main_mint_trap, 20 main_cancel_wordy,
-/// 21 deep_rec, 22 main_deep_rec, 23 yielder, 24 main_yield, 25 own_joiner,
+/// 21 deep_rec, 22 main_deep_rec, 23 parking, 24 main_park, 25 own_joiner,
 /// 26 main_own_join, 27 host_resumer, 28 main_host_resume, 29 parked_resumee,
 /// 30 word_elem, 31 main_strings, 32 nested_reduce_fn, 33 main_nested_reduce,
 /// 34 foreign_joiner, 35 main_foreign_join, 36 deep_base, 37.. the deep
@@ -1340,8 +1342,8 @@ fn fp_registry() -> ModuleRegistry {
         map_main_def("main_cancel_wordy", &[4, 5, 6], 18),
         deep_rec_def(),
         map_main_def("main_deep_rec", &[1024, 100], 21),
-        yielder_def(),
-        map_main_def("main_yield", &[3, 4, 5], 23),
+        parking_def(),
+        map_main_def("main_park", &[3, 4, 5], 23),
         own_joiner_def(),
         map_main_def("main_own_join", &[1, 2, 3], 25),
         host_resumer_def(),
@@ -1674,11 +1676,12 @@ fn a_nested_par_reduce_inside_a_pooled_child_lands() {
 }
 
 #[test]
-fn a_fiber_yield_inside_a_pooled_child_bounces_identically() {
-    // each child parks at its yield; the drive bounces the bare none
-    // tag back in on its re-entry, exactly the sequential drive's
-    // bounce — every element answers 1, so first 1, last 1, len 3
-    let (answer, _, pool) = differential("main_yield");
+fn a_suspension_inside_a_pooled_child_bounces_identically() {
+    // each child parks at its one-shot branch; the drive's re-entry is
+    // preemption-shaped and bounces the fiber back in exactly the
+    // sequential drive's way — every element answers 1, so first 1, last
+    // 1, len 3
+    let (answer, _, pool) = differential("main_park");
     assert_eq!(answer, Ok(FrameAnswer::one(Value::I64(1013))));
     assert!(pool.pooled_fork_drives() > 0);
     assert_children_dead(&pool, 3);

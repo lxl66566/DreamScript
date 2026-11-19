@@ -61,6 +61,12 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 /// word, the runtime convention the list natives' separator pins.
 /// `byte` shares the integer slot [F6]: the word carries the 0-255
 /// value, while the checker holds it outside the int conversion family.
+/// `u32` shares the integer slot the same way (2026-11-19): the word
+/// carries the 32-bit value the json face's bridge natives move, the
+/// checker keeping the width outside the int conversions — so a union
+/// over u32 claims a payload region and the number rides it.
+/// `bytes` — the immutable byte sequence — shares the string Ref too:
+/// one counted block behind one word, `string`'s shape over raw bytes.
 /// `type` is the builtin comptime type-value atom (G1, G2): one `Tag`
 /// word carrying the evaluator's reflection index — never constructed
 /// at runtime, so the word only ever appears inside comptime evaluation.
@@ -68,10 +74,12 @@ const PRIMITIVES: &[(&str, SlotType)] = &[
     ("type", SlotType::Tag),
     ("int", SlotType::I64),
     ("byte", SlotType::I64),
+    ("u32", SlotType::I64),
     ("float", SlotType::F64),
     ("bool", SlotType::Bool),
     ("string", SlotType::Ref),
     ("char", SlotType::Ref),
+    ("bytes", SlotType::Ref),
 ];
 
 fn primitive_slot(name: &str) -> Option<SlotType> {
@@ -208,7 +216,8 @@ impl Shape {
 /// The claim-band tags of the teardown establishment marker (see the
 /// placement pass): a deinit claim's dedicated band word holds SET while
 /// the claim lives and CLEAR once any death path or consuming move spent
-/// it. They sit at the bottom of the reservation so a stale user word can
+/// it. They sit inside the reserved range (below every module mint and
+/// above the net failure classes) so a stale user word can
 /// never spoof a set band in a recycled frame region; mirrored in the
 /// VM's claim directory (crates/ds-vm/src/claims.rs), which decodes them
 /// from the drop shape's own clear op.
@@ -217,12 +226,13 @@ pub(crate) const CLAIM_BAND_CLEAR: u8 = u8::MAX - 9;
 
 /// The first tag id the platform reserves at the top of the u8 space,
 /// counting down from the fallible-native success discriminant through
-/// the cancellation tag to the claim-band pair: module lowering mints
+/// the cancellation tag, the claim-band pair, the net failure classes,
+/// and the utf8 decode failure to this floor: module lowering mints
 /// ids upward from 0 and a mint that reached the reserved range would
 /// alias a user member with a platform span discriminant (TAG_TEST
 /// dispatch is byte equality). Pinned against the VM's deepest
 /// reservation by the native-table drift test.
-pub(crate) const FIRST_RESERVED_TAG: u8 = CLAIM_BAND_CLEAR;
+pub(crate) const FIRST_RESERVED_TAG: u8 = crate::native::UTF8_ERR;
 
 /// Shapes of the types of one package, plus the module-wide tag ids.
 pub(crate) struct Shapes<'a> {
@@ -243,6 +253,13 @@ pub(crate) struct Shapes<'a> {
     /// keyed by the list itself.
     member_cache: HashMap<Box<[TypeId]>, SpanWords>,
     tags: HashMap<TypeId, u8>,
+    /// The served splice's rows whose names resolve to no atom of this
+    /// package: the ambient's own bodies mint those rows in a fresh walk
+    /// (structural atoms a body check registers), while a compile whose
+    /// analysis never touches them holds no atom to key. They ride the
+    /// module's table verbatim and consume their ids, so the bodies
+    /// lowered here continue minting after them.
+    unkeyed_rows: Vec<(String, u8)>,
     next_tag: u8,
 }
 
@@ -259,6 +276,7 @@ impl<'a> Shapes<'a> {
             atom_cache: HashMap::new(),
             member_cache: HashMap::new(),
             tags: HashMap::new(),
+            unkeyed_rows: Vec::new(),
             next_tag: 0,
         }
     }
@@ -285,6 +303,47 @@ impl<'a> Shapes<'a> {
         Ok(tag)
     }
 
+    /// Seeds the tag table from the served splice's rows: the spliced
+    /// bodies carry the ambient's minted ids as code immediates, so the
+    /// merged module must own those ids before any body lowers here,
+    /// and the ids must be the ones the fresh lowering's ambient-first
+    /// walk assigns. The rows must be dense from zero, below the
+    /// reserved range, and name each atom at most once. A row's name need
+    /// not resolve to an atom of this package — the ambient's own
+    /// structural atoms mint only in the body walk the splice skips —
+    /// so an unresolved name rides the table verbatim instead of
+    /// refusing; the served bytes' identity pin and the equivalence
+    /// gates hold the row set against the fresh walk.
+    pub(crate) fn seed_served(&mut self, rows: &[ds_mod::MemberTag]) -> Result<(), LowerError> {
+        for (at, row) in rows.iter().enumerate() {
+            let drift = |what: &str| LowerError::ServedDrift {
+                detail: format!(
+                    "the served tag row {at} is `{}` (id {}): {what}",
+                    row.name, row.id
+                ),
+            };
+            if usize::from(row.id) != at {
+                return Err(drift("the ids are not dense from zero"));
+            }
+            if row.id >= FIRST_RESERVED_TAG {
+                return Err(drift("the id reaches the platform's reserved range"));
+            }
+            if let Some(atom) = self.analyzed.decls.universe.atom_by_name(&row.name) {
+                if self.tags.contains_key(&atom) {
+                    return Err(drift("the row names an atom twice"));
+                }
+                self.tags.insert(atom, row.id);
+            } else {
+                if self.unkeyed_rows.iter().any(|(name, _)| *name == row.name) {
+                    return Err(drift("the row names an atom twice"));
+                }
+                self.unkeyed_rows.push((row.name.clone(), row.id));
+            }
+            self.next_tag = row.id + 1;
+        }
+        Ok(())
+    }
+
     /// The tag table keyed by atom name, for the run entry path.
     pub(crate) fn tag_names(&self) -> HashMap<String, u8> {
         let mut out = HashMap::new();
@@ -293,7 +352,89 @@ impl<'a> Shapes<'a> {
                 out.insert(decl.name.clone(), *tag);
             }
         }
+        for (name, id) in &self.unkeyed_rows {
+            out.insert(name.clone(), *id);
+        }
         out
+    }
+
+    /// Seeds the tag table from the linked modules' rows (the shared tag
+    /// mapping): a union-typed word crossing a module boundary carries
+    /// the producing module's tag ids as immediates, so this compile's
+    /// own table must reserve each row's id for the atom the linked
+    /// facts mint under the same name before any body lowers here. A
+    /// row keys an atom only when that atom is this compile's own
+    /// linked-fact mint (the name index names the def the install
+    /// minted) — every other row drops: a name this compile resolves to
+    /// its own local atom cannot carry a crossing value (the linked
+    /// signature naming it refused at the walk), and a name resolving
+    /// to nothing here (the producer's private atoms) crosses the same
+    /// way never. Rows may repeat (two imports of one package); an
+    /// exact repeat is a no-op. A row whose id another name already
+    /// owns refuses: two linked packages disagreeing on one id is a
+    /// cross-wire no remap can fix (their code immediates are frozen in
+    /// their artifacts), the shared mapping round's own refusal.
+    pub(crate) fn seed_linked(&mut self, rows: &[(String, u8)]) -> Result<(), LowerError> {
+        for (name, id) in rows {
+            let refuse = |reason: String| LowerError::LinkedTagRow {
+                name: name.clone(),
+                id: *id,
+                reason,
+            };
+            if *id >= FIRST_RESERVED_TAG {
+                return Err(refuse(
+                    "the id reaches the platform's reserved range".to_owned(),
+                ));
+            }
+            // the linked-fact mint this name answers, when it is one
+            let Some(atom) = self
+                .analyzed
+                .decls
+                .foreign_type(name)
+                .and_then(|def| self.analyzed.decls.atoms.get(&def).copied())
+                .filter(|&atom| self.analyzed.decls.universe.atom_by_name(name) == Some(atom))
+            else {
+                continue;
+            };
+            match self.tags.get(&atom) {
+                Some(&held) if held == *id => {},
+                Some(&held) => {
+                    return Err(refuse(format!(
+                        "the linked mint already holds id {held} — a linked module re-keyed its \
+                         own row"
+                    )));
+                },
+                None => {
+                    if let Some(held) = self.id_owner(*id) {
+                        return Err(refuse(format!(
+                            "`{held}` already owns the id — two linked modules disagree on the id \
+                             space, and their code immediates are frozen in their artifacts"
+                        )));
+                    }
+                    self.tags.insert(atom, *id);
+                    self.next_tag = self.next_tag.max(*id + 1);
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// The name owning one tag id already: a keyed atom's declaration
+    /// name or an unkeyed row's name.
+    fn id_owner(&self, id: u8) -> Option<String> {
+        for (&atom, &held) in &self.tags {
+            if held == id
+                && let Ok(decl) = self.analyzed.decls.universe.atom_decl(atom)
+            {
+                return Some(decl.name.clone());
+            }
+        }
+        for (name, held) in &self.unkeyed_rows {
+            if *held == id {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 
     /// A union member that declares a deinit refuses (C5): the union's
@@ -720,14 +861,34 @@ impl<'a> Shapes<'a> {
         (universe.atom_decl(*ctor).ok()?.name == "list").then_some(*element)
     }
 
+    /// The value type of one whole-map application [F7]: the map value
+    /// channel's staging reads it (a bare member value re-spans into the
+    /// value type's whole span before the store). `None` for any other
+    /// type — a union of maps, a non-map application, a non-application.
+    pub(crate) fn map_value(&self, ty: Ty) -> Option<Ty> {
+        let universe = &self.analyzed.decls.universe;
+        let [only] = universe.members(ty) else {
+            return None
+        };
+        let decl = universe.atom_decl(*only).ok()?;
+        let ds_check::AtomKind::Apply(ctor, args) = &decl.kind else {
+            return None
+        };
+        if !self.heap_ref(*ctor) {
+            return None;
+        }
+        let [_, value] = &**args else { return None };
+        (universe.atom_decl(*ctor).ok()?.name == "map").then_some(*value)
+    }
+
     /// The builtin instance of a generic call's receiver type [H3]: the
     /// statically-resolved instance reference a CALLG site stages as
     /// its evidence words. The covered vocabulary is the builtin
-    /// instance set — `string`, the `list`/`map` container constructors,
-    /// the `int`/`float` scalars, and the record instance a struct value
-    /// names (the element-taking closes' wider head) — a single-atom
-    /// type check, so unions and unresolved variables answer None and
-    /// the call site reports the uncovered receiver.
+    /// instance set — `string`, `bytes`, the `list`/`map` container
+    /// constructors, the `int`/`float` scalars, and the record instance
+    /// a struct value names (the element-taking closes' wider head) — a
+    /// single-atom type check, so unions and unresolved variables
+    /// answer None and the call site reports the uncovered receiver.
     pub(crate) fn builtin_instance(&self, ty: Ty) -> Option<BuiltinInstance> {
         let universe = &self.analyzed.decls.universe;
         let [only] = universe.members(ty) else {
@@ -746,6 +907,7 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Struct(_) => Some(BuiltinInstance::Record),
             _ => match decl.name.as_str() {
                 "string" => Some(BuiltinInstance::Str),
+                "bytes" => Some(BuiltinInstance::Bytes),
                 "int" => Some(BuiltinInstance::Int),
                 "float" => Some(BuiltinInstance::Float),
                 _ => None,
@@ -760,6 +922,37 @@ impl<'a> Shapes<'a> {
             .universe
             .atom_decl(ctor)
             .is_ok_and(|decl| HEAP_REFS.contains(&decl.name.as_str()))
+    }
+
+    /// The builtin instance one declared atom names — the atom-keyed twin
+    /// of [`Shapes::builtin_instance`] (which keys on solved types): the
+    /// `bytes` primitive, or the `list`/`map` heap application. The
+    /// by-type equality plan keys on it per declared field atom.
+    pub(crate) fn atom_builtin_instance(&self, atom: TypeId) -> Option<BuiltinInstance> {
+        let universe = &self.analyzed.decls.universe;
+        let decl = universe.atom_decl(atom).ok()?;
+        match &decl.kind {
+            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
+                match universe.atom_decl(*ctor).ok()?.name.as_str() {
+                    "list" => Some(BuiltinInstance::List),
+                    "map" => Some(BuiltinInstance::Map),
+                    _ => None,
+                }
+            },
+            _ => match decl.name.as_str() {
+                "bytes" => Some(BuiltinInstance::Bytes),
+                _ => None,
+            },
+        }
+    }
+
+    /// The argument types of one atom's generic application, if it is
+    /// one: the list's element type, the map's key and value types.
+    pub(crate) fn apply_args(&self, atom: TypeId) -> Option<&[Ty]> {
+        match &self.analyzed.decls.universe.atom_decl(atom).ok()?.kind {
+            ds_check::AtomKind::Apply(_, args) => Some(args),
+            _ => None,
+        }
     }
 
     /// The member entry a single-atom source writes into a union: the
@@ -934,7 +1127,6 @@ fn word_of(index: usize) -> Result<u8, LowerError> {
     u8::try_from(index).map_err(|_| unsupported("a value span", "more than 255 payload words"))
 }
 
-/// The word types of one shape's span.
 /// The member atoms a written union of atoms names, read-only: an atom
 /// itself, or a union of such sides, sorted and deduplicated — the
 /// interned solved set's own order, so a field's layout is the one its
@@ -955,7 +1147,8 @@ pub(crate) fn expr_members(expr: &TypeExpr) -> Option<Vec<TypeId>> {
     }
 }
 
-fn shape_words(shape: &Shape) -> Vec<SlotType> {
+/// The word types of one shape's span.
+pub(crate) fn shape_words(shape: &Shape) -> Vec<SlotType> {
     match shape {
         Shape::Word(slot) => vec![*slot],
         Shape::Struct(s) | Shape::Tuple(s) => s
@@ -1347,5 +1540,170 @@ mod tests {
                 "live and dead words partition the region exactly"
             );
         }
+    }
+
+    /// The linked tag rows seed this compile's table (the shared tag
+    /// mapping): a row naming a linked-fact mint keys the atom at the
+    /// row's id, an exact repeat is a no-op, fresh mints continue past
+    /// the keyed ids, every other row drops (a local atom's name never
+    /// crosses — the linked signature naming it refused), and two
+    /// linked names claiming one id refuse with the row named.
+    #[test]
+    fn linked_tag_rows_seed_key_mints_and_refuse_crossed_ids() {
+        let mut files = Files::new();
+        let source = concat!(
+            "pub tag int
+",
+            "tag local
+",
+            "import @lib (tone, quiet, loud)
+",
+            "fn probe(t: tone) -> int {
+",
+            "  match t {
+",
+            "    quiet => 1,
+",
+            "    loud => 2,
+",
+            "  }
+",
+            "}
+",
+            "fn main() -> int {
+",
+            "7
+",
+            "}
+",
+        );
+        let id = files.add_source("seed.ds", source);
+        let ast = parse(&files, id).expect("the probe parses");
+        let at = ds_diag::Span::new(id, 1, 1);
+        let entry = |name: &str, fact: Option<ds_check::TypeFact>| ds_check::ForeignEntry {
+            name: name.to_owned(),
+            vis: ds_check::Vis::Pub,
+            kind: ds_check::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: fact.map(std::sync::Arc::new),
+            link: 0,
+            func: None,
+            std: false,
+        };
+        let unit = || ds_check::import::CasePayload::Unit;
+        let surface = ds_check::MemberSurface {
+            tags: Vec::new(),
+            entries: vec![
+                entry(
+                    "tone",
+                    Some(ds_check::TypeFact::Enum(vec![
+                        ds_check::import::TypeCase {
+                            name: "quiet".to_owned(),
+                            payload: unit(),
+                        },
+                        ds_check::import::TypeCase {
+                            name: "loud".to_owned(),
+                            payload: unit(),
+                        },
+                    ])),
+                ),
+                entry(
+                    "quiet",
+                    Some(ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                        enum_name: "tone".to_owned(),
+                        payload: unit(),
+                    })),
+                ),
+                entry(
+                    "loud",
+                    Some(ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                        enum_name: "tone".to_owned(),
+                        payload: unit(),
+                    })),
+                ),
+            ],
+        };
+        let mut imports = ds_check::ImportGraph::new();
+        for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+            if let ds_parse::ItemKind::Import(import) = &item.kind {
+                imports.add(
+                    import.span,
+                    ds_check::ImportSurface::Linked(surface.clone()),
+                );
+            }
+        }
+        let (package, resolutions, _) = ds_check::resolve_package_linked(&[&ast], &imports);
+        let analyzed = ds_check::type_of::analyze_resolved(
+            &files,
+            vec![std::sync::Arc::new(ast)].into(),
+            package.into(),
+            resolutions.into(),
+            Vec::new(),
+        );
+        assert!(
+            analyzed.checked.diags.is_empty(),
+            "the probe checks clean: {:?}",
+            analyzed.checked.diags
+        );
+        let atom_of = |name: &str| {
+            analyzed
+                .decls
+                .foreign_type(name)
+                .and_then(|def| analyzed.decls.atoms.get(&def).copied())
+                .unwrap_or_else(|| panic!("{name} minted"))
+        };
+        let local = analyzed
+            .decls
+            .universe
+            .atom_by_name("local")
+            .expect("the local tag declares");
+
+        // the keyed seed: quiet at 5, loud at 6, an exact repeat skipped,
+        // the local atom's row dropped, a name resolving to nothing dropped
+        let mut shapes = Shapes::new(&analyzed, std::collections::HashSet::new());
+        shapes
+            .seed_linked(&[
+                ("quiet".to_owned(), 5),
+                ("loud".to_owned(), 6),
+                ("quiet".to_owned(), 5),
+                ("local".to_owned(), 3),
+                ("private".to_owned(), 4),
+            ])
+            .expect("the rows seed");
+        assert_eq!(shapes.tag_id(atom_of("quiet")), Ok(5));
+        assert_eq!(shapes.tag_id(atom_of("loud")), Ok(6));
+        // the dropped rows' ids stay free and fresh mints continue past
+        // the keyed ids
+        assert_eq!(shapes.tag_id(local), Ok(7));
+
+        // a second linked name claiming a keyed id refuses, naming the
+        // row and the holder
+        let mut crossed = Shapes::new(&analyzed, std::collections::HashSet::new());
+        crossed
+            .seed_linked(&[("quiet".to_owned(), 5)])
+            .expect("the first row seeds");
+        let err = crossed
+            .seed_linked(&[("loud".to_owned(), 5)])
+            .expect_err("two linked mints cannot share one id");
+        assert!(
+            err.to_string().contains("loud") && err.to_string().contains("quiet"),
+            "the refusal names the row and the holder: {err}"
+        );
+
+        // a row reaching the reserved range refuses
+        let mut reserved = Shapes::new(&analyzed, std::collections::HashSet::new());
+        let err = reserved
+            .seed_linked(&[("quiet".to_owned(), FIRST_RESERVED_TAG)])
+            .expect_err("the reserved range is closed");
+        assert!(
+            err.to_string().contains("reserved"),
+            "the refusal names the range: {err}"
+        );
     }
 }

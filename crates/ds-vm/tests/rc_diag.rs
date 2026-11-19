@@ -544,9 +544,9 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
 /// The generic container closes' retain contract under the diag
 /// tripwires: `cons` adopts its prepend and copies each element with
 /// one acquired count (construction copies), the checked first-element
-/// body (`head` and `first`, two spellings of the one body) hands the
-/// payload out with its own count, and every frame-owned word drops at
-/// its exit — the heap drains on a scalar-returning program.
+/// body (`first`) hands the payload out with its own count, and every
+/// frame-owned word drops at its exit — the heap drains on a
+/// scalar-returning program.
 #[test]
 fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
     let mut reg = ModuleRegistry::new();
@@ -585,8 +585,9 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
             }
             .into(),
             Uop::Mov { dst: 2, src: 4 }.into(),
-            // the checked first element: the payload rides out with its
-            // own count, and the frame drops the handed word
+            // the checked first element, twice over the same list: the
+            // payload rides out with its own count, and the frame drops
+            // the handed word each time
             Uop::Mov { dst: 4, src: 2 }.into(),
             Uop::Kimm { dst: 5, kidx: k(1) }.into(),
             Uop::Callg {
@@ -595,12 +596,10 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
             }
             .into(),
             RcOp::Dec { src: 5 }.into(),
-            // `first` over the same list: the other spelling of the one
-            // body, the same handed-out count to drop
             Uop::Mov { dst: 4, src: 2 }.into(),
             Uop::Kimm { dst: 5, kidx: k(1) }.into(),
             Uop::Callg {
-                callee: k(5),
+                callee: k(4),
                 nargs: 1,
             }
             .into(),
@@ -608,7 +607,7 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
             // the scalar exit, then every frame-owned word drops: the
             // cons result's death frees its element claim, then the
             // empty list and the birth claim
-            Uop::Kimm { dst: 3, kidx: k(6) }.into(),
+            Uop::Kimm { dst: 3, kidx: k(5) }.into(),
             RcOp::Dec { src: 2 }.into(),
             RcOp::Dec { src: 1 }.into(),
             RcOp::Dec { src: 0 }.into(),
@@ -621,7 +620,6 @@ fn cons_copies_and_the_checked_first_element_hands_out_its_count() {
         Const::I64(BuiltinInstance::List as i64),
         builtin(ds_vm::native::BUILTIN_LIST_NEW),
         builtin(ds_vm::native::BUILTIN_CONS),
-        builtin(ds_vm::native::BUILTIN_HEAD),
         builtin(ds_vm::native::BUILTIN_FIRST),
         Const::I64(0),
     ];

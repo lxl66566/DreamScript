@@ -234,16 +234,16 @@ impl Ctx {
         };
         let mut acc = first;
         while let Some(c) = iter.next() {
-            if c.as_rule() == Rule::kw_is {
-                if let Some(t) = iter.next() {
-                    let ty = Box::new(self.type_expr(t));
-                    let s = join(acc.span(), ty.span());
-                    acc = Expr::Is {
-                        span: s,
-                        expr: Box::new(acc),
-                        ty,
-                    };
-                }
+            if c.as_rule() == Rule::kw_is
+                && let Some(t) = iter.next()
+            {
+                let ty = Box::new(self.type_expr(t));
+                let s = join(acc.span(), ty.span());
+                acc = Expr::Is {
+                    span: s,
+                    expr: Box::new(acc),
+                    ty,
+                };
             }
         }
         acc

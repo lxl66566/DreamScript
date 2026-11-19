@@ -68,8 +68,8 @@ fn member_scan() -> bool {
 // neighbors; the empty list answers the empty string
 fn csv_line() -> string {
   const words = ["alpha", "beta", "gamma"]
-  const csv = words.join(",")
-  const blank = list[string]().join(",")
+  const csv = words.join(',')
+  const blank = list[string]().join(',')
   csv + "|" + blank
 }
 

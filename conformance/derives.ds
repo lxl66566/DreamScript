@@ -1,5 +1,5 @@
-// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15, the part-less shapes 2026-11-15
-// purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, and `#[derive(clone)]` on structs, enums, and tags expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape, the part-less struct included over its one reserved unit word), every call spelling reaches the one body, and each ruled refusal names its class
+// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15, the part-less shapes 2026-11-15, the from_json family 2026-11-18, the to_json family 2026-11-18, the json width fields 2026-11-19
+// purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, `#[derive(clone)]`, `#[derive(from_json)]`, and `#[derive(to_json)]` on structs, enums, and tags (the json families: structs and enums alone) expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape, the part-less struct included over its one reserved unit word), every call spelling reaches the one body, and each ruled refusal names its class
 // items:
 // point: stage: run
 // mark: stage: run
@@ -9,18 +9,39 @@
 // tone: stage: run
 // render: stage: run
 // main: stage: run
-// eq-cell: stage: reject `==` is universal structural equality and never derived [B9]
+// eq-cell: stage: reject `==` is universal structural equality and is never derived [B9]
 // mystery-cell: stage: reject a name outside the ruled set names the ruled set [G1]
 // hash-cell: stage: run
 // clone-cell: stage: run
 // blank-cell: stage: run
-// to-json-cell: stage: reject a ruled family not yet implemented names itself and the ruled set [G1]
 // cb-cell: stage: reject a function-typed part refuses structural derivation, naming the part [G1, B9]
 // res: stage: typecheck
 // holder: stage: reject a ~Copyable-headed part refuses structural derivation, naming the part [G1, B9]
 // not-data: stage: reject a derive applies only to a struct, enum, or tag declaration [G1]
 // gen-cell: stage: reject a generic declaration refuses: the runtime seam lowers one member body per impl [G1]
 // named-cell: stage: run
+// fj-cell: stage: run
+// fj-inner: stage: run
+// fj-holder: stage: run
+// fj-soft: stage: run
+// fj-turn: stage: run
+// fj-tag: stage: reject a tag declares no members, so no json shape names it [G1]
+// fj-pair: stage: reject a tuple field spells no json read, naming the field [G1]
+// fj-plain: stage: typecheck
+// fj-plain-holder: stage: reject a nested field whose type carries no from_json member fails at the synthesized call with the standard missing-member diagnostic
+// fj-scalars: stage: run
+// tj-cell: stage: run
+// tj-inner: stage: run
+// tj-holder: stage: run
+// tj-soft: stage: run
+// tj-turn: stage: run
+// tj-tag: stage: reject a tag declares no members, so no json shape answers it [G1]
+// tj-pair: stage: reject a tuple field spells no json write, naming the field [G1]
+// tj-plain: stage: typecheck
+// tj-plain-holder: stage: reject a nested field whose type carries no to_json member fails at the synthesized call with the standard missing-member diagnostic
+// tj-scalars: stage: run
+// tj-opt-elem: stage: reject an optional nested inside a write (a list element) spells no M3 lowering, naming the field [G1]
+// tj-opt-payload: stage: reject an optional payload field spells no M3 lowering, naming the field [G1]
 
 #[derive(show)]
 struct point { x: int, y: int }
@@ -80,6 +101,17 @@ fn main() -> int {
   println(str(bc.hash()))
   const bc2 = bc.clone()
   println(str(bc2.hash()))
+  const fc = fj_cell.from_json(json_null)
+  const fh = fj_holder.from_json(json_null)
+  const fs = fj_soft.from_json(json_null)
+  const ft = fj_turn.from_json(json_null)
+  const tjc = tj_cell { i: 12, f: 2.5, b: true, s: "arch" }
+  const tjv = tj_cell.to_json(tjc)
+  const tjh0 = tj_holder { port: none, xs: list[int](), n: tj_inner { a: 7 } }
+  const tjh = tj_holder.to_json(tjh0)
+  const tjs0 = tj_soft { rows: none }
+  const tjs = tj_soft.to_json(tjs0)
+  const tjt = tj_turn.to_json(tj_off)
   0
 }
 
@@ -98,9 +130,6 @@ struct clone_cell { v: int }
 #[derive(show, ord, hash, clone)]
 struct blank_cell {}
 
-#[derive(to_json)]
-struct to_json_cell { v: int }
-
 #[derive(show)]
 struct cb_cell { cb: fn(int) -> int }
 
@@ -117,3 +146,67 @@ struct gen_cell[t] { v: t }
 
 #[derive(ord)]
 struct named_cell { s: string, c: char, b: byte }
+
+#[derive(from_json)]
+struct fj_cell { i: int, f: float, b: bool, s: string }
+
+#[derive(from_json)]
+struct fj_inner { a: int }
+
+#[derive(from_json)]
+struct fj_holder { port: int?, xs: list[int], n: fj_inner }
+
+#[derive(from_json)]
+struct fj_soft { rows: list[int]? }
+
+#[derive(from_json)]
+enum fj_turn { off, on, tilt { deg: int } }
+
+#[derive(from_json)]
+tag fj_tag
+
+#[derive(from_json)]
+struct fj_pair { both: (int, int) }
+
+struct fj_plain { v: int }
+
+#[derive(from_json)]
+struct fj_plain_holder { p: fj_plain }
+
+#[derive(from_json)]
+struct fj_scalars { b: byte, c: char, u: u32, z: bytes }
+
+#[derive(to_json)]
+struct tj_cell { i: int, f: float, b: bool, s: string }
+
+#[derive(to_json)]
+struct tj_inner { a: int }
+
+#[derive(to_json)]
+struct tj_holder { port: int?, xs: list[int], n: tj_inner }
+
+#[derive(to_json)]
+struct tj_soft { rows: list[int]? }
+
+#[derive(to_json)]
+enum tj_turn { tj_off, tj_on, tj_tilt { deg: int } }
+
+#[derive(to_json)]
+tag tj_tag
+
+#[derive(to_json)]
+struct tj_pair { both: (int, int) }
+
+struct tj_plain { v: int }
+
+#[derive(to_json)]
+struct tj_plain_holder { p: tj_plain }
+
+#[derive(to_json)]
+struct tj_scalars { b: byte, c: char, u: u32, z: bytes }
+
+#[derive(to_json)]
+struct tj_opt_elem { xs: list[int?] }
+
+#[derive(to_json)]
+enum tj_opt_payload { tj_quiet, tj_hold { p: int? } }

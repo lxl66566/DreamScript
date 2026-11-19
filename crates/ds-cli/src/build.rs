@@ -35,8 +35,22 @@ pub struct BuildArgs {
 pub fn build(args: &BuildArgs) -> Result<()> {
     let prefix = crate::dsi_cache::PrefixCache::discover(true, args.no_ambient);
     let compiled = match package::open(&args.file, args.no_ambient)? {
-        Some(graph) => package::compile_root(&args.file, "main", &graph)?,
-        None => source::compile(&args.file, "main", args.no_ambient, Some(&prefix))?,
+        Some(graph) => {
+            // the same dep identities key the package root's prefix tier
+            let linked = crate::dsi_cache::PrefixCache::discover_linked(
+                true,
+                args.no_ambient,
+                graph.identities(),
+            );
+            package::compile_root(&args.file, "main", &graph, Some(&linked))?
+        },
+        None => source::compile(
+            &args.file,
+            "main",
+            args.no_ambient,
+            Some(&prefix),
+            source::BundleAfter::Keep,
+        )?,
     };
     let module = compiled.lowered.module();
     let bytes = ds_mod::write(module);

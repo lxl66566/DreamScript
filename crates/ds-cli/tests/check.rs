@@ -42,22 +42,24 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 /// per file, all confined to items the header stages away from
 /// `typecheck`:
 ///
-/// * types_hybrid: get_port's `pv is int` tension over the json atoms (two ordering errors) and
-///   `parse_json`'s success-only signature (json stays file-owned, so its `?` reports the
-///   propagation pair) — the io failure and the config type ride the ambient, the fallback's
+/// * types_hybrid: zero noise — the json family and its parse_err ride the ambient's own enum and
+///   reader (`get_port` narrows the json_object/json_int cases, `load` carries parse_err in its
+///   union) — the io failure and the config type ride the ambient, the fallback's
 ///   `log`/`default_config`/`get` externs are the file's own.
-/// * generics: the reject item's intended overlap plus the derive engine behind `json for point`
-///   (its to_json refusal class surfaces through the expansion-aware resolve, and the uncovered
-///   instance follows); the comptime `fields`/`type_name` items now check clean under the ambient's
-///   reflection vocabulary.
+/// * generics: the reject item's intended overlap plus the receiverless `to_json` member's call
+///   spelling (`p.to_json()` falls to the free json writer's UFCS reading, its `json` parameter not
+///   containing `point` — the member answers `point.to_json(p)`); the derive itself now synthesizes
+///   clean, and the comptime `fields`/`type_name` items check clean under the ambient's reflection
+///   vocabulary.
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
 ///   wants narrowing); the config/rows readers resolve through the file's own externs.
-/// * linearity_modes_rc: run items only — `open`/`read_exact` absence (their signatures cannot name
-///   the file's own `file` struct; the dot-callee resolution failure reports alone since the
-///   root-cause-first fix) and `u32`'s distinct width [B7] (the `.err` fallback meets
-///   `lens.len()`'s int — the retired `or` hid that width meeting); the epoch suppresses the
-///   `empty`-typed follow-ons those roots used to print.
+/// * linearity_modes_rc: run items only — the ambient's `open_file` is named apart from the file's
+///   own `open` (the unknown-name pair), its `read_exact` answering the dot call over the file's
+///   `file`-typed receiver with the `not contained` item (the file's face predates the ambient's;
+///   `to_u32_le` still refuses at lowering as before) and `u32`'s distinct width [B7] (the `.err`
+///   fallback meets `lens.len()`'s int — the retired `or` hid that width meeting); the epoch
+///   suppresses the `empty`-typed follow-ons those roots used to print.
 /// * effects_nursery: zero noise — `urls` and the net failure taxonomy are ambient, and the
 ///   fetch/retry matches use member-test arms plus the leftover page binder.
 /// * range_for: zero noise — the for-over-range and `in` membership items are self-contained under
@@ -74,10 +76,10 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   precedence, and trap-edge items are self-contained under the ambient.
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
-    assert_corpus_clean("types_hybrid.ds", 4);
-    assert_corpus_clean("generics_coherent_traits.ds", 3);
+    assert_corpus_clean("types_hybrid.ds", 0);
+    assert_corpus_clean("generics_coherent_traits.ds", 2);
     assert_corpus_clean("syntax_ts_heart.ds", 5);
-    assert_corpus_clean("linearity_modes_rc.ds", 8);
+    assert_corpus_clean("linearity_modes_rc.ds", 9);
     assert_corpus_clean("effects_nursery.ds", 0);
     assert_corpus_clean("range_for.ds", 0);
     assert_corpus_clean("pattern_dispatch.ds", 0);
@@ -134,6 +136,38 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // the one error is the file's own reject item (the float `&`
     // operand the integer table refuses)
     assert_corpus_clean("shift_bitwise.ds", 1);
+    // zero noise — the annotated member's default() spellings and the
+    // defaulting struct field are self-contained under the ambient (the
+    // union-default member annotation round)
+    assert_corpus_clean("derive_default_union.ds", 0);
+    // zero noise — the pure-row helper admits at the comptime fence, and
+    // `ds check` never runs the fence (the comptime pure-fn admission round)
+    assert_corpus_clean("comptime_admission.ds", 0);
+    // the three errors are the file's own reject items (the `pub import`
+    // re-export, the `pub impl`, the missing `@std` selection); the tier
+    // spellings and the clean `@std` selection check clean (the G4
+    // visibility round)
+    assert_corpus_clean("visibility_surface.ds", 3);
+}
+
+/// The two-file visibility package: `pub(pkg)` and `pub` names answer a
+/// cross-file use site while the private name refuses per use site — the
+/// pair checked together (the user file alone resolves nothing), the three
+/// defining-file rejects beside the cross-file DS4017.
+#[test]
+fn the_visibility_pair_enforces_the_file_grain() {
+    let lib = ds_corpus_path::file("visibility_surface.ds");
+    let user = ds_corpus_path::file("visibility_user.ds");
+    let out = ds_check(&[
+        "check",
+        lib.to_str().expect("corpus path is UTF-8"),
+        user.to_str().expect("corpus path is UTF-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stderr.matches("error[").count(), 4, "{stderr}");
+    assert!(stderr.contains("error[DS4017]: `hidden` is private to its defining file"));
 }
 
 /// The intended rejection prints as noise under the ambient and pins its
@@ -275,12 +309,15 @@ fn a_derived_members_call_checks_clean() {
     assert_eq!(out.stdout, [] as [u8; 0]);
 }
 
-/// A file past the DefId block budget reports the packing limit instead of
-/// silently checking the next file's block 0 (block 256 would alias it).
+/// A file past the DefId block budget reports a spanned diagnostic per
+/// overflowing block instead of aborting: blocks 0..=255 still check (an
+/// early block's real error prints beside the packing diagnostics, never
+/// swallowed by a bare engine escape), and block 256 would silently alias
+/// the next file's block 0, so the overflow stays fatal.
 #[test]
-fn a_file_past_the_block_budget_reports_the_packing_limit() {
-    let mut source = String::from("const b0 = 0\n");
-    for i in 1..=256_u32 {
+fn a_file_past_the_block_budget_reports_each_block_and_keeps_checking() {
+    let mut source = String::from("const dup = 0\n##\nconst dup = 1\n");
+    for i in 0..=256_u32 {
         source.push_str("##\n");
         // writing into a String cannot fail
         let _ = writeln!(source, "const b{i} = {i}");
@@ -298,7 +335,51 @@ fn a_file_past_the_block_budget_reports_the_packing_limit() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
+        stderr.contains("`dup` is already defined"),
+        "the early blocks' own diagnostics still print: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("error[DS4023]").count(),
+        3,
+        "blocks 256..=258 each report their own span: {stderr}"
+    );
+    assert!(
         stderr.contains("block 256 of file 0 does not fit the DefId packing"),
         "stderr: {stderr}"
     );
+}
+
+/// Any number of same-trait generic impls over distinct constructors
+/// checks in bounded time: the coherence probe is a pure query (it once
+/// grounded every candidate atom into the shared universe, and its own
+/// products became later probes' candidates — five impls never returned).
+#[test]
+fn many_generic_impls_of_one_trait_check_clean() {
+    for count in [5_u32, 50] {
+        let mut source = String::from("pub trait sized { fn size(self) -> int }\n");
+        for i in 0..count {
+            // writing into a String cannot fail
+            let _ = writeln!(source, "pub struct c{i}[t] {{ a: t }}");
+        }
+        for i in 0..count {
+            let _ = writeln!(
+                source,
+                "impl[t] sized for c{i}[t] {{ fn size(self) -> int {{ 1 }} }}"
+            );
+        }
+        source.push_str("fn main() -> int { 0 }\n");
+        let dir = env::temp_dir().join(format!(
+            "ds-cli-check-coherence-{count}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("the temp dir creates");
+        let path = dir.join("many_impls.ds");
+        fs::write(&path, source).expect("the temp source writes");
+        let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(out.status.code(), Some(0), "count {count}");
+        assert_eq!(out.stdout, [] as [u8; 0], "count {count}");
+        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+        assert_eq!(stderr, "", "count {count}");
+    }
 }

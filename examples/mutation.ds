@@ -18,7 +18,7 @@ fn main() -> () {
   name = shout(name)
   println("name: $name")
 
-  const first = "alpha beta".char_at(0)
+  const first = "alpha beta".char_at(0).unwrap_or('?')
   println("first: ${first}")
 
   const port = "8080".parse_int().err((_: parse_err) => 0)

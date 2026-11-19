@@ -2,8 +2,9 @@
 //! a user package's own `.dsi`-shaped prefix persisted into `$DS_CACHE`
 //! (the one cache-root authority the script-mode dsmod cache and the
 //! package store share), keyed like that cache — the module name, the
-//! source hash, the ambient identity, and the build identity, each
-//! component framed — so two builds whose front-end output can differ
+//! source hash, the ambient identity, the resolved graph's dep
+//! identities, and the build identity, each component framed — so two
+//! builds whose front-end output can differ
 //! never share an artifact. The artifact carries the whole program's
 //! front-end half (the ambient member's and the user member's resolve,
 //! declaration, and effect tables), so a hit serves both and the cold
@@ -13,7 +14,7 @@
 //! that cannot be read or validated, and a write that cannot land are
 //! all silent falls back.
 
-use std::{io::Write, path::PathBuf};
+use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
 use ds_check::{Analyzed, DeclaredRows, Effects, WorldCaps};
 use ds_diag::FileId;
@@ -26,37 +27,70 @@ const DEBUG_ENV: &str = "DS_PREFIX_CACHE_DEBUG";
 
 /// The key fold's domain tag, bumped when the folded component set
 /// changes: old artifacts must never answer a new fold.
-const KEY_DOMAIN: &[u8] = b"ds-prefix-dsi-v1";
+const KEY_DOMAIN: &[u8] = b"ds-prefix-dsi-v2";
 
 /// One compile's prefix-cache handle: the resolved root (absent when
-/// the compile is uncached) and the ambient identity the key folds.
+/// the compile is uncached), the ambient identity the key folds, and
+/// the resolved graph's dep identities (the empty list for a plain
+/// script).
 pub(crate) struct PrefixCache {
     root: Option<PathBuf>,
     ambient: Option<Hash128>,
+    deps: BTreeMap<String, Hash128>,
     debug: bool,
 }
 
 impl PrefixCache {
-    /// Resolves the cache for one compile. `enabled` is the shared
-    /// `--no-cache` off switch; `no_ambient` picks the ambient identity
-    /// the key folds — a compile without the ambient has no composed
-    /// prefix to serve this round, so it runs uncached.
+    /// Resolves the cache for one plain-script compile: no dep identity
+    /// beyond the ambient, so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
-        Self::discover_at(
+        Self::discover_linked(enabled, no_ambient, &BTreeMap::new())
+    }
+
+    /// Resolves the cache for one package-root compile. `enabled` is
+    /// the shared `--no-cache` off switch; `no_ambient` picks the
+    /// ambient identity the key folds — a compile without the ambient
+    /// has no composed prefix to serve this round, so it runs uncached;
+    /// `identities` are the resolved graph's dep content identities,
+    /// which the source text alone does not determine — a linked
+    /// package's surface feeds the front end, so the key folds them and
+    /// a dep whose resolved content changed is another key.
+    pub(crate) fn discover_linked(
+        enabled: bool,
+        no_ambient: bool,
+        identities: &BTreeMap<String, Hash128>,
+    ) -> Self {
+        Self::discover_at_linked(
             enabled,
             no_ambient,
             enabled.then(ds_pkg::store::cache_root).flatten(),
+            identities,
         )
     }
 
-    /// [`Self::discover`](Self::discover) over a caller-named root (the
-    /// in-process gates' private temp directories; the binary paths
-    /// resolve `$DS_CACHE` themselves).
+    /// [`Self::discover`](Self::discover) over a caller-named root:
+    /// the unit tests' private temp directories, since every binary
+    /// path resolves `$DS_CACHE` through
+    /// [`Self::discover_linked`](Self::discover_linked).
+    #[cfg(test)]
     pub(crate) fn discover_at(enabled: bool, no_ambient: bool, root: Option<PathBuf>) -> Self {
+        Self::discover_at_linked(enabled, no_ambient, root, &BTreeMap::new())
+    }
+
+    /// [`Self::discover_linked`](Self::discover_linked) over a
+    /// caller-named root and dep identities: the in-process gates'
+    /// private temp directories.
+    pub(crate) fn discover_at_linked(
+        enabled: bool,
+        no_ambient: bool,
+        root: Option<PathBuf>,
+        identities: &BTreeMap<String, Hash128>,
+    ) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then_some(root).flatten().filter(|_| !no_ambient),
             ambient: (!no_ambient).then(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
+            deps: identities.clone(),
             debug,
         };
         if cache.debug && cache.root.is_none() {
@@ -151,12 +185,12 @@ impl PrefixCache {
         // writers race to byte-identical content and a reader never sees
         // a partial file. Windows rename refuses to replace, so a lost
         // race removes and retries once.
-        if let Err(persist) = temp.persist(&artifact) {
-            if persist.error.kind() == std::io::ErrorKind::AlreadyExists {
-                let _ = std::fs::remove_file(&artifact);
-                let temp = persist.file;
-                let _ = temp.persist(&artifact);
-            }
+        if let Err(persist) = temp.persist(&artifact)
+            && persist.error.kind() == std::io::ErrorKind::AlreadyExists
+        {
+            let _ = std::fs::remove_file(&artifact);
+            let temp = persist.file;
+            let _ = temp.persist(&artifact);
         }
     }
 
@@ -179,6 +213,11 @@ impl PrefixCache {
     /// - the source hash: the artifact's header pins it;
     /// - the ambient identity: the user member's ids continue the ambient's served spaces, so a
     ///   drifted ambient text is a different prefix;
+    /// - each resolved dep's link name and content hash in ascending name order: the identities
+    ///   package resolution pinned, which the source text alone does not determine — a linked
+    ///   package's surface feeds the front end, so a dep whose resolved content changed is another
+    ///   key and never serves a prefix linked against the old content. A plain script folds the
+    ///   empty list;
     /// - the build identity: the same build digest the script-mode dsmod cache keys fold, so two
     ///   builds whose front-end output can differ never share an artifact.
     fn key(&self, module_name: &str, source_hash: Hash128) -> Hash128 {
@@ -194,6 +233,14 @@ impl PrefixCache {
             None => {
                 hasher.update(&[0]);
             },
+        }
+        // the dep identities the resolved graph pinned, each name
+        // framed around its hash so no two pairs splice, the same fold
+        // the script-mode dsmod cache key applies
+        hasher.update(&(self.deps.len() as u64).to_le_bytes());
+        for (name, content) in &self.deps {
+            crate::run_cache::fold_str(&mut hasher, name);
+            hasher.update(content.as_bytes());
         }
         crate::run_cache::fold_str(&mut hasher, crate::run_cache::BUILD_ID);
         let digest = hasher.finalize();
@@ -278,12 +325,14 @@ mod tests {
     }
 
     /// The ambient-registered file ids one run path compile registers:
-    /// the ambient first, the user member after it.
-    fn registered_ids() -> [ds_diag::FileId; 2] {
+    /// the ambient first, the user member after it, the host provision's
+    /// die member last (the entry session's registration order).
+    fn registered_ids() -> [ds_diag::FileId; 3] {
         let mut files = ds_diag::Files::new();
         let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let user = files.add_source("gate.ds", GATE);
-        [ambient, user]
+        let host = files.add_source(crate::source::HOST_FILE, crate::source::HOST_SOURCE);
+        [ambient, user, host]
     }
 
     /// A cold compile persists one prefix under the private root, a warm
@@ -296,13 +345,27 @@ mod tests {
         let root = temp_root("round-trip");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-        let cold = crate::source::compile(&path, "main", false, Some(&cache)).expect("compiles");
+        let cold = crate::source::compile(
+            &path,
+            "main",
+            false,
+            Some(&cache),
+            crate::source::BundleAfter::Drop,
+        )
+        .expect("compiles");
         let artifact = the_artifact(&root);
         let persisted = std::fs::read(&artifact).expect("the persisted prefix reads");
 
         // The warm compile serves the persisted prefix and answers the cold
         // module byte for byte.
-        let warm = crate::source::compile(&path, "main", false, Some(&cache)).expect("compiles");
+        let warm = crate::source::compile(
+            &path,
+            "main",
+            false,
+            Some(&cache),
+            crate::source::BundleAfter::Drop,
+        )
+        .expect("compiles");
         assert_eq!(
             ds_mod::write(warm.lowered.module()),
             ds_mod::write(cold.lowered.module()),
@@ -310,19 +373,31 @@ mod tests {
         );
 
         // The fresh generation over the same sources answers the persisted
-        // bytes exactly (a store from any tier writes the same artifact).
+        // bytes exactly (a store from any tier writes the same artifact):
+        // the entry session's own registration — the ambient, the gate,
+        // the host provision's die member — over the session's rows.
         let mut files = ds_diag::Files::new();
         let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let user = files.add_source("gate.ds", GATE);
+        let host = files.add_source(crate::source::HOST_FILE, crate::source::HOST_SOURCE);
         let fresh_tree = ds_parse::parse(&files, ambient).expect("the ambient parses");
         let user_ast = ds_parse::parse_script(&files, user).expect("the gate parses");
-        let fresh_run = ds_meta::analyze_owned(&files, vec![fresh_tree, user_ast], &[false, false]);
+        let host_ast = ds_parse::parse(&files, host).expect("the host member parses");
+        let fresh_run = ds_meta::analyze_owned(
+            &files,
+            vec![
+                std::sync::Arc::new(fresh_tree),
+                std::sync::Arc::new(user_ast),
+                std::sync::Arc::new(host_ast),
+            ],
+            &[false, false, false],
+        );
         assert!(
             fresh_run.checked.diags.is_empty(),
             "the gate program checks clean: {:?}",
             fresh_run.checked.diags
         );
-        let rows = ds_stdlib::declared_rows();
+        let rows = crate::source::session_rows();
         let caps = ds_stdlib::world_caps();
         let effects = ds_check::effects::effects_of_resolved(
             &fresh_run.asts[..],
@@ -363,21 +438,34 @@ mod tests {
         let root = temp_root("equivalence");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root));
-        crate::source::compile(&path, "main", false, Some(&cache)).expect("compiles");
+        crate::source::compile(
+            &path,
+            "main",
+            false,
+            Some(&cache),
+            crate::source::BundleAfter::Drop,
+        )
+        .expect("compiles");
 
-        let [ambient, user] = registered_ids();
+        let [ambient, user, host] = registered_ids();
         let served = cache
-            .lookup("gate", GATE, &[ambient, user])
+            .lookup("gate", GATE, &[ambient, user, host])
             .expect("the persisted prefix serves");
         let mut files = ds_diag::Files::new();
         let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let user = files.add_source("gate.ds", GATE);
+        let host = files.add_source(crate::source::HOST_FILE, crate::source::HOST_SOURCE);
         let served_tree = ds_stdlib::ambient_ast(ambient).expect("the AST blob verifies");
         let user_ast = ds_parse::parse_script(&files, user).expect("the gate parses");
+        let host_ast = ds_parse::parse(&files, host).expect("the host member parses");
         let served_run = ds_meta::analyze_served(
             &files,
-            vec![served_tree, user_ast.clone()],
-            &[true, false],
+            vec![
+                served_tree,
+                std::sync::Arc::new(user_ast.clone()),
+                std::sync::Arc::new(host_ast.clone()),
+            ],
+            &[true, false, false],
             served.package,
             served.resolutions,
             served.decls,
@@ -398,7 +486,15 @@ mod tests {
         );
 
         let fresh_tree = ds_parse::parse(&files, ambient).expect("the ambient parses");
-        let fresh_run = ds_meta::analyze_owned(&files, vec![fresh_tree, user_ast], &[false, false]);
+        let fresh_run = ds_meta::analyze_owned(
+            &files,
+            vec![
+                std::sync::Arc::new(fresh_tree),
+                std::sync::Arc::new(user_ast),
+                std::sync::Arc::new(host_ast),
+            ],
+            &[false, false, false],
+        );
         assert!(
             fresh_run.checked.diags.is_empty(),
             "the fresh run checks clean: {:?}",
@@ -442,6 +538,11 @@ mod tests {
             "the instance rows match"
         );
         assert_eq!(
+            ds_dsi::gates::const_rows(&served_run),
+            ds_dsi::gates::const_rows(&fresh_run),
+            "the top-level binding rows match"
+        );
+        assert_eq!(
             ds_dsi::gates::trait_facts(&served_run),
             ds_dsi::gates::trait_facts(&fresh_run),
             "the trait registries match"
@@ -468,13 +569,13 @@ mod tests {
             "the checked expression facts match"
         );
         let served_effects = ds_check::effects::effects_of_resolved_served(
-            &served_run.asts[2..],
+            &served_run.asts[3..],
             &served_run.package,
-            &served_run.resolutions[2..],
+            &served_run.resolutions[3..],
             &served_run.checked.hole_show_dispatches,
             &served.effect_defs,
             &served.effect_methods,
-            ds_stdlib::declared_rows(),
+            crate::source::session_rows(),
             ds_stdlib::world_caps(),
         );
         let fresh_effects = ds_check::effects::effects_of_resolved(
@@ -482,7 +583,7 @@ mod tests {
             &fresh_run.package,
             &fresh_run.resolutions[..],
             &fresh_run.checked.hole_show_dispatches,
-            ds_stdlib::declared_rows(),
+            crate::source::session_rows(),
             ds_stdlib::world_caps(),
         );
         assert_eq!(
@@ -502,7 +603,14 @@ mod tests {
         let mut persisted = Vec::new();
         for root in &roots {
             let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-            crate::source::compile(&path, "main", false, Some(&cache)).expect("compiles");
+            crate::source::compile(
+                &path,
+                "main",
+                false,
+                Some(&cache),
+                crate::source::BundleAfter::Drop,
+            )
+            .expect("compiles");
             persisted.push(std::fs::read(the_artifact(root)).expect("the artifact reads"));
         }
         assert_eq!(
@@ -519,14 +627,21 @@ mod tests {
         let root = temp_root("misses");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-        crate::source::compile(&path, "main", false, Some(&cache)).expect("compiles");
+        crate::source::compile(
+            &path,
+            "main",
+            false,
+            Some(&cache),
+            crate::source::BundleAfter::Drop,
+        )
+        .expect("compiles");
         let artifact = the_artifact(&root);
-        let [ambient, user] = registered_ids();
+        let [ambient, user, host] = registered_ids();
 
         // an edited source is another key
         assert!(
             cache
-                .lookup("gate", "fn main() -> () { }\n", &[ambient, user])
+                .lookup("gate", "fn main() -> () { }\n", &[ambient, user, host])
                 .is_none(),
             "an edited source misses"
         );
@@ -546,8 +661,64 @@ mod tests {
         corrupt[last] = corrupt[last].wrapping_add(1);
         std::fs::write(&artifact, &corrupt).expect("the corrupt bytes write");
         assert!(
-            cache.lookup("gate", GATE, &[ambient, user]).is_none(),
+            cache.lookup("gate", GATE, &[ambient, user, host]).is_none(),
             "corrupt bytes miss"
+        );
+    }
+
+    /// The dep-identity fold re-keys: one dep's changed content moves
+    /// the key, the link name frames its hash, and a plain script's
+    /// empty-list fold differs from every resolved graph's — a prefix
+    /// linked against a dep's old content never serves the new
+    /// resolution.
+    #[test]
+    fn the_dep_identity_fold_rekeys() {
+        use std::collections::BTreeMap;
+
+        use ds_mod::Hash128 as H;
+
+        let source = H::compute(b"fn main() -> () { }");
+        let plain = PrefixCache::discover(false, false);
+        let at = |identity: &[u8]| {
+            PrefixCache::discover_at_linked(
+                false,
+                false,
+                None,
+                &BTreeMap::from([("@lib".to_owned(), H::compute(identity))]),
+            )
+        };
+        assert_ne!(
+            at(b"one").key("app", source),
+            at(b"two").key("app", source),
+            "a dep's changed content is another key"
+        );
+        assert_ne!(
+            plain.key("app", source),
+            at(b"one").key("app", source),
+            "a resolved identity never serves a plain script's key"
+        );
+        let named = PrefixCache::discover_at_linked(
+            false,
+            false,
+            None,
+            &BTreeMap::from([
+                ("@a".to_owned(), H::compute(b"one")),
+                ("@b".to_owned(), H::compute(b"two")),
+            ]),
+        );
+        let swapped = PrefixCache::discover_at_linked(
+            false,
+            false,
+            None,
+            &BTreeMap::from([
+                ("@a".to_owned(), H::compute(b"two")),
+                ("@b".to_owned(), H::compute(b"one")),
+            ]),
+        );
+        assert_ne!(
+            named.key("app", source),
+            swapped.key("app", source),
+            "the link name frames its hash"
         );
     }
 }

@@ -1,9 +1,10 @@
-//! The six generic container natives past the map block (indices 32-37):
-//! `cons` (32), `head` (33), `tail` (34), `collect` (35), `first` (36),
-//! `max` (37), each addressed through CALLG with one evidence word
-//! staged after the real arguments (the container adapters drop it —
+//! The five generic container natives past the map block (indices
+//! 32-37): `cons` (32), `tail` (34), `collect` (35), `first` (36), `max`
+//! (37) — the retired `head` spelling's slot at 33 stays reserved —
+//! each addressed through CALLG with one evidence word staged after the
+//! real arguments (the container adapters drop it —
 //! the container word is one `Ref` whatever the element). The producers
-//! answer fresh lists (construction copies), `head` and `first` share
+//! answer fresh lists (construction copies), `first` carries
 //! the one checked first-element body in `list_get`'s ok/none span
 //! shape, and `max` dispatches on the numeric instance the evidence
 //! word names — int in i64's total order and float per IEEE, refusing
@@ -19,8 +20,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIRST, BUILTIN_HEAD, BUILTIN_LIST_NEW,
-        BUILTIN_LIST_PUSH, BUILTIN_MAX, BUILTIN_TAIL, PLATFORM_IO_OK, PLATFORM_NONE,
+        BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIRST, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+        BUILTIN_MAX, BUILTIN_TAIL, PLATFORM_IO_OK, PLATFORM_NONE,
     },
 };
 
@@ -36,7 +37,7 @@ fn builtin(index: u32) -> Const {
 }
 
 /// The shared pool, copied per function (the payload granularity): the
-/// evidence words (list k0, int k9, float k10) and the eight
+/// evidence words (list k0, int k8, float k9) and the seven
 /// container-facing natives. String elements stage as host-passed `Ref`
 /// words.
 fn pool() -> Vec<Const> {
@@ -45,13 +46,12 @@ fn pool() -> Vec<Const> {
         builtin(BUILTIN_LIST_NEW),                // k1
         builtin(BUILTIN_LIST_PUSH),               // k2
         builtin(BUILTIN_CONS),                    // k3
-        builtin(BUILTIN_HEAD),                    // k4
-        builtin(BUILTIN_TAIL),                    // k5
-        builtin(BUILTIN_COLLECT),                 // k6
-        builtin(BUILTIN_FIRST),                   // k7
-        builtin(BUILTIN_MAX),                     // k8
-        Const::I64(BuiltinInstance::Int as i64),  // k9: the int evidence word
-        Const::I64(BuiltinInstance::Float as i64), // k10: the float evidence word
+        builtin(BUILTIN_TAIL),                    // k4
+        builtin(BUILTIN_COLLECT),                 // k5
+        builtin(BUILTIN_FIRST),                   // k6
+        builtin(BUILTIN_MAX),                     // k7
+        Const::I64(BuiltinInstance::Int as i64),  // k8: the int evidence word
+        Const::I64(BuiltinInstance::Float as i64), // k9: the float evidence word
     ]
 }
 
@@ -72,9 +72,8 @@ fn gn_registry() -> ModuleRegistry {
             empty(),
             push(),
             cons(),
-            head(),
             first(),
-            head_tag(),
+            first_tag(),
             tail(),
             collect(),
             max_of(),
@@ -130,42 +129,19 @@ fn cons() -> FunctionDef {
     ])
 }
 
-/// `(xs: list) -> t | none`: the checked first element, dispatched on
-/// the span's tag word like `list_get`'s fixture callers — success
-/// returns the payload element, an empty list halts on the tag word so
-/// the run result itself is the `none` shape.
+/// `(xs: list) -> t | none`: `first`, the checked first element,
+/// dispatched on the span's tag word like `list_get`'s fixture callers —
+/// success returns the payload element, an empty list halts on the tag
+/// word so the run result itself is the `none` shape.
 ///
 /// Slots: [list, elem, hit, overlay words: xs, evidence].
-fn head() -> FunctionDef {
-    def("head", &[Ref, Raw, Bool, Raw, Raw], 1, 2, &[
-        Uop::Funcf { frame_slots: 5 },
-        Uop::Mov { dst: 3, src: 0 },
-        Uop::Kimm { dst: 4, kidx: k(0) },
-        Uop::Callg {
-            callee: k(4),
-            nargs: 1,
-        },
-        Uop::TagTest {
-            dst: 2,
-            src: 3,
-            tag: PLATFORM_NONE,
-        },
-        Uop::Jmpif { cond: 2, target: 8 },
-        Uop::Mov { dst: 1, src: 4 },
-        Uop::Ret { src: 1 },
-        Uop::Halt { slot: 3 },
-    ])
-}
-
-/// `(xs: list) -> t | none`: `first`, the corpus's other spelling over
-/// the one shared body.
 fn first() -> FunctionDef {
     def("first", &[Ref, Raw, Bool, Raw, Raw], 1, 2, &[
         Uop::Funcf { frame_slots: 5 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::Kimm { dst: 4, kidx: k(0) },
         Uop::Callg {
-            callee: k(7),
+            callee: k(6),
             nargs: 1,
         },
         Uop::TagTest {
@@ -182,13 +158,13 @@ fn first() -> FunctionDef {
 
 /// `(xs: list) -> word`: the span's raw discriminant word, pinning the
 /// checked shape itself.
-fn head_tag() -> FunctionDef {
-    def("head_tag", &[Ref, Raw, Raw], 1, 2, &[
+fn first_tag() -> FunctionDef {
+    def("first_tag", &[Ref, Raw, Raw], 1, 2, &[
         Uop::Funcf { frame_slots: 3 },
         Uop::Mov { dst: 1, src: 0 },
         Uop::Kimm { dst: 2, kidx: k(0) },
         Uop::Callg {
-            callee: k(4),
+            callee: k(6),
             nargs: 1,
         },
         Uop::Ret { src: 1 },
@@ -202,7 +178,7 @@ fn tail() -> FunctionDef {
         Uop::Mov { dst: 2, src: 0 },
         Uop::Kimm { dst: 3, kidx: k(0) },
         Uop::Callg {
-            callee: k(5),
+            callee: k(4),
             nargs: 1,
         },
         Uop::Mov { dst: 1, src: 2 },
@@ -217,7 +193,7 @@ fn collect() -> FunctionDef {
         Uop::Mov { dst: 2, src: 0 },
         Uop::Kimm { dst: 3, kidx: k(0) },
         Uop::Callg {
-            callee: k(6),
+            callee: k(5),
             nargs: 1,
         },
         Uop::Mov { dst: 1, src: 2 },
@@ -228,13 +204,13 @@ fn collect() -> FunctionDef {
 /// `(a, b: i64) -> i64`: the greater of the two staged words, the int
 /// instance staged as the evidence word.
 fn max_of() -> FunctionDef {
-    max_with_evidence("max_of", k(9))
+    max_with_evidence("max_of", k(8))
 }
 
 /// `(a, b: f64) -> f64`: the float spelling over the one body, the
 /// float instance staged as the evidence word.
 fn max_float_of() -> FunctionDef {
-    max_with_evidence("max_float_of", k(10))
+    max_with_evidence("max_float_of", k(9))
 }
 
 /// The shared `max` site: two staged operands plus the named evidence
@@ -249,7 +225,7 @@ fn max_with_evidence(name: &str, evidence: ConstIdx) -> FunctionDef {
             kidx: evidence,
         },
         Uop::Callg {
-            callee: k(8),
+            callee: k(7),
             nargs: 2,
         },
         Uop::Ret { src: 2 },
@@ -264,8 +240,8 @@ fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
     *word
 }
 
-fn head_string(vm: &mut Vm, list: Value) -> String {
-    match run_value(vm, "head", &[list]) {
+fn first_string(vm: &mut Vm, list: Value) -> String {
+    match run_value(vm, "first", &[list]) {
         Value::Ref(id) => vm
             .objects()
             .str_at(id.id())
@@ -281,15 +257,15 @@ fn cons_prepends_into_a_fresh_list_over_int_and_string() {
     let empty = run_value(&mut vm, "empty", &[]);
     let one = run_value(&mut vm, "cons", &[Value::I64(2), empty]);
     let two = run_value(&mut vm, "cons", &[Value::I64(1), one]);
-    assert_eq!(run_value(&mut vm, "head", &[two]), Value::I64(1));
+    assert_eq!(run_value(&mut vm, "first", &[two]), Value::I64(1));
     let rest = run_value(&mut vm, "tail", &[two]);
-    assert_eq!(run_value(&mut vm, "head", &[rest]), Value::I64(2));
+    assert_eq!(run_value(&mut vm, "first", &[rest]), Value::I64(2));
     // the prepend answers a fresh object, never the operand
     assert_ne!(two, one, "cons constructs, it does not alias");
     // the elements after the first run out: the none member, no trap
     let empty_tail = run_value(&mut vm, "tail", &[rest]);
     assert_eq!(
-        run_value(&mut vm, "head", &[empty_tail]),
+        run_value(&mut vm, "first", &[empty_tail]),
         Value::Tag(PLATFORM_NONE)
     );
     // the string elements share identity with the interned words
@@ -297,27 +273,23 @@ fn cons_prepends_into_a_fresh_list_over_int_and_string() {
     let b = vm.intern_str("b");
     let one_str = run_value(&mut vm, "cons", &[a, empty]);
     let two_str = run_value(&mut vm, "cons", &[b, one_str]);
-    assert_eq!(run_value(&mut vm, "head", &[two_str]), b);
+    assert_eq!(run_value(&mut vm, "first", &[two_str]), b);
     let tail_str = run_value(&mut vm, "tail", &[two_str]);
-    assert_eq!(head_string(&mut vm, tail_str), "a");
+    assert_eq!(first_string(&mut vm, tail_str), "a");
 }
 
 #[test]
-fn head_and_first_answer_the_checked_first_element() {
+fn first_answers_the_checked_first_element() {
     let mut vm = Vm::new(gn_registry());
     // the empty cases first: list_push mutates in place, so a list bound
     // before the pushes would no longer be empty after them
     let empty = run_value(&mut vm, "empty", &[]);
     assert_eq!(
-        run_value(&mut vm, "head", &[empty]),
-        Value::Tag(PLATFORM_NONE)
-    );
-    assert_eq!(
         run_value(&mut vm, "first", &[empty]),
         Value::Tag(PLATFORM_NONE)
     );
     assert_eq!(
-        run_value(&mut vm, "head_tag", &[empty]),
+        run_value(&mut vm, "first_tag", &[empty]),
         Value::Tag(PLATFORM_NONE)
     );
     // the hit cases over a two-element list
@@ -325,11 +297,10 @@ fn head_and_first_answer_the_checked_first_element() {
     let y = vm.intern_str("y");
     let ys = run_value(&mut vm, "push", &[empty, y]);
     let xs = run_value(&mut vm, "push", &[ys, x]);
-    assert_eq!(run_value(&mut vm, "head", &[xs]), y);
     assert_eq!(run_value(&mut vm, "first", &[xs]), y);
     // the raw span shape: the shared ok discriminant on the hit
     assert_eq!(
-        run_value(&mut vm, "head_tag", &[xs]),
+        run_value(&mut vm, "first_tag", &[xs]),
         Value::Tag(PLATFORM_IO_OK)
     );
 }
@@ -341,12 +312,12 @@ fn tail_and_collect_answer_fresh_copies() {
     let empty = run_value(&mut vm, "empty", &[]);
     let empty_tail = run_value(&mut vm, "tail", &[empty]);
     assert_eq!(
-        run_value(&mut vm, "head", &[empty_tail]),
+        run_value(&mut vm, "first", &[empty_tail]),
         Value::Tag(PLATFORM_NONE)
     );
     let empty_copy = run_value(&mut vm, "collect", &[empty]);
     assert_eq!(
-        run_value(&mut vm, "head", &[empty_copy]),
+        run_value(&mut vm, "first", &[empty_copy]),
         Value::Tag(PLATFORM_NONE)
     );
     // the copy cases over a two-element list
@@ -355,7 +326,7 @@ fn tail_and_collect_answer_fresh_copies() {
     let as_list = run_value(&mut vm, "push", &[empty, a]);
     let ab = run_value(&mut vm, "push", &[as_list, b]);
     let rest = run_value(&mut vm, "tail", &[ab]);
-    assert_eq!(head_string(&mut vm, rest), "b");
+    assert_eq!(first_string(&mut vm, rest), "b");
     // collect answers a plain fresh copy: distinct object, same elements
     let copy = run_value(&mut vm, "collect", &[ab]);
     assert_ne!(copy, ab, "the copy is a fresh object");
@@ -417,7 +388,7 @@ fn max_orders_int_and_float_and_refuses_the_rest() {
         Uop::Mov { dst: 3, src: 1 },
         Uop::Kimm { dst: 4, kidx: k(0) }, // the list instance
         Uop::Callg {
-            callee: k(8),
+            callee: k(7),
             nargs: 2,
         },
         Uop::Ret { src: 2 },

@@ -23,7 +23,7 @@ const push = [t: ~Copyable] (s: stack[t], x: t) -> stack[t] {
   stack { items: cons(x, s.items) }
 }
 const pop = [t: ~Copyable] (s: stack[t]) -> (stack[t], t?) {
-  (stack { items: s.items.tail() }, s.items.head())
+  (stack { items: s.items.tail() }, s.items.first())
 }
 
 // 2. traits with disjoint instance heads [B6]

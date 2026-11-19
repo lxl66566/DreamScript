@@ -573,7 +573,9 @@ fn a_value_shadowing_the_type_keeps_the_value_tier() {
 
 /// The missing member behind a type name reports at the method position
 /// naming the type, and a generic impl's receiverless member refuses
-/// the bare-name call (the spelling carries no type arguments).
+/// the bare-name call (the spelling carries no type arguments) while
+/// the instantiated receiver carries them and substitutes the impl's
+/// variables into the member's written signature.
 #[test]
 fn the_static_surface_refusals_report_their_seams() {
     let missing = concat!(
@@ -605,10 +607,65 @@ fn the_static_surface_refusals_report_their_seams() {
     let rendered = render(&analyzed);
     assert!(
         rendered.contains(
-            "member `make` of `list` lives in a generic impl; the type-keyed call cannot spell \
-             its type arguments"
+            "member `make` of `list` lives in a generic impl; the type-keyed call needs the \
+             applied receiver `list[...]`, which the bare type name cannot spell"
         ),
         "the bare-name call cannot spell a generic impl's type arguments: {rendered}"
+    );
+}
+
+/// The instantiated type-keyed call over a generic impl's receiverless
+/// member: the applied receiver carries the impl's type arguments, the
+/// head's own impl claims the member, and the written signature reads
+/// through the site's substitution — `make`'s `list[t]` answers
+/// `list[int]` at `list[int].make()`, proven by the mismatch a wrong
+/// annotation reports.
+#[test]
+fn an_instantiated_receiver_calls_a_generic_impls_receiverless_member() {
+    let clean = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "trait copy { }\n",
+        "impl copy for int { }\n",
+        "impl copy for string { }\n",
+        "impl[t: copy] list[t] {\n",
+        "  fn make() -> list[t] { list[t]() }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const xs: list[int] = list[int].make()\n",
+        "  const ys = list[string].make()\n",
+        "  0\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("instantiated.ds", clean);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "the instantiated calls check clean with substituted signatures: {rendered}"
+    );
+
+    let mistyped = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "trait copy { }\n",
+        "impl copy for int { }\n",
+        "impl copy for string { }\n",
+        "impl[t: copy] list[t] {\n",
+        "  fn make() -> list[t] { list[t]() }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const xs = list[int].make()\n",
+        "  const wrong: string = xs\n",
+        "  0\n",
+        "}\n",
+    );
+    let (_, analyzed) = analyze_source("mistyped.ds", mistyped);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("has type `list[int]`, not contained in `string`"),
+        "the call's answer type carries the site's substitution: {rendered}"
     );
 }
 

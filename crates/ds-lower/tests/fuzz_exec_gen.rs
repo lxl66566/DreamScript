@@ -9,11 +9,18 @@
 //! census asserts the vocabulary stays in the draw set: or-patterns,
 //! struct patterns, case payload tests, guards over union dispatch,
 //! nested struct sub-patterns, whole-span union equality, par_map and
-//! par_reduce sites, closure callables, multi-word answers, and
+//! par_reduce sites, closure callables, multi-word answers, value
+//! blocks whose tail reads a local binder, and
 //! the free generic call vocabulary (call sites into the ONE
 //! bodies, serving impl bodies, the nested runtime form, tail
 //! transfers, two-level instantiations, and inert uncalled
-//! declarations).
+//! declarations) — the json derive roundtrip legs (an optional list
+//! field encoded through to_json and decoded back through from_json,
+//! presence and absence), and the cross-package linked-enum legs (a
+//! two-module compile: the consumer constructs, matches, narrows, and
+//! scores over the linked enum while union-typed answers cross the
+//! boundary both directions, plus the drawn variant whose second
+//! linked surface claims a seeded tag id and refuses at lowering).
 
 #[path = "../../../fuzz/exec_gen.rs"]
 mod exec_gen;
@@ -68,6 +75,7 @@ fn generated_programs_answer_their_oracle() {
         total.union_guards += drawn.union_guards;
         total.nested_sub_patterns += drawn.nested_sub_patterns;
         total.union_equality += drawn.union_equality;
+        total.bytes_equality += drawn.bytes_equality;
         total.par_map += drawn.par_map;
         total.par_reduce += drawn.par_reduce;
         total.closures += drawn.closures;
@@ -78,6 +86,10 @@ fn generated_programs_answer_their_oracle() {
         total.generic_tails += drawn.generic_tails;
         total.two_level_calls += drawn.two_level_calls;
         total.inert_generics += drawn.inert_generics;
+        total.block_tails += drawn.block_tails;
+        total.json_derive += drawn.json_derive;
+        total.linked_enums += drawn.linked_enums;
+        total.linked_refusals += drawn.linked_refusals;
     }
     assert!(total.or_patterns > 0, "value-level or-patterns are drawn");
     assert!(total.struct_patterns > 0, "struct patterns are drawn");
@@ -93,6 +105,10 @@ fn generated_programs_answer_their_oracle() {
     assert!(
         total.union_equality > 0,
         "whole-span union equality is drawn"
+    );
+    assert!(
+        total.bytes_equality > 0,
+        "bytes-typed equality chains are drawn"
     );
     assert!(total.par_map > 0, "par_map sites are drawn");
     assert!(total.par_reduce > 0, "par_reduce folds are drawn");
@@ -116,6 +132,19 @@ fn generated_programs_answer_their_oracle() {
         total.inert_generics > 0,
         "inert uncalled declarations are drawn"
     );
+    assert!(
+        total.block_tails > 0,
+        "value-block tail reads of local binders are drawn"
+    );
+    assert!(
+        total.json_derive > 0,
+        "json derive roundtrip legs are drawn"
+    );
+    assert!(total.linked_enums > 0, "linked-enum episodes are drawn");
+    assert!(
+        total.linked_refusals > 0,
+        "the linked surface's conflicting-tag-row refusal is drawn"
+    );
     // the degenerate inputs: empty and single-byte streams cycle into a
     // full deterministic program too
     exec_gen::exercise(&[]);
@@ -134,7 +163,7 @@ fn repeated_generated_programs_answer_their_oracle() {
 }
 
 /// Generation is deterministic per input: the same bytes always produce
-/// the same program, oracle, and census, so any campaign finding
+/// the same program, library, oracle, and census, so any campaign finding
 /// reproduces from the raw input alone.
 #[test]
 fn generation_is_deterministic() {
@@ -143,6 +172,7 @@ fn generation_is_deterministic() {
         let a = exec_gen::generate(&data);
         let b = exec_gen::generate(&data);
         assert_eq!(a.source, b.source, "same input, same program");
+        assert_eq!(a.library, b.library, "same input, same library");
         assert_eq!(a.expected, b.expected, "same input, same oracle");
         assert_eq!(a.drawn.or_patterns, b.drawn.or_patterns, "same census");
     }

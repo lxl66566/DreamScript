@@ -6,11 +6,12 @@
 //! the list object's parts) back through the VM's heap; the golden fixture
 //! prints the composed pipeline byte-exact.
 //!
-//! Layout conventions (the contract ds-lower targets): every pure string
-//! native overlays one word on the caller's argument slot 0, and
-//! `parse_int` answers the fallible two-word span [BL-2] on argument slots
-//! 0 and 1 — word 0 the discriminant (`PLATFORM_IO_OK` /
-//! `PLATFORM_PARSE_ERR`), word 1 the payload — so a caller of one sizes its
+//! Layout conventions (the contract ds-lower targets): every total pure
+//! string native overlays one word on the caller's argument slot 0;
+//! `parse_int` answers the fallible two-word span [BL-2] and the checked
+//! reads `substring`/`char_at` their ok/none span on argument slots 0 and
+//! 1 — word 0 the discriminant (`PLATFORM_IO_OK` / `PLATFORM_PARSE_ERR` /
+//! `PLATFORM_NONE`), word 1 the payload — so a caller of one sizes its
 //! overlay area to two; the overlay slots declare `Raw` because the same
 //! words stage arguments first.
 
@@ -25,7 +26,7 @@ use ds_vm::{
     native::{
         BUILTIN_CHAR_AT, BUILTIN_CONCAT, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_NEW,
         BUILTIN_LIST_PUSH, BUILTIN_PARSE_INT, BUILTIN_SPLIT, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
-        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_PARSE_ERR,
+        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_NONE, PLATFORM_PARSE_ERR,
     },
     platform::{OP_PRINTLN, Platform, STD_NAME},
 };
@@ -118,9 +119,12 @@ fn measure() -> FunctionDef {
     ])
 }
 
-/// `(s: string, start, end: int) -> string`: `substring` clamps.
+/// `(s: string, start, end: int) -> string | none`: `substring`'s checked
+/// span — word 0 the discriminant, word 1 the payload `Ref` on the hit
+/// and the rejected `start` on the miss. The hit returns the payload;
+/// the miss halts on the tag word, so the run result answers both arms.
 fn clip() -> FunctionDef {
-    def("clip", &[Ref, I64, I64, Ref, Raw, Raw, Raw], 3, 3, &[
+    def("clip", &[Ref, I64, I64, Bool, Raw, Raw, Raw], 3, 3, &[
         Uop::Funcf { frame_slots: 7 },
         Uop::Mov { dst: 4, src: 0 },
         Uop::Mov { dst: 5, src: 1 },
@@ -129,7 +133,14 @@ fn clip() -> FunctionDef {
             callee: k(3),
             nargs: 3,
         },
-        Uop::Ret { src: 4 },
+        Uop::TagTest {
+            dst: 3,
+            src: 4,
+            tag: PLATFORM_NONE,
+        },
+        Uop::Jmpif { cond: 3, target: 8 },
+        Uop::Ret { src: 5 },
+        Uop::Halt { slot: 4 },
     ])
 }
 
@@ -247,17 +258,26 @@ fn parts() -> FunctionDef {
     ])
 }
 
-/// `(s: string, i: int) -> string`: `char_at`, empty when out of range.
+/// `(s: string, i: int) -> string | none`: `char_at`'s checked span — the
+/// hit returns the one-char payload `Ref`, the miss halts on the `none`
+/// tag word.
 fn pick() -> FunctionDef {
-    def("pick", &[Ref, I64, Ref, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
-        Uop::Mov { dst: 3, src: 0 },
-        Uop::Mov { dst: 4, src: 1 },
+    def("pick", &[Ref, I64, Bool, Raw, Raw, Raw], 2, 2, &[
+        Uop::Funcf { frame_slots: 6 },
+        Uop::Mov { dst: 4, src: 0 },
+        Uop::Mov { dst: 5, src: 1 },
         Uop::Call {
             callee: k(4),
             nargs: 2,
         },
-        Uop::Ret { src: 3 },
+        Uop::TagTest {
+            dst: 3,
+            src: 4,
+            tag: PLATFORM_NONE,
+        },
+        Uop::Jmpif { cond: 3, target: 7 },
+        Uop::Ret { src: 5 },
+        Uop::Halt { slot: 4 },
     ])
 }
 
@@ -294,6 +314,7 @@ fn report() -> FunctionDef {
             callee: k(3),
             nargs: 3,
         },
+        Uop::Mov { dst: 4, src: 5 },
         Uop::Call {
             callee: k(8),
             nargs: 1,
@@ -304,6 +325,7 @@ fn report() -> FunctionDef {
             callee: k(4),
             nargs: 2,
         },
+        Uop::Mov { dst: 4, src: 5 },
         Uop::Call {
             callee: k(8),
             nargs: 1,
@@ -341,6 +363,15 @@ fn run_str(vm: &mut Vm, func: &str, args: &[Value]) -> String {
         .str_at(id.id())
         .expect("the result names a string object")
         .to_owned()
+}
+
+/// Runs a fixture and asserts the checked span's `none` answer: the miss
+/// member halts the run with the tag word.
+fn run_none(vm: &mut Vm, func: &str, args: &[Value]) {
+    assert_eq!(
+        vm.run("st", func, args),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NONE)))
+    );
 }
 
 /// Runs a fixture and reads the parts of its list-object result.
@@ -497,23 +528,24 @@ fn callg_sites_trap_on_missing_or_unknown_evidence() {
 }
 
 #[test]
-fn substring_clamps_to_char_boundaries_and_empty_ranges() {
+fn substring_answers_the_checked_span_over_char_boundaries() {
     let mut vm = Vm::new(st_registry());
     let text = [string(&mut vm, "héllo wörld"), Value::I64(0), Value::I64(5)];
     assert_eq!(run_str(&mut vm, "clip", &text), "héllo");
-    // the upper bound past the end clamps to the string
+    // the upper bound past the end answers none
     let text = [string(&mut vm, "héllo"), Value::I64(2), Value::I64(100)];
-    assert_eq!(run_str(&mut vm, "clip", &text), "llo");
-    // the lower bound below zero clamps to zero
+    run_none(&mut vm, "clip", &text);
+    // the lower bound below zero answers none
     let text = [string(&mut vm, "héllo"), Value::I64(-5), Value::I64(2)];
-    assert_eq!(run_str(&mut vm, "clip", &text), "hé");
-    // an empty range, an inverted range, and one wholly past the end
+    run_none(&mut vm, "clip", &text);
+    // an in-range empty range answers the empty string; an inverted
+    // range and one wholly past the end answer none
     let text = [string(&mut vm, "héllo"), Value::I64(3), Value::I64(3)];
     assert_eq!(run_str(&mut vm, "clip", &text), "");
     let text = [string(&mut vm, "héllo"), Value::I64(4), Value::I64(2)];
-    assert_eq!(run_str(&mut vm, "clip", &text), "");
+    run_none(&mut vm, "clip", &text);
     let text = [string(&mut vm, "héllo"), Value::I64(9), Value::I64(12)];
-    assert_eq!(run_str(&mut vm, "clip", &text), "");
+    run_none(&mut vm, "clip", &text);
 }
 
 #[test]
@@ -611,17 +643,17 @@ fn split_answers_parts_as_a_list_object() {
 }
 
 #[test]
-fn char_at_indexes_chars_and_answers_empty_out_of_range() {
+fn char_at_answers_the_checked_char_read() {
     let mut vm = Vm::new(st_registry());
     let args = [string(&mut vm, "héllo"), Value::I64(1)];
     assert_eq!(run_str(&mut vm, "pick", &args), "é");
     let args = [string(&mut vm, "héllo"), Value::I64(0)];
     assert_eq!(run_str(&mut vm, "pick", &args), "h");
-    // past either end: the empty string, never a trap
+    // past either end: the none member, never a trap
     let args = [string(&mut vm, "héllo"), Value::I64(5)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "");
+    run_none(&mut vm, "pick", &args);
     let args = [string(&mut vm, "héllo"), Value::I64(-1)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "");
+    run_none(&mut vm, "pick", &args);
 }
 
 #[test]
@@ -636,9 +668,9 @@ fn the_composed_pipeline_prints_the_golden_stdout() {
     );
 }
 
-/// Multi-byte text through the clamped surface: cuts land between
-/// scalars (CJK, emoji, mixed widths) and huge bounds clamp to the char
-/// count, never the byte length.
+/// Multi-byte text through the checked surface: cuts land between
+/// scalars (CJK, emoji, mixed widths), and out-of-range bounds by either
+/// side — huge indexes included — answer the `none` member.
 #[test]
 fn substring_and_char_at_pin_multi_byte_boundaries_and_huge_indexes() {
     let mut vm = Vm::new(st_registry());
@@ -657,19 +689,19 @@ fn substring_and_char_at_pin_multi_byte_boundaries_and_huge_indexes() {
     assert_eq!(run_str(&mut vm, "clip", &args), "");
     let args = [string(&mut vm, "漢字"), Value::I64(0), Value::I64(0)];
     assert_eq!(run_str(&mut vm, "clip", &args), "");
-    // huge bounds clamp to the char count
+    // huge bounds answer none
     let args = [string(&mut vm, "漢字"), Value::I64(0), Value::I64(i64::MAX)];
-    assert_eq!(run_str(&mut vm, "clip", &args), "漢字");
+    run_none(&mut vm, "clip", &args);
     let args = [
         string(&mut vm, "漢字"),
         Value::I64(i64::MAX),
         Value::I64(i64::MAX),
     ];
-    assert_eq!(run_str(&mut vm, "clip", &args), "");
-    // the empty text
+    run_none(&mut vm, "clip", &args);
+    // the empty text: every slice answers none
     let args = [string(&mut vm, ""), Value::I64(-1), Value::I64(3)];
-    assert_eq!(run_str(&mut vm, "clip", &args), "");
-    // char_at over the same strings: every scalar, empty past both ends
+    run_none(&mut vm, "clip", &args);
+    // char_at over the same strings: every scalar, none past both ends
     let args = [string(&mut vm, "a👍b🚀"), Value::I64(1)];
     assert_eq!(run_str(&mut vm, "pick", &args), "👍");
     let args = [string(&mut vm, "a👍b🚀"), Value::I64(3)];
@@ -677,9 +709,9 @@ fn substring_and_char_at_pin_multi_byte_boundaries_and_huge_indexes() {
     let args = [string(&mut vm, "漢字"), Value::I64(1)];
     assert_eq!(run_str(&mut vm, "pick", &args), "字");
     let args = [string(&mut vm, "漢字"), Value::I64(2)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "");
+    run_none(&mut vm, "pick", &args);
     let args = [string(&mut vm, "漢字"), Value::I64(i64::MAX)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "");
+    run_none(&mut vm, "pick", &args);
 }
 
 /// One interned string hit by every char-indexed native in turn: the

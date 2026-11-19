@@ -131,26 +131,26 @@ const KERNELS: &[Kernel] = &[
 /// [`KERNELS`] entry must appear here exactly once — a kernel without
 /// a pin or a pin without a kernel fails the gate.
 const PINS: &[(&str, u64)] = &[
-    ("scalar_loop::scalar_loop::scalar_dispatch", 6_443_340_756),
-    ("strcat_temp::strcat_temp::serving_cats", 8_530_833_738),
-    ("strcat_temp::strcat_temp::claiming_cats", 15_210_833_824),
-    ("string_temp::string_temp::borrowing_loads", 4_540_829_221),
-    ("string_temp::string_temp::claiming_loads", 16_355_827_319),
+    ("scalar_loop::scalar_loop::scalar_dispatch", 6_413_591_401),
+    ("strcat_temp::strcat_temp::serving_cats", 8_601_085_173),
+    ("strcat_temp::strcat_temp::claiming_cats", 15_106_085_708),
+    ("string_temp::string_temp::borrowing_loads", 4_526_080_623),
+    ("string_temp::string_temp::claiming_loads", 16_401_078_609),
     (
         "loop_claims::loop_claims::reset_held_to_overwrite",
-        4_445_828_179,
+        4_406_079_421,
     ),
     (
         "loop_claims::loop_claims::reset_released_at_use",
-        8_870_828_175,
+        8_886_079_657,
     ),
     (
         "loop_claims::loop_claims::rebuild_held_to_overwrite",
-        10_710_833_853,
+        10_721_085_972,
     ),
     (
         "loop_claims::loop_claims::rebuild_released_at_use",
-        10_710_833_017,
+        10_721_084_937,
     ),
 ];
 
@@ -258,7 +258,7 @@ fn bakes_the_gungraun_pins_against_the_committed_table() {
         );
         eprintln!("pin_bake: the tree-verified pin table:");
         for (name, count) in &results {
-            let count = count.as_ref().expect("the kernel measured");
+            let count = count.as_ref().unwrap_or_else(|e| panic!("{name}: {e}"));
             eprintln!("    (\"{name}\", {count}),");
         }
         return;
@@ -271,7 +271,7 @@ fn bakes_the_gungraun_pins_against_the_committed_table() {
     );
     let mut failures = Vec::new();
     for (name, count) in &results {
-        let count = count.as_ref().expect("the kernel measured");
+        let count = count.as_ref().unwrap_or_else(|e| panic!("{name}: {e}"));
         let recorded = PINS
             .iter()
             .find(|(pin, _)| pin == name)

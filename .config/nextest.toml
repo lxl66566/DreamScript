@@ -1,0 +1,20 @@
+# The workspace gate policy: any test wedging past the slow bound is killed
+# instead of hanging the run. The measured debug-gate ceiling is ~16s (the TCO
+# and dispatch-tail stress fixtures), the fuzz-exec oracle mirrors run 9-12s,
+# and everything else answers under 6s — so the default flags slow at 4x that
+# ceiling and kills at 8x, while the three heavy hitters carry their own bound
+# so a fully loaded machine never false-kills a stress fixture. A kill names a
+# hang (a dead-waiting net or io probe), never a loaded run.
+
+[profile.default]
+slow-timeout = { timeout = "60s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = "test(mutual_even_odd_at_ten_million_runs_at_constant_stack) or test(dispatch_tails_slide_through_the_frame_reuse_transfer) or binary(fuzz_exec_gen)"
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# the bind e2e legs shell out to the host rustc for their fixture cdylib:
+# a compile under parallel-lane load is a bounded wait, not a hang
+[[profile.default.overrides]]
+filter = "binary(fixture_dylib) or test(a_bound_artifact_reports_its_exported_c_symbols) or test(the_artifact_flag_selects_one_bound_library) or test(a_missing_artifact_refuses_the_bind) or test(an_extern_call_into_a_bound_artifact_keeps_its_lowering_refusal)"
+slow-timeout = { period = "120s", terminate-after = 2 }

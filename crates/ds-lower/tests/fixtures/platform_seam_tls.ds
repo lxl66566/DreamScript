@@ -1,0 +1,18 @@
+// The tls capability's install-validation probe (H5.5's ruling of
+// 2026-11-17): the https op sits in the platform ABI's fixed table
+// behind the net face — no ambient spelling declares it, so the package
+// declares its own extern — and the call site's FuncRef validates
+// against the host's tls membership when the module installs.
+
+tag string
+
+platform "std" provides <net>
+
+extern fn https_get (url: string) -> string
+
+fn fetch (url: string) -> string {
+  const body = https_get(url)
+  body
+}
+
+fn main () -> () { }

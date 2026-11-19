@@ -17,7 +17,7 @@
 //! ```text
 //! offset  size  field
 //! 0       4     magic "\0DSM"
-//! 4       1     format version (currently 3)
+//! 4       1     format version (currently 4)
 //! 5       1     target class: 0 = bytecode, 1 = wasm, 2 = triple
 //! 6       1     flags bitset: bit0 STRIP, bit1 FFI_USED, bit2 HAS_JIT_METADATA
 //! 7       1     collector flags (reserved; bit 0 = two-hook interface active)

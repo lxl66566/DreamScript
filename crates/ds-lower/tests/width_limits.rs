@@ -111,17 +111,19 @@ fn a_callable_value_call_staging_past_255_words_refuses_with_the_frame_error() {
     );
 }
 
-/// The tag mint ceiling: 246 distinct atoms fill the ids below the
+/// The tag mint ceiling: 243 distinct atoms fill the ids below the
 /// reserved top (the platform discriminants, the nursery boundary pair,
-/// and the claim-band pair above them) exactly and lower; the 247th mint
+/// the claim-band pair, the net failure classes, and the utf8 decode
+/// failure above them) exactly
+/// and lower; the 244th mint
 /// refuses with a typed error naming the space, never a silent wrap
 /// into the reserved range.
 #[test]
 fn the_tag_mint_ceiling_refuses_past_the_platforms_reserved_top() {
-    lower_clean("tags_fit", &many_atoms_source(246))
-        .expect("246 atoms exactly fill the space below the reserved top");
-    let Err(err) = lower_clean("tags_overflow", &many_atoms_source(247)) else {
-        panic!("the 247th tag mint must refuse")
+    lower_clean("tags_fit", &many_atoms_source(243))
+        .expect("243 atoms exactly fill the space below the reserved top");
+    let Err(err) = lower_clean("tags_overflow", &many_atoms_source(244)) else {
+        panic!("the 244th tag mint must refuse")
     };
     assert!(
         matches!(err, LowerError::Unsupported { .. }),

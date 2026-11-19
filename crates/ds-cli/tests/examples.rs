@@ -75,8 +75,8 @@ fn lists_print_the_literal_and_constructor_surface() {
 
 #[test]
 fn containers_compose_the_generic_closes() {
-    // the six container closes dispatch through CALLG: cons builds, tail
-    // drops the first, collect copies, head/first answer the checked
+    // the container closes dispatch through CALLG: cons builds, tail
+    // drops the first, collect copies, first answers the checked
     // first element (the empty list the none member), and max orders
     // both numeric instances
     assert_eq!(
@@ -248,7 +248,7 @@ fn net_round_trips_against_a_local_listener() {
         let n = sock.read(&mut buf).expect("the ping arrives");
         let mut reply = b"echo: ".to_vec();
         reply.extend_from_slice(&buf[..n]);
-        // one write: the example's net_recv reads once
+        // one write: the example's recv reads once
         sock.write_all(&reply).expect("the echo writes");
     });
     let out = ds()
@@ -301,8 +301,146 @@ fn schema_builds_its_table_at_comptime() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("schema.ds"))),
         "{title: string, views: int, tags: list[string], }\n{quiet: none/quiet, loud: loud/loud, \
-         }\ntitle, views, tags\nfields: 3\nschema ======\n0\n"
+         }\ntitle,views,tags\nfields: 3\nschema ======\n0\n"
     );
+}
+
+#[test]
+fn generic_dispatch_tells_through_the_staged_evidence() {
+    // the transitive evidence surface: `impl[t: shows] tells for list[t]`
+    // lowers once and the entering concrete site stages the serving
+    // body's whole evidence area, so the nested `show` dispatch rides
+    // the staged words at runtime — int and string elements plus the
+    // two-level list-of-list hop
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("generic_dispatch.ds"))),
+        "told list:n=1;n=2;\ntold list:a!;b!;\ntold list:list:n=3;;\nlist:n=4;\n0\n"
+    );
+}
+
+#[test]
+fn records_list_reads_stage_whole_word_spans() {
+    // the record-element list over the native result span channel:
+    // list_push stages whole inline item words, the checked list_get
+    // answers `item | none` re-spanned whole, the `.ok`/`.err` chain
+    // extracts on both sides (the missing index landing in the fallback
+    // record), and the fields project out of the extracted element
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("records_lists.ds"))),
+        "count 3 first pen mug 15 miss none\ntotal 42\n0\n"
+    );
+}
+
+#[test]
+fn trait_defaults_answer_from_their_single_authorities() {
+    // the defaulted-parameter surface across every call spelling: the
+    // trait member's declared default and the written argument both
+    // stage identically through the dot-call and the `Trait::method`
+    // spelling, and the inherent member keeps the impl block's own
+    // default
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("trait_defaults.ds"))),
+        "int 4 4 13 13\nstr 5 5 9\ncounter 4 11\n0\n"
+    );
+}
+
+#[test]
+fn json_round_trips_through_the_derive_families() {
+    // the json face plus both derive families: parse_json and the plain
+    // writer round trip one open document, the from_json walk answers
+    // the declared struct (an absent optional reading none, a missing
+    // member or a wrong shape answering parse_err), the to_json walk
+    // encodes back with the absent optional's member left out, and the
+    // enum target reads its unit cases from their names and its one
+    // payloaded case from the member its payload declares
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("json.ds"))),
+        concat!(
+            "{\"b\":[1,2.5,true,null],\"a\":\"x\"}\n",
+            "{\"name\":\"ada\",\"age\":45}\n",
+            "{\"name\":\"bob\",\"age\":15,\"email\":\"bob@ds.dev\"}\n",
+            "parse_err\n",
+            "parse_err\n",
+            "\"quiet\"\n",
+            "{\"volume\":3}\n",
+            "parse_err\n",
+            "0\n"
+        )
+    );
+}
+
+#[test]
+fn json_width_round_trips_the_scalar_field_vocabulary() {
+    // the width-scalar fields through both derive families over one
+    // declared frame: byte and u32 decode from and encode as json
+    // numbers (the range edges 0/255 and 0/2^32-1 included), char as a
+    // one-character json string, bytes as a json array of numbers, and
+    // an out-of-range u32, a two-character char, an out-of-range byte
+    // element, and a missing member each answer parse_err
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("json_width.ds"))),
+        concat!(
+            "{\"tag\":65,\"index\":4000000000,\"mark\":\"q\",\"payload\":[104,105]}\n",
+            "{\"tag\":255,\"index\":4294967295,\"mark\":\"é\",\"payload\":[0,255]}\n",
+            "{\"tag\":0,\"index\":0,\"mark\":\"q\",\"payload\":[]}\n",
+            "parse_err\n",
+            "parse_err\n",
+            "parse_err\n",
+            "parse_err\n",
+            "0\n"
+        )
+    );
+}
+
+#[test]
+fn bytes_face_shows_orders_and_crosses_the_utf8_bridges() {
+    // the bytes representation: show renders the payload as a byte list
+    // (empty printing bytes[]), len counts the payload, the checked
+    // byte_at reads, == compares content against the encode bridge's
+    // answer, decode validates on the way back (the orphan lead byte
+    // refusing as utf8_err), and the show derive composes over a bytes
+    // part
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("bytes.ds"))),
+        concat!(
+            "bytes[97, 98]\n",
+            "bytes[]\n",
+            "2 true\n",
+            "true\n",
+            "6\n",
+            "héllo\n",
+            "orphan byte refused\n",
+            "chunk { data: bytes[97, 98] }\n",
+            "0\n"
+        )
+    );
+}
+
+/// Every committed example carries a run gate: each `examples/*.ds`
+/// file must appear in an `example(...)` call above, so a new example
+/// cannot land unguarded — the plan's "every file in examples/ runs
+/// green" held only by listing the files here.
+#[test]
+fn every_example_has_a_gate() {
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let suite =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/examples.rs"))
+            .expect("the suite reads its own source");
+    let mut gated = 0;
+    for entry in fs::read_dir(&examples).expect("the examples dir reads") {
+        let path = entry.expect("the entry reads").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("ds") {
+            continue;
+        }
+        let name = path.file_name().expect("the entry has a name");
+        assert!(
+            suite.contains(&format!("example(\"{}\")", name.to_string_lossy())),
+            "{} has no gate in tests/examples.rs",
+            name.to_string_lossy()
+        );
+        gated += 1;
+    }
+    assert!(gated > 0, "the examples dir holds at least one example");
 }
 
 #[test]

@@ -19,10 +19,14 @@
 //! dep-list writer records real content for the names the source text
 //! alone cannot determine.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    sync::LazyLock,
+};
 
 use anyhow::{Context, Result, anyhow};
-use ds_check::{Analyzed, Ty};
+use ds_check::{Analyzed, DeclaredRows, Effect, EffectRow, Ty};
 use ds_diag::{Diagnostic, ErrorCode, Files, render};
 use ds_dsi::ServedPrefix;
 use ds_lower::{ComptimeValues, LowerError, Lowered, lower_with_comptime, lower_with_served};
@@ -34,8 +38,257 @@ use ds_parse::{ItemKind, Pattern, parse, parse_script};
 /// core and the default `std` platform handler's module name).
 const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 
+/// The host provision's member file: the CLI-owned declaration member an
+/// entry session registers beside the ambient (the 2026-11-17 die split —
+/// the convenience spelling is host code, never ambient or `@std` source).
+/// The `$` stem keeps it outside every plausible user stem.
+pub(crate) const HOST_FILE: &str = "$host.ds";
+
+/// The host provision's text: the `die` spelling's declaration, the
+/// signature the old ambient extern carried, `pub` like every ambient
+/// face [G4] because the member's name is the host's surface to the
+/// entry files, not a private one. The lowerer's compiler-wired
+/// recognition routes the call to the builtin core's bare trap
+/// primitive; what the trap prints and which exit code follows is this
+/// host's own policy.
+pub(crate) const HOST_SOURCE: &str = "pub extern fn die[t](msg: string) -> t\n";
+
+/// The entry session's declared rows: the ambient's table plus the die
+/// spelling's `trap` row — the host's own declaration, so the row rides
+/// with it (a declared row is a lower bound; trap alone never fences or
+/// refuses the pooled bodies).
+static SESSION_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
+    ds_stdlib::declared_rows()
+        .clone()
+        .with("die", EffectRow::of(Effect::Trap))
+});
+
+/// The entry session's rows when the ambient serves: the host member's
+/// die row beside the ambient's table.
+pub(crate) fn session_rows() -> &'static DeclaredRows {
+    &SESSION_ROWS
+}
+
+/// How many ambient files a package compile under `link_name` registers
+/// ahead of its members: one unless the ambient is off — or the package
+/// is the reserved `@std` itself, whose member IS the ambient source
+/// seeded verbatim, so registering the ambient beside it would duplicate
+/// every declaration. The one rule the compile and the surface builder
+/// share: the rebase map a consumer builds reads the linked package's
+/// own file space through it.
+pub(crate) fn package_ambient_files(no_ambient: bool, link_name: &str) -> usize {
+    usize::from(!no_ambient && link_name != ds_stdlib::STD_PACKAGE_NAME)
+}
+
+/// Extracts every member file's exported top-level definitions (G4):
+/// one [`Export`] per package def whose defining span names a member
+/// source — the module's own ambient and the import-bound foreign defs
+/// excluded — carrying the facts an import surface serves (the written
+/// signature of a callable, the solved row, the function-table index a
+/// cross-module call addresses, the literal value a plain `const`
+/// binding carries as its own link fact, and the word layout a struct,
+/// enum, or enum-case declaration carries as its own). A `const` binding whose value
+/// is a function (F2) exports as callable when its signature registered;
+/// a data const exports as a binding, its fact the literal when the
+/// initializer is one.
+#[must_use]
+fn exports_of(
+    analyzed: &Analyzed,
+    ambient_files: usize,
+    effects: &ds_check::Effects,
+    functions: &[String],
+) -> Vec<Export> {
+    let caps_of = |def: ds_check::DefId| {
+        effects
+            .defs()
+            .iter()
+            .find(|entry| entry.def == def)
+            .map_or(0, |entry| entry.caps)
+    };
+    let mut exports = Vec::new();
+    for (index, def) in analyzed.package.defs().enumerate() {
+        if (def.span.file.as_u32() as usize) < ambient_files {
+            continue; // the ambient's own definitions never export
+        }
+        let id = ds_check::DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
+        if analyzed.package.foreign().contains_key(&id) {
+            // an import-bound definition is not this package's own: the
+            // export surface carries the package's declarations alone, so
+            // a linked name never re-exports transitively (G4's
+            // transitive closure stays the artifact round's)
+            continue;
+        }
+        let sig = analyzed.decls.fns.get(&id).cloned();
+        let kind = match (def.kind, sig.is_some()) {
+            (ds_check::DefKind::Const, true) | (ds_check::DefKind::Fn, _) => ExportKind::Fn,
+            (ds_check::DefKind::Const, false) | (ds_check::DefKind::Var, _) => ExportKind::Binding,
+            _ => ExportKind::Type,
+        };
+        let (generic, defaulted, func) = match &sig {
+            Some(sig) => (
+                !sig.generics.is_empty()
+                    || sig
+                        .params
+                        .iter()
+                        .any(|param| matches!(param.mode, ds_parse::ParamMode::Comptime(_))),
+                sig.params.iter().any(|param| param.default.is_some()),
+                functions.iter().position(|name| *name == def.name),
+            ),
+            None => (false, false, None),
+        };
+        // A data const's per-target link fact is the literal itself: an
+        // immutable binding whose initializer is a plain literal carries
+        // it, and everything computed stays shape-refused downstream.
+        let value = if kind == ExportKind::Binding {
+            analyzed
+                .decls
+                .consts
+                .get(&id)
+                .filter(|local| !local.mutable)
+                .and_then(|local| ds_check::ConstFact::of_expr(&local.init))
+        } else {
+            None
+        };
+        // A type declaration's per-target link fact is its word layout
+        // over the surface's vocabulary: a flat non-generic struct, a
+        // non-generic enum's tag rows, and each minted case's own row —
+        // every other type-namespace shape stays refused downstream.
+        let ty = match def.kind {
+            ds_check::DefKind::Struct => {
+                ds_check::TypeFact::of_struct(&analyzed.decls, id).map(std::sync::Arc::new)
+            },
+            ds_check::DefKind::Enum => {
+                ds_check::TypeFact::of_enum(&analyzed.package, &analyzed.decls, id)
+                    .map(std::sync::Arc::new)
+            },
+            ds_check::DefKind::Case => {
+                let enum_name = analyzed
+                    .decls
+                    .cases
+                    .get(&id)
+                    .map(|case| analyzed.package.def(case.enum_def).name.clone());
+                enum_name.and_then(|enum_name| {
+                    ds_check::TypeFact::of_case(&analyzed.decls, id, &enum_name)
+                        .map(std::sync::Arc::new)
+                })
+            },
+            _ => None,
+        };
+        exports.push(Export {
+            name: def.name.clone(),
+            vis: def.vis,
+            kind,
+            generic,
+            defaulted,
+            decl_span: def.span,
+            sig,
+            value,
+            ty,
+            func: func.map(|func| u32::try_from(func).expect("function index fits u32")),
+            row: effects.of(id).unwrap_or_default(),
+            caps: caps_of(id),
+        });
+    }
+    exports
+}
+
+/// Rebases one signature's span set across file registries (G4): every
+/// span and written type names the consuming compile's own registry, so
+/// the diagnostics a link pass mints render there. A signature whose
+/// file ids all map is untouched in shape.
+#[must_use]
+pub(crate) fn rebase_sig(
+    sig: &ds_check::FnSig,
+    map: &HashMap<ds_diag::FileId, ds_diag::FileId>,
+) -> std::sync::Arc<ds_check::FnSig> {
+    let mut sig = ds_check::FnSig {
+        generics: sig.generics.clone(),
+        params: sig.params.clone(),
+        ret: sig.ret.clone(),
+    };
+    for generic in &mut sig.generics {
+        generic.span = rebase_span(generic.span, map);
+        rebase_type(&mut generic.bound, map);
+    }
+    for param in &mut sig.params {
+        param.span = rebase_span(param.span, map);
+        rebase_type(&mut param.ty, map);
+    }
+    rebase_type(&mut sig.ret, map);
+    std::sync::Arc::new(sig)
+}
+
+/// Rebases one written type's spans through the registry map.
+fn rebase_type(ty: &mut Option<ds_parse::Type>, map: &HashMap<ds_diag::FileId, ds_diag::FileId>) {
+    let Some(ty) = ty else { return };
+    rebase_type_node(ty, map);
+}
+
+/// Rebases one type node's spans, recursively.
+fn rebase_type_node(ty: &mut ds_parse::Type, map: &HashMap<ds_diag::FileId, ds_diag::FileId>) {
+    use ds_parse::Type;
+    match ty {
+        Type::Path { span, args, .. } => {
+            *span = rebase_span(*span, map);
+            for arg in args {
+                rebase_type_node(arg, map);
+            }
+        },
+        Type::Optional { span, inner }
+        | Type::Negation { span, inner }
+        | Type::Intersect {
+            span, left: inner, ..
+        }
+        | Type::Difference {
+            span, left: inner, ..
+        }
+        | Type::Paren { span, inner }
+        | Type::Ptr { span, inner, .. } => {
+            *span = rebase_span(*span, map);
+            rebase_type_node(inner, map);
+        },
+        Type::Union { span, left, right } => {
+            *span = rebase_span(*span, map);
+            rebase_type_node(left, map);
+            rebase_type_node(right, map);
+        },
+        Type::Tuple { span, items } => {
+            *span = rebase_span(*span, map);
+            for item in items {
+                rebase_type_node(item, map);
+            }
+        },
+        Type::Unit(span) | Type::TypeKw(span) | Type::Foreign { span, .. } => {
+            *span = rebase_span(*span, map);
+        },
+        Type::Fn { span, params, ret } => {
+            *span = rebase_span(*span, map);
+            for param in params {
+                param.name.span = rebase_span(param.name.span, map);
+                rebase_type(&mut param.ty, map);
+            }
+            if let Some(ret) = ret {
+                rebase_type_node(ret, map);
+            }
+        },
+    }
+}
+
+/// Maps one span's file id through the registry map; a span whose file
+/// does not map keeps its id (a sig fact the surface never reads back).
+pub(crate) fn rebase_span(
+    span: ds_diag::Span,
+    map: &HashMap<ds_diag::FileId, ds_diag::FileId>,
+) -> ds_diag::Span {
+    match map.get(&span.file) {
+        Some(file) => ds_diag::Span::new(*file, span.start, span.end),
+        None => span,
+    }
+}
+
 /// One compiled source: the lowered module plus what the run entry path
-/// needs — the module's name and the entry's staging plan.
+/// needs — the module's name, the entry's staging plan, and the export
+/// surface a dependent's imports bind through (G4).
 pub struct CompiledSource {
     /// The lowered module, its name derived from the file's stem, with
     /// the tag table and every candidate entry's staging plan recorded.
@@ -45,6 +298,77 @@ pub struct CompiledSource {
     /// The entry's staging plan, when a lowerable function of the entry
     /// name exists.
     pub entry_args: Option<Vec<EntryArg>>,
+    /// Every member file's exported top-level definitions (G4), in
+    /// declaration order: the surface a dependent's import selections
+    /// validate against, carrying the written signatures and effect rows
+    /// the dependent's own checks read. Empty for a script compile's
+    /// own view of itself.
+    pub exports: Vec<Export>,
+}
+
+/// One member file's exported definition: the import surface's facts
+/// (G4), in this compile's own file space — a dependent rebases the
+/// spans into its own registry when it builds its import surfaces.
+#[derive(Clone, Debug)]
+pub struct Export {
+    /// The declared name.
+    pub name: String,
+    /// The declared tier.
+    pub vis: ds_check::Vis,
+    /// What the declaration defines.
+    pub kind: ExportKind,
+    /// A generic declaration (generic parameters or a comptime
+    /// parameter).
+    pub generic: bool,
+    /// A defaulted parameter.
+    pub defaulted: bool,
+    /// The defining name occurrence, this compile's file space.
+    pub decl_span: ds_diag::Span,
+    /// The written signature: callable definitions only.
+    pub sig: Option<std::sync::Arc<ds_check::FnSig>>,
+    /// The literal fact a non-callable `const` carries: the value itself,
+    /// which a dependent's use sites embed. Computed initializers and
+    /// `var` bindings carry none.
+    pub value: Option<ds_check::ConstFact>,
+    /// The structural fact a type declaration carries: the word layout
+    /// a dependent's link walk mints its own def from — a struct's
+    /// fields, an enum's tag rows, a case's own row. Every other
+    /// type-namespace shape carries none.
+    pub ty: Option<std::sync::Arc<ds_check::TypeFact>>,
+    /// The function's index in this module's table, callable definitions
+    /// only.
+    pub func: Option<u32>,
+    /// The definition's solved effect row.
+    pub row: EffectRow,
+    /// The definition's world-capability bits.
+    pub caps: u8,
+}
+
+/// What one exported definition declares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExportKind {
+    /// A function (a `fn` or a callable const-arrow binding).
+    Fn,
+    /// A data binding.
+    Binding,
+    /// A type-namespace declaration.
+    Type,
+}
+
+/// What happens to the compile bundle — the analyzer's checked tables
+/// and trees — once the module lowers. The bundle's teardown is
+/// dominated by the ambient's tables and trees, so the one-compile-per-
+/// process subcommands (`ds run`, `ds build`) keep it: the memory stays
+/// resident until process exit and the teardown never runs. A host that
+/// compiles repeatedly in one process (the package graph's member
+/// compiles, the test suites) drops it, so the memory returns per
+/// compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleAfter {
+    /// The bundle drops with the compile.
+    Drop,
+    /// The bundle stays until process exit reclaims it.
+    Keep,
 }
 
 /// Parses, checks, and lowers one source file. Diagnostics render to
@@ -65,6 +389,7 @@ pub fn compile(
     entry: &str,
     no_ambient: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    after: BundleAfter,
 ) -> Result<CompiledSource> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -72,9 +397,20 @@ pub fn compile(
         name: script_module_name(path)?,
         display: path.display().to_string(),
         main_required: true,
+        identity: Hash128::compute(source.as_bytes()),
         dep_content: &NO_DEPS,
     };
-    compile_text(&inputs, &source, entry, no_ambient, true, prefix_cache)
+    compile_text(
+        &inputs,
+        &[(inputs.display.clone(), source)],
+        true,
+        entry,
+        no_ambient,
+        true,
+        prefix_cache,
+        None,
+        after,
+    )
 }
 
 /// The dep identities a plain script supplies: none — every name but the
@@ -92,6 +428,9 @@ struct Inputs<'a> {
     name: String,
     display: String,
     main_required: bool,
+    /// The module's content identity (G3.5): a script's or single-member
+    /// package's source hash, a multi-member package's composed fold.
+    identity: Hash128,
     dep_content: &'a BTreeMap<String, Hash128>,
 }
 
@@ -100,12 +439,16 @@ struct Inputs<'a> {
 /// diagnostics render, and `dep_content` the resolved graph's
 /// identities, which the writer records for names the source text alone
 /// cannot determine. The run contract's `main` entry is required, the
-/// script rule.
+/// script rule. `graph` links the imports when the root runs over a
+/// resolved package graph; `None` keeps every import declarative.
+/// `prefix_cache` is the caller's prefix tier, keyed on the same dep
+/// identities; `None` runs uncached.
 ///
 /// # Errors
 ///
 /// A reserved or empty module name, and every pipeline failure
 /// [`compile`] reports.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_package(
     name: &str,
     display: &str,
@@ -113,47 +456,50 @@ pub fn compile_package(
     entry: &str,
     no_ambient: bool,
     dep_content: &BTreeMap<String, Hash128>,
+    graph: Option<&crate::package::Graph>,
+    prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    after: BundleAfter,
 ) -> Result<CompiledSource> {
-    compile_framed(name, display, source, entry, no_ambient, true, dep_content)
+    compile_linked(
+        name,
+        &[(display.to_owned(), source.to_owned())],
+        Hash128::compute(source.as_bytes()),
+        entry,
+        true,
+        no_ambient,
+        dep_content,
+        graph,
+        prefix_cache,
+        after,
+    )
 }
 
-/// Compiles one resolved package's single source member: the module
-/// serves under the package's link name, its own recorded imports
-/// validate against the same graph through the caller's `dep_content`,
-/// and the run contract's `main` entry check is waived — an installed
-/// member serves its members and never runs as an entry.
+/// Compiles one package module over its member sources (G3's one
+/// namespace per package): the members share one compile unit after the
+/// ambient, the module serves under `name` at the caller-supplied
+/// `identity` (a single member's source hash, a composed fold over
+/// every member otherwise), and its own recorded imports validate
+/// against the same graph through the caller's `dep_content` and bind
+/// through `graph`. The run contract's `main` entry check is waived
+/// when `main_required` is false — an installed member serves its
+/// members and never runs as an entry.
 ///
 /// # Errors
 ///
 /// A reserved or empty module name, and every pipeline failure
 /// [`compile`] reports.
-pub fn compile_member(
+#[allow(clippy::too_many_arguments)]
+pub fn compile_linked(
     name: &str,
-    display: &str,
-    source: &str,
-    no_ambient: bool,
-    dep_content: &BTreeMap<String, Hash128>,
-) -> Result<CompiledSource> {
-    compile_framed(
-        name,
-        display,
-        source,
-        "main",
-        no_ambient,
-        false,
-        dep_content,
-    )
-}
-
-/// The shared framing behind the two package shapes.
-fn compile_framed(
-    name: &str,
-    display: &str,
-    source: &str,
+    members: &[(String, String)],
+    identity: Hash128,
     entry: &str,
-    no_ambient: bool,
     main_required: bool,
+    no_ambient: bool,
     dep_content: &BTreeMap<String, Hash128>,
+    graph: Option<&crate::package::Graph>,
+    prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    after: BundleAfter,
 ) -> Result<CompiledSource> {
     if name.is_empty() {
         return Err(anyhow!("the package module has no name"));
@@ -166,23 +512,40 @@ fn compile_framed(
     }
     let inputs = Inputs {
         name: name.to_owned(),
-        display: display.to_owned(),
+        display: members
+            .first()
+            .map_or_else(String::new, |(display, _)| display.clone()),
         main_required,
+        identity,
         dep_content,
     };
-    compile_text(&inputs, source, entry, no_ambient, true, None)
+    compile_text(
+        &inputs,
+        members,
+        false,
+        entry,
+        no_ambient,
+        true,
+        prefix_cache,
+        graph,
+        after,
+    )
 }
 
 /// The compile pipeline over source text (`compile` after its read):
 /// `allow_serve` switches the ambient dsmod splice off, the fresh
 /// lowering baseline the artifact gates compare against.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn compile_text(
     inputs: &Inputs<'_>,
-    source: &str,
+    sources: &[(String, String)],
+    script: bool,
     entry: &str,
     no_ambient: bool,
     allow_serve: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    graph: Option<&crate::package::Graph>,
+    after: BundleAfter,
 ) -> Result<CompiledSource> {
     let mut files = Files::new();
     // The trees move into the analyzer, one pre-expansion mark per tree:
@@ -190,27 +553,63 @@ fn compile_text(
     // other tree expands at run time.
     let mut asts = Vec::new();
     let mut preexpanded = Vec::new();
-    // The registration the prefix pins: the ambient first, the entry
-    // file after it.
+    // The registration the prefix pins: the ambient first, the sources
+    // after it, in order. The reserved `@std` package's own member
+    // compile registers none — the member IS the ambient source seeded
+    // verbatim, so the ambient beside it would duplicate every face.
     let mut ids = Vec::new();
-    if !no_ambient {
+    let std_pkg = inputs.name == ds_stdlib::STD_PACKAGE_NAME;
+    let ambient_files = usize::from(!no_ambient && !std_pkg);
+    // The die provision (the 2026-11-17 split): an entry session carries
+    // the host member as its last registered source — a plain member, so
+    // the ambient band, the serve tiers' file counts, and the export
+    // rules all see one more member file and nothing else moves. The
+    // session is one the host provisions when the run contract's `main`
+    // entry is required (a script or a package root, never an installed
+    // member), the ambient registers (the merged reading the provision
+    // rides), and the package is not `@std` itself (its member is the
+    // ambient verbatim).
+    let host_member = usize::from(inputs.main_required && !no_ambient && !std_pkg);
+    if ambient_files > 0 {
         let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let (ast, expanded) = ambient_tree(&files, id);
         asts.push(ast);
         preexpanded.push(expanded);
         ids.push(id);
     }
-    // The given file is the entry: script mode folds its top-level
-    // statements into a synthesized `main` (the ambient stays
-    // pure-declaration, like every imported file).
-    let id = files.add_source(inputs.display.clone(), source);
-    asts.push(match parse_script(&files, id) {
-        Ok(ast) => ast,
-        Err(diags) => return Err(reject(&files, &diags, "the source has syntax errors")),
-    });
-    preexpanded.push(false);
-    ids.push(id);
+    let mut members: Vec<(String, String)> = sources.to_vec();
+    if host_member > 0 {
+        members.push((HOST_FILE.to_owned(), HOST_SOURCE.to_owned()));
+    }
+    for (at, (display, text)) in members.iter().enumerate() {
+        // The first source is the entry: script mode folds its top-level
+        // statements into a synthesized `main` (the ambient stays
+        // pure-declaration, like every member file).
+        let id = files.add_source(display, text);
+        asts.push(std::sync::Arc::new(if script && at == 0 {
+            match parse_script(&files, id) {
+                Ok(ast) => ast,
+                Err(diags) => return Err(reject(&files, &diags, "the source has syntax errors")),
+            }
+        } else {
+            match parse(&files, id) {
+                Ok(ast) => ast,
+                Err(diags) => return Err(reject(&files, &diags, "the source has syntax errors")),
+            }
+        }));
+        preexpanded.push(false);
+        ids.push(id);
+    }
     let name = inputs.name.clone();
+    // The import surfaces (G4): a resolved graph's linked packages
+    // validate and bind this compile's own imports (the ambient's merged
+    // member served as `@std` when it registers). A graph absent keeps
+    // every import declarative. The builder registers the selected
+    // linked members' texts after the sources, so the surfaces' spans
+    // name this compile's own registry.
+    let imports = graph
+        .map(|graph| graph.surfaces(&mut files, &asts, ambient_files))
+        .transpose()?;
     // Two serve tiers, each a pure cache with the fresh compute as the
     // canonical fallback: the user cache's composed prefix first — the
     // whole program's front-end half (the ambient member plus this
@@ -222,13 +621,22 @@ fn compile_text(
     let mut served = None;
     let mut served_rows = None;
     if let Some(cache) = prefix_cache {
-        served = cache.lookup(&name, source, &ids);
+        served = cache.lookup(&name, &sources[0].1, &ids);
     }
-    if served.is_none() && !no_ambient {
+    // The ambient tier alone parks its affine walk: the prefix is one
+    // file shared by every compile of the process, so the first walk
+    // over it fills the park and later member compiles install it. A
+    // composed user prefix serves a different (per-source) file set and
+    // keeps the plain full walk. The `@std` package's own member compile
+    // takes the fresh analyze — its member parsed and expanded here, not
+    // the blob-served ambient tree the prefix assumes.
+    let mut ambient_served = false;
+    if served.is_none() && ambient_files > 0 {
         served = ds_stdlib::ambient_dsi(ids[0]).ok();
+        ambient_served = served.is_some();
     }
-    let analyzed = match served {
-        Some(prefix) => {
+    let analyzed = match (served, &imports) {
+        (Some(prefix), imports) => {
             let ServedPrefix {
                 package,
                 resolutions,
@@ -237,9 +645,23 @@ fn compile_text(
                 effect_methods,
             } = prefix;
             served_rows = Some((resolutions.len(), effect_defs, effect_methods));
-            ds_meta::analyze_served(&files, asts, &preexpanded, package, resolutions, decls)
+            match imports {
+                Some(imports) => ds_meta::analyze_served_linked(
+                    &files,
+                    asts,
+                    &preexpanded,
+                    package,
+                    resolutions,
+                    decls,
+                    imports,
+                ),
+                None => {
+                    ds_meta::analyze_served(&files, asts, &preexpanded, package, resolutions, decls)
+                },
+            }
         },
-        None => ds_meta::analyze_owned(&files, asts, &preexpanded),
+        (None, Some(imports)) => ds_meta::analyze_owned_linked(&files, asts, &preexpanded, imports),
+        (None, None) => ds_meta::analyze_owned(&files, asts, &preexpanded),
     };
     if !analyzed.checked.diags.is_empty() {
         return Err(reject(
@@ -252,14 +674,31 @@ fn compile_text(
     // consult before committing, refusing here before anything lowers
     // or runs. Lowering derives its move and deinit placement from this
     // walk's facts, which hold only over a clean one — a moved-then-used
-    // value would lower code whose deinit fires twice.
-    let linear = ds_check::linearity_check(
-        &analyzed.asts,
-        &analyzed.package,
-        &analyzed.resolutions,
-        &analyzed.decls,
-        &analyzed.checked,
-    );
+    // value would lower code whose deinit fires twice. The ambient
+    // serve's prefix parks after the first member compile walks it, so
+    // later compiles walk only their own trees and read the parked rows.
+    let linear = if ambient_served {
+        let Some((served_files, ..)) = &served_rows else {
+            unreachable!("an ambient serve records its file count")
+        };
+        ds_check::linearity_check_served(
+            &analyzed.asts,
+            &analyzed.package,
+            &analyzed.resolutions,
+            &analyzed.decls,
+            &analyzed.checked,
+            *served_files,
+            ds_stdlib::ambient_linearity(),
+        )
+    } else {
+        ds_check::linearity_check(
+            &analyzed.asts,
+            &analyzed.package,
+            &analyzed.resolutions,
+            &analyzed.decls,
+            &analyzed.checked,
+        )
+    };
     if !linear.diags.is_empty() {
         return Err(reject(
             &files,
@@ -274,11 +713,15 @@ fn compile_text(
     // The platform check [H5]: the package's world usage verified inside
     // what its platform declaration provides. Without the ambient there
     // are no declared rows to attribute, but the declaration itself is
-    // still validated.
-    let empty_rows = ds_check::DeclaredRows::new();
+    // still validated — the `@std` package's own member compile the
+    // exception: its source is the ambient's, so its declared rows apply
+    // (they are name-keyed over exactly the externs it declares).
+    let empty_rows = DeclaredRows::new();
     let empty_caps = ds_check::WorldCaps::new();
-    let (rows, caps): (&ds_check::DeclaredRows, &ds_check::WorldCaps) = if no_ambient {
+    let (rows, caps): (&DeclaredRows, &ds_check::WorldCaps) = if no_ambient && !std_pkg {
         (&empty_rows, &empty_caps)
+    } else if host_member > 0 {
+        (&SESSION_ROWS, ds_stdlib::world_caps())
     } else {
         (ds_stdlib::declared_rows(), ds_stdlib::world_caps())
     };
@@ -330,7 +773,7 @@ fn compile_text(
         ));
     }
     let name = inputs.name.clone();
-    let source_hash = Hash128::compute(source.as_bytes());
+    let source_hash = inputs.identity;
     // The comptime evaluator (G1): comptime calls run on the fenced VM
     // here, their answers embedding at the call sites below — a package
     // with no comptime call evaluates nothing.
@@ -339,8 +782,11 @@ fn compile_text(
     // The ambient's impl bodies splice in from the checked-in dsmod when
     // it verifies against this build; every miss (identity, format,
     // name, source hash, splice boundary, plan disagreement) falls back
-    // to lowering them here, whose answer is the canonical one.
-    let served = if !no_ambient && allow_serve { crate::ambient_dsmod::serve() } else { None };
+    // to lowering them here, whose answer is the canonical one. The
+    // `@std` package's own member compile never splices: its items ARE
+    // the ambient's, planned in this module's own table.
+    let served =
+        if !no_ambient && !std_pkg && allow_serve { crate::ambient_dsmod::serve() } else { None };
     let lowered = lower_via_serve(
         inputs.main_required,
         &name,
@@ -348,6 +794,7 @@ fn compile_text(
         asts,
         &analyzed,
         served,
+        &linear,
         &comptime,
     )
     .map_err(|error| lower_error(&files, &error))?;
@@ -361,17 +808,29 @@ fn compile_text(
         .iter()
         .find(|plan| plan.name == entry)
         .map(|plan| plan.args.clone());
-    let deps = dep_list(&asts[usize::from(!no_ambient)..], inputs.dep_content);
+    let deps = dep_list(&asts[ambient_files..], inputs.dep_content);
     // A clean, fully lowered compile persists its own prefix for the
     // next run of the same source; every failure inside is silent (the
     // compile already succeeded, the next run falls back).
     if let Some(cache) = prefix_cache {
-        cache.store(&name, source, &ids, &analyzed, &effects, rows, caps);
+        cache.store(&name, &sources[0].1, &ids, &analyzed, &effects, rows, caps);
+    }
+    let exports = exports_of(&analyzed, ambient_files, &effects, lowered.functions());
+    match after {
+        BundleAfter::Keep => {
+            // The bundle's teardown is pure overhead on the one-shot
+            // subcommands: nothing reads the tables again, and process
+            // exit reclaims the memory, so the ambient-dominated drop
+            // never runs.
+            std::mem::forget(analyzed);
+        },
+        BundleAfter::Drop => {},
     }
     Ok(CompiledSource {
         lowered: lowered.with_deps(deps).with_entry_plans(entries),
         name,
         entry_args,
+        exports,
     })
 }
 
@@ -379,45 +838,76 @@ fn compile_text(
 /// embedded blob when it verifies against this registration (its trees
 /// carry the derive expansion from artifact build time), a fresh parse
 /// otherwise — the blob is a pure cache, never correctness-load-bearing.
-fn ambient_tree(files: &Files, id: ds_diag::FileId) -> (ds_parse::Ast, bool) {
+fn ambient_tree(files: &Files, id: ds_diag::FileId) -> (std::sync::Arc<ds_parse::Ast>, bool) {
     match ds_stdlib::ambient_ast(id) {
         Ok(ast) => (ast, true),
-        Err(_) => (parse(files, id).expect("the ambient parses"), false),
+        Err(_) => (
+            std::sync::Arc::new(parse(files, id).expect("the ambient parses")),
+            false,
+        ),
     }
 }
 
-/// The lowering seam the ambient dsmod rides: the served bodies splice
-/// over the planned ambient prefix, and any failure of theirs — the
-/// splice disagreement included — falls back to the fresh lowering,
-/// whose result (success or refusal) is the run's canonical answer: the
-/// serve is a pure cache, never correctness-load-bearing. Both paths
-/// embed the comptime evaluator's answers at the call sites.
-fn lower_via_serve(
+/// The lowering seam the ambient dsmod rides: the served bodies and
+/// their tag rows splice over the planned ambient prefix, and any
+/// failure of theirs — the splice disagreement included — falls back to
+/// the fresh lowering, whose result (success or refusal) is the run's
+/// canonical answer: the serve is a pure cache, never
+/// correctness-load-bearing. Both paths embed the comptime evaluator's
+/// answers at the call sites and read the affine walk the gate already
+/// ran (`linear`), so the walk answers once per compile.
+fn lower_via_serve<T>(
     main_required: bool,
     name: &str,
     source_hash: Hash128,
-    asts: &[ds_parse::Ast],
+    asts: &[T],
     analyzed: &Analyzed,
-    served: Option<Vec<ds_mod::Function>>,
+    served: Option<ds_lower::Served>,
+    linear: &ds_check::Linearity,
     comptime: &ComptimeValues,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<ds_parse::Ast>,
+{
     if main_required {
         if let Some(served) = served
-            && let Ok(lowered) =
-                lower_with_served(name, source_hash, asts, analyzed, served, comptime)
+            && let Ok(lowered) = lower_with_served(
+                name,
+                source_hash,
+                asts,
+                analyzed,
+                served,
+                Some(linear),
+                comptime,
+            )
         {
             return Ok(lowered);
         }
-        return lower_with_comptime(name, source_hash, asts, analyzed, comptime);
+        return lower_with_comptime(name, source_hash, asts, analyzed, Some(linear), comptime);
     }
     // the member shape: the library lowering, the same served splice
     if let Some(served) = served
-        && let Ok(lowered) =
-            ds_lower::lower_library(name, source_hash, asts, analyzed, Some(served), comptime)
+        && let Ok(lowered) = ds_lower::lower_library(
+            name,
+            source_hash,
+            asts,
+            analyzed,
+            Some(served),
+            Some(linear),
+            comptime,
+        )
     {
         return Ok(lowered);
     }
-    ds_lower::lower_library(name, source_hash, asts, analyzed, None, comptime)
+    ds_lower::lower_library(
+        name,
+        source_hash,
+        asts,
+        analyzed,
+        None,
+        Some(linear),
+        comptime,
+    )
 }
 
 /// Renders every diagnostic to stderr and summarizes the report as one
@@ -431,7 +921,7 @@ fn reject(files: &Files, diags: &[Diagnostic], summary: &str) -> anyhow::Error {
 
 /// One lowering failure: spanned constructs render as diagnostics; the
 /// package-level errors stay one line.
-fn lower_error(files: &Files, error: &LowerError) -> anyhow::Error {
+pub(crate) fn lower_error(files: &Files, error: &LowerError) -> anyhow::Error {
     match error.span() {
         Some(span) => {
             let diagnostic = Diagnostic::error(ErrorCode::LowerUnsupported, error.to_string())
@@ -458,6 +948,13 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
             stem = path.display()
         ));
     }
+    if name == ds_stdlib::STD_PACKAGE_NAME {
+        return Err(anyhow!(
+            "`{stem}` is the reserved standard-library package name; a script or package module \
+             cannot serve under it",
+            stem = path.display()
+        ));
+    }
     Ok(name)
 }
 
@@ -465,9 +962,15 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
 /// with the first occurrence per name (the entry lookup's first-match
 /// rule): each binding is a candidate `--entry` name, and the table
 /// rides the artifact so any of them serves a warm run.
-fn entry_plans(asts: &[ds_parse::Ast], analyzed: &Analyzed) -> Vec<EntryPlan> {
+fn entry_plans<T>(asts: &[T], analyzed: &Analyzed) -> Vec<EntryPlan>
+where
+    T: std::borrow::Borrow<ds_parse::Ast>,
+{
     let mut entries: Vec<EntryPlan> = Vec::new();
-    for ast in asts {
+    for ast in asts
+        .iter()
+        .map(std::borrow::Borrow::<ds_parse::Ast>::borrow)
+    {
         for block in &ast.blocks {
             for item in &block.items {
                 let ItemKind::Local(local) = &item.kind else {
@@ -535,6 +1038,23 @@ fn arg_plans(analyzed: &Analyzed, params: &[Ty]) -> Vec<EntryArg> {
         .collect()
 }
 
+/// The entry's staging plan for a host that compiles through its own
+/// query pass instead of this pipeline (the dev loop): the same
+/// per-parameter facts [`compile`] records, keyed by entry name.
+pub(crate) fn entry_staging_plan<T>(
+    asts: &[T],
+    analyzed: &Analyzed,
+    entry: &str,
+) -> Option<Vec<EntryArg>>
+where
+    T: std::borrow::Borrow<ds_parse::Ast>,
+{
+    entry_plans(asts, analyzed)
+        .into_iter()
+        .find(|plan| plan.name == entry)
+        .map(|plan| plan.args)
+}
+
 /// The module's dep list, recorded from the source's import declarations
 /// into the header's link table (G3.5): one entry per linked name in
 /// declaration order — the plain list the load walk consumes, so a built
@@ -554,28 +1074,41 @@ fn arg_plans(analyzed: &Analyzed, params: &[Ty]) -> Vec<EntryArg> {
 /// a name package resolution pinned, and the zero marker for every name
 /// whose content nothing supplies; a zero link names a dep at no pinned
 /// content, which the load walk's validation refuses.
-fn dep_list(asts: &[ds_parse::Ast], dep_content: &BTreeMap<String, Hash128>) -> Vec<ds_mod::Dep> {
+/// The link name one import declaration records and links under (G3.5):
+/// an at-sigil path's package stem with the sigil (later segments are
+/// member selectors), a bare path whole. The dep-list writer, the link
+/// positions, and the surface builder all derive from this one rule.
+pub(crate) fn import_link_name(import: &ds_parse::ImportDecl) -> String {
+    let mut name = String::new();
+    if import.path.at_sign {
+        name.push('@');
+        name.push_str(&import.path.segments[0].name);
+    } else {
+        for (at, segment) in import.path.segments.iter().enumerate() {
+            if at > 0 {
+                name.push('/');
+            }
+            name.push_str(&segment.name);
+        }
+    }
+    name
+}
+
+fn dep_list<T>(asts: &[T], dep_content: &BTreeMap<String, Hash128>) -> Vec<ds_mod::Dep>
+where
+    T: std::borrow::Borrow<ds_parse::Ast>,
+{
     let mut deps: Vec<ds_mod::Dep> = Vec::new();
-    for ast in asts {
+    for ast in asts
+        .iter()
+        .map(std::borrow::Borrow::<ds_parse::Ast>::borrow)
+    {
         for block in &ast.blocks {
             for item in &block.items {
                 let ItemKind::Import(import) = &item.kind else {
                     continue;
                 };
-                let mut name = String::new();
-                if import.path.at_sign {
-                    // the package stem carries the sigil; later segments
-                    // are member selectors, not link names
-                    name.push('@');
-                    name.push_str(&import.path.segments[0].name);
-                } else {
-                    for (at, segment) in import.path.segments.iter().enumerate() {
-                        if at > 0 {
-                            name.push('/');
-                        }
-                        name.push_str(&segment.name);
-                    }
-                }
+                let name = import_link_name(import);
                 if deps.iter().any(|dep| dep.name == name) {
                     continue;
                 }
@@ -597,7 +1130,29 @@ mod tests {
 
     use ds_vm::abi::{ConstIdx, FrameLayout, SlotType, SlotType::I64, uop::Uop};
 
-    use super::{Inputs, NO_DEPS, compile_package, compile_text};
+    use super::{BundleAfter, CompiledSource, Inputs, NO_DEPS, compile_package, compile_text};
+
+    /// The script-shaped test compile: one source, script parsing, no
+    /// resolved graph.
+    fn compile_script(
+        inputs: &Inputs<'_>,
+        source: &str,
+        entry: &str,
+        no_ambient: bool,
+        allow_serve: bool,
+    ) -> anyhow::Result<CompiledSource> {
+        compile_text(
+            inputs,
+            &[(inputs.display.clone(), source.to_owned())],
+            true,
+            entry,
+            no_ambient,
+            allow_serve,
+            None,
+            None,
+            BundleAfter::Drop,
+        )
+    }
 
     /// One script's compile framing: the module name and display path the
     /// script rule derives.
@@ -606,6 +1161,7 @@ mod tests {
             name: name.to_owned(),
             display: format!("{name}.ds"),
             main_required: true,
+            identity: ds_mod::Hash128::ZERO,
             dep_content: &NO_DEPS,
         }
     }
@@ -627,19 +1183,14 @@ mod tests {
                         = cell.default()\nprintln(\"${c.show()} ${c.label.hash()} ${c.compare(d)} \
                         ${render(5)} ${[1, 2].echo()} ${probe(none)} ${max(1, 2)}\")\n}\n";
 
-    /// One compile over the gate program: the module bytes plus the run
+    /// One compile over the gate program: the module bytes, the run
     /// output of `main` on a fresh VM (the ambient's world natives need
-    /// the std platform installed first, the run path's own order).
-    fn compile_and_run(allow_serve: bool) -> (Vec<u8>, Vec<u8>) {
-        let compiled = compile_text(
-            &script_inputs("gate"),
-            GATE,
-            "main",
-            false,
-            allow_serve,
-            None,
-        )
-        .expect("the gate program compiles");
+    /// the std platform installed first, the run path's own order), and
+    /// how many function records the served splice installed.
+    fn compile_and_run(allow_serve: bool) -> (Vec<u8>, Vec<u8>, usize) {
+        let compiled = compile_script(&script_inputs("gate"), GATE, "main", false, allow_serve)
+            .expect("the gate program compiles");
+        let spliced = compiled.lowered.spliced();
         let bytes = ds_mod::write(compiled.lowered.module());
         let mut registry = ds_vm::ModuleRegistry::new();
         registry.install_platform(ds_vm::Platform::std());
@@ -648,18 +1199,30 @@ mod tests {
             .expect("the module installs");
         vm.capture_output();
         vm.run("gate", "main", &[]).expect("the gate program runs");
-        (bytes, vm.captured_output().to_vec())
+        (bytes, vm.captured_output().to_vec(), spliced)
     }
 
     /// The served splice answers the fresh lowering's module byte for
     /// byte (function table, pools, code words, chains, tags, entry
     /// facts — the writer's canonical bytes pin them all) and the two
-    /// modules run to the same output.
+    /// modules run to the same output. The splice itself must have
+    /// installed the artifact's whole record set on the served side:
+    /// the two modules are byte-identical by contract, so a silent
+    /// fallback would pass this comparison without ever serving.
     #[test]
     fn the_served_module_matches_a_fresh_one() {
-        let (served_bytes, served_out) = compile_and_run(true);
-        let (fresh_bytes, fresh_out) = compile_and_run(false);
+        let records = crate::ambient_dsmod::serve()
+            .expect("the artifact serves")
+            .functions
+            .len();
+        let (served_bytes, served_out, served_spliced) = compile_and_run(true);
+        let (fresh_bytes, fresh_out, fresh_spliced) = compile_and_run(false);
         assert!(!fresh_out.is_empty(), "the gate program prints");
+        assert_eq!(fresh_spliced, 0, "the fresh baseline installs nothing");
+        assert_eq!(
+            served_spliced, records,
+            "the splice must serve, not fall back"
+        );
         assert_eq!(served_bytes, fresh_bytes, "the modules must be identical");
         assert_eq!(served_out, fresh_out, "the runs must print identically");
     }
@@ -671,16 +1234,56 @@ mod tests {
     #[test]
     fn the_serve_installs_the_artifacts_bodies() {
         let served = crate::ambient_dsmod::serve().expect("the artifact serves");
-        let compiled = compile_text(&script_inputs("gate"), GATE, "main", false, true, None)
+        let compiled = compile_script(&script_inputs("gate"), GATE, "main", false, true)
             .expect("the gate program compiles");
+        assert_eq!(
+            compiled.lowered.spliced(),
+            served.functions.len(),
+            "the artifact's whole record set installs"
+        );
         let functions = compiled.lowered.functions();
         assert!(
-            functions.len() > served.len(),
+            functions.len() > served.functions.len(),
             "the user's own bodies sit after the ambient's"
         );
-        for (planned, body) in functions.iter().zip(served.iter()) {
+        for (planned, body) in functions.iter().zip(served.functions.iter()) {
             assert_eq!(planned, body.name());
         }
+    }
+
+    /// The splice serves a compile whose own analysis mints none of the
+    /// ambient's structural atoms: the artifact's tag rows include rows
+    /// only the ambient's body walk mints (the json face's answer-union
+    /// members under the list/map constructors), which a trivial
+    /// program's universe never holds, so the seed must accept rows that
+    /// resolve to no atom and the splice must still install the
+    /// artifact's records.
+    #[test]
+    fn the_splice_serves_a_compile_without_the_ambient_s_structural_atoms() {
+        const TRIVIAL: &str = "fn main() -> int {\n7\n}\n";
+        let records = crate::ambient_dsmod::serve()
+            .expect("the artifact serves")
+            .functions
+            .len();
+        let compiled = compile_script(&script_inputs("trivial"), TRIVIAL, "main", false, true)
+            .expect("the trivial program compiles");
+        assert_eq!(
+            compiled.lowered.spliced(),
+            records,
+            "the splice serves a universe that never minted the ambient's structural atoms"
+        );
+        // the json readers' answer unions ride as structural rows a
+        // trivial program never mints (the written enum's member atoms
+        // under the `list[...]`/`map[...]` constructors)
+        assert!(
+            compiled
+                .lowered
+                .module()
+                .tags()
+                .iter()
+                .any(|row| row.name.starts_with("list[json_null")),
+            "the unminted row rides the module's table"
+        );
     }
 
     /// The fallback path: a served list that disagrees with the plan
@@ -700,7 +1303,14 @@ mod tests {
         assert!(analyzed.checked.diags.is_empty(), "the probe checks clean");
 
         let mut served = crate::ambient_dsmod::serve().expect("the artifact serves");
-        served.swap(0, 1);
+        served.functions.swap(0, 1);
+        let linear = ds_check::linearity_check(
+            &analyzed.asts,
+            &analyzed.package,
+            &analyzed.resolutions,
+            &analyzed.decls,
+            &analyzed.checked,
+        );
         let spliced = super::lower_via_serve(
             true,
             "simple",
@@ -708,9 +1318,15 @@ mod tests {
             &analyzed.asts,
             &analyzed,
             Some(served),
+            &linear,
             &ds_lower::ComptimeValues::default(),
         )
         .expect("the disagreeing serve still compiles");
+        assert_eq!(
+            spliced.spliced(),
+            0,
+            "the disagreeing serve installs nothing"
+        );
         let fresh = ds_lower::lower(
             "simple",
             ds_mod::Hash128::compute(SIMPLE.as_bytes()),
@@ -786,7 +1402,7 @@ mod tests {
     fn a_built_module_s_recorded_dep_list_round_trips_the_walk() {
         const APP: &str = "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n7\n}\n";
         let compiled =
-            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
         let recorded = compiled.lowered.module().deps().to_vec();
         assert_eq!(
             recorded,
@@ -831,7 +1447,7 @@ mod tests {
     fn a_stale_hash_in_the_recorded_list_refuses_as_today() {
         const APP: &str = "import @std/io\n\nfn main() -> int {\n7\n}\n";
         let compiled =
-            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
         let bytes = ds_mod::write(compiled.lowered.module());
         let built = ds_mod::read(&bytes).expect("the written module reads back");
         let mut vm = ds_vm::Vm::new(ds_vm::ModuleRegistry::new());
@@ -857,7 +1473,7 @@ mod tests {
     fn a_self_named_recorded_entry_stays_local() {
         const APP: &str = "import app\n\nfn main() -> int {\n7\n}\n";
         let compiled =
-            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
             name: "app".to_owned(),
             content_hash: ds_mod::Hash128::ZERO,
@@ -883,7 +1499,7 @@ mod tests {
         const APP: &str =
             "import acme/pipeline/schema (row, parse_row)\n\nfn main() -> int {\n7\n}\n";
         let compiled =
-            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
             name: "acme/pipeline/schema".to_owned(),
             content_hash: ds_mod::Hash128::ZERO,
@@ -908,8 +1524,18 @@ mod tests {
         const APP: &str = "import @lib/helper (twice)\nimport @other\n\nfn main() -> int {\n7\n}\n";
         let identity = ds_mod::Hash128::compute(b"the lib member's text");
         let dep_content = BTreeMap::from([("@lib".to_owned(), identity)]);
-        let compiled = compile_package("@app", "@app/main.ds", APP, "main", false, &dep_content)
-            .expect("compiles");
+        let compiled = compile_package(
+            "@app",
+            "@app/main.ds",
+            APP,
+            "main",
+            false,
+            &dep_content,
+            None,
+            None,
+            BundleAfter::Drop,
+        )
+        .expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [
             ds_mod::Dep {
                 name: "@lib".to_owned(),
@@ -931,7 +1557,7 @@ mod tests {
         const APP: &str = "import acme/pipeline/fs as pio\nimport acme/pipeline/io if os == \
                            \"windows\"\n\nfn main() -> int {\n7\n}\n";
         let compiled =
-            compile_text(&script_inputs("app"), APP, "main", false, true, None).expect("compiles");
+            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [
             ds_mod::Dep {
                 name: "acme/pipeline/fs".to_owned(),

@@ -65,6 +65,7 @@ use ds_rt::{Heap, RcHeader, drop_deinit};
 use crate::{
     claims::ClaimTable,
     fiber::{Fiber, FiberId},
+    loader::StagedSite,
     value::{FuncRef, RefId, Value},
     vm::Trap,
 };
@@ -223,6 +224,11 @@ fn char_offsets(text: &str) -> Box<[u32]> {
 enum Object {
     /// A string: the text plus its lazily built char-boundary map.
     Str(Str),
+    /// A bytes value: the immutable byte string, `string`'s shape over
+    /// raw bytes — one counted block behind one `Ref` word carrying the
+    /// whole payload, never a produced arena temporary. Owns no `Ref`
+    /// words, so its death is the plain dec.
+    Bytes(Box<[u8]>),
     /// A closure object: one heap object behind one `Ref` word (F2) —
     /// the value a capturing lambda's slot holds.
     Closure(Closure),
@@ -249,6 +255,35 @@ enum Object {
     Map(MapData),
 }
 
+/// A map's payload: the keys, the flattened value words at a per-map
+/// value stride, and the row index over the per-row filter hashes. The
+/// stride is the list element stride's exact sibling — the per-map
+/// constant taken from `map[k, v]`'s compile-time value shape, fixed by
+/// the first store and repeated by every later one — because a map value
+/// spans as many words as its type's inline span (a two-word union value
+/// rides two words per row). Keys stay one word: the probe resolution and
+/// the row index hash whole words, and no faced key type spans words yet.
+/// An empty map carries stride 0 (the invariant: stride 0 iff empty), so
+/// an empty map is stride-polymorphic until its first store.
+#[derive(Debug, Default)]
+struct MapData {
+    /// The filter hash of each row, parallel to `keys`.
+    hashes: Vec<u32>,
+    /// The row index: one row number per slot, [`ROW_NONE`] when free,
+    /// probed linearly from the hash. Its length is a power of two and at
+    /// least twice the row count, so a probe always meets a free slot; it
+    /// is empty until the map holds a row.
+    slots: Vec<u32>,
+    /// The key words, in entry order.
+    keys: Vec<Value>,
+    /// The value words, flattened: row `i`'s value at
+    /// `i * vstride .. (i + 1) * vstride`.
+    values: Vec<Value>,
+    /// How many consecutive words one row's value spans; 0 iff the map is
+    /// empty.
+    vstride: usize,
+}
+
 /// A list's payload: the element words inline plus the per-list element
 /// stride — how many consecutive words one element spans. The stride is
 /// a per-list constant taken from `list[t]`'s compile-time shape: the
@@ -262,33 +297,15 @@ struct ListData {
     stride: usize,
 }
 
-/// A map's payload: the association rows in entry order, one filter hash
-/// per row, and the row index over those hashes. The hash is a reject
-/// filter, never the answer — every hash hit runs the exact key check, so
-/// a collision costs one compare and nothing else, while a miss answers
-/// from the index walk alone.
-#[derive(Debug, Default)]
-struct MapData {
-    /// The filter hash of each row, parallel to `pairs`.
-    hashes: Vec<u32>,
-    /// The row index: one row number per slot, [`ROW_NONE`] when free,
-    /// probed linearly from the hash. Its length is a power of two and at
-    /// least twice the row count, so a probe always meets a free slot; it
-    /// is empty until the map holds a row.
-    slots: Vec<u32>,
-    /// The association rows, in entry order (the order `map_pairs` walks).
-    pairs: Vec<(Value, Value)>,
-}
-
 /// The free-slot marker of a map's row index: `u32::MAX` is past every
 /// index's capacity, so it names no row.
 const ROW_NONE: u32 = u32::MAX;
 
 impl MapData {
-    /// Records the row just pushed into `pairs`, extending the index to the
-    /// next power of two when the load factor would pass one half.
+    /// Records the row just pushed into `keys`, extending the index to
+    /// the next power of two when the load factor would pass one half.
     fn index_push(&mut self) {
-        let rows = self.pairs.len();
+        let rows = self.keys.len();
         let capacity = if self.slots.len() >= rows * 2 {
             self.slots.len()
         } else {
@@ -495,13 +512,10 @@ impl Hasher for InternHasher {
         // the length rides its own round, so zero padding a short tail
         // never aliases a shorter key
         self.mix(bytes.len() as u64);
-        let mut words = bytes.chunks_exact(8);
-        for word in &mut words {
-            self.mix(u64::from_le_bytes(
-                word.try_into().expect("a full 8-byte chunk"),
-            ));
+        let (words, tail) = bytes.as_chunks::<8>();
+        for word in words {
+            self.mix(u64::from_le_bytes(*word));
         }
-        let tail = words.remainder();
         if !tail.is_empty() {
             let mut padded = [0u8; 8];
             padded[..tail.len()].copy_from_slice(tail);
@@ -844,10 +858,10 @@ impl Objects {
         while let Some((id, header)) = dying.pop() {
             // an interned entry pointing here must not outlive the object:
             // the next intern of the same content allocates a fresh one
-            if let Object::Str(s) = self.heap.payload::<Object>(header) {
-                if self.interned.get(&*s.text).is_some_and(|row| row.id == id) {
-                    self.interned.remove(&*s.text);
-                }
+            if let Object::Str(s) = self.heap.payload::<Object>(header)
+                && self.interned.get(&*s.text).is_some_and(|row| row.id == id)
+            {
+                self.interned.remove(&*s.text);
             }
             let next = self.free_head.unwrap_or(NO_FREE);
             self.free_head = Some(id);
@@ -862,13 +876,14 @@ impl Objects {
                 Object::List(data) => std::mem::take(&mut data.elems),
                 Object::Closure(closure) => std::mem::take(&mut closure.captures),
                 Object::Map(data) => {
-                    for (key, value) in data.pairs.drain(..) {
+                    let vstride = data.vstride;
+                    for key in data.keys.drain(..) {
                         spill.push(key);
-                        spill.push(value);
+                        spill.extend(data.values.drain(..vstride));
                     }
                     Vec::new()
                 },
-                Object::Str(_) => Vec::new(),
+                Object::Str(_) | Object::Bytes(_) => Vec::new(),
             };
             let words: &[Value] = if owned.is_empty() { &spill } else { &owned };
             // the block's death hook (the payload's own drop glue) runs,
@@ -1113,6 +1128,26 @@ impl Objects {
         }
     }
 
+    /// Allocates a fresh bytes object holding `payload`, owned by the
+    /// caller — one counted block, `string`'s shape over raw bytes.
+    pub fn alloc_bytes(&mut self, payload: Box<[u8]>) -> u32 {
+        self.alloc(Object::Bytes(payload))
+    }
+
+    /// The byte payload of bytes object `obj`.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live bytes
+    /// object: hand-assembled code or a host argument carried a bogus
+    /// `Ref` word.
+    pub fn bytes_at(&self, obj: u32) -> Result<&[u8], Trap> {
+        match self.payload_of(obj) {
+            Some(Object::Bytes(data)) => Ok(data),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// The element words of list object `obj` and its per-element stride:
     /// the payload holds `len * stride` words, element `i` at
     /// `i * stride .. (i + 1) * stride`.
@@ -1169,6 +1204,56 @@ impl Objects {
             Some(Object::Closure(closure)) => Ok((closure.func, &closure.captures)),
             _ => Err(Trap::UnknownObject { obj }),
         }
+    }
+
+    /// Visits every heap-held callable word — closure headers, closure
+    /// captures, list elements, map keys and values — letting the caller
+    /// inspect or rewrite each in place (the slot swap's staged-word
+    /// re-check). The first `Err` short-circuits the walk.
+    pub(crate) fn for_each_staged_fn<E>(
+        &mut self,
+        visit: &mut impl FnMut(StagedSite, &mut FuncRef) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let owner = self.owner.0;
+        for slot in &self.table {
+            let Slot::Live(header) = *slot else {
+                continue;
+            };
+            match self.heap.payload_mut::<Object>(header) {
+                Object::Closure(closure) => {
+                    visit(
+                        StagedSite::ClosureHeader { fiber: owner },
+                        &mut closure.func,
+                    )?;
+                    for word in &mut closure.captures {
+                        if let Value::Fn(func) = word {
+                            visit(StagedSite::ClosureCapture { fiber: owner }, func)?;
+                        }
+                    }
+                },
+                Object::List(list) => {
+                    for word in &mut list.elems {
+                        if let Value::Fn(func) = word {
+                            visit(StagedSite::ListElement { fiber: owner }, func)?;
+                        }
+                    }
+                },
+                Object::Map(map) => {
+                    for key in &mut map.keys {
+                        if let Value::Fn(func) = key {
+                            visit(StagedSite::MapWord { fiber: owner }, func)?;
+                        }
+                    }
+                    for word in &mut map.values {
+                        if let Value::Fn(func) = word {
+                            visit(StagedSite::MapWord { fiber: owner }, func)?;
+                        }
+                    }
+                },
+                Object::Str(_) | Object::Bytes(_) => {},
+            }
+        }
+        Ok(())
     }
 
     /// Whether `obj` names a live string object holding exactly `text`:
@@ -1265,7 +1350,7 @@ impl Objects {
         let mut at = hash as usize & mask;
         while data.slots[at] != ROW_NONE {
             let row = data.slots[at] as usize;
-            if data.hashes[row] == hash && self.stored_key_matches(data.pairs[row].0, probe) {
+            if data.hashes[row] == hash && self.stored_key_matches(data.keys[row], probe) {
                 return Some(row);
             }
             at = (at + 1) & mask;
@@ -1273,24 +1358,30 @@ impl Objects {
         None
     }
 
-    /// Stores one key-value pair into a map object in place, the exclusive
-    /// window's one mutation (the `map_set` native). Every stored `Ref`
-    /// word is acquired for the map before it enters an entry, fresh or
-    /// overwriting, so the caller's own count stays the caller's and a
-    /// later death drops exactly what was stored. A content-equal key
-    /// overwrites: the old value's count drops, and the entry keeps its
-    /// original key word (the map already owns that count; the caller
-    /// keeps its own probe word), so the row index keeps its entry too.
+    /// Stores one key and its value span into a map object in place, the
+    /// exclusive window's one mutation (the `map_set` native). The value
+    /// is the value type's whole inline word span — one word for a
+    /// scalar, a tag-plus-region span for a union value — and the first
+    /// store onto an empty map fixes the value stride every later store
+    /// must repeat. Every stored `Ref` word is acquired for the map
+    /// before it enters a row, fresh or overwriting, so the caller's own
+    /// count stays the caller's and a later death drops exactly what was
+    /// stored. A content-equal key overwrites: the old value span's
+    /// counts drop, and the row keeps its original key word (the map
+    /// already owns that count; the caller keeps its own probe word), so
+    /// the row index keeps its entry too.
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownObject`] when the reference names no map object.
+    /// [`Trap::UnknownObject`] when the reference names no map object;
+    /// [`Trap::ElementStride`] when the staged span's width disagrees
+    /// with the non-empty map's value stride.
     pub fn set_map(
         &mut self,
         obj: u32,
         key: Value,
         res: &ResolvedKey,
-        value: Value,
+        value: &[Value],
     ) -> Result<(), Trap> {
         let header = match self.table.get(obj as usize) {
             Some(Slot::Live(header))
@@ -1302,26 +1393,42 @@ impl Objects {
         };
         // one probe resolution serves the scan and the fresh row's hash;
         // the borrow ends before the mutation window opens
-        let (found, hash) = match self.payload_of(obj) {
+        let (found, hash, stride) = match self.payload_of(obj) {
             Some(Object::Map(data)) => {
                 let probe = self.resolve_probe(key, res);
-                (self.map_row_at(data, &probe), probe.hash())
+                (self.map_row_at(data, &probe), probe.hash(), data.vstride)
             },
             _ => return Err(Trap::UnknownObject { obj }),
         };
+        if stride != 0 && stride != value.len() {
+            return Err(Trap::ElementStride {
+                obj,
+                stride,
+                given: value.len(),
+            });
+        }
         if let Some(at) = found {
             // the store acquires for the map first, whatever it replaces:
             // a value word arriving with its caller's count must not ride
-            // that count into the entry (a dying caller would free it)
-            if let Value::Ref(word) = value {
-                self.acquire_stored(word);
+            // that count into the row (a dying caller would free it)
+            for word in value {
+                if let Value::Ref(word) = *word {
+                    self.acquire_stored(word);
+                }
             }
             let old = match self.heap.payload_mut::<Object>(header) {
-                Object::Map(data) => std::mem::replace(&mut data.pairs[at].1, value),
+                Object::Map(data) => {
+                    let at = at * data.vstride;
+                    let old = data.values[at..at + value.len()].to_vec();
+                    data.values[at..at + value.len()].copy_from_slice(value);
+                    old
+                },
                 _ => return Err(Trap::UnknownObject { obj }),
             };
-            if let Value::Ref(word) = old {
-                self.release_stored(word);
+            for word in old {
+                if let Value::Ref(word) = word {
+                    self.release_stored(word);
+                }
             }
             return Ok(());
         }
@@ -1330,13 +1437,19 @@ impl Objects {
         if let Value::Ref(word) = key {
             self.acquire_stored(word);
         }
-        if let Value::Ref(word) = value {
-            self.acquire_stored(word);
+        for word in value {
+            if let Value::Ref(word) = *word {
+                self.acquire_stored(word);
+            }
         }
         match self.heap.payload_mut::<Object>(header) {
             Object::Map(data) => {
+                if data.keys.is_empty() {
+                    data.vstride = value.len();
+                }
                 data.hashes.push(hash);
-                data.pairs.push((key, value));
+                data.keys.push(key);
+                data.values.extend_from_slice(value);
                 data.index_push();
             },
             _ => return Err(Trap::UnknownObject { obj }),
@@ -1344,14 +1457,19 @@ impl Objects {
         Ok(())
     }
 
-    /// The value word stored under `key` in map object `obj`, if present.
+    /// The value span stored under `key` in map object `obj`, if present.
     /// The read is a lookup, not a hand-out: the map keeps every count it
     /// owns, so the caller that wants the value acquires its own.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
-    pub fn map_at(&self, obj: u32, key: Value, res: &ResolvedKey) -> Result<Option<Value>, Trap> {
+    pub fn map_at(
+        &self,
+        obj: u32,
+        key: Value,
+        res: &ResolvedKey,
+    ) -> Result<Option<&[Value]>, Trap> {
         let Some(Object::Map(data)) = self.payload_of(obj) else {
             return Err(Trap::UnknownObject { obj });
         };
@@ -1360,17 +1478,34 @@ impl Objects {
             return Ok(None);
         }
         let probe = self.resolve_probe(key, res);
-        Ok(self.map_row_at(data, &probe).map(|at| data.pairs[at].1))
+        Ok(self.map_row_at(data, &probe).map(|at| {
+            let at = at * data.vstride;
+            &data.values[at..at + data.vstride]
+        }))
     }
 
-    /// The pairs of map object `obj`, in entry order.
+    /// The row count of map object `obj`.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object.
-    pub fn map_pairs(&self, obj: u32) -> Result<&[(Value, Value)], Trap> {
+    pub fn map_len(&self, obj: u32) -> Result<usize, Trap> {
         match self.payload_of(obj) {
-            Some(Object::Map(data)) => Ok(&data.pairs),
+            Some(Object::Map(data)) => Ok(data.keys.len()),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// The key words of map object `obj`, in entry order — the ordered
+    /// key face (`map_keys`), the value spans read back through
+    /// [`Objects::map_at`].
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn map_keys(&self, obj: u32) -> Result<&[Value], Trap> {
+        match self.payload_of(obj) {
+            Some(Object::Map(data)) => Ok(&data.keys),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -1558,6 +1693,20 @@ impl<'a> Heaps<'a> {
     pub(crate) fn new_map(&mut self) -> Value {
         let id = self.current.alloc_map();
         self.claimed_alloc(id)
+    }
+
+    /// A fresh bytes object holding `payload` on the running fiber's
+    /// store, as its word — the caller's frame claim.
+    pub(crate) fn new_bytes(&mut self, payload: Box<[u8]>) -> Value {
+        let id = self.current.alloc_bytes(payload);
+        self.claimed_alloc(id)
+    }
+
+    /// The byte payload of bytes object `word`, routed: a borrowed slice
+    /// of the owning store — copy a byte out before another routed call.
+    pub(crate) fn bytes_at(&mut self, word: RefId) -> Result<&[u8], Trap> {
+        let store = self.store(word)?;
+        store.bytes_at(word.id())
     }
 
     /// The interned word of `text` on the running fiber's store,
@@ -1785,15 +1934,20 @@ impl<'a> Heaps<'a> {
         })
     }
 
-    /// The value word stored under `key` in map object `map`, routed.
-    pub(crate) fn map_at(&mut self, map: RefId, key: Value) -> Result<Option<Value>, Trap> {
+    /// The value span stored under `key` in map object `map`, routed and
+    /// copied out: the slice leaves the owning store as owned words, so
+    /// the caller may route count mutations while holding it.
+    pub(crate) fn map_at(&mut self, map: RefId, key: Value) -> Result<Option<Vec<Value>>, Trap> {
         let res = self.resolve_key(map.fiber(), key)?;
-        self.store(map)?.map_at(map.id(), key, &res)
+        match self.store(map)?.map_at(map.id(), key, &res)? {
+            Some(span) => Ok(Some(span.to_vec())),
+            None => Ok(None),
+        }
     }
 
-    /// Stores one key-value pair into map object `map`, routed, with the
-    /// queues drained.
-    pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: Value) -> Result<(), Trap> {
+    /// Stores one key and its value span into map object `map`, routed,
+    /// with the queues drained.
+    pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: &[Value]) -> Result<(), Trap> {
         let res = self.resolve_key(map.fiber(), key)?;
         self.store(map)?.set_map(map.id(), key, &res, value)?;
         self.settle(map.fiber())
@@ -1809,12 +1963,138 @@ impl<'a> Heaps<'a> {
         Ok((header, block.to_vec()))
     }
 
-    /// The pairs of map object `map`, in entry order, routed.
-    pub(crate) fn map_pairs(&mut self, map: RefId) -> Result<&[(Value, Value)], Trap> {
-        let store = self.store(map)?;
-        let pairs = store.map_pairs(map.id())?;
-        Ok(pairs)
+    /// The row count of map object `map`, routed.
+    pub(crate) fn map_len(&mut self, map: RefId) -> Result<usize, Trap> {
+        self.store(map)?.map_len(map.id())
     }
+
+    /// The key words of map object `map`, in entry order, routed and
+    /// copied out: the caller may route count mutations while holding
+    /// them.
+    pub(crate) fn map_keys(&mut self, map: RefId) -> Result<Vec<Value>, Trap> {
+        Ok(self.store(map)?.map_keys(map.id())?.to_vec())
+    }
+
+    /// The content-compare face the object behind `word` presents, routed:
+    /// the four kinds the structural `==` content compare reads, or `None`
+    /// for a faceless kind (a closure), which compares by word identity
+    /// alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live object.
+    pub(crate) fn content_face(&mut self, word: RefId) -> Result<Option<ContentFace>, Trap> {
+        let store = self.store(word)?;
+        Ok(match store.payload_of(word.id()) {
+            Some(Object::Str(_)) => Some(ContentFace::Str),
+            Some(Object::Bytes(_)) => Some(ContentFace::Bytes),
+            Some(Object::List(_)) => Some(ContentFace::List),
+            Some(Object::Map(_)) => Some(ContentFace::Map),
+            _ => None,
+        })
+    }
+
+    /// The structural content compare over the objects behind two
+    /// reference words [B9]: strings compare text, bytes payloads, lists
+    /// their element words pairwise, maps row by row through the same
+    /// lookup face `map_get` serves (string keys by content, every other
+    /// word by identity), and every nested reference pair compares the
+    /// same way — the walk covers a list of lists and a map over string
+    /// values without a static plan. Scalar words compare by value; mixed
+    /// object kinds, and the faceless kinds against anything, never
+    /// compare equal. Both operands stay borrowed: the walk only reads,
+    /// so it owns no count and queues nothing. Iterative over a pending
+    /// word stack, so depth costs heap words, not native frames, and an
+    /// in-progress pair memo makes a cyclic structure answer instead of
+    /// looping — a re-encountered in-progress pair assumes equal (the
+    /// greatest fixed point), any real mismatch surfacing through some
+    /// first-visit pair.
+    pub(crate) fn content_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
+        let mut pending = vec![(Value::Ref(x), Value::Ref(y))];
+        let mut assumed: Vec<(RefId, RefId)> = Vec::new();
+        while let Some((l, r)) = pending.pop() {
+            // an equal word pair — one scalar, one shared object — needs
+            // no walk; unequal non-reference words answer at once
+            if l == r {
+                continue;
+            }
+            let (Value::Ref(a), Value::Ref(b)) = (l, r) else {
+                return Ok(false);
+            };
+            match (self.content_face(a)?, self.content_face(b)?) {
+                (Some(ContentFace::Str), Some(ContentFace::Str)) => {
+                    // the routed read borrows the store, so one side copies out
+                    let text = self.str_at(a)?.to_owned();
+                    if text.as_str() != self.str_at(b)? {
+                        return Ok(false);
+                    }
+                },
+                (Some(ContentFace::Bytes), Some(ContentFace::Bytes)) => {
+                    // the routed read borrows the store, so one side copies out
+                    let payload = self.bytes_at(a)?.to_vec();
+                    if payload.as_slice() != self.bytes_at(b)? {
+                        return Ok(false);
+                    }
+                },
+                (Some(ContentFace::List), Some(ContentFace::List)) => {
+                    if assumed.contains(&(a, b)) {
+                        continue;
+                    }
+                    assumed.push((a, b));
+                    let (front, _) = self.list_at(a)?;
+                    let front = front.to_vec();
+                    let (back, _) = self.list_at(b)?;
+                    let back = back.to_vec();
+                    if front.len() != back.len() {
+                        return Ok(false);
+                    }
+                    pending.extend(front.into_iter().zip(back));
+                },
+                (Some(ContentFace::Map), Some(ContentFace::Map)) => {
+                    if assumed.contains(&(a, b)) {
+                        continue;
+                    }
+                    assumed.push((a, b));
+                    if self.map_len(a)? != self.map_len(b)? {
+                        return Ok(false);
+                    }
+                    for key in self.map_keys(a)? {
+                        // the left span is the key's own row, so only the
+                        // right side can miss — a missing key answers
+                        // unequal at once
+                        let (Some(front), Some(back)) =
+                            (self.map_at(a, key)?, self.map_at(b, key)?)
+                        else {
+                            return Ok(false);
+                        };
+                        if front.len() != back.len() {
+                            return Ok(false);
+                        }
+                        pending.extend(front.into_iter().zip(back));
+                    }
+                },
+                // mixed kinds, or a faceless kind against anything: no
+                // content face, never equal
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The content-compare face one heap object presents: which payload walk
+/// [`Heaps::content_eq`] reads over it. The faceless kinds (a closure)
+/// compare by word identity alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContentFace {
+    /// A string's text.
+    Str,
+    /// A bytes payload.
+    Bytes,
+    /// A list's element words.
+    List,
+    /// A map's rows.
+    Map,
 }
 
 /// A map key probe's resolution for [`Objects::map_at`] and
@@ -1864,6 +2144,89 @@ mod tests {
         assert!(
             pool[other.index()].objects.is_empty() && pool[other.index()].objects.queued() == 0,
             "the element's own heap took the release"
+        );
+    }
+
+    /// The structural content compare [B9]: equal content answers true
+    /// behind distinct objects — nested lists, a map's rows through the
+    /// lookup face (string keys by content), strings and bytes by payload
+    /// — a mismatch at any depth answers false, mixed object kinds never
+    /// compare equal, and a cyclic structure answers instead of looping
+    /// (the in-progress pair memo's assumed-equal rule).
+    #[test]
+    fn the_content_compare_walks_nested_collections_and_cycles() {
+        let mut current = Objects::new(FIBER_ROOT);
+        let s1 = current.intern("a");
+        let s2 = current.alloc_str("a".to_owned());
+        let b1 = current.alloc_bytes(b"x".to_vec().into_boxed_slice());
+        let b2 = current.alloc_bytes(b"x".to_vec().into_boxed_slice());
+        let inner1 =
+            current.alloc_list(vec![Value::I64(1), Value::Ref(RefId::new(FIBER_ROOT, s1))]);
+        let inner2 =
+            current.alloc_list(vec![Value::I64(1), Value::Ref(RefId::new(FIBER_ROOT, s2))]);
+        let inner_short = current.alloc_list(vec![Value::I64(1)]);
+        let nest1 = current.alloc_list(vec![
+            Value::Ref(RefId::new(FIBER_ROOT, inner1)),
+            Value::Ref(RefId::new(FIBER_ROOT, b1)),
+        ]);
+        let nest2 = current.alloc_list(vec![
+            Value::Ref(RefId::new(FIBER_ROOT, inner2)),
+            Value::Ref(RefId::new(FIBER_ROOT, b2)),
+        ]);
+        let map1 = current.alloc_map();
+        let map2 = current.alloc_map();
+        let map_miss = current.alloc_map();
+        for (obj, key) in [(map1, s1), (map2, s2)] {
+            current
+                .set_map(
+                    obj,
+                    Value::Ref(RefId::new(FIBER_ROOT, key)),
+                    &ResolvedKey::Word,
+                    &[Value::I64(7), Value::Ref(RefId::new(FIBER_ROOT, inner1))],
+                )
+                .expect("the row stores");
+        }
+        current
+            .set_map(
+                map_miss,
+                Value::Ref(RefId::new(FIBER_ROOT, s2)),
+                &ResolvedKey::Word,
+                &[Value::I64(8), Value::Ref(RefId::new(FIBER_ROOT, inner2))],
+            )
+            .expect("the row stores");
+        let mut pool = vec![Fiber::empty(FIBER_ROOT)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT)];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        let (w, m) = (
+            |id: u32| RefId::new(FIBER_ROOT, id),
+            |heaps: &mut Heaps, x: RefId, y: RefId| heaps.content_eq(x, y),
+        );
+        assert_eq!(m(&mut heaps, w(nest1), w(nest2)), Ok(true));
+        assert_eq!(m(&mut heaps, w(nest1), w(nest1)), Ok(true));
+        assert_eq!(m(&mut heaps, w(inner1), w(inner_short)), Ok(false));
+        assert_eq!(m(&mut heaps, w(s1), w(b1)), Ok(false), "mixed kinds");
+        assert_eq!(m(&mut heaps, w(map1), w(map2)), Ok(true));
+        assert_eq!(m(&mut heaps, w(map1), w(map_miss)), Ok(false));
+        // a self-referential list in both operands: the pair memo assumes
+        // the re-encountered pair equal, so the walk answers instead of
+        // looping
+        let Value::Ref(cyc1) = heaps.new_list(vec![]) else {
+            unreachable!("a fresh list is its reference word")
+        };
+        heaps
+            .push_list(cyc1, &[Value::Ref(cyc1)])
+            .expect("the self edge stores");
+        let Value::Ref(cyc2) = heaps.new_list(vec![]) else {
+            unreachable!("a fresh list is its reference word")
+        };
+        heaps
+            .push_list(cyc2, &[Value::Ref(cyc2)])
+            .expect("the self edge stores");
+        assert_eq!(m(&mut heaps, cyc1, cyc2), Ok(true));
+        assert_eq!(
+            m(&mut heaps, cyc1, w(inner1)),
+            Ok(false),
+            "a list and a one-word list of distinct content"
         );
     }
 
@@ -2130,13 +2493,13 @@ mod tests {
                     map,
                     Value::Ref(RefId::new(FIBER_ROOT, key)),
                     &ResolvedKey::Word,
-                    Value::Ref(RefId::new(FIBER_ROOT, value)),
+                    &[Value::Ref(RefId::new(FIBER_ROOT, value))],
                 )
                 .expect("the map accepts the pair");
             objects.dec(key).expect("the caller drops the key");
             objects.dec(value).expect("the caller drops the value");
         }
-        let pairs = objects.map_pairs(map).expect("the map is live").len();
+        let pairs = objects.map_len(map).expect("the map is live");
         objects.dec(map).expect("the map's owner drops");
         assert!(objects.is_empty(), "the pairs died with the map");
         assert!(
@@ -2166,7 +2529,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, interned)),
                 &ResolvedKey::Word,
-                Value::I64(80),
+                &[Value::I64(80)],
             )
             .expect("the map object accepts the pair");
         // the fresh object's content names the interned key's entry
@@ -2176,7 +2539,7 @@ mod tests {
                 Value::Ref(RefId::new(FIBER_ROOT, fresh)),
                 &ResolvedKey::Word
             ),
-            Ok(Some(Value::I64(80))),
+            Ok(Some(&[Value::I64(80)][..])),
             "string keys match by content, not object identity"
         );
         assert_eq!(
@@ -2185,39 +2548,99 @@ mod tests {
         );
         // a scalar key of its own
         objects
-            .set_map(map, Value::I64(1), &ResolvedKey::Word, Value::Bool(true))
+            .set_map(map, Value::I64(1), &ResolvedKey::Word, &[Value::Bool(true)])
             .expect("the map accepts scalars");
         assert_eq!(
             objects.map_at(map, Value::I64(1), &ResolvedKey::Word),
-            Ok(Some(Value::Bool(true)))
+            Ok(Some(&[Value::Bool(true)][..]))
         );
-        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
+        assert_eq!(objects.map_len(map), Ok(2));
         // the overwrite keeps one entry and drops the old value's count
         objects
             .set_map(
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, fresh)),
                 &ResolvedKey::Word,
-                Value::I64(8080),
+                &[Value::I64(8080)],
             )
             .expect("the content-equal key overwrites");
-        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(2));
+        assert_eq!(objects.map_len(map), Ok(2));
         assert_eq!(
             objects.map_at(
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, interned)),
                 &ResolvedKey::Word
             ),
-            Ok(Some(Value::I64(8080)))
+            Ok(Some(&[Value::I64(8080)][..]))
         );
         // wrong-kind reads name no object
         assert_eq!(objects.list_at(map), Err(Trap::UnknownObject { obj: map }));
         assert_eq!(objects.str_at(map), Err(Trap::UnknownObject { obj: map }));
         // a set over a non-map reports the bogus side
         assert_eq!(
-            objects.set_map(interned, Value::I64(1), &ResolvedKey::Word, Value::I64(2)),
+            objects.set_map(interned, Value::I64(1), &ResolvedKey::Word, &[Value::I64(
+                2
+            )]),
             Err(Trap::UnknownObject { obj: interned })
         );
+    }
+
+    /// The value channel carries whole word spans: a two-word value (the
+    /// tag-plus-payload shape of a union value) stores, reads back, and
+    /// overwrites one span per row, the first store fixing the stride a
+    /// disagreeing later store traps on, and the map's death dropping one
+    /// count per `Ref` word of every stored span.
+    #[test]
+    fn maps_carry_two_word_value_spans() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let map = objects.alloc_map();
+        // a two-word union-shaped span: tag word plus one Ref payload
+        let text = objects.intern("payload");
+        let span = [Value::Tag(3), Value::Ref(RefId::new(FIBER_ROOT, text))];
+        objects
+            .set_map(map, Value::I64(1), &ResolvedKey::Word, &span)
+            .expect("the first store fixes the two-word stride");
+        assert_eq!(objects.map_len(map), Ok(1));
+        assert_eq!(
+            objects.map_at(map, Value::I64(1), &ResolvedKey::Word),
+            Ok(Some(&span[..])),
+            "the read hands back the whole span"
+        );
+        // the map's own count plus one per stored Ref word
+        assert_eq!(objects.rc_at(text), Ok(2));
+        // a disagreeing width traps, leaving the map untouched
+        assert_eq!(
+            objects.set_map(map, Value::I64(2), &ResolvedKey::Word, &[Value::I64(9)]),
+            Err(Trap::ElementStride {
+                obj: map,
+                stride: 2,
+                given: 1,
+            })
+        );
+        assert_eq!(objects.map_len(map), Ok(1));
+        // the overwrite trades the span's counts: the old payload drops,
+        // the new one gains
+        let other = objects.alloc_str("next".to_owned());
+        let next = [Value::Tag(4), Value::Ref(RefId::new(FIBER_ROOT, other))];
+        objects
+            .set_map(map, Value::I64(1), &ResolvedKey::Word, &next)
+            .expect("the stride agrees");
+        assert_eq!(objects.rc_at(text), Ok(1), "the old span's count dropped");
+        assert_eq!(objects.rc_at(other), Ok(2));
+        // the death cascade drops one count per stored Ref word
+        objects.dec(map).expect("the map's owner drops");
+        assert_eq!(
+            objects.rc_at(other),
+            Ok(1),
+            "only the caller's count remains"
+        );
+        objects
+            .dec(text)
+            .expect("the caller drops the first payload");
+        objects
+            .dec(other)
+            .expect("the caller drops the stored payload");
+        assert!(objects.is_empty(), "the span's payload died with the map");
     }
 
     /// Foreign probe resolution holds through the pre-resolved forms: a
@@ -2235,7 +2658,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Word,
-                Value::I64(80),
+                &[Value::I64(80)],
             )
             .expect("the local key stores");
         let foreign_text: Box<str> = "host".into();
@@ -2249,7 +2672,7 @@ mod tests {
                     hash
                 }
             ),
-            Ok(Some(Value::I64(80))),
+            Ok(Some(&[Value::I64(80)][..])),
             "a foreign string probe matches a local key by content"
         );
         let other_text: Box<str> = "port".into();
@@ -2283,11 +2706,13 @@ mod tests {
         let mut objects = Objects::new(FIBER_ROOT);
         let map = objects.alloc_map();
         objects
-            .set_map(map, Value::F64(0.0), &ResolvedKey::Word, Value::Bool(true))
+            .set_map(map, Value::F64(0.0), &ResolvedKey::Word, &[Value::Bool(
+                true,
+            )])
             .expect("the positive zero stores");
         assert_eq!(
             objects.map_at(map, Value::F64(-0.0), &ResolvedKey::Word),
-            Ok(Some(Value::Bool(true))),
+            Ok(Some(&[Value::Bool(true)][..])),
             "the two zero spellings are one scalar key"
         );
         assert_eq!(
@@ -2316,7 +2741,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Word,
-                Value::I64(1),
+                &[Value::I64(1)],
             )
             .expect("the map accepts the string key");
         assert_eq!(
@@ -2333,7 +2758,7 @@ mod tests {
                 other,
                 Value::Ref(RefId::new(FIBER_ROOT, fresh)),
                 &ResolvedKey::Word,
-                Value::I64(2),
+                &[Value::I64(2)],
             )
             .expect("the second map accepts the same content");
         assert_eq!(
@@ -2342,7 +2767,7 @@ mod tests {
                 Value::Ref(RefId::new(FIBER_ROOT, fresh)),
                 &ResolvedKey::Word
             ),
-            Ok(Some(Value::I64(1)))
+            Ok(Some(&[Value::I64(1)][..]))
         );
         assert_eq!(
             objects.map_at(
@@ -2350,7 +2775,7 @@ mod tests {
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Word
             ),
-            Ok(Some(Value::I64(2)))
+            Ok(Some(&[Value::I64(2)][..]))
         );
         assert_eq!(cached(&objects), Some(text_hash("cached")));
     }
@@ -2369,7 +2794,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, identity)),
                 &ResolvedKey::Word,
-                Value::I64(9),
+                &[Value::I64(9)],
             )
             .expect("the map accepts a reference key");
         objects
@@ -2377,7 +2802,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, text)),
                 &ResolvedKey::Word,
-                Value::I64(5),
+                &[Value::I64(5)],
             )
             .expect("the map accepts a string key");
         assert_eq!(
@@ -2386,7 +2811,7 @@ mod tests {
                 Value::Ref(RefId::new(FIBER_ROOT, identity)),
                 &ResolvedKey::Word
             ),
-            Ok(Some(Value::I64(9))),
+            Ok(Some(&[Value::I64(9)][..])),
             "the same reference word names its row"
         );
         let other_identity = objects.alloc_list(Vec::new());
@@ -2424,7 +2849,7 @@ mod tests {
         let map = objects.alloc_map();
         for i in 0..40i64 {
             objects
-                .set_map(map, Value::I64(i), &ResolvedKey::Word, Value::I64(i * 2))
+                .set_map(map, Value::I64(i), &ResolvedKey::Word, &[Value::I64(i * 2)])
                 .expect("the map accepts a scalar key");
             let key = objects.alloc_str(format!("key{i}"));
             objects
@@ -2432,22 +2857,22 @@ mod tests {
                     map,
                     Value::Ref(RefId::new(FIBER_ROOT, key)),
                     &ResolvedKey::Word,
-                    Value::I64(i),
+                    &[Value::I64(i)],
                 )
                 .expect("the map accepts a string key");
             objects.dec(key).expect("the caller drops its key count");
         }
         let shape = match objects.payload_of(map) {
             Some(Object::Map(data)) => {
-                assert_eq!(data.pairs.len(), 80);
+                assert_eq!(data.keys.len(), 80);
                 assert!(data.slots.len().is_power_of_two());
                 assert!(
-                    data.slots.len() >= data.pairs.len() * 2,
+                    data.slots.len() >= data.keys.len() * 2,
                     "the load factor stays at most one half"
                 );
                 assert_eq!(
                     data.slots.iter().filter(|slot| **slot != ROW_NONE).count(),
-                    data.pairs.len(),
+                    data.keys.len(),
                     "every row claims exactly one index slot"
                 );
                 data.slots.len()
@@ -2458,7 +2883,7 @@ mod tests {
         for i in 0..40i64 {
             assert_eq!(
                 objects.map_at(map, Value::I64(i), &ResolvedKey::Word),
-                Ok(Some(Value::I64(i * 2)))
+                Ok(Some(&[Value::I64(i * 2)][..]))
             );
             assert_eq!(
                 objects.map_at(map, Value::I64(i + 1000), &ResolvedKey::Word),
@@ -2473,7 +2898,7 @@ mod tests {
                     Value::Ref(RefId::new(FIBER_ROOT, hit)),
                     &ResolvedKey::Word
                 ),
-                Ok(Some(Value::I64(i)))
+                Ok(Some(&[Value::I64(i)][..]))
             );
             objects.dec(hit).expect("the caller drops its probe count");
             let miss = objects.alloc_str(format!("missing{i}"));
@@ -2490,13 +2915,13 @@ mod tests {
         // the repeated keys overwrite: the row count and the index hold
         for i in 0..40i64 {
             objects
-                .set_map(map, Value::I64(i), &ResolvedKey::Word, Value::I64(-i))
+                .set_map(map, Value::I64(i), &ResolvedKey::Word, &[Value::I64(-i)])
                 .expect("the content-equal key overwrites");
         }
-        assert_eq!(objects.map_pairs(map).map(<[_]>::len), Ok(80));
+        assert_eq!(objects.map_len(map), Ok(80));
         assert_eq!(
             objects.map_at(map, Value::I64(9), &ResolvedKey::Word),
-            Ok(Some(Value::I64(-9))),
+            Ok(Some(&[Value::I64(-9)][..])),
             "the overwrite answers under the original key"
         );
     }
@@ -2579,7 +3004,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Word,
-                Value::Ref(RefId::new(FIBER_ROOT, value)),
+                &[Value::Ref(RefId::new(FIBER_ROOT, value))],
             )
             .expect("the map accepts the pair");
         // the store acquired one count per stored Ref word, on top of the
@@ -2593,19 +3018,16 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Word,
-                Value::I64(8080),
+                &[Value::I64(8080)],
             )
             .expect("the content-equal key overwrites");
         assert_eq!(objects.rc_at(value), Ok(1));
         assert_eq!(objects.rc_at(key), Ok(2));
         let other = objects.alloc_str("port".to_owned());
         objects
-            .set_map(
-                map,
-                Value::I64(1),
-                &ResolvedKey::Word,
-                Value::Ref(RefId::new(FIBER_ROOT, other)),
-            )
+            .set_map(map, Value::I64(1), &ResolvedKey::Word, &[Value::Ref(
+                RefId::new(FIBER_ROOT, other),
+            )])
             .expect("the second entry adopts the scalar key");
         assert_eq!(objects.rc_at(other), Ok(2));
         // the death drops exactly the map's acquired counts, both pairs'

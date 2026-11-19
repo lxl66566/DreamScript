@@ -16,8 +16,10 @@ type url = string
 struct page { url: url, body: string }
 
 // the fetch/consume/die seams, file-owned since the ambient shed its dead
-// declarations: no native answers these callees, so the bodies below
-// check clean and refuse at lowering
+// declarations: fetch and consume keep no answering native, so their bodies
+// check clean and refuse at lowering, while die routes to the builtin trap
+// primitive through the same file-owned shape (the CLI host's own provision
+// is the entry sessions' spelling alone)
 extern fn fetch(u: string) -> response | net_err
 extern fn consume(r: response) -> string
 extern fn die[t](msg: string) -> t

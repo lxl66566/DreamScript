@@ -1,0 +1,19 @@
+// The embed platform's refusal probe (H5): the declaration claims fsys,
+// so the checker verifies the usage inside the claim — but the host's
+// console-only embed handler refuses the op's call site at install, the
+// defense under the checker's subset rule.
+
+tag string
+
+tag int
+
+platform "embed" provides <fsys>
+
+extern fn file_size (path: string) -> int
+
+fn size (path: string) -> int {
+  const n = file_size(path)
+  n
+}
+
+fn main () -> () { }

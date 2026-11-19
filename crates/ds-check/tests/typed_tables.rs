@@ -119,15 +119,13 @@ fn call_spans(ast: &Ast) -> Vec<ds_diag::Span> {
     }
     let mut out = Vec::new();
     for item in ast.blocks.iter().flat_map(|b| b.items.iter()) {
-        if let ds_parse::ItemKind::Local(l) = &item.kind {
-            if let Expr::Lambda {
+        if let ds_parse::ItemKind::Local(l) = &item.kind
+            && let Expr::Lambda {
                 body: lambda_body, ..
             } = &l.init
-            {
-                if let Expr::Block(b) = &**lambda_body {
-                    block(b, &mut out);
-                }
-            }
+            && let Expr::Block(b) = &**lambda_body
+        {
+            block(b, &mut out);
         }
     }
     out
@@ -189,11 +187,11 @@ fn unsolved_generic_calls_record_nothing() {
 
 fn field_recv(ast: &Ast) -> Option<ds_diag::Span> {
     fn expr(e: &Expr, out: &mut Option<ds_diag::Span>) {
-        if let Expr::Field { recv, name, .. } = e {
-            if name.name == "value" {
-                *out = Some(recv.span());
-                return;
-            }
+        if let Expr::Field { recv, name, .. } = e
+            && name.name == "value"
+        {
+            *out = Some(recv.span());
+            return;
         }
         match e {
             Expr::Call { callee, args, .. } => {
@@ -222,18 +220,17 @@ fn field_recv(ast: &Ast) -> Option<ds_diag::Span> {
     let mut out = None;
     for b in &ast.blocks {
         for item in &b.items {
-            if let ds_parse::ItemKind::Local(l) = &item.kind {
-                if let Expr::Lambda {
+            if let ds_parse::ItemKind::Local(l) = &item.kind
+                && let Expr::Lambda {
                     body: lambda_body, ..
                 } = &l.init
-                {
-                    let Expr::Block(b) = &**lambda_body else {
-                        continue;
-                    };
-                    for stmt in &b.stmts {
-                        if let ds_parse::StmtKind::Expr(e) = &stmt.kind {
-                            expr(e, &mut out);
-                        }
+            {
+                let Expr::Block(b) = &**lambda_body else {
+                    continue;
+                };
+                for stmt in &b.stmts {
+                    if let ds_parse::StmtKind::Expr(e) = &stmt.kind {
+                        expr(e, &mut out);
                     }
                 }
             }

@@ -103,10 +103,12 @@
 //! # }
 //! ```
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use crate::{
     atom::{AtomKind, TraitId, TypeId},
     error::Error,
-    expr::TypeExpr,
+    expr::{TypeExpr, remap_type_expr},
     universe::{Ty, Universe, narrow},
 };
 
@@ -326,6 +328,13 @@ pub struct InstanceEnv {
     /// proved it coherent) and probes only the pairs and cycles a fresh
     /// row takes part in.
     served: usize,
+    /// Same-trait head pairs (raw indices, earlier first) whose
+    /// instantiation probe concluded disjoint at declaration: a
+    /// structural verdict no later declaration undoes, so
+    /// [`InstanceEnv::check_all`] skips their probe. Pairs the probe left
+    /// open and pairs no declaration ever put together (link merges) stay
+    /// absent and probe there.
+    probed_disjoint: FxHashSet<(u32, u32)>,
 }
 
 impl InstanceEnv {
@@ -448,37 +457,51 @@ impl InstanceEnv {
         // existing same-trait head, then new branches against each other
         // (duplicate branches like `int | int` overlap here). Decomposition
         // precedes the check, so errors name per-branch heads, and each
-        // branch probes under its own kept conditions.
+        // branch probes under its own kept conditions. Pairs the probe
+        // concludes disjoint are recorded; the records commit only with
+        // the declaration (a failed one rolls its branches back, and with
+        // them the ids its records name).
         let first = self.instances.len();
+        let mut decided: Vec<(u32, u32)> = Vec::new();
         for (i, &head) in heads.iter().enumerate() {
-            for inst in &self.instances {
-                if inst.trait_id == decl.trait_id {
-                    if let Some(err) = overlap_error(
+            let new_head = ProbedHead {
+                head,
+                conditions: &per_branch[i].0,
+            };
+            for (index, inst) in self.instances.iter().enumerate() {
+                if inst.trait_id == decl.trait_id
+                    && let Some(outcome) = overlap_error(
                         universe,
                         self,
-                        inst.head,
-                        &inst.conditions,
-                        head,
-                        &per_branch[i].0,
+                        ProbedHead {
+                            head: inst.head,
+                            conditions: &inst.conditions,
+                        },
+                        new_head,
                         decl.trait_id,
                         InstanceId::from_raw(narrow(first + i)),
-                    )? {
-                        return Err(err);
-                    }
+                        true,
+                    )?
+                    && matches!(outcome, ProbeOutcome::Decided)
+                {
+                    decided.push((narrow(index), narrow(first + i)));
                 }
             }
             for (j, &later) in heads[i + 1..].iter().enumerate() {
-                if let Some(err) = overlap_error(
+                if let Some(outcome) = overlap_error(
                     universe,
                     self,
-                    head,
-                    &per_branch[i].0,
-                    later,
-                    &per_branch[i + 1 + j].0,
+                    new_head,
+                    ProbedHead {
+                        head: later,
+                        conditions: &per_branch[i + 1 + j].0,
+                    },
                     decl.trait_id,
                     InstanceId::from_raw(narrow(first + i + 1 + j)),
-                )? {
-                    return Err(err);
+                    true,
+                )? && matches!(outcome, ProbeOutcome::Decided)
+                {
+                    decided.push((narrow(first + i), narrow(first + i + 1 + j)));
                 }
             }
         }
@@ -523,6 +546,7 @@ impl InstanceEnv {
                 }
             }
         }
+        self.probed_disjoint.extend(decided);
         Ok(ids)
     }
 
@@ -572,13 +596,30 @@ impl InstanceEnv {
         self.served
     }
 
+    /// Rewrites the served rows' written heads and conditions onto the
+    /// merged ids the mint replay landed at (the declaration build's
+    /// post-replay remap): the recorded expressions name minted atoms
+    /// by their generation ids, which a fresh file's reserve mints shift.
+    pub fn remap_served_exprs(&mut self, minted: &FxHashMap<TypeId, TypeId>) {
+        let land = |id: TypeId| -> TypeId { minted.get(&id).copied().unwrap_or(id) };
+        for row in self.instances.iter_mut().take(self.served) {
+            remap_type_expr(&mut row.head_expr, &land);
+            for condition in &mut row.condition_exprs {
+                remap_type_expr(&mut condition.ty, &land);
+            }
+        }
+    }
+
     /// Closure check over the final instance environment (B6, section 10
     /// item 7): every head and condition is first re-solved against the
     /// current universe (stored heads are declaration-time snapshots, and a
     /// trait-as-type head widens when its trait gains members), then
     /// pairwise disjointness of same-trait heads runs over all pairs in
     /// declaration order and the structural cycle check over every
-    /// instance. Per-declaration checking is [`InstanceEnv::declare`]'s
+    /// instance. The instantiation probe joins a pair only when no
+    /// declaration concluded it disjoint (pairs left open, and pairs a
+    /// merge first put together); the set-algebra half runs for every
+    /// pair. Per-declaration checking is [`InstanceEnv::declare`]'s
     /// incremental rule; this pass catches what only the closed set — or
     /// the grown universe — shows, so it runs after the single package's
     /// declarations settle and over cross-package link merges. It stops
@@ -624,18 +665,27 @@ impl InstanceEnv {
                 }
                 let (a, b) = (&self.instances[i], &self.instances[j]);
                 if a.trait_id == b.trait_id {
-                    if let Some(err) = overlap_error(
+                    // The instantiation probe re-runs only for pairs no
+                    // declaration concluded disjoint (pairs the probe left
+                    // open, and pairs a merge first put together); the
+                    // set-algebra half above still runs for every pair,
+                    // since memberships grow after declaration.
+                    let probe = !self.probed_disjoint.contains(&(narrow(i), narrow(j)));
+                    overlap_error(
                         universe,
                         self,
-                        edges.heads[i],
-                        edges.conditions[i],
-                        edges.heads[j],
-                        edges.conditions[j],
+                        ProbedHead {
+                            head: edges.heads[i],
+                            conditions: edges.conditions[i],
+                        },
+                        ProbedHead {
+                            head: edges.heads[j],
+                            conditions: edges.conditions[j],
+                        },
                         a.trait_id,
                         InstanceId::from_raw(narrow(j)),
-                    )? {
-                        return Err(err);
-                    }
+                        probe,
+                    )?;
                 }
             }
         }
@@ -650,10 +700,19 @@ impl InstanceEnv {
 
     /// Appends another environment's instances (link (G3)). The appended
     /// instances are renumbered, so previously held ids from `other` are
-    /// invalid; callers re-query. Coherence over the merged set is
+    /// invalid; callers re-query — the appended rows' recorded probe
+    /// verdicts renumber with them. Coherence over the merged set is
     /// [`InstanceEnv::check_all`]'s job; the receiver's own served prefix
     /// stays served (the appended rows are fresh to the merged set).
     pub fn merge(&mut self, other: Self) {
+        let offset = narrow(self.instances.len());
+        self.probed_disjoint
+            .extend(other.probed_disjoint.into_iter().map(|(i, j)| {
+                (
+                    narrow(i as usize + offset as usize),
+                    narrow(j as usize + offset as usize),
+                )
+            }));
         self.instances.extend(other.instances);
     }
 
@@ -765,38 +824,73 @@ fn condition_fits(universe: &Universe, head_vars: &[TypeId], cond_ty: Ty) -> boo
     vars.iter().all(|var| head_vars.contains(var))
 }
 
+/// The non-overlap outcome of one same-trait head pair: whether the
+/// instantiation probe concluded the pair disjoint for good, or left it
+/// open for the closure pass over the closed set.
+enum ProbeOutcome {
+    /// A structural verdict no later declaration undoes.
+    Decided,
+    /// The shapes can meet but no witness exists yet.
+    Open,
+}
+
+/// One side of a coherence pair: a solved head with the conditions the
+/// probe runs under it.
+#[derive(Clone, Copy)]
+struct ProbedHead<'a> {
+    head: Ty,
+    conditions: &'a [Condition<Ty>],
+}
+
 /// Builds the overlap error for two same-trait heads that intersect, with a
-/// witness value type of the intersection (B6); `None` when the heads are
-/// disjoint. `head_a` is the earlier-declared head. Heads the set algebra
+/// witness value type of the intersection (B6); `Ok(None)` when the heads
+/// are disjoint. `a` is the earlier-declared head. Heads the set algebra
 /// reads disjoint because a generic head is opaque get the instantiation
-/// probe: an intersection through generic heads is the same error, with
-/// the shared instantiation as the witness.
+/// probe (a pure query — it never writes the universe; the error path
+/// alone materializes a witness): an intersection through generic heads is
+/// the same error, with the shared instantiation as the witness. `probe`
+/// false skips the instantiation half for a pair a declaration already
+/// concluded; the set-algebra half always runs.
 fn overlap_error(
     universe: &mut Universe,
     env: &InstanceEnv,
-    head_a: Ty,
-    conds_a: &[Condition<Ty>],
-    head_b: Ty,
-    conds_b: &[Condition<Ty>],
+    a: ProbedHead<'_>,
+    b: ProbedHead<'_>,
     trait_id: TraitId,
     later: InstanceId,
-) -> Result<Option<Error>, Error> {
-    let inter = if universe.is_disjoint(head_a, head_b) {
-        let Some(shared) = crate::instance_solve::instantiation_overlap(
-            universe, env, head_a, conds_a, head_b, conds_b,
-        ) else {
+    probe: bool,
+) -> Result<Option<ProbeOutcome>, Error> {
+    let inter = if universe.is_disjoint(a.head, b.head) {
+        if !probe {
             return Ok(None);
-        };
-        shared
+        }
+        match crate::instance_solve::instantiation_overlap(
+            universe,
+            env,
+            a.head,
+            a.conditions,
+            b.head,
+            b.conditions,
+        ) {
+            crate::instance_solve::Instantiation::Witness(grounds) => {
+                crate::instance_solve::ground_witness(universe, &grounds)?
+            },
+            crate::instance_solve::Instantiation::Disjoint => {
+                return Ok(Some(ProbeOutcome::Decided));
+            },
+            crate::instance_solve::Instantiation::Undecided => {
+                return Ok(Some(ProbeOutcome::Open));
+            },
+        }
     } else {
-        universe.inter(head_a, head_b)
+        universe.inter(a.head, b.head)
     };
     let witness = universe.witness(inter)?;
-    Ok(Some(Error::InstanceOverlap {
+    Err(Error::InstanceOverlap {
         trait_id,
-        head_a,
-        head_b,
+        head_a: a.head,
+        head_b: b.head,
         witness,
         later,
-    }))
+    })
 }

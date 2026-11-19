@@ -253,12 +253,11 @@ impl Function {
         for (pc, inst) in body.iter().enumerate() {
             let pc = u32::try_from(pc).expect("pc fits u32");
             words.push(inst.encode(pc).map_err(FunctionError::Encode)?);
-            if let Inst::Uop(uop) = inst {
-                if let Some(target) = jump_target_of(*uop) {
-                    if target >= len {
-                        return Err(FunctionError::JumpEscapesBody { pc, target, len });
-                    }
-                }
+            if let Inst::Uop(uop) = inst
+                && let Some(target) = jump_target_of(*uop)
+                && target >= len
+            {
+                return Err(FunctionError::JumpEscapesBody { pc, target, len });
             }
         }
         Ok(Self {

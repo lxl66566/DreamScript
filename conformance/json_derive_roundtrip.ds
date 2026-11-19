@@ -1,0 +1,52 @@
+// source: the from_json and to_json derive families' roundtrip round 2026-11-18 (todo item 5's json slices)
+// purpose: one declaration deriving both json families round-trips through the ambient's own parser and writer — a struct with an optional list field encoded through to_json and decoded back through from_json (presence, presence-empty, and absence), an enum with two unit cases and one struct-payload case both directions, and a wrong-shape document answering parse_err (a non-object, a missing required member, a wrong-typed member, an unknown case name, a non-string non-object enum shape)
+// items:
+// soft: stage: run
+// turn: stage: run
+// doc: stage: run
+// soft-round: stage: run
+// turn-round: stage: run
+// main: stage: run
+
+#[derive(from_json, to_json)]
+struct soft { name: string, rows: list[int]? }
+
+#[derive(from_json, to_json)]
+enum turn { left, right, spin { times: int } }
+
+fn doc(text: string) -> json {
+  const j = parse_json(text)
+  if j is parse_err { json_null } else { j }
+}
+
+fn soft_round(text: string) -> () {
+  const s = soft.from_json(doc(text))
+  if s is parse_err { println("parse_err") } else {
+    println("${soft.to_json(s).to_json()} ${s.rows is none}")
+  }
+}
+
+fn turn_round(text: string) -> () {
+  const t = turn.from_json(doc(text))
+  if t is parse_err { println("parse_err") } else {
+    println(turn.to_json(t).to_json())
+  }
+}
+
+fn main() -> () {
+  println(soft.to_json(soft { name: "ada", rows: [4, 5] }).to_json())
+  println(soft.to_json(soft { name: "ada", rows: none }).to_json())
+  soft_round("{\"name\": \"ada\", \"rows\": [4, 5]}")
+  soft_round("{\"name\": \"ada\"}")
+  soft_round("{\"name\": \"ada\", \"rows\": []}")
+  soft_round("3")
+  soft_round("{\"rows\": [1]}")
+  soft_round("{\"name\": \"ada\", \"rows\": 5}")
+  println(turn.to_json(left).to_json())
+  println(turn.to_json(spin(times: 3)).to_json())
+  turn_round("\"left\"")
+  turn_round("\"right\"")
+  turn_round("{\"times\": 3}")
+  turn_round("\"up\"")
+  turn_round("3")
+}

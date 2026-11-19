@@ -7,10 +7,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The registry client shells out to system git for `https://` remotes;
+  # a credential prompt must fail fast instead of hanging the job.
+  GIT_TERMINAL_PROMPT: "0"
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
@@ -24,6 +28,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -45,6 +50,7 @@ jobs:
 
   pin-bake:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -60,6 +66,7 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -71,6 +78,7 @@ jobs:
 
   bench-goldens:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

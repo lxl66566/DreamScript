@@ -26,3 +26,7 @@ ds-meta  = { path = "../ds-meta" }
 # the ambient member's precompiled parse tree: the parse compute serves it
 # from the embedded blob, the fresh parse as the fallback
 ds-stdlib = { workspace = true, features = ["ast-serde"] }
+
+[[bench]]
+name    = "query_loop"
+harness = false

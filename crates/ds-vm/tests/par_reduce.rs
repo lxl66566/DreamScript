@@ -6,8 +6,8 @@
 //! fixtures pin:
 //!
 //! - order determinism: the non-commutative fold `acc * 10 + b` over `[1, 2, 3, 4, 5]` answers
-//!   `12345`, and a callable that parks at a yield mid-element bounces back in and still folds in
-//!   place — ten fresh runs answer the identical fold.
+//!   `12345`, and a callable that parks mid-element bounces back in and still folds in place — ten
+//!   fresh runs answer the identical fold.
 //! - the input list is untouched: its elements read back identical after the chain.
 //! - the accumulator's `Ref` counts follow `reduce`'s owned discipline (a string fold through the
 //!   native `concat`): the init stays borrowed until the first delivered answer adopts, each
@@ -41,8 +41,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_CONCAT, BUILTIN_FIBER_YIELD, BUILTIN_LIST_GET, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
-        BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
+        BUILTIN_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_PAR_MAP,
+        BUILTIN_PAR_REDUCE,
     },
 };
 
@@ -244,24 +244,35 @@ fn shift10_def() -> FunctionDef {
     )
 }
 
-/// `(acc: int, b: int) -> int`: parks at `fiber_yield` mid-element (the
-/// bounce answer is ignored), then answers acc * 10 + b — the
-/// out-of-order-completion stand-in the hosted `reduce` loop refuses.
-fn yielding_shift10_def() -> FunctionDef {
+/// `(acc: int, b: int) -> int`: parks at its one-shot backward branch
+/// mid-element (the bounce answer is dropped — no call site stands), then
+/// answers acc * 10 + b — the out-of-order-completion stand-in the hosted
+/// `reduce` loop refuses.
+fn parking_shift10_def() -> FunctionDef {
+    // pool k0=one, k1=two, k2=zero, k3=10
     def(
-        "yielding_shift10",
-        &[I64, I64, Raw, I64, I64],
+        "parking_shift10",
+        &[I64, I64, Bool, I64, I64],
         2,
-        1,
-        vec![builtin(BUILTIN_FIBER_YIELD), Const::I64(10)],
+        0,
+        vec![Const::I64(1), Const::I64(2), Const::I64(0), Const::I64(10)],
         &[
             Uop::Funcf { frame_slots: 5 },
-            Uop::Mov { dst: 2, src: 0 },
-            Uop::Call {
-                callee: k(0),
-                nargs: 1,
+            Uop::Kimm { dst: 4, kidx: k(2) }, // zero the counter
+            Uop::Kimm { dst: 3, kidx: k(0) }, // one
+            Uop::AddI64 {
+                dst: 4,
+                lhs: 4,
+                rhs: 3,
             },
-            Uop::Kimm { dst: 3, kidx: k(1) },
+            Uop::Kimm { dst: 3, kidx: k(1) }, // two
+            Uop::LtI64 {
+                dst: 2,
+                lhs: 4,
+                rhs: 3,
+            },
+            Uop::Jmpif { cond: 2, target: 3 }, // the one-shot park point
+            Uop::Kimm { dst: 3, kidx: k(3) },
             Uop::MulI64 {
                 dst: 4,
                 lhs: 0,
@@ -1035,9 +1046,9 @@ fn wide_ref_main_def(name: &str, elems: &[&str]) -> FunctionDef {
 }
 
 /// The fixture module. Function indices are pool-FuncRef contract:
-/// 0 main_order, 1 main_yield, 2 main_untouched, 3 main_first_failure,
+/// 0 main_order, 1 main_park, 2 main_untouched, 3 main_first_failure,
 /// 4 main_nested, 5 main_ref_chain, 6 main_bad_callable,
-/// 7 main_wide_interior, 8 main_empty, 9 shift10, 10 yielding_shift10,
+/// 7 main_wide_interior, 8 main_empty, 9 shift10, 10 parking_shift10,
 /// 11 guard2, 12 nested_fn, 13 add2, 14 strcat2, 15 biased_shift,
 /// 16 main_closure_fold, 17 main_nested_map, 18 nested_map_fn,
 /// 19 double1, 20 biased_pair, 21 wide_strcat_guard, 22 pick3,
@@ -1047,7 +1058,7 @@ fn pr_registry() -> ModuleRegistry {
     reg.install(
         ModuleVersion::new("pr", vec![
             pr_main_def("main_order", &[1, 2, 3, 4, 5], 0, 9, false),
-            pr_main_def("main_yield", &[1, 2, 3, 4, 5], 0, 10, false),
+            pr_main_def("main_park", &[1, 2, 3, 4, 5], 0, 10, false),
             pr_main_def("main_untouched", &[10, 20, 30], 0, 9, true),
             pr_main_def("main_first_failure", &[5, 0], 0, 11, false),
             pr_main_def("main_nested", &[7], 0, 12, false),
@@ -1056,7 +1067,7 @@ fn pr_registry() -> ModuleRegistry {
             wide_interior_def(),
             empty_def(),
             shift10_def(),
-            yielding_shift10_def(),
+            parking_shift10_def(),
             guard2_def(),
             nested_fn_def(),
             add2_def(),
@@ -1106,13 +1117,13 @@ fn the_fold_applies_in_input_order() {
 }
 
 #[test]
-fn a_yielding_element_folds_in_place_across_ten_runs() {
-    // each element parks at its yield mid-flight and is bounced back in
+fn a_parking_element_folds_in_place_across_ten_runs() {
+    // each element parks mid-flight and is bounced back in
     // by the worklist; the fold still applies strictly in input order
     for _ in 0..10 {
         let mut vm = Vm::new(pr_registry());
         assert_eq!(
-            vm.run("pr", "main_yield", &[]),
+            vm.run("pr", "main_park", &[]),
             Ok(FrameAnswer::one(Value::I64(12_345)))
         );
         assert_children_dead(&vm, 5);

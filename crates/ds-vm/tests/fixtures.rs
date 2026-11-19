@@ -247,10 +247,10 @@ fn trapped_tail_chain_backtrace_reports_elided_frames() {
     // two real frames: main (caller) and countdown (trapping, reused frame)
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].func, "countdown");
-    assert_eq!(frames[0].pc, ds_vm::abi::CodePc(8)); // the ADDI64
+    assert_eq!(frames[0].pc, ds_vm::FramePc::At(ds_vm::abi::CodePc(8))); // the ADDI64
     assert_eq!(frames[0].elided, 5); // five tail calls: 5 -> 4 -> 3 -> 2 -> 1 -> 0
     assert_eq!(frames[1].func, "main");
-    assert_eq!(frames[1].pc, ds_vm::abi::CodePc(3)); // saved return pc, past the CALL
+    assert_eq!(frames[1].pc, ds_vm::FramePc::At(ds_vm::abi::CodePc(3))); // saved return pc, past the CALL
     assert_eq!(frames[1].elided, 0);
 }
 
@@ -271,13 +271,16 @@ fn counter_version(get_value: i64) -> ModuleVersion {
 #[test]
 fn module_slot_swap_redirects_qualified_calls() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    let v1_row = vm.install_module(counter_version(1));
+    let v1_row = vm
+        .install_module(counter_version(1))
+        .expect("the swap installs");
     assert_eq!(
         vm.run("counter", "get", &[]),
         Ok(FrameAnswer::one(Value::I64(1)))
     );
 
-    vm.install_module(counter_version(2));
+    vm.install_module(counter_version(2))
+        .expect("the swap installs");
     // the current slot now answers pool FuncRefs
     assert_eq!(
         vm.run("counter", "get", &[]),
@@ -294,7 +297,8 @@ fn module_slot_swap_redirects_qualified_calls() {
     // a third install retires the oldest version: the row left the
     // registry's own reachability and the sweep drops it, and the row is
     // the version's single home, so the version is gone
-    vm.install_module(counter_version(3));
+    vm.install_module(counter_version(3))
+        .expect("the swap installs");
     assert_eq!(
         vm.run("counter", "get", &[]),
         Ok(FrameAnswer::one(Value::I64(3)))

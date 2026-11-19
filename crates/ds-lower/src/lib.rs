@@ -81,6 +81,20 @@ pub enum PlacedOp {
     Rc(RcOp),
 }
 
+/// The served ambient splice: the pre-lowered function records plus
+/// the member-tag rows their bodies minted, both read off the checked-in
+/// dsmod artifact. The rows seed the merged lowering's tag table so the
+/// bodies the plan lowers here mint after the spliced prefix with the
+/// ids the fresh lowering's ambient-first walk would assign them —
+/// byte-identical to the fresh module, which the splice's equivalence
+/// gate pins.
+pub struct Served {
+    /// The pre-lowered bodies, the plan's function-table prefix.
+    pub functions: Vec<ds_mod::Function>,
+    /// The member-tag rows the bodies mint, in id order.
+    pub tags: Vec<ds_mod::MemberTag>,
+}
+
 /// The lowered module plus the tables callers need: the function table's
 /// names in index order, the module-wide tag ids, and each function's
 /// placed op sequence.
@@ -90,6 +104,9 @@ pub struct Lowered {
     tags: HashMap<String, u8>,
     placed: Vec<Vec<PlacedOp>>,
     facts: Vec<FnFacts>,
+    /// How many function records a served splice installed in front of
+    /// the plan's own table; a fresh lowering answers zero.
+    spliced: usize,
 }
 
 /// One function's lowering facts beyond the artifact itself: the
@@ -136,6 +153,16 @@ impl Lowered {
             .iter()
             .position(|f| f == name)
             .map(|index| u32::try_from(index).expect("function index fits u32"))
+    }
+
+    /// How many function records a served splice installed in front of
+    /// the plan's own table; a fresh lowering answers zero. The count is
+    /// the observable difference between a served splice and a silent
+    /// fallback: the two answer byte-identical modules by contract, so
+    /// a gate that must tell them apart reads this.
+    #[must_use]
+    pub fn spliced(&self) -> usize {
+        self.spliced
     }
 
     /// The module-wide tag id of a declared atom name, as the run entry
@@ -281,24 +308,31 @@ impl ComptimeValues {
 /// the run contract's entry check for the ambient's declaration-only
 /// generation and the comptime slice, `served` splices pre-lowered
 /// function bodies over the planned prefix instead of walking them,
-/// `comptime` selects the evaluator's slice or embeds its recorded
-/// answers at the call sites, and `mode` carries the REPL session's
-/// resumed-frame facts.
+/// `facts` carries a caller's already-run affine walk (the walk is
+/// deterministic over the same tables, so the same inputs answer the same
+/// rows; `None` walks here — the backstop for embedders that run no gate
+/// of their own), `comptime` selects the evaluator's slice or embeds its
+/// recorded answers at the call sites, and `mode` carries the REPL
+/// session's resumed-frame facts.
 // the slice's admitted callee set is a ninth lowering input beside the
 // run's own eight; bundling them would invent a config struct for one
 // call path
 #[allow(clippy::too_many_arguments)]
-fn lower_module(
+fn lower_module<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
     main_required: bool,
-    served: Option<Vec<ds_mod::Function>>,
+    served: Option<Served>,
     admitted: &[ds_check::DefId],
+    facts: Option<&ds_check::Linearity>,
     comptime: func::ComptimeRun<'_>,
     mode: LowerMode,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let slice = matches!(comptime, func::ComptimeRun::Slice);
     if !analyzed.checked.diags.is_empty() {
         return Err(LowerError::NotChecked {
@@ -307,14 +341,23 @@ fn lower_module(
     }
     let mut plan = Plan::new();
     plan.set_demands(collect_demands(asts, analyzed));
-    if !slice {
-        plan_deinits(asts, &mut plan, analyzed);
-    }
-    for ast in asts {
+    for tree in asts {
+        let ast = tree.borrow();
         for block in &ast.blocks {
             for item in &block.items {
                 refuse_derive(item)?;
                 plan_item(item, &mut plan, analyzed, slice, admitted);
+                // each struct's deinit plans right after its own item, so
+                // one file's entries stay contiguous and append-stable:
+                // the ambient's records (items plus deinits) remain the
+                // plan's prefix the splice serves, while a growing file's
+                // new declaration appends after every earlier entry —
+                // item and deinit alike — instead of a shifted deinit
+                // re-keying the indices a live frame's retiring row still
+                // names, the reorder a swap refuses over
+                if !slice {
+                    plan_deinits(item, &mut plan, analyzed);
+                }
             }
         }
     }
@@ -323,22 +366,23 @@ fn lower_module(
     }
     if let Some(served) = &served {
         let names = plan.names();
-        let detail = if names.len() < served.len() {
+        let functions = &served.functions;
+        let detail = if names.len() < functions.len() {
             Some(format!(
                 "the plan holds {} functions, the serve holds {}",
                 names.len(),
-                served.len()
+                functions.len()
             ))
         } else {
             names
                 .iter()
-                .zip(served.iter())
+                .zip(functions.iter())
                 .position(|(planned, body)| planned != body.name())
                 .map(|at| {
                     format!(
                         "planned function {at} is `{}` but the served body names `{}`",
                         names[at],
-                        served[at].name()
+                        functions[at].name()
                     )
                 })
         };
@@ -347,14 +391,21 @@ fn lower_module(
         }
     }
     // the affine facts the placement pass consumes: last uses and moves
-    // come from the checker (C1), never re-derived here
-    let lin = ds_check::linearity_check(
-        asts,
-        &analyzed.package,
-        &analyzed.resolutions,
-        &analyzed.decls,
-        &analyzed.checked,
-    );
+    // come from the checker (C1), never re-derived here — the caller's
+    // own walk serves when it already ran over the same tables
+    let walked;
+    let lin = if let Some(lin) = facts {
+        lin
+    } else {
+        walked = ds_check::linearity_check(
+            asts,
+            &analyzed.package,
+            &analyzed.resolutions,
+            &analyzed.decls,
+            &analyzed.checked,
+        );
+        &walked
+    };
     // the walk's own refusals gate the facts: placement over a violating
     // walk is unsound (a moved-then-used value's deinit would fire twice),
     // so a package the walk reports refuses here the same way an unchecked
@@ -364,10 +415,10 @@ fn lower_module(
             count: lin.diags.len(),
         });
     }
-    let (functions, placed, facts, shapes) = lower_all(
+    let (functions, placed, facts, shapes, spliced) = lower_all(
         &mut plan,
         analyzed,
-        &lin,
+        lin,
         &platform_name(asts),
         served,
         comptime,
@@ -395,6 +446,7 @@ fn lower_module(
         tags,
         placed,
         facts,
+        spliced,
     })
 }
 
@@ -406,12 +458,15 @@ fn lower_module(
 /// diagnostics; [`LowerError::Unsupported`] for constructs outside the M3
 /// runtime contract (each error names the seam it needs); [`LowerError::NoMain`]
 /// when no lowerable `main` entry exists.
-pub fn lower(
+pub fn lower<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     lower_in_mode(module_name, source_hash, asts, analyzed, LowerMode::Program)
 }
 
@@ -421,13 +476,16 @@ pub fn lower(
 /// # Errors
 ///
 /// [`lower`]'s own.
-pub fn lower_in_mode(
+pub fn lower_in_mode<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
     mode: LowerMode,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let empty = ComptimeValues::default();
     lower_module(
         module_name,
@@ -437,6 +495,7 @@ pub fn lower_in_mode(
         true,
         None,
         &[],
+        None,
         func::ComptimeRun::Runtime(&empty),
         mode,
     )
@@ -448,18 +507,24 @@ pub fn lower_in_mode(
 /// exactly as [`lower`]. The artifact's consumer splices the returned
 /// functions in front of a user package's own table (see
 /// [`lower_with_served`]), so the ambient's items must keep planning
-/// first in the combined package for the indexes to line up.
+/// first in the combined package for the indexes to line up, and the
+/// returned tag table rides beside them (the splice seeds the merged
+/// module's ids with it, so the artifact's bodies and tags travel
+/// together).
 ///
 /// # Errors
 ///
 /// [`LowerError::NotChecked`] and [`LowerError::Unsupported`] as
 /// [`lower`]; never [`LowerError::NoMain`].
-pub fn lower_ambient(
+pub fn lower_ambient<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let empty = ComptimeValues::default();
     lower_module(
         module_name,
@@ -469,6 +534,7 @@ pub fn lower_ambient(
         false,
         None,
         &[],
+        None,
         func::ComptimeRun::Runtime(&empty),
         LowerMode::Program,
     )
@@ -477,19 +543,24 @@ pub fn lower_ambient(
 /// The runtime-module lowering with the comptime evaluator's answers
 /// embedded: comptime functions plan nothing (their call sites emit the
 /// recorded constants), and every other surface lowers exactly like
-/// [`lower`].
+/// [`lower`]. `facts` carries a caller's already-run affine walk, `None`
+/// walking here.
 ///
 /// # Errors
 ///
 /// As [`lower`], plus [`LowerError::Unsupported`] for a comptime call
 /// whose span the evaluator never recorded.
-pub fn lower_with_comptime(
+pub fn lower_with_comptime<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
+    facts: Option<&ds_check::Linearity>,
     values: &ComptimeValues,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     lower_module(
         module_name,
         source_hash,
@@ -498,6 +569,7 @@ pub fn lower_with_comptime(
         true,
         None,
         &[],
+        facts,
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
     )
@@ -508,19 +580,25 @@ pub fn lower_with_comptime(
 /// `main` entry check waived, `served` splicing pre-lowered ambient
 /// bodies over the planned prefix exactly as [`lower_with_served`] does —
 /// an installed module's callers reach its members and never its entry.
+/// `facts` carries a caller's already-run affine walk, `None` walking
+/// here.
 ///
 /// # Errors
 ///
 /// [`lower_with_served`]'s and [`lower_with_comptime`]'s; never
 /// [`LowerError::NoMain`].
-pub fn lower_library(
+pub fn lower_library<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
-    served: Option<Vec<ds_mod::Function>>,
+    served: Option<Served>,
+    facts: Option<&ds_check::Linearity>,
     values: &ComptimeValues,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     lower_module(
         module_name,
         source_hash,
@@ -529,6 +607,7 @@ pub fn lower_library(
         false,
         served,
         &[],
+        facts,
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
     )
@@ -550,13 +629,16 @@ pub fn lower_library(
 /// [`LowerError::NotChecked`] when the package still carries checker
 /// diagnostics; [`LowerError::Unsupported`] for comptime bodies outside
 /// the covered runtime contract.
-pub fn lower_comptime_slice(
+pub fn lower_comptime_slice<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
     admitted: &[ds_check::DefId],
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     lower_module(
         module_name,
         source_hash,
@@ -565,6 +647,7 @@ pub fn lower_comptime_slice(
         false,
         None,
         admitted,
+        None,
         func::ComptimeRun::Slice,
         LowerMode::Program,
     )
@@ -577,23 +660,32 @@ pub fn lower_comptime_slice(
 /// reproduce their function-table prefix: the served list installs at
 /// indexes `0..n`, every body-walking seam (dispatch staging, call
 /// FuncRefs, evidence demands) reads the planned entries as ever, and
-/// only the per-body lowering walk is skipped. The ambient member must
-/// sit first in `asts` (the run path's registration order); a served
-/// list whose length or names disagree with the plan is
-/// [`LowerError::ServedDrift`] — the caller falls back to [`lower`].
+/// only the per-body lowering walk is skipped. The served tag rows seed
+/// the mint table so the bodies lowered here continue the ambient's
+/// ids — the fresh lowering's ambient-first walk mints the same rows in
+/// the same order, which the splice's equivalence gate pins. The
+/// ambient member must sit first in `asts` (the run path's registration
+/// order); a served list whose length, names, or tag rows disagree with
+/// the plan is [`LowerError::ServedDrift`] — the caller falls back to
+/// [`lower`]. `facts` carries a caller's already-run affine walk, `None`
+/// walking here.
 ///
 /// # Errors
 ///
 /// As [`lower`], plus [`LowerError::ServedDrift`] when the served
 /// prefix disagrees with the plan.
-pub fn lower_with_served(
+pub fn lower_with_served<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
-    served: Vec<ds_mod::Function>,
+    served: Served,
+    facts: Option<&ds_check::Linearity>,
     values: &ComptimeValues,
-) -> Result<Lowered, LowerError> {
+) -> Result<Lowered, LowerError>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     lower_module(
         module_name,
         source_hash,
@@ -602,62 +694,57 @@ pub fn lower_with_served(
         true,
         Some(served),
         &[],
+        facts,
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
     )
 }
 
-/// Plans every struct's declared `deinit` member as a synthesized module
-/// function before any body lowers (C5): binding a value of a
+/// Plans one struct item's declared `deinit` member as a synthesized
+/// module function before any body lowers (C5): binding a value of a
 /// deinit-carrying struct claims the hook by naming this plan's function,
 /// so the table index must exist before the first binder mints its pool
 /// constant. The synthesized function is one borrowed `self` parameter —
-/// the dying instance — whose body is the declared block, named after
-/// the struct. A generic struct's deinit registers without a plan:
+/// the dying instance — whose body is the declared block, named after the
+/// struct. A generic struct's deinit registers without a plan:
 /// binding its values refuses with the CALL_GENERIC seam instead of
 /// silently skipping the hook.
-fn plan_deinits(asts: &[Ast], plan: &mut Plan, analyzed: &Analyzed) {
-    for ast in asts {
-        for block in &ast.blocks {
-            for item in &block.items {
-                let ItemKind::Struct(s) = &item.kind else {
-                    continue;
-                };
-                let Some((span, body)) = s.members.iter().find_map(|member| match member {
-                    StructMember::Deinit { span, body } => Some((*span, body.clone())),
-                    StructMember::Field(_) => None,
-                }) else {
-                    continue;
-                };
-                let Some(def) = analyzed.package.lookup_type(&s.name.name) else {
-                    continue;
-                };
-                if !s.generics.is_empty() {
-                    plan.declare_deinit(def);
-                    continue;
-                }
-                let lambda = Expr::Lambda {
-                    span,
-                    generics: Vec::new(),
-                    params: vec![Param {
-                        span,
-                        mode: ds_parse::ParamMode::Borrow,
-                        name: Ident {
-                            span,
-                            name: "self".to_owned(),
-                        },
-                        ty: None,
-                        default: None,
-                    }],
-                    ret: None,
-                    arrow: true,
-                    body: Box::new(Expr::Block(body)),
-                };
-                let body_span_value = body_span(&lambda);
-                plan.push_deinit(def, &s.name.name, lambda, body_span_value);
-            }
-        }
+fn plan_deinits(item: &Item, plan: &mut Plan, analyzed: &Analyzed) {
+    let ItemKind::Struct(s) = &item.kind else {
+        return;
+    };
+    let Some((span, body)) = s.members.iter().find_map(|member| match member {
+        StructMember::Deinit { span, body } => Some((*span, body.clone())),
+        StructMember::Field(_) => None,
+    }) else {
+        return;
+    };
+    let Some(def) = analyzed.package.lookup_type(&s.name.name) else {
+        return;
+    };
+    if !s.generics.is_empty() {
+        plan.declare_deinit(def);
+        return;
     }
+    let lambda = Expr::Lambda {
+        span,
+        generics: Vec::new(),
+        params: vec![Param {
+            span,
+            mode: ds_parse::ParamMode::Borrow,
+            name: Ident {
+                span,
+                name: "self".to_owned(),
+            },
+            ty: None,
+            default: None,
+        }],
+        ret: None,
+        arrow: true,
+        body: Box::new(Expr::Block(body)),
+    };
+    let body_span_value = body_span(&lambda);
+    plan.push_deinit(def, &s.name.name, lambda, body_span_value);
 }
 
 /// The deinit function's recorded body-block span: the checker types the
@@ -696,8 +783,8 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 /// generic one its single ONE body with the runtime-evidence demands its
 /// bounds collect [H3]. Everything else is skipped; comptime functions
 /// are the evaluator's slice — the runtime module plans none of them and
-/// the slice plans nothing else beyond the pure-row helpers `admitted`
-/// names (the evaluator's own admission pass, G1).
+/// the slice plans nothing else beyond the row-admitted helpers
+/// `admitted` names (the evaluator's own admission pass, G1).
 fn plan_item(
     item: &Item,
     plan: &mut Plan,
@@ -743,8 +830,8 @@ fn plan_item(
         .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)));
     if comptime_fn != slice && !(slice && admitted.contains(&def)) {
         return; // the runtime module and the comptime slice split here; an
-        // admitted helper is the slice's one exception, a pure-row callee
-        // the evaluator's admission pass named for this slice
+        // admitted helper is the slice's one exception, a row-admitted
+        // callee the evaluator's admission pass named for this slice
     }
     if !generics.is_empty() {
         // The ONE generic body [H3]: a free generic fn lowers once,
@@ -971,7 +1058,10 @@ fn trait_bounds(
 /// demands may themselves carry callee demands, so the pass iterates
 /// until no body's list grows; the final table feeds the planning
 /// pushes here and the lambda/spawn walks at lowering time.
-fn collect_demands(asts: &[Ast], analyzed: &Analyzed) -> func::Demands {
+fn collect_demands<T>(asts: &[T], analyzed: &Analyzed) -> func::Demands
+where
+    T: std::borrow::Borrow<Ast>,
+{
     struct Body<'a> {
         id: BodyId,
         bounds: Rc<HashMap<String, HashSet<TraitId>>>,
@@ -979,7 +1069,7 @@ fn collect_demands(asts: &[Ast], analyzed: &Analyzed) -> func::Demands {
         res: &'a ds_check::Resolutions,
     }
     let mut bodies: Vec<Body> = Vec::new();
-    for ast in asts {
+    for ast in asts.iter().map(std::borrow::Borrow::<Ast>::borrow) {
         for block in &ast.blocks {
             for item in &block.items {
                 match &item.kind {
@@ -1161,6 +1251,7 @@ type LowerAll<'b> = (
     Vec<Vec<PlacedOp>>,
     Vec<FnFacts>,
     Shapes<'b>,
+    usize,
 );
 
 /// The platform name the world natives' pool FuncRefs address (H5, E1):
@@ -1170,8 +1261,11 @@ type LowerAll<'b> = (
 /// call sites. The comptime evaluator serves the same name with an
 /// empty platform, which is the fence.
 #[must_use]
-pub fn platform_name(asts: &[Ast]) -> String {
-    for ast in asts {
+pub fn platform_name<T>(asts: &[T]) -> String
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    for ast in asts.iter().map(std::borrow::Borrow::<Ast>::borrow) {
         for block in &ast.blocks {
             for item in &block.items {
                 if let ItemKind::Platform(decl) = &item.kind {
@@ -1188,7 +1282,7 @@ fn lower_all<'b>(
     analyzed: &'b Analyzed,
     lin: &ds_check::Linearity,
     platform: &str,
-    served: Option<Vec<ds_mod::Function>>,
+    served: Option<Served>,
     comptime: func::ComptimeRun<'b>,
     mode: LowerMode,
 ) -> Result<LowerAll<'b>, LowerError> {
@@ -1196,17 +1290,27 @@ fn lower_all<'b>(
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
     let mut facts = Vec::with_capacity(plan.functions().len());
+    let mut spliced = 0;
     // The served prefix installs verbatim (names already validated
     // against the plan): its bodies carry their own placed streams as
     // code words, so their placed rows here stay empty and the walk
-    // starts at the splice's end.
+    // starts at the splice's end. Its tag rows seed the mint table
+    // first — the spliced bodies reference those ids as immediates, so
+    // every body lowered here must mint after them. The linked
+    // modules' rows seed beside them (the shared tag mapping): a
+    // union-typed word crossing a module boundary carries the producer's
+    // ids as immediates, so this module's own table reserves them before
+    // any body mints.
     if let Some(served) = served {
-        for body in served {
+        shapes.seed_served(&served.tags)?;
+        for body in served.functions {
             functions.push(body);
             placed.push(Vec::new());
             facts.push(FnFacts::default());
         }
+        spliced = placed.len();
     }
+    shapes.seed_linked(analyzed.package.linked_tag_rows())?;
     let mut index = functions.len();
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
@@ -1234,5 +1338,5 @@ fn lower_all<'b>(
         facts.push(fact);
         index += 1;
     }
-    Ok((functions, placed, facts, shapes))
+    Ok((functions, placed, facts, shapes, spliced))
 }

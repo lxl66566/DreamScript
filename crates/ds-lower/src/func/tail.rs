@@ -43,7 +43,7 @@ impl FnLower<'_, '_, '_> {
                     self.res.get(*span),
                     Some(Res::Def(def))
                         if self.extraction_def(*def).is_some()
-                            || self.ambient_str_def(*def)
+                            || self.ambient_extern(*def, AmbientExtern::Str)
                             || self
                                 .analyzed
                                 .decls
@@ -109,9 +109,21 @@ impl FnLower<'_, '_, '_> {
             },
             Expr::Match { .. } => self.match_tail(e),
             Expr::Try { expr, .. } => self.try_tail(expr),
-            Expr::Call { .. } if self.is_tail_callee(e) => {
+            // The frame-reuse transfer slides the callee's own answer
+            // words onto this frame's caller, so it is sound only while
+            // the call's answer is the declared return itself. A member
+            // or strict sub-union answer would need the return's re-span
+            // after the transfer, and the transfer leaves no position
+            // for it — the same boundary a fallible-native tail keeps —
+            // so it lowers in place through the value walk.
+            Expr::Call { .. } => {
                 let ty = self.val(e.span())?.ty;
-                self.call_impl(e, ty, true)?;
+                if self.is_tail_callee(e) && ty == self.ret_ty {
+                    self.call_impl(e, ty, true)?;
+                } else {
+                    let tp = self.value(e)?;
+                    self.emit_return(&tp.place, tp.ty, e.span())?;
+                }
                 Ok(())
             },
             _ => {
@@ -140,7 +152,21 @@ impl FnLower<'_, '_, '_> {
             Some(Stmt {
                 kind: StmtKind::Expr(expr),
                 ..
-            }) => self.tail(expr),
+            }) => {
+                // A spawned child's non-unit tail answer dies at the
+                // child's own completion like a discarded statement's
+                // value [E2]: the boundary and count joins take no
+                // completed answer, so the value's unique death — a
+                // `~Copyable` answer's deinit claim included — runs
+                // inside the child, the frame answering the unit word.
+                // A unit tail keeps the tail walk below (a native tail
+                // transfer answers nothing and adds no frame hop).
+                if self.spawn_child && !self.is_unit_ty(self.val(expr.span())?.ty) {
+                    self.spawn_child_answer(expr)
+                } else {
+                    self.tail(expr)
+                }
+            },
             Some(Stmt {
                 kind: StmtKind::Local(local),
                 ..
@@ -156,6 +182,20 @@ impl FnLower<'_, '_, '_> {
                 self.emit_return(&unit.place, unit.ty, block.span)
             },
         }
+    }
+
+    /// A spawned child's non-unit tail answer [E2]: the joins at the
+    /// boundary and count seams take no completed answer, so the value
+    /// is discarded at the child's own completion — the claim discipline
+    /// a statement's value dies through, its deinit hook included — and
+    /// the frame answers the unit word, so no count rides the
+    /// completion to a receiver that never comes.
+    fn spawn_child_answer(&mut self, expr: &Expr) -> Result<(), LowerError> {
+        let tp = self.value(expr)?;
+        let words = self.discard_words(&tp.place, tp.ty, expr.span())?;
+        self.rc.discard(&mut self.code, &words);
+        let unit = self.canonical_unit()?;
+        self.emit_return(&unit, self.ret_ty, expr.span())
     }
 
     /// An early `return e`: the value leaves through the frame's return
@@ -307,7 +347,11 @@ impl FnLower<'_, '_, '_> {
                         dst: Slot::body(target.base + field.word),
                         src: Slot::body(src_addr.slot),
                     });
-                    if field.slot() == SlotType::Ref {
+                    // a variable-typed element's declared word is Raw under
+                    // a counted instantiation, so the copy registration
+                    // covers both classifications (the RC ops check the
+                    // runtime kind)
+                    if matches!(field.slot(), SlotType::Ref | SlotType::Raw) {
                         self.rc
                             .copied(&mut self.code, target.base + field.word, src_addr.slot);
                     }

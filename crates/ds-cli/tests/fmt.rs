@@ -179,3 +179,45 @@ fn a_non_ds_extension_is_refused() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("ds fmt formats .ds sources"));
 }
+
+/// A CRLF file keeps its line endings: the messy one formats to the
+/// canonical CRLF spelling (never an LF rewrite), and the canonical CRLF
+/// file is byte-stable — plain `fmt` and `--check` both report it
+/// unchanged, so a `core.autocrlf` workspace passes the CI gate.
+#[test]
+fn crlf_files_format_to_crlf_and_stay_there() {
+    let scratch = Scratch::new("crlf");
+    let messy = scratch.write("crlf.ds", "const   x=1\r\nconst  y=2\r\n");
+    let arg = messy.to_str().expect("temp path is UTF-8");
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("formatted {}\n", messy.display())
+    );
+    assert_eq!(
+        fs::read_to_string(&messy).expect("the messy file rewrote"),
+        "const x = 1\r\nconst y = 2\r\n"
+    );
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", messy.display())
+    );
+    assert_eq!(
+        fs::read_to_string(&messy).expect("the file stays CRLF"),
+        "const x = 1\r\nconst y = 2\r\n"
+    );
+    let out = ds_fmt(&["fmt", "--check", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // A bare-LF file beside the CRLF one stays LF: the dominant rule is
+    // per file, not per invocation.
+    let lf = scratch.write("lf.ds", "const x = 1\n");
+    let out = ds_fmt(&["fmt", "--check", lf.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", lf.display())
+    );
+}

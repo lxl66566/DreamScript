@@ -73,8 +73,9 @@ use ds_abi::{
 
 use crate::{
     EVIDENCE_MODULE,
-    claims::{CLAIM_BAND_CLEAR, CLAIM_BAND_SET, ClaimTable, HookSite, hook_sites},
+    claims::{CLAIM_BAND_CLEAR, CLAIM_BAND_SET, ClaimReading, ClaimTable, HookSite, hook_sites},
     fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
+    loader::{LoadError, StagedSite},
     module::{ModuleRegistry, ModuleVersion, VersionIdx},
     native::{
         ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction, NativeResult,
@@ -299,6 +300,14 @@ pub enum Trap {
     /// construction); the name keeps a corrupted range a structured
     /// refusal instead of an unchecked conversion.
     Utf8Content,
+    /// The bare trap primitive's deliberate trap (the 2026-11-17 die
+    /// split): a `die` spelling's message-bearing abort. The engine
+    /// reports nothing itself — what the trap prints and which exit code
+    /// follows is the host's own policy.
+    Die {
+        /// The message the spelling staged.
+        message: String,
+    },
     /// A print/println write failed at the output sink.
     OutputWrite {
         /// The class of the underlying io failure.
@@ -809,16 +818,19 @@ impl FrameAnswer {
 }
 
 /// How a drive of the dispatcher ended for its host: the current fiber
-/// completed, it parked at a yield whose resumer is the host, a nested
-/// drive's reentry frame returned, or it parked at a cross-nursery join
-/// whose drive the host must run first.
+/// completed, it parked with the host as resumer (a control park or a
+/// requested suspension at a preemption point), a nested drive's reentry
+/// frame returned, or it parked at a cross-nursery join whose drive the
+/// host must run first.
 pub(crate) enum DriveOutcome {
     /// The current fiber's entry frame returned or `HALT`ed: its whole
     /// answer span — one word for a scalar body, the RETSPAN's width for a
     /// multi-word return — so a host seam reads tuples and widened spans
     /// whole, never a truncated head word.
     Died(FrameAnswer),
-    /// The current fiber yielded with no in-language resumer.
+    /// The current fiber parked with no in-language resumer: the splice's
+    /// park seam or the host's requested suspension carrying its park
+    /// word (the bare bounce tag for the suspension).
     Yielded(Value),
     /// A nested reentrant call's synthetic frame returned: the answer's
     /// whole word span (one word for a scalar body, the full span for a
@@ -998,29 +1010,39 @@ impl StackState<'_> {
     }
 
     /// Resolves a scalar FuncRef word (module id + function index, the
-    /// `Fn` slot classification, F2) through the two-slot module table at
-    /// call time [H6 item 5]: the id names a module, the index names a
-    /// function in its current slot's table. Resolution never caches a
-    /// code pointer, so a hot-reload swap redirects a staged fn word at
-    /// its next call exactly like every cross-module call. Callable words
-    /// address the uop module tables only — natives are not values.
+    /// `Fn` slot classification, F2) for the CALLS dispatch and the hosted
+    /// call seam [H6 item 5]. A staged fn word is a VALUE: it carries the
+    /// current table's index space (the swap-time re-key keeps it there),
+    /// so `None` resolves through the target module's current slot — the
+    /// hot-reload redirect a staged word picks up. `Some(row)` is the
+    /// frame-own rule — the teardown pass alone uses it, driving a hook
+    /// the dying frame's own code declared. Callable words address the
+    /// uop module tables only — natives are not values.
     fn resolve_func_word(
         registry: &ModuleRegistry,
         funcref: FuncRef,
+        owner: Option<VersionIdx>,
         nargs: u8,
     ) -> Result<(VersionIdx, u32), Trap> {
-        let name = registry
-            .module_name(funcref.module())
-            .ok_or(Trap::UnknownModule {
-                module: funcref.module(),
-            })?;
-        let (version, func_id) =
-            registry
-                .resolve_indexed(name, funcref.func())
-                .ok_or(Trap::UnknownCallee {
-                    module: name.to_owned(),
-                    func: funcref.func(),
-                })?;
+        let owner_name = owner.map(|row| registry.pinned(row).name());
+        let target =
+            if owner_name.is_some_and(|own| registry.module_name(funcref.module()) == Some(own)) {
+                registry.resolve_indexed_in(owner.expect("checked above"), funcref.func())
+            } else {
+                let name = registry
+                    .module_name(funcref.module())
+                    .ok_or(Trap::UnknownModule {
+                        module: funcref.module(),
+                    })?;
+                registry.resolve_indexed(name, funcref.func())
+            };
+        let (version, func_id) = target.ok_or_else(|| Trap::UnknownCallee {
+            module: registry
+                .module_name(funcref.module())
+                .unwrap_or("")
+                .to_owned(),
+            func: funcref.func(),
+        })?;
         let target = &registry.pinned(version).functions()[func_id as usize];
         debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
         if usize::from(nargs) != target.layout.params_len() {
@@ -1030,6 +1052,65 @@ impl StackState<'_> {
             });
         }
         Ok((version, func_id))
+    }
+
+    /// Mints a scalar fn word from a pool FuncRef (the KCONST arm, F2):
+    /// a retiring frame's own-module ref carries its row's index space, so
+    /// when the minting frame's row no longer holds the module's current
+    /// slot the mint translates the index through the identity the row
+    /// records — name plus frame layout, the staged re-check's judge,
+    /// extended by the content identity a moved index-embedded name
+    /// judges by (body plus capture set hashing equal against exactly
+    /// one current candidate) — into the current table. The minted value
+    /// enters current-index-valid exactly like a re-keyed staged word,
+    /// and a dropped or ambiguous identity refuses the mint instead of
+    /// minting a word the current slot would silently misroute. A frame
+    /// on the current row (the ordinary case) and every cross-module or
+    /// native ref keep the verbatim spelling: a dependency's version the
+    /// minting pool linked against is not recorded, the cross-module
+    /// redirect staying the current-slot rule.
+    fn minted_fn_word(
+        registry: &ModuleRegistry,
+        frame_row: VersionIdx,
+        fref: FuncRef,
+    ) -> Result<Value, Trap> {
+        let own_name = registry.pinned(frame_row).name();
+        if registry.module_name(fref.module()) != Some(own_name) {
+            return Ok(Value::Fn(fref));
+        }
+        let current = registry
+            .slots(own_name)
+            .expect("a frame's module stays installed")
+            .current_idx();
+        if current == frame_row {
+            return Ok(Value::Fn(fref));
+        }
+        let refused = || Trap::UnknownCallee {
+            module: own_name.to_owned(),
+            func: fref.func(),
+        };
+        let Some(at) = usize::try_from(fref.func()).ok() else {
+            return Err(refused());
+        };
+        let row = registry.pinned(frame_row);
+        let Some(old) = row.functions().get(at) else {
+            return Err(refused());
+        };
+        let current_version = registry.pinned(current);
+        let moved = current_version
+            .functions()
+            .iter()
+            .position(|f| f.name == old.name && f.layout == old.layout)
+            .and_then(|at| u32::try_from(at).ok())
+            .or_else(|| {
+                old.embeds_table_index()
+                    .then(|| current_version.content_unique(old.content_hash()))
+                    .flatten()
+            });
+        moved.map_or_else(
+            || Err(refused()),
+            |at| Ok(Value::Fn(FuncRef::new(fref.module(), at))),
+        )
     }
 
     /// The per-call-site check for `Raw`-staged arguments: they carry no
@@ -2095,6 +2176,22 @@ fn check_native_call_site(caller: &FrameLayout, nf: &NativeFunction) -> Result<(
     check_native_overlay(area, nf)
 }
 
+/// Where a backtrace frame stands: a bytecode position, or parked inside
+/// a hosted native's reentrant call — the synthetic reentry frame
+/// [`Vm::call_hosted`] pushed carries the entry-frame sentinel return pc,
+/// which names no real position, so the frame's caller renders the seam
+/// instead of a bogus integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramePc {
+    /// A real position in the frame's function: the trapping uop for the
+    /// innermost frame, the callee's saved return pc for callers.
+    At(CodePc),
+    /// The frame called a native that reenters the VM per element (the
+    /// container combinators' hosted calls): the frame parks inside the
+    /// native, so no bytecode position exists.
+    Hosted,
+}
+
 /// One backtrace entry: a real frame plus its tail chain's elided count [H2].
 #[derive(Clone, Debug, PartialEq)]
 pub struct BacktraceFrame {
@@ -2102,9 +2199,8 @@ pub struct BacktraceFrame {
     pub module: String,
     /// The frame's function.
     pub func: String,
-    /// Where the frame is: the trapping uop for the innermost frame, the
-    /// callee's saved return pc for callers.
-    pub pc: CodePc,
+    /// Where the frame is.
+    pub pc: FramePc,
     /// How many logical frames this physical frame elided via tail calls
     /// since the normal call that created it.
     pub elided: u32,
@@ -2187,6 +2283,24 @@ pub struct Vm {
     /// what a trapped submission's rollback restores to. `None` while no
     /// REPL drive is mid-flight.
     pub(crate) repl_pre: Option<crate::repl::ReplPre>,
+    /// The REPL park seam's marker (crates/ds-vm/src/repl.rs): `Some` when
+    /// the `repl_park` control native parked the root fiber for the host,
+    /// carrying the submission's whole staged answer. The seam reaches the
+    /// host as [`DriveOutcome::Yielded`]; the REPL drive consumes this to
+    /// tell a park from any other resumer-less stop, whose continuation
+    /// the drive keeps running.
+    pub(crate) repl_park: Option<FrameAnswer>,
+    /// The host's pending suspension request (the dev host's capability
+    /// face): the named fiber parks at its next taken backward branch under
+    /// its next drive, handing the drive's host the fiber's continuation.
+    /// Consumed when it parks.
+    suspend_request: Option<FiberId>,
+    /// The parked branch a resumed suspension re-enters: its own re-take
+    /// is the resume, not a fresh preemption point, so the request check
+    /// skips it exactly once (a second arrival at the same instruction
+    /// parks — the frame has advanced a full iteration). Set by the
+    /// switch into a Preempted fiber; every switch resets it.
+    suspend_skip: Option<(FiberId, CodePc)>,
     /// The fork-join worker pool opt-in (E3's 2026-11-15 sendability
     /// ruling, crates/ds-vm/src/forkpool.rs): off by default — the
     /// sequential interlock drive is M5's backend — and when on, a
@@ -2199,6 +2313,27 @@ pub struct Vm {
     /// run that answers every fork sequentially through the gate's
     /// fallback reads zero).
     fork_pool_drives: usize,
+}
+
+/// The caller identity a call-site resolution carries: the running
+/// function's address (the inline cache's key half) and its version row
+/// (the index space a retiring frame's own-module site reads).
+#[derive(Clone, Copy)]
+struct CallerAt {
+    func: usize,
+    row: VersionIdx,
+}
+
+/// A slot swap's staged-word plan, validated before the install and
+/// consumed after it: the swapped module's registry id plus one row per
+/// retiring-table index — the incoming table's index of the same function
+/// identity, or `None` where the identity did not survive (a staged word
+/// keying a `None` row refused the swap already). Default is the no-op a
+/// first install under a fresh name validates to.
+#[derive(Debug, Default)]
+struct StagedSwap {
+    module_id: u32,
+    map: Vec<Option<u32>>,
 }
 
 /// The opcode byte each canonical uop occupies in the hot dispatch table:
@@ -2307,6 +2442,9 @@ impl Vm {
             teardown_drive: false,
             calls_staging: CaptureStaging::new(),
             repl_pre: None,
+            repl_park: None,
+            suspend_request: None,
+            suspend_skip: None,
             fork_pool: false,
             fork_pool_drives: 0,
         }
@@ -2411,37 +2549,64 @@ impl Vm {
         self.out.set_net_timeout(timeout);
     }
 
+    /// Pins the TLS client of the net face's tls tier: custom trust
+    /// roots for an embedding host or a test, the default being the
+    /// webpki root set. The tier itself stays the platform's `tls`
+    /// capability — a host omitting the capability never serves the
+    /// https bodies, whatever roots are pinned.
+    pub fn set_tls_config(&mut self, config: Arc<rustls::ClientConfig>) {
+        self.out.set_tls_config(config);
+    }
+
     /// Installs a module version into its two-slot table (hot reload swap):
-    /// the swap moves the retiring slot's old row out of the registry's own
-    /// reachability, and the install-time sweep then retires every row no
-    /// live frame or parked fiber names — the retired pools' KSTR rows
-    /// reclaimed at the same moment. Answers the installed version's
-    /// table row, the version's single home.
-    pub fn install_module(&mut self, version: ModuleVersion) -> VersionIdx {
-        let mut dead_pools = self.retiring_pool_addrs(version.name());
+    /// the swap re-checks run first (a reordering table re-keys the staged
+    /// words whose identity survived while refusing a dropped one, and a
+    /// live code row's direct-call site naming a moved or dropped index
+    /// refuses the swap), then the swap moves the retiring slot's old row
+    /// out of the registry's own reachability, and the install-time sweep
+    /// retires every row no live frame or parked fiber names — the retired
+    /// pools' KSTR rows reclaimed at the same moment. Answers the installed
+    /// version's table row, the version's single home.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::LoadError::StagedFnMisroute`] or
+    /// [`crate::LoadError::PoolRefMisroute`] when a re-check refuses (the
+    /// installed version keeps running).
+    pub fn install_module(&mut self, version: ModuleVersion) -> Result<VersionIdx, LoadError> {
+        let name = version.name().to_owned();
+        let swap = self.validate_staged_swap(&name, &version)?;
+        let mut dead_pools = self.retiring_pool_addrs(&name);
         let row = self.registry.install(version);
+        self.finish_swap(&swap);
         self.sweep_call_cache();
         dead_pools.extend(self.sweep_versions());
         self.reclaim_retired_kstr_rows(&dead_pools);
-        row
+        Ok(row)
     }
 
-    /// Installs a dsmod module into its two-slot table: the loader maps the
-    /// payload, fills the entry-descriptor placeholders, and the slots swap
-    /// [BL-7, H6 item 5]. The module is consumed, so every body's code
-    /// words reach the installed table without a copy. Answers the
-    /// installed version's table row, the version's single home.
+    /// Installs a dsmod module into its two-slot table: the swap re-checks
+    /// run first (below), the loader maps the payload, fills the
+    /// entry-descriptor placeholders, and the slots swap [BL-7, H6 item 5].
+    /// The module is consumed, so every body's code words reach the
+    /// installed table without a copy. Answers the installed version's
+    /// table row, the version's single home.
     ///
     /// # Errors
     ///
     /// Returns [`crate::LoadError`] for unqualified or unresolved callee
-    /// strings and for bodies failing the load checks.
-    pub fn install_dsmod(
-        &mut self,
-        module: ds_mod::Module,
-    ) -> Result<VersionIdx, crate::LoadError> {
-        let mut dead_pools = self.retiring_pool_addrs(module.name());
-        let row = crate::loader::install(&mut self.registry, module)?;
+    /// strings, for bodies failing the load checks, and for the swap
+    /// re-checks' refusals (the installed version keeps running).
+    pub fn install_dsmod(&mut self, module: ds_mod::Module) -> Result<VersionIdx, LoadError> {
+        let name = module.name().to_owned();
+        // build first, so the re-checks read the incoming table in its
+        // installed spelling (a failed build touches no slot, exactly like
+        // a refused swap)
+        let version = crate::loader::build(&self.registry, module)?;
+        let swap = self.validate_staged_swap(&name, &version)?;
+        let mut dead_pools = self.retiring_pool_addrs(&name);
+        let row = self.registry.install(version);
+        self.finish_swap(&swap);
         self.sweep_call_cache();
         dead_pools.extend(self.sweep_versions());
         self.reclaim_retired_kstr_rows(&dead_pools);
@@ -2456,26 +2621,326 @@ impl Vm {
     /// validated — a mismatched link, a dep cycle, or a provider miss
     /// refuses the load. Resolution keeps reading each name's current
     /// slot, so a later swap of a loaded dep redirects the dependent's
-    /// calls [H6 item 5]. Answers the root's table row, the version's
-    /// single home.
+    /// calls [H6 item 5]. The swap re-checks cover the root's swap (the
+    /// walk's own door: already-installed deps validate and skip, so only
+    /// the root can move a slot). Answers the root's table row, the
+    /// version's single home.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::LoadError`] for every refusal the walk names;
-    /// dependencies that finished installing stay installed.
+    /// Returns [`crate::LoadError`] for every refusal the walk names and
+    /// for the swap re-checks' refusals; dependencies that finished
+    /// installing stay installed.
     pub fn load(
         &mut self,
         root: ds_mod::Module,
         provider: impl FnMut(&str, ds_mod::Hash128) -> Option<ds_mod::Module>,
-    ) -> Result<VersionIdx, crate::LoadError> {
+    ) -> Result<VersionIdx, LoadError> {
+        let name = root.name().to_owned();
+        // the walk installs the dependencies and answers the root built;
         // only the root can swap a slot (already-installed deps validate
-        // and skip), so the pre-walk retiring pools are exactly its own
-        let mut dead_pools = self.retiring_pool_addrs(root.name());
-        let row = crate::load::load(&mut self.registry, root, provider)?;
+        // and skip), so the re-checks read the built table before the
+        // install lands and the pre-walk retiring pools are its own
+        let version = crate::load::load_built(&mut self.registry, root, provider)?;
+        let swap = self.validate_staged_swap(&name, &version)?;
+        let mut dead_pools = self.retiring_pool_addrs(&name);
+        let row = self.registry.install(version);
+        self.finish_swap(&swap);
         self.sweep_call_cache();
         dead_pools.extend(self.sweep_versions());
         self.reclaim_retired_kstr_rows(&dead_pools);
         Ok(row)
+    }
+
+    /// The content identity the name's current installed version records
+    /// (`None`: no current version under the name): the host-side seam a
+    /// dev session reads to decide whether a reload round moves a dep
+    /// before the walk validates its link — the identity stays pinned at
+    /// link time for the walk itself.
+    #[must_use]
+    pub fn installed_content_hash(&self, name: &str) -> Option<ds_mod::Hash128> {
+        self.registry
+            .current_version(name)
+            .and_then(ModuleVersion::content_hash)
+    }
+
+    /// The slot swap's staged-word re-check [H6 item 5's re-check landing]:
+    /// a scalar callable word keys on the function-table index and
+    /// resolution reads the name's current slot, so a swap whose incoming
+    /// table moves or drops the indexed function would silently misroute
+    /// every staged word into whatever function now holds the index. The
+    /// identity judge is what the table already records — the function's
+    /// name plus its frame layout, extended by the content identity a
+    /// moved index-embedded name judges by (body plus capture set hashing
+    /// equal against exactly one incoming candidate, never a guess).
+    /// Phase one (here, read-only, before any install): build the
+    /// retiring table's re-key map against the incoming rows and refuse on
+    /// the first staged word whose identity did not survive, then the
+    /// direct-call half ([`Vm::validate_pool_call_refs`]) refuses on the
+    /// first live code row's call site whose named identity the incoming
+    /// table moves or drops. Phase two ([`Vm::finish_swap`], after the
+    /// install landed): re-key every staged word through the validated
+    /// map, transparent where the identity kept, moved, or content-
+    /// survived its index. A first install under a fresh name needs no
+    /// check — no staged word can name an id the registry has not
+    /// assigned.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::StagedFnMisroute`] naming the staged value and the
+    /// dropped function, or [`LoadError::PoolRefMisroute`] naming the
+    /// refused call site; the registry is untouched.
+    fn validate_staged_swap(
+        &mut self,
+        name: &str,
+        incoming: &ModuleVersion,
+    ) -> Result<StagedSwap, LoadError> {
+        let Some(old) = self.registry.current_version(name) else {
+            return Ok(StagedSwap::default());
+        };
+        let old_names: Vec<String> = old.functions().iter().map(|f| f.name.clone()).collect();
+        let map: Vec<Option<u32>> = (0..u32::try_from(old.functions().len())
+            .expect("function tables fit u32"))
+            .map(|at| old.surviving_index(at, incoming))
+            .collect();
+        let module_id = self
+            .registry
+            .module_id(name)
+            .expect("a module with a current version has its id");
+        let module = name.to_owned();
+        self.walk_staged_fns(&mut |site, func| {
+            if func.module() != module_id {
+                return Ok(());
+            }
+            let at = usize::try_from(func.func()).ok();
+            let survived = at.and_then(|at| map.get(at).copied().flatten()).is_some();
+            if survived {
+                return Ok(());
+            }
+            Err(LoadError::StagedFnMisroute {
+                module: module.clone(),
+                index: func.func(),
+                func: at.and_then(|at| old_names.get(at).cloned()),
+                site,
+            })
+        })?;
+        self.validate_pool_call_refs(name, incoming)?;
+        Ok(StagedSwap { module_id, map })
+    }
+
+    /// The re-check's direct-call half: a live code row's CALL/CALLT/
+    /// CALLG/CALLTG site names the swapped module through its constant
+    /// pool by function-table index, the site's code is immutable, and
+    /// resolution follows the module's current slot — so a swap that
+    /// re-keys the index onto a different function NAME would silently
+    /// route every live frame's next direct call into whatever function
+    /// now holds the index. The staged-word half covers the callable
+    /// VALUES (re-key or refuse at the swap); this half covers the
+    /// executable CODE. The site's identity is the name alone: a kept
+    /// name with a changed frame layout is the ordinary body edit (the
+    /// inline cache re-derives the site's layout facts at its stamp
+    /// miss). A moved name refuses — with one carve-out: the swapped
+    /// module's OWN retiring rows carry sites whose index reads that
+    /// row's index space, and the dispatch translates those through the
+    /// identity the row records, so a moved index-embedded name (a
+    /// synthesized lambda, renamed by the reorder itself) passes exactly
+    /// when its content identity survives the move — body plus capture
+    /// set hashing equal against exactly one incoming candidate. A
+    /// dependent module's sites keep the strict name judge: their rows
+    /// record no linked version of the swapped module, so the
+    /// cross-module redirect stays the verbatim current-slot rule. The
+    /// walk reads every version-table row a live frame or parked fiber
+    /// pins (the registry's own slots excluded — a row no runnable
+    /// frame names never executes again, so its pool refs take the
+    /// ordinary redirect the inline-cache tests pin), so a dependent
+    /// module's direct calls into the swapped module are covered exactly
+    /// like the swapped module's own.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::PoolRefMisroute`] naming the pool that carries the
+    /// site, the index, and the identity the installed table records;
+    /// the registry is untouched.
+    fn validate_pool_call_refs(
+        &self,
+        name: &str,
+        incoming: &ModuleVersion,
+    ) -> Result<(), LoadError> {
+        let current = self
+            .registry
+            .current_version(name)
+            .expect("the staged phase proved a current version exists");
+        let module_id = self
+            .registry
+            .module_id(name)
+            .expect("a module with a current version has its id");
+        let identity = |index: u32| -> Option<&str> {
+            usize::try_from(index)
+                .ok()
+                .and_then(|at| current.functions().get(at))
+                .map(|f| f.name.as_str())
+        };
+        // the rows live frames name — the sweep's marking walk minus the
+        // registry's own slots: a row no frame or parked fiber names will
+        // never execute again (a fresh run resolves through the swapped-in
+        // current table), so its pool refs take the ordinary redirect, the
+        // completed-frame semantics the inline-cache tests pin
+        let mut live = vec![false; self.registry.version_rows()];
+        for frame in &self.callinfo {
+            live[frame.module.0 as usize] = true;
+        }
+        for fiber in &self.pool {
+            // a dead fiber's kept frames never execute again (the recycle
+            // door walks them for deinit claims alone, resolving hooks
+            // through the row the sweep pins), so they take no part in
+            // the valve: only a fiber that can run its code names a row
+            if fiber.state == FiberState::Dead {
+                continue;
+            }
+            for frame in &fiber.callinfo {
+                live[frame.module.0 as usize] = true;
+            }
+            if let Some(resume) = &fiber.resume {
+                live[resume.version.0 as usize] = true;
+            }
+        }
+        for (row, &named) in live.iter().enumerate() {
+            if !named {
+                continue;
+            }
+            let Some(version) = self.registry.version(VersionIdx(
+                u32::try_from(row).expect("version rows fit u32"),
+            )) else {
+                continue;
+            };
+            for function in version.functions() {
+                for (pc, &word) in function.code.iter().enumerate() {
+                    let pc = u32::try_from(pc).expect("pc fits u32");
+                    let Ok(ds_abi::Inst::Uop(op)) = ds_abi::Inst::decode(pc, word) else {
+                        continue;
+                    };
+                    let (ds_abi::uop::Uop::Call { callee, .. }
+                    | ds_abi::uop::Uop::Callt { callee, .. }
+                    | ds_abi::uop::Uop::Callg { callee, .. }
+                    | ds_abi::uop::Uop::Calltg { callee, .. }) = op
+                    else {
+                        continue;
+                    };
+                    let Some(Const::FuncRef(entry)) = function.pool.get(usize::from(callee.0))
+                    else {
+                        continue;
+                    };
+                    let index = match entry {
+                        ConstFuncRef::Uop { module, func } if *module == module_id => *func,
+                        ConstFuncRef::Named { module, func } if module == name => *func,
+                        _ => continue,
+                    };
+                    let Some(func_name) = identity(index) else {
+                        return Err(LoadError::PoolRefMisroute {
+                            module: name.to_owned(),
+                            pool: version.name().to_owned(),
+                            index,
+                            func: None,
+                        });
+                    };
+                    // a call site's identity is the NAME the index holds —
+                    // the index re-keying a different name is the misroute.
+                    // A kept name with a changed frame layout is the
+                    // ordinary body edit: the inline cache re-derives the
+                    // site's layout facts at its stamp miss, and an edited
+                    // signature traps at the call exactly like a fresh
+                    // run's would, so layout never gates the swap here
+                    // (unlike a staged callable WORD, whose re-check judges
+                    // name plus layout). The one moved name that passes is
+                    // the swapped module's own retiring row's index-
+                    // embedded callee whose content identity survived —
+                    // the dispatch translates the site through the row's
+                    // recorded identity, so the install keeps its
+                    // byte-identical redirect (never a guess: zero or
+                    // several content matches refuse)
+                    let kept = usize::try_from(index)
+                        .ok()
+                        .and_then(|at| incoming.functions().get(at))
+                        .is_some_and(|f| f.name == func_name);
+                    let translated = !kept
+                        && version.name() == name
+                        && usize::try_from(index)
+                            .ok()
+                            .and_then(|at| current.functions().get(at))
+                            .filter(|f| f.embeds_table_index())
+                            .and_then(|f| incoming.content_unique(f.content_hash()))
+                            .is_some();
+                    if !kept && !translated {
+                        return Err(LoadError::PoolRefMisroute {
+                            module: name.to_owned(),
+                            pool: version.name().to_owned(),
+                            index,
+                            func: Some(func_name.to_owned()),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The re-check's phase two: rewrites every staged word keyed to the
+    /// swapped module's id through the validated map. Runs only after the
+    /// install landed, so a refused or failed install never leaves a
+    /// re-keyed word behind (a re-keyed index is wrong against the table
+    /// still installed).
+    fn finish_swap(&mut self, swap: &StagedSwap) {
+        let mut rekey =
+            |_: StagedSite, func: &mut FuncRef| -> Result<(), std::convert::Infallible> {
+                if let Some(to) = usize::try_from(func.func())
+                    .ok()
+                    .and_then(|at| swap.map.get(at).copied().flatten())
+                {
+                    *func = FuncRef::new(swap.module_id, to);
+                }
+                Ok(())
+            };
+        let () = self
+            .walk_staged_fns(&mut rekey)
+            .unwrap_or_else(|never| match never {});
+    }
+
+    /// Walks every staged callable word the VM owns, applying `visit`,
+    /// which may rewrite the word in place; the first `Err` short-circuits.
+    /// The sites: every fiber's heap objects (closure headers and captures,
+    /// list elements, map keys and values) and every fiber's live segment
+    /// words — the live drive context's store and segment walk through the
+    /// context fields while its pool slot (scratch while the context is
+    /// live) is skipped, every other fiber's through its slot. Dead
+    /// fibers' stores and segments walk too: their objects survive
+    /// foreign-held words and their frames fire deinit claims at slot
+    /// reuse, the sweep's own reachability discipline.
+    fn walk_staged_fns<E>(
+        &mut self,
+        visit: &mut impl FnMut(StagedSite, &mut FuncRef) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.ctx_live {
+            self.objects.for_each_staged_fn(visit)?;
+            let fiber = self.current.0;
+            for at in 0..self.stack.len() {
+                if let Word::Slot(Value::Fn(func)) = &mut self.stack[at] {
+                    visit(StagedSite::FrameSlot { fiber }, func)?;
+                }
+            }
+        }
+        for (index, slot) in self.pool.iter_mut().enumerate() {
+            if self.ctx_live && index == self.current.index() {
+                continue;
+            }
+            slot.objects.for_each_staged_fn(visit)?;
+            let fiber = u32::try_from(index).expect("fiber ids fit u32");
+            for at in 0..slot.segment.len() {
+                if let Word::Slot(Value::Fn(func)) = &mut slot.segment[at] {
+                    visit(StagedSite::FrameSlot { fiber }, func)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     // -- Bounded-memory reclamation over the two hint caches -------------
@@ -2879,13 +3344,29 @@ impl Vm {
         id
     }
 
+    /// Requests that `fiber` park at its next taken backward branch under
+    /// its next host drive ([`Vm::resume_fiber`]), the dev host's
+    /// suspension-injection face: the drive ends handing the host the
+    /// fiber's continuation as the suspension outcome, exactly the drive
+    /// a parked-at-a-switch entry answers, and the fiber parks `Preempted`
+    /// — no call site stands, so the later resume drops its payload. The
+    /// request never bites inside a hosted reentry frame (a Rust-side
+    /// native loop cannot suspend) or a teardown drive, and it waits
+    /// past those instead. One request stands at a time; a later request
+    /// overwrites it, and the drive consumes it when it parks.
+    pub fn request_suspend(&mut self, fiber: FiberId) {
+        self.suspend_request = Some(fiber);
+    }
+
     /// Drives one fiber slice from the host: enters `fiber` (Ready or
     /// parked), delivering `payload` as the answer of the call it parked at
-    /// (a Ready fiber drops the payload), and runs until that fiber next
-    /// parks with the host as resumer (the payload it yielded, or the value
-    /// of a fiber it resumed completing) or completes (its final value). A
-    /// trapped drive leaves the fiber interrupted (not resumable) with its
-    /// frames kept for [`Vm::backtrace`].
+    /// (a Ready fiber drops the payload; a fiber parked by the host's
+    /// suspension request drops it too — no call site stands), and runs
+    /// until that fiber next parks with the host as resumer (a control
+    /// park, or the requested suspension at a taken backward branch) or
+    /// completes (its final value). A trapped drive leaves the fiber
+    /// interrupted (not resumable) with its frames kept for
+    /// [`Vm::backtrace`].
     ///
     /// # Errors
     ///
@@ -2914,7 +3395,8 @@ impl Vm {
                 Ok(answer)
             },
             Ok(DriveOutcome::Yielded(v)) => {
-                // a yield parks with one word; the fiber itself keeps its
+                // a park with the host as resumer answers one word (the
+                // suspension's bare bounce tag); the fiber itself keeps its
                 // remaining claims (interrupted drives keep their frames,
                 // and their ledgers, whole)
                 self.host_delivery(&v);
@@ -2939,6 +3421,139 @@ impl Vm {
                 self.trap_delivery(&trap);
                 Err(trap)
             },
+        }
+    }
+
+    /// Releases a fiber a trapped host drive left interrupted: the kept
+    /// frames' deinit hooks fire exactly once (the teardown pass every
+    /// drain door shares, each drive resolving through its owning frame's
+    /// version row), the claims drain, the slot's intern rows die, and
+    /// the frames clear — the pool slot returns to the spawn-reuse set
+    /// and the executing version's row unpins, so the next install's
+    /// sweep retires it (a dead drive pins nothing). The owner's open
+    /// nurseries die with it: every never-consumed nursery the fiber (or
+    /// an already-dead child under it) left open tears down, its live
+    /// children releasing their pins under this same discipline. The
+    /// caller reports first: the trap's backtrace reads the kept frames,
+    /// so the release belongs after it. Answers whether this call
+    /// released the fiber; a resumable one (a parked entry keeps its
+    /// drive), a dead slot, or the live running context answers false
+    /// untouched.
+    pub fn release_interrupted(&mut self, fiber: FiberId) -> bool {
+        // the interrupted shape: a drive ended in a Trap on this fiber,
+        // so it keeps Running with no resume point and its context sits
+        // parked in its slot — never the context a drive still holds
+        let interrupted = self
+            .pool
+            .get(fiber.index())
+            .is_some_and(|f| f.state == FiberState::Running && f.resume.is_none());
+        if !interrupted || (self.ctx_live && self.current == fiber) {
+            return false;
+        }
+        self.release_pooled_fiber(fiber);
+        self.release_owned_nurseries(fiber);
+        true
+    }
+
+    /// The per-fiber release pass the interrupted door and the nursery
+    /// teardown share: the kept frames' deinit hooks fire (through their
+    /// owning frames' version rows, a trapping hook keeping its effects
+    /// and ending the pass), the claims drain, the slot's intern rows
+    /// die, and the cleared chain plus the truncated segment drop every
+    /// pin the frames held — version rows through the call chain and the
+    /// resume point, staged callable words through the swap re-check —
+    /// before the Dead marking returns the slot to the spawn-reuse set.
+    fn release_pooled_fiber(&mut self, fiber: FiberId) {
+        self.fire_teardown_hooks(fiber, &[]);
+        self.drain_claims(fiber);
+        self.reclaim_fiber_kstr_rows(fiber);
+        let slot = &mut self.pool[fiber.index()];
+        slot.callinfo.clear();
+        slot.segment.truncate(0);
+        slot.resume = None;
+        slot.state = FiberState::Dead;
+    }
+
+    /// Tears down every open nursery whose owner's death released it:
+    /// `released` (this door's fiber — already Dead by its own pass) and
+    /// every already-dead owner (a child a drive walked dead inside its
+    /// own nursery block left it open with no drive left to consume it).
+    /// Each torn nursery's live children release in spawn order under the
+    /// per-fiber release pass — no child is entered or re-driven at this
+    /// door: a never-entered child never ran (nothing of it stands but
+    /// its staged words' counts and pins, released cold), a parked child
+    /// keeps the effects that ran and fires its kept frames' hooks
+    /// without the cut's sentinel (its resumer is dead or releases in the
+    /// same pass), and a Dead child was already walked — skipped. A
+    /// released child's own open nurseries fold into the same fixpoint,
+    /// so an abandoned nest dies whole; nursery slots close (Dead,
+    /// spawn-reusable) lowest-slot-first, deterministic.
+    fn release_owned_nurseries(&mut self, released: FiberId) {
+        while let Some(slot) = self.nurseries.iter().position(|n| {
+            n.state == NurseryState::Open
+                && n.owner.is_some_and(|owner| {
+                    owner == released || self.pool[owner.index()].state == FiberState::Dead
+                })
+        }) {
+            self.tear_down_nursery(slot);
+        }
+    }
+
+    /// Closes one abandoned nursery: its live children release in spawn
+    /// order under the per-fiber release pass — no child is entered (a
+    /// reused slot belongs to another nursery: the child died and was
+    /// ledgered before its slot recycled; a child a drive already walked
+    /// is Dead, its hooks fired at its walk, never double-released here)
+    /// — then the slot closes (Dead, spawn-reusable). The shared body of
+    /// every release door.
+    fn tear_down_nursery(&mut self, slot: usize) {
+        let id = NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"));
+        let children = self.nurseries[slot].children.clone();
+        for child in children {
+            if self.pool[child.index()].nursery != Some(id) {
+                continue;
+            }
+            if self.pool[child.index()].state == FiberState::Dead {
+                continue;
+            }
+            self.release_pooled_fiber(child);
+        }
+        let nursery = &mut self.nurseries[slot];
+        nursery.driving = false;
+        nursery.state = NurseryState::Dead;
+        nursery.outcomes.clear();
+    }
+
+    /// The REPL rollback's line-scoped nursery door: the trapping
+    /// line's root survives its own rollback, so no dead-owner door
+    /// ever catches the line's open nursery. The pre-step nursery
+    /// reading — the pool's states as the step entered, beside the
+    /// ledger reading the rollback's claim gate already matches —
+    /// floors the teardown: every root-owned open nursery sitting at
+    /// a slot the reading held Dead (recycled into by the line) or
+    /// past the reading's extent is the line's own and tears down
+    /// with its never-entered children releasing cold, while the
+    /// host-supervised root nursery and anything the reading held
+    /// Open stay untouched. A child the line's join drive walked dead
+    /// inside its own block left its nursery open with no drive left
+    /// to consume it — the dead-owner pass below folds such a nest
+    /// in, exactly the drive release's fixpoint.
+    pub(crate) fn release_line_nurseries(&mut self, floor: &[NurseryState]) {
+        loop {
+            let slot = (0..self.nurseries.len()).find(|&slot| {
+                self.nurseries[slot].state == NurseryState::Open
+                    && self.nurseries[slot].owner == Some(FIBER_ROOT)
+                    && !matches!(floor.get(slot), Some(NurseryState::Open))
+            });
+            let Some(slot) = slot else { break };
+            self.tear_down_nursery(slot);
+        }
+        while let Some(slot) = self.nurseries.iter().position(|n| {
+            n.state == NurseryState::Open
+                && n.owner
+                    .is_some_and(|owner| self.pool[owner.index()].state == FiberState::Dead)
+        }) {
+            self.tear_down_nursery(slot);
         }
     }
 
@@ -3007,6 +3622,9 @@ impl Vm {
             return id;
         }
         let id = self.open_fresh_nursery();
+        // the host supervises the root: no fiber owns it, so no release
+        // door ever tears it down
+        self.nurseries[id.index()].owner = None;
         self.root_nursery = Some(id);
         id
     }
@@ -3014,8 +3632,11 @@ impl Vm {
     /// Opens a fresh nursery [E2]: the in-language `nursery` block's own
     /// (never the root — bare host spawns route there alone), and the
     /// fork-join combinator's own over the same reuse discipline. Dead
-    /// slots reuse like fiber slots.
+    /// slots reuse like fiber slots. The opening fiber owns it — the link
+    /// a trapped owner's release follows to the nursery its abandoned
+    /// block left open.
     pub(crate) fn open_fresh_nursery(&mut self) -> NurseryId {
+        let owner = Some(self.current);
         let slot = match self
             .nurseries
             .iter()
@@ -3025,9 +3646,9 @@ impl Vm {
             None => self.nurseries.len(),
         };
         if slot == self.nurseries.len() {
-            self.nurseries.push(Nursery::open());
+            self.nurseries.push(Nursery::open(owner));
         } else {
-            self.nurseries[slot] = Nursery::open();
+            self.nurseries[slot] = Nursery::open(owner);
         }
         NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"))
     }
@@ -3375,17 +3996,20 @@ impl Vm {
                     break; // interrupted mid-trap (already ledgered)
                 }
                 // The resume is preemption-shaped [E2, E5]: a child parked
-                // at a switch point sits at a suspension it chose, so the
-                // bounce under the nursery's raised cancel flag delivers
-                // the cut instead of resuming — the driver-side twin of the
+                // at a suspension it chose (a control call) or one the
+                // host's request injected sits at a park, so the bounce
+                // under the nursery's raised cancel flag delivers the cut
+                // instead of resuming — the driver-side twin of the
                 // backward-branch preemption point, and the only bound on a
                 // child that parks with no taken backward jump left between
-                // parks (a yield inside a tail loop would otherwise bounce
+                // parks (a park inside a tail loop would otherwise bounce
                 // forever; the CALLT pc-reset is deliberately not a
                 // preemption point). A Ready child is a first entry, not a
                 // resume: its straight-line work still lands [E5].
-                let step = if self.pool[child.index()].state == FiberState::Suspended
-                    && self.nurseries[frame.nursery.index()].cancelled
+                let step = if matches!(
+                    self.pool[child.index()].state,
+                    FiberState::Suspended | FiberState::Preempted
+                ) && self.nurseries[frame.nursery.index()].cancelled
                 {
                     // enter, then die at the resume point: cancel_current
                     // fires the kept-frame deinits (the cancel-cut door)
@@ -3444,6 +4068,25 @@ impl Vm {
 
     fn consume_frame(&mut self, frame: &NurseryDrive) -> (Vec<ChildOutcome>, Option<Delivery>) {
         let outcomes = self.consume_nursery(frame.nursery);
+        // the count and boundary seams take no completed answer: each
+        // discarded span's `Ref` words dec once through the death walk's
+        // no-ledger door (the child's claim row released at its death, the
+        // count left in flight for a receiver that never comes), so the
+        // word's unique death still runs — its free cascade, deinit claims
+        // included. The face seam's outcomes cross to the host driver and
+        // the fork seam's stage adopts its own words, so neither walks
+        // here.
+        if matches!(frame.seam, DriveSeam::Count | DriveSeam::Boundary { .. }) {
+            for outcome in &outcomes {
+                if let ChildOutcome::Completed(span) = outcome {
+                    for word in span.as_slice() {
+                        if let Value::Ref(word) = word {
+                            let _ = self.heaps_walk().dec_walk(*word);
+                        }
+                    }
+                }
+            }
+        }
         // the first failure in spawn-drive order decides: a cancelled child
         // with no trapped one before it cannot happen (the flag only rises
         // at a trapped death)
@@ -3695,14 +4338,11 @@ impl Vm {
                                 return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
                             }
                             for word in answer.as_slice() {
-                                if let Value::Ref(word) = word {
-                                    if let Err(trap) = heaps.dec(*word) {
-                                        let _ = heaps.dec(result);
-                                        return ForkEnd::End(
-                                            Vec::new(),
-                                            Some(Delivery::Raise(trap)),
-                                        );
-                                    }
+                                if let Value::Ref(word) = word
+                                    && let Err(trap) = heaps.dec(*word)
+                                {
+                                    let _ = heaps.dec(result);
+                                    return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
                                 }
                             }
                         },
@@ -3765,10 +4405,10 @@ impl Vm {
                             return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
                         }
                         for word in words {
-                            if let Value::Ref(id) = *word {
-                                if let Err(trap) = heaps.dec(id) {
-                                    return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
-                                }
+                            if let Value::Ref(id) = *word
+                                && let Err(trap) = heaps.dec(id)
+                            {
+                                return ForkEnd::End(Vec::new(), Some(Delivery::Raise(trap)));
                             }
                         }
                         return ForkEnd::End(
@@ -4141,12 +4781,16 @@ impl Vm {
             .take()
             .expect("a validated switch target carries its continuation");
         let parked = fiber.state == FiberState::Suspended;
+        let preempted = fiber.state == FiberState::Preempted;
         fiber.state = FiberState::Running;
         if parked {
             let f = &self.registry.pinned(resume.version).functions()[resume.func as usize];
             let fp = self.callinfo[self.callinfo.len() - 1].fp;
             overlay_word(payload, &mut self.stack, &f.layout, fp);
         }
+        // a suspension-resumed fiber re-enters at its parked branch: that
+        // re-take is the resume itself, so the request check skips it once
+        self.suspend_skip = preempted.then_some((target, resume.pc));
         (
             Active {
                 version: resume.version,
@@ -4166,11 +4810,11 @@ impl Vm {
     /// reclaims its bytes), and the flag clears for the frame a tail
     /// transfer reuses.
     fn arena_frame_close(&mut self, fp: usize) {
-        if let Word::Meta(meta) = &mut self.stack[fp] {
-            if meta.arena_active() {
-                self.pool[self.current.index()].arena.pop_frame_mark();
-                meta.clear_arena_active();
-            }
+        if let Word::Meta(meta) = &mut self.stack[fp]
+            && meta.arena_active()
+        {
+            self.pool[self.current.index()].arena.pop_frame_mark();
+            meta.clear_arena_active();
         }
     }
 
@@ -4284,24 +4928,6 @@ impl Vm {
             return Err(Trap::ReentrancyRefused);
         }
         match control {
-            ControlNative::Yield => {
-                let payload = control_i64(&self.stack, fp, caller, 0)?;
-                self.park_current(active, CodePc(pc + 1));
-                let resumer = self.pool[self.current.index()].resumer;
-                // the resumer is the host, a fiber parked at its own resume
-                // call, or dead (the leftover pattern: it died while this
-                // fiber was parked) — a dead resumer hands the yield to the
-                // host, never a switch into a corpse
-                match resumer.filter(|&r| self.pool[r.index()].resumable()) {
-                    None => Ok(SwitchOutcome::Host(DriveOutcome::Yielded(Value::I64(
-                        payload,
-                    )))),
-                    Some(target) => {
-                        let (a, at) = self.switch_in(target, Value::I64(payload));
-                        Ok(SwitchOutcome::Entered(a, at))
-                    },
-                }
-            },
             ControlNative::Resume => {
                 let id = control_i64(&self.stack, fp, caller, 0)?;
                 let payload = control_i64(&self.stack, fp, caller, 1)?;
@@ -4455,25 +5081,33 @@ impl Vm {
             },
             ControlNative::ReplPark => {
                 // the REPL's resumed frame parks here: the staged span is
-                // the submission's answer (the splice mirrored the exit's
-                // RET staging), and word 0 rides the event to the host.
-                // Only a host drive ever meets the seam — the call sites
-                // live in the entry function the splice owns — so the
-                // resumer switch of the yield arm cannot occur; a stray
-                // in-language resumer still gets the honest switch.
+                // the submission's whole answer (the splice mirrored the
+                // exit's RET staging), word 0 riding the event to the host
+                // while the whole span rides the seam's marker for the
+                // REPL drive to read. Only a host drive ever meets the
+                // seam — the call sites live in the entry function the
+                // splice owns — so the resumer switch of the yield arm
+                // cannot occur; a stray in-language resumer still gets the
+                // honest switch.
                 if usize::from(nargs) > caller.arg_area_len() {
                     return Err(Trap::CallLayout(SlideError::StagingTooSmall {
                         available: caller.arg_area_len(),
                         needed: usize::from(nargs),
                     }));
                 }
-                let payload = control_word(&self.stack, fp, caller, 0)?;
+                let answer = FrameAnswer::staged(usize::from(nargs), |index| {
+                    control_word(&self.stack, fp, caller, index)
+                })?;
+                let head = answer.as_slice().first().copied().unwrap_or(Value::I64(0));
                 self.park_current(active, CodePc(pc + 1));
                 let resumer = self.pool[self.current.index()].resumer;
                 match resumer.filter(|&r| self.pool[r.index()].resumable()) {
-                    None => Ok(SwitchOutcome::Host(DriveOutcome::Yielded(payload))),
+                    None => {
+                        self.repl_park = Some(answer);
+                        Ok(SwitchOutcome::Host(DriveOutcome::Yielded(head)))
+                    },
                     Some(target) => {
-                        let (a, at) = self.switch_in(target, payload);
+                        let (a, at) = self.switch_in(target, head);
                         Ok(SwitchOutcome::Entered(a, at))
                     },
                 }
@@ -4550,10 +5184,10 @@ impl Vm {
     /// crosses whole — one word per span word, never a truncated head.
     /// The root's execution state resets per run (other pool fibers keep
     /// their state); on a `Trap` the state is kept for [`Vm::backtrace`].
-    /// A root that yields to the host (it has no in-language resumer) is
-    /// re-entered with the bare `PLATFORM_NONE` tag as the yield's
-    /// answer — a `run` entry drives to completion; interactive stepping
-    /// is [`Vm::resume_fiber`].
+    /// A root that parks with the host as resumer is re-entered with the
+    /// bare `PLATFORM_NONE` tag as the park's answer — a `run` entry
+    /// drives to completion; interactive stepping is
+    /// [`Vm::resume_fiber`].
     pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<FrameAnswer, Trap> {
         self.trap_pc = None;
         let (version, func_id) = self.resolve_entry(module, func, args)?;
@@ -4565,9 +5199,12 @@ impl Vm {
         // drive's kept frames fire their deinits here (E5), then release
         // their claims before the reset discards them (the tail-native
         // abandon's count dies here now, at the next run, instead of
-        // leaking to the VM's drop)
+        // leaking to the VM's drop) — and a trapped root's abandoned
+        // nurseries die with it here, their never-entered children
+        // releasing their rows and slots the same way
         self.fire_teardown_hooks(FIBER_ROOT, &[]);
         self.drain_claims(FIBER_ROOT);
+        self.release_owned_nurseries(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();
         Self::push_entry_frame(root, version, func_id, args, frame_size);
@@ -4682,6 +5319,20 @@ impl Vm {
         callee: Value,
         args: &[Value],
     ) -> Result<FrameAnswer, Trap> {
+        self.call_hosted_in(callee, args, None)
+    }
+
+    /// The hosted call seam's owner-explicit half: the teardown pass
+    /// names the dying frame's version row itself (the hook's owning
+    /// frame may sit deep in the dying chain, not at its innermost entry),
+    /// every other caller resolving staged values through the current
+    /// slot.
+    pub(crate) fn call_hosted_in(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        owner: Option<VersionIdx>,
+    ) -> Result<FrameAnswer, Trap> {
         let nargs = u8::try_from(args.len()).expect("hosted-call arities are tiny");
         let (funcref, captures) = match callee {
             Value::Fn(funcref) => (funcref, None),
@@ -4703,7 +5354,8 @@ impl Vm {
                 })
             },
         };
-        let (version, func_id) = StackState::resolve_func_word(&self.registry, funcref, nargs)?;
+        let (version, func_id) =
+            StackState::resolve_func_word(&self.registry, funcref, owner, nargs)?;
         let target = &self.registry.pinned(version).functions()[func_id as usize];
         let frame_size = target.layout.frame_size() as usize;
         let base = self.stack.len();
@@ -4952,6 +5604,25 @@ impl Vm {
     /// the nursery and never surfaces a user-hook failure, exactly the
     /// death walk's bogus-word honesty.
     pub(crate) fn fire_teardown_hooks(&mut self, fiber: FiberId, held: &[RefId]) {
+        self.fire_teardown_hooks_past(fiber, held, None, None);
+    }
+
+    /// [`Self::fire_teardown_hooks`] with the REPL rollback's partial
+    /// gate: `pre` — the pre-step ledger reading — and `parked` — the
+    /// parked frame's words as the step entered — together skip every
+    /// claim that was already live before the partial run started (a
+    /// band set in the parked words is the parked frame's own binder, a
+    /// span word already counted in the reading is a value moved into a
+    /// dying frame through a parked binding), so only the claims the run
+    /// itself established fire and every surviving value keeps its hook
+    /// for its real death.
+    pub(crate) fn fire_teardown_hooks_past(
+        &mut self,
+        fiber: FiberId,
+        held: &[RefId],
+        pre: Option<&ClaimReading>,
+        parked: Option<&[Word]>,
+    ) {
         if self.teardown_drive {
             // a door inside a teardown drive never starts a second pass.
             // The nursery seams refuse under the drive flag, so no path
@@ -4959,7 +5630,7 @@ impl Vm {
             // exotic switch tangle — the outer pass remains the only walker
             return;
         }
-        let drives = self.collect_teardown_drives(fiber, held);
+        let drives = self.collect_teardown_drives(fiber, held, pre, parked);
         if drives.is_empty() {
             return;
         }
@@ -4975,8 +5646,11 @@ impl Vm {
             self.ctx_live = true;
         }
         self.teardown_drive = true;
-        for (callee, words) in drives {
-            if self.call_hosted(Value::Fn(callee), &words).is_err() {
+        for (row, callee, words) in drives {
+            if self
+                .call_hosted_in(Value::Fn(callee), &words, Some(row))
+                .is_err()
+            {
                 break;
             }
         }
@@ -5014,12 +5688,17 @@ impl Vm {
     /// word stays unfired there. The held-back cancel payload skips, a
     /// word consumed by an earlier drive never fires twice, and each
     /// fired band clears in its frame word so a later door on the same
-    /// kept frames cannot fire the claim again.
+    /// kept frames cannot fire the claim again. Each drive names its
+    /// owning frame's version row too: the hook declares in that row's
+    /// module, so the hosted drive resolves it through the row (the
+    /// frame-own rule), never the module's current slot.
     fn collect_teardown_drives(
         &mut self,
         fiber: FiberId,
         held: &[RefId],
-    ) -> Vec<(FuncRef, Vec<Value>)> {
+        pre: Option<&ClaimReading>,
+        parked: Option<&[Word]>,
+    ) -> Vec<(VersionIdx, FuncRef, Vec<Value>)> {
         let live = self.ctx_live && self.current == fiber;
         // the frames are read by index, innermost first: each frame's
         // version row is Copy, so the walk holds no handle at all
@@ -5048,6 +5727,18 @@ impl Vm {
             }
             driven_bases.clear();
             for site in sites.iter().copied() {
+                // the partial gate's band witness: a site of the frame
+                // the parked words cover whose establishment band was
+                // already set before the partial run started belongs to
+                // the parked frame's own binder — its claim survives the
+                // rollback for the value's real death, so only a band
+                // the run itself established fires
+                if let (Some(words), Some(band)) = (parked, site.band) {
+                    let at = fp + 1 + usize::from(band);
+                    if matches!(words.get(at), Some(Word::Slot(Value::Tag(CLAIM_BAND_SET)))) {
+                        continue;
+                    }
+                }
                 if driven_bases.contains(&site.base) {
                     continue; // one value lives in one slot per frame
                 }
@@ -5059,6 +5750,7 @@ impl Vm {
                     module_id,
                     held,
                     &driven_words,
+                    pre,
                 ) else {
                     continue;
                 };
@@ -5080,7 +5772,9 @@ impl Vm {
                         self.pool[fiber.index()].segment[at] = cleared;
                     }
                 }
-                drives.push(drive);
+                // the hook addresses this frame's own module, so its row
+                // (not the chain's innermost entry) drives the resolution
+                drives.push((version, drive.0, drive.1));
             }
         }
         drives
@@ -5095,7 +5789,11 @@ impl Vm {
     /// witness, firing Ref-free spans and refusing dead claims whose
     /// counts survive on outstanding borrows. A bandless site (a
     /// hand-assembled shape) falls back to the claim ledger: every `Ref`
-    /// word of the span must still hold a count. `None` = skip.
+    /// word of the span must still hold a count. `pre` — the pre-step
+    /// ledger reading of a partial run's rollback — skips the site when
+    /// any `Ref` word already carried a count before the run started:
+    /// that value survives the rollback through its parked claim.
+    /// `None` = skip.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gate_teardown_site(
         &self,
@@ -5106,6 +5804,7 @@ impl Vm {
         module_id: u32,
         held: &[RefId],
         driven_words: &[RefId],
+        pre: Option<&ClaimReading>,
     ) -> Option<(FuncRef, Vec<Value>)> {
         let hook = &self.registry.pinned(version).functions()[site.hook as usize];
         let params = hook.layout.params();
@@ -5157,6 +5856,7 @@ impl Vm {
                 (Value::Ref(id), SlotType::Ref) => {
                     if driven_words.contains(id)
                         || (ledger_witness && self.claims[fiber.index()].count_of(*id) == 0)
+                        || pre.is_some_and(|reading| reading.count_of(*id) > 0)
                     {
                         return None;
                     }
@@ -5246,24 +5946,75 @@ impl Vm {
         )
     }
 
+    /// The current-table index a pool FuncRef's uop target resolves to for
+    /// a caller running `caller_row`: the verbatim index unless the caller
+    /// runs one of the target module's retiring rows and names its own
+    /// module — then the site's index reads the caller row's own index
+    /// space, so a kept name keeps the index (the ordinary redirect the
+    /// re-check's name judge pins) and a moved index-embedded name (a
+    /// synthesized lambda, renamed by the reorder itself) translates
+    /// through the content judge: body plus capture set hashing equal
+    /// against exactly one current candidate. `None` names an identity
+    /// that did not survive the swap — the call refuses rather than
+    /// routing the verbatim index into whatever function now holds it.
+    /// Sites crossing modules keep the verbatim rule outright: the
+    /// caller's row records no linked version of the target, so the
+    /// cross-module redirect stays the current-slot read.
+    fn uop_site_index(
+        registry: &ModuleRegistry,
+        caller_row: VersionIdx,
+        module: &str,
+        index: u32,
+    ) -> Option<u32> {
+        let row = registry.version(caller_row)?;
+        if row.name() != module {
+            return Some(index);
+        }
+        let current = registry.slots(module)?.current_idx();
+        if current == caller_row {
+            return Some(index);
+        }
+        let at = usize::try_from(index).ok()?;
+        let old = row.functions().get(at)?;
+        let current = registry.version(current)?;
+        // the kept-name fast path: the current table's function at the
+        // same index carries the site's name — verbatim
+        if current
+            .functions()
+            .get(at)
+            .is_some_and(|f| f.name == old.name)
+        {
+            return Some(index);
+        }
+        // the moved index-embedded name: the content judge, exactly one
+        // match — zero or several answer None (the never-guessing refusal)
+        if !old.embeds_table_index() {
+            return None;
+        }
+        current.content_unique(old.content_hash())
+    }
+
     /// Resolves a pool FuncRef for the CALL/CALLT dispatch: the per-site
     /// inline cache first — the entry keyed on the caller function's
     /// identity and pc, validated against the registry's install
     /// generation — then the full lookup as the fallback and the refill.
     /// The full path is the same resolution discipline as ever: uop
-    /// modules first (through the target's current slot), then the native
-    /// tables (a uop module installed under a native table's name shadows
-    /// the natives); a stamp mismatch after a swap lands here, so callee
-    /// resolution always follows the current slot [H6 item 5]. Traps are
-    /// never cached — every failure comes from the full path (a refused
-    /// layout pair rides the entry as its cached refusal, re-raised at the
-    /// call seam, never answered as a resolution failure). A uop fill also
-    /// derives the site's layout facts against `caller_layout`, so the
-    /// plan is re-derived exactly when the callee is.
+    /// modules first (through the target's current slot, a retiring
+    /// caller's own-module index translating through the identity its row
+    /// records), then the native tables (a uop module installed under a
+    /// native table's name shadows the natives); a stamp mismatch after a
+    /// swap lands here, so callee resolution always follows the current
+    /// slot [H6 item 5]. Traps are
+    /// never cached — every failure comes from the
+    /// full path (a refused layout pair rides the entry as its cached
+    /// refusal, re-raised at the call seam, never answered as a resolution
+    /// failure). A uop fill also derives the site's layout facts against
+    /// `caller_layout`, so the plan is re-derived exactly when the callee
+    /// is.
     fn resolve_site(
         &mut self,
         pool: &[Const],
-        caller: usize,
+        caller: CallerAt,
         caller_layout: &FrameLayout,
         pc: u32,
         kidx: ConstIdx,
@@ -5273,7 +6024,7 @@ impl Vm {
         let stamp = self.registry.generation();
         let hit = self.call_cache[at]
             .as_ref()
-            .is_some_and(|e| e.caller == caller && e.pc == pc && e.stamp == stamp);
+            .is_some_and(|e| e.caller == caller.func && e.pc == pc && e.stamp == stamp);
         if !hit {
             let entry =
                 self.resolve_site_full(pool, caller, caller_layout, pc, kidx, nargs, stamp)?;
@@ -5306,14 +6057,17 @@ impl Vm {
     /// pool kind check, the target module's current slot, the entry-word
     /// and arity checks. The pool belongs to the CALLER's module version:
     /// instruction stream and pool are version-stable, callee resolution
-    /// follows the target's current slot [H6 item 5]. The pool operand's
+    /// follows the target's current slot [H6 item 5] — the redirect a
+    /// parked old frame's next direct call picks up, with a retiring
+    /// caller's own-module index translated through the identity its row
+    /// records ([`Vm::uop_site_index`]). The pool operand's
     /// index and FuncRef kind were proved at install (module.rs's body
     /// validation), so the fetch indexes directly and the kind arm is the
     /// corrupted-pool tripwire.
     fn resolve_site_full(
         &self,
         pool: &[Const],
-        caller: usize,
+        caller: CallerAt,
         caller_layout: &FrameLayout,
         pc: u32,
         kidx: ConstIdx,
@@ -5331,17 +6085,32 @@ impl Vm {
         // uop first: an install-resolved id addresses the dep's module
         // directly (its name sits in the registry's id vector), a name
         // through the module table — so a uop module installed under a
-        // native table's name still shadows the natives
-        let uop_target = match entry {
-            ConstFuncRef::Uop { module, func } => {
-                let name = self
-                    .registry
-                    .module_name(*module)
-                    .ok_or(Trap::UnknownModule { module: *module })?;
-                self.registry.resolve_indexed(name, *func)
-            },
-            ConstFuncRef::Named { module, func } => self.registry.resolve_indexed(module, *func),
-        };
+        // native table's name still shadows the natives. A retiring
+        // caller's own-module index translates first; a translation that
+        // cannot be proven traps rather than routing the verbatim index.
+        let uop_target =
+            match entry {
+                ConstFuncRef::Uop { module, func } => {
+                    let name = self
+                        .registry
+                        .module_name(*module)
+                        .ok_or(Trap::UnknownModule { module: *module })?;
+                    let func = Self::uop_site_index(&self.registry, caller.row, name, *func)
+                        .ok_or(Trap::UnknownCallee {
+                            module: name.to_owned(),
+                            func: *func,
+                        })?;
+                    self.registry.resolve_indexed(name, func)
+                },
+                ConstFuncRef::Named { module, func } => {
+                    let func = Self::uop_site_index(&self.registry, caller.row, module, *func)
+                        .ok_or(Trap::UnknownCallee {
+                            module: module.clone(),
+                            func: *func,
+                        })?;
+                    self.registry.resolve_indexed(module, func)
+                },
+            };
         if let Some((version, func_id)) = uop_target {
             let target = &self.registry.pinned(version).functions()[func_id as usize];
             debug_assert_eq!(target.entry.tier1_prologue(), func_id as usize);
@@ -5353,7 +6122,7 @@ impl Vm {
             }
             let facts = SiteFacts::derive(caller_layout, &target.layout);
             return Ok(CallSite {
-                caller,
+                caller: caller.func,
                 pc,
                 stamp,
                 callee: CachedCallee::Uop {
@@ -5403,7 +6172,7 @@ impl Vm {
             });
         }
         Ok(CallSite {
-            caller,
+            caller: caller.func,
             pc,
             stamp,
             callee: CachedCallee::Native {
@@ -5438,6 +6207,7 @@ impl Vm {
         &mut self,
         entry: &ConstFuncRef,
         caller: usize,
+        caller_row: VersionIdx,
         caller_layout: &FrameLayout,
         pc: u32,
         nargs: u8,
@@ -5453,17 +6223,28 @@ impl Vm {
         if !hit {
             // an install-resolved id addresses its dep's module directly
             // (the name sits in the registry's id vector), a name through
-            // the module table
+            // the module table; a retiring caller's own-module index
+            // translates through the identity its row records
             let target = match entry {
                 ConstFuncRef::Uop { module, func } => {
                     let name = self
                         .registry
                         .module_name(*module)
                         .ok_or(Trap::UnknownModule { module: *module })?;
-                    self.registry.resolve_indexed(name, *func)
+                    let func = Self::uop_site_index(&self.registry, caller_row, name, *func)
+                        .ok_or(Trap::UnknownCallee {
+                            module: name.to_owned(),
+                            func: *func,
+                        })?;
+                    self.registry.resolve_indexed(name, func)
                 },
                 ConstFuncRef::Named { module, func } => {
-                    self.registry.resolve_indexed(module, *func)
+                    let func = Self::uop_site_index(&self.registry, caller_row, module, *func)
+                        .ok_or(Trap::UnknownCallee {
+                            module: module.clone(),
+                            func: *func,
+                        })?;
+                    self.registry.resolve_indexed(module, func)
                 },
             };
             let Some((version, func_id)) = target else {
@@ -5562,13 +6343,13 @@ impl Vm {
             .and_then(|row| row.ids.get(idx))
             .copied()
             .flatten();
-        if let Some(id) = cached {
-            if self.objects.is_live_str_with(id, text) {
-                if claim {
-                    self.objects.inc(id)?;
-                }
-                return Ok(id);
+        if let Some(id) = cached
+            && self.objects.is_live_str_with(id, text)
+        {
+            if claim {
+                self.objects.inc(id)?;
             }
+            return Ok(id);
         }
         let id = if claim { self.objects.intern(text) } else { self.objects.intern_borrow(text) };
         let (at, row) = self.kstr_cache.open(key, pool.len());
@@ -5580,7 +6361,7 @@ impl Vm {
     /// The dispatcher: decode-on-dispatch (see the module docs), then a
     /// dense `match` over the uop [BL-3 note: computed goto is not available
     /// on stable Rust]. A drive ends when the current fiber completes
-    /// ([`DriveOutcome::Died`]) or yields to the host
+    /// ([`DriveOutcome::Died`]) or parks with the host as resumer
     /// ([`DriveOutcome::Yielded`]); switches between fibers happen inside.
     /// `boundary` is the call-chain depth of a nested reentrant drive's
     /// synthetic reentry frame ([`Vm::call_hosted`]): a host-level drive
@@ -5665,6 +6446,39 @@ impl Vm {
                                         PLATFORM_CANCELLED,
                                     ))))
                                 },
+                            }
+                        }
+                        // the host's suspension request [the dev host's
+                        // capability face]: the requested fiber parks at the
+                        // same observation point a cancel uses, and the drive
+                        // ends handing the host its continuation. The resume
+                        // point is the branch itself: the frame is frozen in
+                        // between, so the resumed drive re-takes the branch
+                        // and decides the same. The parked branch's own
+                        // re-take is the resume — the skip marker — so a
+                        // resumed drive parks at its NEXT backward branch,
+                        // one loop iteration per drive. Never inside a
+                        // hosted reentry frame — a Rust-side native loop
+                        // cannot suspend, so the request waits for the
+                        // hosting drive to return — and never under a
+                        // teardown drive, which must finish its walk.
+                        if t <= pc.0
+                            && self.suspend_request == Some(self.current)
+                            && !self.teardown_drive
+                            && !self.reentry_live(boundary)
+                        {
+                            if self.suspend_skip.take() == Some((self.current, pc)) {
+                                // the resumed branch's own re-take
+                            } else {
+                                self.suspend_request = None;
+                                let fiber = &mut self.pool[self.current.index()];
+                                fiber.resume = Some(ResumePoint {
+                                    version: active.version,
+                                    func: active.func,
+                                    pc: CodePc(pc.0),
+                                });
+                                fiber.state = FiberState::Preempted;
+                                return Ok(DriveOutcome::Yielded(Value::Tag(PLATFORM_NONE)));
                             }
                         }
                         pc = CodePc(t);
@@ -5873,20 +6687,25 @@ impl Vm {
                             // the word directly — the dsmod install already
                             // walked position → dep name → module id, and the
                             // mint carries exactly that one vector index.
-                            // CALLS re-resolves the word through the target's
-                            // current slot at call time, so a minted word picks
-                            // up a hot-reload swap like a staged one. A
-                            // name-keyed callee resolves at issue time: a
-                            // directly installed module through the registry's
-                            // id space, a native surface refusing as no
-                            // callable word (natives are not values). The
-                            // loader validated the reference at install, so
-                            // an unresolved name is a corrupted pool, never a
-                            // program fact.
+                            // A retiring frame's own-module ref carries its
+                            // row's index space, so the mint translates it
+                            // into the current table (below): the minted
+                            // value enters current-index-valid exactly like
+                            // a re-keyed staged word. A name-keyed callee
+                            // resolves at issue time: a directly installed
+                            // module through the registry's id space, a
+                            // native surface refusing as no callable word
+                            // (natives are not values). The loader validated
+                            // the reference at install, so an unresolved
+                            // name is a corrupted pool, never a program
+                            // fact.
                             Const::FuncRef(callee) => match callee {
-                                ConstFuncRef::Uop { module, func } => {
-                                    Value::Fn(FuncRef::new(*module, *func))
-                                },
+                                ConstFuncRef::Uop { module, func } => StackState::minted_fn_word(
+                                    &self.registry,
+                                    active.version,
+                                    FuncRef::new(*module, *func),
+                                )
+                                .map_err(|e| (e, pc))?,
                                 ConstFuncRef::Named { module, func } => {
                                     let module_id = self.registry.module_id(module).ok_or((
                                         Trap::UnknownCallee {
@@ -5895,7 +6714,12 @@ impl Vm {
                                         },
                                         pc,
                                     ))?;
-                                    Value::Fn(FuncRef::new(module_id, *func))
+                                    StackState::minted_fn_word(
+                                        &self.registry,
+                                        active.version,
+                                        FuncRef::new(module_id, *func),
+                                    )
+                                    .map_err(|e| (e, pc))?
                                 },
                             },
                             found => {
@@ -6762,7 +7586,10 @@ impl Vm {
                     OP_CALL => {
                         let callee = ConstIdx(fd);
                         let nargs = fa;
-                        let caller = std::ptr::from_ref(f) as usize;
+                        let caller = CallerAt {
+                            func: std::ptr::from_ref(f) as usize,
+                            row: active.version,
+                        };
                         let resolved = self
                             .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
                             .map_err(|e| (e, pc))?;
@@ -6841,7 +7668,10 @@ impl Vm {
                     OP_CALLT => {
                         let callee = ConstIdx(fd);
                         let nargs = fa;
-                        let caller = std::ptr::from_ref(f) as usize;
+                        let caller = CallerAt {
+                            func: std::ptr::from_ref(f) as usize,
+                            row: active.version,
+                        };
                         let resolved = self
                             .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
                             .map_err(|e| (e, pc))?;
@@ -7070,7 +7900,7 @@ impl Vm {
                             },
                         };
                         let (version, func_id) =
-                            StackState::resolve_func_word(&self.registry, funcref, nargs)
+                            StackState::resolve_func_word(&self.registry, funcref, None, nargs)
                                 .map_err(|e| (e, pc))?;
                         let target = &self.registry.pinned(version).functions()[func_id as usize];
                         // a closure's capture block lands in the callee's frame
@@ -7240,7 +8070,14 @@ impl Vm {
                         // callee's frame never claims it.
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(callee, caller_site, &f.layout, pc.0, nargs)
+                            .resolve_dispatch_site(
+                                callee,
+                                caller_site,
+                                active.version,
+                                &f.layout,
+                                pc.0,
+                                nargs,
+                            )
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
@@ -7496,7 +8333,14 @@ impl Vm {
                         // reuses this frame
                         let caller_site = std::ptr::from_ref(f) as usize;
                         let resolved = self
-                            .resolve_dispatch_site(callee, caller_site, &f.layout, pc.0, nargs)
+                            .resolve_dispatch_site(
+                                callee,
+                                caller_site,
+                                active.version,
+                                &f.layout,
+                                pc.0,
+                                nargs,
+                            )
                             .map_err(|e| (e, pc))?;
                         if let DispatchResolved::Uop {
                             version,
@@ -7593,17 +8437,17 @@ impl Vm {
                                 pc,
                             ));
                         }
-                        if let Some(caller_area) = self.caller_arg_area() {
-                            if usize::from(g.result_words) > caller_area {
-                                return Err((
-                                    Trap::RetSpanTooWide {
-                                        span: u16::from(g.result_words),
-                                        caller_area: u16::try_from(caller_area)
-                                            .expect("argument areas fit u16"),
-                                    },
-                                    pc,
-                                ));
-                            }
+                        if let Some(caller_area) = self.caller_arg_area()
+                            && usize::from(g.result_words) > caller_area
+                        {
+                            return Err((
+                                Trap::RetSpanTooWide {
+                                    span: u16::from(g.result_words),
+                                    caller_area: u16::try_from(caller_area)
+                                        .expect("argument areas fit u16"),
+                                },
+                                pc,
+                            ));
                         }
                         let start = f.layout.arg_area().start;
                         let mut inline = [Value::I64(0); INLINE_WORDS];
@@ -7978,11 +8822,12 @@ impl Vm {
             let ci = &fiber.callinfo[depth];
             let f = &self.registry.pinned(ci.module).functions()[ci.func as usize];
             let pc = if depth + 1 == fiber.callinfo.len() {
-                self.trap_pc.unwrap_or(CodePc(0))
+                FramePc::At(self.trap_pc.unwrap_or(CodePc(0)))
             } else {
                 match fiber.segment[fiber.callinfo[depth + 1].fp] {
-                    Word::Meta(m) => m.return_pc,
-                    Word::Slot(_) => CodePc(0),
+                    Word::Meta(m) if m.return_pc.0 == u32::MAX => FramePc::Hosted,
+                    Word::Meta(m) => FramePc::At(m.return_pc),
+                    Word::Slot(_) => FramePc::At(CodePc(0)),
                 }
             };
             let elided = match fiber.segment[ci.fp] {
@@ -8435,7 +9280,7 @@ mod tests {
             ModuleVersion::new("m", vec![g, f]).expect("valid fixture module")
         }
         let mut vm = Vm::new(ModuleRegistry::new());
-        let v1 = vm.install_module(fixture(2));
+        let v1 = vm.install_module(fixture(2)).expect("the swap installs");
         for _ in 0..8 {
             assert_eq!(
                 vm.run("m", "f", &[Value::I64(21)]),
@@ -8451,10 +9296,10 @@ mod tests {
         // home; the second swap leaves the slots, but the root drive's
         // kept entry frame still names v1 — the sweep honestly keeps the
         // row (the same pin the fiber sweep tests carry)
-        vm.install_module(fixture(3));
+        vm.install_module(fixture(3)).expect("the swap installs");
         assert_eq!(vm.registry.row_arc_count(v1), 1);
         assert!(vm.registry.version(v1).is_some());
-        vm.install_module(fixture(5));
+        vm.install_module(fixture(5)).expect("the swap installs");
         assert_eq!(vm.registry.row_arc_count(v1), 1);
         assert!(vm.registry.version(v1).is_some());
         // the next run resets the root's kept entry frame onto the
@@ -8464,7 +9309,7 @@ mod tests {
             vm.run("m", "f", &[Value::I64(21)]),
             Ok(FrameAnswer::one(Value::I64(105)))
         );
-        vm.install_module(fixture(7));
+        vm.install_module(fixture(7)).expect("the swap installs");
         assert_eq!(vm.registry.row_arc_count(v1), 0);
         assert!(vm.registry.version(v1).is_none());
     }

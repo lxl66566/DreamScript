@@ -395,9 +395,10 @@ impl Walker<'_> {
             Res::TraitMethod(_) | Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. }) => {
                 (Tok::Method, 0)
             },
-            Res::Dot(DotRes::Free { .. }) => (Tok::Function, 0),
-            // The `.err`/`.ok` handler forms are surface syntax.
-            Res::Handler => (Tok::Keyword, 0),
+            Res::Dot(DotRes::Free { .. } | DotRes::Module { .. }) => (Tok::Function, 0),
+            // The `.err`/`.ok` handler forms are surface syntax, and a
+            // bare module alias is not a value this round.
+            Res::Handler | Res::Module(_) => (Tok::Keyword, 0),
         };
         self.push(ident.span, tok, mods);
     }

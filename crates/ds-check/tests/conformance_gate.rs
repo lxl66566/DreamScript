@@ -37,7 +37,17 @@ const TYPES_AMBIENT: &str = concat!(
     "pub extern fn fields (t: type) -> list[field]\n",
     "pub extern fn type_name (t: type) -> string\n",
     "pub extern fn read_file (path: string) -> string | io_err\n",
-    "pub extern fn parse_json (text: string) -> json | io_err\n",
+    "pub tag parse_err\n",
+    "pub enum json {\n",
+    "  json_null\n",
+    "  json_bool { value: bool }\n",
+    "  json_int { value: int }\n",
+    "  json_float { value: float }\n",
+    "  json_string { value: string }\n",
+    "  json_array { items: list[json] }\n",
+    "  json_object { fields: map[string, json] }\n",
+    "}\n",
+    "pub extern fn parse_json (text: string) -> json | parse_err\n",
     "pub extern fn str[t] (v: t) -> string\n",
 );
 
@@ -88,6 +98,7 @@ const SWEEP_AMBIENT: &str = concat!(
 const GENERICS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
+    "pub tag char\n",
     "pub tag bool\n",
     "pub trait Copyable { }\n",
     "pub trait ord {\n",
@@ -101,9 +112,9 @@ const GENERICS_AMBIENT: &str = concat!(
     "pub struct list[t]\n",
     "pub struct field { name: string, type: type, tag: string }\n",
     "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
-    "pub extern fn head[t] (xs: list[t]) -> t?\n",
+    "pub extern fn first[t] (xs: list[t]) -> t?\n",
     "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
-    "pub extern fn join (parts: list[string], sep: string) -> string\n",
+    "pub extern fn join (parts: list[string], sep: char) -> string\n",
     "pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
     "pub extern fn str[t] (v: t) -> string\n",
     "pub extern fn fields (t: type) -> list[field]\n",
@@ -189,6 +200,7 @@ const TOPLEVEL_AMBIENT: &str = concat!(
 const LISTS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
+    "pub tag char\n",
     "pub tag bool\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
@@ -198,22 +210,27 @@ const LISTS_AMBIENT: &str = concat!(
     "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
     "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
     "pub extern fn collect[t] (xs: list[t]) -> list[t]\n",
-    "pub extern fn join (parts: list[string], sep: string) -> string\n",
+    "pub extern fn join (parts: list[string], sep: char) -> string\n",
     "pub extern fn println (msg: string) -> ()\n",
 );
 
 /// Ambient stdlib stubs per the maps_surface list: the checked map reads
-/// the constructor and builder calls build against (the `get` spelling is
-/// the corpus file's own extern — the ambient shed its dead declarations).
+/// the constructor and builder calls build against, the ordered key face
+/// the entry-order item walks, the free `len` the member-count item
+/// spells, and the list the key face answers (the `get` spelling is the
+/// corpus file's own extern — the ambient shed its dead declarations).
 const MAPS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
     "pub tag bool\n",
     "pub trait Copyable { }\n",
     "pub struct map[k, v]\n",
+    "pub struct list[t]\n",
     "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
     "pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "pub extern fn map_len[k, v] (m: map[k, v]) -> int\n",
+    "pub extern fn map_keys[k, v] (m: map[k, v]) -> list[k]\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
 );
 /// Ambient for extraction_family: the primitives, the collection reads,
 /// the family's own extern spellings, and the ambient-owned config the
@@ -418,7 +435,7 @@ fn extraction_family_items_check_clean() {
 }
 
 #[test]
-fn types_hybrid_known_tension_is_confined_to_get_port() {
+fn types_hybrid_narrows_the_ambient_json_cleanly() {
     let path = ds_corpus_path::resolve("../../conformance/types_hybrid.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let mut files = Files::new();
@@ -426,31 +443,17 @@ fn types_hybrid_known_tension_is_confined_to_get_port() {
     let cor = files.add_source("corpus.ds", &source);
     let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
     let checked = type_check(&files, &asts);
-    let get_port = items_of(&asts[1])
-        .into_iter()
-        .find(|i| {
-            matches!(
-                &i.kind,
-                ItemKind::Local(l)
-                    if matches!(&l.pat, ds_parse::Pattern::Binding { name, .. } if name.name == "get_port")
-            )
-        })
-        .expect("get_port item");
-    let mut confined = 0;
-    for diag in &checked.diags {
-        let inside = diag.labels.iter().any(|l| within(l.span, get_port));
-        assert!(
-            inside,
-            "diagnostic outside get_port: {} {}",
-            diag.code.as_str(),
-            diag.message
-        );
-        assert_eq!(diag.code.as_str(), "DS2001");
-        confined += 1;
-    }
-    assert_eq!(
-        confined, 2,
-        "the known get_port tension is exactly two ordering errors"
+    // get_port narrows the ambient's json_object and json_int cases and
+    // load carries parse_err in its union, so the whole file checks clean
+    // under the stub that mirrors the ambient's own json face
+    assert!(
+        checked.diags.is_empty(),
+        "types_hybrid checks clean: {}",
+        checked
+            .diags
+            .iter()
+            .map(|d| ds_diag::human(d, &files))
+            .collect::<String>()
     );
 }
 
@@ -462,7 +465,7 @@ fn generics_reject_item_is_the_overlap_witness() {
     );
     assert_eq!(rejects.len(), 1, "one reject item in the file header");
     let (id, _what, diag) = &rejects[0];
-    assert_eq!(id, "impl-json-int-bool");
+    assert_eq!(id, "impl-json-text-int-bool");
     assert_eq!(diag.code.as_str(), "DS2006");
     assert_eq!(
         diag.message,
@@ -559,10 +562,10 @@ fn gate_full(
         if let Some(d) = &lin_diag {
             all.push((stage.id.clone(), stage.stage.clone(), d.clone()));
         }
-        if let Some(what) = stage.stage.strip_prefix("reject ") {
-            if let Some(diag) = &lin_diag {
-                rejects.push((stage.id.clone(), what.to_owned(), diag.clone()));
-            }
+        if let Some(what) = stage.stage.strip_prefix("reject ")
+            && let Some(diag) = &lin_diag
+        {
+            rejects.push((stage.id.clone(), what.to_owned(), diag.clone()));
         }
     }
     (rejects, all, lin, source)

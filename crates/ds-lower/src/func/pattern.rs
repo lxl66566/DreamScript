@@ -27,30 +27,39 @@ impl FnLower<'_, '_, '_> {
         // with its own value; the join keeps what both arms kept
         let base = self.rc.save();
         let then_tp = self.block_value(then)?;
-        self.refuse_fn_word_answer(
-            ty,
-            &then_tp,
-            then.span,
-            "a capturing closure in a fn-typed join arm",
-            "an unproven callable in a fn-typed join arm",
-        )?;
-        self.widen_into(&result, ty, &then_tp, then.span)?;
-        let arm_then = self.rc.take();
         let then_div = self.rc.diverged();
+        // an arm that exited the frame never reaches the join: its
+        // handed-back place is the exit's dead answer, so the join widen
+        // would emit dead code over a mismatched shape (a statement if's
+        // early-exit arm) — the arm's own exit stands in for the join
+        if !then_div {
+            self.refuse_fn_word_answer(
+                ty,
+                &then_tp,
+                then.span,
+                "a capturing closure in a fn-typed join arm",
+                "an unproven callable in a fn-typed join arm",
+            )?;
+            self.widen_into(&result, ty, &then_tp, then.span)?;
+        }
+        let arm_then = self.rc.take();
         let then_jmp = self.code.len();
         self.emit(Op::Jmp { target: join });
         self.rc.restore(base);
         self.bind_label(else_lbl);
         if let Some(else_expr) = else_ {
             let else_tp = self.value(else_expr)?;
-            self.refuse_fn_word_answer(
-                ty,
-                &else_tp,
-                else_expr.span(),
-                "a capturing closure in a fn-typed join arm",
-                "an unproven callable in a fn-typed join arm",
-            )?;
-            self.widen_into(&result, ty, &else_tp, else_expr.span())?;
+            let else_div = self.rc.diverged();
+            if !else_div {
+                self.refuse_fn_word_answer(
+                    ty,
+                    &else_tp,
+                    else_expr.span(),
+                    "a capturing closure in a fn-typed join arm",
+                    "an unproven callable in a fn-typed join arm",
+                )?;
+                self.widen_into(&result, ty, &else_tp, else_expr.span())?;
+            }
         } else {
             // a missing else is the unit else [B2]: the checker already
             // types the if as the then-type united with unit
@@ -289,16 +298,21 @@ impl FnLower<'_, '_, '_> {
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                self.refuse_fn_word_answer(
-                    ty,
-                    &body_tp,
-                    arm.body.span(),
-                    "a capturing closure in a fn-typed join arm",
-                    "an unproven callable in a fn-typed join arm",
-                )?;
-                self.widen_into(result, ty, &body_tp, arm.body.span())?;
+                let div = self.rc.diverged();
+                // an exited arm never reaches the join (if_value's arm
+                // comment): its dead answer does not widen
+                if !div {
+                    self.refuse_fn_word_answer(
+                        ty,
+                        &body_tp,
+                        arm.body.span(),
+                        "a capturing closure in a fn-typed join arm",
+                        "an unproven callable in a fn-typed join arm",
+                    )?;
+                    self.widen_into(result, ty, &body_tp, arm.body.span())?;
+                }
                 states.push(self.rc.take());
-                divs.push(self.rc.diverged());
+                divs.push(div);
                 let at = self.code.len();
                 self.emit(Op::Jmp { target: join });
                 jumps.push(Some(at));
@@ -393,14 +407,18 @@ impl FnLower<'_, '_, '_> {
             match value {
                 Some((result, ty, _join)) => {
                     let body = self.value(&arm.body)?;
-                    self.refuse_fn_word_answer(
-                        ty,
-                        &body,
-                        arm.body.span(),
-                        "a capturing closure in a fn-typed join arm",
-                        "an unproven callable in a fn-typed join arm",
-                    )?;
-                    self.widen_into(result, ty, &body, arm.body.span())?;
+                    // an exited arm never reaches the join (if_value's arm
+                    // comment): its dead answer does not widen
+                    if !self.rc.diverged() {
+                        self.refuse_fn_word_answer(
+                            ty,
+                            &body,
+                            arm.body.span(),
+                            "a capturing closure in a fn-typed join arm",
+                            "an unproven callable in a fn-typed join arm",
+                        )?;
+                        self.widen_into(result, ty, &body, arm.body.span())?;
+                    }
                 },
                 None => self.tail(&arm.body)?,
             }
@@ -493,16 +511,21 @@ impl FnLower<'_, '_, '_> {
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                self.refuse_fn_word_answer(
-                    ty,
-                    &body_tp,
-                    arm.body.span(),
-                    "a capturing closure in a fn-typed join arm",
-                    "an unproven callable in a fn-typed join arm",
-                )?;
-                self.widen_into(result, ty, &body_tp, arm.body.span())?;
+                let div = self.rc.diverged();
+                // an exited arm never reaches the join (if_value's arm
+                // comment): its dead answer does not widen
+                if !div {
+                    self.refuse_fn_word_answer(
+                        ty,
+                        &body_tp,
+                        arm.body.span(),
+                        "a capturing closure in a fn-typed join arm",
+                        "an unproven callable in a fn-typed join arm",
+                    )?;
+                    self.widen_into(result, ty, &body_tp, arm.body.span())?;
+                }
                 states.push(self.rc.take());
-                divs.push(self.rc.diverged());
+                divs.push(div);
                 let at = self.code.len();
                 self.emit(Op::Jmp { target: join });
                 jumps.push(Some(at));
@@ -800,10 +823,9 @@ impl FnLower<'_, '_, '_> {
             trailing_comma: false,
             ..
         } = pat
+            && pats.len() == 1
         {
-            if pats.len() == 1 {
-                return self.value_arm_kind(&pats[0], scrut);
-            }
+            return self.value_arm_kind(&pats[0], scrut);
         }
         match pat {
             Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(ValueArmKind::Catchall),
@@ -958,10 +980,9 @@ impl FnLower<'_, '_, '_> {
             trailing_comma: false,
             ..
         } = pat
+            && pats.len() == 1
         {
-            if pats.len() == 1 {
-                return self.alt_binder_words(&pats[0], scrut, off, slots);
-            }
+            return self.alt_binder_words(&pats[0], scrut, off, slots);
         }
         match pat {
             Pattern::Wildcard(_)
@@ -1064,10 +1085,9 @@ impl FnLower<'_, '_, '_> {
             trailing_comma: false,
             ..
         } = pat
+            && pats.len() == 1
         {
-            if pats.len() == 1 {
-                return self.emit_value_tests(&pats[0], scrut, fail);
-            }
+            return self.emit_value_tests(&pats[0], scrut, fail);
         }
         match pat {
             Pattern::Wildcard(_) | Pattern::Binding { .. } => Ok(()),
@@ -1418,12 +1438,18 @@ impl FnLower<'_, '_, '_> {
 
     /// The member atom a bare identifier names in a pattern, mirroring
     /// the checker: the predeclared `none`, or a constructor type's
-    /// atom; `None` means the identifier is a binding (a catchall).
+    /// atom (a linked case's def through the name index the linked
+    /// install filled); `None` means the identifier is a binding (a
+    /// catchall).
     fn binding_atom(&self, name: &str) -> Option<TypeId> {
         if name == "none" && !self.analyzed.package.declares("none") {
             return Some(TypeId::NONE);
         }
-        let def = self.analyzed.package.lookup_type(name)?;
+        let def = self
+            .analyzed
+            .package
+            .lookup_type(name)
+            .or_else(|| self.analyzed.decls.foreign_type(name))?;
         self.analyzed.decls.atoms.get(&def).copied()
     }
 

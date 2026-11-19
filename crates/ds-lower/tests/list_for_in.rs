@@ -218,3 +218,55 @@ fn non_list_membership_keeps_the_checker_refusal() {
         "membership over a map keeps the honest checker refusal"
     );
 }
+
+/// A generic iteration over tuple elements with a variable first word:
+/// the element span's Raw word (a string instantiation's counted word)
+/// registers its production like a Ref — the fetch handed one count the
+/// binder owns through the rollover — so the heap drains. The read
+/// values were already right; only the count accounting differed (the
+/// multi-word gather matched Ref alone while the one-word shape above
+/// already matched Ref | Raw).
+#[test]
+fn a_generic_tuple_element_iteration_drains_the_handed_counts() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag bool\n",
+        "\n",
+        "struct list[t]\n",
+        "\n",
+        "extern fn println (msg: string) -> ()\n",
+        "\n",
+        "fn count_pairs[t] (xs: list[(t, int)]) -> int {\n",
+        "  var n = 0\n",
+        "  for x in xs {\n",
+        "    const (s, c) = x\n",
+        "    n += c\n",
+        "  }\n",
+        "  n\n",
+        "}\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  const xs = [(\"alpha\", 1), (\"beta\", 2)]\n",
+        "  println(\"sum ${count_pairs(xs)}\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut vm = build(source, "generic_tuple_for_in");
+    vm.capture_output();
+    assert_eq!(
+        vm.run("generic_tuple_for_in", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        "sum 3\n",
+        "the values read through the Raw element word"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}

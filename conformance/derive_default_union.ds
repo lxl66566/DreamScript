@@ -1,0 +1,29 @@
+// source: the union-default member annotation round 2026-11-15 (the 2026-11-15 ruling, todo item 56)
+// purpose: #[default] on one enum case names the member the default family synthesizes the union's default over - the annotated enum's default(), a payloaded case's per-part defaults, and a defaulting struct field typing the union answering the same construction; the ruled DS2026/DS2038 refusal classes are pinned in the ds-lower derive_default_union_e2e and derive_refusal suites
+// items:
+// tone: stage: run
+// level: stage: run
+// holder: stage: run
+// main: stage: run
+
+#[derive(show, default)]
+enum tone {
+  quiet
+  #[default] loud { volume: int }
+}
+
+#[derive(show, default)]
+enum level {
+  small
+  #[default] big(int)
+}
+
+#[derive(show, default)]
+struct holder { pick: tone }
+
+fn main() -> () {
+  const t = tone.default()
+  const l = level.default()
+  const h = holder.default()
+  println("tone=${t} level=${l} pick=${h.pick}")
+}

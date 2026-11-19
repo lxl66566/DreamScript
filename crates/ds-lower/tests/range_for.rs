@@ -104,12 +104,14 @@ fn for_over_a_range_runs_every_step_and_in_tests_both_edges() {
 
 /// Same-width ranges of non-`int` integer types type-check [B7] but stay
 /// a named lowering boundary: only the ambient `int` width is in the M3
-/// uop contract.
+/// uop contract. `u32` rides the I64 slot since the 2026-11-19 width
+/// ruling, so its ranges lower like `int`'s; `u16` keeps the boundary
+/// pin (a width whose word is no integer slot).
 #[test]
 fn a_non_int_width_range_stays_a_named_lowering_boundary() {
     let source = concat!(
-        "tag u32\n",
-        "fn main(a: u32) -> () {\n",
+        "tag u16\n",
+        "fn main(a: u16) -> () {\n",
         "  for i in a..a { }\n",
         "}\n",
     );

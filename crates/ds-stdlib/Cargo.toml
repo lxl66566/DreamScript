@@ -25,6 +25,8 @@ ds-check = { path = "../ds-check" }
 ds-meta  = { path = "../ds-meta" }
 ds-diag  = { path = "../ds-diag" }
 ds-parse = { path = "../ds-parse" }
+# the default @std package's bundle framing
+ds-pkg   = { path = "../ds-pkg" }
 ds-mod   = { workspace = true, optional = true }
 # the checked-prefix artifact format the ambient's `.dsi` rides
 ds-dsi    = { workspace = true, optional = true }

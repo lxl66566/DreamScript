@@ -378,14 +378,14 @@ fn blocks(stream: &[StreamOp]) -> Vec<Block> {
             _ if !is_terminator(uop) => successors.extend(fallthrough),
             _ => {},
         }
-        if let Some(target) = target {
-            if matches!(
+        if let Some(target) = target
+            && matches!(
                 uop,
                 Uop::Jmp { .. } | Uop::Jmpif { .. } | Uop::JmpifNot { .. }
-            ) && blocks[target].start <= block.start
-            {
-                blocks[index].back_edge = Some(target);
-            }
+            )
+            && blocks[target].start <= block.start
+        {
+            blocks[index].back_edge = Some(target);
         }
         blocks[index].successors = successors;
     }

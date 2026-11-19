@@ -543,12 +543,12 @@ impl Inner {
     /// pooled one when `cap` is a canonical ladder size (bump allocations are
     /// always written before they are read, so stale contents are harmless).
     fn acquire_chunk(&mut self, cap: usize, align: usize) -> Chunk {
-        if align == MIN_ALIGN {
-            if let Some(pos) = self.free.iter().position(|c| c.cap == cap) {
-                let mut chunk = self.free.swap_remove(pos);
-                chunk.len = 0;
-                return chunk;
-            }
+        if align == MIN_ALIGN
+            && let Some(pos) = self.free.iter().position(|c| c.cap == cap)
+        {
+            let mut chunk = self.free.swap_remove(pos);
+            chunk.len = 0;
+            return chunk;
         }
         let layout = Layout::from_size_align(cap, align).expect("arena: chunk layout overflow");
         // SAFETY: `cap >= MIN_ALIGN > 0` and `align` is a power of two, so

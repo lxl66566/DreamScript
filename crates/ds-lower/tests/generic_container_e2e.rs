@@ -1,12 +1,13 @@
 //! The generic container natives end to end [H3, phase 2]: `list_len`,
-//! `list_get`, `list_concat` over list[int] and list[string] receivers
-//! and `map_len`, `map_get` over map[string, int] and map[int, string]
-//! lower every call site to CALLG — the callee is the ambient generic's
+//! `list_get`, `list_concat` over list[int] and list[string] receivers,
+//! `map_len`, `map_get`, and the free `len` over map[string, int] and
+//! map[int, string] receivers,
+//! all lower every call site to CALLG — the callee is the ambient generic's
 //! ONE body and the staged words end in the evidence words naming the
 //! receiver's container instance — and the checked reads answer their
 //! hit and miss members. The container closes [phase 3] run the same
 //! dispatch: `cons` (the evidence word names the element instance — int
-//! and string both), `tail`, `collect`, the `head`/`first` checked
+//! and string both), `tail`, `collect`, the `first` checked
 //! first element (the empty list answers none), and `max` over both
 //! numeric instances. A plain CALL never reaches the reserved slots, so
 //! the phase-1 name-routed monomorphic fallback is gone.
@@ -44,11 +45,11 @@ const ROUTED: &[(u32, u8, u8, &[BuiltinInstance])] = &[
     (29, 1, 2, &[BuiltinInstance::Map]),  // map_len
     (30, 2, 2, &[BuiltinInstance::Map]),  // map_get
     (32, 2, 1, &[BuiltinInstance::Int, BuiltinInstance::Str]), // cons
-    (33, 1, 1, &[BuiltinInstance::List]), // head
     (34, 1, 1, &[BuiltinInstance::List]), // tail
     (35, 1, 1, &[BuiltinInstance::List]), // collect
     (36, 1, 1, &[BuiltinInstance::List]), // first
     (37, 2, 1, &[BuiltinInstance::Int, BuiltinInstance::Float]), // max
+    (10, 1, 1, &[BuiltinInstance::Map]),  // len
 ];
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
@@ -91,7 +92,7 @@ fn build_vm() -> (Vm, Lowered) {
 /// receiver's element types with distinct outputs, and the checked reads
 /// answer their hit and miss members in both spellings' shared path.
 /// The closes add the cons/tail/collect compositions over int and
-/// string elements, the empty list's none arm under `head` and `first`,
+/// string elements, the empty list's none arm under `first`,
 /// and `max` over both numeric instances.
 #[test]
 fn container_natives_run_two_element_types_and_both_checked_arms() {
@@ -105,7 +106,7 @@ fn container_natives_run_two_element_types_and_both_checked_arms() {
     assert_eq!(
         vm.captured_output(),
         b"ints 3 6 3 0\ntexts 3 gamma ?\nnames 2 2 0\nschemes 1 http ?\n\
-          closed 4 7 3\nheaded delta 3\ndropped 2 3 alpha\nblank 0 ?\nmax 9 2.5\n"
+          pairs 2 1\nclosed 4 7 3\nheaded delta 3\ndropped 2 3 alpha\nblank 0 ?\nmax 9 2.5\n"
     );
 }
 
@@ -174,8 +175,9 @@ fn every_container_native_site_is_one_callg_with_container_evidence() {
     }
     assert_eq!(
         sites,
-        [7, 2, 2, 2, 2, 2, 1, 3, 2, 1, 2],
+        [7, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2],
         "one Callg per use: list_len seven (one UFCS), list_get and list_concat two, map_len and \
-         map_get two, cons two, head one, tail three (one UFCS), collect two, first one, max two"
+         map_get two, cons two, tail three (one UFCS), collect two, first two, max two, len two \
+         (one UFCS over each map)"
     );
 }

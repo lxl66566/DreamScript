@@ -16,7 +16,7 @@ use std::{
 
 use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
 use ds_check::{
-    Analyzed, AtomKind, BinderFact, DefId, DotRes, Extraction, GenericCallBounds,
+    Analyzed, AtomKind, BinderFact, ConstFact, DefId, DotRes, Extraction, GenericCallBounds,
     InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
     Ty, TypeExpr, TypeId, Val,
 };
@@ -31,16 +31,19 @@ use crate::{
     PlacedOp,
     error::LowerError,
     native::{
-        GENERIC_NATIVES, GenericNative, NURSERY_BOUNDARY_ERR, Native, NativeShape, PLATFORM_IO_OK,
+        GENERIC_NATIVES, GenericNative, NET_CLASSES, NURSERY_BOUNDARY_ERR, Native, NativeShape,
+        PLATFORM_IO_OK,
     },
-    place::{Hook, Owned, Placement},
-    shape::{MemberField, Shape, Shapes, SpanWords, StructShape, expr_members},
+    place::{Hook, Owned, Placement, State},
+    shape::{MemberField, Shape, Shapes, SpanWords, StructShape, expr_members, shape_words},
 };
 
 mod calls;
 mod extraction;
 mod pattern;
 mod tail;
+
+use extraction::AmbientExtern;
 
 /// One symbolic frame slot: a body word, or an outgoing-overlay word that
 /// resolves against the frame tail at finalization.
@@ -1852,6 +1855,21 @@ enum Callee {
     Generic(&'static GenericNative),
     /// This module's function-table index.
     Local(u32),
+    /// A linked package's function (G4): the def carries the import
+    /// surface entry — its checked fn type serves the parameter reads
+    /// exactly like a planned def's — and the FuncRef addresses the
+    /// linked dep position and the linked module's function index. The
+    /// call stages like a local's; the tail form lowers in place (CALL
+    /// plus return), the cross-module frame-reuse transfer waiting on
+    /// the tail round.
+    Foreign {
+        /// The import-bound def: the signature's checker facts.
+        def: DefId,
+        /// The linked dep entry's position in the recorded dep list.
+        position: u32,
+        /// The function's index inside the linked module's table.
+        func: u32,
+    },
     /// A runtime-resolved trait dispatch inside a generic impl body: the
     /// frame's evidence slot whose word names the serving member body in
     /// the enclosing module (the sentinel FuncRef the CALLG carries).
@@ -2884,10 +2902,41 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Lowers one block's statements, returning the block's value.
     fn block_value(&mut self, block: &BlockExpr) -> Result<TypedPlace, LowerError> {
+        let bracket = self.rc.staging_bracket();
         self.scope_push();
         let result = self.block_inner(block);
+        // The tail answer's words escape to the consumer outside the
+        // block, so they stage past the scope end: the block's tail read
+        // of a local binder answers the binder's own words, and the
+        // leaving scope would release their counts — and fire a
+        // deinit value's claim — before any consumer claims them. The
+        // staged-word computation is fallible, so its error waits past
+        // the pop: every exit runs scope_pop and retires the staging
+        // bracket, matching block_inner's own failure path.
+        let staged = match &result {
+            Ok(tp) => self.stage_tail_words(tp, block.span),
+            Err(_) => Ok(()),
+        };
         self.scope_pop();
+        self.rc.unstage_tail_answer(bracket);
+        staged?;
         result
+    }
+
+    /// Computes and stages the words the block's tail answer carries
+    /// past its scope end: the tracked words plus, for a deinit-carrying
+    /// answer whose base anchors the frame's claim, the claim's own
+    /// base word.
+    fn stage_tail_words(&mut self, tp: &TypedPlace, span: Span) -> Result<(), LowerError> {
+        let mut words = self.tracked_words(&tp.place, tp.ty)?;
+        if self.deinit_claim(tp.ty, span)?.is_some()
+            && self.rc.anchors_claim(tp.place.base)
+            && !words.contains(&tp.place.base)
+        {
+            words.push(tp.place.base);
+        }
+        self.rc.stage_tail_answer(&words);
+        Ok(())
     }
 
     fn block_inner(&mut self, block: &BlockExpr) -> Result<TypedPlace, LowerError> {
@@ -3299,8 +3348,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 "qualified places resolve through modules [G4, M7]",
             ));
         };
-        let bind = match self.res.get(only.span) {
-            Some(Res::Local { bind }) => *bind,
+        let binder = match self.res.get(only.span) {
+            Some(Res::Local { bind: binder }) => *binder,
             Some(Res::Def(_)) => {
                 return Err(LowerError::unsupported(
                     only.span,
@@ -3318,14 +3367,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         };
         let place = self
             .binders
-            .get(&bind)
+            .get(&binder)
             .cloned()
             .ok_or_else(|| self.missing_binder(only.span))?;
         let declared = self
             .analyzed
             .checked
             .binders
-            .get(&bind)
+            .get(&binder)
             .copied()
             .ok_or_else(|| mismatch("an assignment place"))?
             .ty;
@@ -3449,6 +3498,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.refuse_closure_widen(&assigned, declared, e.span())?;
         self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
         self.widen_into(&place, declared, &assigned, e.span())?;
+        // The replaced value's claim re-registers at its slot: the store
+        // fired the old content's drop (spending the site's band) and the
+        // incoming claim's transfer spent its own, so without this the
+        // teardown doors read the slot dead and the value the frame still
+        // holds never fires its hook — the same re-registration a binder
+        // performs over a moved-in claim (C5).
+        if let Some(claim) = self.deinit_claim(declared, e.span())?
+            && self.rc.has_claim(place.base)
+            && self.rc.anchors_claim(place.base)
+        {
+            self.overlay_site(&claim.staged, &[SlotType::I64]);
+            let words = self.tracked_words(&place, declared)?;
+            let band = self.claim_band_word(place.base)?;
+            self.rc
+                .claimed(&mut self.code, place.base, claim.hook, band, &words);
+        }
         Ok(self.unit_value(e.span())?.place)
     }
 
@@ -3886,11 +3951,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Gathers one fetched element out of the overlay span into a fresh
     /// element place: one word per element word moved in declaration
-    /// order (a struct's flattened words are contiguous), each `Ref`
-    /// word produced for the frame — the fetch handed one count per
-    /// `Ref` word, which this place owns until its death. The one-word
-    /// shape stays a bare word (a `Raw` element word is a type
-    /// variable's runtime word, owned and kind-checked at its drop).
+    /// order (a struct's flattened words are contiguous), each counted
+    /// word produced for the frame — Ref, or Raw (a type variable's
+    /// runtime word under a counted instantiation) — because the fetch
+    /// handed one count per counted word, which this place owns until
+    /// its death. The one-word shape stays a bare word, owned and
+    /// kind-checked at its drop.
     fn gather_element(
         &mut self,
         elem_words: &[SlotType],
@@ -3917,7 +3983,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 dst: Slot::body(word),
                 src: Slot::overlay(u8::try_from(1 + index).expect("overlay word fits u8")),
             });
-            if *slot == SlotType::Ref {
+            // a Raw element word is a type variable's runtime word under a
+            // counted instantiation, so the production (the fetch's handed
+            // count) registers like a Ref — the RC ops check the runtime
+            // kind, matching the one-word shape above
+            if matches!(*slot, SlotType::Ref | SlotType::Raw) {
                 self.rc.produced(word);
             }
         }
@@ -3969,11 +4039,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .words(element)
                     .map_err(|err| err.respanned(span))
             },
-            _ => Err(LowerError::unsupported(
+            Shape::Union(_) => {
+                // a union element's whole tag-plus-region span, gathered
+                // verbatim (the checked read's own multi-atom hand-back
+                // shape — the element's own tag word already names the
+                // member the binder narrows by); a union member cannot
+                // carry a deinit, so the struct arm's guard is vacuous
+                self.shapes
+                    .words(element)
+                    .map_err(|err| err.respanned(span))
+            },
+            Shape::Word(_) => Err(LowerError::unsupported(
                 span,
                 "a list element of this shape",
-                "iteration and membership bind one scalar word, one struct's flattened span, or a \
-                 tuple's positional words; union elements keep the checked-read refusal",
+                "iteration and membership bind one scalar word, one struct's flattened span, a \
+                 tuple's positional words, or a union's whole span",
             )),
         }
     }
@@ -4155,6 +4235,75 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
+    /// One linked const's value fact as a place: the literal embeds at the
+    /// use site over the same word shapes and RC treatment the owning
+    /// module's own literal lowering gives it — a string or char through
+    /// the produced-Kstr channel (an arena temporary), everything else a
+    /// scalar constant word.
+    fn embed_const_fact(&mut self, fact: ConstFact, _span: Span) -> Result<Place, LowerError> {
+        let text = match fact {
+            ConstFact::Int(value) => {
+                let dst = self.temp_word(SlotType::I64)?;
+                let kidx = self.pool(Constant::I64(value));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+                return Ok(Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::I64),
+                });
+            },
+            ConstFact::Float(value) => {
+                let dst = self.temp_word(SlotType::F64)?;
+                let kidx = self.pool(Constant::F64(value));
+                self.emit(Op::Kconst {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+                return Ok(Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::F64),
+                });
+            },
+            ConstFact::Bool(value) => {
+                let dst = self.temp_word(SlotType::Bool)?;
+                let kidx = self.pool(Constant::Bool(value));
+                self.emit(Op::Kconst {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+                return Ok(Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::Bool),
+                });
+            },
+            ConstFact::Byte(value) => {
+                // a byte stages as its 0-255 integer value, the literal
+                // lowering's own convention
+                let dst = self.temp_word(SlotType::I64)?;
+                let kidx = self.pool(Constant::I64(i64::from(value)));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+                return Ok(Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::I64),
+                });
+            },
+            ConstFact::Str(text) => text,
+            ConstFact::Char(c) => c.encode_utf8(&mut [0u8; 4]).to_owned(),
+        };
+        let dst = self.temp_word(SlotType::Ref)?;
+        let kidx = self.pool_str(&text);
+        self.kstr(dst, kidx);
+        Ok(Place {
+            base: dst,
+            shape: PlaceShape::Word(SlotType::Ref),
+        })
+    }
+
     /// A lambda value (F2): the synthesized module function plus its word.
     /// A non-capturing lambda mints the copyable scalar FuncRef into a Fn
     /// slot (KCONST over the pool's same-module FuncRef, resolved through
@@ -4299,6 +4448,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .word_addrs(&place, ty)
                 .map_err(|err| err.respanned(span))?
             {
+                // the capture is a migration point: the construction
+                // acquires its own count per Ref capture inside the op,
+                // so a produced temporary (an arena StrCat result, a
+                // borrow KSTR) transits here and keeps its counted
+                // spelling — the count-bearing capture site refuses the
+                // arena and borrow servings
+                self.rc.captured(addr.slot);
                 moves.push(addr.slot);
                 staged.push(addr.slot_ty);
             }
@@ -4324,7 +4480,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             });
             // the construction acquires its own count per Ref capture
             // inside the op: a staged capture is a borrow, never a dup or
-            // a forward, so no placement bookkeeping runs here
+            // a forward, and the captured word's own placement migrated
+            // at the collection above
         }
         self.overlay_site(&staged, &[]);
         let dst = self.temp_word(SlotType::Ref)?;
@@ -4719,6 +4876,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         match target {
             Callee::Builtin(_) | Callee::Evidence(_) => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
+            Callee::Foreign { def, .. } => self
+                .analyzed
+                .checked
+                .def_types
+                .get(&def)
+                .copied()
+                .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                .and_then(|(params, _)| {
+                    let mut words = Vec::with_capacity(params.len());
+                    for ty in params {
+                        words.extend_from_slice(&self.shapes.words(*ty).ok()?);
+                    }
+                    Some(words)
+                }),
             Callee::Local(index) => {
                 let planned = self.plan.functions().get(index as usize)?;
                 if planned.decl.is_some() {
@@ -5216,6 +5387,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         })
                     },
                     _ => {
+                        // A linked const's value fact (G4): the literal is
+                        // the whole fact, so the use embeds it exactly as
+                        // the literal a user would have written — the same
+                        // word shapes and RC treatment the owning module's
+                        // own literal lowering gives it.
+                        if let Some(fact) = self.analyzed.decls.foreign_consts.get(def).cloned() {
+                            return self.embed_const_fact(fact, span);
+                        }
                         // A named fn used as a value (F2, functions are
                         // values): the same pool FuncRef const channel a
                         // non-capturing lambda mints — one copyable scalar
@@ -5444,7 +5623,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if name == "none" {
             return Some(TypeId::NONE);
         }
-        let def = self.analyzed.package.lookup(name)?;
+        let def = self
+            .analyzed
+            .package
+            .lookup(name)
+            .or_else(|| self.analyzed.decls.foreign_type(name))?;
         self.analyzed.decls.atoms.get(&def).copied()
     }
 
@@ -5454,6 +5637,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Expr::Field { recv, name, .. } = e else {
             return Err(mismatch("a field access"));
         };
+        // A module alias's qualified const (G4): the checker bound the
+        // linked binding's def at the member's span, so the value embeds
+        // through the same literal fact the selection spelling lowers
+        // — no receiver word exists.
+        if let Some(&Res::Def(def)) = self.res.get(name.span)
+            && let Some(fact) = self.analyzed.decls.foreign_consts.get(&def).cloned()
+        {
+            return self.embed_const_fact(fact, name.span);
+        }
         let recv_val = self.value(recv)?;
         // the receiver's recorded type carries the refinement: a member
         // name inside an `is`/match arm [B2]
@@ -5709,7 +5901,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 dst: Slot::body(target.base + field.word),
                 src: Slot::body(addr.slot),
             });
-            if field.slot() == SlotType::Ref {
+            // a variable-typed element's declared word is Raw under a
+            // counted instantiation, so the copy registration covers both
+            // classifications (the RC ops check the runtime kind)
+            if matches!(field.slot(), SlotType::Ref | SlotType::Raw) {
                 self.rc
                     .copied(&mut self.code, target.base + field.word, addr.slot);
             }
@@ -5794,7 +5989,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let rhs = self.value(right)?;
         let (place, landed) = match op {
-            BinaryOp::Eq | BinaryOp::Ne => (self.eq_chain(&lhs, &rhs, e.span())?, false),
+            BinaryOp::Eq | BinaryOp::Ne => (
+                self.eq_chain(&lhs, &rhs, e.span())
+                    .map_err(|err| err.respanned(e.span()))?,
+                false,
+            ),
             BinaryOp::Add if str_add => (self.concat_value(&lhs, &rhs, static_ty, *span)?, false),
             BinaryOp::Add => {
                 self.arith_dst(DataOp::AddI64, DataOp::AddF64, &lhs, &rhs, offered, *span)?
@@ -6153,6 +6352,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// arithmetic opcode.
     fn bool_chain(&mut self, is_and: bool, left: &Expr, right: &Expr) -> Result<Place, LowerError> {
         let short = self.label();
+        let lie_lbl = self.label();
         let join = self.label();
         let lhs = self.value(left)?;
         let lcond = single(&self.word_addrs(&lhs.place, lhs.ty)?, left.span())?;
@@ -6174,15 +6374,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.emit(if is_and {
             Op::JmpifNot {
                 cond: Slot::body(rcond.slot),
-                target: short,
+                target: lie_lbl,
             }
         } else {
             Op::Jmpif {
                 cond: Slot::body(rcond.slot),
-                target: short,
+                target: lie_lbl,
             }
         });
         let truth = self.pool(Constant::Bool(is_and));
+        let lie = self.pool(Constant::Bool(!is_and));
         let dst = self.temp_word(SlotType::Bool)?;
         self.emit(Op::Kconst {
             dst: Slot::body(dst),
@@ -6190,11 +6391,25 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         });
         let arm_full = self.rc.take();
         let full_div = self.rc.diverged();
-        let full_jmp = self.code.len();
+        let truth_jmp = self.code.len();
+        self.emit(Op::Jmp { target: join });
+        // The right operand's own shortcut answer: this block runs with
+        // the post-right-operand ownership state, so its drops differ
+        // from the left shortcut's — a block shared with the first
+        // jump would dec the words the right operand's call already
+        // handed to its callee (a double drop, the trap the `||`
+        // right-arm probes pinned). Each of the full arm's two exits
+        // carries its own copy of the full arm's dying drops, and each
+        // runtime path decs once.
+        self.bind_label(lie_lbl);
+        self.emit(Op::Kconst {
+            dst: Slot::body(dst),
+            kidx: lie,
+        });
+        let lie_jmp = self.code.len();
         self.emit(Op::Jmp { target: join });
         self.rc.restore(base);
         self.bind_label(short);
-        let lie = self.pool(Constant::Bool(!is_and));
         self.emit(Op::Kconst {
             dst: Slot::body(dst),
             kidx: lie,
@@ -6207,7 +6422,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if let [full, short] = &dying[..] {
             let mut epilogue = Vec::new();
             Placement::emit_drops(&mut epilogue, full);
-            self.splice(epilogue, full_jmp);
+            // the later site splices first: the earlier site's splice
+            // would shift it
+            self.splice(epilogue.clone(), lie_jmp);
+            self.splice(epilogue, truth_jmp);
             self.arm_epilogue(short);
         }
         self.bind_label(join);
@@ -6314,10 +6532,24 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(LowerError::unsupported(
                 span,
                 "a membership over tag or callable elements",
-                "membership compares int, float, bool, and string elements",
+                "membership compares int, float, bool, string, bytes, and collection elements",
             ));
         }
-        let op = (!wide).then(|| eq_op(elem_words[0])).transpose()?;
+        // the one-word element compares by its type, never its slot kind
+        // alone: the element's own word plan names the compare — a
+        // collection element (bytes, list, map, or a one-word struct
+        // whose field is one) dispatches its content-compare native, the
+        // EqStr uop reading string objects alone
+        let kind = (!wide)
+            .then(|| {
+                let plan = self.eq_word_plan(element)?;
+                let [word] = plan.as_slice() else {
+                    return Err(mismatch("a membership comparison"));
+                };
+                Ok(*word)
+            })
+            .transpose()
+            .map_err(|err: LowerError| err.respanned(span))?;
         let mut operand_words: Vec<u8> = self
             .word_addrs(&x_tp.place, x_tp.ty)
             .map_err(|err| err.respanned(span))?
@@ -6378,23 +6610,34 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     ty: element,
                 },
                 span,
-            )?
+            )
+            .map_err(|err| err.respanned(span))?
         } else {
-            // the one-word shape keeps its emission exactly (the word's
-            // count dies at the comparison read)
-            let (Some(word), Some(op)) = (x_w, op) else {
+            let (Some(word), Some(kind)) = (x_w, kind) else {
                 return Err(mismatch("a membership comparison"));
             };
-            let cmp = self.temp_word(SlotType::Bool)?;
-            self.emit(Op::Data {
-                op,
-                dst: Slot::body(cmp),
-                lhs: Slot::body(word),
-                rhs: Slot::body(elem_place.base),
-            });
-            if op == DataOp::EqStr {
-                self.rc.read(&mut self.code, &[word, elem_place.base]);
-            }
+            let cmp = match kind {
+                // the one-word shape keeps its emission exactly (the
+                // word's count dies at the comparison read)
+                WordEq::Scalar(op) => {
+                    let cmp = self.temp_word(SlotType::Bool)?;
+                    self.emit(Op::Data {
+                        op,
+                        dst: Slot::body(cmp),
+                        lhs: Slot::body(word),
+                        rhs: Slot::body(elem_place.base),
+                    });
+                    if op == DataOp::EqStr {
+                        self.rc.read(&mut self.code, &[word, elem_place.base]);
+                    }
+                    cmp
+                },
+                // a collection element compares through its content
+                // compare, the operands staged as borrows
+                WordEq::Bytes | WordEq::List | WordEq::Map => {
+                    self.content_eq_slots(kind, word, elem_place.base, true)?
+                },
+            };
             Place {
                 base: cmp,
                 shape: PlaceShape::Word(SlotType::Bool),
@@ -6471,29 +6714,32 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let shape = self.shapes.shape(lty)?;
         let dst = match &*shape {
             Shape::Word(slot) => {
-                let op = eq_op(*slot)?;
-                let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
-                let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
-                let dst = self.temp_word(SlotType::Bool)?;
-                self.emit(Op::Data {
-                    op,
-                    dst: Slot::body(dst),
-                    lhs: Slot::body(l.slot),
-                    rhs: Slot::body(r.slot),
-                });
-                if op == DataOp::EqStr {
-                    self.rc.read(&mut self.code, &[l.slot, r.slot]);
+                // the heap collections share the string's one Ref word
+                // shape but the EqStr uop reads string objects [B9]: each
+                // collection's content-compare native serves the chain's
+                // word
+                if *slot == SlotType::Ref {
+                    if let Some(word) = self.collection_ty_word(lty)? {
+                        self.collection_eq_word(word, lhs, rhs, span)?
+                    } else {
+                        self.scalar_eq_word(lhs, rhs, span, *slot)?
+                    }
+                } else {
+                    self.scalar_eq_word(lhs, rhs, span, *slot)?
                 }
-                dst
             },
             Shape::Struct(_) => {
                 // the flattened word lists compare pairwise, a field's
-                // span word-by-word in declaration order
+                // span word-by-word in declaration order; the compares
+                // borrow, so both exits release the operands' dying
+                // counts at the join — a fail-fast field mismatch
+                // cannot strand a later Ref word's staged count
                 let fail = self.label();
                 let join = self.label();
                 let l = self.word_addrs(&lhs.place, lhs.ty)?;
                 let r = self.word_addrs(&rhs.place, rhs.ty)?;
-                self.emit_word_compares(&l, &r, fail)?;
+                let plan = self.eq_word_plan(lty)?;
+                self.emit_word_compares(&l, &r, &plan, fail)?;
                 let truth = self.pool(Constant::Bool(true));
                 let dst = self.temp_word(SlotType::Bool)?;
                 self.emit(Op::Kconst {
@@ -6508,6 +6754,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     kidx: lie,
                 });
                 self.bind_label(join);
+                self.release_eq_words(&l, &r);
                 dst
             },
             Shape::Tuple(s) => {
@@ -6518,7 +6765,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if l.len() != s.fields.len() || r.len() != s.fields.len() {
                     return Err(mismatch("a tuple equality's arity"));
                 }
-                self.emit_word_compares(&l, &r, fail)?;
+                let plan = self.eq_word_plan(lty)?;
+                self.emit_word_compares(&l, &r, &plan, fail)?;
                 let truth = self.pool(Constant::Bool(true));
                 let dst = self.temp_word(SlotType::Bool)?;
                 self.emit(Op::Kconst {
@@ -6533,6 +6781,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     kidx: lie,
                 });
                 self.bind_label(join);
+                self.release_eq_words(&l, &r);
                 dst
             },
             Shape::Union(_) => self.union_eq(lhs, rhs, lty)?,
@@ -6543,37 +6792,357 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
+    /// The scalar `==`/`!=` word: the one uop the word's slot kind
+    /// selects (the string Ref's EqStr reads string objects), its reads
+    /// owning no word's death.
+    fn scalar_eq_word(
+        &mut self,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        span: Span,
+        slot: SlotType,
+    ) -> Result<u8, LowerError> {
+        let op = eq_op(slot)?;
+        let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
+        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
+        let dst = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::Data {
+            op,
+            dst: Slot::body(dst),
+            lhs: Slot::body(l.slot),
+            rhs: Slot::body(r.slot),
+        });
+        if op == DataOp::EqStr {
+            self.rc.read(&mut self.code, &[l.slot, r.slot]);
+        }
+        Ok(dst)
+    }
+
+    /// The collection `==`/`!=` seam [B9]: structural content equality
+    /// through the builtin core's content-compare native the word's
+    /// collection names — one CALL in the chain's word, the operands
+    /// staged as borrows exactly the concat call shape's (a staged word's
+    /// count dies at the window's flush, never owning).
+    fn collection_eq_word(
+        &mut self,
+        word: WordEq,
+        lhs: &TypedPlace,
+        rhs: &TypedPlace,
+        span: Span,
+    ) -> Result<u8, LowerError> {
+        let l = single(&self.word_addrs(&lhs.place, lhs.ty)?, span)?;
+        let r = single(&self.word_addrs(&rhs.place, rhs.ty)?, span)?;
+        self.content_eq_slots(word, l.slot, r.slot, true)
+    }
+
+    /// The content compare over two operand words: one CALL, the
+    /// operands staged as borrows exactly the concat call shape's, the
+    /// bool answer landed on a fresh word — the direct-operand seam and
+    /// the per-field chain word share it. `own` marks whether the window's
+    /// flush owns a dying operand's dec (a chain word stages keep-mode:
+    /// its fail-fast exit skips the flush site, so the chain's merged
+    /// exits release instead).
+    fn content_eq_slots(
+        &mut self,
+        kind: WordEq,
+        l: u8,
+        r: u8,
+        own: bool,
+    ) -> Result<u8, LowerError> {
+        let name = match kind {
+            WordEq::Bytes => "bytes_eq",
+            WordEq::List => "list_eq",
+            WordEq::Map => "map_eq",
+            WordEq::Scalar(_) => return Err(mismatch("a content compare")),
+        };
+        let native = crate::native::lookup(name).ok_or_else(|| mismatch("the content compare"))?;
+        self.rc.native_open();
+        for (index, word) in [l, r].into_iter().enumerate() {
+            self.emit(Op::Mov {
+                dst: Slot::overlay(u8::try_from(index).expect("two staged words fit u8")),
+                src: Slot::body(word),
+            });
+            if own {
+                self.rc.staged_native(word, false);
+            } else {
+                self.rc.staged_native_keep(word);
+            }
+        }
+        self.overlay_site(&[SlotType::Ref, SlotType::Ref], &[SlotType::Bool]);
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: 2,
+        });
+        self.rc.native_done(&mut self.code);
+        let dst = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::Mov {
+            dst: Slot::body(dst),
+            src: Slot::overlay(0),
+        });
+        Ok(dst)
+    }
+
+    /// The per-word compare plan of one type's flattened value span
+    /// [B9]: the chain compares fields by their declared type, never by
+    /// their slot kind alone, so the plan pairs with `word_addrs` word
+    /// for word. A collection-typed Ref word plans that collection's
+    /// content compare (`builtin_instance` names the collection the way
+    /// the call sites do); every other word plans the scalar uop its kind
+    /// selects — a kind with no uop keeps the refusal the slot-kind
+    /// chain gave.
+    fn eq_word_plan(&mut self, ty: Ty) -> Result<Vec<WordEq>, LowerError> {
+        let shape = self.shapes.shape(ty)?;
+        match &*shape {
+            Shape::Word(slot) => {
+                if *slot == SlotType::Ref
+                    && let Some(word) = self.collection_ty_word(ty)?
+                {
+                    return Ok(vec![word]);
+                }
+                Ok(vec![WordEq::Scalar(eq_op(*slot)?)])
+            },
+            // a bare struct or tuple flattens its declared fields' plans
+            // in span order; a union value never reaches a word chain
+            // (its equality rides the tag dispatch), and a union-typed
+            // field's span words each plan their own kind — the tag word
+            // refusing exactly as the slot-kind chain refused
+            Shape::Struct(_) | Shape::Tuple(_) => {
+                let [atom] = self.members(ty) else {
+                    return Err(mismatch("a span equality plan"));
+                };
+                self.atom_word_plan(*atom)
+            },
+            Shape::Union(u) => u
+                .words
+                .iter()
+                .map(|slot| Ok(WordEq::Scalar(eq_op(*slot)?)))
+                .collect(),
+        }
+    }
+
+    /// The per-word compare plan of one atom's own value span: a
+    /// collection atom (the bytes word, a list/map heap application)
+    /// plans that collection's content compare; a struct or tuple atom
+    /// flattens its declared fields' plans; every other atom is its one
+    /// word's kind (the uop, or its refusal).
+    fn atom_word_plan(&mut self, atom: TypeId) -> Result<Vec<WordEq>, LowerError> {
+        match &self
+            .analyzed
+            .decls
+            .universe
+            .atom_decl(atom)
+            .map_err(|_| mismatch("an equality plan"))?
+            .kind
+        {
+            AtomKind::Struct(_) | AtomKind::Tuple(_) => self.payload_word_plan(atom),
+            _ => {
+                if let Some(word) = self.collection_atom_word(atom)? {
+                    return Ok(vec![word]);
+                }
+                let shape = self.shapes.atom_shape(atom)?;
+                let Shape::Word(slot) = shape else {
+                    return Err(mismatch("an equality plan"));
+                };
+                Ok(vec![WordEq::Scalar(eq_op(slot)?)])
+            },
+        }
+    }
+
+    /// The content-compare word one solved collection type plans [B9]:
+    /// the native its builtin instance names — the by-type entry the
+    /// direct operand pair, a membership's element, and the flattened
+    /// plan's word arm share.
+    ///
+    /// `None` for every non-collection type (the string's EqStr serves
+    /// its own Ref word).
+    fn collection_ty_word(&mut self, ty: Ty) -> Result<Option<WordEq>, LowerError> {
+        match self.shapes.builtin_instance(ty) {
+            Some(BuiltinInstance::Bytes) => Ok(Some(WordEq::Bytes)),
+            Some(BuiltinInstance::List) => {
+                let element = self
+                    .shapes
+                    .list_element(ty)
+                    .ok_or_else(|| mismatch("a list equality plan"))?;
+                self.eq_word_plan(element).map_err(|_| list_refusal())?;
+                Ok(Some(WordEq::List))
+            },
+            Some(BuiltinInstance::Map) => {
+                let value = self
+                    .shapes
+                    .map_value(ty)
+                    .ok_or_else(|| mismatch("a map equality plan"))?;
+                self.eq_word_plan(value).map_err(|_| map_refusal())?;
+                Ok(Some(WordEq::Map))
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The atom-keyed twin of [`Self::collection_ty_word`]: the content
+    /// compare one declared collection atom plans — the entry the field
+    /// atoms of the flattened plan ride.
+    fn collection_atom_word(&mut self, atom: TypeId) -> Result<Option<WordEq>, LowerError> {
+        let Some(instance) = self.shapes.atom_builtin_instance(atom) else {
+            return Ok(None);
+        };
+        match instance {
+            BuiltinInstance::Bytes => Ok(Some(WordEq::Bytes)),
+            BuiltinInstance::List => {
+                let [element] = self.shapes.apply_args(atom).unwrap_or(&[]) else {
+                    return Err(mismatch("a list equality plan"));
+                };
+                self.eq_word_plan(*element).map_err(|_| list_refusal())?;
+                Ok(Some(WordEq::List))
+            },
+            BuiltinInstance::Map => {
+                let [_, value] = self.shapes.apply_args(atom).unwrap_or(&[]) else {
+                    return Err(mismatch("a map equality plan"));
+                };
+                self.eq_word_plan(*value).map_err(|_| map_refusal())?;
+                Ok(Some(WordEq::Map))
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The per-word compare plan of one atom's declared payload fields
+    /// (a bare struct's fields, or a union member's), in declaration
+    /// order — the typed half of the shape walk `payload_fields` laid
+    /// out, so the plan pairs with the laid-out field spans.
+    fn payload_word_plan(&mut self, atom: TypeId) -> Result<Vec<WordEq>, LowerError> {
+        let decl = self
+            .analyzed
+            .decls
+            .universe
+            .atom_decl(atom)
+            .map_err(|_| mismatch("an equality plan"))?;
+        match &decl.kind {
+            AtomKind::Struct(fields) => {
+                // a part-less struct's payload is its one reserved I64
+                // word, the frame's inert zero — no declared field backs
+                // it, so the plan mirrors the reserved word itself
+                if fields.is_empty() {
+                    return Ok(vec![WordEq::Scalar(eq_op(SlotType::I64)?)]);
+                }
+                let mut plan = Vec::new();
+                for field in fields {
+                    plan.extend(self.type_word_plan(&field.ty)?);
+                }
+                Ok(plan)
+            },
+            AtomKind::Tuple(elements) => {
+                let mut plan = Vec::new();
+                for element in elements {
+                    plan.extend(self.atom_word_plan(*element)?);
+                }
+                Ok(plan)
+            },
+            // a bare tag carries no payload; a callable, a primitive,
+            // or a heap application is its own one word
+            _ => {
+                if let Some(word) = self.collection_atom_word(atom)? {
+                    return Ok(vec![word]);
+                }
+                let shape = self.shapes.atom_shape(atom)?;
+                let Shape::Word(slot) = shape else {
+                    return Err(mismatch("an equality plan"));
+                };
+                Ok(vec![WordEq::Scalar(eq_op(slot)?)])
+            },
+        }
+    }
+
+    /// The per-word compare plan of one written field type: a bytes
+    /// atom plans the content compare; a nested struct or tuple atom
+    /// flattens its own fields' plans; a union flattens its whole span's
+    /// word kinds; a tuple type flattens its elements' plans (the
+    /// layout's one-word-per-element rule already refused a wider
+    /// element).
+    fn type_word_plan(&mut self, expr: &TypeExpr) -> Result<Vec<WordEq>, LowerError> {
+        match expr {
+            TypeExpr::Atom(id) => self.atom_word_plan(*id),
+            TypeExpr::Union(..) => {
+                let members = expr_members(expr).ok_or_else(|| mismatch("an equality plan"))?;
+                let shape = self
+                    .shapes
+                    .members_shape(&members, 0)
+                    .map_err(|_| mismatch("an equality plan"))?;
+                shape_words(&shape)
+                    .iter()
+                    .map(|slot| Ok(WordEq::Scalar(eq_op(*slot)?)))
+                    .collect()
+            },
+            TypeExpr::Tuple(elements) => {
+                let mut plan = Vec::new();
+                for element in elements {
+                    plan.extend(self.type_word_plan(element)?);
+                }
+                Ok(plan)
+            },
+            // a trait, negation, intersection, or difference never laid
+            // out as an inline field span
+            _ => Err(mismatch("an equality plan")),
+        }
+    }
+
     /// Emits the pairwise word compares of two flattened address lists,
     /// every mismatched word jumping to `fail`; the last word's result
     /// flows on. A struct's whole span compares word-by-word this way —
-    /// inline spans are flat words, so per-word equality is the value's.
+    /// inline spans are flat words, so per-word equality is the value's,
+    /// each word compared by its field's planned kind: a bytes word
+    /// through the content-compare native, every other through its
+    /// scalar uop. The compares borrow their operands — no read owns its
+    /// word's death — because the chain's fail-fast exit skips the later
+    /// compares' own release sites; the caller releases every dying
+    /// operand word where the chain's exits merge.
     fn emit_word_compares(
         &mut self,
         l: &[WordAddr],
         r: &[WordAddr],
+        plan: &[WordEq],
         fail: usize,
     ) -> Result<(), LowerError> {
-        if l.len() != r.len() {
+        if l.len() != r.len() || l.len() != plan.len() {
             return Err(mismatch("a span equality's width"));
         }
-        for pair in l.iter().zip(r.iter()) {
-            let cond = self.temp_word(SlotType::Bool)?;
-            let op = eq_op(pair.0.slot_ty)?;
-            self.emit(Op::Data {
-                op,
-                dst: Slot::body(cond),
-                lhs: Slot::body(pair.0.slot),
-                rhs: Slot::body(pair.1.slot),
-            });
-            if op == DataOp::EqStr {
-                self.rc.read(&mut self.code, &[pair.0.slot, pair.1.slot]);
-            }
+        for (pair, kind) in l.iter().zip(r.iter()).zip(plan.iter().copied()) {
+            let cond = match kind {
+                WordEq::Scalar(op) => {
+                    if op != eq_op(pair.0.slot_ty)? {
+                        return Err(mismatch("a span equality plan"));
+                    }
+                    let cond = self.temp_word(SlotType::Bool)?;
+                    self.emit(Op::Data {
+                        op,
+                        dst: Slot::body(cond),
+                        lhs: Slot::body(pair.0.slot),
+                        rhs: Slot::body(pair.1.slot),
+                    });
+                    cond
+                },
+                // a collection word dispatches its content compare,
+                // staged keep-mode (the chain's merged exits release)
+                WordEq::Bytes | WordEq::List | WordEq::Map => {
+                    self.content_eq_slots(kind, pair.0.slot, pair.1.slot, false)?
+                },
+            };
             self.emit(Op::JmpifNot {
                 cond: Slot::body(cond),
                 target: fail,
             });
         }
         Ok(())
+    }
+
+    /// Releases the equality chain's operand counts where its exits merge:
+    /// every dying operand word drops here, on the equal path and the
+    /// fail-fast path alike (`drop_word` itself defers into an enclosing
+    /// window that still reads the word, so a chain nested in a call's
+    /// operand staging stays sound).
+    fn release_eq_words(&mut self, l: &[WordAddr], r: &[WordAddr]) {
+        let words: Vec<u8> = l.iter().chain(r.iter()).map(|addr| addr.slot).collect();
+        self.rc.read(&mut self.code, &words);
     }
 
     /// Union equality: per-member tag tests, then the member's payload
@@ -6615,9 +7184,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     dst: Slot::body(dst),
                     kidx: truth,
                 });
+                self.emit(Op::Jmp { target: done });
             } else {
                 // the whole payload span compares field by field, the
-                // same per-word chain a bare struct's equality rides
+                // same per-word chain a bare struct's equality rides —
+                // the compares borrow, and both of the member's exits
+                // release the payload counts from the fork's own state,
+                // so a fail-fast field mismatch cannot strand a later
+                // field's count
                 let l = member
                     .fields
                     .iter()
@@ -6628,9 +7202,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .iter()
                     .flat_map(|field| field_addrs(rhs.place.base, field))
                     .collect::<Vec<_>>();
-                self.emit_word_compares(&l, &r, false_lbl)?;
+                let plan = self.payload_word_plan(member.atom)?;
+                let member_fail = self.label();
+                let fork = self.rc.save();
+                self.emit_word_compares(&l, &r, &plan, member_fail)?;
+                self.release_eq_words(&l, &r);
+                self.emit(Op::Jmp { target: done });
+                self.bind_label(member_fail);
+                self.rc.rewind(fork);
+                self.release_eq_words(&l, &r);
+                self.emit(Op::Jmp { target: false_lbl });
             }
-            self.emit(Op::Jmp { target: done });
             self.bind_label(next);
         }
         self.bind_label(false_lbl);
@@ -7093,6 +7675,12 @@ impl FnLower<'_, '_, '_> {
                 key: FuncRefKey::Dep(0), // the enclosing module
                 func: index,
             },
+            Callee::Foreign { position, func, .. } => Constant::FuncRef {
+                // position 0 is the enclosing module, so the dep entry's
+                // list position shifts by one (G3.5's position key)
+                key: FuncRefKey::Dep(position + 1),
+                func,
+            },
             Callee::Evidence(slot) => Constant::FuncRef {
                 key: FuncRefKey::Native(crate::native::EVIDENCE_MODULE.to_owned()),
                 func: u32::from(slot),
@@ -7204,6 +7792,50 @@ fn eq_op(slot: SlotType) -> Result<DataOp, LowerError> {
         SlotType::Ref => DataOp::EqStr,
         _ => return Err(mismatch("a scalar equality")),
     })
+}
+
+/// The named refusal a list word's element gate answers: the element
+/// kind's own plan found a word without content equality, so the chain
+/// refuses naming the seam instead of reading the list's Ref word through
+/// the EqStr uop (a runtime trap over a non-string object).
+fn list_refusal() -> LowerError {
+    LowerError::unsupported(
+        no_span(),
+        "a structural equality over list elements",
+        "the content compare covers int, float, bool, string, bytes, struct, tuple, and nested \
+         collection elements; callable and union elements have no content equality",
+    )
+}
+
+/// The named refusal a map word's value gate answers, [`list_refusal`]'s
+/// twin over the value channel.
+fn map_refusal() -> LowerError {
+    LowerError::unsupported(
+        no_span(),
+        "a structural equality over map values",
+        "the content compare covers int, float, bool, string, bytes, struct, tuple, and nested \
+         collection values; callable and union values have no content equality",
+    )
+}
+
+/// How one word of a structural `==` chain compares [B9]: the word's
+/// own scalar uop, or — when the word's field type is a heap collection
+/// — that collection's content-compare native, because the EqStr uop
+/// reads string objects alone. The chain selects per field type, never
+/// per slot kind, so a bytes-, list-, or map-typed struct, tuple, or
+/// union field, and a membership element over any of them, dispatch the
+/// content compare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordEq {
+    /// The scalar word's equality uop.
+    Scalar(DataOp),
+    /// One bytes-typed word: the content compare through the native
+    /// call.
+    Bytes,
+    /// One list-typed word: the content compare through the native call.
+    List,
+    /// One map-typed word: the content compare through the native call.
+    Map,
 }
 
 /// The single identifier of a one-segment path expression, if it is one.

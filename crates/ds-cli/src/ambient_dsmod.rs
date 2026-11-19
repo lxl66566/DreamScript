@@ -15,9 +15,9 @@
 //! * the payload must pass `ds_mod::read`'s validating decode (magic, format version, section
 //!   framing, payload versions, per-word body canonicity);
 //! * the module must name the ambient's artifact label and carry the ambient source's hash;
-//! * the module must carry no chains and no tags: the splice installs function records only, so any
-//!   module fact outside the function table (a future ambient whose bodies mint either) is a miss
-//!   until the splice learns to carry it.
+//! * the module must carry no chains: the splice installs function records plus the tag rows the
+//!   bodies minted (the merged lowering seeds its tag table with them), so a chain table — a module
+//!   fact no splice installs — is still a miss.
 //!
 //! The drift gates pin the artifact like the `.dsi` round: a byte gate
 //! regenerates from the current compiler and compares, an equivalence
@@ -27,7 +27,7 @@
 
 #[cfg(test)]
 use ds_mod::Module;
-use ds_mod::{Function, Hash128, read};
+use ds_mod::{Hash128, read};
 
 /// The artifact's module-name label. The label never installs — the
 /// served function records move into the user module's table — it is
@@ -67,7 +67,7 @@ pub(crate) fn generate_module() -> Module {
     let mut files = ds_diag::Files::new();
     let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
     let ast = ds_parse::parse(&files, id).expect("the ambient parses");
-    let analyzed = ds_meta::analyze_owned(&files, vec![ast], &[false]);
+    let analyzed = ds_meta::analyze_owned(&files, vec![std::sync::Arc::new(ast)], &[false]);
     assert!(
         analyzed.checked.diags.is_empty(),
         "the ambient does not check clean: {:?}",
@@ -82,24 +82,25 @@ pub(crate) fn generate_module() -> Module {
     .expect("the ambient lowers");
     let module = lowered.module();
     assert!(
-        module.chains().is_empty() && module.tags().is_empty(),
-        "the ambient's lowering mints a chain or tag table: the splice installs function records \
-         only, so the serving seam needs widening first"
+        module.chains().is_empty(),
+        "the ambient's lowering mints a chain table: the splice installs function records and tag \
+         rows only, so the serving seam needs widening first"
     );
     module.clone()
 }
 
-/// The served ambient bodies for this build, when the embedded artifact
-/// verifies: the function records a cold compile splices in front of its
-/// own table. `None` is the miss every caller falls back from.
-pub(crate) fn serve() -> Option<Vec<Function>> {
+/// The served ambient splice for this build, when the embedded artifact
+/// verifies: the function records a cold compile splices in front of
+/// its own table, plus the tag rows those bodies minted. `None` is the
+/// miss every caller falls back from.
+pub(crate) fn serve() -> Option<ds_lower::Served> {
     serve_bytes(ds_stdlib::AMBIENT_DSMOD, &build_identity())
 }
 
 /// The validating serve over artifact bytes: the miss matrix in one
 /// place, so the poisoned-input gates exercise exactly what the run path
 /// consults.
-fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<Vec<Function>> {
+fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<ds_lower::Served> {
     let (header, payload) = bytes.split_first_chunk::<HEADER>()?;
     if header != identity.as_bytes() {
         return None;
@@ -111,10 +112,13 @@ fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<Vec<Function>> {
     if module.source_hash() != Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()) {
         return None;
     }
-    if !module.chains().is_empty() || !module.tags().is_empty() {
+    if !module.chains().is_empty() {
         return None;
     }
-    Some(module.into_functions())
+    Some(ds_lower::Served {
+        tags: module.tags().to_vec(),
+        functions: module.into_functions(),
+    })
 }
 
 #[cfg(test)]
@@ -142,17 +146,39 @@ mod tests {
     fn the_embedded_artifact_serves() {
         let served = serve().expect("the embedded artifact verifies");
         assert!(
-            served.len() > 20,
+            served.functions.len() > 20,
             "the ambient's impl bodies are many; a shrunk serve is a drifted artifact"
         );
-        assert_eq!(served[0].name(), "show#int#show");
+        assert_eq!(
+            served.functions.last().map(ds_mod::Function::name),
+            Some("json_of_bytes"),
+            "each struct's deinit plans right after its own item, so a growing module's\ntable \
+             ends on its last item's entries and stays append-stable under live-frame swaps",
+        );
+        assert!(
+            served
+                .functions
+                .iter()
+                .any(|f| f.name() == "net_handle$deinit"),
+            "the ambient's deinit-carrying structs plan their hooks"
+        );
+        assert_eq!(
+            served.tags.len(),
+            generate_module().tags().len(),
+            "the served tag rows match the fresh generation's"
+        );
     }
 
     /// Every refusal in the miss matrix, each over bytes the run path
     /// could plausibly hold: a wrong identity (a stale artifact), a
     /// truncated file, a corrupt payload, a foreign module name, a stale
-    /// source hash, and a module carrying a chain or tag table the
-    /// splice does not install.
+    /// source hash, and a module carrying a chain table the splice does
+    /// not install. A module carrying tag rows is the healthy path, not
+    /// a miss: the splice seeds the merged lowering's tag table with
+    /// them, and a poisoned row set surfaces through the lowering's
+    /// [`ds_lower::LowerError::ServedDrift`] (the ids' density and the
+    /// duplicate names; the row set as a whole is pinned by the
+    /// artifact's identity and the equivalence gates).
     #[test]
     fn every_miss_refuses_the_serve() {
         let identity = build_identity();
@@ -199,9 +225,10 @@ mod tests {
         });
         assert!(serve_bytes(&artifact_bytes(&chained, identity), &identity).is_none());
 
-        // a module whose tag table the splice does not install
-        let tagged = module.clone().with_tag("int", 0);
-        assert!(serve_bytes(&artifact_bytes(&tagged, identity), &identity).is_none());
+        // a module whose tag rows ride the splice: the serve hands them to
+        // the lowering, whose seeding validates them against the plan
+        let tagged = module.clone().with_tag("a_probe_row", 200);
+        assert!(serve_bytes(&artifact_bytes(&tagged, identity), &identity).is_some());
 
         // the unperturbed bytes still serve
         assert!(serve_bytes(&good, &identity).is_some());

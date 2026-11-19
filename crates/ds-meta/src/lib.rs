@@ -16,9 +16,12 @@
 //!
 //! The fence is the admission plus the install seam: an ordinary
 //! runtime callee admits by its own solved effect row (the 2026-11-15
-//! ruling) — an empty row admits the callee's body into the slice, any
-//! effect refusing with `ComptimeCalleeRefusal` naming the comptime
-//! function, the callee, and the call — and the registry still serves
+//! ruling, the 2026-11-17 amendment) — an empty row and a row of `trap`
+//! alone admit the callee's body into the slice (trap is deterministic
+//! and never the fence's business, a hit trap surfacing as the comptime
+//! call's own compile error from the fenced run), every other row
+//! refusing with `ComptimeCalleeRefusal` naming the comptime function,
+//! the callee, and the call — and the registry still serves
 //! the package's platform name with an empty provides list and the
 //! comptime reflection natives under their reserved module, so a
 //! world-touching call the rows cannot attribute refuses at the
@@ -34,7 +37,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ds_check::{Analyzed, DefId, DotRes, Res, Ty, TypeExpr, TypeId, type_of::analyze_resolved};
+use ds_check::{
+    Analyzed, DefId, DotRes, Effect, EffectRow, Res, Ty, TypeExpr, TypeId,
+    type_of::analyze_resolved,
+};
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_lower::{ComptimeConst, ComptimeValues};
 use ds_mod::Hash128;
@@ -65,23 +71,30 @@ pub fn analyze<T>(files: &ds_diag::Files, asts: &[T]) -> Analyzed
 where
     T: std::borrow::Borrow<Ast>,
 {
-    // The trees arrive borrowed, so they copy once into the owned
+    // The trees arrive borrowed, so they copy once into the shared
     // shape; a caller holding the trees by value takes `analyze_owned`
     // and skips this copy.
-    let owned: Vec<Ast> = asts
+    let owned: Vec<std::sync::Arc<Ast>> = asts
         .iter()
-        .map(|ast| std::borrow::Borrow::borrow(ast).clone())
+        .map(|ast| std::sync::Arc::new(std::borrow::Borrow::borrow(ast).clone()))
         .collect();
     analyze_owned(files, owned, &[])
 }
 
 /// The ownership variant of [`analyze`] for the cold run path: the
-/// caller hands the package's trees by value, with `preexpanded` marks
+/// caller hands the package's trees as shared handles (`Arc::new` moves
+/// an owned tree in without copying it), with `preexpanded` marks
 /// aligned with them (a marked tree already carries its derive
-/// expansion — the ambient blob's decode), and the expansion moves
-/// every tree through without cloning, so the bundle adopts the moved
-/// trees. An unmarked tree expands exactly like [`analyze`] expands it.
-pub fn analyze_owned(files: &ds_diag::Files, asts: Vec<Ast>, preexpanded: &[bool]) -> Analyzed {
+/// expansion — the ambient blob's decode). The expansion moves every
+/// sole-owner tree through without cloning (`Arc::make_mut`), so the
+/// bundle adopts the caller's trees; a shared tree carrying expansion
+/// work clones once, exactly the copy [`analyze`] pays. An unmarked
+/// tree expands exactly like [`analyze`] expands it.
+pub fn analyze_owned(
+    files: &ds_diag::Files,
+    asts: Vec<std::sync::Arc<Ast>>,
+    preexpanded: &[bool],
+) -> Analyzed {
     let (asts, mut diags) = expand_owned(asts, preexpanded);
     let (package, resolutions, resolve_diags) = ds_check::resolve_package(&asts);
     diags.extend(resolve_diags);
@@ -94,16 +107,41 @@ pub fn analyze_owned(files: &ds_diag::Files, asts: Vec<Ast>, preexpanded: &[bool
     )
 }
 
+/// [`analyze_owned`] with import surfaces linked (G4): the resolve half
+/// runs through [`ds_check::resolve_package_linked`], so an import the
+/// graph serves validates and binds — its selected names and module
+/// aliases entering the importing file's namespace. A graph that names
+/// no import keeps the pass inert and the answer identical to
+/// [`analyze_owned`]'s.
+pub fn analyze_owned_linked(
+    files: &ds_diag::Files,
+    asts: Vec<std::sync::Arc<Ast>>,
+    preexpanded: &[bool],
+    imports: &ds_check::ImportGraph,
+) -> Analyzed {
+    let (asts, mut diags) = expand_owned(asts, preexpanded);
+    let (package, resolutions, resolve_diags) = ds_check::resolve_package_linked(&asts, imports);
+    diags.extend(resolve_diags);
+    analyze_resolved(
+        files,
+        asts.into(),
+        package.into(),
+        resolutions.into(),
+        diags,
+    )
+}
+
 /// The served variant of [`analyze_owned`] behind a checked-ambient
 /// artifact: the ambient member's tree arrives first (marked in
-/// `preexpanded`, the blob discipline) with its namespace,
+/// `preexpanded`, the blob discipline — a shared handle, so the
+/// process's resident tree serves without a clone) with its namespace,
 /// per-file resolutions, and declaration-side prefix pre-served, and
 /// the user trees after it expand like [`analyze_owned`] expands them,
 /// the expansion's refusals folded ahead of the served resolution
 /// classes.
 pub fn analyze_served(
     files: &ds_diag::Files,
-    asts: Vec<Ast>,
+    asts: Vec<std::sync::Arc<Ast>>,
     preexpanded: &[bool],
     package: ds_check::Package,
     resolutions: Vec<ds_check::Resolutions>,
@@ -111,6 +149,32 @@ pub fn analyze_served(
 ) -> Analyzed {
     let (asts, diags) = expand_owned(asts, preexpanded);
     ds_check::type_of::analyze_served(files, asts, package, resolutions, served, diags)
+}
+
+/// [`analyze_served`] with import surfaces linked (G4): the served
+/// prefix serves as ever, and the link pass runs over every tree of the
+/// unit — the served trees' import-bound defs re-register at the same
+/// tail ids their served resolutions name, so the serve and the fresh
+/// path see identical link facts.
+pub fn analyze_served_linked(
+    files: &ds_diag::Files,
+    asts: Vec<std::sync::Arc<Ast>>,
+    preexpanded: &[bool],
+    package: ds_check::Package,
+    resolutions: Vec<ds_check::Resolutions>,
+    served: ds_check::ServedDecls,
+    imports: &ds_check::ImportGraph,
+) -> Analyzed {
+    let (asts, diags) = expand_owned(asts, preexpanded);
+    ds_check::type_of::analyze_served_linked(
+        files,
+        asts,
+        package,
+        resolutions,
+        served,
+        diags,
+        imports,
+    )
 }
 
 /// Evaluates every comptime call in the package: the answers keyed by
@@ -124,17 +188,20 @@ pub fn analyze_served(
 /// # Errors
 ///
 /// One diagnostic per honest refusal: a runtime callee the fence
-/// refuses (an impure row, a generic body, a member call), a
-/// world-touching call the rows cannot attribute (the install seam), an
-/// argument shape the round does not stage, a result it cannot embed,
-/// or a trap the fenced run raised.
-pub fn evaluate(
+/// refuses (a row beyond pure and `trap`, a generic body, a member
+/// call), a world-touching call the rows cannot attribute (the install
+/// seam), an argument shape the round does not stage, a result it
+/// cannot embed, or a trap the fenced run raised.
+pub fn evaluate<T>(
     module_name: &str,
     source_hash: Hash128,
-    asts: &[Ast],
+    asts: &[T],
     analyzed: &Analyzed,
     effects: &ds_check::Effects,
-) -> Result<ComptimeValues, Vec<Diagnostic>> {
+) -> Result<ComptimeValues, Vec<Diagnostic>>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let sites = collect_sites(asts, analyzed);
     if sites.is_empty() {
         return Ok(ComptimeValues::default());
@@ -277,11 +344,14 @@ struct ComptimeFn {
 /// body is the evaluator's, not a lowered position — its nested comptime
 /// calls are ordinary intra-module calls inside the fenced run, so the
 /// walk skips those trees.
-fn collect_sites(asts: &[Ast], analyzed: &Analyzed) -> Vec<CallSite> {
+fn collect_sites<T>(asts: &[T], analyzed: &Analyzed) -> Vec<CallSite>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let mut sites = Vec::new();
     for (index, ast) in asts.iter().enumerate() {
         let res = &analyzed.resolutions[index];
-        for item in items_of(ast) {
+        for item in items_of(std::borrow::Borrow::borrow(ast)) {
             if is_comptime_declaration(item) {
                 continue;
             }
@@ -338,9 +408,16 @@ fn is_comptime_declaration(item: &Item) -> bool {
 }
 
 /// The package's declared comptime functions, in declaration order.
-fn comptime_functions(asts: &[Ast], analyzed: &Analyzed) -> Vec<ComptimeFn> {
+fn comptime_functions<T>(asts: &[T], analyzed: &Analyzed) -> Vec<ComptimeFn>
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let mut fns = Vec::new();
-    for item in asts.iter().flat_map(items_of) {
+    for item in asts
+        .iter()
+        .map(std::borrow::Borrow::<Ast>::borrow)
+        .flat_map(items_of)
+    {
         let ItemKind::Local(local) = &item.kind else {
             continue;
         };
@@ -368,19 +445,33 @@ fn comptime_functions(asts: &[Ast], analyzed: &Analyzed) -> Vec<ComptimeFn> {
     fns
 }
 
-/// The fence's callee admission (the 2026-11-15 ruling): an ordinary
-/// runtime callee admits by its own solved row — an empty (pure) row
-/// admits the callee's body into the slice, any impure row refusing at
+/// The fence's row predicate (the 2026-11-17 amendment): a pure row
+/// admits, and a row of `trap` alone admits — trap is deterministic and
+/// never the fence's business, a trap the fenced run hits reporting as
+/// the comptime call's own compile error. Every other row (a world row,
+/// an error row, a nursery internal, or any of them beside `trap`)
+/// refuses exactly as the 2026-11-15 ruling held.
+fn row_admits(row: EffectRow) -> bool {
+    row.minus(EffectRow::of(Effect::Trap)).is_pure()
+}
+
+/// The fence's callee admission (the 2026-11-15 ruling, the 2026-11-17
+/// amendment): an ordinary runtime callee admits by its own solved row —
+/// an empty (pure) row and a row of `trap` alone admit the callee's
+/// body into the slice ([`row_admits`]), every other row refusing at
 /// the fence naming the comptime fn, the callee, and the call. The rows
 /// are the effects pass's solved fixpoint, so a direct callee's row
-/// already carries its transitive closure: one impure reach anywhere
-/// behind a callee refuses that callee here. A pure-row callee still
-/// refuses when the slice cannot plan what it reaches — a generic
-/// body's evidence seam, a member call the slice plans no body for, a
-/// binding shape no module function lowers — each an honest residual of
-/// this round. The slice's lowering keeps its belt refusal for the
-/// shapes this walk does not match (a fn-value indirection), and the
-/// install seam keeps the world refusal (DS2033's capability
+/// already carries its transitive closure: one refusing reach anywhere
+/// behind a callee refuses that callee here. Trap never refuses here —
+/// a trap the fenced run hits reports as the comptime call's own
+/// compile error — so the pass's unsolved-type over-approximation (every
+/// trapping operator rows `trap`, B7) fences nothing. An admitted
+/// callee still refuses when the slice cannot plan what it reaches — a
+/// generic body's evidence seam, a member call the slice plans no body
+/// for, a binding shape no module function lowers — each an honest
+/// residual of this round. The slice's lowering keeps its belt refusal
+/// for the shapes this walk does not match (a fn-value indirection),
+/// and the install seam keeps the world refusal (DS2033's capability
 /// diagnostic) behind the admission.
 struct Admission<'a> {
     analyzed: &'a Analyzed,
@@ -402,11 +493,14 @@ struct Admission<'a> {
 }
 
 impl<'a> Admission<'a> {
-    fn new(asts: &'a [Ast], analyzed: &'a Analyzed, effects: &'a ds_check::Effects) -> Self {
+    fn new<T>(asts: &'a [T], analyzed: &'a Analyzed, effects: &'a ds_check::Effects) -> Self
+    where
+        T: std::borrow::Borrow<Ast>,
+    {
         let mut bodies = HashMap::default();
         let mut roots = Vec::new();
         let mut deinits = HashSet::default();
-        for ast in asts {
+        for ast in asts.iter().map(std::borrow::Borrow::<Ast>::borrow) {
             for item in items_of(ast) {
                 let ItemKind::Struct(decl) = &item.kind else {
                     continue;
@@ -423,7 +517,11 @@ impl<'a> Admission<'a> {
                 }
             }
         }
-        for (index, ast) in asts.iter().enumerate() {
+        for (index, ast) in asts
+            .iter()
+            .enumerate()
+            .map(|(index, ast)| (index, std::borrow::Borrow::borrow(ast)))
+        {
             for item in items_of(ast) {
                 let ItemKind::Local(local) = &item.kind else {
                     continue;
@@ -458,7 +556,7 @@ impl<'a> Admission<'a> {
         }
     }
 
-    /// The slice's plan set: every pure-row callee the walk admitted.
+    /// The slice's plan set: every row-admitted callee the walk admitted.
     fn admitted(&self) -> &[DefId] {
         &self.admitted
     }
@@ -537,15 +635,15 @@ impl<'a> Admission<'a> {
                 ),
             ));
         };
-        if !row.is_pure() {
+        if !row_admits(row) {
             let origin = self.origin(def);
             let origin_clause = (origin != def).then(|| {
                 let origin_name = analyzed.package.def(origin).name.clone();
-                format!(" — the row turns impure at `{origin_name}` first")
+                format!(" — the row turns refusing at `{origin_name}` first")
             });
             let message = format!(
                 "the comptime function `{}` reaches `{name}`, whose effect row is `{}`; the \
-                 comptime fence admits only callees with a pure row{}",
+                 comptime fence admits only callees with a pure or trap-only row{}",
                 owner.name,
                 row.render(),
                 origin_clause.as_deref().unwrap_or("")
@@ -554,7 +652,7 @@ impl<'a> Admission<'a> {
             if origin != def {
                 diagnostic = diagnostic.with_secondary(
                     analyzed.package.def(origin).span,
-                    "the row's first impure hop",
+                    "the row's first refusing hop",
                 );
             }
             return Err(diagnostic);
@@ -673,10 +771,11 @@ impl<'a> Admission<'a> {
             .with_secondary(self.analyzed.package.def(callee).span, "the callee")
     }
 
-    /// The row's first impure hop: drilling through body order, the
-    /// first impure use of each pure-named caller names the next hop,
-    /// and a definition whose own body holds no impure use (its
-    /// impurity is intrinsic) or a revisited definition is the hop.
+    /// The row's first refusing hop: drilling through body order, the
+    /// first non-admitting use of each admitting caller names the next
+    /// hop, and a definition whose own body holds no refusing use (its
+    /// refusing effect is intrinsic) or a revisited definition is the
+    /// hop.
     fn origin(&self, def: DefId) -> DefId {
         let analyzed = self.analyzed;
         let mut visited = vec![def];
@@ -694,7 +793,7 @@ impl<'a> Admission<'a> {
                 for (_, _, target) in reaches(res, expr) {
                     if let Target::Fn(callee) = target
                         && is_runtime_fn(callee, analyzed)
-                        && self.effects.of(callee).is_some_and(|row| !row.is_pure())
+                        && self.effects.of(callee).is_some_and(|row| !row_admits(row))
                     {
                         next = Some(callee);
                         return;
@@ -1359,7 +1458,7 @@ fn fence_diagnostic(error: &LoadError, fns: &[ComptimeFn], sites: &[CallSite]) -
             format!(
                 "the comptime function `{func}` calls `{module}`, which the comptime slice does \
                  not carry; a comptime function may call the pure builtins, other comptime \
-                 functions, and the pure-row helpers the fence admits this round"
+                 functions, and the helpers the fence admits this round (a pure or trap-only row)"
             ),
         )
         .with_primary(
@@ -1595,4 +1694,36 @@ fn path_target<'r>(path: &Path, res: &'r ds_check::Resolutions) -> Option<&'r Re
         return None;
     };
     res.get(only.span)
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_check::{Effect, EffectRow};
+
+    use super::row_admits;
+
+    /// The fence's row predicate (the 2026-11-17 amendment): a pure row
+    /// and a row of `trap` alone admit — the over-approximation the
+    /// effects pass rows onto unsolved-type trapping operators (string
+    /// concat included) fences nothing — while every other row refuses:
+    /// each effect alone, and each beside `trap` (a world row keeps its
+    /// refusal whatever `trap` rides with it).
+    #[test]
+    fn the_fence_admits_pure_and_trap_only_rows() {
+        assert!(row_admits(EffectRow::PURE));
+        assert!(row_admits(EffectRow::of(Effect::Trap)));
+        assert!(!row_admits(EffectRow::of(Effect::World)));
+        assert!(!row_admits(EffectRow::of(Effect::Error)));
+        assert!(!row_admits(EffectRow::of(Effect::Cancel)));
+        assert!(!row_admits(EffectRow::of(Effect::Discontinue)));
+        assert!(!row_admits(
+            EffectRow::of(Effect::Trap) | EffectRow::of(Effect::World)
+        ));
+        assert!(!row_admits(
+            EffectRow::of(Effect::Trap) | EffectRow::of(Effect::Error)
+        ));
+        assert!(!row_admits(
+            EffectRow::of(Effect::World) | EffectRow::of(Effect::Cancel)
+        ));
+    }
 }

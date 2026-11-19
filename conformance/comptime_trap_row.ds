@@ -1,0 +1,24 @@
+// source: the comptime trap-row admission round 2026-11-17 (the 2026-11-17 fence-predicate amendment, todo item 57)
+// purpose: a callee whose solved row is trap alone admits into the comptime fence - the int-arithmetic helper and the string-concat helper (its row the effects pass's unsolved-type over-approximation, concat being total) both join the fenced evaluation with their answers embedding at the call site, and both still run on the runtime path
+// items:
+// pad: stage: run
+// twice: stage: run
+// page: stage: run
+// label: stage: run
+// main: stage: run
+
+fn pad(s: string) -> string { s + "!" }
+
+fn twice(n: int) -> int { n * 2 }
+
+struct page { title: string }
+
+fn label(comptime t: type) -> string {
+  const n = type_name(t)
+  pad(n)
+}
+
+fn main() -> () {
+  println(label(page))
+  println("${twice(21)}")
+}

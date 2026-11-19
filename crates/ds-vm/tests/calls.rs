@@ -14,10 +14,11 @@ use ds_vm::{
     ModuleVersion, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
-        SlotType::{Bool, Fn as FnSlot, I64, Ref},
+        SlotType::{Bool, Fn as FnSlot, I64, Raw, Ref},
         uop::Uop,
     },
     assemble, native,
+    native::PLATFORM_NONE,
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -104,7 +105,7 @@ fn cross_module_calls_word_picks_up_hot_reload_swaps() {
         vm.run("app", "apply", &[word]),
         Ok(FrameAnswer::one(Value::I64(42)))
     );
-    vm.install_module(scaled_lib(3));
+    vm.install_module(scaled_lib(3)).expect("the swap installs");
     assert_eq!(
         vm.run("app", "apply", &[word]),
         Ok(FrameAnswer::one(Value::I64(63))),
@@ -155,12 +156,12 @@ fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
         vm.run("app", "apply", &[Value::I64(21)]),
         Ok(FrameAnswer::one(Value::I64(42)))
     );
-    vm.install_module(scaled_lib(3));
+    vm.install_module(scaled_lib(3)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_some(),
         "the retiring slot names the row: the cache dropped its entry at the swap"
     );
-    vm.install_module(scaled_lib(5));
+    vm.install_module(scaled_lib(5)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_none(),
         "the second swap's sweep retired v1's row, and nothing lingers for it"
@@ -180,14 +181,14 @@ fn swapped_out_versions_leave_the_call_cache_at_the_swap() {
 #[test]
 fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    let v1_row = vm.install_module(scaled_lib(2));
+    let v1_row = vm.install_module(scaled_lib(2)).expect("the swap installs");
     let child = vm
         .spawn_fiber("lib", "scaled", &[Value::I64(21)])
         .expect("the entry resolves");
     // two swaps move v1's row out of every registry slot; the ready
     // child's resume point still names it, so the sweep keeps the row
-    vm.install_module(scaled_lib(3));
-    vm.install_module(scaled_lib(5));
+    vm.install_module(scaled_lib(3)).expect("the swap installs");
+    vm.install_module(scaled_lib(5)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_some(),
         "the ready child's resume point pins the row"
@@ -201,7 +202,7 @@ fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
     // the completed child's kept frames still pin the row: the recycle
     // door fires whatever banded deinit claims survived the death, so
     // the frames must outlive the slot's reuse
-    vm.install_module(scaled_lib(7));
+    vm.install_module(scaled_lib(7)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_some(),
         "the dead child's kept frames pin the row until its slot reuses"
@@ -211,7 +212,7 @@ fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
     let fresh = vm
         .spawn_fiber("lib", "scaled", &[Value::I64(3)])
         .expect("the spawn recycles the dead slot");
-    vm.install_module(scaled_lib(9));
+    vm.install_module(scaled_lib(9)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_none(),
         "the recycled slot cleared the frames, so the sweep dropped the row"
@@ -224,35 +225,38 @@ fn the_sweep_retires_a_row_only_after_its_last_fiber_names_it() {
 }
 
 /// The `lib` module for the parked-mid-chain sweep seam: `inner` parks at
-/// `fiber_yield` and multiplies its resumed payload by the scale constant;
-/// `outer` stages a marker local before CALLing `inner` and adds it to the
-/// answer — the caller frame's survival witness across a suspension.
+/// its one-shot backward branch under the host's suspension request and
+/// multiplies its argument by the scale constant; `outer` stages a marker
+/// local before CALLing `inner` and adds it to the answer — the caller
+/// frame's survival witness across a suspension.
 fn yield_lib(scale: i64) -> ModuleVersion {
     let inner = def(
         "inner",
-        &[I64, I64, I64, I64],
+        &[I64, I64, I64, I64, Bool, Raw],
         1,
         1,
-        vec![
-            Const::I64(scale),
-            Const::FuncRef(ConstFuncRef::Named {
-                module: "builtin".into(),
-                func: native::BUILTIN_FIBER_YIELD,
-            }),
-        ],
+        vec![Const::I64(scale), Const::I64(1), Const::I64(2)],
         &[
-            Uop::Funcf { frame_slots: 4 },
-            Uop::Mov { dst: 3, src: 0 }, // stage n as the yield's value
-            Uop::Call {
-                callee: k(1),
-                nargs: 1,
-            }, // parks; the payload lands on word 3
-            Uop::Kimm { dst: 2, kidx: k(0) },
+            Uop::Funcf { frame_slots: 6 },
+            Uop::Kimm { dst: 5, kidx: k(1) }, // one
+            Uop::AddI64 {
+                dst: 3,
+                lhs: 3,
+                rhs: 5,
+            },
+            Uop::Kimm { dst: 5, kidx: k(2) }, // two
+            Uop::LtI64 {
+                dst: 4,
+                lhs: 3,
+                rhs: 5,
+            },
+            Uop::Jmpif { cond: 4, target: 2 }, // the one-shot park point
+            Uop::Kimm { dst: 2, kidx: k(0) },  // the entered version's scale
             Uop::MulI64 {
                 dst: 1,
-                lhs: 3,
+                lhs: 0,
                 rhs: 2,
-            }, // the entered version's scale
+            },
             Uop::Ret { src: 1 },
         ],
     );
@@ -288,46 +292,48 @@ fn yield_lib(scale: i64) -> ModuleVersion {
 }
 
 /// The simultaneous seam the entry-frame and dead-frame tests miss: a
-/// fiber parked at a yield inside a multi-frame chain keeps both marking
-/// sources live at once — its chain holds `outer`'s and `inner`'s frames,
-/// and its resume point names the entered version — and every install's
-/// sweep must mark through both. The second `lib` swap moves v1's row out
-/// of every registry slot, so the row's liveness is a real witness (only
-/// the parked child names it), and the resume answers in the entered
-/// version through its caller frame.
+/// fiber parked at a suspension inside a multi-frame chain keeps both
+/// marking sources live at once — its chain holds `outer`'s and
+/// `inner`'s frames, and its resume point names the entered version —
+/// and every install's sweep must mark through both. The second `lib`
+/// swap moves v1's row out of every registry slot, so the row's liveness
+/// is a real witness (only the parked child names it), and the resume
+/// answers in the entered version through its caller frame.
 #[test]
 fn an_install_pins_a_parked_mid_chain_fibers_frames_and_resume_point() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    let v1_row = vm.install_module(yield_lib(2));
+    let v1_row = vm.install_module(yield_lib(2)).expect("the swap installs");
     let child = vm
         .spawn_fiber("lib", "outer", &[Value::I64(21)])
         .expect("the entry resolves");
     // the first resume enters under v1, drives `outer` into `inner`, and
-    // parks at the yield handing out `inner`'s argument
+    // parks at the requested suspension's taken backward branch
+    vm.request_suspend(child);
     assert_eq!(
         vm.resume_fiber(child, Value::I64(0)),
-        Ok(FrameAnswer::one(Value::I64(21))),
-        "the drive parked at the yield inside the called callee"
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NONE))),
+        "the drive parked at the suspension inside the called callee"
     );
-    assert_eq!(vm.fiber_state(child), Some(FiberState::Suspended));
+    assert_eq!(vm.fiber_state(child), Some(FiberState::Preempted));
     // the hot swap moves v1's row to the retiring slot, and the
     // unrelated module's install sweeps too — both must keep marking the
     // parked child's row
-    vm.install_module(yield_lib(7));
-    vm.install_module(apply_module());
+    vm.install_module(yield_lib(7)).expect("the swap installs");
+    vm.install_module(apply_module())
+        .expect("the swap installs");
     // the second `lib` swap moves v1's row out of every registry slot:
     // only the parked child's frames and resume point name it now
-    vm.install_module(yield_lib(11));
+    vm.install_module(yield_lib(11)).expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_some(),
         "the parked child's kept frames and resume point pin the row"
     );
     // the resume continues in the entered version (scale 2, not the
     // current 11) and unwinds through outer's kept frame — the marker
-    // staged before the call comes back with the answer: 100 * 2 + 5
+    // staged before the call comes back with the answer: 21 * 2 + 5
     assert_eq!(
-        vm.resume_fiber(child, Value::I64(100)),
-        Ok(FrameAnswer::one(Value::I64(205))),
+        vm.resume_fiber(child, Value::I64(0)),
+        Ok(FrameAnswer::one(Value::I64(47))),
         "the resumed fiber multiplies in its entered version and returns through its caller frame"
     );
     // the completed child keeps its frames until its pool slot recycles
@@ -342,14 +348,18 @@ fn an_install_pins_a_parked_mid_chain_fibers_frames_and_resume_point() {
 #[test]
 fn an_install_pins_the_versions_a_trapped_runs_frames_still_name() {
     let mut vm = Vm::new(ModuleRegistry::new());
-    let v1_row = vm.install_module(apply_module());
+    let v1_row = vm
+        .install_module(apply_module())
+        .expect("the swap installs");
     let word = Value::Fn(FuncRef::new(u32::MAX, 0));
     assert!(
         vm.run("app", "apply", &[word]).is_err(),
         "the garbage word traps"
     );
-    vm.install_module(apply_module());
-    vm.install_module(apply_module());
+    vm.install_module(apply_module())
+        .expect("the swap installs");
+    vm.install_module(apply_module())
+        .expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_some(),
         "the trapped drive's kept frames pin the row past the swap"
@@ -361,7 +371,8 @@ fn an_install_pins_the_versions_a_trapped_runs_frames_still_name() {
     // the next run resets the trapped drive's frames and traps again on
     // the current version, so the install after it retires v1's row
     assert!(vm.run("app", "apply", &[word]).is_err());
-    vm.install_module(apply_module());
+    vm.install_module(apply_module())
+        .expect("the swap installs");
     assert!(
         vm.registry().version(v1_row).is_none(),
         "the reset run's frames named the current row, so the sweep freed v1's"
@@ -375,7 +386,7 @@ fn an_install_pins_the_versions_a_trapped_runs_frames_still_name() {
 fn recursion_version() -> ModuleVersion {
     ModuleVersion::new("rec", vec![def(
         "f",
-        &[FnSlot, I64, Bool, I64, SlotType::Raw, SlotType::Raw],
+        &[FnSlot, I64, Bool, I64, Raw, Raw],
         2,
         2,
         vec![Const::I64(0), Const::I64(1)],
@@ -746,7 +757,7 @@ fn call_site_cache_redirects_after_a_target_swap() {
             vm.run("app", "main", &[Value::I64(0)]),
             Ok(FrameAnswer::one(Value::I64(7)))
         );
-        vm.install_module(answer_lib(9));
+        vm.install_module(answer_lib(9)).expect("the swap installs");
         assert_eq!(
             vm.run("app", "main", &[Value::I64(0)]),
             Ok(FrameAnswer::one(Value::I64(9))),
@@ -999,7 +1010,8 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
             ],
         )])
         .expect("valid swap module"),
-    );
+    )
+    .expect("the swap installs");
     assert_eq!(
         vm.run("app", "f", &[Value::I64(10)]),
         Ok(FrameAnswer::one(Value::Bool(false))),
@@ -1027,7 +1039,7 @@ fn dispatch_tail_sites_key_the_inline_cache_with_full_lookup_fallback() {
         ],
     )])
     .expect("valid bad module");
-    vm.install_module(bogus);
+    vm.install_module(bogus).expect("the swap installs");
     for _ in 0..3 {
         assert_eq!(
             vm.run("bad", "main", &[Value::I64(1)]),

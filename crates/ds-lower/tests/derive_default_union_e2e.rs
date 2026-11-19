@@ -18,7 +18,7 @@ use ds_lower::{Lowered, lower};
 use ds_meta::analyze;
 use ds_mod::{Hash128, read_checked, write};
 use ds_parse::parse;
-use ds_vm::{ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// Parse -> check -> lower over one source; panics with the rendered
 /// diagnostics when an earlier stage refuses.
@@ -113,7 +113,7 @@ fn the_annotated_member_answers_the_type_keyed_surface() {
     let mut vm = run_lowered("union_default_probe", &lowered, full);
     assert_eq!(
         vm.run("union_default_probe", "main", &[]),
-        Ok(Value::I64(0))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
     let stdout: &[u8] = concat!("quiet\n", "big(0)\n", "wide { from: 0, to: 0 }\n").as_bytes();
     assert_eq!(
@@ -153,7 +153,10 @@ fn a_field_typing_the_annotated_union_answers_the_member() {
     );
     let lowered = lower_source("field_union_probe", full);
     let mut vm = run_lowered("field_union_probe", &lowered, full);
-    assert_eq!(vm.run("field_union_probe", "main", &[]), Ok(Value::I64(0)));
+    assert_eq!(
+        vm.run("field_union_probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
     let stdout: &[u8] = concat!("loud { volume: 0 }\n", "loud { volume: 0 }\n").as_bytes();
     assert_eq!(
         vm.captured_output(),

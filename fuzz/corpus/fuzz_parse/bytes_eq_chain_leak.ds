@@ -1,0 +1,23 @@
+// Reproducer (parse-seed carrier; the leak it pinned is fixed — the
+// chain's compares borrow and every dying operand releases where the
+// chain's exits merge): a struct-typed == whose chain fail-fasts
+// before a later Ref-carrying field once left that field's staged
+// count live at run end. The two-field interpolation spelling and the
+// three-field branch spelling over a differing first field both leaked
+// two objects (a bytes first field, or an int first field with any Ref
+// field behind it); the same compares in branch position over shapes
+// that fail at the chain's last field, with string first fields, and
+// over plain bytes operands drained. Found by the source leg's
+// bytes-equality episode; the widened e2e pins and the episode's
+// fail-fast shapes carry the regression now.
+
+struct inner { b: bytes }
+struct pair { b: bytes, n: int, deep: inner }
+
+fn main() -> () {
+  const one = pair { b: bytes_of([b'a']), n: 1, deep: inner { b: bytes_of([b'c']) } }
+  const swapped = pair { b: bytes_of([b'd']), n: 1, deep: inner { b: bytes_of([b'c']) } }
+  if one == swapped { println("eq") } else { println("ne") }
+  println("${one == swapped}")
+  println("end")
+}

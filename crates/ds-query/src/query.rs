@@ -15,8 +15,8 @@ use crate::{
     key::{BlockId, DefId, PackageId, QueryKey},
     value::{
         AnalyzedOutput, BlockIndexOutput, CheckedPackageOutput, ExpandedOutput, LinearityOutput,
-        PackageEffectsOutput, PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue,
-        ResolveOutput, ScopeIndexOutput, TypeOfOutput,
+        PackageEffectsOutput, PackageLinearityOutput, ParseOutput, PlatformCheckOutput,
+        PooledCheckOutput, QueryValue, ResolveOutput, ScopeIndexOutput, TypeOfOutput,
     },
 };
 
@@ -214,6 +214,27 @@ impl Query for PlatformCheck {
     fn extract(value: QueryValue) -> Option<Self::Value> {
         match value {
             QueryValue::PlatformCheck(out) => Some(out),
+            _ => None,
+        }
+    }
+}
+
+/// Marker for the pooled-check query: [`QueryKey::PooledCheck`]. The key
+/// is the package id; the value is the pooled-body refusal (E3) the CLI
+/// compile seam and the editor's diagnostics both publish.
+pub struct PooledCheck;
+
+impl Query for PooledCheck {
+    type Key = PackageId;
+    type Value = PooledCheckOutput;
+
+    fn make_key(key: Self::Key) -> QueryKey {
+        QueryKey::PooledCheck(key)
+    }
+
+    fn extract(value: QueryValue) -> Option<Self::Value> {
+        match value {
+            QueryValue::PooledCheck(out) => Some(out),
             _ => None,
         }
     }

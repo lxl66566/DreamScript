@@ -827,14 +827,55 @@ fn byte_literals_cook_to_single_bytes() {
     else {
         panic!("escaped byte");
     };
+    // the escape range is the full byte range: every value 0-255 spells,
+    // the edges included
+    for (spelling, value) in [
+        ("\\u{0}", 0),
+        ("\\u{80}", 128),
+        ("\\u{ff}", 255),
+        ("\\u{FF}", 255),
+    ] {
+        let ast = ok(&format!("const b = b'{spelling}'\n"));
+        assert!(
+            matches!(init_expr(&ast), Expr::Literal {
+                lit: Literal::Byte(v),
+                ..
+            } if *v == value),
+            "b'{spelling}' must cook to {value}"
+        );
+    }
+    // the char literal stays scalar-scoped: the same escape names the
+    // scalar, never a byte
+    let ast = ok("const c = '\\u{ff}'\n");
+    assert!(matches!(init_expr(&ast), Expr::Literal {
+        lit: Literal::Char('\u{ff}'),
+        ..
+    }));
 }
 
 #[test]
 fn byte_literals_reject_non_ascii_and_non_single_bodies() {
-    // a non-ASCII scalar names itself; an escape past the byte range does too
+    // a raw non-ASCII char keeps refusing (the escape is the high-byte
+    // spelling); an escape past the byte range refuses naming the value
+    let message = |src: &str| {
+        let mut files = Files::new();
+        let f = files.add_source("t.ds", src);
+        let diags = parse(&files, f).expect_err("should fail");
+        diags[0].message.clone()
+    };
     let (code, ..) = err("const b = b'é'\n");
     assert_eq!(code, ErrorCode::InvalidLiteral);
-    let (code, ..) = err("const b = b'\\u{80}'\n");
+    assert!(
+        message("const b = b'é'\n").contains("not an ASCII byte"),
+        "the raw non-ASCII refusal names the escape spelling"
+    );
+    let (code, ..) = err("const b = b'\\u{100}'\n");
+    assert_eq!(code, ErrorCode::InvalidLiteral);
+    assert!(
+        message("const b = b'\\u{100}'\n").contains("past the byte range 0-255"),
+        "the past-range refusal names the value and the range"
+    );
+    let (code, ..) = err("const b = b'\\u{d800}'\n");
     assert_eq!(code, ErrorCode::InvalidLiteral);
     // empty and multi-char bodies never match the single-byte shape
     let (code, ..) = err("const b = b''\n");

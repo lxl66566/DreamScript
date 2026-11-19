@@ -54,6 +54,20 @@ pub enum LowerError {
         /// What disagreed.
         detail: String,
     },
+    /// A linked module's tag-table row cannot join this compile's own
+    /// table: two linked modules disagreeing on one id is a cross-wire
+    /// no remap can fix (their code immediates are frozen in their
+    /// artifacts), and a row reaching the platform's reserved range has
+    /// no id to take.
+    #[error("the linked tag row `{name}` (id {id}) cannot join this module's tag table: {reason}")]
+    LinkedTagRow {
+        /// The row's name.
+        name: String,
+        /// The row's id.
+        id: u8,
+        /// Why the row refuses.
+        reason: String,
+    },
 }
 
 impl LowerError {

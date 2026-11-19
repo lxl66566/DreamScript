@@ -13,14 +13,53 @@ use ds_parse::{Ast, Item, parse};
 /// the derives target beside the primitives' own impls (ord's int
 /// directly, string, char, and byte through their compare natives;
 /// hash's int mixing its own word; clone's int answering itself), the
-/// compare and hash externs those impls call, and the Copyable marker
-/// (the file's `res` names the marker in its supers).
+/// compare and hash externs those impls call, the Copyable marker (the
+/// file's `res` names the marker in its supers), and the json face the
+/// json families' synthesized walks read (the typed readers and the
+/// object-map seam as signature stubs — the real ambient owns the
+/// ds-source bodies).
 const DERIVES_AMBIENT: &str = concat!(
     "pub tag int\n",
+    "pub tag float\n",
+    "pub tag bool\n",
     "pub tag string\n",
     "pub tag char\n",
     "pub tag byte\n",
+    "pub tag u32\n",
+    "pub tag bytes\n",
+    "pub tag parse_err\n",
     "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub enum json {\n",
+    "  json_null\n",
+    "  json_bool { value: bool }\n",
+    "  json_int { value: int }\n",
+    "  json_float { value: float }\n",
+    "  json_string { value: string }\n",
+    "  json_array { items: list[json] }\n",
+    "  json_object { fields: map[string, json] }\n",
+    "}\n",
+    "pub struct map[k, v]\n",
+    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+    "pub extern fn json_member (v: json, key: string) -> json | none\n",
+    "pub extern fn json_as_int (v: json) -> int | parse_err\n",
+    "pub extern fn json_as_float (v: json) -> float | parse_err\n",
+    "pub extern fn json_as_bool (v: json) -> bool | parse_err\n",
+    "pub extern fn json_as_string (v: json) -> string | parse_err\n",
+    "pub extern fn json_as_array (v: json) -> list[json] | parse_err\n",
+    "pub extern fn json_as_object (v: json) -> map[string, json] | parse_err\n",
+    "pub extern fn json_as_byte (v: json) -> byte | parse_err\n",
+    "pub extern fn json_as_u32 (v: json) -> u32 | parse_err\n",
+    "pub extern fn json_as_char (v: json) -> char | parse_err\n",
+    "pub extern fn json_as_bytes (v: json) -> bytes | parse_err\n",
+    "pub extern fn json_of_byte (b: byte) -> json\n",
+    "pub extern fn json_of_u32 (v: u32) -> json\n",
+    "pub extern fn json_of_char (c: char) -> json\n",
+    "pub extern fn json_of_bytes (b: bytes) -> json\n",
+    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "pub trait show {\n",
     "  fn show(self) -> string\n",
     "}\n",
@@ -75,11 +114,6 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
             "`mystery` is not a derive name [G1]",
         ),
         (
-            "to-json-cell",
-            "DS2024",
-            "derive `to_json` is ruled but not implemented yet [G1]",
-        ),
-        (
             "cb-cell",
             "DS2026",
             "derive `show` refuses the field `cb`: a function-typed part compares and shows as no \
@@ -100,6 +134,50 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
             "gen-cell",
             "DS2029",
             "derive `show` refuses a generic declaration [G1]",
+        ),
+        (
+            "fj-tag",
+            "DS2026",
+            "derive `from_json` refuses the declaration `fj_tag`: a tag declares no members, so \
+             no json shape names it [G1, B9]",
+        ),
+        (
+            "fj-pair",
+            "DS2026",
+            "derive `from_json` refuses the field `both`: this shape spells no json read [G1, B9]",
+        ),
+        (
+            "fj-plain-holder",
+            "DS2004",
+            "type `fj_plain` carries no member `from_json`",
+        ),
+        (
+            "tj-tag",
+            "DS2026",
+            "derive `to_json` refuses the declaration `tj_tag`: a tag declares no members, so no \
+             json shape answers it [G1, B9]",
+        ),
+        (
+            "tj-pair",
+            "DS2026",
+            "derive `to_json` refuses the field `both`: this shape spells no json write [G1, B9]",
+        ),
+        (
+            "tj-plain-holder",
+            "DS2004",
+            "type `tj_plain` carries no member `to_json`",
+        ),
+        (
+            "tj-opt-elem",
+            "DS2026",
+            "derive `to_json` refuses the field `xs`: an optional nested inside a write spells no \
+             M3 lowering (the word-union member dispatch has no runtime contract) [G1, B9]",
+        ),
+        (
+            "tj-opt-payload",
+            "DS2026",
+            "derive `to_json` refuses the enum case payload `p`: an optional payload field spells \
+             no M3 lowering (the payload-bound member dispatch has no runtime contract) [G1, B9]",
         ),
     ];
     assert_eq!(rejects.len(), expected.len(), "one reject per class");

@@ -120,11 +120,17 @@ pub(crate) struct Nursery {
     /// driven nursery would interlock the two drives on each other (the
     /// cycle the own-nursery rule refuses for one level).
     pub(crate) driving: bool,
+    /// The fiber whose code opened this nursery (the owning seam a trapped
+    /// owner's release follows), `None` for the host-supervised root: a
+    /// fiber's block opens its nursery, spawns into it, and joins at scope
+    /// exit, so an open nursery whose owner is dead is abandoned — no drive
+    /// will ever consume it and the release door tears it down.
+    pub(crate) owner: Option<FiberId>,
 }
 
 impl Nursery {
-    /// An empty open nursery.
-    pub(crate) fn open() -> Self {
+    /// An empty open nursery owned by `owner`.
+    pub(crate) fn open(owner: Option<FiberId>) -> Self {
         Self {
             children: Vec::new(),
             outcomes: Vec::new(),
@@ -132,6 +138,7 @@ impl Nursery {
             cancelled: false,
             state: NurseryState::Open,
             driving: false,
+            owner,
         }
     }
 
@@ -191,7 +198,7 @@ mod tests {
     /// and whatever pool slots the children hold.
     #[test]
     fn a_death_lands_at_the_childs_own_spawn_slot() {
-        let mut nursery = Nursery::open();
+        let mut nursery = Nursery::open(None);
         let spawned = [FiberId(4), FiberId(1), FiberId(7), FiberId(2)];
         for &child in &spawned {
             nursery.push_child(child);
@@ -209,7 +216,7 @@ mod tests {
     /// recycled slot naming another nursery's child, or the root.
     #[test]
     fn a_record_for_a_foreign_fiber_drops() {
-        let mut nursery = Nursery::open();
+        let mut nursery = Nursery::open(None);
         nursery.push_child(FiberId(5));
         nursery.push_child(FiberId(2));
         nursery.record(FiberId(3), ChildOutcome::Cancelled);
@@ -225,7 +232,7 @@ mod tests {
     /// drained ledger) drops instead of overwriting a newer spawn.
     #[test]
     fn a_record_after_the_ledger_is_drained_drops() {
-        let mut nursery = Nursery::open();
+        let mut nursery = Nursery::open(None);
         nursery.push_child(FiberId(1));
         nursery.outcomes.clear();
         nursery.record(FiberId(1), ChildOutcome::Cancelled);

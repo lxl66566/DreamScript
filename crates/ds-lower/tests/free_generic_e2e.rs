@@ -341,3 +341,126 @@ fn a_multi_word_argument_into_a_variable_parameter_refuses() {
         "the substituted type spans more than one word",
     );
 }
+
+/// A tuple built inside a free generic fn over its own variable registers
+/// the element word's ownership at the construction and the tail return
+/// alike: the element's declared word is the variable's Raw classification
+/// under a counted instantiation (a string), so the count moves into the
+/// returned span instead of dying with the still-owned parameter — the
+/// caller reads the value it passed while a later binding reuses no freed
+/// id under the tuple's word.
+#[test]
+fn a_generic_tuple_hands_the_element_count_to_the_returned_span() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "fn pair[t] (x: t, y: int) -> (t, int) { (x, y) }\n",
+        "fn main() -> int {\n",
+        "  const p = pair(\"world\", 2)\n",
+        "  const (a, b) = p\n",
+        "  const marker = \"ABCDEFGH\"\n",
+        "  println(\"a is ${a}\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("probe.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the surface checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "probe",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the tuple over the variable lowers");
+    let mut vm = run_lowered(&lowered);
+    assert_eq!(
+        vm.run("probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"a is world\n" as &[u8],
+        "the caller reads the string it passed, not a reused id"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// A multi-word parameter over the fn's own variables (a tuple formal)
+/// declares Raw words on the callee side while the call site's argument
+/// words carry their concrete kinds: the staging records the callee's
+/// Raw at those overlay indices (the slide's one-way exemption), so the
+/// call enters the ONE body — previously the site staged the argument's
+/// own Ref/I64 against the Raw formals and the VM rejected the layout
+/// at runtime with no diagnostic from check or lowering.
+#[test]
+fn a_multi_word_variable_parameter_stages_the_callees_raw_words() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "fn head_of[t, u] (p: (t, u)) -> t {\n",
+        "  const (x, _) = p\n",
+        "  x\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const s = head_of((\"AAAAAAAAAAAAAAAAAAAA\", 5))\n",
+        "  println(\"$s\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("probe.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the surface checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "probe",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the call into the tuple formal lowers");
+    let mut vm = run_lowered(&lowered);
+    assert_eq!(
+        vm.run("probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"AAAAAAAAAAAAAAAAAAAA\n" as &[u8],
+        "the call enters the body and answers its first element"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}

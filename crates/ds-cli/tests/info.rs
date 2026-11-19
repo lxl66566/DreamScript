@@ -40,7 +40,7 @@ const LIB_MEMBER: &str = concat!(
     "  2\n",
     "}\n",
     "pub fn open_api(mut xs: list[int]) -> int | none {\n",
-    "  head(xs)\n",
+    "  first(xs)\n",
     "}\n",
     "pub extern fn fields(t: type) -> list[field]\n",
     "pub struct rec[t] {\n",
@@ -93,7 +93,7 @@ fn a_package_root_renders_its_pub_surface() {
             "  shaped { code: int }\n",
             "}\n",
             "pub trait speak { fn speak(self) -> string }\n",
-            "pub const answer: int\n",
+            "pub const answer: int = 42\n",
             "pub type id[t] = t\n",
             "pub tag unit\n",
         ),
@@ -121,7 +121,7 @@ fn a_file_target_renders_its_own_surface() {
             "  shaped { code: int }\n",
             "}\n",
             "pub trait speak { fn speak(self) -> string }\n",
-            "pub const answer: int\n",
+            "pub const answer: int = 42\n",
             "pub type id[t] = t\n",
             "pub tag unit\n",
         ),
@@ -147,6 +147,37 @@ fn a_missing_or_empty_target_refuses() {
     assert!(
         err.contains("holds no .ds source member"),
         "the refusal names the emptiness: {err}"
+    );
+    fs::remove_dir_all(&root).expect("the scratch root removes");
+}
+
+/// The `.dsi` over the repo's own stdlib surface — the surface carrying
+/// `pub const urls`, whose bare-spelling line used to fail DS1002 and
+/// poison every line behind it — re-parses clean through `ds check`: the
+/// document contract (G4) checked end to end.
+#[test]
+fn the_stdlib_surface_reparses_clean() {
+    let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/ds-stdlib/src");
+    let (ok, out, err) = ds_info(&stdlib);
+    assert!(ok, "info succeeds (stderr: {err})");
+    assert!(
+        out.contains("pub const urls = "),
+        "the initialized const spells its initializer: {out}"
+    );
+    let root = temp("reparse");
+    let surface = root.join("surface.dsi");
+    fs::write(&surface, &out).expect("the surface writes");
+    let check = Command::new(env!("CARGO_BIN_EXE_ds"))
+        .arg("check")
+        .arg("--no-ambient")
+        .arg(&surface)
+        .output()
+        .expect("the ds binary builds with the test");
+    assert!(
+        check.status.success(),
+        "the rendered surface re-parses clean (stdout: {}, stderr: {})",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
     );
     fs::remove_dir_all(&root).expect("the scratch root removes");
 }

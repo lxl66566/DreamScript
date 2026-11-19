@@ -482,14 +482,25 @@ impl Drop for Heap {
     fn drop(&mut self) {
         let inner = self.inner();
         for (row, pool) in inner.pools.iter_mut().enumerate() {
-            if let Some(block) = pool.head.take() {
-                // SAFETY: pooled blocks were allocated exactly at
-                // (row's class size, MIN_ALIGN) and are released once here.
+            // The freelist is intrusive: each pooled node links through its
+            // deinit slot, written by `thread_block`, and a row can hold up
+            // to POOL_DEPTH nodes — dropping only the head strands the rest.
+            let mut node = pool.head.take();
+            while let Some(block) = node {
+                // SAFETY: pooled nodes were allocated exactly at (row's
+                // class size, MIN_ALIGN) and are released once here; the
+                // next link is read before the release, mirroring
+                // `Inner::alloc_at`.
                 unsafe {
+                    let next = ptr::read(
+                        ptr::addr_of!((*block.cast::<RcHeader>().as_ptr()).deinit)
+                            .cast::<Option<NonNull<u8>>>(),
+                    );
                     dealloc(
                         block.as_ptr(),
                         Layout::from_size_align_unchecked(class_size(row), MIN_ALIGN),
                     );
+                    node = next;
                 }
             }
         }

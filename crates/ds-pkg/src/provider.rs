@@ -1,10 +1,10 @@
 //! The store-backed provider seam: resolution's fetch interface
 //! answered from the content-addressed cache, misses filled by a
-//! caller-supplied remote fetch hook. The net natives stay out of scope
-//! — https is rejected until the platform decision — so the remote side
-//! stays abstract: the registry index client serves the hook over a
-//! local path this round, the remote git client queuing behind the
-//! https ruling.
+//! caller-supplied remote fetch hook. The net natives stay out of
+//! scope here — the platform's tls capability serves https, but the
+//! remote side stays abstract: the registry client serves the hook —
+//! a local index root or a git remote's snapshot — the verified
+//! bundles installing through the store either way.
 
 use std::collections::BTreeMap;
 

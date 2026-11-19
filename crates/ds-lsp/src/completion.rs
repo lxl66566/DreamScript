@@ -1,6 +1,7 @@
 //! Completion's position slices beyond flat scope names: the member
-//! surface after a dot, type-variable scopes in type positions, and
-//! prefix ranking over every answer.
+//! surface after a dot, type-variable scopes in type positions, the
+//! fixed declaration and expression skeletons behind a typed keyword
+//! prefix, and prefix ranking over every answer.
 //!
 //! The member slice rides the checked expression-type table the hover
 //! answers read: the receiver is the tightest expression whose span ends
@@ -19,6 +20,16 @@
 //! enclosing declarations' type variables (innermost first, `Self` inside
 //! impl and trait member regions) ahead of the type-namespace names the
 //! scope-index reports visible.
+//!
+//! The skeletons are the fixed shapes the grammar's own spellings make
+//! unambiguous, and the grammar decides where each one parses, by probe:
+//! the source with the typed prefix's span replaced by one probe token
+//! re-parses on a scratch registry (the same pattern `fresh_name` uses
+//! for name legality), a `tag` probe naming item level, a literal probe
+//! naming an expression slot, a body-less `fn` probe naming an impl or
+//! trait member list. Every offered expansion is therefore valid surface
+//! at the position, and a document broken beyond the prefix answers no
+//! snippet at all.
 
 use ds_check::{Analyzed, DefKind, MethodOwner, Package, ScopeEntry, ScopeKind, Val};
 use ds_diag::{FileId, Span};
@@ -154,7 +165,7 @@ pub(crate) fn members(analyzed: &Analyzed, recv: Val) -> Vec<lsp::CompletionItem
     }
     // Trait members through solved instances: every trait whose instance
     // set contains the receiver's type (B6).
-    for (raw, def) in package.defs().iter().enumerate() {
+    for (raw, def) in package.defs().enumerate() {
         if def.kind != DefKind::Trait {
             continue;
         }
@@ -591,7 +602,7 @@ impl Walker<'_> {
 
 /// Whether one scope kind declares into the type namespace (F9): the
 /// type-position filter over the scope-index's answer.
-fn type_namespace(kind: ScopeKind) -> bool {
+pub(crate) fn type_namespace(kind: ScopeKind) -> bool {
     matches!(
         kind,
         ScopeKind::Struct
@@ -638,6 +649,156 @@ pub(crate) fn type_items(vars: &TypeVars, entries: &[ScopeEntry]) -> Vec<lsp::Co
     out
 }
 
+/// Where one skeleton's expansion is valid surface: the probe parses'
+/// verdict on the position the typed prefix sits at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Site {
+    /// Top level, where every declaration skeleton parses.
+    Item,
+    /// An impl or trait member list, where the fn skeleton alone parses.
+    Member,
+    /// Inside a block, where the expression skeletons parse as statements.
+    Body,
+}
+
+/// One fixed skeleton the grammar's spellings make unambiguous: the site
+/// its expansion belongs to, the label the typed prefix filters on, and
+/// the expansion in LSP snippet syntax — every placeholder's default a
+/// valid spelling of its slot, so the placeholder-resolved expansion
+/// parses as-is (the test suite's validity gate).
+pub(crate) struct Snippet {
+    /// The site whose skeletons include this one.
+    pub(crate) site: Site,
+    /// The keyword (or shape) label the typed prefix filters on.
+    pub(crate) label: &'static str,
+    /// The expansion: tab stops `$0`/`$n`, placeholders `${n:default}`.
+    pub(crate) text: &'static str,
+}
+
+/// The shipped skeletons. Indentation is the canonical two spaces, so an
+/// accepted expansion is already the formatter's own form.
+pub(crate) const SNIPPETS: &[Snippet] = &[
+    // Item level: the declaration skeletons.
+    Snippet {
+        site: Site::Item,
+        label: "fn",
+        text: "fn ${1:name}(${2:p}) -> ${3:t} {\n  $0\n}",
+    },
+    Snippet {
+        site: Site::Item,
+        label: "struct",
+        text: "struct ${1:name} {\n  ${2:field}: ${3:t},\n}",
+    },
+    Snippet {
+        site: Site::Item,
+        label: "enum",
+        text: "enum ${1:name} {\n  ${2:case},\n}",
+    },
+    Snippet {
+        site: Site::Item,
+        label: "impl",
+        text: "impl ${1:target} {\n  fn ${2:member}(self) -> ${3:t} {\n    $0\n  }\n}",
+    },
+    Snippet {
+        site: Site::Item,
+        label: "trait",
+        text: "trait ${1:name} {\n  fn ${2:member}(self) -> ${3:t}\n}",
+    },
+    // Member level: the fn skeleton alone (impl and trait member lists).
+    Snippet {
+        site: Site::Member,
+        label: "fn",
+        text: "fn ${1:name}(${2:p}) -> ${3:t} {\n  $0\n}",
+    },
+    // Body level: the expression skeletons.
+    Snippet {
+        site: Site::Body,
+        label: "lambda",
+        text: "(${1:x}) => ${2:expr}",
+    },
+    Snippet {
+        site: Site::Body,
+        label: "if",
+        text: "if ${1:cond} {\n  $0\n}",
+    },
+    Snippet {
+        site: Site::Body,
+        label: "while",
+        text: "while ${1:cond} {\n  $0\n}",
+    },
+    Snippet {
+        site: Site::Body,
+        label: "match",
+        text: "match ${1:expr} {\n  ${2:pat} => ${3:expr},\n}",
+    },
+    Snippet {
+        site: Site::Body,
+        label: "nursery",
+        text: "nursery {\n  $0\n}",
+    },
+    Snippet {
+        site: Site::Body,
+        label: "spawn",
+        text: "spawn {\n  $0\n}",
+    },
+];
+
+/// Whether the whole source parses with the typed prefix's span replaced
+/// by one probe token, on a scratch registry: the grammar itself decides
+/// the position exactly as it would decide in source.
+fn parses_with(source: &str, start: u32, at: u32, probe: &str) -> bool {
+    let mut text = String::with_capacity(source.len() + probe.len());
+    text.push_str(&source[..start as usize]);
+    text.push_str(probe);
+    text.push_str(&source[at as usize..]);
+    let mut files = ds_diag::Files::new();
+    let file = files.add_source("probe.ds", &text);
+    ds_parse::parse(&files, file).is_ok()
+}
+
+/// The site of one position, by probe parses over the source with the
+/// typed prefix replaced: the `tag` probe (an item spelling no other
+/// position admits) names item level, the literal probe names an
+/// expression slot, the body-less `fn` probe names an impl or trait
+/// member list — three places no probe shares with another. `None` when
+/// no probe parses: a document broken beyond the prefix answers no site.
+fn site(source: &str, start: u32, at: u32) -> Option<Site> {
+    if parses_with(source, start, at, "tag zz") {
+        Some(Site::Item)
+    } else if parses_with(source, start, at, "1") {
+        Some(Site::Body)
+    } else if parses_with(source, start, at, "fn zz()") {
+        Some(Site::Member)
+    } else {
+        None
+    }
+}
+
+/// The snippet items at one position: nothing until the typed prefix
+/// names a label (a non-empty prefix of some snippet's), then the
+/// probe-decided site picks the skeletons whose expansion parses there.
+/// No probe runs when no label matches.
+pub(crate) fn snippets(source: &str, at: u32, prefix: &str) -> Vec<lsp::CompletionItem> {
+    if prefix.is_empty() || !SNIPPETS.iter().any(|s| s.label.starts_with(prefix)) {
+        return Vec::new();
+    }
+    let start = ident_start(source, at);
+    let Some(site) = site(source, start, at) else {
+        return Vec::new();
+    };
+    SNIPPETS
+        .iter()
+        .filter(|s| s.site == site && s.label.starts_with(prefix))
+        .map(|s| lsp::CompletionItem {
+            label: s.label.to_owned(),
+            kind: Some(lsp::CompletionItemKind::SNIPPET),
+            insert_text: Some(s.text.to_owned()),
+            insert_text_format: Some(lsp::InsertTextFormat::SNIPPET),
+            ..lsp::CompletionItem::default()
+        })
+        .collect()
+}
+
 /// The rank of one label against the typed prefix: an exact prefix
 /// first, a word-boundary match next, a plain substring after, and the
 /// rest last. Case-sensitive — identifiers are.
@@ -678,6 +839,87 @@ pub(crate) fn rank(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resolves one snippet's syntax to plain surface: every placeholder
+    /// keeps its default spelling, bare tab stops drop out.
+    fn resolve(snippet: &str) -> String {
+        let mut out = String::new();
+        let mut rest = snippet;
+        while let Some(dollar) = rest.find('$') {
+            out.push_str(&rest[..dollar]);
+            let after = &rest[dollar + 1..];
+            if let Some(inner) = after.strip_prefix('{') {
+                let close = inner.find('}').expect("the placeholder closes");
+                let (_, default) = inner[..close]
+                    .split_once(':')
+                    .expect("a placeholder carries its default");
+                out.push_str(default);
+                rest = &inner[close + 1..];
+            } else {
+                let stop = after.chars().next().expect("a tab stop follows $");
+                rest = &after[stop.len_utf8()..];
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Every snippet's expansion, its placeholders resolved to their
+    /// default spellings, parses as surface at its site: item and member
+    /// skeletons as whole sources, body skeletons as one statement inside
+    /// a probe fn — the validity gate for shipping a shape.
+    #[test]
+    fn every_snippet_expansion_parses_at_its_site() {
+        for snippet in SNIPPETS {
+            let resolved = format!("{}\n", resolve(snippet.text));
+            let source = match snippet.site {
+                Site::Item | Site::Member => resolved,
+                Site::Body => format!("fn probe() {{\n  {resolved}\n}}\n"),
+            };
+            let mut files = ds_diag::Files::new();
+            let file = files.add_source("probe.ds", &source);
+            ds_parse::parse(&files, file).unwrap_or_else(|diags| {
+                panic!(
+                    "the `{}` skeleton's expansion stays surface: {diags:?}",
+                    snippet.label
+                )
+            });
+        }
+    }
+
+    /// The probe parses separate the three positions, and a document
+    /// broken beyond the typed prefix answers no site at all.
+    #[test]
+    fn probe_sites_separate_items_members_and_bodies() {
+        let site_of = |source: &str, prefix: &str| {
+            // The typed prefix is the last occurrence (an earlier line can
+            // embed the same letters inside a keyword, like `st` in
+            // `const`).
+            let found = source.rfind(prefix).expect("the prefix is placed");
+            let at = u32::try_from(found + prefix.len()).expect("an offset fits u32");
+            site(source, ident_start(source, at), at)
+        };
+        assert_eq!(site_of("const one = 1\nst\n", "st"), Some(Site::Item));
+        assert_eq!(site_of("fn probe() {\n  if\n}\n", "if"), Some(Site::Body));
+        assert_eq!(site_of("impl point {\n  fn\n}\n", "fn"), Some(Site::Member));
+        assert_eq!(
+            site_of("trait pretty {\n  fn\n}\n", "fn"),
+            Some(Site::Member),
+            "a trait member list is the fn skeleton's site too"
+        );
+        // An expression slot mid-statement is the body site (the skeleton
+        // is an expression there): `const g = ` names one.
+        assert_eq!(
+            site_of("const g = if\n", "if"),
+            Some(Site::Body),
+            "an expression slot answers the body site"
+        );
+        assert_eq!(
+            site_of("st\nst\n", "st"),
+            None,
+            "a document broken beyond the prefix answers no site"
+        );
+    }
 
     #[test]
     fn member_positions_and_prefixes_scan_back() {

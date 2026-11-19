@@ -5,8 +5,9 @@
 //! signature agreement) and the normal lowering. Nothing in the
 //! emission paths knows a derive exists.
 //!
-//! `show`, `ord`, `hash`, `clone`, and `default` are the landed
-//! families: `show` answers the construction spelling of the data;
+//! `show`, `ord`, `hash`, `clone`, `default`, `from_json`, and
+//! `to_json` are the landed families: `show` answers the construction
+//! spelling of the data;
 //! `ord` answers the field-order lexicographic comparison (never
 //! structural, float parts sorting through the explicit
 //! `total_compare` native the ambient's float impl carries); `hash`
@@ -20,7 +21,9 @@
 //! the type's own impl, the 2026-11-15 ruling), one default per field
 //! keyed by the field's type expression — a bare type name a `default`
 //! dispatch, a tuple the per-element construction, an optional `none`,
-//! an application the empty construction — a part-less struct the
+//! an application over the collection heads (`list`, `map`) the empty
+//! construction and every other application the instantiated `default`
+//! dispatch — a part-less struct the
 //! unit-word construction, an enum its first unit case, a tag itself.
 //! A union's `#[default]` member annotation (the 2026-11-15 ruling)
 //! names the one member the family synthesizes over: the annotated
@@ -30,9 +33,52 @@
 //! construction, a union over one enum's cases member-wise; no
 //! annotation keeps the ambiguity refusal, a second annotated member
 //! refusing as a duplicate.
-//! Every other name in the ruled set (`to_json`, `from_json`) parses
-//! and refuses with a checklist diagnostic naming it unimplemented; `==`
-//! refuses with the B9 diagnostic (equality is universal and never
+//! `from_json` answers the decode walk (the 2026-11-18 ruling) — a
+//! receiverless inherent member `fn from_json(v: json) -> Self |
+//! parse_err` over the landed typed readers, never a comptime
+//! extension: the struct body guards the object shape
+//! (`json_as_object(v)?`, so a non-object answers `parse_err` whatever
+//! its fields), reads one member per field (`json_member`, a required
+//! member none-testing into `parse_err`, an optional member reading
+//! absence as `none`), and answers the construction — a scalar field
+//! through its reader inline (byte, u32, char, and bytes included per
+//! the 2026-11-19 ruling: a json number as byte or u32, a
+//! one-character json string as char, a number array as bytes), a list
+//! field through the array read plus
+//! one element walk per position, a field whose type spells no reader
+//! through that type's own `from_json` member (a type carrying none
+//! fails at the synthesized call with the standard missing-member
+//! diagnostic); the enum body matches the value's shape, the unit cases
+//! reading from their own names (a json string) and the one
+//! struct-payload case from the members its payload declares (a json
+//! object), any other shape answering `parse_err`. The walk refuses: a
+//! field whose type spells no read (a tuple, a union, a shape the
+//! reader vocabulary does not name), an enum with no cases, a
+//! tuple-payload case (no member names), or two payloaded cases (the
+//! object shape names no case).
+//! `to_json` answers the encode walk, from_json's mirror — the
+//! receiverless inherent member `fn to_json(v: Self) -> json` building
+//! the json enum value through its own case constructions, the plain
+//! `to_json: (json) -> string` writer staying the composition point:
+//! the struct body fills one object map with one member per field — a
+//! scalar field through its case construction inline (the four widths
+//! the case vocabulary cannot spell from — byte, u32, char, bytes —
+//! through the json face's own encode helpers, the same 2026-11-19
+//! ruling), a list field
+//! through one json element per position, a field whose type spells no
+//! case construction through that type's own `to_json` member (a type
+//! carrying none failing at the synthesized call with the standard
+//! missing-member diagnostic) — an optional field's presence setting
+//! its member and its absence leaving the member out (the decode
+//! mirror: the absent member reads back as `none`); the enum body
+//! matches the receiver, the unit cases answering their json_string
+//! names and the one struct-payload case its object. The walk refuses:
+//! a field whose type spells no write (a tuple, a union, a shape the
+//! case vocabulary does not name), an optional nested inside a part (a
+//! `t?` list element, an optional payload field — the M3 member
+//! dispatch has no runtime contract for either), an enum with no
+//! cases, a tuple-payload case, or two payloaded cases.
+//! `==` refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
 //! declaration carrying its own type parameters refuses (the runtime
@@ -50,9 +96,6 @@ use ds_parse::{
 /// The ruled derive vocabulary (G1), in ruling order.
 pub const RULED_SET: &str = "hash, show, ord, clone, to_json, from_json, default";
 
-/// The families this round has not implemented yet, in ruling order.
-const UNIMPLEMENTED: &[&str] = &["to_json", "from_json"];
-
 /// The hash family's fold constants: FNV-1a's offset basis and prime,
 /// the same pair the builtin str/float/char hash natives hash under —
 /// the basis exceeds i64's range, so the fold spells its 2^64 wrap as a
@@ -67,12 +110,11 @@ const PRINTABLE: &[&str] = &["int", "float", "bool", "char", "string"];
 /// Expands every derive attribute in the package: consumed attributes
 /// are stripped and their impls appended beside the attributed item,
 /// refused names keep the attribute and contribute a diagnostic. Files
-/// without derive attributes come back byte-identical (a plain clone).
-/// `asts` may hold shared trees (`Borrow<Ast>`, like
-/// [`check_resolved`](ds_check::type_of::check_resolved)): the query layer
-/// expands its parse memos without cloning the trees.
+/// without derive attributes come back byte-identical (a plain copy).
+/// `asts` may hold shared trees (`Borrow<Ast>`): the query layer
+/// expands its parse memos, copying once per tree.
 #[must_use]
-pub fn expand<T>(asts: &[T]) -> (Vec<Ast>, Vec<Diagnostic>)
+pub fn expand<T>(asts: &[T]) -> (Vec<std::sync::Arc<Ast>>, Vec<Diagnostic>)
 where
     T: std::borrow::Borrow<Ast>,
 {
@@ -81,20 +123,25 @@ where
 }
 
 /// Expands the package's caller-owned trees by moving each one
-/// through: nothing clones, so the cold run path never pays the deep
-/// copy [`expand`] pays over its borrowed inputs. `preexpanded` marks,
-/// aligned with `asts`, the trees already derive-expanded (the ambient
-/// blob's decode); a marked tree must carry no derive attribute and
-/// passes through untouched — the mark asserts the artifact held its
-/// end of the contract, it never gates behavior, because expansion
-/// consumes derive attributes and a second expansion over a
-/// pre-expanded tree is the identity either way. Linear heads are
-/// collected over the whole package first, marked trees included, so a
-/// user derive over a linear ambient part refuses identically to the
-/// borrowed expansion.
+/// through: nothing clones while the caller holds the sole reference
+/// (`Arc::make_mut` mutates in place; a tree shared past the caller —
+/// a query memo's — clones once for the expansion, exactly the copy
+/// [`expand`] pays), so the cold run path never pays a deep copy.
+/// `preexpanded` marks, aligned with `asts`, the trees already
+/// derive-expanded (the ambient blob's decode); a marked tree must
+/// carry no derive attribute and passes through untouched — the mark
+/// asserts the artifact held its end of the contract, it never gates
+/// behavior, because expansion consumes derive attributes and a
+/// second expansion over a pre-expanded tree is the identity either
+/// way. Linear heads are collected over the whole package first, marked
+/// trees included, so a user derive over a linear ambient part refuses
+/// identically to the borrowed expansion.
 #[must_use]
-pub fn expand_owned(mut asts: Vec<Ast>, preexpanded: &[bool]) -> (Vec<Ast>, Vec<Diagnostic>) {
-    let trees: Vec<&Ast> = asts.iter().collect();
+pub fn expand_owned(
+    mut asts: Vec<std::sync::Arc<Ast>>,
+    preexpanded: &[bool],
+) -> (Vec<std::sync::Arc<Ast>>, Vec<Diagnostic>) {
+    let trees: Vec<&Ast> = asts.iter().map(|ast| &**ast).collect();
     let linear = linear_heads(&trees);
     let mut diags = Vec::new();
     for (index, ast) in asts.iter_mut().enumerate() {
@@ -104,16 +151,19 @@ pub fn expand_owned(mut asts: Vec<Ast>, preexpanded: &[bool]) -> (Vec<Ast>, Vec<
                 "a pre-expanded tree carries no expansion work"
             );
         } else if has_expansion(ast) {
-            expand_tree_in_place(ast, &linear, &mut diags);
+            expand_tree_in_place(std::sync::Arc::make_mut(ast), &linear, &mut diags);
         }
     }
     (asts, diags)
 }
 
 /// The expansion over the collected trees; see [`expand`].
-fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
+fn expand_trees(asts: &[&Ast]) -> (Vec<std::sync::Arc<Ast>>, Vec<Diagnostic>) {
     if !asts.iter().any(|ast| has_expansion(ast)) {
-        let cloned: Vec<Ast> = asts.iter().map(|ast| (*ast).clone()).collect();
+        let cloned: Vec<std::sync::Arc<Ast>> = asts
+            .iter()
+            .map(|ast| std::sync::Arc::new((*ast).clone()))
+            .collect();
         return (cloned, Vec::new());
     }
     let linear = linear_heads(asts);
@@ -121,12 +171,12 @@ fn expand_trees(asts: &[&Ast]) -> (Vec<Ast>, Vec<Diagnostic>) {
     let mut out = Vec::with_capacity(asts.len());
     for &ast in asts {
         if !has_expansion(ast) {
-            out.push(ast.clone());
+            out.push(std::sync::Arc::new(ast.clone()));
             continue;
         }
-        let mut ast = ast.clone();
-        expand_tree_in_place(&mut ast, &linear, &mut diags);
-        out.push(ast);
+        let mut tree = ast.clone();
+        expand_tree_in_place(&mut tree, &linear, &mut diags);
+        out.push(std::sync::Arc::new(tree));
     }
     (out, diags)
 }
@@ -214,7 +264,7 @@ fn expand_item(
     // range's spans to two different name uses, and the member fn
     // declarations mint here too, so two families' fns never share one
     // span.
-    let mut mint = Mint::new(item.span);
+    let mut mint = Mint::new(item);
     for attr in &item.attrs {
         if attr.name.name == "default" {
             diags.push(misplaced_default(attr));
@@ -256,9 +306,13 @@ fn expand_item(
                     Some(impl_item) => extra.push(impl_item),
                     None => attr_consumed = false,
                 },
-                ruled if UNIMPLEMENTED.contains(&ruled) => {
-                    diags.push(unimplemented(attr.span, ruled));
-                    attr_consumed = false;
+                "from_json" => match from_json_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
+                },
+                "to_json" => match to_json_impl(item, attr, &mut mint, linear, diags) {
+                    Some(impl_item) => extra.push(impl_item),
+                    None => attr_consumed = false,
                 },
                 _ => {
                     diags.push(unknown(arg.span, name));
@@ -279,15 +333,6 @@ fn single_segment(path: &Path) -> Option<&str> {
         [only] => Some(only.name.as_str()),
         _ => None,
     }
-}
-
-fn unimplemented(span: Span, name: &str) -> Diagnostic {
-    Diagnostic::error(
-        ErrorCode::DeriveUnimplemented,
-        format!("derive `{name}` is ruled but not implemented yet [G1]"),
-    )
-    .with_primary(span, format!("the `{name}` family is queued"))
-    .with_note(format!("the ruled set is: {RULED_SET}"))
 }
 
 fn unknown(span: Span, name: &str) -> Diagnostic {
@@ -515,17 +560,17 @@ fn check_part(
             None
         },
         Type::Path { path, .. } => {
-            if let [only] = path.segments.as_slice() {
-                if linear.iter().any(|head| head == &only.name) {
-                    diags.push(part_refused(
-                        span,
-                        family,
-                        what,
-                        part,
-                        &format!("`{}` declares the `~Copyable` linear layer", only.name),
-                    ));
-                    return None;
-                }
+            if let [only] = path.segments.as_slice()
+                && linear.iter().any(|head| head == &only.name)
+            {
+                diags.push(part_refused(
+                    span,
+                    family,
+                    what,
+                    part,
+                    &format!("`{}` declares the `~Copyable` linear layer", only.name),
+                ));
+                return None;
             }
             Some(())
         },
@@ -1907,15 +1952,9 @@ enum NoDefault {
     /// path, an intersection, a difference, a pointer, a foreign atom,
     /// or the `type` keyword.
     Unkeyed,
-    /// An application of more type arguments than any empty
-    /// construction spells.
-    Arity(usize),
-    /// A two-argument application whose head is not `map`: the
-    /// two-argument empty construction is the `map[k, v]()` spelling
-    /// alone (the grammar pins the form to that head).
-    NonMapPair,
-    /// A type argument the constructor brackets spell no key for (an
-    /// optional or a union inside the brackets).
+    /// A type argument the constructor brackets spell no key for (a
+    /// union inside the brackets; an optional rides the fn-type
+    /// carrier).
     Arg,
     /// A duplicate member annotation the collection already refused:
     /// the reading site refuses over it with no second diagnostic.
@@ -1941,12 +1980,6 @@ impl NoDefault {
             Self::Unkeyed => {
                 "the type-expression key spells no default construction for this shape".to_owned()
             },
-            Self::Arity(count) => {
-                format!("the empty construction spells no application of {count} type arguments")
-            },
-            Self::NonMapPair => "a two-argument application constructs empty only through the \
-                                 `map[k, v]()` spelling"
-                .to_owned(),
             Self::Arg => "the constructor brackets spell no key for this type argument".to_owned(),
             // The collection reported the duplicate; the because-clause
             // never renders.
@@ -1978,11 +2011,12 @@ fn default_member(mint: &mut Mint) -> Member {
 /// One field's default construction keyed by its type expression's
 /// shape: a bare type name dispatches `<name>.default()` through the
 /// receiverless surface; a tuple constructs per element; `t?` answers
-/// `none`; a one-argument application constructs empty (`list[int]`)
-/// and the two-argument `map` application likewise; a parenthesized
-/// type keys by its inner shape; the unit type answers the unit value.
-/// Every other shape refuses — a union names the open ruling, anything
-/// else names the unkeyed shape.
+/// `none`; an application over the collection heads constructs empty
+/// (`list[t]()`, `map[k, v]()`); every other application dispatches the
+/// applied type's own `default` member through the instantiated
+/// receiverless call; a parenthesized type keys by its inner shape; the
+/// unit type answers the unit value. Every other shape refuses — a
+/// union names the open ruling, anything else names the unkeyed shape.
 fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<Expr, NoDefault> {
     match ty {
         Type::Paren { inner, .. } => default_value(inner, mint, unions),
@@ -1999,7 +2033,7 @@ fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<E
                     Ok(None) => Ok(type_keyed_call(&only.name, "default", mint)),
                     Ok(Some(case)) => case_default(&case.name, &case.payload, unions, mint),
                 },
-                [arg] => {
+                [arg] if only.name == "list" => {
                     let index = bracket_arg(arg, mint)?;
                     let recv_span = mint.span();
                     let recv = path_expr(&only.name, recv_span);
@@ -2015,10 +2049,7 @@ fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<E
                         trailing: None,
                     })
                 },
-                [key, value] => {
-                    if only.name != "map" {
-                        return Err(NoDefault::NonMapPair);
-                    }
+                [key, value] if only.name == "map" => {
                     let key = bracket_arg(key, mint)?;
                     let value = bracket_arg(value, mint)?;
                     let apply_span = mint.span();
@@ -2039,7 +2070,15 @@ fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<E
                         trailing: None,
                     })
                 },
-                many => Err(NoDefault::Arity(many.len())),
+                // Every other application — a head the constructor
+                // brackets do not serve, whatever its arity — defaults
+                // through the applied type's own `default` member: the
+                // instantiated receiverless call, whose substitution
+                // and evidence the checker stages at the site. A head
+                // carrying no member refuses at the synthesized call
+                // with the standard missing-member diagnostic, the
+                // bare-name precedent.
+                _ => Ok(applied_default(ty, mint)),
             }
         },
         Type::Tuple { items, .. } => {
@@ -2140,12 +2179,17 @@ fn bracket_arg(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
                 trailing_comma: false,
             })
         },
-        // The written type's own spans ride along, the hand-written
-        // spelling's discipline: the resolver walks them as type uses
-        // either way.
-        Type::Fn { .. } => Ok(Expr::FnType {
+        // A fn type or an optional rides the fn-type node — the one
+        // expression form that holds a written type the bracket
+        // spellings cannot express; the checker's bracket read unwraps
+        // either way. The carried type takes the minted copy (the
+        // written declaration already used the original's spans). The
+        // empty construction never builds an element, so an optional
+        // element's own default never runs; a union keeps the argument
+        // refusal (no clause lifts it).
+        Type::Fn { .. } | Type::Optional { .. } => Ok(Expr::FnType {
             span: mint.span(),
-            ty: Box::new(ty.clone()),
+            ty: Box::new(minted_type(ty, mint)),
         }),
         _ => Err(NoDefault::Arg),
     }
@@ -2258,6 +2302,97 @@ fn struct_default_body(
         path,
         fields: literal,
     })
+}
+
+/// The instantiated type-keyed `default` call: the field's written
+/// application type rides the fn-type node as the receiver — the one
+/// expression form that holds a written type of any arity, including
+/// the shapes the constructor brackets cannot spell — dispatching the
+/// applied type's own `default` member. The carried type is the
+/// structure-only minted copy (resolution records name uses by span,
+/// and the written declaration already used the original's spans); the
+/// member name and call mint their own.
+fn applied_default(ty: &Type, mint: &mut Mint) -> Expr {
+    let recv = Expr::FnType {
+        span: mint.span(),
+        ty: Box::new(minted_type(ty, mint)),
+    };
+    let name = Ident {
+        span: mint.span(),
+        name: "default".to_owned(),
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Field {
+            span: mint.span(),
+            recv: Box::new(recv),
+            name,
+        }),
+        args: Vec::new(),
+        trailing: None,
+    }
+}
+
+/// A structure-only copy of one written type with every span freshly
+/// minted: a synthesized expression's type uses must key by spans the
+/// written declaration never used (resolution records one name use per
+/// span). A fn type's parameter defaults drop on the copy — a type
+/// spelling's parameter carries none.
+fn minted_type(ty: &Type, mint: &mut Mint) -> Type {
+    let span = mint.span();
+    match ty {
+        Type::Path { path, args, .. } => Type::Path {
+            span,
+            path: Path {
+                span,
+                segments: path
+                    .segments
+                    .iter()
+                    .map(|seg| Ident {
+                        span: mint.span(),
+                        name: seg.name.clone(),
+                    })
+                    .collect(),
+            },
+            args: args.iter().map(|arg| minted_type(arg, mint)).collect(),
+        },
+        Type::Optional { inner, .. } => Type::Optional {
+            span,
+            inner: Box::new(minted_type(inner, mint)),
+        },
+        Type::Paren { inner, .. } => Type::Paren {
+            span,
+            inner: Box::new(minted_type(inner, mint)),
+        },
+        Type::Tuple { items, .. } => Type::Tuple {
+            span,
+            items: items.iter().map(|item| minted_type(item, mint)).collect(),
+        },
+        Type::Union { left, right, .. } => Type::Union {
+            span,
+            left: Box::new(minted_type(left, mint)),
+            right: Box::new(minted_type(right, mint)),
+        },
+        Type::Fn { params, ret, .. } => Type::Fn {
+            span,
+            params: params
+                .iter()
+                .map(|param| Param {
+                    span: mint.span(),
+                    mode: param.mode,
+                    name: Ident {
+                        span: mint.span(),
+                        name: param.name.name.clone(),
+                    },
+                    ty: param.ty.as_ref().map(|t| minted_type(t, mint)),
+                    default: None,
+                })
+                .collect(),
+            ret: ret.as_ref().map(|r| Box::new(minted_type(r, mint))),
+        },
+        Type::Unit(_) => Type::Unit(span),
+        other => other.clone(),
+    }
 }
 
 /// One type-keyed member call `<type>.<member>()`: the receiver is the
@@ -2406,6 +2541,1510 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
         span: mint.span(),
         scrutinee: Box::new(self_expr(mint)),
         arms,
+    }
+}
+
+// ---- the from_json family (the 2026-11-18 ruling) ----
+
+/// Synthesizes `impl <decl> { fn from_json(v: json) -> Self | parse_err { ... } }`:
+/// the receiverless decode member over the landed typed readers
+/// (`json_member` plus the `json_as_*` family, each read answering
+/// `parse_err` on a wrong shape) — the per-target walk the ds-source
+/// face pinned as a plain user function, now the engine's own
+/// synthesis. The struct body is the object guard plus one member read
+/// per field plus the construction; the enum body matches the value's
+/// shape, the unit cases reading from their own names and the one
+/// struct-payload case from its members. A field whose type spells no
+/// reader dispatches that type's own `from_json` member (a type
+/// carrying none fails at the synthesized call with the standard
+/// missing-member diagnostic, the bare-name precedent); a shape the
+/// walk cannot spell refuses at the attribute. Refuses otherwise like
+/// the other families: a generic declaration, a non-data declaration, a
+/// function-typed or `~Copyable` part; a tag carries no members to
+/// walk, so it refuses naming itself.
+fn from_json_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "from_json"));
+        return None;
+    }
+    match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "from_json",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            let mut stmts = vec![guard_stmt(mint)];
+            let (rows, literal) = field_rows(&fields, "v", mint, &mut 0, diags)?;
+            stmts.extend(rows);
+            stmts.push(expr_stmt(Expr::Struct {
+                span: mint.span(),
+                path: minted_path(&decl.name.name, mint),
+                fields: literal,
+            }));
+            Some(impl_item(
+                attr,
+                &decl.name,
+                &decl.generics,
+                from_json_member(mint),
+                stmts,
+                mint,
+            ))
+        },
+        ItemKind::Enum(decl) => {
+            let payloaded: Vec<&EnumCase> = decl
+                .cases
+                .iter()
+                .filter(|case| !matches!(case.payload, EnumPayload::None))
+                .collect();
+            match payloaded.as_slice() {
+                [] | [_]
+                    if payloaded
+                        .iter()
+                        .all(|case| matches!(case.payload, EnumPayload::Struct(_))) => {},
+                [only] => {
+                    diags.push(part_refused(
+                        only.span,
+                        "from_json",
+                        "enum case",
+                        &only.name.name,
+                        "a tuple payload spells no member names for the object walk",
+                    ));
+                    return None;
+                },
+                _ => {
+                    diags.push(part_refused(
+                        attr.span,
+                        "from_json",
+                        "enum",
+                        &decl.name.name,
+                        "two payloaded cases share the json object shape, so no member read names \
+                         the case",
+                    ));
+                    return None;
+                },
+            }
+            let body = vec![expr_stmt(enum_decode_body(decl, mint, diags)?)];
+            Some(impl_item(
+                attr,
+                &decl.name,
+                &decl.generics,
+                from_json_member(mint),
+                body,
+                mint,
+            ))
+        },
+        ItemKind::Tag(decl) => {
+            diags.push(part_refused(
+                attr.span,
+                "from_json",
+                "declaration",
+                &decl.name.name,
+                "a tag declares no members, so no json shape names it",
+            ));
+            None
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            None
+        },
+    }
+}
+
+/// `from_json`'s member: receiverless in the type's own impl (the
+/// `default` shape), one `json` parameter, the target-or-`parse_err`
+/// union back.
+fn from_json_member(mint: &mut Mint) -> Member {
+    let param = Param {
+        span: mint.span(),
+        mode: ParamMode::Borrow,
+        name: Ident {
+            span: mint.span(),
+            name: "v".to_owned(),
+        },
+        ty: Some(name_type(mint, "json")),
+        default: None,
+    };
+    let ret = {
+        let span = mint.span();
+        Type::Union {
+            span,
+            left: Box::new(name_type(mint, "Self")),
+            right: Box::new(name_type(mint, "parse_err")),
+        }
+    };
+    Member {
+        trait_name: None,
+        fn_name: "from_json",
+        params: vec![param],
+        ret,
+    }
+}
+
+/// The struct walk's object guard: a bare `json_as_object(v)?`
+/// statement, so a non-object document answers `parse_err` whatever the
+/// fields read (an all-optional or empty target included).
+fn guard_stmt(mint: &mut Mint) -> Stmt {
+    let doc = path_expr("v", mint.span());
+    let read = fn_call(mint, "json_as_object", vec![doc]);
+    expr_stmt(Expr::Try {
+        span: mint.span(),
+        expr: Box::new(read),
+    })
+}
+
+/// One minted construction row: the field's name and its initializer.
+type FieldRow = (Ident, Option<Expr>);
+
+/// The per-field member reads (the staging statements) and the
+/// construction's field literal: one `json_member` read per field over
+/// `source` (the struct's `v`, the enum's narrowed `v`), a required
+/// member none-testing into `parse_err` while an optional member leaves
+/// absence to its value read, then the value read keyed by the field's
+/// type. A field whose type spells no read refuses at the attribute,
+/// naming the field.
+fn field_rows(
+    fields: &[&FieldDecl],
+    source: &str,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Vec<FieldRow>)> {
+    let mut stmts = Vec::with_capacity(fields.len() * 2);
+    let mut literal = Vec::with_capacity(fields.len());
+    for field in fields {
+        let member = fresh_binder(fresh, "m");
+        let source_read = path_expr(source, mint.span());
+        let key = key_literal(mint, &field.name.name);
+        let read = fn_call(mint, "json_member", vec![source_read, key]);
+        stmts.push(local(mint, &member, read, false));
+        if !matches!(field.ty, Type::Optional { .. }) {
+            stmts.push(none_test(mint, &member));
+        }
+        let value = value_read(
+            &field.ty,
+            &member,
+            mint,
+            fresh,
+            field.span,
+            &field.name.name,
+            "field",
+            diags,
+        )?;
+        stmts.extend(value.0);
+        literal.push((
+            Ident {
+                span: mint.span(),
+                name: field.name.name.clone(),
+            },
+            Some(value.1),
+        ));
+    }
+    Some((stmts, literal))
+}
+
+/// The value read keyed by one written type over the json value named
+/// `source`: a scalar reads through its reader inline (byte, u32, char,
+/// and bytes included, each through the json face's own width reader —
+/// the 2026-11-19 ruling: a json number as byte or u32, a
+/// one-character json string as char, a number array as bytes, every
+/// wrong shape answering `parse_err`); a bare-name or
+/// application type dispatches its own `from_json` member (the
+/// `is parse_err` narrow, since the `?` kept-set assumes word
+/// payloads); a list reads the array then walks one element per
+/// position into a fresh accumulator; an optional reads absence as
+/// `none` and presence through its inner read — a list inner through
+/// the statement-position member row (to_json's mirror, since the
+/// array walk's statements spell no value-position else that carries
+/// them). Every other shape refuses at the attribute.
+fn value_read(
+    ty: &Type,
+    source: &str,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Expr)> {
+    match ty {
+        Type::Paren { inner, .. } => {
+            value_read(inner, source, mint, fresh, span, part, what, diags)
+        },
+        Type::Optional { inner, .. } => {
+            if let Type::Path { path, args, .. } = paren_free(inner)
+                && path.segments.len() == 1
+                && path.segments[0].name == "list"
+                && let [element] = args.as_slice()
+            {
+                return optional_list_row(element, ty, source, mint, fresh, span, part, what, diags);
+            }
+            let binder = fresh_binder(fresh, "o");
+            let (els, staged_narrow) = optional_else(inner, source, mint, span, part, what, diags)?;
+            let source_read = path_expr(source, mint.span());
+            let cond = Expr::Is {
+                span: mint.span(),
+                expr: Box::new(source_read),
+                ty: Box::new(name_type(mint, "none")),
+            };
+            let absent = path_expr("none", mint.span());
+            let then = block_of(mint, absent);
+            let init = Expr::If {
+                span: mint.span(),
+                cond: Box::new(cond),
+                then,
+                else_: Some(Box::new(els)),
+            };
+            let mut stmts = vec![local(mint, &binder, init, false)];
+            if staged_narrow {
+                // The recursive call answers its own error union into
+                // the if's union, so the wrong-shape narrow runs at
+                // statement position over the bound optional.
+                stmts.push(err_test(mint, &binder));
+            }
+            Some((stmts, path_expr(&binder, mint.span())))
+        },
+        Type::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
+                diags.push(part_refused(
+                    span,
+                    "from_json",
+                    what,
+                    part,
+                    "a multi-segment path spells no read",
+                ));
+                return None;
+            };
+            if args.is_empty() {
+                let reader = match only.name.as_str() {
+                    "int" => Some("json_as_int"),
+                    "float" => Some("json_as_float"),
+                    "bool" => Some("json_as_bool"),
+                    "string" => Some("json_as_string"),
+                    "byte" => Some("json_as_byte"),
+                    "u32" => Some("json_as_u32"),
+                    "char" => Some("json_as_char"),
+                    "bytes" => Some("json_as_bytes"),
+                    _ => None,
+                };
+                if let Some(reader) = reader {
+                    let source_read = path_expr(source, mint.span());
+                    let read = fn_call(mint, reader, vec![source_read]);
+                    return Some((Vec::new(), Expr::Try {
+                        span: mint.span(),
+                        expr: Box::new(read),
+                    }));
+                }
+                // The recursive composition: the field's own type
+                // decodes through its `from_json` member, a type
+                // carrying none failing at the synthesized call with
+                // the standard missing-member diagnostic.
+                let recv = path_expr(&only.name, mint.span());
+                let call = type_keyed_decode(mint, &recv, source);
+                return Some(member_decode(mint, fresh, call));
+            }
+            if only.name == "list"
+                && let [element] = args.as_slice()
+            {
+                return list_read(element, source, mint, fresh, span, part, what, diags);
+            }
+            // Every other application decodes through the applied
+            // type's own member over the fn-type carrier (the
+            // `default` family's applied-receiver precedent).
+            let recv = Expr::FnType {
+                span: mint.span(),
+                ty: Box::new(minted_type(ty, mint)),
+            };
+            let call = type_keyed_decode(mint, &recv, source);
+            Some(member_decode(mint, fresh, call))
+        },
+        _ => {
+            diags.push(part_refused(
+                span,
+                "from_json",
+                what,
+                part,
+                "this shape spells no json read",
+            ));
+            None
+        },
+    }
+}
+
+/// The optional read's else half: a scalar inner answers its reader's
+/// `?`, a member-typed inner answers the raw recursive call (its
+/// wrong-shape narrow running at statement position after the if — a
+/// `return` inside a value-position block is outside the M3 lowering
+/// seam); every other inner shape spells no read the else can carry
+/// (a list inner never reaches here — the member row owns it).
+fn optional_else(
+    inner: &Type,
+    source: &str,
+    mint: &mut Mint,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Expr, bool)> {
+    let mut refused = |because: &str| {
+        diags.push(part_refused(span, "from_json", what, part, because));
+    };
+    let inner = match inner {
+        Type::Paren { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    let Type::Path { path, args, .. } = inner else {
+        refused("an optional of this shape spells no read");
+        return None;
+    };
+    let [only] = path.segments.as_slice() else {
+        refused("a multi-segment path spells no read");
+        return None;
+    };
+    if args.is_empty() {
+        let reader = match only.name.as_str() {
+            "int" => Some("json_as_int"),
+            "float" => Some("json_as_float"),
+            "bool" => Some("json_as_bool"),
+            "string" => Some("json_as_string"),
+            "byte" => Some("json_as_byte"),
+            "u32" => Some("json_as_u32"),
+            "char" => Some("json_as_char"),
+            "bytes" => Some("json_as_bytes"),
+            _ => None,
+        };
+        if let Some(reader) = reader {
+            let source_read = path_expr(source, mint.span());
+            let read = fn_call(mint, reader, vec![source_read]);
+            return Some((
+                Expr::Try {
+                    span: mint.span(),
+                    expr: Box::new(read),
+                },
+                false,
+            ));
+        }
+        let recv = path_expr(&only.name, mint.span());
+        let call = type_keyed_decode(mint, &recv, source);
+        return Some((call, true));
+    }
+    let recv = Expr::FnType {
+        span: mint.span(),
+        ty: Box::new(minted_type(inner, mint)),
+    };
+    let call = type_keyed_decode(mint, &recv, source);
+    Some((call, true))
+}
+
+/// The optional list field's decode row, to_json's member row
+/// mirrored: the field's value rides a mutable binder typed by the
+/// field's own optional and initialized to `none`, and the presence
+/// narrow's catchall arm runs the array walk and stores its
+/// accumulator. The walk must run at statement position — a value
+/// block whose tail reads the accumulator answers the var's slot, and
+/// the block's scope end releases the reference before the join's
+/// consumer claims it — so the rows run where to_json's member rows
+/// run, and absence leaves the binder at `none`.
+// Threads value_read's context plus the field's own type; the minting family shares this shape.
+#[allow(clippy::too_many_arguments)]
+fn optional_list_row(
+    element: &Type,
+    ty: &Type,
+    source: &str,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Expr)> {
+    let binder = fresh_binder(fresh, "o");
+    let inner = fresh_binder(fresh, "j");
+    let (rows, value) = list_read(element, &inner, mint, fresh, span, part, what, diags)?;
+    let mut arm = rows;
+    arm.push(assign(mint, &binder, value));
+    let narrow = presence_narrow(mint, source, &inner, arm);
+    let ann = minted_type(ty, mint);
+    let init = path_expr("none", mint.span());
+    Some((
+        vec![local_typed(mint, &binder, ann, init), narrow],
+        path_expr(&binder, mint.span()),
+    ))
+}
+
+/// One type-keyed `from_json` call: `<recv>.from_json(source)`.
+fn type_keyed_decode(mint: &mut Mint, recv: &Expr, source: &str) -> Expr {
+    let callee = Expr::Field {
+        span: mint.span(),
+        recv: Box::new(recv.clone()),
+        name: Ident {
+            span: mint.span(),
+            name: "from_json".to_owned(),
+        },
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: vec![CallArg {
+            span: mint.span(),
+            name: None,
+            value: path_expr(source, mint.span()),
+        }],
+        trailing: None,
+    }
+}
+
+/// The array walk over a `list[t]` field: read the array, then one
+/// element read per position into a fresh accumulator, the element read
+/// keyed by the element's own type (an element shape spelling no read
+/// refusing at the attribute).
+fn list_read(
+    element: &Type,
+    source: &str,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Expr)> {
+    let array = fresh_binder(fresh, "a");
+    let out = fresh_binder(fresh, "w");
+    let index = fresh_binder(fresh, "i");
+    let at = fresh_binder(fresh, "e");
+    // The empty accumulator's element type rides the constructor
+    // brackets, the ctor-arg vocabulary the language spells.
+    let Ok(element_expr) = bracket_arg(element, mint) else {
+        diags.push(part_refused(
+            span,
+            "from_json",
+            what,
+            part,
+            "the element type spells no constructor-bracket argument",
+        ));
+        return None;
+    };
+    let array_source = path_expr(source, mint.span());
+    let array_read = fn_call(mint, "json_as_array", vec![array_source]);
+    let read_array = Expr::Try {
+        span: mint.span(),
+        expr: Box::new(array_read),
+    };
+    let empty = Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Index {
+            span: mint.span(),
+            recv: Box::new(path_expr("list", mint.span())),
+            index: Box::new(element_expr),
+        }),
+        args: Vec::new(),
+        trailing: None,
+    };
+    let array_read = path_expr(&array, mint.span());
+    let index_read = path_expr(&index, mint.span());
+    let get = fn_call(mint, "list_get", vec![array_read, index_read]);
+    let elem = Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Field {
+            span: mint.span(),
+            recv: Box::new(get),
+            name: Ident {
+                span: mint.span(),
+                name: "unwrap_or".to_owned(),
+            },
+        }),
+        args: vec![CallArg {
+            span: mint.span(),
+            name: None,
+            value: path_expr("json_null", mint.span()),
+        }],
+        trailing: None,
+    };
+    let read = value_read(element, &at, mint, fresh, span, part, what, diags)?;
+    let mut loop_body = vec![local(mint, &at, elem, false)];
+    loop_body.extend(read.0);
+    let out_read = path_expr(&out, mint.span());
+    loop_body.push(expr_stmt(fn_call(mint, "list_push", vec![
+        out_read, read.1,
+    ])));
+    loop_body.push(assign_add(mint, &index));
+    let index_cmp = path_expr(&index, mint.span());
+    let array_len_arg = path_expr(&array, mint.span());
+    let array_len = fn_call(mint, "list_len", vec![array_len_arg]);
+    let cond = Expr::Binary {
+        span: mint.span(),
+        op: BinaryOp::Lt,
+        left: Box::new(index_cmp),
+        right: Box::new(array_len),
+    };
+    let zero = int_answer(mint, "0");
+    let stmts = vec![
+        local(mint, &array, read_array, false),
+        local(mint, &out, empty, true),
+        local(mint, &index, zero, true),
+        expr_stmt(Expr::While {
+            span: mint.span(),
+            cond: Box::new(cond),
+            body: BlockExpr {
+                span: mint.span(),
+                stmts: loop_body,
+                trailing_trivia: Vec::new(),
+            },
+        }),
+    ];
+    Some((stmts, path_expr(&out, mint.span())))
+}
+
+/// The enum walk: the value's shape names the arm — the unit cases read
+/// from their own names (a json string), the one struct-payload case
+/// from the members its payload declares (a json object), any other
+/// shape answering `parse_err`.
+fn enum_decode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic>) -> Option<Expr> {
+    if decl.cases.is_empty() {
+        diags.push(part_refused(
+            decl.span,
+            "from_json",
+            "enum",
+            &decl.name.name,
+            "an enum with no cases has no value to decode",
+        ));
+        return None;
+    }
+    let payloaded = decl
+        .cases
+        .iter()
+        .find(|case| !matches!(case.payload, EnumPayload::None));
+    let Some(case) = payloaded else {
+        let chain =
+            name_chain(decl, mint).expect("a non-empty enum with no payloaded case carries one");
+        return Some(shape_switch(mint, &["json_string"], vec![chain]));
+    };
+    let EnumPayload::Struct(fields) = &case.payload else {
+        return None;
+    };
+    let (rows, literal) = field_rows(&fields.iter().collect::<Vec<_>>(), "v", mint, &mut 0, diags)?;
+    // One minted span shared by the construction's callee path and its
+    // identifier: resolution records the case's name use at the
+    // identifier's span and the lowerer's case-ctor probe looks it up
+    // by the expression's, which must coincide.
+    let case_span = mint.span();
+    let construction = Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Path {
+            span: case_span,
+            path: Path {
+                span: case_span,
+                segments: vec![Ident {
+                    span: case_span,
+                    name: case.name.name.clone(),
+                }],
+            },
+        }),
+        args: literal
+            .iter()
+            .map(|(name, value)| CallArg {
+                span: mint.span(),
+                name: Some(name.clone()),
+                value: value.clone().expect("the literal always carries its value"),
+            })
+            .collect(),
+        trailing: None,
+    };
+    let mut object_stmts = rows;
+    object_stmts.push(expr_stmt(construction));
+    let object_arm = Expr::Block(BlockExpr {
+        span: mint.span(),
+        stmts: object_stmts,
+        trailing_trivia: Vec::new(),
+    });
+    match name_chain(decl, mint) {
+        Some(chain) => Some(shape_switch(mint, &["json_string", "json_object"], vec![
+            chain, object_arm,
+        ])),
+        None => Some(shape_switch(mint, &["json_object"], vec![object_arm])),
+    }
+}
+
+/// The unit cases' name chain: `v.value == "c1" { c1 } else if ... else
+/// { parse_err }`, `None` when the enum carries no unit case.
+fn name_chain(decl: &EnumDecl, mint: &mut Mint) -> Option<Expr> {
+    let names: Vec<&str> = decl
+        .cases
+        .iter()
+        .filter(|case| matches!(case.payload, EnumPayload::None))
+        .map(|case| case.name.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let mut chain = path_expr("parse_err", mint.span());
+    for name in names.iter().rev() {
+        let cond = Expr::Binary {
+            span: mint.span(),
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Field {
+                span: mint.span(),
+                recv: Box::new(path_expr("v", mint.span())),
+                name: Ident {
+                    span: mint.span(),
+                    name: "value".to_owned(),
+                },
+            }),
+            right: Box::new(key_literal(mint, name)),
+        };
+        let case = path_expr(name, mint.span());
+        let then = block_of(mint, case);
+        chain = Expr::If {
+            span: mint.span(),
+            cond: Box::new(cond),
+            then,
+            else_: Some(Box::new(chain)),
+        };
+    }
+    Some(chain)
+}
+
+/// The value's shape match: one arm per named json case (`v is <case>`
+/// narrowing into the arm), the `parse_err` tail over every other
+/// shape.
+fn shape_switch(mint: &mut Mint, cases: &[&str], arms: Vec<Expr>) -> Expr {
+    let tail = path_expr("parse_err", mint.span());
+    let mut chain = Expr::Block(BlockExpr {
+        span: mint.span(),
+        stmts: vec![expr_stmt(tail)],
+        trailing_trivia: Vec::new(),
+    });
+    for (case, arm) in cases.iter().rev().zip(arms.into_iter().rev()) {
+        chain = Expr::If {
+            span: mint.span(),
+            cond: Box::new(Expr::Is {
+                span: mint.span(),
+                expr: Box::new(path_expr("v", mint.span())),
+                ty: Box::new(name_type(mint, case)),
+            }),
+            then: BlockExpr {
+                span: mint.span(),
+                stmts: vec![expr_stmt(arm)],
+                trailing_trivia: Vec::new(),
+            },
+            else_: Some(Box::new(chain)),
+        };
+    }
+    chain
+}
+
+/// One member's recursive decode staged as statements: the call bound,
+/// the `is parse_err` narrow returning early, the binder answering.
+fn member_decode(mint: &mut Mint, fresh: &mut usize, call: Expr) -> (Vec<Stmt>, Expr) {
+    let binder = fresh_binder(fresh, "r");
+    let stmts = vec![local(mint, &binder, call, false), err_test(mint, &binder)];
+    (stmts, path_expr(&binder, mint.span()))
+}
+
+/// `if <name> is none { return parse_err }` — the missing member's
+/// refusal.
+fn none_test(mint: &mut Mint, name: &str) -> Stmt {
+    narrow_test(mint, name, "none")
+}
+
+/// `if <name> is parse_err { return parse_err }` — the recursive
+/// decode's wrong-shape refusal.
+fn err_test(mint: &mut Mint, name: &str) -> Stmt {
+    narrow_test(mint, name, "parse_err")
+}
+
+fn narrow_test(mint: &mut Mint, name: &str, member: &str) -> Stmt {
+    expr_stmt(Expr::If {
+        span: mint.span(),
+        cond: Box::new(Expr::Is {
+            span: mint.span(),
+            expr: Box::new(path_expr(name, mint.span())),
+            ty: Box::new(name_type(mint, member)),
+        }),
+        then: BlockExpr {
+            span: mint.span(),
+            stmts: vec![expr_stmt(Expr::Return {
+                span: mint.span(),
+                expr: Some(Box::new(path_expr("parse_err", mint.span()))),
+            })],
+            trailing_trivia: Vec::new(),
+        },
+        else_: None,
+    })
+}
+
+// ---- the to_json family (from_json's mirror) ----
+
+/// Synthesizes `impl <decl> { fn to_json(v: Self) -> json { ... } }`:
+/// the receiverless encode member over the json enum's own case
+/// constructions (the constructed-value seam this engine alone owns),
+/// the plain `to_json: (json) -> string` writer staying the composition
+/// point. The struct body fills one object map with one member per
+/// field; the enum body matches the receiver, the unit cases answering
+/// their json_string names and the one struct-payload case its object.
+/// A field whose type spells no case construction dispatches that
+/// type's own `to_json` member (a type carrying none failing at the
+/// synthesized call with the standard missing-member diagnostic, the
+/// bare-name precedent); a shape the walk cannot spell refuses at the
+/// attribute, and so does an optional the M3 member dispatch cannot
+/// carry (a `t?` list element, an optional payload field). Refuses
+/// otherwise like from_json: a generic declaration, a non-data
+/// declaration, a function-typed or `~Copyable` part; a tag
+/// carries no members to walk, so it refuses naming itself.
+fn to_json_impl(
+    item: &Item,
+    attr: &Attribute,
+    mint: &mut Mint,
+    linear: &[String],
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Item> {
+    let generics = match &item.kind {
+        ItemKind::Struct(decl) => Some(&decl.generics),
+        ItemKind::Enum(decl) => Some(&decl.generics),
+        _ => None,
+    };
+    if let Some(generics) = generics
+        && !generics.is_empty()
+    {
+        diags.push(generic_refused(attr.span, "to_json"));
+        return None;
+    }
+    match &item.kind {
+        ItemKind::Struct(decl) => {
+            let fields: Vec<&FieldDecl> = decl
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    StructMember::Field(f) => Some(f),
+                    StructMember::Deinit { .. } => None,
+                })
+                .collect();
+            for field in &fields {
+                check_part(
+                    &field.ty,
+                    field.span,
+                    "to_json",
+                    &field.name.name,
+                    "field",
+                    linear,
+                    diags,
+                )?;
+            }
+            let mut fresh = 0;
+            let map = fresh_binder(&mut fresh, "m");
+            let empty = map_empty(mint);
+            let mut stmts = vec![local(mint, &map, empty, true)];
+            let rows = member_rows(
+                &fields
+                    .iter()
+                    .map(|field| (*field, field_read("v", &field.name, mint)))
+                    .collect::<Vec<_>>(),
+                &map,
+                mint,
+                &mut fresh,
+                diags,
+            )?;
+            stmts.extend(rows);
+            let map_read = path_expr(&map, mint.span());
+            stmts.push(expr_stmt(case_value(
+                mint,
+                "json_object",
+                "fields",
+                map_read,
+            )));
+            Some(impl_item(
+                attr,
+                &decl.name,
+                &decl.generics,
+                to_json_member(mint),
+                stmts,
+                mint,
+            ))
+        },
+        ItemKind::Enum(decl) => {
+            let payloaded: Vec<&EnumCase> = decl
+                .cases
+                .iter()
+                .filter(|case| !matches!(case.payload, EnumPayload::None))
+                .collect();
+            match payloaded.as_slice() {
+                [] | [_]
+                    if payloaded
+                        .iter()
+                        .all(|case| matches!(case.payload, EnumPayload::Struct(_))) => {},
+                [only] => {
+                    diags.push(part_refused(
+                        only.span,
+                        "to_json",
+                        "enum case",
+                        &only.name.name,
+                        "a tuple payload spells no member names for the object walk",
+                    ));
+                    return None;
+                },
+                _ => {
+                    diags.push(part_refused(
+                        attr.span,
+                        "to_json",
+                        "enum",
+                        &decl.name.name,
+                        "two payloaded cases share the json object shape, so no member write \
+                         names the case",
+                    ));
+                    return None;
+                },
+            }
+            let body = vec![expr_stmt(enum_encode_body(decl, mint, diags)?)];
+            Some(impl_item(
+                attr,
+                &decl.name,
+                &decl.generics,
+                to_json_member(mint),
+                body,
+                mint,
+            ))
+        },
+        ItemKind::Tag(decl) => {
+            diags.push(part_refused(
+                attr.span,
+                "to_json",
+                "declaration",
+                &decl.name.name,
+                "a tag declares no members, so no json shape answers it",
+            ));
+            None
+        },
+        _ => {
+            diags.push(non_data_refused(attr));
+            None
+        },
+    }
+}
+
+/// `to_json`'s member: receiverless in the type's own impl (the
+/// `default` shape), one borrowed `Self` parameter, the json value
+/// back.
+fn to_json_member(mint: &mut Mint) -> Member {
+    let param = Param {
+        span: mint.span(),
+        mode: ParamMode::Borrow,
+        name: Ident {
+            span: mint.span(),
+            name: "v".to_owned(),
+        },
+        ty: Some(name_type(mint, "Self")),
+        default: None,
+    };
+    Member {
+        trait_name: None,
+        fn_name: "to_json",
+        params: vec![param],
+        ret: name_type(mint, "json"),
+    }
+}
+
+/// The empty object map the member rows fill: `map[string, json]()`,
+/// the collection face's empty construction.
+fn map_empty(mint: &mut Mint) -> Expr {
+    let apply_span = mint.span();
+    let head = Ident {
+        span: mint.span(),
+        name: "map".to_owned(),
+    };
+    let key = path_expr("string", mint.span());
+    let value = path_expr("json", mint.span());
+    let callee = Expr::MapApply {
+        span: apply_span,
+        head,
+        key: Box::new(key),
+        value: Box::new(value),
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: Vec::new(),
+        trailing: None,
+    }
+}
+
+/// The object walk's member rows: per field the staged value write then
+/// one `map_set` — a required field's write directly, an optional
+/// field's inside the presence narrow, absence leaving the member out
+/// (the decode mirror: the absent member reads back as `none`). The
+/// source expression is the field read (a struct target) or the arm's
+/// bound binder (an enum payload field).
+fn member_rows(
+    fields: &[(&FieldDecl, Expr)],
+    map: &str,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Vec<Stmt>> {
+    let mut stmts = Vec::with_capacity(fields.len() * 2);
+    for &(field, ref source) in fields {
+        let key = key_literal(mint, &field.name.name);
+        let ty = paren_free(&field.ty);
+        if let Type::Optional { inner, .. } = ty {
+            let binder = fresh_binder(fresh, "o");
+            let inner_name = fresh_binder(fresh, "n");
+            let narrowed = path_expr(&inner_name, mint.span());
+            let (rows, value) = json_value(
+                inner,
+                narrowed,
+                mint,
+                fresh,
+                field.span,
+                &field.name.name,
+                "field",
+                diags,
+            )?;
+            let mut set = rows;
+            set.push(member_set(mint, map, key, value));
+            stmts.push(local(mint, &binder, source.clone(), false));
+            stmts.push(presence_narrow(mint, &binder, &inner_name, set));
+        } else {
+            let (rows, value) = json_value(
+                ty,
+                source.clone(),
+                mint,
+                fresh,
+                field.span,
+                &field.name.name,
+                "field",
+                diags,
+            )?;
+            stmts.extend(rows);
+            stmts.push(member_set(mint, map, key, value));
+        }
+    }
+    Some(stmts)
+}
+
+/// One member's `map_set` statement at minted spans.
+fn member_set(mint: &mut Mint, map: &str, key: Expr, value: Expr) -> Stmt {
+    let map_read = path_expr(map, mint.span());
+    expr_stmt(fn_call(mint, "map_set", vec![map_read, key, value]))
+}
+
+/// The value write keyed by one written type over the value expression
+/// already assembled (a field read, an arm's bound binder, a for-bound
+/// element): a scalar writes its case construction inline, the four
+/// widths the case vocabulary cannot spell from (byte, u32, char,
+/// bytes) through the json face's own encode helpers (the 2026-11-19
+/// ruling); a bare-name
+/// or application type dispatches its own `to_json` member (a type
+/// carrying none failing at the synthesized call with the standard
+/// missing-member diagnostic); a list walks one json element per
+/// position into a fresh array. An optional nested inside a part (a
+/// `t?` list element, a doubly-optional field) refuses: the word-union
+/// member dispatch has no M3 runtime contract, so no spelling the walk
+/// can build lowers. Every other shape refuses at the attribute too.
+fn json_value(
+    ty: &Type,
+    source: Expr,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Expr)> {
+    let ty = paren_free(ty);
+    match ty {
+        Type::Optional { .. } => {
+            diags.push(part_refused(
+                span,
+                "to_json",
+                what,
+                part,
+                "an optional nested inside a write spells no M3 lowering (the word-union member \
+                 dispatch has no runtime contract)",
+            ));
+            None
+        },
+        Type::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
+                diags.push(part_refused(
+                    span,
+                    "to_json",
+                    what,
+                    part,
+                    "a multi-segment path spells no write",
+                ));
+                return None;
+            };
+            if args.is_empty() {
+                // The widths the case vocabulary cannot spell from (the
+                // 2026-11-19 ruling): byte/u32 as json numbers, char as
+                // its one-character string, bytes as the number array —
+                // each through the json face's own encode helper.
+                let helper = match only.name.as_str() {
+                    "byte" => Some("json_of_byte"),
+                    "u32" => Some("json_of_u32"),
+                    "char" => Some("json_of_char"),
+                    "bytes" => Some("json_of_bytes"),
+                    _ => None,
+                };
+                if let Some(helper) = helper {
+                    return Some((Vec::new(), fn_call(mint, helper, vec![source])));
+                }
+                let case = match only.name.as_str() {
+                    "int" => Some("json_int"),
+                    "float" => Some("json_float"),
+                    "bool" => Some("json_bool"),
+                    "string" => Some("json_string"),
+                    _ => None,
+                };
+                if let Some(case) = case {
+                    return Some((Vec::new(), case_value(mint, case, "value", source)));
+                }
+                // The recursive composition: the part's own type encodes
+                // through its `to_json` member.
+                let recv = path_expr(&only.name, mint.span());
+                return Some((Vec::new(), type_keyed_encode(mint, &recv, source)));
+            }
+            if only.name == "list"
+                && let [element] = args.as_slice()
+            {
+                return list_write(element, source, mint, fresh, span, part, what, diags);
+            }
+            // Every other application encodes through the applied
+            // type's own member over the fn-type carrier (the `default`
+            // family's applied-receiver precedent).
+            let recv = Expr::FnType {
+                span: mint.span(),
+                ty: Box::new(minted_type(ty, mint)),
+            };
+            Some((Vec::new(), type_keyed_encode(mint, &recv, source)))
+        },
+        _ => {
+            diags.push(part_refused(
+                span,
+                "to_json",
+                what,
+                part,
+                "this shape spells no json write",
+            ));
+            None
+        },
+    }
+}
+
+/// One json case construction over its single named member:
+/// `json_int(value: part)`, `json_array(items: part)`. The callee path
+/// and its identifier share one minted span (resolution records the
+/// case's name use at the identifier's span and the lowerer's case-ctor
+/// probe looks it up by the expression's, which must coincide).
+fn case_value(mint: &mut Mint, case: &str, member: &str, value: Expr) -> Expr {
+    let span = mint.span();
+    let callee = Path {
+        span,
+        segments: vec![Ident {
+            span,
+            name: case.to_owned(),
+        }],
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Path { span, path: callee }),
+        args: vec![CallArg {
+            span: mint.span(),
+            name: Some(Ident {
+                span: mint.span(),
+                name: member.to_owned(),
+            }),
+            value,
+        }],
+        trailing: None,
+    }
+}
+
+/// One type-keyed `to_json` call: `<recv>.to_json(source)`.
+fn type_keyed_encode(mint: &mut Mint, recv: &Expr, source: Expr) -> Expr {
+    let callee = Expr::Field {
+        span: mint.span(),
+        recv: Box::new(recv.clone()),
+        name: Ident {
+            span: mint.span(),
+            name: "to_json".to_owned(),
+        },
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: vec![CallArg {
+            span: mint.span(),
+            name: None,
+            value: source,
+        }],
+        trailing: None,
+    }
+}
+
+/// The array walk over a `list[t]` part: one json element per position
+/// into a fresh accumulator, the element write keyed by the element's
+/// own type (an element shape spelling no write refusing at the
+/// attribute).
+fn list_write(
+    element: &Type,
+    source: Expr,
+    mint: &mut Mint,
+    fresh: &mut usize,
+    span: Span,
+    part: &str,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<(Vec<Stmt>, Expr)> {
+    let out = fresh_binder(fresh, "w");
+    let at = fresh_binder(fresh, "e");
+    let empty = Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Index {
+            span: mint.span(),
+            recv: Box::new(path_expr("list", mint.span())),
+            index: Box::new(path_expr("json", mint.span())),
+        }),
+        args: Vec::new(),
+        trailing: None,
+    };
+    let (rows, value) = json_value(
+        element,
+        path_expr(&at, mint.span()),
+        mint,
+        fresh,
+        span,
+        part,
+        what,
+        diags,
+    )?;
+    let mut body = rows;
+    let out_read = path_expr(&out, mint.span());
+    body.push(expr_stmt(fn_call(mint, "list_push", vec![out_read, value])));
+    let pat_span = mint.span();
+    let walk = Expr::For {
+        span: mint.span(),
+        pat: Pattern::Binding {
+            span: pat_span,
+            name: Ident {
+                span: pat_span,
+                name: at,
+            },
+        },
+        iter: Box::new(source),
+        body: Box::new(Expr::Block(BlockExpr {
+            span: mint.span(),
+            stmts: body,
+            trailing_trivia: Vec::new(),
+        })),
+    };
+    let stmts = vec![local(mint, &out, empty, true), expr_stmt(walk)];
+    let out_read = path_expr(&out, mint.span());
+    Some((stmts, case_value(mint, "json_array", "items", out_read)))
+}
+
+/// The optional narrow: `match <name> { none => { } <inner> => { <rows>
+/// } }` — the catchall binder binds the inner type as its own word (a
+/// narrowed read of the optional's own word has no M3 lowering), the
+/// empty none arm contributing nothing, so absence leaves the member
+/// out.
+fn presence_narrow(mint: &mut Mint, name: &str, inner: &str, rows: Vec<Stmt>) -> Stmt {
+    // The pattern, its path, and its identifier share one span (the
+    // use records key by the identifier's); the arm's own span mints
+    // separately, since the arm's facts key by theirs.
+    let none_span = mint.span();
+    let binder_span = mint.span();
+    let arms = vec![
+        MatchArm {
+            span: mint.span(),
+            // The bare `none` arm is a binding pattern the checker's
+            // arm tag reads as the builtin none member, never a path
+            // pattern (an item reference).
+            pat: Pattern::Binding {
+                span: none_span,
+                name: Ident {
+                    span: none_span,
+                    name: "none".to_owned(),
+                },
+            },
+            ann: None,
+            guard: None,
+            body: Expr::Block(BlockExpr {
+                span: mint.span(),
+                stmts: Vec::new(),
+                trailing_trivia: Vec::new(),
+            }),
+        },
+        MatchArm {
+            span: mint.span(),
+            pat: Pattern::Binding {
+                span: binder_span,
+                name: Ident {
+                    span: binder_span,
+                    name: inner.to_owned(),
+                },
+            },
+            ann: None,
+            guard: None,
+            body: Expr::Block(BlockExpr {
+                span: mint.span(),
+                stmts: rows,
+                trailing_trivia: Vec::new(),
+            }),
+        },
+    ];
+    let scrutinee = path_expr(name, mint.span());
+    expr_stmt(Expr::Match {
+        span: mint.span(),
+        scrutinee: Box::new(scrutinee),
+        arms,
+    })
+}
+
+/// The enum walk: the receiver's case names the arm — the unit cases
+/// answering their json_string names, the one struct-payload case its
+/// object (one member row per payload field over the arm's bound
+/// binders).
+fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic>) -> Option<Expr> {
+    if decl.cases.is_empty() {
+        diags.push(part_refused(
+            decl.span,
+            "to_json",
+            "enum",
+            &decl.name.name,
+            "an enum with no cases has no value to encode",
+        ));
+        return None;
+    }
+    let mut fresh = 0;
+    let arms = decl
+        .cases
+        .iter()
+        .map(|case| {
+            let (pat, binders) = case_pattern(case, "p", mint);
+            let body = match &case.payload {
+                EnumPayload::None => {
+                    let name = key_literal(mint, &case.name.name);
+                    case_value(mint, "json_string", "value", name)
+                },
+                EnumPayload::Struct(fields) => {
+                    // An optional payload field's nested member dispatch
+                    // has no M3 runtime contract (the payload-bound
+                    // word traps), so the walk refuses it at the
+                    // attribute — the honest boundary until the seam
+                    // lands.
+                    for field in fields {
+                        if matches!(paren_free(&field.ty), Type::Optional { .. }) {
+                            diags.push(part_refused(
+                                field.span,
+                                "to_json",
+                                "enum case payload",
+                                &field.name.name,
+                                "an optional payload field spells no M3 lowering (the \
+                                 payload-bound member dispatch has no runtime contract)",
+                            ));
+                            return None;
+                        }
+                    }
+                    let map = fresh_binder(&mut fresh, "m");
+                    let rows = member_rows(
+                        &fields
+                            .iter()
+                            .zip(binders.iter())
+                            .map(|(field, binder)| (field, binder_use(binder, mint)))
+                            .collect::<Vec<_>>(),
+                        &map,
+                        mint,
+                        &mut fresh,
+                        diags,
+                    )?;
+                    let empty = map_empty(mint);
+                    let mut stmts = vec![local(mint, &map, empty, true)];
+                    stmts.extend(rows);
+                    let map_read = path_expr(&map, mint.span());
+                    stmts.push(expr_stmt(case_value(
+                        mint,
+                        "json_object",
+                        "fields",
+                        map_read,
+                    )));
+                    Expr::Block(BlockExpr {
+                        span: mint.span(),
+                        stmts,
+                        trailing_trivia: Vec::new(),
+                    })
+                },
+                // The attribute-level refusal owns the tuple payload;
+                // the body never synthesizes over one.
+                EnumPayload::Tuple(_) => return None,
+            };
+            Some(MatchArm {
+                span: case.span,
+                pat,
+                ann: None,
+                guard: None,
+                body,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Expr::Match {
+        span: mint.span(),
+        scrutinee: Box::new(path_expr("v", mint.span())),
+        arms,
+    })
+}
+
+/// The written type beneath any paren wrappers.
+fn paren_free(ty: &Type) -> &Type {
+    match ty {
+        Type::Paren { inner, .. } => paren_free(inner),
+        other => other,
+    }
+}
+
+/// A fresh binder name under one body-wide counter.
+fn fresh_binder(fresh: &mut usize, prefix: &str) -> String {
+    let name = format!("{prefix}{fresh}");
+    *fresh += 1;
+    name
+}
+
+/// A free-fn call over minted spans.
+fn fn_call(mint: &mut Mint, name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(path_expr(name, mint.span())),
+        args: args
+            .into_iter()
+            .map(|value| CallArg {
+                span: mint.span(),
+                name: None,
+                value,
+            })
+            .collect(),
+        trailing: None,
+    }
+}
+
+/// A string literal at a minted span.
+fn key_literal(mint: &mut Mint, key: &str) -> Expr {
+    str_expr(mint.span(), vec![text(mint.span(), key)])
+}
+
+/// A binding statement at minted spans.
+fn local(mint: &mut Mint, name: &str, init: Expr, mutable: bool) -> Stmt {
+    let span = mint.span();
+    Stmt {
+        span,
+        kind: StmtKind::Local(LocalDecl {
+            span,
+            mutable,
+            pat: Pattern::Binding {
+                span,
+                name: Ident {
+                    span,
+                    name: name.to_owned(),
+                },
+            },
+            ty: None,
+            init,
+        }),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// A typed mutable binding statement at minted spans: the var's slot
+/// span is sized by its declared type, so a union-typed var stores
+/// whichever member a later assignment widens into it.
+fn local_typed(mint: &mut Mint, name: &str, ty: Type, init: Expr) -> Stmt {
+    let span = mint.span();
+    Stmt {
+        span,
+        kind: StmtKind::Local(LocalDecl {
+            span,
+            mutable: true,
+            pat: Pattern::Binding {
+                span,
+                name: Ident {
+                    span,
+                    name: name.to_owned(),
+                },
+            },
+            ty: Some(ty),
+            init,
+        }),
+        leading_trivia: Vec::new(),
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// `name += 1` at minted spans.
+fn assign_add(mint: &mut Mint, name: &str) -> Stmt {
+    expr_stmt(Expr::Assign {
+        span: mint.span(),
+        op: AssignOp::Add,
+        left: Box::new(path_expr(name, mint.span())),
+        right: Box::new(int_answer(mint, "1")),
+    })
+}
+
+/// `name = value` at minted spans.
+fn assign(mint: &mut Mint, name: &str, value: Expr) -> Stmt {
+    expr_stmt(Expr::Assign {
+        span: mint.span(),
+        op: AssignOp::Plain,
+        left: Box::new(path_expr(name, mint.span())),
+        right: Box::new(value),
+    })
+}
+
+/// A block expression over one value statement.
+fn block_of(mint: &mut Mint, value: Expr) -> BlockExpr {
+    BlockExpr {
+        span: mint.span(),
+        stmts: vec![expr_stmt(value)],
+        trailing_trivia: Vec::new(),
+    }
+}
+
+/// A minted one-segment path over a declaration name, the path and its
+/// identifier sharing one span (resolution records the name use at the
+/// identifier's span and lowering looks it up by the path's).
+fn minted_path(name: &str, mint: &mut Mint) -> Path {
+    let span = mint.span();
+    Path {
+        span,
+        segments: vec![Ident {
+            span,
+            name: name.to_owned(),
+        }],
     }
 }
 
@@ -2633,45 +4272,162 @@ fn path_expr(name: &str, span: Span) -> Expr {
 }
 
 /// Allocates the synthesized nodes' spans inside the attributed item's
-/// own byte range: the declaration contains no expressions, so its
-/// bytes collide with no real expression span, and distinct slices keep
-/// the checker's span-keyed tables (name uses, expression types, trait
-/// calls, binder facts, member fns' solved returns) collision-free. A
-/// pass spends one span per byte; a spent pass is followed by one over
-/// one-byte-longer spans, so the budget grows with the square of the
-/// item's length while every synthesized node — the member fn
-/// declarations included — mints only a few spans per part (the `ord`
-/// fold's dozen against a part's few bytes), leaving the budget better
-/// than two spans per span spent on every reachable declaration: the
-/// wrap never runs out, its cycle start-over degrading a diagnostic's
-/// span only.
+/// own byte range. The declaration carries no expressions, but its
+/// written types record name uses of their own (a field type's
+/// `int`, a `list[t]` head), so the mint skips the declaration's
+/// written identifier and type spans: a minted span colliding with a
+/// written use would key two resolutions into one span. Distinct
+/// slices keep the checker's span-keyed tables (name uses, expression
+/// types, trait calls, binder facts, member fns' solved returns)
+/// collision-free. A pass spends one span per byte; a spent pass is
+/// followed by one over one-byte-longer spans, so the budget grows
+/// with the square of the item's length while every synthesized node —
+/// the member fn declarations included — mints only a few spans per
+/// part (the `from_json` walk's few dozen against a part's few bytes),
+/// leaving the budget better than two spans per span spent on every
+/// reachable declaration: the wrap never runs out, its cycle start-over
+/// degrading a diagnostic's span only.
 struct Mint {
     file: ds_diag::FileId,
     start: u32,
     next: u32,
     end: u32,
     len: u32,
+    /// The declaration's written identifier and type spans, skipped by
+    /// every mint: the resolver records a use per one of them.
+    forbidden: std::collections::HashSet<Span>,
 }
 
 impl Mint {
-    fn new(item: Span) -> Self {
+    fn new(item: &Item) -> Self {
+        let mut forbidden = std::collections::HashSet::new();
+        forbidden.insert(item.span);
+        written_spans(item, &mut forbidden);
         Self {
-            file: item.file,
-            start: item.start,
-            next: item.start,
-            end: item.end.saturating_sub(1),
+            file: item.span.file,
+            start: item.span.start,
+            next: item.span.start,
+            end: item.span.end.saturating_sub(1),
             len: 1,
+            forbidden,
         }
     }
 
     fn span(&mut self) -> Span {
-        let range = self.end.saturating_sub(self.start);
-        if self.len > range || self.next + self.len > self.end {
-            self.next = self.start;
-            self.len = if self.len >= range { 1 } else { self.len + 1 };
+        loop {
+            let range = self.end.saturating_sub(self.start);
+            if self.len > range || self.next + self.len > self.end {
+                self.next = self.start;
+                self.len = if self.len >= range { 1 } else { self.len + 1 };
+            }
+            let span = Span::new(self.file, self.next, self.next + self.len);
+            self.next += 1;
+            if self.forbidden.contains(&span) {
+                continue;
+            }
+            return span;
         }
-        let span = Span::new(self.file, self.next, self.next + self.len);
-        self.next += 1;
-        span
+    }
+}
+
+/// The written spans of one attributed declaration: every identifier it
+/// names and every type node it spells, the spans the resolver records
+/// uses at (a field type's head and arguments, a supers bound, a
+/// payload's types).
+fn written_spans(item: &Item, out: &mut std::collections::HashSet<Span>) {
+    match &item.kind {
+        ItemKind::Struct(decl) => {
+            out.insert(decl.name.span);
+            for param in &decl.generics {
+                out.insert(param.name.span);
+                if let Some(bound) = &param.bound {
+                    type_spans(bound, out);
+                }
+            }
+            for ty in &decl.supers {
+                type_spans(ty, out);
+            }
+            for member in &decl.members {
+                if let StructMember::Field(field) = member {
+                    out.insert(field.name.span);
+                    type_spans(&field.ty, out);
+                }
+            }
+        },
+        ItemKind::Enum(decl) => {
+            out.insert(decl.name.span);
+            for param in &decl.generics {
+                out.insert(param.name.span);
+                if let Some(bound) = &param.bound {
+                    type_spans(bound, out);
+                }
+            }
+            for ty in &decl.supers {
+                type_spans(ty, out);
+            }
+            for case in &decl.cases {
+                out.insert(case.name.span);
+                match &case.payload {
+                    EnumPayload::None => {},
+                    EnumPayload::Tuple(items) => {
+                        for ty in items {
+                            type_spans(ty, out);
+                        }
+                    },
+                    EnumPayload::Struct(fields) => {
+                        for field in fields {
+                            out.insert(field.name.span);
+                            type_spans(&field.ty, out);
+                        }
+                    },
+                }
+            }
+        },
+        ItemKind::Tag(decl) => {
+            out.insert(decl.name.span);
+        },
+        _ => {},
+    }
+}
+
+/// One written type's spans: its own node plus every identifier inside.
+fn type_spans(ty: &Type, out: &mut std::collections::HashSet<Span>) {
+    out.insert(ty.span());
+    match ty {
+        Type::Path { path, args, .. } => {
+            out.insert(path.span);
+            for seg in &path.segments {
+                out.insert(seg.span);
+            }
+            for arg in args {
+                type_spans(arg, out);
+            }
+        },
+        Type::Tuple { items, .. } => {
+            for item in items {
+                type_spans(item, out);
+            }
+        },
+        Type::Optional { inner, .. } | Type::Paren { inner, .. } => {
+            type_spans(inner, out);
+        },
+        Type::Fn { params, ret, .. } => {
+            for param in params {
+                if let Some(ty) = &param.ty {
+                    type_spans(ty, out);
+                }
+            }
+            if let Some(ret) = ret {
+                type_spans(ret, out);
+            }
+        },
+        Type::Negation { inner, .. } | Type::Ptr { inner, .. } => type_spans(inner, out),
+        Type::Union { left, right, .. }
+        | Type::Intersect { left, right, .. }
+        | Type::Difference { left, right, .. } => {
+            type_spans(left, out);
+            type_spans(right, out);
+        },
+        Type::Unit(_) | Type::TypeKw(_) | Type::Foreign { .. } => {},
     }
 }

@@ -8,8 +8,9 @@
 //! The grammar is total over accepted input, so conversion is total too:
 //! shapes the grammar cannot produce record a diagnostic and yield a
 //! placeholder instead of panicking. Value-level validation also happens here
-//! (raw-string hash counts, byte-literal ASCII, `\u{...}` range), producing
-//! two-span diagnostics where the record names two locations.
+//! (raw-string hash counts, the byte literal's escape range, `\u{...}` scalar
+//! validity), producing two-span diagnostics where the record names two
+//! locations.
 // Span offsets are u32 by contract (Files::add_source rejects longer
 // sources), so narrowing casts from usize are total.
 #![allow(clippy::cast_possible_truncation)]
@@ -1524,7 +1525,7 @@ fn is_type_rule(p: &Pair<'_, Rule>) -> bool {
 /// Splits `0xffu8` / `1000000i64` into digits and suffix, mirroring the
 /// grammar's greedy digit matching (suffixes start at the first character
 /// that cannot belong to the radix's digit set).
-fn split_int_suffix(text: &str) -> (String, String) {
+fn split_int_suffix(text: &str) -> (&str, &str) {
     let (radix, prefix_len) = if let Some(rest) = text.strip_prefix("0x") {
         (16, text.len() - rest.len())
     } else if let Some(rest) = text.strip_prefix("0o") {
@@ -1543,17 +1544,17 @@ fn split_int_suffix(text: &str) -> (String, String) {
     let digits_end = text[prefix_len..]
         .find(|c: char| !is_digit(c))
         .map_or(text.len(), |i| prefix_len + i);
-    (text[..digits_end].to_owned(), text[digits_end..].to_owned())
+    (&text[..digits_end], &text[digits_end..])
 }
 
-fn split_float_suffix(text: &str) -> (String, String) {
+fn split_float_suffix(text: &str) -> (&str, &str) {
     if let Some(digits) = text
         .strip_suffix("f32")
         .or_else(|| text.strip_suffix("f64"))
     {
-        return (digits.to_owned(), text[text.len() - 3..].to_owned());
+        return (digits, &text[text.len() - 3..]);
     }
-    (text.to_owned(), String::new())
+    (text, "")
 }
 
 enum Cooked {
@@ -1588,6 +1589,59 @@ fn cook_escape(s: &str) -> Cooked {
         return Cooked::Char(s.chars().next().unwrap_or('\0'));
     }
     Cooked::Empty
+}
+
+/// One cooked byte-literal token.
+enum CookedByte {
+    /// The byte the token names: an escape reaches the full 0-255 range
+    /// (`\u{..}` included), one raw char the ASCII bytes alone.
+    Byte(u8),
+    /// One raw non-ASCII char: the escape is the spelling for high bytes,
+    /// so the raw form keeps refusing.
+    NotAscii(char),
+    /// A `\u{..}` escape naming a code point past 255.
+    PastRange(u32),
+    /// A `\u{..}` escape whose hex does not name a Unicode scalar value.
+    Invalid(u32),
+    Empty,
+}
+
+/// Cooks one byte-literal token: the escapes reach every byte value
+/// 0-255 (a `\u{..}` hex number up to 0xff), while one raw character
+/// names an ASCII byte alone — the escape is the spelling for high
+/// bytes, so a raw multi-byte char and a code point past 255 refuse.
+fn cook_byte(s: &str) -> CookedByte {
+    let simple = match s {
+        "\\n" => Some(b'\n'),
+        "\\t" => Some(b'\t'),
+        "\\r" => Some(b'\r'),
+        "\\0" => Some(0),
+        "\\\\" => Some(b'\\'),
+        "\\\"" => Some(b'"'),
+        "\\$" => Some(b'$'),
+        "\\'" => Some(b'\''),
+        _ => None,
+    };
+    if let Some(b) = simple {
+        return CookedByte::Byte(b);
+    }
+    if let Some(rest) = s.strip_prefix("\\u{").and_then(|r| r.strip_suffix('}')) {
+        return match u32::from_str_radix(rest, 16) {
+            Ok(value) if value <= 0xff => CookedByte::Byte(value as u8),
+            Ok(value) => CookedByte::PastRange(value),
+            // the grammar bounds the hex at six digits, so this arm is
+            // totality alone
+            Err(_) => CookedByte::Invalid(3),
+        };
+    }
+    if s.chars().count() == 1 {
+        return match s.chars().next() {
+            Some(ch) if ch.is_ascii() => CookedByte::Byte(ch as u8),
+            Some(ch) => CookedByte::NotAscii(ch),
+            None => CookedByte::Empty,
+        };
+    }
+    CookedByte::Empty
 }
 
 mod expr;

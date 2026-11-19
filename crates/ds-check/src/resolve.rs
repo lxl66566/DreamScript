@@ -92,12 +92,16 @@
 //! # }
 //! ```
 
+use std::sync::Arc;
+
 use ds_diag::{Diagnostic, ErrorCode, Span, Suggestion};
 use ds_parse::{
     Ast, Expr, FnDecl, Ident, Item, ItemKind, Param, Path, Pattern, Stmt, StmtKind, StructMember,
     TraitMember, Type, TypeParam,
 };
 use rustc_hash::FxHashMap;
+
+use crate::import::{ForeignEntry, ForeignKind, ImportGraph, ImportSurface, MemberSurface};
 
 /// Identity of one package-level definition inside its [`Package`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -237,6 +241,24 @@ impl MethodId {
     }
 }
 
+/// Identity of one registered module reference inside its [`Package`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ModuleId(u32);
+
+impl ModuleId {
+    /// Builds an id from a raw table index (serialization, tests).
+    #[must_use]
+    pub const fn from_raw(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Raw index inside its package.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
 /// Which declaration a registered method belongs to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MethodOwner {
@@ -282,6 +304,10 @@ pub enum Res {
     /// The `.err(h)`/`.ok(h)` handler surface form [section 10 item 2];
     /// no name sits behind it.
     Handler,
+    /// A module alias an import binds (`import p as c`): the receiver of
+    /// a module-qualified call, never a value. The module ref lives in
+    /// the package's table the id indexes.
+    Module(ModuleId),
 }
 
 /// The resolution of a dot-call's method position (F3).
@@ -313,22 +339,40 @@ pub enum DotRes {
         /// Candidate method ids: the type's inherent impl members.
         candidates: Vec<MethodId>,
     },
+    /// The receiver is a module alias an import bound: the named member
+    /// of the linked package, called with the written arguments alone —
+    /// no receiver word stages.
+    Module {
+        /// The linked member's function the call enters.
+        func: DefId,
+    },
 }
 
 /// The side table a resolution pass produces: use span to resolution.
-/// Checker passes consume it; nothing in it mutates the package.
-#[derive(Clone, PartialEq, Eq, Default, Debug)]
+/// Checker passes consume it; nothing in it mutates the package. The rows
+/// sit behind one shared handle, so a table clones by refcount — the
+/// checked-ambient serve parks its converted tables once per process and
+/// hands every member compile a clone.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Resolutions {
     /// One entry per name use, sorted by span so per-expression lookups
     /// binary search: `Span` carries no ordering, so the key is its raw
     /// file and offset triple.
-    uses: Vec<(Span, Res)>,
+    uses: Arc<[(Span, Res)]>,
+}
+
+impl Default for Resolutions {
+    fn default() -> Self {
+        Self {
+            uses: Arc::from(Vec::new()),
+        }
+    }
 }
 
 impl Resolutions {
     /// Rebuilds one file's resolution table from its recorded uses (the
-    /// checked-ambient artifact's served prefix): the caller's uses must
-    /// already be sorted by span, the pass's own output order.
+    /// checked-ambient artifact's served prefix): the caller's uses must be
+    /// already sorted by span, the pass's own output order.
     #[must_use]
     pub fn from_uses(uses: Vec<(Span, Res)>) -> Self {
         debug_assert!(
@@ -336,7 +380,9 @@ impl Resolutions {
                 .all(|pair| span_key(pair[0].0) < span_key(pair[1].0)),
             "served uses must be sorted by span"
         );
-        Self { uses }
+        Self {
+            uses: Arc::from(uses),
+        }
     }
 
     /// Every recorded use with its resolution, in span order (the
@@ -413,6 +459,16 @@ fn span_key(span: Span) -> (u32, u32, u32) {
     (span.file.as_u32(), span.start, span.end)
 }
 
+/// Why one linked signature's type spelling refuses at the link walk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Unspellable {
+    /// The head names no type this compile or its surface can spell.
+    Unknown,
+    /// The head names a linked type whose registration a collision
+    /// refused.
+    Unbound,
+}
+
 /// The reverse edge of the resolution side table: for one resolved
 /// target, every use that resolved to it. Package grain — a definition's
 /// uses span every file, including the first-registered member's own.
@@ -446,7 +502,7 @@ impl UseIndex {
     pub fn build(resolutions: &[Resolutions]) -> Self {
         let mut index = Self::default();
         for table in resolutions {
-            for &(use_span, ref res) in &table.uses {
+            for &(use_span, ref res) in &table.uses[..] {
                 match res {
                     Res::Def(id) => {
                         index.defs.entry(id.index()).or_default().push(use_span);
@@ -457,10 +513,12 @@ impl UseIndex {
                     Res::TraitMethod(id) => {
                         index.methods.entry(id.index()).or_default().push(use_span);
                     },
-                    Res::Dot(DotRes::Free { func, .. }) => {
+                    Res::Dot(DotRes::Free { func, .. } | DotRes::Module { func }) => {
                         index.defs.entry(func.index()).or_default().push(use_span);
                     },
-                    Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. }) | Res::Handler => {},
+                    Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. })
+                    | Res::Handler
+                    | Res::Module(_) => {},
                 }
             }
         }
@@ -492,14 +550,238 @@ impl UseIndex {
 /// (`add_file`) is order-independent; use resolution (`resolve`) runs
 /// against the complete tables, which is what makes intra-package
 /// definition cycles legal.
-#[derive(Clone, PartialEq, Eq, Default, Debug)]
+///
+/// The collected tables are two-tier, the same shape [`IdTable`](crate::IdTable)
+/// carries: an optional shared base — a checked-ambient serve's prefix,
+/// parked per process and installed by refcount per serve — plus the
+/// per-compile growth the compiled files' own collection builds. The base
+/// is a leading run of the def and method id spaces (a served prefix
+/// precedes the fresh files), a growth insert never shadows a base row
+/// (a duplicate against the base reports at collection like any other),
+/// and the name tables answer growth-first with the base below.
+#[derive(Clone, Default, Debug)]
 pub struct Package {
+    base: Option<Arc<PackageBase>>,
     files: Vec<ds_diag::FileId>,
     defs: Vec<Def>,
     type_names: FxHashMap<String, DefId>,
     value_names: FxHashMap<String, DefId>,
     methods: Vec<MethodDecl>,
     method_index: FxHashMap<String, Vec<MethodId>>,
+    /// The import-bound functions, keyed by their def (G4): the
+    /// signatures the declaration pass registers and the link facts the
+    /// call lowering addresses. Foreign defs sit outside both name
+    /// tables — only the importing file's bindings reach them.
+    foreign: FxHashMap<DefId, ForeignEntry>,
+    /// Each file's import bindings (G4): the selection names and module
+    /// aliases the file's use sites resolve through.
+    imports: FxHashMap<ds_diag::FileId, FileImports>,
+    /// The module references the files' import aliases bound, indexed by
+    /// [`ModuleId`].
+    module_refs: Vec<ModuleRef>,
+    /// Dedupes a foreign def per linked function: two imports of one
+    /// package share the def the first registered.
+    foreign_defs: FxHashMap<(u32, String), DefId>,
+    /// Dedupes a foreign const def per linked binding: a literal const
+    /// has no module table index, so its name is the fact's identity.
+    foreign_const_defs: FxHashMap<(u32, String), DefId>,
+    /// The registered foreign type defs, keyed by name alone (G4): one
+    /// linked type owns a name across the compile — the universe mints
+    /// by name, so a second linked type of the same name refuses its
+    /// selection instead of mis-shaping the first's spellings. A local
+    /// declaration of the name never appears here (the registration gate
+    /// refuses it), keeping the shadowing discipline the value namespace
+    /// already follows.
+    foreign_type_defs: FxHashMap<String, DefId>,
+    /// The linked modules' tag-table rows the link pass collected (the
+    /// shared tag mapping): a union-typed word crossing a module
+    /// boundary carries the producing module's tag ids as immediates,
+    /// so the consuming compile's lowering seeds its own table with
+    /// these rows — identity from the linked module's artifact, never a
+    /// positional guess. Duplicate rows (two imports of one package)
+    /// ride twice; the seed is idempotent per name and id.
+    linked_tags: Vec<(String, u8)>,
+}
+
+/// The collected namespace tables a checked-ambient serve parks per
+/// process: exactly the tables [`Package::add_file`] builds, with the
+/// name tables as name/id maps (first-definition wins, the collection
+/// rule). Shared behind one handle, so a serve installs it as a base and
+/// every member compile's teardown drops a refcount, never the rows.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct PackageBase {
+    /// The collected files, in addition order.
+    files: Vec<ds_diag::FileId>,
+    /// The definitions, in collection order.
+    defs: Vec<Def>,
+    /// The type namespace: name to definition.
+    type_names: FxHashMap<String, DefId>,
+    /// The value namespace: name to definition.
+    value_names: FxHashMap<String, DefId>,
+    /// The registered methods, in registration order.
+    methods: Vec<MethodDecl>,
+    /// The method-name index: name to candidates.
+    method_index: FxHashMap<String, Vec<MethodId>>,
+}
+
+impl PackageBase {
+    /// Builds a base from its collected parts (the checked-ambient
+    /// artifact's converted namespace): the parts are exactly the tables
+    /// [`Package::add_file`](Package::add_file) builds, with the name
+    /// tables as name/id pairs.
+    #[must_use]
+    pub fn from_parts(
+        files: Vec<ds_diag::FileId>,
+        defs: Vec<Def>,
+        type_names: Vec<(String, DefId)>,
+        value_names: Vec<(String, DefId)>,
+        methods: Vec<MethodDecl>,
+        method_index: Vec<(String, Vec<MethodId>)>,
+    ) -> Self {
+        Self {
+            files,
+            defs,
+            type_names: type_names.into_iter().collect(),
+            value_names: value_names.into_iter().collect(),
+            methods,
+            method_index: method_index.into_iter().collect(),
+        }
+    }
+}
+
+/// Two packages are equal when their effective tables answer the same:
+/// the base and growth tiers flatten to the same def, method, and file
+/// runs and the same name resolutions (the drift gates' served-vs-fresh
+/// comparison — one side carries the served base, the other a flat
+/// walk).
+impl PartialEq for Package {
+    fn eq(&self, other: &Self) -> bool {
+        self.defs().eq(other.defs())
+            && self.methods().eq(other.methods())
+            && self.files().eq(other.files())
+            && self.namespace_eq(other, Self::type_names_of)
+            && self.namespace_eq(other, Self::value_names_of)
+            && self.method_index_eq(other)
+    }
+}
+
+impl Eq for Package {}
+
+/// A namespace tier pair: the package's growth tier plus the base tier
+/// every growth insert leaves unshadowed.
+type NamespaceTiers<'a> = (
+    &'a FxHashMap<String, DefId>,
+    Option<&'a FxHashMap<String, DefId>>,
+);
+
+impl Package {
+    /// The type namespace's growth tier and base tier.
+    fn type_names_of(pkg: &Self) -> NamespaceTiers<'_> {
+        (
+            &pkg.type_names,
+            pkg.base.as_deref().map(|base| &base.type_names),
+        )
+    }
+
+    /// The value namespace's growth tier and base tier.
+    fn value_names_of(pkg: &Self) -> NamespaceTiers<'_> {
+        (
+            &pkg.value_names,
+            pkg.base.as_deref().map(|base| &base.value_names),
+        )
+    }
+
+    /// Whether both packages' selected namespace answers the same name/id
+    /// pairs: the key counts match and every key of `self`'s tiers
+    /// resolves the same through `other`'s (the tiers are disjoint — a
+    /// growth insert never shadows a base row).
+    fn namespace_eq(&self, other: &Self, of: fn(&Self) -> NamespaceTiers<'_>) -> bool {
+        let count = |pkg: &Self| {
+            let (growth, base) = of(pkg);
+            growth.len() + base.map_or(0, FxHashMap::len)
+        };
+        if count(self) != count(other) {
+            return false;
+        }
+        let (growth, base) = of(self);
+        growth
+            .iter()
+            .chain(base.into_iter().flat_map(FxHashMap::iter))
+            .all(|(name, id)| {
+                let (other_growth, other_base) = of(other);
+                other_growth
+                    .get(name)
+                    .copied()
+                    .or_else(|| other_base.and_then(|names| names.get(name).copied()))
+                    == Some(*id)
+            })
+    }
+
+    /// Whether both packages' method-name indexes answer the same
+    /// candidates per name over the same method count.
+    fn method_index_eq(&self, other: &Self) -> bool {
+        if self.method_len() != other.method_len() {
+            return false;
+        }
+        let mut names = self.method_index.keys().chain(
+            self.base
+                .as_ref()
+                .into_iter()
+                .flat_map(|base| base.method_index.keys()),
+        );
+        names.all(|name| {
+            self.method_candidates(name).collect::<Vec<_>>()
+                == other.method_candidates(name).collect::<Vec<_>>()
+        })
+    }
+
+    /// Number of registered methods across both tiers.
+    fn method_len(&self) -> usize {
+        self.methods.len() + self.base.as_ref().map_or(0, |base| base.methods.len())
+    }
+
+    /// The linked modules' tag-table rows the link pass collected (the
+    /// shared tag mapping): the lowering seeds its own table with them
+    /// before any body mints, so a union-typed word crossing a module
+    /// boundary carries ids both modules agree on.
+    #[must_use]
+    pub fn linked_tag_rows(&self) -> &[(String, u8)] {
+        &self.linked_tags
+    }
+}
+
+/// One file's import bindings (G4): the names its import declarations
+/// selected (under their own or their per-symbol alias spelling) and the
+/// module aliases its `as` clauses bound. Imported names enter the
+/// file's namespace alone — other files of the package see nothing.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct FileImports {
+    names: FxHashMap<String, (DefId, Span)>,
+    modules: FxHashMap<String, (ModuleId, Span)>,
+}
+
+/// One module reference an import's `as` clause bound: the alias's name
+/// and the surface its qualified member calls resolve through.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ModuleRef {
+    /// The alias spelling, for diagnostics.
+    alias: String,
+    /// The alias's surface.
+    surface: ModuleSurface,
+}
+
+/// The surface a module alias resolves through.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum ModuleSurface {
+    /// An `@std` alias: the merged member's own declarations, resolved
+    /// through the package namespace with the member's file filter.
+    Merged { member: ds_diag::FileId },
+    /// A linked package member: its exported surface, with the def each
+    /// bound function registered.
+    Linked {
+        surface: MemberSurface,
+        defs: FxHashMap<String, DefId>,
+    },
 }
 
 /// Resolves one package (G3): collects every file's declarations into one
@@ -529,6 +811,59 @@ where
     (package, resolutions, diags)
 }
 
+/// [`resolve_package`] with import surfaces linked (G4): the same
+/// collection and resolution, plus the link pass between them — one
+/// pass over every file's import declarations that validates each
+/// selection against its linked member's surface and binds what passes
+/// (the selected names and module aliases the file's use sites resolve
+/// through). A graph that names no import keeps the pass inert.
+#[must_use]
+pub fn resolve_package_linked<T>(
+    asts: &[T],
+    imports: &ImportGraph,
+) -> (Package, Vec<Resolutions>, Vec<Diagnostic>)
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut package = Package::new();
+    let mut diags = Vec::new();
+    for ast in asts {
+        diags.extend(package.add_file(ast.borrow()));
+    }
+    diags.extend(
+        package.link_imports(
+            &asts
+                .iter()
+                .map(std::borrow::Borrow::borrow)
+                .collect::<Vec<_>>(),
+            imports,
+        ),
+    );
+    let mut resolutions = Vec::with_capacity(asts.len());
+    for ast in asts {
+        let (uses, mut file_diags) = package.resolve(ast.borrow());
+        resolutions.push(uses);
+        diags.append(&mut file_diags);
+    }
+    (package, resolutions, diags)
+}
+
+impl ModuleRef {
+    /// The alias spelling the import bound.
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    /// Whether the alias references a linked package member: its
+    /// qualified consts bind through the linked surface's literal
+    /// facts, while a merged alias keeps the call-only reading.
+    #[must_use]
+    pub fn linked(&self) -> bool {
+        matches!(self.surface, ModuleSurface::Linked { .. })
+    }
+}
+
 impl Package {
     /// An empty package.
     #[must_use]
@@ -536,29 +871,18 @@ impl Package {
         Self::default()
     }
 
-    /// Rebuilds a package from its collected parts (the checked-ambient
-    /// artifact's served prefix): the parts are exactly the tables
-    /// [`Package::add_file`](Self::add_file) builds, with the name tables
-    /// as name/id pairs (first-definition wins, the collection rule). A
-    /// package rebuilt this way continues collecting and resolving user
-    /// files like any other — `from_parts` only replaces the collection
-    /// walk over the served member's own items.
+    /// A package over one served prefix's collected tables: the base is
+    /// the parked namespace (one [`Park`](crate::Park) cell's rows, an
+    /// [`Arc`] refcount) a checked-ambient serve hands every member
+    /// compile, and the growth the compile's own files build. A package
+    /// installed this way continues collecting
+    /// and resolving user files like any other — the base only replaces
+    /// the collection walk over the served member's own items.
     #[must_use]
-    pub fn from_parts(
-        files: Vec<ds_diag::FileId>,
-        defs: Vec<Def>,
-        type_names: Vec<(String, DefId)>,
-        value_names: Vec<(String, DefId)>,
-        methods: Vec<MethodDecl>,
-        method_index: Vec<(String, Vec<MethodId>)>,
-    ) -> Self {
+    pub fn with_base(base: Arc<PackageBase>) -> Self {
         Self {
-            files,
-            defs,
-            type_names: type_names.into_iter().collect(),
-            value_names: value_names.into_iter().collect(),
-            methods,
-            method_index: method_index.into_iter().collect(),
+            base: Some(base),
+            ..Self::default()
         }
     }
 
@@ -585,6 +909,7 @@ impl Package {
             package: self,
             uses: Vec::new(),
             diags: Vec::new(),
+            imports: self.imports.get(&ast.file),
             scopes: vec![FxHashMap::default()],
             type_scopes: vec![FxHashMap::default()],
         };
@@ -596,50 +921,666 @@ impl Package {
         let mut uses = resolver.uses;
         uses.sort_by_key(|(span, _)| span_key(*span));
         debug_assert!(uses.windows(2).all(|pair| pair[0].0 != pair[1].0));
-        (Resolutions { uses }, resolver.diags)
+        (
+            Resolutions {
+                uses: Arc::from(uses),
+            },
+            resolver.diags,
+        )
     }
 
-    /// The declaration of a definition.
+    /// The link pass (G4): after every file collected and before any
+    /// use resolves, two passes over the import declarations the graph
+    /// serves — every linked member's exported definitions register as
+    /// package defs first (so no selection's validation depends on
+    /// import order inside the file), then each selection validates
+    /// against its linked member's surface (a missing name, a non-`pub`
+    /// tier, or a shape this round cannot bind refusing at the import),
+    /// what passes binds into the importing file's namespace, and an
+    /// `as` alias binds a module reference the file's qualified calls
+    /// resolve through. Running after collection keeps the pass
+    /// order-independent (G3): a use before its import declaration in
+    /// the same file still binds.
+    pub fn link_imports(&mut self, asts: &[&Ast], imports: &ImportGraph) -> Vec<Diagnostic> {
+        let mut diags = Vec::new();
+        for ast in asts {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ItemKind::Import(imp) = &item.kind else {
+                        continue;
+                    };
+                    let Some(surface) = imports.get(imp.span) else {
+                        continue;
+                    };
+                    match surface {
+                        ImportSurface::NoSuchMember { member } => {
+                            diags.push(
+                                Diagnostic::error(
+                                    ErrorCode::ImportNameMissing,
+                                    format!(
+                                        "`{member}` names no member of the linked package [G4]"
+                                    ),
+                                )
+                                .with_primary(imp.path.span, "no such member"),
+                            );
+                        },
+                        ImportSurface::Merged { member } => {
+                            if let Some(alias) = &imp.alias {
+                                self.bind_module_alias(
+                                    ast.file,
+                                    alias,
+                                    imp.span,
+                                    ModuleSurface::Merged { member: *member },
+                                    &mut diags,
+                                );
+                            }
+                        },
+                        ImportSurface::Linked(member_surface) => {
+                            self.register_member(ast.file, imp, member_surface, &mut diags);
+                            // the shared tag mapping's rows collect here:
+                            // the lowering seeds its table with them, so
+                            // duplicate rows (two imports of one package)
+                            // ride twice and the seed stays idempotent
+                            self.linked_tags.extend(member_surface.tags.iter().cloned());
+                        },
+                    }
+                }
+            }
+        }
+        for ast in asts {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ItemKind::Import(imp) = &item.kind else {
+                        continue;
+                    };
+                    if let Some(ImportSurface::Linked(member_surface)) = imports.get(imp.span) {
+                        self.validate_member(ast.file, imp, member_surface, &mut diags);
+                    }
+                }
+            }
+        }
+        diags
+    }
+
+    /// Registers one linked member's surface at its import: the
+    /// exported definitions become package defs — callables and literal
+    /// consts deduped per linked definition so two imports of one
+    /// package share them, a type by its name alone (the universe mints
+    /// by name, so a local declaration or another linked package owning
+    /// the name gates the registration and the selection refuses) — and
+    /// the alias binds a module reference the file's qualified calls
+    /// resolve through.
+    fn register_member(
+        &mut self,
+        file: ds_diag::FileId,
+        imp: &ds_parse::ImportDecl,
+        member_surface: &MemberSurface,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        let mut callables: FxHashMap<String, DefId> = FxHashMap::default();
+        for entry in &member_surface.entries {
+            match entry.kind {
+                ForeignKind::Fn => {
+                    // the dedup key names the linked definition, not its
+                    // table slot: two bodiless externs of one package
+                    // share no func index, so the name is the identity
+                    let key = (entry.link, entry.name.clone());
+                    let def = if let Some(&def) = self.foreign_defs.get(&key) {
+                        def
+                    } else {
+                        let def = DefId::from_raw(
+                            u32::try_from(self.len()).expect("definition count fits u32"),
+                        );
+                        self.defs.push(Def {
+                            name: entry.name.clone(),
+                            kind: DefKind::Fn,
+                            vis: entry.vis,
+                            span: entry.decl_span,
+                        });
+                        self.foreign.insert(def, entry.clone());
+                        self.foreign_defs.insert(key, def);
+                        def
+                    };
+                    callables.insert(entry.name.clone(), def);
+                },
+                ForeignKind::Binding if entry.value.is_some() => {
+                    let key = (entry.link, entry.name.clone());
+                    if !self.foreign_const_defs.contains_key(&key) {
+                        let def = DefId::from_raw(
+                            u32::try_from(self.len()).expect("definition count fits u32"),
+                        );
+                        self.defs.push(Def {
+                            name: entry.name.clone(),
+                            kind: DefKind::Const,
+                            vis: entry.vis,
+                            span: entry.decl_span,
+                        });
+                        self.foreign.insert(def, entry.clone());
+                        self.foreign_const_defs.insert(key, def);
+                    }
+                },
+                // A fact-carrying type registers when its name is free:
+                // the universe mints by name, so a local declaration (or
+                // a universe-predeclared spelling) or another linked
+                // package's type of the same name skips the registration
+                // and the selection refuses naming the collision — a
+                // silent skip here would mis-shape every signature the
+                // local spelling answers instead. A case registers only
+                // beside its enum's registration (the entries declare the
+                // enum first), so an enum that refuses takes its cases'
+                // selections down with it — the case's row maps back to
+                // the enum's def.
+                ForeignKind::Type if entry.ty.is_some() => {
+                    let kind = match entry.ty.as_deref() {
+                        Some(crate::import::TypeFact::Struct(..)) => Some(DefKind::Struct),
+                        Some(crate::import::TypeFact::Enum(..)) => Some(DefKind::Enum),
+                        Some(crate::import::TypeFact::Case(fact)) => self
+                            .foreign_type_defs
+                            .contains_key(&fact.enum_name)
+                            .then_some(DefKind::Case),
+                        None => None,
+                    };
+                    let free = entry.name != "none"
+                        && entry.name != "type"
+                        && self.lookup_type(&entry.name).is_none()
+                        && !self.foreign_type_defs.contains_key(&entry.name);
+                    if let (Some(kind), true) = (kind, free) {
+                        let def = DefId::from_raw(
+                            u32::try_from(self.len()).expect("definition count fits u32"),
+                        );
+                        self.defs.push(Def {
+                            name: entry.name.clone(),
+                            kind,
+                            vis: entry.vis,
+                            span: entry.decl_span,
+                        });
+                        self.foreign.insert(def, entry.clone());
+                        self.foreign_type_defs.insert(entry.name.clone(), def);
+                    }
+                },
+                ForeignKind::Binding | ForeignKind::Type => {},
+            }
+        }
+        // the alias serves the callables alone: a qualified member use is
+        // a call site, so only function defs reach its surface
+        if let Some(alias) = &imp.alias {
+            self.bind_module_alias(
+                file,
+                alias,
+                imp.span,
+                ModuleSurface::Linked {
+                    surface: member_surface.clone(),
+                    defs: callables.clone(),
+                },
+                diags,
+            );
+        }
+    }
+
+    /// Validates one linked member's selections: each names an exported
+    /// definition whose shape binds this round, and what passes binds
+    /// into the importing file's namespace (G4).
+    fn validate_member(
+        &mut self,
+        file: ds_diag::FileId,
+        imp: &ds_parse::ImportDecl,
+        member_surface: &MemberSurface,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        for sel in &imp.select {
+            let Some(entry) = member_surface.entry(&sel.name.name) else {
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportNameMissing,
+                        format!(
+                            "`{}` names no definition the imported member exports [G4]",
+                            sel.name.name
+                        ),
+                    )
+                    .with_primary(sel.span, "no such exported name"),
+                );
+                continue;
+            };
+            if !entry.vis.exported() {
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportNotExported,
+                        format!(
+                            "`{}` is `pub(pkg)` or private in its package; only `pub` names \
+                             export                              [G4]",
+                            sel.name.name
+                        ),
+                    )
+                    .with_primary(sel.span, "not exported to dependents")
+                    .with_secondary(entry.decl_span, "declared here"),
+                );
+                continue;
+            }
+            // The bindable def this selection names, when its shape binds
+            // this round: a function through its signature's spellability,
+            // a literal const through its value fact, a flat struct
+            // through its registered structural fact.
+            let bindable = match entry.kind {
+                ForeignKind::Fn if entry.generic || entry.defaulted => {
+                    let what = if entry.generic {
+                        "a generic function: its one body is a per-instantiation fact the linked \
+                         module serves"
+                    } else {
+                        "a function with a defaulted parameter: the default stages at the linked \
+                         module's own call sites"
+                    };
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportUnsupportedShape,
+                            format!(
+                                "`{}` cannot bind across packages this round: {what} [G4]",
+                                sel.name.name
+                            ),
+                        )
+                        .with_primary(sel.span, "not bindable across packages")
+                        .with_secondary(entry.decl_span, "declared here"),
+                    );
+                    continue;
+                },
+                ForeignKind::Fn => {
+                    if let Some((bad, kind)) = self.unspellable_type(entry, member_surface) {
+                        let what = match kind {
+                            Unspellable::Unbound => format!(
+                                "`{}`'s signature names `{}`, a linked type whose name this \
+                                 package or another linked package already owns [G4]",
+                                sel.name.name, bad
+                            ),
+                            Unspellable::Unknown => format!(
+                                "`{}`'s signature names `{}`, which this package cannot spell; \
+                                 cross-package types wait on the artifact round [G4]",
+                                sel.name.name, bad
+                            ),
+                        };
+                        diags.push(
+                            Diagnostic::error(ErrorCode::ImportUnsupportedShape, what)
+                                .with_primary(sel.span, "the signature names a foreign type")
+                                .with_secondary(entry.decl_span, "declared here"),
+                        );
+                        continue;
+                    }
+                    self.foreign_defs
+                        .get(&(entry.link, entry.name.clone()))
+                        .copied()
+                },
+                ForeignKind::Binding if entry.value.is_some() => self
+                    .foreign_const_defs
+                    .get(&(entry.link, entry.name.clone()))
+                    .copied(),
+                ForeignKind::Binding => {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportUnsupportedShape,
+                            format!(
+                                "`{}` cannot bind across packages this round: its value is no \
+                                 literal fact — a computed or mutable binding evaluates in the \
+                                 linked module, the artifact round's per-target fact [G4]",
+                                sel.name.name
+                            ),
+                        )
+                        .with_primary(sel.span, "not bindable across packages")
+                        .with_secondary(entry.decl_span, "declared here"),
+                    );
+                    continue;
+                },
+                ForeignKind::Type if entry.ty.is_some() => {
+                    if let Some(&def) = self.foreign_type_defs.get(&entry.name) {
+                        Some(def)
+                    } else {
+                        let what = if let Some(crate::import::TypeFact::Case(fact)) =
+                            entry.ty.as_deref()
+                            && !self.foreign_type_defs.contains_key(&fact.enum_name)
+                        {
+                            format!(
+                                "its enum `{}` did not bind this round — the case registers only \
+                                 beside its enum [G4]",
+                                fact.enum_name
+                            )
+                        } else if self.lookup_type(&entry.name).is_some()
+                            || entry.name == "none"
+                            || entry.name == "type"
+                        {
+                            format!(
+                                "this package already declares `{}`; the local declaration would \
+                                 shadow the linked type and mis-shape every signature spelling it \
+                                 [G4]",
+                                entry.name
+                            )
+                        } else {
+                            format!(
+                                "another linked package already binds the type `{}` [G4]",
+                                entry.name
+                            )
+                        };
+                        diags.push(
+                            Diagnostic::error(
+                                ErrorCode::ImportUnsupportedShape,
+                                format!(
+                                    "`{}` cannot bind across packages this round: {what}",
+                                    sel.name.name
+                                ),
+                            )
+                            .with_primary(sel.span, "not bindable across packages")
+                            .with_secondary(entry.decl_span, "declared here"),
+                        );
+                        continue;
+                    }
+                },
+                ForeignKind::Type => {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportUnsupportedShape,
+                            format!(
+                                "`{}` cannot bind across packages this round: a cross-package \
+                                 type's layout and tag rows are the artifact round's link facts \
+                                 [G4]",
+                                sel.name.name
+                            ),
+                        )
+                        .with_primary(sel.span, "not bindable across packages")
+                        .with_secondary(entry.decl_span, "declared here"),
+                    );
+                    continue;
+                },
+            };
+            let Some(def) = bindable else {
+                continue;
+            };
+            let name = sel.alias.as_ref().unwrap_or(&sel.name);
+            let file_imports = self.imports.entry(file).or_default();
+            if let Some((_, first)) = file_imports.names.get(&name.name) {
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportDuplicate,
+                        format!(
+                            "two imports bind the name `{}` into this file [G4]",
+                            name.name
+                        ),
+                    )
+                    .with_primary(name.span, "bound again here")
+                    .with_secondary(*first, "first bound here"),
+                );
+                continue;
+            }
+            if let Some(&(_, first)) = file_imports.modules.get(&name.name) {
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportDuplicate,
+                        format!(
+                            "two imports bind the name `{}` into this file [G4]",
+                            name.name
+                        ),
+                    )
+                    .with_primary(name.span, "bound again here")
+                    .with_secondary(first, "the module alias bound it here"),
+                );
+                continue;
+            }
+            file_imports
+                .names
+                .insert(name.name.clone(), (def, imp.span));
+        }
+    }
+
+    /// The first type-name head a linked function's written signature
+    /// spells that this compile cannot spell as the linked package
+    /// means it: a head naming a type the member itself exports must
+    /// have registered (a fact-carrying type that bound), anything else
+    /// must live in this package's own type namespace — the ambient's
+    /// atoms included. A registered foreign type spells in every
+    /// position, unions included: the shared tag mapping seeds this
+    /// compile's tag table with the linked module's own rows at
+    /// lowering, so a union's tag word carries ids both modules agree
+    /// on.
+    fn unspellable_type(
+        &self,
+        entry: &ForeignEntry,
+        surface: &MemberSurface,
+    ) -> Option<(String, Unspellable)> {
+        let sig = entry.sig.as_ref()?;
+        for param in &sig.params {
+            if let Some(ty) = &param.ty
+                && let Some(found) = self.type_refusal(ty, false, surface)
+            {
+                return Some(found);
+            }
+        }
+        if let Some(ret) = &sig.ret {
+            return self.type_refusal(ret, false, surface);
+        }
+        None
+    }
+
+    /// One written signature type's first refusal, walking the tree: a
+    /// union or optional node marks everything under it union-carried,
+    /// where the @std equivalence arm stays refused.
+    fn type_refusal(
+        &self,
+        ty: &Type,
+        in_union: bool,
+        surface: &MemberSurface,
+    ) -> Option<(String, Unspellable)> {
+        match ty {
+            Type::Path { path, args, .. } => {
+                if let [only] = path.segments.as_slice() {
+                    let head = &only.name;
+                    let refusal = if let Some(entry) = surface.entry(head) {
+                        // The linked package's own type spells when its
+                        // fact registered; a local declaration of the same
+                        // name would otherwise answer the spelling with
+                        // the wrong shape. Unions spell too — the tag
+                        // mapping owns the crossing words.
+                        let registered = entry.kind != ForeignKind::Type
+                            || self.foreign_type_defs.contains_key(head);
+                        // The @std equivalence: the reserved package's
+                        // member is the ambient source verbatim this
+                        // round, so a word-shaped atom head the consuming
+                        // ambient also declares is the same declaration —
+                        // the spelling resolves through the consumer's own
+                        // atom, the same base-aware lookup the registered
+                        // foreign types read. Union positions keep the
+                        // tag-seam refusal (the two modules' private tag
+                        // tables), and every tag- or struct-bearing head
+                        // keeps its Unbound refusal; the arm retires with
+                        // the un-merge.
+                        let std_equivalent = entry.std
+                            && !in_union
+                            && args.is_empty()
+                            && self.word_shaped_ambient_atom(head);
+                        (!registered && !std_equivalent).then_some(Unspellable::Unbound)
+                    } else {
+                        (head != "none" && self.lookup_type(head).is_none())
+                            .then_some(Unspellable::Unknown)
+                    };
+                    if let Some(kind) = refusal {
+                        return Some((head.clone(), kind));
+                    }
+                }
+                args.iter()
+                    .find_map(|arg| self.type_refusal(arg, false, surface))
+            },
+            // the optional marker adds `none` to the union, so everything
+            // under it rides a tag word
+            Type::Optional { inner, .. } => self.type_refusal(inner, true, surface),
+            Type::Union { left, right, .. }
+            | Type::Intersect { left, right, .. }
+            | Type::Difference { left, right, .. } => self
+                .type_refusal(left, true, surface)
+                .or_else(|| self.type_refusal(right, true, surface)),
+            Type::Paren { inner, .. } | Type::Negation { inner, .. } | Type::Ptr { inner, .. } => {
+                self.type_refusal(inner, in_union, surface)
+            },
+            Type::Tuple { items, .. } => items
+                .iter()
+                .find_map(|item| self.type_refusal(item, in_union, surface)),
+            Type::Fn { params, ret, .. } => params
+                .iter()
+                .filter_map(|param| param.ty.as_ref())
+                .find_map(|ty| self.type_refusal(ty, in_union, surface))
+                .or_else(|| {
+                    ret.as_ref()
+                        .and_then(|ty| self.type_refusal(ty, in_union, surface))
+                }),
+            Type::Unit(_) | Type::TypeKw(_) | Type::Foreign { .. } => None,
+        }
+    }
+
+    /// Whether `name` is one of the ambient's word-shaped atoms — the
+    /// scalar words plus the two Ref-word collections whose values cross
+    /// modules as plain words with no tag id inside. The closed set the
+    /// @std spelling equivalence trusts: a value of these types built in
+    /// either module reads identically in the other, where a tag-bearing
+    /// or struct value keeps its cross-package refusals. The lookup is
+    /// the package's own base-aware one, so a parked serve's atoms and a
+    /// fresh walk's answer alike.
+    fn word_shaped_ambient_atom(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "int" | "float" | "bool" | "string" | "char" | "byte" | "u32" | "bytes"
+        ) && self.lookup_type(name).is_some()
+    }
+
+    /// Binds one import's module alias, refusing a second binding of
+    /// the same name into the file.
+    fn bind_module_alias(
+        &mut self,
+        file: ds_diag::FileId,
+        alias: &Ident,
+        import_span: Span,
+        surface: ModuleSurface,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        let file_imports = self.imports.entry(file).or_default();
+        if let Some((_, first)) = file_imports.names.get(&alias.name) {
+            diags.push(
+                Diagnostic::error(
+                    ErrorCode::ImportDuplicate,
+                    format!(
+                        "two imports bind the name `{}` into this file [G4]",
+                        alias.name
+                    ),
+                )
+                .with_primary(alias.span, "bound again here")
+                .with_secondary(*first, "first bound here"),
+            );
+            return;
+        }
+        // The duplicate check runs before the id exists: an insert that
+        // overwrites first would leave the new id dangling over a
+        // module_refs slot the early return never pushes.
+        if file_imports.modules.contains_key(&alias.name) {
+            diags.push(
+                Diagnostic::error(
+                    ErrorCode::ImportDuplicate,
+                    format!(
+                        "two imports bind the module alias `{}` into this file [G4]",
+                        alias.name
+                    ),
+                )
+                .with_primary(alias.span, "bound again here")
+                .with_secondary(import_span, "the import bound it here"),
+            );
+            return;
+        }
+        let id = ModuleId::from_raw(
+            u32::try_from(self.module_refs.len()).expect("module count fits u32"),
+        );
+        file_imports
+            .modules
+            .insert(alias.name.clone(), (id, import_span));
+        self.module_refs.push(ModuleRef {
+            alias: alias.name.clone(),
+            surface,
+        });
+    }
+
+    /// The import-bound functions, keyed by their def.
+    #[must_use]
+    pub fn foreign(&self) -> &FxHashMap<DefId, ForeignEntry> {
+        &self.foreign
+    }
+
+    /// The module reference an id names.
+    #[must_use]
+    pub fn module_ref(&self, id: ModuleId) -> &ModuleRef {
+        &self.module_refs[id.index() as usize]
+    }
+
+    /// The declaration of a definition: the base answers a served prefix
+    /// id, the growth tier a compiled file's own.
     #[must_use]
     pub fn def(&self, id: DefId) -> &Def {
-        &self.defs[id.index() as usize]
+        let slot = id.index() as usize;
+        match self.base.as_deref() {
+            Some(base) if slot < base.defs.len() => &base.defs[slot],
+            Some(base) => &self.defs[slot - base.defs.len()],
+            None => &self.defs[slot],
+        }
     }
 
-    /// Every declaration, in collection order.
-    #[must_use]
-    pub fn defs(&self) -> &[Def] {
-        &self.defs
+    /// Every declaration, in collection order: the base tier's run first,
+    /// the growth tier's after it.
+    pub fn defs(&self) -> impl Iterator<Item = &Def> + '_ {
+        self.base
+            .as_ref()
+            .into_iter()
+            .flat_map(|base| base.defs.iter())
+            .chain(self.defs.iter())
     }
 
-    /// The declaration of a registered method.
+    /// The declaration of a registered method: the base answers a served
+    /// prefix id, the growth tier a compiled file's own.
     #[must_use]
     pub fn method(&self, id: MethodId) -> &MethodDecl {
-        &self.methods[id.index() as usize]
+        let slot = id.index() as usize;
+        match self.base.as_deref() {
+            Some(base) if slot < base.methods.len() => &base.methods[slot],
+            Some(base) => &self.methods[slot - base.methods.len()],
+            None => &self.methods[slot],
+        }
     }
 
-    /// The registered methods, in registration order.
-    #[must_use]
-    pub fn methods(&self) -> &[MethodDecl] {
-        &self.methods
+    /// The registered methods, in registration order: the base tier's run
+    /// first, the growth tier's after it.
+    pub fn methods(&self) -> impl Iterator<Item = &MethodDecl> + '_ {
+        self.base
+            .as_ref()
+            .into_iter()
+            .flat_map(|base| base.methods.iter())
+            .chain(self.methods.iter())
     }
 
-    /// The definition of a type-namespace name, if any (F9).
+    /// The definition of a type-namespace name, if any (F9): the growth
+    /// tier answers first, the shared base below.
     #[must_use]
     pub fn lookup_type(&self, name: &str) -> Option<DefId> {
-        self.type_names.get(name).copied()
+        self.type_names.get(name).copied().or_else(|| {
+            self.base
+                .as_deref()
+                .and_then(|base| base.type_names.get(name).copied())
+        })
     }
 
-    /// The definition of a value-namespace name, if any (F9).
+    /// The definition of a value-namespace name, if any (F9): the growth
+    /// tier answers first, the shared base below.
     #[must_use]
     pub fn lookup_value(&self, name: &str) -> Option<DefId> {
-        self.value_names.get(name).copied()
+        self.value_names.get(name).copied().or_else(|| {
+            self.base
+                .as_deref()
+                .and_then(|base| base.value_names.get(name).copied())
+        })
     }
 
     /// Whether either namespace declares the name — the sentinel checks
     /// (`none`, `self`) that must not shadow universe spellings.
     #[must_use]
     pub fn declares(&self, name: &str) -> bool {
-        self.type_names.contains_key(name) || self.value_names.contains_key(name)
+        self.lookup_type(name).is_some() || self.lookup_value(name).is_some()
     }
 
     /// The namespace-agnostic lookup: the type declaration when the name
@@ -652,30 +1593,50 @@ impl Package {
         self.lookup_type(name).or_else(|| self.lookup_value(name))
     }
 
-    /// The ids of the files collected so far, in addition order.
-    #[must_use]
-    pub fn files(&self) -> &[ds_diag::FileId] {
-        &self.files
+    /// The ids of the files collected so far, in addition order: the base
+    /// tier's run first, the growth tier's after it.
+    pub fn files(&self) -> impl Iterator<Item = ds_diag::FileId> + '_ {
+        self.base
+            .as_ref()
+            .into_iter()
+            .flat_map(|base| base.files.iter().copied())
+            .chain(self.files.iter().copied())
     }
 
-    /// The registered candidates for a method name, in declaration order.
+    /// The position of one file in the addition order (the resolutions'
+    /// tree alignment).
     #[must_use]
-    pub fn method_candidates(&self, name: &str) -> &[MethodId] {
-        self.method_index
-            .get(name)
-            .map_or(&[] as &[MethodId], Vec::as_slice)
+    pub fn file_position(&self, file: ds_diag::FileId) -> Option<usize> {
+        self.files().position(|candidate| candidate == file)
     }
 
-    /// Number of package-level definitions.
+    /// The registered candidates for a method name, in declaration order:
+    /// the base tier's run first, the growth tier's after it (a growth
+    /// entry for a name the base carries is seeded with the base's
+    /// candidates, so its list alone is the complete one).
+    pub fn method_candidates<'a>(&'a self, name: &str) -> impl Iterator<Item = MethodId> + 'a {
+        let growth = self.method_index.get(name).map_or(&[][..], Vec::as_slice);
+        let base = if self.method_index.contains_key(name) {
+            &[][..]
+        } else {
+            self.base
+                .as_deref()
+                .and_then(|base| base.method_index.get(name))
+                .map_or(&[][..], Vec::as_slice)
+        };
+        base.iter().chain(growth).copied()
+    }
+
+    /// Number of package-level definitions across both tiers.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.defs.len()
+        self.defs.len() + self.base.as_ref().map_or(0, |base| base.defs.len())
     }
 
     /// Whether the package has no definitions.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
+        self.len() == 0
     }
 
     fn collect_item(&mut self, item: &Item, diags: &mut Vec<Diagnostic>) {
@@ -773,10 +1734,10 @@ impl Package {
         vis: Vis,
         diags: &mut Vec<Diagnostic>,
     ) -> DefId {
-        let names =
-            if kind.in_type_namespace() { &mut self.type_names } else { &mut self.value_names };
-        if let Some(&first) = names.get(name) {
-            let first_span = self.defs[first.index() as usize].span;
+        let existing =
+            if kind.in_type_namespace() { self.lookup_type(name) } else { self.lookup_value(name) };
+        if let Some(first) = existing {
+            let first_span = self.def(first).span;
             diags.push(
                 Diagnostic::error(
                     ErrorCode::DuplicateDefinition,
@@ -787,14 +1748,19 @@ impl Package {
             );
             return first;
         }
-        let id = DefId::from_raw(u32::try_from(self.defs.len()).expect("table index fits u32"));
+        // A growth id continues the def space past the base tier's run.
+        let id = DefId::from_raw(u32::try_from(self.len()).expect("table index fits u32"));
         self.defs.push(Def {
             name: name.to_owned(),
             kind,
             vis,
             span,
         });
-        names.insert(name.to_owned(), id);
+        if kind.in_type_namespace() {
+            self.type_names.insert(name.to_owned(), id);
+        } else {
+            self.value_names.insert(name.to_owned(), id);
+        }
         id
     }
 
@@ -805,11 +1771,11 @@ impl Package {
     /// two traits, or two inherent impls on different target types; call
     /// sites disambiguate by receiver (F3).
     fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) {
-        if let Some(&id) = self.method_index.get(&name.name).and_then(|ids| {
-            ids.iter()
-                .find(|&&id| self.methods[id.index() as usize].owner == owner)
-        }) {
-            let first_span = self.methods[id.index() as usize].span;
+        if let Some(id) = self
+            .method_candidates(&name.name)
+            .find(|&id| self.method(id).owner == owner)
+        {
+            let first_span = self.method(id).span;
             diags.push(
                 Diagnostic::error(
                     ErrorCode::DuplicateDefinition,
@@ -820,12 +1786,27 @@ impl Package {
             );
             return;
         }
+        // A growth id continues the method space past the base tier's run,
+        // and a growth entry for a name the base carries seeds with the
+        // base's candidates so the growth list alone stays the complete
+        // one in declaration order.
         let id =
-            MethodId::from_raw(u32::try_from(self.methods.len()).expect("table index fits u32"));
-        self.method_index
-            .entry(name.name.clone())
-            .or_default()
-            .push(id);
+            MethodId::from_raw(u32::try_from(self.method_len()).expect("table index fits u32"));
+        let seeded = self
+            .base
+            .as_deref()
+            .and_then(|base| base.method_index.get(&name.name))
+            .is_some();
+        if seeded {
+            let mut candidates = self.method_candidates(&name.name).collect::<Vec<_>>();
+            candidates.push(id);
+            self.method_index.insert(name.name.clone(), candidates);
+        } else {
+            self.method_index
+                .entry(name.name.clone())
+                .or_default()
+                .push(id);
+        }
         self.methods.push(MethodDecl {
             name: name.name.clone(),
             owner,
@@ -855,6 +1836,8 @@ struct FileResolver<'a> {
     package: &'a Package,
     uses: Vec<(Span, Res)>,
     diags: Vec<Diagnostic>,
+    /// The file's import bindings, when the link pass produced any.
+    imports: Option<&'a FileImports>,
     /// Value scopes, innermost last: binder name to binder span.
     scopes: Vec<FxHashMap<String, Span>>,
     /// Type-variable scopes, innermost last.
@@ -972,6 +1955,31 @@ impl FileResolver<'_> {
                     match trait_ref.path.segments.as_slice() {
                         [head] => self.type_name_use(head),
                         _ => self.path_use(&trait_ref.path),
+                    }
+                } else if let Some(head) = impl_target_head(&imp.target) {
+                    // An inherent impl over a linked type (G4): the
+                    // minted def answers the layout seams, but the
+                    // impl's members register nowhere its receiver
+                    // resolves — the declaration itself is the honest
+                    // refusal point. A trait impl keeps its own shape
+                    // pass's head refusal.
+                    if let Some(import_span) = self.linked_impl_target(head) {
+                        self.diags.push(
+                            Diagnostic::error(
+                                ErrorCode::ImportUnsupportedShape,
+                                format!(
+                                    "impl over `{}`, a type a linked package owns: its members \
+                                     would register nowhere this package's receivers resolve [G4]",
+                                    head.name
+                                ),
+                            )
+                            .with_primary(head.span, "the impl targets an import-bound type")
+                            .with_secondary(import_span, "the import binds the type here")
+                            .with_note(
+                                "cross-package impls wait on the artifact round's member link \
+                                 facts",
+                            ),
+                        );
                     }
                 }
                 // An impl's members spell the self type `Self` [F2, record
@@ -1121,7 +2129,7 @@ impl FileResolver<'_> {
                     // a bare type name as the receiver takes the
                     // type-keyed tier instead (the receiverless ruling).
                     Expr::Field { recv, name, .. } => {
-                        self.expr(recv);
+                        self.dot_recv_use(recv);
                         self.dot_use(recv, name);
                     },
                     // A call-form name resolves per the namespace split
@@ -1143,9 +2151,15 @@ impl FileResolver<'_> {
                     self.expr(tail);
                 }
             },
-            Expr::Field { recv, .. } => {
+            Expr::Field { recv, name, .. } => {
                 // Bare field access: struct-owned, type-directed later.
-                self.expr(recv);
+                // A module-alias receiver takes the qualified member's
+                // value seam instead (G4).
+                if let Some(module) = self.module_ref_receiver(recv) {
+                    self.module_member_value_use(recv, module, name);
+                } else {
+                    self.expr(recv);
+                }
             },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv);
@@ -1310,9 +2324,59 @@ impl FileResolver<'_> {
             .or_else(|| self.package.lookup_type(&name.name))
         {
             self.def_use(name.span, def);
+        } else if let Some(def) = self.import_binding(&name.name) {
+            self.uses.push((name.span, Res::Def(def)));
+        } else if let Some(module) = self.module_alias(&name.name) {
+            self.uses.push((name.span, Res::Module(module)));
         } else if name.name != "none" {
             self.unknown_name(name, self.shadowing_candidates());
         }
+    }
+
+    /// The import-bound function a name selects in the resolving file
+    /// (G4): locals and package names shadow imported names, the
+    /// resolver's own priority.
+    fn import_binding(&self, name: &str) -> Option<DefId> {
+        self.imports
+            .and_then(|imports| imports.names.get(name))
+            .map(|&(def, _)| def)
+    }
+
+    /// The module alias a name binds in the resolving file, when no
+    /// local, package name, or imported name shadows it.
+    fn module_alias(&self, name: &str) -> Option<ModuleId> {
+        self.imports
+            .and_then(|imports| imports.modules.get(name))
+            .map(|&(module, _)| module)
+    }
+
+    /// The import-bound type a name selects in the resolving file (G4):
+    /// a selection of a linked type's def, when the package's own type
+    /// namespace does not declare the name — the same shadowing priority
+    /// the value positions follow.
+    fn import_type_binding(&self, name: &str) -> Option<DefId> {
+        let def = self.import_binding(name)?;
+        self.package
+            .def(def)
+            .kind
+            .in_type_namespace()
+            .then_some(def)
+    }
+
+    /// The import site binding an impl target's head as a linked type
+    /// (G4), when the package's own namespace does not declare the name:
+    /// the answer names the import that owns the impl's target.
+    fn linked_impl_target(&self, head: &Ident) -> Option<Span> {
+        if self.package.lookup_type(&head.name).is_some() {
+            return None;
+        }
+        self.imports.and_then(|imports| {
+            imports
+                .names
+                .get(&head.name)
+                .filter(|&(def, _)| self.package.def(*def).kind.in_type_namespace())
+                .map(|&(_, span)| span)
+        })
     }
 
     /// The callee of a call form (F9): locals first (an indirect call of a
@@ -1339,7 +2403,11 @@ impl FileResolver<'_> {
             (Some(value), None) => self.def_use(name.span, value),
             (None, Some(ty)) => self.def_use(name.span, ty),
             (None, None) => {
-                if name.name != "none" {
+                if let Some(def) = self.import_binding(&name.name) {
+                    self.uses.push((name.span, Res::Def(def)));
+                } else if let Some(module) = self.module_alias(&name.name) {
+                    self.uses.push((name.span, Res::Module(module)));
+                } else if name.name != "none" {
                     self.unknown_name(name, self.callable_candidates());
                 }
             },
@@ -1454,15 +2522,11 @@ impl FileResolver<'_> {
                 let candidate = self
                     .package
                     .method_candidates(&method.name)
-                    .iter()
-                    .copied()
                     .find(|&id| self.package.method(id).owner == MethodOwner::Trait(def));
                 let Some(id) = candidate else {
                     let others = self
                         .package
                         .method_candidates(&method.name)
-                        .iter()
-                        .copied()
                         .filter(|&id| self.package.method(id).owner != MethodOwner::Trait(def))
                         .map(|id| self.package.method(id).owner_name(self.package))
                         .collect::<Vec<_>>();
@@ -1501,7 +2565,11 @@ impl FileResolver<'_> {
     fn ctor_path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => {
-                if let Some(def) = self.package.lookup_type(&only.name) {
+                if let Some(def) = self
+                    .package
+                    .lookup_type(&only.name)
+                    .or_else(|| self.import_type_binding(&only.name))
+                {
                     self.def_use(only.span, def);
                 } else if only.name != "none" {
                     let candidates = self.type_candidates();
@@ -1529,6 +2597,10 @@ impl FileResolver<'_> {
     /// type-keyed tier instead (the receiverless-member ruling): the
     /// value tiers never apply behind a type name.
     fn dot_use(&mut self, recv: &Expr, name: &Ident) {
+        if let Some(module) = self.module_ref_receiver(recv) {
+            self.module_member_use(module, name);
+            return;
+        }
         if let Some(target) = self.type_keyed_receiver(recv) {
             self.static_use(target, name);
             return;
@@ -1536,22 +2608,287 @@ impl FileResolver<'_> {
         self.dot_use_value(name);
     }
 
+    /// Whether a dot-call's receiver is a bare name this file's import
+    /// aliases bound (G4): no local and no package name shadows it —
+    /// the module reference is the weakest reading, exactly like the
+    /// type-keyed tier's discipline.
+    fn module_ref_receiver(&self, recv: &Expr) -> Option<ModuleId> {
+        let only = single_path_ident(recv)?;
+        if self.lookup_local(&only.name).is_some()
+            || self.package.lookup_value(&only.name).is_some()
+            || self.package.lookup_type(&only.name).is_some()
+            || self.import_binding(&only.name).is_some()
+        {
+            return None;
+        }
+        self.module_alias(&only.name)
+    }
+
+    /// The member position behind a module alias: the alias's surface
+    /// resolves the name — an `@std` alias through the merged member's
+    /// own declarations, a linked alias through its member's exported
+    /// entries — with the same tier refusals a selection meets.
+    fn module_member_use(&mut self, module: ModuleId, name: &Ident) {
+        let module_ref = self.package.module_ref(module);
+        match &module_ref.surface {
+            ModuleSurface::Merged { member } => {
+                let found = self.package.lookup_value(&name.name).filter(|&def| {
+                    let def_decl = self.package.def(def);
+                    def_decl.span.file == *member && def_decl.vis.exported()
+                });
+                match found {
+                    Some(def) => {
+                        self.uses
+                            .push((name.span, Res::Dot(DotRes::Module { func: def })));
+                    },
+                    None => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                ErrorCode::ImportNameMissing,
+                                format!(
+                                    "`{}` names no `pub` definition the module `{}` exports [G4]",
+                                    name.name, module_ref.alias
+                                ),
+                            )
+                            .with_primary(name.span, "no such exported name"),
+                        );
+                    },
+                }
+            },
+            ModuleSurface::Linked { surface, defs } => {
+                let Some(entry) = surface.entry(&name.name) else {
+                    self.diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportNameMissing,
+                            format!(
+                                "`{}` names no definition the module `{}` exports [G4]",
+                                name.name, module_ref.alias
+                            ),
+                        )
+                        .with_primary(name.span, "no such exported name"),
+                    );
+                    return;
+                };
+                if !entry.vis.exported() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportNotExported,
+                            format!(
+                                "`{}` is `pub(pkg)` or private in its package; only `pub` names \
+                                 export                              [G4]",
+                                name.name
+                            ),
+                        )
+                        .with_primary(name.span, "not exported to dependents")
+                        .with_secondary(entry.decl_span, "declared here"),
+                    );
+                    return;
+                }
+                let Some(&func) = defs.get(&name.name) else {
+                    // a shape the qualified call cannot serve: the alias
+                    // resolves call sites, so a literal const (a value
+                    // member since the value seam) and a refused shape
+                    // alike name the same boundary here
+                    let what = if entry.kind == ForeignKind::Binding && entry.value.is_some() {
+                        format!(
+                            "the module alias serves callables at call sites; a linked const \
+                             reads in value position (`{}.{}`) or binds through its selection \
+                             import",
+                            module_ref.alias, name.name
+                        )
+                    } else {
+                        "it cannot bind across packages this round".to_owned()
+                    };
+                    self.diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImportUnsupportedShape,
+                            format!(
+                                "`{}` names no callable the module serves: {what} [G4]",
+                                name.name
+                            ),
+                        )
+                        .with_primary(name.span, "not bindable through the alias")
+                        .with_secondary(entry.decl_span, "declared here"),
+                    );
+                    return;
+                };
+                self.uses
+                    .push((name.span, Res::Dot(DotRes::Module { func })));
+            },
+        }
+    }
+
+    /// A module alias's qualified member in value position (G4): a
+    /// linked package's fact-carrying const binds through the alias
+    /// exactly as its selection spelling does — the same def, so every
+    /// later pass embeds the literal — while every other member keeps
+    /// its refusal at this seam. The merged-ambient alias keeps the
+    /// call-only reading: its member file's names are the merged
+    /// namespace's own, never import-bound defs.
+    fn module_member_value_use(&mut self, recv: &Expr, module: ModuleId, name: &Ident) {
+        let linked = match &self.package.module_ref(module).surface {
+            ModuleSurface::Linked { surface, .. } => Some(surface.clone()),
+            ModuleSurface::Merged { .. } => None,
+        };
+        self.expr(recv);
+        let Some(surface) = linked else {
+            return;
+        };
+        let module_alias = self.package.module_ref(module).alias().to_owned();
+        let Some(entry) = surface.entry(&name.name) else {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::ImportNameMissing,
+                    format!(
+                        "`{}` names no definition the module `{module_alias}` exports [G4]",
+                        name.name
+                    ),
+                )
+                .with_primary(name.span, "no such exported name"),
+            );
+            return;
+        };
+        if !entry.vis.exported() {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::ImportNotExported,
+                    format!(
+                        "`{}` is `pub(pkg)` or private in its package; only `pub` names \
+                         export                              [G4]",
+                        name.name
+                    ),
+                )
+                .with_primary(name.span, "not exported to dependents")
+                .with_secondary(entry.decl_span, "declared here"),
+            );
+            return;
+        }
+        let Some(&def) = self
+            .package
+            .foreign_const_defs
+            .get(&(entry.link, entry.name.clone()))
+        else {
+            let what = match entry.kind {
+                ForeignKind::Binding => "its value is no literal fact — a computed or mutable \
+                                         binding evaluates in the linked module, the artifact \
+                                         round's per-target fact; its selection import keeps the \
+                                         same refusal"
+                    .to_owned(),
+                ForeignKind::Fn => "a linked function serves through the alias at its call sites \
+                                    alone; a function value has no callable word this round"
+                    .to_owned(),
+                ForeignKind::Type => "a linked type is a type-namespace name; its selection \
+                                      import binds the name in type position"
+                    .to_owned(),
+            };
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::ImportUnsupportedShape,
+                    format!(
+                        "`{}` names no value member the module serves: {what} [G4]",
+                        name.name
+                    ),
+                )
+                .with_primary(name.span, "not bindable through the alias")
+                .with_secondary(entry.decl_span, "declared here"),
+            );
+            return;
+        };
+        self.uses.push((name.span, Res::Def(def)));
+    }
+
     /// Whether a dot-call's receiver is a bare name resolving through the
     /// type namespace: no local and no value-namespace def shadows it
     /// (the ordinary name-use priority), and a type-namespace def names
-    /// it. Such a receiver is a type, not a value — the type-keyed call
-    /// tier owns it.
+    /// it — the package's own declarations first, the file's import
+    /// bindings below, the same priority a type position spells (G4).
+    /// Such a receiver is a type, not a value — the type-keyed call tier
+    /// owns it, so a linked type name refuses its member calls at the
+    /// check instead of falling to the value tiers. An instantiated
+    /// application takes the same tier: the receiver's head (a
+    /// constructor-bracket application or a carried application type)
+    /// names the type whose own impl members the call dispatches.
     fn type_keyed_receiver(&self, recv: &Expr) -> Option<DefId> {
-        let only = single_path_ident(recv)?;
-        if self.lookup_local(&only.name).is_some() {
+        if let Some(only) = single_path_ident(recv) {
+            if self.lookup_local(&only.name).is_some() {
+                return None;
+            }
+            let def = self
+                .package
+                .lookup_type(&only.name)
+                .or_else(|| self.import_type_binding(&only.name))?;
+            return self
+                .package
+                .def(def)
+                .kind
+                .in_type_namespace()
+                .then_some(def);
+        }
+        self.applied_receiver_head(recv)
+    }
+
+    /// The head's def of an instantiated type-keyed receiver — a type
+    /// application in the receiver position: the one-argument bracket
+    /// (`stack[int]`), the two-argument bracket (the grammar spells it
+    /// `map[k, v]`; a synthesized tree carries any head), or a written
+    /// application type carried by the fn-type node (the spelling the
+    /// brackets cannot express: three or more arguments, an optional
+    /// argument). The head names a type with no local shadow, the
+    /// package's namespace first and the file's import bindings below —
+    /// exactly the bare form's discipline.
+    fn applied_receiver_head(&self, recv: &Expr) -> Option<DefId> {
+        let head = match recv {
+            Expr::Index { recv, .. } => single_path_ident(recv)?,
+            Expr::MapApply { head, .. } => head,
+            Expr::FnType { ty, .. } => {
+                let Type::Path { path, args, .. } = ty.as_ref() else {
+                    return None;
+                };
+                if path.segments.len() != 1 || args.is_empty() {
+                    return None;
+                }
+                &path.segments[0]
+            },
+            _ => return None,
+        };
+        if self.lookup_local(&head.name).is_some() {
             return None;
         }
-        let def = self.package.lookup_type(&only.name)?;
+        let def = self
+            .package
+            .lookup_type(&head.name)
+            .or_else(|| self.import_type_binding(&head.name))?;
         self.package
             .def(def)
             .kind
             .in_type_namespace()
             .then_some(def)
+    }
+
+    /// The receiver walk of a dot-call: an instantiated type-keyed
+    /// receiver whose head names a type — the package's declarations or
+    /// the file's import bindings — walks as type uses (the
+    /// constructor-bracket convention), while every other shape — the
+    /// map application and a carried fn type included, whose own arms
+    /// already read as type uses — keeps the expression walk.
+    fn dot_recv_use(&mut self, recv: &Expr) {
+        let Expr::Index {
+            recv: head, index, ..
+        } = recv
+        else {
+            self.expr(recv);
+            return;
+        };
+        let Some(head) = single_path_ident(head).filter(|id| {
+            self.lookup_local(&id.name).is_none()
+                && (self.package.lookup_type(&id.name).is_some()
+                    || self.import_type_binding(&id.name).is_some())
+        }) else {
+            self.expr(recv);
+            return;
+        };
+        self.type_name_use(head);
+        self.ctor_type_arg(index);
     }
 
     /// The method position behind a type-name receiver: the type's own
@@ -1565,12 +2902,8 @@ impl FileResolver<'_> {
         let type_name = self.package.def(target).name.clone();
         // one pass serves both halves: the owner's own members claim the
         // call, and the rest feed the "exists on" note when none do
-        let (candidates, others): (Vec<MethodId>, Vec<MethodId>) = self
-            .package
-            .method_candidates(&name.name)
-            .iter()
-            .copied()
-            .partition(|&id| {
+        let (candidates, others): (Vec<MethodId>, Vec<MethodId>) =
+            self.package.method_candidates(&name.name).partition(|&id| {
                 matches!(
                     &self.package.method(id).owner,
                     MethodOwner::Inherent(owner) if *owner == type_name
@@ -1625,7 +2958,7 @@ impl FileResolver<'_> {
                 .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
             return;
         }
-        let candidates: Vec<MethodId> = self.package.method_candidates(&name.name).to_vec();
+        let candidates: Vec<MethodId> = self.package.method_candidates(&name.name).collect();
         if candidates.is_empty() {
             let mut diag = Diagnostic::error(
                 ErrorCode::UnresolvedName,
@@ -1719,6 +3052,10 @@ impl FileResolver<'_> {
                     with: "Self".to_owned(),
                 }),
             );
+        } else if let Some(def) = self.import_type_binding(&name.name) {
+            // a linked type's selection (G4): the sentinels above keep
+            // their readings before any imported spelling
+            self.def_use(name.span, def);
         } else {
             let candidates = self.type_candidates();
             self.unknown_name_at(name, candidates, "type");
@@ -1802,6 +3139,7 @@ impl FileResolver<'_> {
         }
         self.package
             .lookup_type(&name.name)
+            .or_else(|| self.import_type_binding(&name.name))
             .filter(|&def| self.package.def(def).kind.is_constructor())
             .map_or(ArmTag::Binding, ArmTag::Def)
     }
@@ -1819,7 +3157,11 @@ impl FileResolver<'_> {
         };
         match path.segments.as_slice() {
             [only] => {
-                if let Some(def) = self.package.lookup_type(&only.name) {
+                if let Some(def) = self
+                    .package
+                    .lookup_type(&only.name)
+                    .or_else(|| self.import_type_binding(&only.name))
+                {
                     self.def_use(only.span, def);
                 } else {
                     let candidates = candidates();
@@ -1828,7 +3170,11 @@ impl FileResolver<'_> {
             },
             // The tail is a case name; case tables are the checker's.
             [head, _case] => {
-                if let Some(def) = self.package.lookup_type(&head.name) {
+                if let Some(def) = self
+                    .package
+                    .lookup_type(&head.name)
+                    .or_else(|| self.import_type_binding(&head.name))
+                {
                     self.def_use(head.span, def);
                 } else {
                     let candidates = candidates();
@@ -1921,12 +3267,7 @@ impl FileResolver<'_> {
     /// Names visible for suggestions at a value use: package names plus
     /// every local in scope.
     fn shadowing_candidates(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .package
-            .defs
-            .iter()
-            .map(|def| def.name.clone())
-            .collect();
+        let mut names: Vec<String> = self.package.defs().map(|def| def.name.clone()).collect();
         for scope in &self.scopes {
             names.extend(scope.keys().cloned());
         }
@@ -1935,12 +3276,7 @@ impl FileResolver<'_> {
 
     /// Names visible at a type use: package names plus type variables.
     fn type_candidates(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .package
-            .defs
-            .iter()
-            .map(|def| def.name.clone())
-            .collect();
+        let mut names: Vec<String> = self.package.defs().map(|def| def.name.clone()).collect();
         for scope in &self.type_scopes {
             names.extend(scope.keys().cloned());
         }
@@ -1952,6 +3288,10 @@ impl FileResolver<'_> {
     fn callable_candidates(&self) -> Vec<String> {
         let mut names: Vec<String> = self.package.value_names.keys().cloned().collect();
         names.extend(self.package.method_index.keys().cloned());
+        if let Some(base) = self.package.base.as_deref() {
+            names.extend(base.value_names.keys().cloned());
+            names.extend(base.method_index.keys().cloned());
+        }
         names
     }
 }
@@ -1988,6 +3328,17 @@ fn inherent_owner(target: &Type) -> String {
         Type::Paren { inner, .. } => inherent_owner(inner),
         Type::Path { path, .. } if path.segments.len() == 1 => path.segments[0].name.clone(),
         other => crate::decls::render_type(other),
+    }
+}
+
+/// The head identifier an impl's target names when it is a bare path
+/// spelling (parens peeled, application args aside): the name whose
+/// namespace priority decides whether the impl targets a linked type.
+fn impl_target_head(target: &Type) -> Option<&Ident> {
+    match target {
+        Type::Paren { inner, .. } => impl_target_head(inner),
+        Type::Path { path, .. } if path.segments.len() == 1 => Some(&path.segments[0]),
+        _ => None,
     }
 }
 

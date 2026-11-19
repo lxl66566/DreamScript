@@ -1,0 +1,93 @@
+// purpose: the platform file/time natives' lowering over a package-owned
+// file struct — the ds-source handler layer over the raw externs (a
+// native call cannot borrow a deinit-carrying argument, so read_exact
+// reads the fd word out first), the deinit pairing (the one-fn scope
+// end fires the hook, so the many() loop pins that close runs per
+// call), and the time op's epoch-nanos word. The reads answer the
+// io_err union with the `bytes` collection as the success member
+// (`?` and match extract; a handled failure neither prints nor halts)
+// — one immutable byte string per read, `len` counting its payload,
+// `byte_at` the checked indexed read, `bytes_of`/`byte_list` the
+// list[byte] bridges — while open_file keeps the total spelling — the
+// handle is deinit-carrying, so a union member holding it refuses —
+// and its failure still prints and halts on the discriminant.
+
+tag int
+tag bool
+tag string
+tag byte
+tag bytes
+tag io_err
+pub trait Copyable { }
+pub struct list[t]
+
+pub struct file_handle: ~Copyable {
+  fd: int
+  deinit { close_raw(self.fd) }
+}
+extern fn open_file (path: string) -> file_handle
+extern fn read_raw (fd: int, n: int) -> bytes | io_err
+extern fn close_raw (fd: int) -> ()
+extern fn time () -> int
+extern fn len[t] (xs: t) -> int
+extern fn bytes_of (xs: list[byte]) -> bytes
+extern fn byte_list (b: bytes) -> list[byte]
+extern fn byte_at (b: bytes, i: int) -> byte | none
+extern fn byte_compare (a: byte, b: byte) -> int
+
+fn read_exact (f: file_handle, n: int) -> bytes | io_err {
+  const b = read_raw(f.fd, n)
+  b
+}
+
+fn one(path: string) -> int | io_err {
+  const f = open_file(path)
+  const b = read_exact(f, 4)?
+  len(b)
+}
+
+fn many(path: string) -> int {
+  var total = 0
+  var i = 0
+  while i < 2000 {
+    total += one(path).err((_: io_err) => 0)
+    i += 1
+  }
+  total
+}
+
+fn main(path: string) -> bool {
+  cycle(path).err((_: io_err) => false)
+}
+
+fn cycle(path: string) -> bool | io_err {
+  const f = open_file(path)
+  const a = read_exact(f, 4)?
+  const b = read_exact(f, 4)?
+  const t = time()
+  const back = bytes_of(byte_list(a))
+  const head = byte_at(a, 0)
+  const head_ok = if head is byte { byte_compare(head, b'p') == 0 } else { false }
+  many(path) == 8000 && len(a) == 4 && len(b) == 4 && len(back) == 4 && head_ok && t > 1700000000000000000
+}
+
+// A read over a closed handle answers the io_err member, and the
+// match arms turn it into a value without printing or halting.
+fn fail_read(path: string) -> int {
+  const f = open_file(path)
+  close_raw(f.fd)
+  const cell = read_exact(f, 4)
+  match cell {
+    io_err => -1,
+    b => len(b),
+  }
+}
+
+fn fail_open(path: string) -> int {
+  const f = open_file(path)
+  const cell = read_exact(f, 4)
+  match cell {
+    io_err => -1,
+    b => len(b),
+  }
+}

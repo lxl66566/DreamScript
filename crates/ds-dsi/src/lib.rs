@@ -18,7 +18,10 @@
 //!   mints them (the mint-determinism pin);
 //! * the declaration half's plain tables — the universe's atom and trait mint logs (replayed
 //!   through the declare APIs) plus the atoms/structs/enums/cases tables and the trait memberships
-//!   — so the reserve and shape passes skip the served defs;
+//!   — so the reserve and shape passes skip the served defs; the shape-phase mint log carries each
+//!   mint's generation atom id beside it, because the replay lands past the fresh files' reserve
+//!   mints and a post-replay remap rewrites every recorded datum naming a minted atom onto its
+//!   landing id (a def-named reference replays first, at its own id, and never moves);
 //! * the hard declaration tables — every stored signature (`fns`, trait `members`, `inherent`; the
 //!   embedded written types serialize like an AST blob's trees), the trait member/generics tables,
 //!   the instance environment's rows with their solved heads and conditions (raw
@@ -43,12 +46,15 @@
 //! program and deep-compares the bundles through the [`gates`] views;
 //! and the consuming path's own suite exercises the serve end to end.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ds_check::{
     Analyzed, AtomKind, Case, Condition, Def, DefEffects, DefId, DefKind, Effects, Field, FnSig,
-    InstanceId, MethodDecl, MethodId, MethodOwner, Package, ReplayMint, Res, Resolutions,
-    ServedDecls, ServedInstance, ServedMethodRow, TraitId, TypeExpr, TypeId, Universe,
+    IdTable, InstanceId, MethodDecl, MethodId, MethodOwner, Package, PackageBase, ReplayMint, Res,
+    Resolutions, ServedDecls, ServedInstance, ServedMethodRow, TraitId, TypeExpr, TypeId, Universe,
 };
 use ds_diag::{FileId, Span};
 use ds_mod::Hash128;
@@ -61,7 +67,7 @@ use serde::{Deserialize, Serialize};
 const HEADER: usize = 32;
 
 /// Why a checked-prefix artifact could not be served.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum PrefixDsiError {
     /// The artifact's source hash does not match the source the caller
     /// registered: the artifact predates an edit. Regenerate it.
@@ -105,10 +111,11 @@ pub struct ServedPrefix {
     pub resolutions: Vec<Resolutions>,
     /// The declaration-side prefix.
     pub decls: ServedDecls,
-    /// The served definitions' solved rows.
-    pub effect_defs: Vec<DefEffects>,
-    /// The served methods' solved rows.
-    pub effect_methods: Vec<ServedMethodRow>,
+    /// The served definitions' solved rows, one shared handle the serve
+    /// clones by refcount (the rows name definition ids alone).
+    pub effect_defs: Arc<[DefEffects]>,
+    /// The served methods' solved rows, cloned by refcount the same way.
+    pub effect_methods: Arc<[ServedMethodRow]>,
 }
 
 /// The artifact's payload: everything one served run needs, all of it
@@ -209,6 +216,11 @@ pub enum ResData {
     Dot(DotResData),
     /// The `.err`/`.ok` handler surface form.
     Handler,
+    /// A module alias an import bound (G4). The alias's module-reference
+    /// table itself never serves — no linked compile persists a prefix —
+    /// so a served entry here is a generation-side contract break, kept
+    /// round-trip-faithful rather than refused at the format.
+    Module(u32),
 }
 
 /// The resolution of a dot-call's method position.
@@ -231,6 +243,11 @@ pub enum DotResData {
         /// Candidate method indexes.
         candidates: Vec<u32>,
     },
+    /// The module-qualified tier behind an import's alias (G4).
+    Module {
+        /// The linked function's definition index.
+        func: u32,
+    },
 }
 
 /// The universe's mint logs and interned sets: the reserve-phase atoms
@@ -250,9 +267,11 @@ pub struct UniverseLog {
     pub traits: Vec<String>,
     /// `(trait index, atom index)` membership records.
     pub memberships: Vec<(u32, u32)>,
-    /// The shape-phase atom mints, in mint order: impl type variables
-    /// and the structural atoms their head solving minted.
-    pub mints: Vec<MintData>,
+    /// The shape-phase atom mints, in mint order, each with the
+    /// generation atom id the prefix's recorded data names it by (the
+    /// serve's landing map keys): impl type variables and the structural
+    /// atoms their head solving minted.
+    pub mints: Vec<(u32, MintData)>,
     /// The interned member sets, in intern order.
     pub sets: Vec<Vec<u32>>,
     /// The shared type-variable counter after the ambient's impl arms.
@@ -274,6 +293,16 @@ pub enum MintData {
         ctor: u32,
         /// The argument sets, in position order.
         args: Vec<u32>,
+    },
+    /// A minted linked struct (G4): an import-bound type's def-named
+    /// atom, which the def-named log's rank replay could not place —
+    /// the mint log's ids replay in order.
+    Struct {
+        /// The atom's declared name.
+        name: String,
+        /// Its field signatures, naming the ambient's def-named atoms
+        /// (identities) and its own minted applications by generation id.
+        fields: Vec<FieldData>,
     },
 }
 
@@ -574,27 +603,40 @@ pub fn extract(
     method_rows: &[ServedMethodRow],
 ) -> PrefixDsi {
     let package = &analyzed.package;
+    // The import-bound definitions (G4): excluded from the def-named
+    // atom log and re-keyed as mints (see `universe_log`), like their
+    // exclusion from the defs below.
+    let foreign: HashSet<DefId> = package.foreign().keys().copied().collect();
 
     let mut type_names = Vec::new();
     let mut value_names = Vec::new();
     let defs: Vec<DefData> = package
         .defs()
-        .iter()
         .enumerate()
-        .map(|(index, def)| {
+        .filter_map(|(index, def)| {
             let id = DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
+            // The import-bound definitions (G4) never ride the artifact:
+            // their link-pass products (the foreign map, the per-file
+            // bindings, the module refs) are compile-time state a serve
+            // re-derives from its own fresh graph, and the defs themselves
+            // sit strictly after every collected definition, so the
+            // serve's link re-run re-registers them at the same tail ids
+            // the served resolutions and tables name.
+            if foreign.contains(&id) {
+                return None;
+            }
             if package.lookup_type(&def.name) == Some(id) {
                 type_names.push((def.name.clone(), id.index()));
             }
             if package.lookup_value(&def.name) == Some(id) {
                 value_names.push((def.name.clone(), id.index()));
             }
-            DefData {
+            Some(DefData {
                 name: def.name.clone(),
                 kind: kind_bits(def.kind),
                 vis: vis_bits(def.vis),
                 span: def.span,
-            }
+            })
         })
         .collect();
     let mut method_index: Vec<(String, Vec<u32>)> = Vec::new();
@@ -603,7 +645,6 @@ pub fn extract(
     let mut method_slots: HashMap<&str, usize> = HashMap::new();
     let methods: Vec<MethodDeclData> = package
         .methods()
-        .iter()
         .enumerate()
         .map(|(index, method)| {
             let id = u32::try_from(index).expect("method count fits u32");
@@ -640,7 +681,7 @@ pub fn extract(
 
     PrefixDsi {
         package: PackageData {
-            files: package.files().to_vec(),
+            files: package.files().collect(),
             defs,
             type_names,
             value_names,
@@ -648,7 +689,7 @@ pub fn extract(
             method_index,
         },
         uses,
-        universe: universe_log(decls),
+        universe: universe_log(decls, &foreign),
         decls: decls_data(decls),
         instances: instance_rows_of(decls),
         effects: effects
@@ -675,14 +716,23 @@ pub fn extract(
 }
 
 /// The universe's mint logs and interned sets from the declaration-phase
-/// snapshot: the def-named atoms with final shapes, the declared traits
-/// in order, the trait memberships, the shape-phase mints, the interned
-/// sets, and the settled variable counter.
-fn universe_log(decls: &ds_check::Decls) -> UniverseLog {
+/// snapshot: the def-named atoms with final shapes (the import-bound
+/// types' atoms excepted — they ride the mints below), the declared
+/// traits in order, the trait memberships, the shape-phase mints, the
+/// interned sets, and the settled variable counter.
+fn universe_log(decls: &ds_check::Decls, foreign: &HashSet<DefId>) -> UniverseLog {
     let universe = &decls.universe;
     let mut log = Vec::new();
     for id in universe.atom_ids() {
         if id == TypeId::NONE || !decls.defs_of_atoms.contains_key(&id) {
+            continue;
+        }
+        // An import-bound type's atom is def-named but minted late (the
+        // link pass's products mint after the shape phase), so the
+        // def-named log — which the serve replays by rank — cannot place
+        // it: it rides the mints below, whose generation ids replay in
+        // order.
+        if foreign.contains(&decls.defs_of_atoms.get(&id).copied().unwrap()) {
             continue;
         }
         let decl = universe.atom_decl(id).expect("every id has a decl");
@@ -701,9 +751,14 @@ fn universe_log(decls: &ds_check::Decls) -> UniverseLog {
             },
         });
     }
+    let linked_atoms = decls
+        .defs_of_atoms
+        .iter()
+        .filter(|(_, def)| foreign.contains(def))
+        .count();
     assert_eq!(
         log.len(),
-        decls.defs_of_atoms.len(),
+        decls.defs_of_atoms.len() - linked_atoms,
         "the mint log must carry every def-named atom"
     );
     let mut memberships = Vec::new();
@@ -737,13 +792,35 @@ fn universe_log(decls: &ds_check::Decls) -> UniverseLog {
     let traits: Vec<String> = trait_rows.into_iter().map(|(_, name)| name).collect();
 
     // The shape-phase mints: every atom the impl arms minted (variables
-    // and structural atoms), in mint order.
-    let mints: Vec<MintData> = universe
+    // and structural atoms), in mint order, each with the generation id
+    // the recorded data names it by (the merged run's reserve mints can
+    // shift the landing, so the serve remaps through these). A linked
+    // type's atom rides the same log's tail: its generation id replays
+    // in order, and its fields name the ambient's identities and its
+    // own later-minted applications, which the serve's remap rewrites.
+    let mints: Vec<(u32, MintData)> = universe
         .atom_ids()
-        .filter(|id| *id != TypeId::NONE && !decls.defs_of_atoms.contains_key(id))
-        .map(|id| {
+        .filter(|id| *id != TypeId::NONE)
+        .filter_map(|id| {
             let decl = universe.atom_decl(id).expect("every id has a decl");
-            match &decl.kind {
+            if let Some(&def) = decls.defs_of_atoms.get(&id) {
+                if !foreign.contains(&def) {
+                    return None;
+                }
+                let linked = match &decl.kind {
+                    // a linked struct, or a linked enum case's struct
+                    // payload, rides its shape
+                    AtomKind::Struct(fields) => MintData::Struct {
+                        name: decl.name.clone(),
+                        fields: fields.iter().map(field_data).collect(),
+                    },
+                    // a linked enum's unit case rides its bare name
+                    AtomKind::Unit => MintData::Var(decl.name.clone()),
+                    _ => panic!("a linked type's atom is a struct or a unit case"),
+                };
+                return Some((id.index(), linked));
+            }
+            let mint = match &decl.kind {
                 AtomKind::Unit => MintData::Var(decl.name.clone()),
                 AtomKind::Tuple(elements) => {
                     MintData::Tuple(elements.iter().map(|e| e.index()).collect())
@@ -758,7 +835,8 @@ fn universe_log(decls: &ds_check::Decls) -> UniverseLog {
                 | AtomKind::FnSig(..) => {
                     panic!("a shape-phase mint is a variable or structural atom")
                 },
-            }
+            };
+            Some((id.index(), mint))
         })
         .collect();
 
@@ -1044,9 +1122,83 @@ fn res_data(res: &Res) -> ResData {
             ds_check::DotRes::Static { candidates } => DotResData::Static {
                 candidates: candidates.iter().map(|m| m.index()).collect(),
             },
+            ds_check::DotRes::Module { func } => DotResData::Module { func: func.index() },
         }),
         Res::Handler => ResData::Handler,
+        Res::Module(module) => ResData::Module(module.index()),
     }
+}
+
+/// The artifact's decoded payload: the source-hash header must match the
+/// source text the caller registered, the payload must pass its digest,
+/// and the bytes must decode — the format half of [`decode_dsi`] alone,
+/// so a process that serves the same artifact repeatedly decodes once
+/// and re-`serve_prefix`es per call. Any miss is an error the caller
+/// answers with the fresh compute.
+///
+/// # Errors
+///
+/// [`PrefixDsiError`]: a stale header or a corrupt payload — both cache
+/// misses, never source problems.
+pub fn decode_prefix(bytes: &[u8], source_hash: Hash128) -> Result<PrefixDsi, PrefixDsiError> {
+    let Some((header, payload)) = bytes.split_first_chunk::<HEADER>() else {
+        return Err(PrefixDsiError::SourceDrift);
+    };
+    let Some((source, digest)) = header.split_first_chunk::<16>() else {
+        return Err(PrefixDsiError::SourceDrift);
+    };
+    if source != source_hash.as_bytes() {
+        return Err(PrefixDsiError::SourceDrift);
+    }
+    if digest != Hash128::compute(payload).as_bytes() {
+        return Err(PrefixDsiError::Decode(
+            "the payload does not match its digest",
+        ));
+    }
+    postcard::from_bytes(payload).map_err(|_| PrefixDsiError::Decode("postcard refused"))
+}
+
+/// One decoded artifact's native serve: the decoded tables must address
+/// exactly the file ids the caller registered (the registration the
+/// spans carry), and every table rebuilds owned per call — the tables
+/// move into the caller's bundle, so a shared decode serves a private
+/// conversion each time. A caller serving the same artifact repeatedly
+/// converts once through [`convert_tables`] and serves through
+/// [`serve_prefix_tables`] instead, installing the shared bases per
+/// serve. Any miss is an error the caller answers with the fresh
+/// compute.
+///
+/// # Errors
+///
+/// [`PrefixDsiError`]: a foreign registration, or tables the conversion
+/// refuses — both cache misses, never source problems.
+pub fn serve_prefix(
+    artifact: &PrefixDsi,
+    files: &[FileId],
+) -> Result<ServedPrefix, PrefixDsiError> {
+    let tables = convert_tables(artifact)?;
+    serve_prefix_tables(artifact, files, &tables)
+}
+
+/// [`serve_prefix`] over a caller-parked conversion: a process that
+/// serves the same artifact repeatedly (the ambient's member compiles,
+/// a query session) converts once and hands every serve the same shared
+/// table bases, so each serve's install is a refcount and its teardown
+/// never drops the rows.
+///
+/// # Errors
+///
+/// [`PrefixDsiError`]: a foreign registration, or tables the conversion
+/// refuses — both cache misses, never source problems.
+pub fn serve_prefix_tables(
+    artifact: &PrefixDsi,
+    files: &[FileId],
+    tables: &ServedTables,
+) -> Result<ServedPrefix, PrefixDsiError> {
+    if artifact.package.files.as_slice() != files {
+        return Err(PrefixDsiError::FileMismatch);
+    }
+    serve(artifact, tables)
 }
 
 /// The verified artifact's native serve over its bytes: the source-hash
@@ -1064,35 +1216,147 @@ pub fn decode_dsi(
     source_hash: Hash128,
     files: &[FileId],
 ) -> Result<ServedPrefix, PrefixDsiError> {
-    let Some((header, payload)) = bytes.split_first_chunk::<HEADER>() else {
-        return Err(PrefixDsiError::SourceDrift);
-    };
-    let Some((source, digest)) = header.split_first_chunk::<16>() else {
-        return Err(PrefixDsiError::SourceDrift);
-    };
-    if source != source_hash.as_bytes() {
-        return Err(PrefixDsiError::SourceDrift);
-    }
-    if digest != Hash128::compute(payload).as_bytes() {
-        return Err(PrefixDsiError::Decode(
-            "the payload does not match its digest",
-        ));
-    }
-    let artifact: PrefixDsi =
-        postcard::from_bytes(payload).map_err(|_| PrefixDsiError::Decode("postcard refused"))?;
-    if artifact.package.files.as_slice() != files {
-        return Err(PrefixDsiError::FileMismatch);
-    }
-    serve(&artifact)
+    serve_prefix(&decode_prefix(bytes, source_hash)?, files)
 }
 
-/// Converts the decoded artifact into the native serve.
-fn serve(artifact: &PrefixDsi) -> Result<ServedPrefix, PrefixDsiError> {
-    let package = serve_package(artifact)?;
-    let resolutions = serve_resolutions(artifact);
-    let (universe, tys) = serve_universe(artifact)?;
-    let (decls, mints) = serve_tables(artifact, universe, &tys);
+/// The artifact's plain and signature declaration tables converted once,
+/// beside the converted namespace, per-file resolution tables, and
+/// solved effect rows: the shareable half of the serve (none of it
+/// consults the universe replay — the instance rows and shape-phase
+/// mints name intern indices, so they stay per-serve). Every table lands
+/// behind one shared handle, so a process that serves the same artifact
+/// repeatedly parks this behind a `ds_check::Park` cell and installs the
+/// same bases per serve; a one-shot caller converts per serve through
+/// [`serve_prefix`] and the conversion drops once with the bundle,
+/// exactly what a per-serve rebuild always paid.
+pub struct ServedTables {
+    /// The converted namespace, installed as the package's shared base
+    /// per serve: its rows name definition and method ids alone, which
+    /// every serve mints identically, so a member compile's growth
+    /// continues the id spaces and its teardown drops a refcount.
+    pub package: Arc<PackageBase>,
+    /// The converted per-file resolution tables, cloned per serve by
+    /// refcount (each table's rows sit behind one shared handle).
+    pub resolutions: Vec<Resolutions>,
+    /// Definition to atom identity.
+    pub atoms: Arc<IdTable<DefId, TypeId>>,
+    /// Atom identity back to its definition.
+    pub defs_of_atoms: Arc<IdTable<TypeId, DefId>>,
+    /// Definition to trait identity.
+    pub traits: Arc<IdTable<DefId, TraitId>>,
+    /// Struct shapes (enum-case payload shapes included).
+    pub structs: Arc<IdTable<DefId, ds_check::decls::StructShape>>,
+    /// Enum shapes.
+    pub enums: Arc<IdTable<DefId, ds_check::decls::EnumShape>>,
+    /// Minted cases of non-generic enums.
+    pub cases: Arc<IdTable<DefId, ds_check::decls::CaseDecl>>,
+    /// Signatures of named functions and const-arrow function bindings.
+    pub fns: Arc<IdTable<DefId, Arc<FnSig>>>,
+    /// Trait member signatures, by method id.
+    pub members: Arc<IdTable<MethodId, Arc<FnSig>>>,
+    /// Inherent impl-function signatures, by method id.
+    pub inherent: Arc<IdTable<MethodId, Arc<FnSig>>>,
+    /// Member names of each trait, by trait def.
+    pub trait_members: Arc<IdTable<DefId, Vec<String>>>,
+    /// The defaulted member names of each trait, by trait def.
+    pub trait_member_defaults: Arc<IdTable<DefId, Vec<String>>>,
+    /// Generic parameter names of each trait, by trait def.
+    pub trait_generics: Arc<IdTable<DefId, Vec<String>>>,
+    /// The declaring impl item's span per served instance.
+    pub instance_impls: Arc<IdTable<InstanceId, Span>>,
+    /// The impl item each served inherent impl function lives in.
+    pub inherent_impls: Arc<IdTable<MethodId, Span>>,
+    /// The solved definition rows, one shared handle cloned per serve by
+    /// refcount: the rows name definition ids alone, which every serve
+    /// mints identically, so the fill's name rows park with the
+    /// conversion instead of re-collecting per serve.
+    pub effect_defs: Arc<[DefEffects]>,
+    /// The solved method rows, cloned per serve the same way: method ids
+    /// alone, the same share the namespace base rides.
+    pub effect_methods: Arc<[ServedMethodRow]>,
+}
 
+/// Converts the artifact's namespace and declaration tables into shared
+/// bases.
+///
+/// # Errors
+///
+/// [`PrefixDsiError`]: tables the conversion refuses (an unknown
+/// discriminant) — a cache miss, never a source problem.
+pub fn convert_tables(artifact: &PrefixDsi) -> Result<ServedTables, PrefixDsiError> {
+    let package = Arc::new(package_base(artifact)?);
+    let resolutions = serve_resolutions(artifact);
+    let mut atoms = IdTable::default();
+    for (def, atom) in &artifact.decls.atoms {
+        atoms.insert(DefId::from_raw(*def), TypeId::from_raw(*atom));
+    }
+    let mut defs_of_atoms = IdTable::default();
+    for (atom, def) in &artifact.decls.defs_of_atoms {
+        defs_of_atoms.insert(TypeId::from_raw(*atom), DefId::from_raw(*def));
+    }
+    let mut traits = IdTable::default();
+    for (def, trait_id) in &artifact.decls.traits {
+        traits.insert(DefId::from_raw(*def), TraitId::from_raw(*trait_id));
+    }
+    let mut structs = IdTable::default();
+    for (def, shape) in &artifact.decls.structs {
+        structs.insert(DefId::from_raw(*def), ds_check::decls::StructShape {
+            params: shape.params.iter().map(generic_param).collect(),
+            fields: shape.fields.clone(),
+            linear: shape.linear,
+        });
+    }
+    let mut enums = IdTable::default();
+    for (def, shape) in &artifact.decls.enums {
+        enums.insert(DefId::from_raw(*def), ds_check::decls::EnumShape {
+            params: shape.params.iter().map(generic_param).collect(),
+            cases: shape
+                .cases
+                .iter()
+                .map(|case| (case.name.clone(), case.span, case.payload.clone()))
+                .collect(),
+            linear: shape.linear,
+        });
+    }
+    let mut cases = IdTable::default();
+    for (def, case) in &artifact.decls.cases {
+        cases.insert(DefId::from_raw(*def), ds_check::decls::CaseDecl {
+            enum_def: DefId::from_raw(case.enum_def),
+            payload: case.payload.clone(),
+        });
+    }
+    let mut fns = IdTable::default();
+    for (def, sig) in &artifact.decls.fns {
+        fns.insert(DefId::from_raw(*def), Arc::new(fn_sig(sig)));
+    }
+    let mut members = IdTable::default();
+    for (method, sig) in &artifact.decls.members {
+        members.insert(MethodId::from_raw(*method), Arc::new(fn_sig(sig)));
+    }
+    let mut inherent = IdTable::default();
+    for (method, sig) in &artifact.decls.inherent {
+        inherent.insert(MethodId::from_raw(*method), Arc::new(fn_sig(sig)));
+    }
+    let mut trait_members = IdTable::default();
+    for (def, names) in &artifact.decls.trait_members {
+        trait_members.insert(DefId::from_raw(*def), names.clone());
+    }
+    let mut trait_member_defaults = IdTable::default();
+    for (def, names) in &artifact.decls.trait_member_defaults {
+        trait_member_defaults.insert(DefId::from_raw(*def), names.clone());
+    }
+    let mut trait_generics = IdTable::default();
+    for (def, names) in &artifact.decls.trait_generics {
+        trait_generics.insert(DefId::from_raw(*def), names.clone());
+    }
+    let mut instance_impls = IdTable::default();
+    for (instance, span) in &artifact.decls.instance_impls {
+        instance_impls.insert(InstanceId::from_raw(*instance), *span);
+    }
+    let mut inherent_impls = IdTable::default();
+    for (method, span) in &artifact.decls.inherent_impls {
+        inherent_impls.insert(MethodId::from_raw(*method), *span);
+    }
     let effect_defs = artifact
         .effects
         .iter()
@@ -1115,7 +1379,45 @@ fn serve(artifact: &PrefixDsi) -> Result<ServedPrefix, PrefixDsiError> {
             row: ds_check::EffectRow::from_bits(row.row),
             caps: row.caps,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    Ok(ServedTables {
+        package,
+        resolutions,
+        atoms: Arc::new(atoms),
+        defs_of_atoms: Arc::new(defs_of_atoms),
+        traits: Arc::new(traits),
+        structs: Arc::new(structs),
+        enums: Arc::new(enums),
+        cases: Arc::new(cases),
+        fns: Arc::new(fns),
+        members: Arc::new(members),
+        inherent: Arc::new(inherent),
+        trait_members: Arc::new(trait_members),
+        trait_member_defaults: Arc::new(trait_member_defaults),
+        trait_generics: Arc::new(trait_generics),
+        instance_impls: Arc::new(instance_impls),
+        inherent_impls: Arc::new(inherent_impls),
+        effect_defs: effect_defs.into(),
+        effect_methods: effect_methods.into(),
+    })
+}
+
+/// Converts the decoded artifact into the native serve over the shared
+/// table bases: the universe replay and the solved rows that name it
+/// (instances, mints, memberships) rebuild owned per serve — they name
+/// the replayed universe's intern indices or shift with the compiled
+/// files' mint landings, so a shared conversion cannot carry them. The
+/// namespace, the per-file resolution tables, and the solved effect rows
+/// clone from the shared conversion: refcount installs (the package's
+/// base tier, the rows' shared handles), never a row rebuild.
+fn serve(artifact: &PrefixDsi, tables: &ServedTables) -> Result<ServedPrefix, PrefixDsiError> {
+    let package = Package::with_base(Arc::clone(&tables.package));
+    let resolutions = tables.resolutions.clone();
+    let (universe, tys) = serve_universe(artifact)?;
+    let (decls, mints) = serve_tables(artifact, universe, &tys, tables)?;
+
+    let effect_defs = Arc::clone(&tables.effect_defs);
+    let effect_methods = Arc::clone(&tables.effect_methods);
 
     Ok(ServedPrefix {
         package,
@@ -1136,8 +1438,10 @@ fn serve(artifact: &PrefixDsi) -> Result<ServedPrefix, PrefixDsiError> {
     })
 }
 
-/// Rebuilds the namespace parts.
-fn serve_package(artifact: &PrefixDsi) -> Result<Package, PrefixDsiError> {
+/// Converts the namespace parts into the shared base the serve installs:
+/// every id it names (definitions, methods) is one every serve mints
+/// identically, so the base is shareable across a process's serves.
+fn package_base(artifact: &PrefixDsi) -> Result<PackageBase, PrefixDsiError> {
     let defs = artifact
         .package
         .defs
@@ -1164,7 +1468,7 @@ fn serve_package(artifact: &PrefixDsi) -> Result<Package, PrefixDsiError> {
             span: method.span,
         })
         .collect();
-    Ok(Package::from_parts(
+    Ok(PackageBase::from_parts(
         artifact.package.files.clone(),
         defs,
         artifact
@@ -1228,8 +1532,14 @@ fn serve_resolutions(artifact: &PrefixDsi) -> Vec<Resolutions> {
                                         .map(|&id| MethodId::from_raw(id))
                                         .collect(),
                                 },
+                                DotResData::Module { func } => ds_check::DotRes::Module {
+                                    func: DefId::from_raw(*func),
+                                },
                             }),
                             ResData::Handler => Res::Handler,
+                            ResData::Module(module) => {
+                                Res::Module(ds_check::ModuleId::from_raw(*module))
+                            },
                         };
                         (use_.span, res)
                     })
@@ -1302,112 +1612,59 @@ fn serve_universe(artifact: &PrefixDsi) -> Result<(Universe, Vec<ds_check::Ty>),
     Ok((universe, tys))
 }
 
-/// Installs the artifact's declaration tables over the replayed
-/// universe, answering the shape-phase mints the build replays later.
+/// Installs the artifact's shared table bases over the replayed
+/// universe, converting the solved rows — the instance environment and
+/// the shape-phase mints — per serve. Every raw intern index the rows
+/// and mints name is bounds-checked against the replayed `tys` table: a
+/// crafted artifact answers a [`PrefixDsiError::Decode`] miss, never an
+/// indexing panic.
 fn serve_tables(
     artifact: &PrefixDsi,
     universe: Universe,
     tys: &[ds_check::Ty],
-) -> (ds_check::Decls, Vec<ReplayMint>) {
+    tables: &ServedTables,
+) -> Result<(ds_check::Decls, Vec<(TypeId, ReplayMint)>), PrefixDsiError> {
+    let corrupt = || PrefixDsiError::Decode("a solved snapshot names an intern index out of range");
     let mut decls = ds_check::Decls {
         universe,
         ..ds_check::Decls::default()
     };
-    for (def, atom) in &artifact.decls.atoms {
-        decls
-            .atoms
-            .insert(DefId::from_raw(*def), TypeId::from_raw(*atom));
-    }
-    for (atom, def) in &artifact.decls.defs_of_atoms {
-        decls
-            .defs_of_atoms
-            .insert(TypeId::from_raw(*atom), DefId::from_raw(*def));
-    }
-    for (def, trait_id) in &artifact.decls.traits {
-        decls
-            .traits
-            .insert(DefId::from_raw(*def), TraitId::from_raw(*trait_id));
-    }
-    for (def, shape) in &artifact.decls.structs {
-        decls
-            .structs
-            .insert(DefId::from_raw(*def), ds_check::decls::StructShape {
-                params: shape.params.iter().map(generic_param).collect(),
-                fields: shape.fields.clone(),
-                linear: shape.linear,
-            });
-    }
-    for (def, shape) in &artifact.decls.enums {
-        decls
-            .enums
-            .insert(DefId::from_raw(*def), ds_check::decls::EnumShape {
-                params: shape.params.iter().map(generic_param).collect(),
-                cases: shape
-                    .cases
-                    .iter()
-                    .map(|case| (case.name.clone(), case.span, case.payload.clone()))
-                    .collect(),
-                linear: shape.linear,
-            });
-    }
-    for (def, case) in &artifact.decls.cases {
-        decls
-            .cases
-            .insert(DefId::from_raw(*def), ds_check::decls::CaseDecl {
-                enum_def: DefId::from_raw(case.enum_def),
-                payload: case.payload.clone(),
-            });
-    }
-    for (def, sig) in &artifact.decls.fns {
-        decls
-            .fns
-            .insert(DefId::from_raw(*def), Arc::new(fn_sig(sig)));
-    }
-    for (method, sig) in &artifact.decls.members {
-        decls
-            .members
-            .insert(MethodId::from_raw(*method), Arc::new(fn_sig(sig)));
-    }
-    for (method, sig) in &artifact.decls.inherent {
-        decls
-            .inherent
-            .insert(MethodId::from_raw(*method), Arc::new(fn_sig(sig)));
-    }
-    for (def, names) in &artifact.decls.trait_members {
-        decls
-            .trait_members
-            .insert(DefId::from_raw(*def), names.clone());
-    }
-    for (def, names) in &artifact.decls.trait_member_defaults {
-        decls
-            .trait_member_defaults
-            .insert(DefId::from_raw(*def), names.clone());
-    }
-    for (def, names) in &artifact.decls.trait_generics {
-        decls
-            .trait_generics
-            .insert(DefId::from_raw(*def), names.clone());
-    }
-    for (instance, span) in &artifact.decls.instance_impls {
-        decls
-            .instance_impls
-            .insert(InstanceId::from_raw(*instance), *span);
-    }
-    for (method, span) in &artifact.decls.inherent_impls {
-        decls
-            .inherent_impls
-            .insert(MethodId::from_raw(*method), *span);
-    }
-    let rows: Vec<ServedInstance> = artifact
+    decls.atoms.install_base(Arc::clone(&tables.atoms));
+    decls
+        .defs_of_atoms
+        .install_base(Arc::clone(&tables.defs_of_atoms));
+    decls.traits.install_base(Arc::clone(&tables.traits));
+    decls.structs.install_base(Arc::clone(&tables.structs));
+    decls.enums.install_base(Arc::clone(&tables.enums));
+    decls.cases.install_base(Arc::clone(&tables.cases));
+    decls.fns.install_base(Arc::clone(&tables.fns));
+    decls.members.install_base(Arc::clone(&tables.members));
+    decls.inherent.install_base(Arc::clone(&tables.inherent));
+    decls
+        .trait_members
+        .install_base(Arc::clone(&tables.trait_members));
+    decls
+        .trait_member_defaults
+        .install_base(Arc::clone(&tables.trait_member_defaults));
+    decls
+        .trait_generics
+        .install_base(Arc::clone(&tables.trait_generics));
+    decls
+        .instance_impls
+        .install_base(Arc::clone(&tables.instance_impls));
+    decls
+        .inherent_impls
+        .install_base(Arc::clone(&tables.inherent_impls));
+    let rows: Result<Vec<ServedInstance>, PrefixDsiError> = artifact
         .instances
         .iter()
         .map(|row| {
-            let solved = |set: &u32| tys[*set as usize];
-            ServedInstance {
+            let solved = |set: &u32| tys.get(*set as usize).copied().ok_or_else(corrupt);
+            Ok(ServedInstance {
                 trait_id: TraitId::from_raw(row.trait_id),
                 head_expr: type_expr(&row.head_expr),
-                head: solved(&row.head),
-                written: solved(&row.written),
+                head: solved(&row.head)?,
+                written: solved(&row.written)?,
                 condition_exprs: row
                     .condition_exprs
                     .iter()
@@ -1419,33 +1676,48 @@ fn serve_tables(
                     .conditions
                     .iter()
                     .map(|(trait_id, set)| {
-                        Condition::new(TraitId::from_raw(*trait_id), solved(set))
+                        solved(set).map(|ty| Condition::new(TraitId::from_raw(*trait_id), ty))
                     })
-                    .collect(),
-            }
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
         })
         .collect();
-    decls.instances.serve(rows);
-    let mints: Vec<ReplayMint> = artifact
+    decls.instances.serve(rows?);
+    let mints: Result<Vec<(TypeId, ReplayMint)>, PrefixDsiError> = artifact
         .universe
         .mints
         .iter()
-        .map(|mint| match mint {
-            MintData::Var(name) => ReplayMint::Var(name.clone()),
-            MintData::Tuple(elements) => {
-                ReplayMint::Tuple(elements.iter().map(|&id| TypeId::from_raw(id)).collect())
-            },
-            MintData::Apply { ctor, args } => ReplayMint::Apply(
-                TypeId::from_raw(*ctor),
-                args.iter().map(|set| tys[*set as usize]).collect(),
-            ),
+        .map(|(gen_id, mint)| {
+            let mint = match mint {
+                MintData::Var(name) => ReplayMint::Var(name.clone()),
+                MintData::Tuple(elements) => {
+                    ReplayMint::Tuple(elements.iter().map(|&id| TypeId::from_raw(id)).collect())
+                },
+                MintData::Apply { ctor, args } => ReplayMint::Apply(
+                    TypeId::from_raw(*ctor),
+                    args.iter()
+                        .map(|set| tys.get(*set as usize).copied().ok_or_else(corrupt))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                MintData::Struct { name, fields } => ReplayMint::Struct(
+                    name.clone(),
+                    fields
+                        .iter()
+                        .map(|field| Field {
+                            name: field.name.clone(),
+                            ty: type_expr(&field.ty),
+                        })
+                        .collect(),
+                ),
+            };
+            Ok((TypeId::from_raw(*gen_id), mint))
         })
         .collect();
     decls.var_counter = artifact.universe.var_counter;
     decls.served_defs = u32::try_from(artifact.package.defs.len()).expect("def count fits u32");
     decls.served_methods =
         u32::try_from(artifact.package.methods.len()).expect("method count fits u32");
-    (decls, mints)
+    Ok((decls, mints?))
 }
 
 fn type_expr(data: &TypeExprData) -> TypeExpr {
@@ -1650,6 +1922,25 @@ pub mod gates {
         postcard::to_allocvec(&view).expect("the signature tables serialize")
     }
 
+    /// The top-level binding rows of one run: one postcard blob per def,
+    /// in id order — the initializers carry no equality, so the bytes pin
+    /// them. The rows arrive shared from the served base where the serve
+    /// installs one, so this view is what pins the base's content to the
+    /// fresh walk's clones.
+    #[must_use]
+    pub fn const_rows(run: &Analyzed) -> Vec<(u32, Vec<u8>)> {
+        run.decls
+            .consts
+            .iter()
+            .map(|(def, local)| {
+                (
+                    def.index(),
+                    postcard::to_allocvec(local.as_ref()).expect("the binding row serializes"),
+                )
+            })
+            .collect()
+    }
+
     /// Every stored instance row of one run, serialized in id order (the
     /// written halves are the artifact's data form, so postcard bytes are
     /// the comparable shape).
@@ -1722,5 +2013,109 @@ pub mod gates {
     /// One stored signature's data form.
     fn fn_sig_data(sig: &ds_check::FnSig) -> FnSigData {
         super::fn_sig_data(sig)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_diag::FileId;
+
+    use super::{
+        AtomEntry, AtomShapeData, DeclsData, InstanceRowData, MintData, PackageData, PrefixDsi,
+        PrefixDsiError, TypeExprData, UniverseLog, artifact_bytes, decode_dsi,
+    };
+
+    /// A one-file, otherwise-empty artifact with `instances`/`mints` the
+    /// caller overrides: everything else replays cleanly, so the crafted
+    /// rows are what the serve must refuse.
+    fn artifact() -> PrefixDsi {
+        let empty_decls = DeclsData {
+            atoms: Vec::new(),
+            defs_of_atoms: Vec::new(),
+            traits: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            cases: Vec::new(),
+            fns: Vec::new(),
+            members: Vec::new(),
+            inherent: Vec::new(),
+            trait_members: Vec::new(),
+            trait_member_defaults: Vec::new(),
+            trait_generics: Vec::new(),
+            instance_impls: Vec::new(),
+            inherent_impls: Vec::new(),
+        };
+        PrefixDsi {
+            package: PackageData {
+                files: vec![FileId::new(0)],
+                defs: Vec::new(),
+                type_names: Vec::new(),
+                value_names: Vec::new(),
+                methods: Vec::new(),
+                method_index: Vec::new(),
+            },
+            uses: vec![Vec::new()],
+            universe: UniverseLog {
+                atoms: vec![AtomEntry {
+                    name: "probe".to_owned(),
+                    shape: AtomShapeData::Unit,
+                }],
+                traits: Vec::new(),
+                memberships: Vec::new(),
+                mints: Vec::new(),
+                sets: vec![vec![0]],
+                var_counter: 0,
+            },
+            decls: empty_decls,
+            instances: Vec::new(),
+            effects: Vec::new(),
+            method_rows: Vec::new(),
+        }
+    }
+
+    fn decode(artifact: &PrefixDsi) -> Result<super::ServedPrefix, PrefixDsiError> {
+        let hash = ds_mod::Hash128::compute(b"probe source");
+        let bytes = artifact_bytes(hash, artifact);
+        decode_dsi(&bytes, hash, &[FileId::new(0)])
+    }
+
+    #[test]
+    fn a_minimal_artifact_serves() {
+        assert!(decode(&artifact()).is_ok());
+    }
+
+    /// An instance row naming an intern index past the replayed set table
+    /// is a corrupt artifact answered as a decode miss, never an indexing
+    /// panic (the header digest gates bit rot, not crafted bytes).
+    #[test]
+    fn an_instance_set_index_out_of_range_is_a_decode_miss() {
+        let mut artifact = artifact();
+        artifact.instances = vec![InstanceRowData {
+            trait_id: 0,
+            head_expr: TypeExprData::Atom(0),
+            head: 9,
+            written: 0,
+            condition_exprs: Vec::new(),
+            conditions: Vec::new(),
+        }];
+        let Err(PrefixDsiError::Decode(why)) = decode(&artifact) else {
+            panic!("a crafted head index must be a decode miss");
+        };
+        assert!(why.contains("intern index"), "{why}");
+    }
+
+    /// An application mint whose argument names a set the universe never
+    /// interned is the same corruption class.
+    #[test]
+    fn a_mint_set_index_out_of_range_is_a_decode_miss() {
+        let mut artifact = artifact();
+        artifact.universe.mints = vec![(0, MintData::Apply {
+            ctor: 0,
+            args: vec![7],
+        })];
+        let Err(PrefixDsiError::Decode(why)) = decode(&artifact) else {
+            panic!("a crafted mint index must be a decode miss");
+        };
+        assert!(why.contains("intern index"), "{why}");
     }
 }

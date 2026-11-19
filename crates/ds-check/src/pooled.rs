@@ -18,21 +18,28 @@
 //! semantics. The hunt follows the callable's reach: the callable's own
 //! subtree (nested lambdas included — a hosted combinator's element
 //! lambda runs inside the child's extent), named-fn and const-binding
-//! bodies, fn-typed locals one binding step, trait and inherent member
-//! bodies by member name (dispatch candidates over-approximated), and
-//! interpolation holes' `show` dispatches. A fn value this pass cannot
-//! pin — a parameter or a computed callable — stays clean; flow-sensitive
+//! bodies, fn-typed locals through their alias chains (visited-guarded,
+//! so no depth truncates), value-position fn arguments (a named helper a
+//! combinator receives runs inside the extent), trait and inherent
+//! member bodies by member name (dispatch candidates over-approximated),
+//! interpolation holes' `show` dispatches, and linked callees by their
+//! carried row (their bodies live outside this package's trees). The
+//! site scan covers every tree position a body can sit at, a struct's
+//! `deinit` block included. A fn value this pass cannot pin — a
+//! parameter or a computed callable — stays clean; flow-sensitive
 //! attribution is the later effect-attribution round.
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
-    BlockExpr, Expr, Item, ItemKind, Stmt, StmtKind, StrPart, TraitMember, Type as Written,
+    BlockExpr, Expr, Item, ItemKind, Stmt, StmtKind, StrPart, StructMember, TraitMember,
+    Type as Written,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     decls::{Decls, ParamSig},
     effects::{DeclaredRows, Effect},
+    import::ForeignKind,
     pattern::pattern_binders,
     resolve::{DefId, DotRes, Package, Res, Resolutions},
     type_of::{Analyzed, HoleShowDispatches},
@@ -356,7 +363,9 @@ impl<'a> Index<'a> {
     fn hunt(&self, callable: &'a Expr, declared: &DeclaredRows) -> Option<Offense> {
         let mut visited: FxHashSet<Span> = FxHashSet::default();
         let mut queue: Vec<Body<'a>> = Vec::new();
-        if let Some(offense) = self.chase_value(callable, declared, &mut queue, 0) {
+        if let Some(offense) =
+            self.chase_value(callable, declared, &mut queue, &mut FxHashSet::default())
+        {
             return Some(offense);
         }
         while let Some(body) = queue.pop() {
@@ -372,7 +381,7 @@ impl<'a> Index<'a> {
                         let Some(Body::Expr(init)) = self.locals.get(&bind) else {
                             continue;
                         };
-                        self.chase_value(init, declared, &mut queue, 0)
+                        self.chase_value(init, declared, &mut queue, &mut FxHashSet::default())
                     },
                     Hop::Member(name) => {
                         if let Some(bodies) = self.methods.get(&name) {
@@ -391,44 +400,56 @@ impl<'a> Index<'a> {
 
     /// Follows one fn-typed value to the body it may run: a lambda
     /// queues its own subtree, a named definition takes the def hop, a
-    /// local chases its initializer one binding step (the chase depth
-    /// caps the local chains — definitions are visited-guarded, so only
-    /// locals need it).
+    /// local chases its initializer binding step after binding step —
+    /// the chase's visited set guards the local chains (a cycle answers
+    /// clean), so no alias depth truncates the reach. Definitions are
+    /// visited-guarded at the queue, so only locals need the set.
     fn chase_value(
         &self,
         expr: &'a Expr,
         declared: &DeclaredRows,
         queue: &mut Vec<Body<'a>>,
-        depth: u8,
+        seen: &mut FxHashSet<Span>,
     ) -> Option<Offense> {
-        if depth == 8 {
-            return None;
-        }
-        match peel(expr) {
-            Expr::Lambda { .. } => {
-                queue.push(Body::Expr(peel(expr)));
-                None
-            },
-            Expr::Path { path, .. } if path.segments.len() == 1 => {
-                let only = &path.segments[0];
-                match self.res_of(only.span) {
-                    Some(Res::Def(def)) => self.def_hop(*def, only.span, declared, queue),
-                    Some(Res::Local { bind }) => {
-                        let Some(Body::Expr(init)) = self.locals.get(bind) else {
-                            return None;
-                        };
-                        self.chase_value(init, declared, queue, depth + 1)
-                    },
-                    _ => None,
-                }
-            },
-            _ => None,
+        let mut value = expr;
+        loop {
+            match peel(value) {
+                Expr::Lambda { .. } => {
+                    queue.push(Body::Expr(peel(value)));
+                    return None;
+                },
+                Expr::Path { path, .. } if path.segments.len() == 1 => {
+                    let only = &path.segments[0];
+                    match self.res_of(only.span) {
+                        Some(Res::Def(def)) => {
+                            return self.def_hop(*def, only.span, declared, queue);
+                        },
+                        Some(Res::Local { bind }) => {
+                            if !seen.insert(*bind) {
+                                return None;
+                            }
+                            let Some(Body::Expr(init)) = self.locals.get(bind) else {
+                                return None;
+                            };
+                            value = init;
+                        },
+                        _ => return None,
+                    }
+                },
+                _ => return None,
+            }
         }
     }
 
     /// One definition hop: a bodiless control native or a world-row
     /// callee offends at the use that named it; a bodied definition
-    /// queues its body.
+    /// queues its body. A linked callee's body lives in the linked
+    /// module, out of this hunt's reach, so its carried link facts judge
+    /// it alone: the entry's solved row refuses a world callee (the same
+    /// fact the comptime fence reads), and a fn entry named for a
+    /// control native refuses by entry name — the lowerer routes a
+    /// bodiless linked callee to the native exactly as it routes a local
+    /// extern spelling.
     fn def_hop(
         &self,
         def: DefId,
@@ -437,6 +458,15 @@ impl<'a> Index<'a> {
         queue: &mut Vec<Body<'a>>,
     ) -> Option<Offense> {
         let name = self.package.def(def).name.clone();
+        if let Some(entry) = self.package.foreign().get(&def) {
+            if entry.kind == ForeignKind::Fn && CONTROL_NATIVES.contains(&name.as_str()) {
+                return Some(Offense::Control { name, span: at });
+            }
+            if entry.row.contains(Effect::World) {
+                return Some(Offense::World { name, span: at });
+            }
+            return None;
+        }
         if matches!(self.by_def.get(&def), Some(None)) && CONTROL_NATIVES.contains(&name.as_str()) {
             return Some(Offense::Control { name, span: at });
         }
@@ -466,7 +496,10 @@ impl<'a> Index<'a> {
     }
 
     /// One walked node: a call resolves its callee, a string resolves
-    /// its holes' show dispatches.
+    /// its holes' show dispatches, and a value-position name a fn value
+    /// may carry (a combinator argument like `filter(helper)` runs the
+    /// named body inside this extent) — resolving it over-approximates
+    /// toward the safe direction.
     fn collect_expr(&self, expr: &'a Expr, hops: &mut Vec<Hop>) {
         match expr {
             Expr::Call { callee, .. } => self.call_hops(callee, hops),
@@ -479,6 +512,14 @@ impl<'a> Index<'a> {
                     if let Some(&method) = self.holes.get(&span) {
                         hops.push(Hop::Member(self.package.method(method).name.clone()));
                     }
+                }
+            },
+            Expr::Path { path, .. } if path.segments.len() == 1 => {
+                let only = &path.segments[0];
+                match self.res_of(only.span) {
+                    Some(Res::Def(def)) => hops.push(Hop::Def(*def, only.span)),
+                    Some(Res::Local { bind }) => hops.push(Hop::Local(*bind)),
+                    _ => {},
                 }
             },
             _ => {},
@@ -618,10 +659,18 @@ fn walk_item<'t>(item: &'t Item, on: &mut impl FnMut(Visit<'t>)) {
                 }
             }
         },
+        ItemKind::Struct(s) => {
+            // A deinit block runs at the value's death site, so its own
+            // pooled call sites hunt like any body's.
+            for member in &s.members {
+                if let StructMember::Deinit { body, .. } = member {
+                    walk_block(body, on);
+                }
+            }
+        },
         ItemKind::Fn(_)
         | ItemKind::ExternFn(_)
         | ItemKind::Import(_)
-        | ItemKind::Struct(_)
         | ItemKind::Enum(_)
         | ItemKind::Tag(_)
         | ItemKind::TypeAlias(_)

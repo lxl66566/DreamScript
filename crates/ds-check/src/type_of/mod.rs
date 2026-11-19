@@ -207,6 +207,15 @@ pub struct Checked {
     /// atom from it when the written type is not a nominal single-segment
     /// path (a written fn type is the read-back call-through spelling).
     pub is_tests: FxHashMap<Span, Ty>,
+    /// The member one dot-call's type-directed selection settled on,
+    /// keyed by the callee name's own span (F3): the single survivor of
+    /// the value-receiver tier — a trait member a solved instance or an
+    /// in-scope assumption answers, or an inherent fn whose owner covers
+    /// the receiver — or the member the type-keyed tier claimed. The
+    /// dispatch records live at the call's span; this one names the
+    /// member behind the name occurrence itself, so a name-position
+    /// consumer reads the selection without re-deriving it.
+    pub method_selections: FxHashMap<Span, MethodId>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -278,7 +287,11 @@ pub struct TypedPackage {
 /// Every field of the bundle is a shared handle, so cloning it clones
 /// pointers — the query layer hands the bundle out of a memo without
 /// copying the namespace — and a consumer holding the bundle keeps the
-/// universe its `Ty`s were minted by alive.
+/// universe its `Ty`s were minted by alive. The trees are shared handles
+/// too (`Arc<Ast>` per tree): a process that compiles many members over
+/// one ambient (a package graph's member compiles, a query session)
+/// serves the ambient's resident tree to every compile without cloning
+/// it, and a compile's teardown drops a refcount, never the tree itself.
 ///
 /// The check runs over the derive-expanded trees (G1): the trees the
 /// caller hands in are the ones every table is built over, and
@@ -287,32 +300,31 @@ pub struct TypedPackage {
 /// (the landed ruling) and belongs to the meta layer: a caller with
 /// raw trees expands through the derive engine's analyze entries
 /// (`ds_meta::analyze`, over shared trees) and hands the expanded trees
-/// in. `asts` may hold shared trees (`Borrow<Ast>`, like
-/// [`check_resolved`]): the query layer analyzes its parse memos without
-/// cloning the trees, and the split below lets a caller that already
-/// resolved through a memo hand that memo's own expanded trees and
-/// resolution in instead of resolving again.
+/// in. A caller that already resolved through a memo hands that memo's
+/// own expanded trees and resolution in through [`analyze_resolved`]
+/// instead of resolving again.
 pub fn analyze<T>(files: &Files, asts: &[T]) -> Analyzed
 where
     T: std::borrow::Borrow<Ast>,
 {
-    // The trees arrive borrowed, so they copy once into the owned
+    // The trees arrive borrowed, so they copy once into the shared
     // shape; a caller holding the trees by value takes `analyze_owned`
     // and skips this copy.
-    let owned: Vec<Ast> = asts
+    let owned: Vec<Arc<Ast>> = asts
         .iter()
-        .map(|ast| std::borrow::Borrow::borrow(ast).clone())
+        .map(|ast| Arc::new(std::borrow::Borrow::borrow(ast).clone()))
         .collect();
     analyze_owned(files, owned)
 }
 
 /// The ownership variant of [`analyze`] for the cold run path: the
-/// caller hands the package's derive-expanded trees by value, so the
-/// bundle adopts the moved trees. The expansion itself belongs to the
-/// meta layer: a caller with raw trees expands through
-/// `ds_meta::analyze_owned` (the derive engine and the expanding
-/// analyze entries live there) and hands the result here unchanged.
-pub fn analyze_owned(files: &Files, asts: Vec<Ast>) -> Analyzed {
+/// caller hands the package's derive-expanded trees as shared handles
+/// (`Arc::new` moves an owned tree in without copying it), so the
+/// bundle adopts them. The expansion itself belongs to the meta layer:
+/// a caller with raw trees expands through `ds_meta::analyze_owned` (the
+/// derive engine and the expanding analyze entries live there) and
+/// hands the result here unchanged.
+pub fn analyze_owned(files: &Files, asts: Vec<Arc<Ast>>) -> Analyzed {
     let (package, resolutions, resolve_diags) = crate::resolve_package(&asts);
     analyze_resolved(
         files,
@@ -333,7 +345,7 @@ pub fn analyze_owned(files: &Files, asts: Vec<Ast>) -> Analyzed {
 /// memo's value passes its parts here unchanged.
 pub fn analyze_resolved(
     files: &Files,
-    asts: Arc<[Ast]>,
+    asts: Arc<[Arc<Ast>]>,
     package: Arc<Package>,
     resolutions: Arc<[Resolutions]>,
     resolve_diags: Vec<Diagnostic>,
@@ -353,6 +365,7 @@ pub fn analyze_resolved(
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
+        method_selections: checked.method_selections,
     };
     Analyzed {
         asts,
@@ -381,11 +394,47 @@ pub fn analyze_resolved(
 /// exactly as in a fresh analyze.
 pub fn analyze_served(
     files: &Files,
-    asts: Vec<Ast>,
+    asts: Vec<Arc<Ast>>,
     package: Package,
     resolutions: Vec<Resolutions>,
     served: decls::ServedDecls,
     diags: Vec<Diagnostic>,
+) -> Analyzed {
+    analyze_served_over(files, asts, package, resolutions, served, diags, None)
+}
+
+/// [`analyze_served`] with import surfaces linked (G4): the link pass
+/// runs over every tree of the unit between collection and resolution,
+/// so an import the graph serves validates and binds exactly as the
+/// fresh path's does.
+pub fn analyze_served_linked(
+    files: &Files,
+    asts: Vec<Arc<Ast>>,
+    package: Package,
+    resolutions: Vec<Resolutions>,
+    served: decls::ServedDecls,
+    diags: Vec<Diagnostic>,
+    imports: &crate::import::ImportGraph,
+) -> Analyzed {
+    analyze_served_over(
+        files,
+        asts,
+        package,
+        resolutions,
+        served,
+        diags,
+        Some(imports),
+    )
+}
+
+fn analyze_served_over(
+    files: &Files,
+    asts: Vec<Arc<Ast>>,
+    package: Package,
+    resolutions: Vec<Resolutions>,
+    served: decls::ServedDecls,
+    diags: Vec<Diagnostic>,
+    imports: Option<&crate::import::ImportGraph>,
 ) -> Analyzed {
     let mut diags = diags;
     let mut package = package;
@@ -395,6 +444,19 @@ pub fn analyze_served(
     );
     for ast in &asts[resolutions.len()..] {
         diags.extend(package.add_file(ast));
+    }
+    if let Some(imports) = imports {
+        // The link pass runs over every tree of the unit, the served
+        // trees too: the artifact carries no link-pass state (the
+        // foreign map, the per-file bindings, the module refs are all
+        // re-derived from the caller's fresh graph), and a served tree's
+        // import-bound defs register at the same tail ids its served
+        // resolutions name, so the re-run re-lands them and every later
+        // pass sees the compile's own link facts exactly like the fresh
+        // path's. A served tree with no imports (the ambient member) the
+        // pass scans and skips.
+        let trees: Vec<&Ast> = asts.iter().map(|ast| &**ast).collect();
+        diags.extend(package.link_imports(&trees, imports));
     }
     let mut tables = resolutions;
     for ast in &asts[tables.len()..] {
@@ -416,6 +478,7 @@ pub fn analyze_served(
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
+        method_selections: checked.method_selections,
     };
     Analyzed {
         asts: asts.into(),
@@ -482,6 +545,7 @@ where
     let mut generic_calls = FxHashMap::default();
     let mut trait_calls = FxHashMap::default();
     let mut inherent_calls = FxHashMap::default();
+    let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
@@ -504,6 +568,7 @@ where
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
             hole_show_dispatches: &mut hole_show_dispatches,
+            method_selections: &mut method_selections,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -513,15 +578,77 @@ where
             assumption_marks: Vec::new(),
             ret: None,
             loop_depth: 0,
+            loop_breaks: Vec::new(),
             frame_depth: 0,
             cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
+            value_pos: true,
             expected_ty_span: None,
             comptime: ComptimeCtx::default(),
         };
         bodies.file(ast);
         diags.append(&mut bodies.diags);
+    }
+    // The import-bound functions' checked types (G4): a foreign def has
+    // no tree to walk, so its fn type mints here from the surface's
+    // written signature — the same fn typing every later consumer reads
+    // (the lowerer's parameter-word reads, a value use's fn typing). The
+    // link pass already refused a signature naming a type this package
+    // cannot spell, and a foreign def no use reaches mints quietly.
+    {
+        let empty_res = Resolutions::from_uses(Vec::new());
+        let empty_tables: Vec<Resolutions> = Vec::new();
+        let no_files = FilePositions(Vec::new());
+        let mut bodies = Bodies {
+            files,
+            package,
+            res: &empty_res,
+            resolutions: &empty_tables,
+            res_by_file: &no_files,
+            decls: &mut decls,
+            def_types: &mut def_types,
+            binders: &mut binders,
+            expr_types: &mut expr_types,
+            generic_calls: &mut generic_calls,
+            trait_calls: &mut trait_calls,
+            inherent_calls: &mut inherent_calls,
+            inherent_call_bounds: &mut inherent_call_bounds,
+            generic_call_bounds: &mut generic_call_bounds,
+            is_tests: &mut is_tests,
+            hole_show_dispatches: &mut hole_show_dispatches,
+            method_selections: &mut method_selections,
+            diags: Vec::new(),
+            linear_vars: FxHashMap::default(),
+            locals: ScopedMap::default(),
+            refined: ScopedMap::default(),
+            type_vars: Vec::new(),
+            assumptions: Vec::new(),
+            assumption_marks: Vec::new(),
+            ret: None,
+            loop_depth: 0,
+            loop_breaks: Vec::new(),
+            frame_depth: 0,
+            cond_depth: 0,
+            visiting: Vec::new(),
+            solve_reported: false,
+            value_pos: true,
+            expected_ty_span: None,
+            comptime: ComptimeCtx::default(),
+        };
+        let mut linked: Vec<DefId> = package.foreign().keys().copied().collect();
+        linked.sort_by_key(|def| def.index());
+        let mut linked_types = Vec::with_capacity(linked.len());
+        for def in linked {
+            let Some(entry) = package.foreign().get(&def) else {
+                continue;
+            };
+            let Some(sig) = &entry.sig else {
+                continue;
+            };
+            linked_types.push((def, bodies.fn_atom_of(sig).ty));
+        }
+        def_types.extend(linked_types);
     }
     (decls, Checked {
         diags,
@@ -535,6 +662,7 @@ where
         inherent_call_bounds,
         generic_call_bounds,
         is_tests,
+        method_selections,
     })
 }
 
@@ -548,7 +676,10 @@ pub struct Analyzed {
     /// The derive-expanded trees the tables were built over (G1):
     /// consumed derive attributes became ordinary impl items here. The
     /// lowering pass consumes these trees, never the caller's originals.
-    pub asts: Arc<[Ast]>,
+    /// Shared handles one apiece, so a process's resident ambient tree
+    /// serves to every member compile without a clone and a compile's
+    /// teardown drops a refcount, never the tree.
+    pub asts: Arc<[Arc<Ast>]>,
     /// The package namespace: definitions, name tables, method registry.
     pub package: Arc<Package>,
     /// Per-file name resolutions, aligning with the package's collected
@@ -603,6 +734,7 @@ struct Bodies<'a> {
     generic_calls: &'a mut FxHashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut FxHashMap<Span, TraitCall>,
     inherent_calls: &'a mut FxHashMap<Span, MethodId>,
+    method_selections: &'a mut FxHashMap<Span, MethodId>,
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
@@ -626,6 +758,11 @@ struct Bodies<'a> {
     /// The enclosing return union; `None` outside function bodies.
     ret: Option<Ty>,
     loop_depth: usize,
+    /// Break counts per enclosing loop, innermost last: index
+    /// `loop_depth - 1` is the count for the loop being walked. The stack
+    /// follows `loop_depth` at every seam (frame entry resets both), so a
+    /// `while true` body with a zero top can never break out of its loop.
+    loop_breaks: Vec<usize>,
     /// Depth of enclosing lambda and spawned-body frames. Loop exits
     /// never cross such a frame, so a stray exit inside one reports the
     /// crossed boundary instead of a missing loop.
@@ -641,6 +778,12 @@ struct Bodies<'a> {
     /// distribution cap precisely; the generic fallbacks around
     /// `solve_here` consume it so DS2012 never layers under another code.
     solve_reported: bool,
+    /// Whether the expression currently being checked has its value
+    /// consumed (a binding's initializer, an argument, an operand, an
+    /// if/match arm's answer). A `return` there is refused: the early
+    /// exit is a statement [F2], and the lowerer would emit the exit's
+    /// dead answer into the consuming slot.
+    value_pos: bool,
     /// Where the expectation currently fed to an expression was written,
     /// when the feeding site knows it (a callee's declared fn-typed
     /// parameter). A lambda-literal arity refusal cites it as the
@@ -769,6 +912,7 @@ impl Bodies<'_> {
             let old_ret = self.ret;
             self.ret = Some(unit);
             let block = Expr::Block(body.clone());
+            self.value_pos = false;
             let val = self.expr(&block, Some(unit));
             if !val.diverges {
                 self.expect_contains(val, unit, body.span, "a deinit body");
@@ -823,27 +967,25 @@ impl Bodies<'_> {
                     );
                     continue;
                 }
-                if let (Some(def), Some(subst)) = (trait_def, &subst) {
-                    if let Some((sig, sig_span)) =
+                if let (Some(def), Some(subst)) = (trait_def, &subst)
+                    && let Some((sig, sig_span)) =
                         decls::trait_member_sig(self.package, self.decls, def, &f.name.name)
-                    {
-                        impl_sig::agree_member_signature(self, f, &sig, sig_span, subst);
-                    }
+                {
+                    impl_sig::agree_member_signature(self, f, &sig, sig_span, subst);
                 }
             }
             let inferred = self.fn_decl(f, Some(target), false);
             // An inferred return is agreed through the body's checked tail
             // type, exactly as a written one is: the trait member's
             // registered signature stays the call-site contract.
-            if f.ret.is_none() {
-                if let (Some(def), Some(subst)) = (trait_def, &subst) {
-                    if let (Some((sig, sig_span)), Some(inferred)) = (
-                        decls::trait_member_sig(self.package, self.decls, def, &f.name.name),
-                        inferred,
-                    ) {
-                        impl_sig::agree_inferred_return(self, f, &sig, sig_span, subst, inferred);
-                    }
-                }
+            if f.ret.is_none()
+                && let (Some(def), Some(subst)) = (trait_def, &subst)
+                && let (Some((sig, sig_span)), Some(inferred)) = (
+                    decls::trait_member_sig(self.package, self.decls, def, &f.name.name),
+                    inferred,
+                )
+            {
+                impl_sig::agree_inferred_return(self, f, &sig, sig_span, subst, inferred);
             }
         }
         // Every trait member without a default body needs a bodied impl
@@ -918,16 +1060,17 @@ impl Bodies<'_> {
         // The initializer is its own frame: a lazily triggered fill
         // must not inherit the triggering walk's loop and frame depths.
         let (outer_loops, outer_frames) = (self.loop_depth, self.frame_depth);
+        let outer_breaks = std::mem::take(&mut self.loop_breaks);
         self.loop_depth = 0;
         self.frame_depth = 0;
         // A use in another file's body can trigger this lazy fill; the
         // initializer's spans resolve under the binding's OWN file table,
         // never the triggering file's [G3].
         let home_res = self.res;
-        if let Some(index) = self.res_by_file.get(self.package.def(defs[0]).span.file) {
-            if let Some(res) = self.resolutions.get(index) {
-                self.res = res;
-            }
+        if let Some(index) = self.res_by_file.get(self.package.def(defs[0]).span.file)
+            && let Some(res) = self.resolutions.get(index)
+        {
+            self.res = res;
         }
 
         // A top-level fn declaration's initializer is its lambda: mark it
@@ -935,6 +1078,7 @@ impl Bodies<'_> {
         // the round-one surface (a free fn), never on a nested lambda.
         let was = self.comptime;
         self.comptime.declaring_fn = matches!(local.init, Expr::Lambda { .. });
+        self.value_pos = true;
         let mut val = self.expr(&local.init, None);
         self.comptime = was;
         if let Some(ann) = &local.ty {
@@ -962,6 +1106,7 @@ impl Bodies<'_> {
         self.restore(saved);
         self.loop_depth = outer_loops;
         self.frame_depth = outer_frames;
+        self.loop_breaks = outer_breaks;
         self.res = home_res;
         self.visiting.truncate(visiting);
     }
@@ -1067,11 +1212,12 @@ impl Bodies<'_> {
         self.ret = ret;
         let mut body_val: Option<Val> = None;
         if let Some(body) = &f.body {
+            self.value_pos = false;
             let val = self.block_expected(body, ret);
-            if let Some(ret) = ret {
-                if !val.diverges {
-                    self.expect_contains(val, ret, body.span, "function body");
-                }
+            if let Some(ret) = ret
+                && !val.diverges
+            {
+                self.expect_contains(val, ret, body.span, "function body");
             }
             body_val = Some(val);
         }
@@ -1080,10 +1226,10 @@ impl Bodies<'_> {
         // DefId, so its solved signature lives here — the written return
         // against `Self`, or the body's own checked type when inferred.
         let solved = ret.or_else(|| body_val.as_ref().filter(|v| !v.poisoned).map(|v| v.ty));
-        if self_ty.is_some() {
-            if let Some(ty) = solved {
-                self.decls.impl_fn_rets.insert(f.span, ty);
-            }
+        if self_ty.is_some()
+            && let Some(ty) = solved
+        {
+            self.decls.impl_fn_rets.insert(f.span, ty);
         }
         self.ret = old_ret;
         self.restore(saved);
@@ -1105,6 +1251,10 @@ impl Bodies<'_> {
     /// return union there, so a fully-contained operand yields itself
     /// instead of propagating everything (E4).
     fn block_expected(&mut self, block: &BlockExpr, expected: Option<Ty>) -> Val {
+        // The tail expression occupies the block's own position (a frame
+        // body's tail is a statement slot, a consumed block's tail feeds
+        // its consumer); head statements are statements either way.
+        let tail_pos = self.value_pos;
         let saved = self.snapshot();
         let mut val = Val {
             ty: self.unit(),
@@ -1125,7 +1275,10 @@ impl Bodies<'_> {
             Some(Stmt {
                 kind: ds_parse::StmtKind::Expr(expr),
                 ..
-            }) => val = self.expr(expr, expected),
+            }) => {
+                self.value_pos = tail_pos;
+                val = self.expr(expr, expected);
+            },
             Some(other) => val = self.stmt(other),
             None => {},
         }
@@ -1143,12 +1296,16 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
-            ds_parse::StmtKind::Expr(expr) => self.expr(expr, None),
+            ds_parse::StmtKind::Expr(expr) => {
+                self.value_pos = false;
+                self.expr(expr, None)
+            },
         }
     }
 
     /// A statement-level binding: locals infer (B2).
     fn local_stmt(&mut self, local: &LocalDecl) {
+        self.value_pos = true;
         let mut val = self.expr(&local.init, None);
         if let Some(ann) = &local.ty {
             if let Some(expected) = self.solve_here(ann) {
@@ -1199,6 +1356,13 @@ impl Bodies<'_> {
     }
 
     fn expr_inner(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
+        // The position this expression occupies (statement or
+        // value-consumed) was set by the parent walk; every sub-expression
+        // defaults back to value-consumed, and the frame-like bodies (a
+        // lambda's, a loop's, a spawned fiber's) and the arm inheritance
+        // below override it.
+        let pos = self.value_pos;
+        self.value_pos = true;
         match e {
             Expr::Literal { span, lit } => self.literal(*span, lit),
             Expr::Str { span, parts } => self.string_expr(*span, parts),
@@ -1212,30 +1376,33 @@ impl Bodies<'_> {
                 ..
             } => self.tuple_expr(e, items, *trailing_comma, expected),
             Expr::List { .. } => self.list_expr(e, expected),
-            Expr::Paren { inner, .. } => self.expr(inner, expected),
+            Expr::Paren { inner, .. } => {
+                self.value_pos = pos;
+                self.expr(inner, expected)
+            },
             Expr::Call { .. } => self.call(e),
             Expr::Field { recv, name, .. } => self.field_access(recv, name),
             Expr::Index { span, recv, .. } => {
-                if let Some(head) = single_path_ident(recv) {
-                    if self.package.lookup_type(&head.name).is_some() {
-                        self.error(
-                            ErrorCode::TypeMismatch,
-                            format!(
-                                "`{}` is a type; the application `{}[...]` constructs only in \
-                                 call position — `{name}[t]()` [F9, B3]",
-                                head.name,
-                                head.name,
-                                name = head.name
-                            ),
-                            *span,
-                            "type application outside a call",
-                        );
-                        return Val {
-                            ty: self.empty(),
-                            diverges: false,
-                            poisoned: false,
-                        };
-                    }
+                if let Some(head) = single_path_ident(recv)
+                    && self.package.lookup_type(&head.name).is_some()
+                {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "`{}` is a type; the application `{}[...]` constructs only in call \
+                             position — `{name}[t]()` [F9, B3]",
+                            head.name,
+                            head.name,
+                            name = head.name
+                        ),
+                        *span,
+                        "type application outside a call",
+                    );
+                    return Val {
+                        ty: self.empty(),
+                        diverges: false,
+                        poisoned: false,
+                    };
                 }
                 self.error(
                     ErrorCode::InferenceFailed,
@@ -1363,29 +1530,13 @@ impl Bodies<'_> {
             } => self.assign(*op, left, right, *span),
             Expr::If {
                 cond, then, else_, ..
-            } => self.if_expr(cond, then, else_.as_deref(), expected),
+            } => self.if_expr(cond, then, else_.as_deref(), expected, pos),
             Expr::Match {
                 scrutinee,
                 arms,
                 span,
-            } => self.match_expr(scrutinee, arms, *span, expected),
-            Expr::While { cond, body, .. } => {
-                self.cond_depth += 1;
-                let cond_val = self.expr(cond, None);
-                self.cond_depth -= 1;
-                self.expect_bool(cond_val, cond.span());
-                let saved = self.snapshot();
-                self.refined.clear();
-                self.loop_depth += 1;
-                self.block(body);
-                self.loop_depth -= 1;
-                self.restore(saved);
-                Val {
-                    ty: self.unit(),
-                    diverges: false,
-                    poisoned: false,
-                }
-            },
+            } => self.match_expr(scrutinee, arms, *span, expected, pos),
+            Expr::While { cond, body, .. } => self.while_expr(cond, body),
             Expr::For {
                 pat,
                 iter,
@@ -1393,6 +1544,26 @@ impl Bodies<'_> {
                 span,
             } => self.for_expr(pat, iter, body, *span),
             Expr::Return { expr, span } => {
+                // The early exit is a statement [F2]: a block whose value
+                // feeds a binding, an argument, or a join arm has no
+                // lowering for it — the exit's answer is dead at the point
+                // the consuming slot reads — so the position refuses
+                // instead of trapping past a clean check.
+                if pos {
+                    self.error(
+                        ErrorCode::ReturnInValuePosition,
+                        "`return` is a statement; this position consumes the block's value, so \
+                         the exit has no answer to feed it"
+                            .to_owned(),
+                        *span,
+                        "return in a value position",
+                    );
+                    return Val {
+                        ty: self.empty(),
+                        diverges: true,
+                        poisoned: true,
+                    };
+                }
                 // The returned expression carries the declared return as
                 // its expected type, matching the final-expression anchor:
                 // a `?` operand splits against the return union here too
@@ -1435,6 +1606,12 @@ impl Bodies<'_> {
                         ("loop exit outside a loop", "stray loop exit")
                     };
                     self.error(ErrorCode::InferenceFailed, message.to_owned(), *span, label);
+                } else if matches!(e, Expr::Break(..)) {
+                    // A break leaves its loop's value reachable, which a
+                    // `while true` diverge decision below must see.
+                    if let Some(count) = self.loop_breaks.last_mut() {
+                        *count += 1;
+                    }
                 }
                 Val {
                     ty: self.empty(),
@@ -1447,6 +1624,7 @@ impl Bodies<'_> {
             // inside its frame.
             Expr::Spawn { body, .. } => self.fiber_block(body, true),
             Expr::Defer { body, .. } => {
+                self.value_pos = false;
                 self.block(body);
                 Val {
                     ty: self.unit(),
@@ -1454,7 +1632,44 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
-            Expr::Block(block) => self.block_expected(block, expected),
+            // A bare block inherits its consumer's position: statement
+            // blocks keep statement exits, consumed blocks refuse them in
+            // their tail.
+            Expr::Block(block) => {
+                self.value_pos = pos;
+                self.block_expected(block, expected)
+            },
+        }
+    }
+
+    /// A while loop: the condition types in condition position (an
+    /// always-false `is` test refines legitimately there), the body in
+    /// statement position inside its own loop frame.
+    fn while_expr(&mut self, cond: &Expr, body: &BlockExpr) -> Val {
+        self.cond_depth += 1;
+        let cond_val = self.expr(cond, None);
+        self.cond_depth -= 1;
+        self.expect_bool(cond_val, cond.span());
+        let saved = self.snapshot();
+        self.refined.clear();
+        self.loop_depth += 1;
+        self.loop_breaks.push(0);
+        self.value_pos = false;
+        let body_val = self.block(body);
+        let breaks = self.loop_breaks.pop().unwrap_or(0);
+        self.loop_depth -= 1;
+        self.restore(saved);
+        // A literal-`true` condition with no break in the body
+        // never completes the loop normally, so the while keeps
+        // the body's own diverge flag (`while true { return 1 }`
+        // leaves through the return). Any other condition — or a
+        // break — leaves the loop's unit value reachable, and a
+        // `for` body's early return never diverges the `for`
+        // itself: zero iterations complete it.
+        Val {
+            ty: self.unit(),
+            diverges: is_true_expr(cond) && breaks == 0 && body_val.diverges,
+            poisoned: false,
         }
     }
 
@@ -1651,7 +1866,7 @@ impl Bodies<'_> {
         let mut survivors: Vec<MethodId> = Vec::new();
         let mut runtime: Vec<MethodId> = Vec::new();
         let mut ambiguous = None;
-        for &candidate in self.package.method_candidates("show") {
+        for candidate in self.package.method_candidates("show") {
             let Some(sig) = self.member_sig(candidate) else {
                 continue;
             };
@@ -1756,7 +1971,7 @@ impl Bodies<'_> {
                     poisoned: false,
                 },
                 Res::Def(def) => self.def_value(*def, name.span),
-                Res::TraitMethod(_) | Res::Dot(_) | Res::Handler => Val {
+                Res::TraitMethod(_) | Res::Dot(_) | Res::Handler | Res::Module(_) => Val {
                     ty: self.empty(),
                     diverges: false,
                     poisoned: false,
@@ -1836,6 +2051,25 @@ impl Bodies<'_> {
                         ty: self.empty(),
                         diverges: false,
                         poisoned: false,
+                    },
+                    Res::Module(module) => {
+                        // A module alias alone is not a value: only the
+                        // qualified call behind it lowers [G4].
+                        let alias = self.package.module_ref(*module).alias().to_owned();
+                        self.error(
+                            ErrorCode::InferenceFailed,
+                            format!(
+                                "`{alias}` is a module alias; call its members through it, as \
+                                 `{alias}.name(args)` [G4]",
+                            ),
+                            only.span,
+                            "a module reference is callable only",
+                        );
+                        Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: false,
+                        }
                     },
                 }
             } else if only.name == "none" && !self.package.declares("none") {
@@ -1978,9 +2212,25 @@ impl Bodies<'_> {
     }
 
     /// The memoized type of a top-level binding, typed lazily so
-    /// order-independent uses work (G3).
+    /// order-independent uses work (G3). A linked const has no tree here:
+    /// its literal fact is the whole type story — the fact's scalar atom,
+    /// minted once and memoized like a solved initializer.
     fn const_ty(&mut self, def: DefId, span: Span) -> Val {
         if let Some(&ty) = self.def_types.get(&def) {
+            return Val {
+                ty,
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        if let Some(fact) = self.decls.foreign_consts.get(&def).cloned() {
+            let ty = self
+                .decls
+                .universe
+                .atom_by_name(fact.atom_name())
+                .and_then(|atom| self.decls.universe.atom_ty(atom).ok())
+                .unwrap_or_else(|| self.empty());
+            self.def_types.insert(def, ty);
             return Val {
                 ty,
                 diverges: false,
@@ -2216,6 +2466,9 @@ impl Bodies<'_> {
         // the context — they evaluate inside the same compile-time run.
         let outer_ctx = self.comptime;
         self.comptime.ctx |= comptime_fn;
+        // The lambda's body is its own frame's statement stream: its tail
+        // may exit early like any function body's.
+        self.value_pos = false;
         let body_val = self.expr(body, self.ret);
         self.comptime = outer_ctx;
         if let Some(frame) = frame {
@@ -2271,7 +2524,11 @@ impl Bodies<'_> {
                 poisoned: false,
             };
         };
-        let Some(def) = self.package.lookup_type(&only.name) else {
+        let Some(def) = self
+            .package
+            .lookup_type(&only.name)
+            .or_else(|| self.decls.foreign_type(&only.name))
+        else {
             return Val {
                 ty: self.empty(),
                 diverges: false,
@@ -2320,13 +2577,12 @@ impl Bodies<'_> {
         // scope) [B2].
         let mut subst = FxHashMap::default();
         if !shape.params.is_empty() {
-            if let Some(expected) = expected {
-                if let Some((ctor, args)) = self.single_apply(expected) {
-                    if self.decls.defs_of_atoms.get(&ctor) == Some(&def) {
-                        for (param, arg) in shape.params.iter().zip(args.iter()) {
-                            subst.insert(param.name.clone(), *arg);
-                        }
-                    }
+            if let Some(expected) = expected
+                && let Some((ctor, args)) = self.single_apply(expected)
+                && self.decls.defs_of_atoms.get(&ctor) == Some(&def)
+            {
+                for (param, arg) in shape.params.iter().zip(args.iter()) {
+                    subst.insert(param.name.clone(), *arg);
                 }
             }
             let scoped: Vec<(String, Ty)> = shape
@@ -2843,10 +3099,10 @@ impl Bodies<'_> {
         }
         // A generic-application constructor `list[t]()` [F9]: the callee
         // head resolves in the type namespace.
-        if let Expr::Index { recv, index, .. } = callee {
-            if let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span) {
-                return val;
-            }
+        if let Expr::Index { recv, index, .. } = callee
+            && let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span)
+        {
+            return val;
         }
         // The map constructor `map[k, v]()` [F9, B3]: the head resolved
         // in the type namespace.
@@ -2866,10 +3122,10 @@ impl Bodies<'_> {
                         }
                         // A minted case constructs by call form [B3]; a
                         // bare case falls through to the tag error below.
-                        if let Some(case) = self.decls.cases.get(&def) {
-                            if !matches!(case.payload, EnumPayload::None) {
-                                return self.case_call(def, only, args, trailing.as_deref(), *span);
-                            }
+                        if let Some(case) = self.decls.cases.get(&def)
+                            && !matches!(case.payload, EnumPayload::None)
+                        {
+                            return self.case_call(def, only, args, trailing.as_deref(), *span);
                         }
                         if self.decls.structs.contains_key(&def)
                             || self.decls.atoms.contains_key(&def)
@@ -3332,9 +3588,7 @@ impl Bodies<'_> {
             if let Some(fn_ret) = fn_ret {
                 // The lambda's own result type binds the parameter's
                 // return variables, not the lambda's function type.
-                let result = self
-                    .decompose_fn(val.ty)
-                    .map_or_else(|| val.ty, |(_, ret)| ret);
+                let result = self.decompose_fn(val.ty).map_or(val.ty, |(_, ret)| ret);
                 self.match_param(fn_ret, result, &sig.generics, &mut subst);
             }
         }
@@ -3684,7 +3938,15 @@ impl Bodies<'_> {
             }
             self.record_solved_dispatch(method, recv_val.ty, span);
         }
-        self.member_call(method, &sig, recv_val.ty, &args[1..], trailing, span)
+        self.member_call(
+            method,
+            &sig,
+            recv_val.ty,
+            Some(&recv.value),
+            &args[1..],
+            trailing,
+            span,
+        )
     }
 
     fn dot_call(
@@ -3702,14 +3964,22 @@ impl Bodies<'_> {
         // every other type has no value reading even when the resolver
         // already reported the missing member, so the static path owns the
         // receiver and the poison silences the cascade.
-        if let Some((def, recv_span)) = self.type_keyed_receiver(recv) {
+        if let Some((def, recv_span, written)) = self.type_keyed_receiver(recv) {
             let recorded_static = matches!(
                 self.res.get(name.span),
                 Some(Res::Dot(DotRes::Static { .. }))
             );
             let value_reading = matches!(self.package.def(def).kind, DefKind::Tag | DefKind::Case);
             if recorded_static || !value_reading {
-                return self.static_member_call(def, recv_span, name, args, trailing, span);
+                return self.static_member_call(
+                    def,
+                    recv_span,
+                    written.as_ref(),
+                    name,
+                    args,
+                    trailing,
+                    span,
+                );
             }
         }
         let Some(res) = self.res.get(name.span).cloned() else {
@@ -3738,6 +4008,12 @@ impl Bodies<'_> {
                 let fed = (fed_param == 0).then_some(recv);
                 self.call_def(func, fed, args, trailing, span)
             },
+            Res::Dot(DotRes::Module { func }) => {
+                // A module-qualified call (G4): the linked function takes
+                // the written arguments alone — no receiver word stages —
+                // and types exactly like the bare call of the bound name.
+                self.call_def(func, None, args, trailing, span)
+            },
             Res::Dot(DotRes::Methods { candidates }) => {
                 self.method_select(recv, name, &candidates, args, trailing, span)
             },
@@ -3763,20 +4039,105 @@ impl Bodies<'_> {
 
     /// The receiver of a type-keyed dot-call: a bare single-segment path
     /// (parentheses break the spelling, mirroring the resolver's side)
-    /// whose recorded use names a type-namespace def. The resolver made
-    /// the namespace decision (locals and value defs shadow the type),
-    /// so this only reads it back.
-    fn type_keyed_receiver(&self, recv: &Expr) -> Option<(DefId, Span)> {
-        let Expr::Path { path, .. } = recv else {
-            return None;
-        };
-        let [only] = path.segments.as_slice() else {
-            return None;
-        };
-        match self.res.get(only.span) {
-            Some(Res::Def(def)) if self.package.def(*def).kind.in_type_namespace() => {
-                Some((*def, only.span))
+    /// whose recorded use names a type-namespace def, or an instantiated
+    /// application — a one-argument bracket, a two-argument bracket, or
+    /// a written application type carried by the fn-type node — whose
+    /// head use names the type. The resolver made the namespace decision
+    /// (locals and value defs shadow the type), so this only reads it
+    /// back. The written application rides along when the receiver
+    /// spells one, so the static tier solves the applied type the call
+    /// dispatches.
+    fn type_keyed_receiver(&self, recv: &Expr) -> Option<(DefId, Span, Option<Type>)> {
+        if let Expr::Path { path, .. } = recv {
+            let [only] = path.segments.as_slice() else {
+                return None;
+            };
+            return match self.res.get(only.span) {
+                Some(Res::Def(def)) if self.package.def(*def).kind.in_type_namespace() => {
+                    Some((*def, only.span, None))
+                },
+                _ => None,
+            };
+        }
+        self.applied_receiver(recv)
+    }
+
+    /// The instantiated form of a type-keyed receiver: the head's
+    /// recorded def plus the written application it dispatches. The
+    /// bracket forms carry expression-position type spellings the
+    /// checker rereads as types (the constructor-bracket convention);
+    /// the fn-type node carries the written application itself — the
+    /// synthesized spelling for shapes the brackets cannot express.
+    fn applied_receiver(&self, recv: &Expr) -> Option<(DefId, Span, Option<Type>)> {
+        let (head_span, def, written): (Span, DefId, Option<Type>) = match recv {
+            Expr::Index { recv, index, .. } => {
+                let Expr::Path { span, path, .. } = recv.as_ref() else {
+                    return None;
+                };
+                let [only] = path.segments.as_slice() else {
+                    return None;
+                };
+                let def = self.recorded_type_def(only.span)?;
+                let arg = Self::ctor_type_arg(index)?;
+                (
+                    only.span,
+                    def,
+                    Some(Type::Path {
+                        span: *span,
+                        path: path.clone(),
+                        args: vec![arg],
+                    }),
+                )
             },
+            Expr::MapApply {
+                span,
+                head,
+                key,
+                value,
+                ..
+            } => {
+                let def = self.recorded_type_def(head.span)?;
+                let key = Self::ctor_type_arg(key)?;
+                let value = Self::ctor_type_arg(value)?;
+                (
+                    head.span,
+                    def,
+                    Some(Type::Path {
+                        span: *span,
+                        path: Path {
+                            span: head.span,
+                            segments: vec![head.clone()],
+                        },
+                        args: vec![key, value],
+                    }),
+                )
+            },
+            Expr::FnType { ty, .. } => {
+                let Type::Path { path, args, .. } = ty.as_ref() else {
+                    return None;
+                };
+                let [only] = path.segments.as_slice() else {
+                    return None;
+                };
+                if args.is_empty() {
+                    return None;
+                }
+                (
+                    only.span,
+                    self.recorded_type_def(only.span)?,
+                    Some((**ty).clone()),
+                )
+            },
+            _ => return None,
+        };
+        Some((def, head_span, written))
+    }
+
+    /// The type-namespace def a resolver-recorded use names, `None` when
+    /// the span carries no type-namespace def.
+    fn recorded_type_def(&self, span: Span) -> Option<DefId> {
+        match self.res.get(span) {
+            Some(Res::Def(def)) if self.package.def(*def).kind.in_type_namespace() => Some(*def),
             _ => None,
         }
     }
@@ -3816,12 +4177,15 @@ impl Bodies<'_> {
     /// type's members with that name as the candidates, so at most one
     /// exists (registration dedups by name and owner); the member must
     /// be receiverless, its owner's `Self` binds the call, and a
-    /// generic impl's member refuses (the bare type name cannot spell
-    /// the type arguments).
+    /// generic impl's member refuses behind the bare type name alone —
+    /// an instantiated receiver carries the type arguments, so it
+    /// proceeds and stages the body's evidence exactly like a solved
+    /// inherent dot-call.
     fn static_member_call(
         &mut self,
         def: DefId,
         recv_span: Span,
+        written: Option<&Type>,
         name: &Ident,
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
@@ -3861,16 +4225,18 @@ impl Bodies<'_> {
         }
         // A generic impl's member cannot be spelled through the bare type
         // name: the call would need the impl's type arguments, and the
-        // receiver position carries none.
-        if let Some(&impl_site) = self.decls.inherent_impls.get(&method)
+        // bare receiver position carries none. An instantiated receiver
+        // carries them, so the refusal names the applied spelling.
+        if written.is_none()
+            && let Some(&impl_site) = self.decls.inherent_impls.get(&method)
             && self.decls.inherent_impl_bounds.contains_key(&impl_site)
         {
             self.error(
                 ErrorCode::InferenceFailed,
                 format!(
-                    "member `{}` of `{}` lives in a generic impl; the type-keyed call cannot \
-                     spell its type arguments [H3]",
-                    name.name, type_name
+                    "member `{}` of `{}` lives in a generic impl; the type-keyed call needs the \
+                     applied receiver `{}[...]`, which the bare type name cannot spell [H3]",
+                    name.name, type_name, type_name
                 ),
                 span,
                 "generic impl member",
@@ -3878,9 +4244,11 @@ impl Bodies<'_> {
             return self.refuse_static_member_call(args, trailing, false, false);
         }
         // The owner's own type binds `Self` at the call: solved through
-        // the normal name solver over the receiver's own name, so an
-        // enum is the union of its cases and an alias its body.
-        let written = Type::Path {
+        // the normal name solver over the receiver's own spelling, so an
+        // enum is the union of its cases and an alias its body — and an
+        // instantiated receiver solves the applied type, whose
+        // substitution the member's signature reads below.
+        let owner_written = written.cloned().unwrap_or_else(|| Type::Path {
             span: recv_span,
             path: Path {
                 span: recv_span,
@@ -3890,22 +4258,50 @@ impl Bodies<'_> {
                 }],
             },
             args: Vec::new(),
-        };
-        let Some(owner_ty) = self.solve_here(&written) else {
-            self.error(
-                ErrorCode::UnresolvedName,
-                format!("`{type_name}` names no value-bearing type"),
-                span,
-                "no owner type",
-            );
+        });
+        let Some(owner_ty) = self.solve_here(&owner_written) else {
+            if let Some(applied) = &written {
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!(
+                            "the type-keyed receiver `{}` does not solve against the package \
+                             declarations",
+                            decls::render_type(applied)
+                        ),
+                        span,
+                        "unsolvable application",
+                    );
+                }
+                self.solve_reported = true;
+            } else {
+                self.error(
+                    ErrorCode::UnresolvedName,
+                    format!("`{type_name}` names no value-bearing type"),
+                    span,
+                    "no owner type",
+                );
+            }
             return self.refuse_static_member_call(args, trailing, false, false);
         };
         // The static dispatch record: the method id at the call's own
         // span, the same table a solved inherent dot-call records into —
         // the lowerer resolves the member's body through it and stages no
-        // receiver word.
+        // receiver word. A generic impl's body dispatches on runtime
+        // evidence (H3): the instantiated receiver records the serving
+        // instance per declared bound under the application's
+        // substitution, the value-receiver record's own mirror.
         self.inherent_calls.insert(span, method);
-        self.member_call(method, &sig, owner_ty, args, trailing, span)
+        self.method_selections.insert(name.span, method);
+        if let Some(&impl_site) = self.decls.inherent_impls.get(&method)
+            && let Some(record) = self.decls.inherent_impl_bounds.get(&impl_site).cloned()
+        {
+            let bounds = self.inherent_evidence(record.head, &record.conditions, owner_ty, span);
+            if !bounds.is_empty() {
+                self.inherent_call_bounds.insert(span, bounds);
+            }
+        }
+        self.member_call(method, &sig, owner_ty, None, args, trailing, span)
     }
 
     /// Method-candidate selection (F3, B6): candidates narrow by receiver
@@ -4059,8 +4455,9 @@ impl Bodies<'_> {
             };
         }
         let (method, sig) = survivors.remove(0);
+        self.method_selections.insert(name.span, method);
         self.record_solved_dispatch(method, recv_val.ty, span);
-        self.member_call(method, &sig, recv_val.ty, args, trailing, span)
+        self.member_call(method, &sig, recv_val.ty, Some(recv), args, trailing, span)
     }
 
     /// Whether an inherent impl's owner accepts the receiver (F3): every
@@ -4186,12 +4583,15 @@ impl Bodies<'_> {
     /// reference rewritten against the receiver), so arguments check
     /// against the site's substitution — a generic parameter left free
     /// bound itself to any argument, accepting types the substitution
-    /// does not cover [record 6.1].
+    /// does not cover [record 6.1]. A value receiver passes through the
+    /// same mut-window exclusivity gate as a free call's fed argument
+    /// (D2, C3).
     fn member_call(
         &mut self,
         method: MethodId,
         sig: &FnSig,
         recv_ty: Ty,
+        recv_expr: Option<&Expr>,
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
@@ -4218,6 +4618,30 @@ impl Bodies<'_> {
                 }
             }
         }
+        // A generic inherent impl's head pattern binds its variables at
+        // the call: the receiver unifies with the head, and each
+        // variable's solved type substitutes into the member's written
+        // signature (the trait branch's instance substitution mirrored
+        // on the inherent side — a variable the head does not bind, or a
+        // receiver it cannot unify with, leaves the written name to the
+        // ordinary solver).
+        if let Some(&impl_site) = self.decls.inherent_impls.get(&method)
+            && let Some(record) = self.decls.inherent_impl_bounds.get(&impl_site).cloned()
+            && let Some(pairs) = crate::instance_solve::pattern_substitution(
+                &self.decls.universe,
+                record.head,
+                self_ty,
+            )
+        {
+            for (var, members) in pairs {
+                let Some(name) = crate::instance_solve::var_param_name(&self.decls.universe, var)
+                else {
+                    continue;
+                };
+                let ty = self.decls.universe.set_ty(&members);
+                vars.insert(name, ty);
+            }
+        }
         self.type_vars.push(vars);
         let mut param_tys = Vec::with_capacity(sig.params.len());
         for param in &sig.params {
@@ -4228,6 +4652,16 @@ impl Bodies<'_> {
         // (the type-keyed surface) has no filled slot, so the written
         // arguments feed the whole signature.
         let skip = usize::from(sig.params.first().is_some_and(|p| p.name == "self"));
+        // The receiver expression fills the `self` slot, so a `mut self`
+        // member checks its exclusivity exactly like a free call's fed
+        // `mut` argument [D2, C3] — a dot-call on a `const` binding of a
+        // copyable type rejects identically to the free-function
+        // spelling. The static tier passes no receiver, so it skips.
+        if skip == 1
+            && let Some(recv) = recv_expr
+        {
+            self.check_mut_window_args(&[Some(recv)], &sig.params[..1]);
+        }
         if let Some(slots) = self.arg_slots(None, skip, args, trailing, &sig.params, span) {
             self.check_slots(&slots[skip..], &sig.params[skip..], &param_tys[skip..]);
         }
@@ -4597,6 +5031,33 @@ impl Bodies<'_> {
     /// generic application through the constructor's shape and the
     /// application's argument substitution.
     fn field_access(&mut self, recv: &Expr, name: &Ident) -> Val {
+        // A module alias's qualified member in value position (G4): the
+        // resolver bound a linked const's def at the member's span —
+        // the same res its selection spelling carries at its own use —
+        // so the use types as the bound name's value and the receiver
+        // is no value of its own. A member that refused at the seam
+        // reports nothing here: the resolver named the boundary, and
+        // the receiver's module-alias word would only cascade over
+        // it.
+        if let Some(head) = single_path_ident(recv)
+            && let Some(Res::Module(module)) = self.res.get(head.span)
+            && self.package.module_ref(*module).linked()
+        {
+            match self.res.get(name.span) {
+                Some(Res::Def(def)) if self.decls.foreign_consts.contains_key(def) => {
+                    let def = *def;
+                    return self.def_value(def, name.span);
+                },
+                _ => {
+                    self.solve_reported = true;
+                    return Val {
+                        ty: self.empty(),
+                        diverges: false,
+                        poisoned: false,
+                    };
+                },
+            }
+        }
         let recv_val = self.expr(recv, None);
         // A poisoned receiver already reported; a field-access complaint
         // over its (empty or wrapper) type would be a cascade.
@@ -4870,6 +5331,7 @@ impl Bodies<'_> {
         then: &BlockExpr,
         else_: Option<&Expr>,
         expected: Option<Ty>,
+        pos: bool,
     ) -> Val {
         self.cond_depth += 1;
         let cond_val = self.expr(cond, None);
@@ -4893,13 +5355,19 @@ impl Bodies<'_> {
         for narrow in &narrows {
             self.apply_narrow(narrow);
         }
-        let then_val = self.block_expected(then, expected);
+        let then_val = {
+            self.value_pos = pos;
+            let val = self.block_expected(then, expected);
+            self.value_pos = true;
+            val
+        };
         self.restore(saved);
         let else_val = if let Some(else_expr) = else_ {
             let saved = self.snapshot();
             for narrow in else_narrows {
                 self.apply_inverse(narrow);
             }
+            self.value_pos = pos;
             let val = self.expr(else_expr, expected);
             self.restore(saved);
             val
@@ -4937,6 +5405,7 @@ impl Bodies<'_> {
         arms: &[MatchArm],
         span: Span,
         expected: Option<Ty>,
+        pos: bool,
     ) -> Val {
         let scrut_val = self.expr(scrutinee, None);
         let scrut_ty = scrut_val.ty;
@@ -4965,6 +5434,7 @@ impl Bodies<'_> {
             }
             if let Some(guard) = &arm.guard {
                 self.cond_depth += 1;
+                self.value_pos = true;
                 let guard_val = self.expr(guard, None);
                 self.cond_depth -= 1;
                 self.expect_bool(guard_val, guard.span());
@@ -4972,6 +5442,7 @@ impl Bodies<'_> {
                     self.apply_narrow(&narrow);
                 }
             }
+            self.value_pos = pos;
             let body_val = self.expr(&arm.body, expected);
             self.restore(saved);
             arm_vals.push(body_val);
@@ -5033,8 +5504,11 @@ impl Bodies<'_> {
                 let saved = self.snapshot();
                 self.refined.clear();
                 self.loop_depth += 1;
+                self.loop_breaks.push(0);
                 self.bind_pattern(pat, element_ty, false);
+                self.value_pos = false;
                 self.expr(body, None);
+                self.loop_breaks.pop();
                 self.loop_depth -= 1;
                 self.restore(saved);
             }
@@ -5077,8 +5551,11 @@ impl Bodies<'_> {
         let saved = self.snapshot();
         self.refined.clear();
         self.loop_depth += 1;
+        self.loop_breaks.push(0);
         self.bind_pattern(pat, element_ty, false);
+        self.value_pos = false;
         self.expr(body, None);
+        self.loop_breaks.pop();
         self.loop_depth -= 1;
         self.restore(saved);
         Val {
@@ -5389,7 +5866,10 @@ impl Bodies<'_> {
                     self.solve_reported = true;
                     return None;
                 }
-                let def = self.package.lookup_type(&only.name)?;
+                let def = self
+                    .package
+                    .lookup_type(&only.name)
+                    .or_else(|| self.decls.foreign_type(&only.name))?;
                 if !args.is_empty() {
                     let mut arg_tys = Vec::with_capacity(args.len());
                     for arg in args {
@@ -5407,7 +5887,9 @@ impl Bodies<'_> {
                     DefKind::Enum => {
                         // A generic enum keeps its opaque atom; a
                         // non-generic one names the union of its minted
-                        // case atoms [B3].
+                        // case atoms [B3] — a linked enum's case defs
+                        // answer through the name index the linked
+                        // install filled.
                         if let Some(&atom) = self.decls.atoms.get(&def) {
                             return self.decls.universe.atom_ty(atom).ok();
                         }
@@ -5417,7 +5899,10 @@ impl Bodies<'_> {
                         }
                         let mut union: Option<Ty> = None;
                         for (name, ..) in &shape.cases {
-                            let case_def = self.package.lookup_type(name)?;
+                            let case_def = self
+                                .package
+                                .lookup_type(name)
+                                .or_else(|| self.decls.foreign_type(name))?;
                             let atom = self.decls.atoms.get(&case_def).copied()?;
                             let ty = self.decls.universe.atom_ty(atom).ok()?;
                             union = Some(match union {
@@ -5854,6 +6339,7 @@ impl Bodies<'_> {
         let saved = self.snapshot();
         self.refined.clear();
         let frame = own_frame.then(|| self.enter_frame());
+        self.value_pos = false;
         self.block(body);
         if let Some(frame) = frame {
             self.exit_frame(frame);
@@ -5870,15 +6356,19 @@ impl Bodies<'_> {
     /// stays with the enclosing frame because loop exits never cross a
     /// function or lambda frame boundary. Returns the saved depth for the
     /// paired [`Self::exit_frame`].
-    fn enter_frame(&mut self) -> usize {
+    fn enter_frame(&mut self) -> (usize, Vec<usize>) {
         self.frame_depth += 1;
-        std::mem::replace(&mut self.loop_depth, 0)
+        (
+            std::mem::replace(&mut self.loop_depth, 0),
+            std::mem::take(&mut self.loop_breaks),
+        )
     }
 
     /// The paired exit of [`Self::enter_frame`].
-    fn exit_frame(&mut self, saved: usize) {
+    fn exit_frame(&mut self, saved: (usize, Vec<usize>)) {
         self.frame_depth -= 1;
-        self.loop_depth = saved;
+        self.loop_depth = saved.0;
+        self.loop_breaks = saved.1;
     }
 
     fn snapshot(&self) -> ScopeMark {
@@ -6176,8 +6666,12 @@ fn generic_of(param: &TypeParam) -> GenericParam {
     }
 }
 
+/// Whether a parameter binds a re-assignable place (C3): only the `mut`
+/// window re-binds — `move` transfers once, `comptime` is a compile-time
+/// value, and a plain borrow is immutable — so assignment accepts a
+/// `mut` parameter alone, exactly like a `var` local.
 fn param_is_mut(param: &Param) -> bool {
-    !matches!(param.mode, ds_parse::ParamMode::Borrow)
+    matches!(param.mode, ds_parse::ParamMode::Mut(_))
 }
 
 /// One comptime parameter's annotation inside the round's shape: the
@@ -6228,4 +6722,13 @@ fn is_none_expr(expr: &Expr) -> bool {
         Expr::Path { path, .. }
             if path.segments.len() == 1 && path.segments[0].name == "none"
     )
+}
+
+/// Whether an expression is the literal `true` (a paren-wrapped spelling
+/// included): the one condition a `while` never re-tests false.
+fn is_true_expr(expr: &Expr) -> bool {
+    matches!(peel_paren(expr), Expr::Literal {
+        lit: Literal::Bool(true),
+        ..
+    })
 }

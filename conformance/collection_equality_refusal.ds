@@ -1,0 +1,15 @@
+// source: the list and map structural equality round 2026-11-18 (todo item 5's collection-equality slice, B9)
+// purpose: the element gate's named refusal — a structural == over list elements whose kind has no content equality (a union element; a callable element the same) checks clean [B9] and refuses at lowering naming the seam, never a silent EqStr fallback that trapped at runtime over the non-string object; the affirmative surface lives in collection_equality.ds, the refusal pinned in the ds-lower list_map_structural_eq suite
+// items:
+// grade: stage: typecheck
+// main: stage: reject the structural == over the union-element lists refuses at lowering with the named seam (callable and union elements have no content equality), never an EqStr fallback that trapped at runtime [B9]
+
+enum grade { plain, scored(int) }
+
+fn main() -> () {
+  var one = list[grade]()
+  list_push(one, plain)
+  var two = list[grade]()
+  list_push(two, plain)
+  println("${one == two}")
+}

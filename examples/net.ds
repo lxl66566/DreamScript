@@ -1,8 +1,13 @@
-// A minimal TCP client flow: net_connect, net_send, net_recv, net_close
-// against 127.0.0.1 on the port staged with --args. Without a staged port
+// A minimal TCP client flow: net_connect answering the linear
+// net_handle, then the send/recv handlers, and close_conn — against
+// 127.0.0.1 on the port staged with --args. Without a staged port
 // the run prints instructions and exits 0 (no local test server assumed);
-// with one, a listener answers and the run prints its reply. Failures
-// print through the unhandled-failure handler. The hermetic proof lives
+// with one, a listener answers and the run prints its reply. The reads
+// answer the failure taxonomy's union, so the match names the net_err
+// case each failure landed on; the connect keeps the total spelling
+// (the handle is deinit-carrying, so a union member holding it
+// refuses), and the binding's scope end closes the connection even
+// past the explicit close_conn, idempotently. The hermetic proof lives
 // in the ds-vm net_io fixtures plus the CLI integration test, which
 // spins an in-process listener.
 
@@ -14,9 +19,13 @@ fn main(port: int?) -> () {
     println("  start a TCP listener, then run: ds run examples/net.ds --args <port>")
   } else {
     const conn = net_connect("127.0.0.1", port)
-    net_send(conn, "ping from DreamScript")
-    const reply = net_recv(conn, 64)
-    net_close(conn)
-    println("server replied: ${reply}")
+    send(conn, "ping from DreamScript")
+    match recv(conn, 64) {
+      timeout => println("recv timed out"),
+      refused => println("recv refused"),
+      reply => println("server replied: ${reply}")
+    }
+    const closed = close_conn(conn)
+    closed
   }
 }

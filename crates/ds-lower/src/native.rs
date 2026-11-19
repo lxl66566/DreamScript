@@ -29,6 +29,20 @@ pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 /// user package can collide.
 pub(crate) const EVIDENCE_MODULE: &str = "$evidence";
 
+/// The net failure classes a classed fallible native answers: each
+/// platform failure discriminant paired with the ambient `net_err` case
+/// name the call-site union carries — the error-class mapping (ruled
+/// 2026-11-12), each failure landing on the member the name names.
+/// Mirrors the VM's tag reservation, pinned by the drift test.
+pub(crate) const NET_TIMEOUT: u8 = u8::MAX - 10;
+pub(crate) const NET_REFUSED: u8 = u8::MAX - 11;
+pub(crate) const NET_CLASSES: &[(u8, &str)] = &[(NET_TIMEOUT, "timeout"), (NET_REFUSED, "refused")];
+
+/// The utf8 decode failure discriminant: the taxonomy's `utf8_err` tag,
+/// one class alone so no member mapping rides — mirrors the VM's tag
+/// reservation, pinned by the drift test.
+pub(crate) const UTF8_ERR: u8 = u8::MAX - 12;
+
 /// The builtin core's reserved module name, as pool FuncRefs address it.
 pub(crate) const BUILTIN_MODULE_NAME: &str = "builtin";
 
@@ -72,6 +86,20 @@ pub(crate) enum NativeShape {
         /// The success payload's word kind.
         payload: SlotType,
         /// The unhandled-failure message prefix, e.g. `io error: `.
+        err_prefix: &'static str,
+    },
+    /// The two-word platform span of a classed fallible native: like
+    /// [`NativeShape::Fallible`] but failure answers one of the error-class
+    /// discriminants in [`NET_CLASSES`], each landing on the union member
+    /// the ambient case name names, so the call's checked union may
+    /// flatten the whole case set of the failure taxonomy's enum. Success
+    /// is the one payload word, or the unit value when the payload is the
+    /// inert unit word. `err_prefix` heads the printed unhandled-failure
+    /// line of a total spelling.
+    FallibleClassed {
+        /// The success payload's word kind.
+        payload: SlotType,
+        /// The unhandled-failure message prefix, e.g. `net error: `.
         err_prefix: &'static str,
     },
     /// The two-word ok/none span of a checked collection read: word 0
@@ -124,7 +152,16 @@ pub(crate) struct Native {
 /// and byte spellings, each two words to one i64), the three content
 /// hashes `str_hash`, `float_hash`, and `char_hash` (the `hash`
 /// derive's string, float, and char spellings, each one word to one
-/// i64), the list and
+/// i64), the bytes collection's face (the `bytes_of` construction seam
+/// and `byte_list` bridge over `list[byte]`, the checked `byte_at`
+/// indexed read, the `bytes_eq` content compare the `==`/`!=` chain
+/// dispatches, the `bytes_compare` sort key and `bytes_hash` content
+/// hash the derives order and fold bytes parts through, and the two
+/// UTF-8 bridges `utf8_encode`/`utf8_decode` — the decode answering the
+/// taxonomy's `utf8_err` tag), the byte/u32 width bridges
+/// `byte_of`/`int_of_byte`/`u32_of`/`int_of_u32` (the json face's scalar
+/// readers over the widths ds source cannot cross, each checked in
+/// answering a `t | none` span), the list and
 /// map construction and mutation surfaces (one heap-object `Ref` per
 /// value, element and pair words opaque to the natives), the file-IO
 /// surface including `fs_list`, and the TCP surface. The ambient's
@@ -136,7 +173,12 @@ pub(crate) struct Native {
 /// the receiver's builtin instance as the evidence words [H3].
 /// Name-routing the constructors and mutators is safe: every list and
 /// map is the one Ref word whatever the element type, and
-/// `list_push`'s element stages as one guarded word.
+/// `list_push`'s element stages as one guarded word. The fiber
+/// substrate's `fiber_resume` keeps its monomorphic row (the debug
+/// switch, its answer word raw — an unreachable target's bounce
+/// delivers the none tag, never an i64); the debug yield's row is
+/// gone with the spelling (the 2026-11-17 ruling), the dev host
+/// injecting suspension through its own capability face.
 pub(crate) const NATIVES: &[Native] = &[
     Native {
         name: "println",
@@ -169,10 +211,13 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
+        // B8's checked slice: the ok/none span re-spans into the call's
+        // own `string | none` union, the payload the in-range slice's
+        // Ref (an out-of-range request answers the none member)
         name: "substring",
         module: NativeModule::Builtin,
         index: 11,
-        shape: NativeShape::Total(SlotType::Ref),
+        shape: NativeShape::Checked,
     },
     Native {
         name: "concat",
@@ -208,6 +253,15 @@ pub(crate) const NATIVES: &[Native] = &[
         },
     },
     Native {
+        name: "parse_float",
+        module: NativeModule::Builtin,
+        index: 19,
+        shape: NativeShape::Fallible {
+            payload: SlotType::F64,
+            err_prefix: "parse error: ",
+        },
+    },
+    Native {
         name: "split",
         module: NativeModule::Builtin,
         index: 17,
@@ -238,10 +292,152 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
     Native {
+        // B8's checked char read: the ok/none span re-spans into the
+        // call's own `char | none` union (char rides the Ref, the hit
+        // payload the one-scalar word `char_of` mints); an out-of-range
+        // index answers the none member
         name: "char_at",
         module: NativeModule::Builtin,
         index: 18,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        // the codepoint→char reader: the ok/none span the @std json
+        // parser's `\u` decoding extracts, the payload kind the call
+        // site's own `char | none` union holds (char rides the Ref)
+        name: "char_of",
+        module: NativeModule::Builtin,
+        index: 58,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        name: "code_of",
+        module: NativeModule::Builtin,
+        index: 60,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the byte string's construction seam: the `list[byte]` bridge
+        // in, one payload byte per element word
+        name: "bytes_of",
+        module: NativeModule::Builtin,
+        index: 61,
         shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        // the bridge back out: one fresh list word per payload byte
+        name: "byte_list",
+        module: NativeModule::Builtin,
+        index: 62,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        // the checked indexed read, the ok/none span re-spanning into
+        // the call's own `byte | none` union, the payload the in-range
+        // byte's shared integer word
+        name: "byte_at",
+        module: NativeModule::Builtin,
+        index: 63,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        // the bytes collection's structural content compare [B9]: the
+        // `==`/`!=` chain over bytes operands routes here through the
+        // synthesized CALL (no source spelling names it), the string's
+        // EqStr uop reading string objects alone
+        name: "bytes_eq",
+        module: NativeModule::Builtin,
+        index: 64,
+        shape: NativeShape::Total(SlotType::Bool),
+    },
+    Native {
+        // the bytes sort key the `ord` derive orders bytes parts
+        // through: lexicographic over the payloads, a shorter prefix
+        // first
+        name: "bytes_compare",
+        module: NativeModule::Builtin,
+        index: 65,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the bytes content hash the `hash` derive folds bytes parts
+        // through: FNV-1a over the payload
+        name: "bytes_hash",
+        module: NativeModule::Builtin,
+        index: 66,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the string->bytes bridge: the string's own UTF-8 bytes
+        name: "utf8_encode",
+        module: NativeModule::Builtin,
+        index: 67,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        // the bytes->string bridge: UTF-8 validated on the way back,
+        // invalid sequences answering the taxonomy's utf8_err tag
+        name: "utf8_decode",
+        module: NativeModule::Builtin,
+        index: 68,
+        shape: NativeShape::Fallible {
+            payload: SlotType::Ref,
+            err_prefix: "utf8 error: ",
+        },
+    },
+    Native {
+        // the list collection's structural content compare [B9]: the
+        // `==`/`!=` chain over list operands (a struct or tuple field, a
+        // union payload, `in` membership, the plain pair) routes here
+        // through the synthesized CALL, the string's EqStr uop reading
+        // string objects alone
+        name: "list_eq",
+        module: NativeModule::Builtin,
+        index: 70,
+        shape: NativeShape::Total(SlotType::Bool),
+    },
+    Native {
+        // the map collection's structural content compare [B9]: the
+        // `==`/`!=` chain over map operands routes here through the
+        // synthesized CALL
+        name: "map_eq",
+        module: NativeModule::Builtin,
+        index: 71,
+        shape: NativeShape::Total(SlotType::Bool),
+    },
+    Native {
+        // the byte width bridge in: the ok/none span re-spanning into
+        // the call's own `byte | none` union, the payload the in-range
+        // byte's shared integer word
+        name: "byte_of",
+        module: NativeModule::Builtin,
+        index: 72,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        // the byte width bridge read back: the 0-255 number for the
+        // json face's json_int construction
+        name: "int_of_byte",
+        module: NativeModule::Builtin,
+        index: 73,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the u32 width bridge in: the ok/none span re-spanning into
+        // the call's own `u32 | none` union, the payload the in-range
+        // number's word
+        name: "u32_of",
+        module: NativeModule::Builtin,
+        index: 74,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        // the u32 width bridge read back: the word's number for the
+        // json face's json_int construction
+        name: "int_of_u32",
+        module: NativeModule::Builtin,
+        index: 75,
+        shape: NativeShape::Total(SlotType::I64),
     },
     Native {
         name: "join",
@@ -349,7 +545,10 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "net_connect",
         module: NativeModule::Platform,
         index: 7,
-        shape: NativeShape::Fallible {
+        // the net natives answer the failure classes: the classed shape
+        // keeps the total ambient row on the shared printing-halt path
+        // while a union row pairs by the class names
+        shape: NativeShape::FallibleClassed {
             payload: SlotType::I64,
             err_prefix: "net error: ",
         },
@@ -358,7 +557,7 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "net_send",
         module: NativeModule::Platform,
         index: 8,
-        shape: NativeShape::Fallible {
+        shape: NativeShape::FallibleClassed {
             payload: SlotType::I64,
             err_prefix: "net error: ",
         },
@@ -367,7 +566,7 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "net_recv",
         module: NativeModule::Platform,
         index: 9,
-        shape: NativeShape::Fallible {
+        shape: NativeShape::FallibleClassed {
             payload: SlotType::Ref,
             err_prefix: "net error: ",
         },
@@ -376,19 +575,64 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "net_close",
         module: NativeModule::Platform,
         index: 10,
-        shape: NativeShape::Fallible {
-            payload: SlotType::I64,
-            err_prefix: "net error: ",
-        },
+        // the raw idempotent-close seam (the stdlib's `net_handle`
+        // deinit pairs with it, `close_raw`'s contract)
+        shape: NativeShape::Total(SlotType::I64), // the unit word
     },
     Native {
         name: "http_get",
         module: NativeModule::Platform,
         index: 11,
-        shape: NativeShape::Fallible {
+        shape: NativeShape::FallibleClassed {
             payload: SlotType::Ref,
             err_prefix: "net error: ",
         },
+    },
+    Native {
+        name: "https_get",
+        module: NativeModule::Platform,
+        index: 16,
+        // the tls capability's own op: no ambient spelling declares it
+        // (the net face's http_get routes https URLs onto the tier), so
+        // no call site resolves it by name — a package wanting the
+        // explicit op declares its own extern. The entry sits here so
+        // the drift test pins the mirror against the VM tables.
+        shape: NativeShape::FallibleClassed {
+            payload: SlotType::Ref,
+            err_prefix: "net error: ",
+        },
+    },
+    Native {
+        name: "open_file",
+        module: NativeModule::Platform,
+        index: 12,
+        // the success payload is the package-owned file handle's one
+        // inline word (the struct's fd field)
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,
+            err_prefix: "io error: ",
+        },
+    },
+    Native {
+        name: "read_raw",
+        module: NativeModule::Platform,
+        index: 13,
+        shape: NativeShape::Fallible {
+            payload: SlotType::Ref,
+            err_prefix: "io error: ",
+        },
+    },
+    Native {
+        name: "close_raw",
+        module: NativeModule::Platform,
+        index: 14,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        name: "time",
+        module: NativeModule::Platform,
+        index: 15,
+        shape: NativeShape::Total(SlotType::I64), // epoch nanoseconds
     },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
@@ -419,6 +663,15 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "nursery_cancel",
         module: NativeModule::Builtin,
         index: 44,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the bare trap primitive (the 2026-11-17 die split): the
+        // `die(msg)` spelling's seam — the unit shape only satisfies the
+        // call site's width check, the native never answers
+        name: "trap",
+        module: NativeModule::Builtin,
+        index: 69,
         shape: NativeShape::Total(SlotType::I64),
     },
 ];
@@ -464,13 +717,14 @@ pub(crate) struct GenericNative {
 
 /// The generic builtins the lowering contract routes [H3, phase 2]:
 /// the ambient `len[t]` (reserved builtin index 10), whose one body
-/// answers the string char count or the list element count on the
-/// evidence word, and the container reads and counts — `list_len`,
+/// answers the string char count, the bytes payload count, the list
+/// element count, or the map pair count on the evidence word, and the
+/// container reads and counts — `list_len`,
 /// `list_get`, `list_concat` (indices 21-23) and `map_len`, `map_get`
 /// (29-30) — whose one bodies are element-agnostic: the evidence words
 /// (one per constraint-list entry) name the receiver's container
 /// instance. The container closes (32-37) join them: `cons`, `tail`,
-/// `collect`, `head`, `first` are element-agnostic over the list
+/// `collect`, `first` are element-agnostic over the list
 /// instance, and `max` dispatches on the numeric instance its evidence
 /// word names, its result word keyed to that instance. The
 /// lambda-taking combinators (38-40, and `partition` at 46) join them
@@ -494,7 +748,12 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         params: &[SlotType::Ref],
         staging: Staging::Fixed,
         shape: NativeShape::Total(SlotType::I64),
-        instances: &[BuiltinInstance::Str, BuiltinInstance::List],
+        instances: &[
+            BuiltinInstance::Str,
+            BuiltinInstance::Bytes,
+            BuiltinInstance::List,
+            BuiltinInstance::Map,
+        ],
     },
     GenericNative {
         name: "list_len",
@@ -547,6 +806,19 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         instances: &[BuiltinInstance::Map],
     },
     GenericNative {
+        // the ordered key face: the entry-order key list, one word per
+        // key — the constraint list is [k, v] like map_len's, two
+        // evidence words recording the receiver's map instance
+        name: "map_keys",
+        module: NativeModule::Builtin,
+        index: 59,
+        evidence: 2,
+        params: &[SlotType::Ref],
+        staging: Staging::Fixed,
+        shape: NativeShape::Total(SlotType::Ref), // the list object
+        instances: &[BuiltinInstance::Map],
+    },
+    GenericNative {
         // the receiver is the element: the evidence word names the
         // element's instance (the constraint list's `t`), and the gate
         // is the full vocabulary — the one body prepends any element's
@@ -567,16 +839,6 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
             BuiltinInstance::Float,
             BuiltinInstance::Record,
         ],
-    },
-    GenericNative {
-        name: "head",
-        module: NativeModule::Builtin,
-        index: 33,
-        evidence: 1,
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        shape: NativeShape::Checked,
-        instances: &[BuiltinInstance::List],
     },
     GenericNative {
         name: "tail",
@@ -763,7 +1025,9 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. }
+                | NativeShape::FallibleClassed { .. }
+                | NativeShape::Checked => 2,
                 // no monomorphic resident yet; the floor is the resident
                 // generic body's two list refs
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
@@ -823,7 +1087,9 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. }
+                | NativeShape::FallibleClassed { .. }
+                | NativeShape::Checked => 2,
                 // the resident tag-less total answers two list refs; a
                 // wider fold joining the shape widens its own floor
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
@@ -851,7 +1117,7 @@ mod drift {
         assert_eq!(DEFAULT_PLATFORM_NAME, ds_vm::platform::STD_NAME);
         assert_eq!(
             ds_vm::platform::Platform::std().capabilities().len(),
-            4,
+            5,
             "the default platform serves every capability"
         );
         assert_eq!(PLATFORM_IO_OK, ds_vm::native::PLATFORM_IO_OK);
@@ -866,5 +1132,10 @@ mod drift {
         }
         assert_eq!(NURSERY_BOUNDARY_OK, ds_vm::native::NURSERY_BOUNDARY_OK);
         assert_eq!(NURSERY_BOUNDARY_ERR, ds_vm::native::NURSERY_BOUNDARY_ERR);
+        // the net failure classes mirror the VM's tag reservation
+        assert_eq!(NET_TIMEOUT, ds_vm::native::PLATFORM_NET_TIMEOUT);
+        assert_eq!(NET_REFUSED, ds_vm::native::PLATFORM_NET_REFUSED);
+        // the utf8 failure discriminant mirrors it the same way
+        assert_eq!(UTF8_ERR, ds_vm::native::PLATFORM_UTF8_ERR);
     }
 }

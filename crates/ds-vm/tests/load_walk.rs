@@ -263,7 +263,8 @@ fn an_installed_dep_validates_by_its_recorded_hash() {
             .expect("encodes"),
         }])
         .expect("valid module"),
-    );
+    )
+    .expect("the swap installs");
     let app = app_calling_first_dep("hostmod", Hash128::compute(b"hostmod-src"));
     assert_eq!(
         vm.load(app, serving(vec![])).unwrap_err(),

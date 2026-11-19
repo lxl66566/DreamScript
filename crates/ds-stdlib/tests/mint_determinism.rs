@@ -72,7 +72,14 @@ fn one_pass() -> MintFacts {
     let user = files.add_source("user.ds", USER);
     let ambient_ast = ds_parse::parse(&files, ambient).expect("the ambient parses");
     let user_ast = ds_parse::parse_script(&files, user).expect("the user source parses");
-    let analyzed = ds_meta::analyze_owned(&files, vec![ambient_ast, user_ast], &[true, false]);
+    let analyzed = ds_meta::analyze_owned(
+        &files,
+        vec![
+            std::sync::Arc::new(ambient_ast),
+            std::sync::Arc::new(user_ast),
+        ],
+        &[true, false],
+    );
     assert!(
         analyzed.checked.diags.is_empty(),
         "the pinned program must check clean: {:?}",
@@ -118,14 +125,12 @@ fn facts(analyzed: &Analyzed) -> MintFacts {
     let defs = analyzed
         .package
         .defs()
-        .iter()
         .enumerate()
         .map(|(index, def)| format!("{index} {} {:?} {}", def.name, def.kind, span(def.span)))
         .collect();
     let methods = analyzed
         .package
         .methods()
-        .iter()
         .enumerate()
         .map(|(index, method)| {
             let owner = match &method.owner {

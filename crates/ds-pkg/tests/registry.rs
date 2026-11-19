@@ -14,8 +14,8 @@ use std::{
 use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{
-    INDEX_SEGMENT, Manifest, Package, Registry, Remote, Resolved, Store, StoreProvider, Version,
-    resolve,
+    ArtifactFetch, INDEX_SEGMENT, Manifest, Package, Registry, Remote, Resolved, Store,
+    StoreProvider, Version, resolve,
 };
 
 /// Builds a manifest from parts, mirroring the resolution fixtures.
@@ -399,4 +399,36 @@ fn a_multi_version_row_file_serves_the_demanded_version() {
         fetches,
         BTreeMap::from([("lib".to_owned(), Version::new(1, 2, 0))])
     );
+}
+
+/// The artifact storage serves by content hash: found bytes verify
+/// against the demanded identity, an unknown identity answers absent,
+/// and bytes that do not hash to the identity they sit under refuse
+/// hard — the store's own discipline over the registry's files.
+#[test]
+fn artifacts_serve_by_content_hash_under_the_artifact_segment() {
+    let fixture = fixture();
+    let registry = Registry::open(&fixture.index);
+    let bytes = b"library bytes".to_vec();
+    let identity = ds_pkg::artifact_content_hash(&bytes);
+    // nothing sits under the identity yet
+    assert!(matches!(
+        registry.fetch_artifact(identity),
+        ArtifactFetch::Absent
+    ));
+    // land the library and the demand serves, verified
+    let path = registry.artifact_path(identity);
+    std::fs::create_dir_all(path.parent().expect("the segment dir has a parent"))
+        .expect("the artifact segment creates");
+    std::fs::write(&path, &bytes).expect("the library lands");
+    assert_eq!(
+        registry.fetch_artifact(identity),
+        ArtifactFetch::Found(bytes.clone())
+    );
+    // drifted bytes under the identity refuse hard, both hashes named
+    std::fs::write(&path, b"drifted").expect("the drift lands");
+    let ArtifactFetch::Refused(message) = registry.fetch_artifact(identity) else {
+        panic!("drifted storage refuses")
+    };
+    assert!(message.contains("blake3:"), "{message}");
 }

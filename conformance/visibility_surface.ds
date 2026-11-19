@@ -1,0 +1,24 @@
+// source: the G4 visibility round 2026-11-15, the defining file of the two-file visibility package
+// purpose: private is the defining file's alone, pub(pkg) opens the package, pub opens dependents and enters the dsi, an @std import selection validates against the exported surface, and a visibility modifier on a nameless item refuses
+// items:
+// hidden: stage: m7
+// internal: stage: typecheck
+// open: stage: typecheck
+// uses-own: stage: typecheck
+// import-io: stage: typecheck
+// pub-import: stage: reject a visibility modifier on an import re-export names no package-level definition (DS4020)
+// pub-impl: stage: reject a visibility modifier on an impl names no package-level definition (DS4020)
+// std-missing: stage: reject an @std import selection naming no exported member refuses as missing (DS4019)
+
+fn hidden() -> int { 1 }
+pub(pkg) fn internal() -> int { 2 }
+pub fn open() -> int { 3 }
+fn uses_own() -> int { hidden() + internal() + open() }
+
+import @std/io (println)
+
+pub import @std/csv
+
+pub impl int { fn bump(self) -> int { 0 } }
+
+import @std/nope (missing_thing)

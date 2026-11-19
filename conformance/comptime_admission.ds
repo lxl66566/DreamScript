@@ -1,0 +1,23 @@
+// source: the comptime pure-fn admission round 2026-11-16 (the 2026-11-15 ruling, todo item 57)
+// purpose: an ordinary fn admits into the comptime fence by its own solved pure effect row - the callee's body joins the fenced evaluation beside the comptime fns, the direct callees carrying the transitive closure, and the helper still runs on the runtime path
+// items:
+// flat: stage: run
+// same: stage: run
+// point: stage: run
+// kind: stage: run
+// main: stage: run
+
+fn flat(a: int, b: int) -> bool { a == b }
+
+fn same(n: int) -> bool { flat(n, n) }
+
+struct point { x: int, y: int }
+
+fn kind(comptime t: type) -> string {
+  const ok = same(1)
+  if ok { type_name(t) } else { "?" }
+}
+
+fn main() -> () {
+  println("kind=${kind(point)} flat=${flat(1, 1)}")
+}

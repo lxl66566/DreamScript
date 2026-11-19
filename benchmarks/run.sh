@@ -35,7 +35,6 @@ else
         fi
     done
 fi
-
 # One python slot: python3 first (the usual spelling on Linux), then python.
 python_bin=""
 for candidate in python3 python; do
@@ -115,6 +114,15 @@ if [ -z "$kernels" ]; then
     exit 2
 fi
 
+# The ds interpreter is the suite's subject, not a peer: a missing binary
+# fails the run (the peer languages still SKIP — only ds is required). A
+# silent SKIP here would leave every ds kernel unmeasured with the run
+# still green.
+if [ -z "$ds_bin" ]; then
+    echo "run.sh: no ds binary (set DS_BIN or build: CARGO_TARGET_DIR=<target> cargo build -p ds-cli --release)" >&2
+    exit 1
+fi
+
 # ---- check -------------------------------------------------------------------
 
 if [ "$mode" = check ]; then
@@ -133,8 +141,19 @@ if [ "$mode" = check ]; then
                 continue
             fi
             file=$(kernel_file "$name" "$interp")
-            out=$(run_kernel "$interp" "$file" 2>&1 | sed 's/\r$//' | grep '^result:' | tail -n 1)
-            if [ -z "$out" ]; then
+            # The kernel's own exit status survives the filter pipeline
+            # only through a temp file: `$?` after a pipe is the last
+            # stage's, so a crashing interpreter with a `result:` line on
+            # stdout would read green through sed | grep | tail.
+            log=$(mktemp)
+            run_kernel "$interp" "$file" >"$log" 2>&1
+            status=$?
+            out=$(sed 's/\r$//' "$log" | grep '^result:' | tail -n 1)
+            rm -f "$log"
+            if [ "$status" -ne 0 ]; then
+                echo "FAIL $name $interp: interpreter exited $status"
+                failures=$((failures + 1))
+            elif [ -z "$out" ]; then
                 echo "FAIL $name $interp: no \`result:\` line on stdout (did the kernel run?)"
                 failures=$((failures + 1))
             elif [ "$out" != "$golden" ]; then

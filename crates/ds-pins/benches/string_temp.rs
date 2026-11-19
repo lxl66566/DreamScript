@@ -131,6 +131,12 @@ pub(crate) fn drive(borrowing: bool) -> Value {
     let [got] = answer.as_slice() else {
         panic!("the kernel answers one word");
     };
+    assert_eq!(got, &Value::I64(ITERATIONS), "the loop ran to completion");
+    assert!(
+        vm.objects().is_empty(),
+        "the loads' counts balance: {} live",
+        vm.objects().len()
+    );
     *got
 }
 

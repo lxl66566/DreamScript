@@ -32,10 +32,12 @@ fn refusals(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The checker refuses a ruled-but-unimplemented family and lowering is
-/// blocked by the diagnostics, not by the uop contract.
+/// A refused derive argument keeps the attribute unconsumed, so
+/// lowering is blocked by the checker's diagnostics, not by the uop
+/// contract: the refused family rides `==` (the B9 refusal every list
+/// carries whatever else it names).
 #[test]
-fn an_unimplemented_family_refuses_at_the_checker() {
+fn a_refused_family_blocks_lowering_through_the_diagnostics() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -48,7 +50,7 @@ fn an_unimplemented_family_refuses_at_the_checker() {
         "trait show {\n",
         "  fn show(self) -> string\n",
         "}\n",
-        "#[derive(hash, show, to_json)]\n",
+        "#[derive(hash, show, ==)]\n",
         "struct point { x: int, y: int }\n",
         "fn main() -> int { 0 }\n",
     );
@@ -56,21 +58,18 @@ fn an_unimplemented_family_refuses_at_the_checker() {
     assert_eq!(
         rendered.len(),
         1,
-        "hash and show synthesize; only to_json refuses: {rendered:?}"
+        "hash and show synthesize; only `==` refuses: {rendered:?}"
     );
     assert!(
-        rendered[0].contains("DS2024"),
-        "the checklist refusal: {rendered:?}"
+        rendered[0].contains("DS2027"),
+        "the B9 refusal: {rendered:?}"
     );
     assert!(
         rendered
             .iter()
-            .any(|r| r.contains("derive `to_json` is ruled but not implemented yet")),
+            .any(|r| r.contains("`==` is universal structural equality and is never derived")),
         "{rendered:?}"
     );
-    assert!(rendered.iter().all(|r| {
-        r.contains("the ruled set is: hash, show, ord, clone, to_json, from_json, default")
-    }));
     let mut files = Files::new();
     let id = files.add_source("derive.ds", source);
     let asts = [parse(&files, id).expect("the probe parses")];
@@ -425,13 +424,13 @@ fn an_unconsumed_attribute_refuses_at_lowering() {
 // ---- the `default` family's refusal classes -------------------------------
 
 /// The `default` family's honest refusals: a field type the
-/// type-expression key reaches but the language answers no construction
-/// for (a bare name carrying no `default` member, a one-argument head
-/// that is not the empty-construction shape) fails at the synthesized
-/// call with the standard diagnostic (the family precedent), and the
-/// attribute-level classes — a union naming its un-annotated
-/// ambiguity, the shapes spelling no key, a payloaded or empty enum, a
-/// generic declaration — refuse naming the part or the declaration.
+/// type-expression key reaches but the head answers no member for (a
+/// bare name or an application whose head carries no `default` member)
+/// fails at the synthesized call with the standard diagnostic (the
+/// family precedent), and the attribute-level classes — a union naming
+/// its un-annotated ambiguity, a union inside the constructor brackets,
+/// the shapes spelling no key, a payloaded or empty enum, a generic
+/// declaration — refuse naming the part or the declaration.
 #[test]
 fn the_default_family_refuses_its_boundaries() {
     let missing = concat!(
@@ -494,61 +493,80 @@ fn the_default_family_refuses_its_boundaries() {
         "a union field names the ambiguity instead of inventing a member: {one}"
     );
 
-    // a two-argument application whose head is not `map`: only the map
-    // spelling constructs empty
+    // a two-argument application whose head is not `map` dispatches the
+    // applied type's own `default` member (the instantiated receiverless
+    // call); an impl-less head fails at the synthesized call with the
+    // standard missing-member diagnostic, the family precedent
     let non_map_pair = concat!(
         "tag int\n",
         "tag string\n",
-        "struct pair[a, b]\n",
+        "struct pair[a, b] { x: a, y: b }\n",
         "#[derive(default)]\n",
         "struct holder { p: pair[int, string] }\n",
     );
     let rendered = refusals(non_map_pair);
     let [one] = rendered.as_slice() else {
-        panic!("one two-argument-head refusal: {rendered:?}")
+        panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains(
-            "a two-argument application constructs empty only through the `map[k, v]()` spelling"
-        ),
-        "a non-map two-argument head refuses naming the spelling: {one}"
+        one.contains("DS2004") && one.contains("type `pair` carries no member `default`"),
+        "a non-map two-argument head dispatches its own member, the missing one reporting: {one}"
     );
 
-    // an application of more type arguments than any empty construction
-    // spells
+    // an application of three or more type arguments dispatches the
+    // same way, whatever the arity
     let triple_apply = concat!(
         "tag int\n",
-        "struct triple[a, b, c]\n",
+        "struct triple[a, b, c] { x: a, y: b, z: c }\n",
         "#[derive(default)]\n",
         "struct holder { t: triple[int, int, int] }\n",
     );
     let rendered = refusals(triple_apply);
     let [one] = rendered.as_slice() else {
-        panic!("one arity refusal: {rendered:?}")
+        panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains("the empty construction spells no application of 3 type arguments"),
-        "a three-argument application refuses naming the arity: {one}"
+        one.contains("type `triple` carries no member `default`"),
+        "a three-argument application dispatches its own member: {one}"
     );
 
     // a type argument the constructor brackets themselves cannot spell
+    // rides the fn-type carrier: the empty construction never builds an
+    // element, so an optional element needs no default of its own and
+    // the field checks clean
     let optional_arg = concat!(
         "tag int\n",
         "struct list[t]\n",
         "#[derive(default)]\n",
         "struct holder { xs: list[int?] }\n",
+        "fn main() -> int { 0 }\n",
     );
     let rendered = refusals(optional_arg);
+    assert!(
+        rendered.is_empty(),
+        "an optional inside the brackets constructs empty: {rendered:?}"
+    );
+
+    // a union inside the brackets keeps the argument refusal — no
+    // clause lifts it
+    let union_arg = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "#[derive(default)]\n",
+        "struct holder { xs: list[int | string] }\n",
+    );
+    let rendered = refusals(union_arg);
     let [one] = rendered.as_slice() else {
         panic!("one bracket-argument refusal: {rendered:?}")
     };
     assert!(
         one.contains("the constructor brackets spell no key for this type argument"),
-        "an optional inside the brackets refuses naming the argument: {one}"
+        "a union inside the brackets refuses naming the argument: {one}"
     );
 
     // a one-argument head the language answers no empty construction
-    // for fails at the synthesized call, the family precedent
+    // for dispatches the same way, the family precedent
     let applied_fields = concat!(
         "tag int\n",
         "struct box[t] { v: t }\n",
@@ -558,11 +576,11 @@ fn the_default_family_refuses_its_boundaries() {
     );
     let rendered = refusals(applied_fields);
     let [one] = rendered.as_slice() else {
-        panic!("one cross-spelling refusal: {rendered:?}")
+        panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains("constructs per its declaration, not by type application"),
-        "a fields-carrying head refuses at the synthesized call: {one}"
+        one.contains("type `box` carries no member `default`"),
+        "a fields-carrying head dispatches its own member, the missing one reporting: {one}"
     );
 
     let callable = concat!(
@@ -591,5 +609,307 @@ fn the_default_family_refuses_its_boundaries() {
     assert!(
         one.contains("DS2029") && one.contains("derive `default` refuses a generic declaration"),
         "the one-body-per-impl seam refuses: {one}"
+    );
+}
+
+/// The compound-field lift's acceptance: a field typed as an
+/// application the collection spellings do not serve — two arguments
+/// over a non-`map` head, three arguments, whatever the arity —
+/// defaults through the applied type's own `default` member (the
+/// instantiated receiverless call), so a head whose generic impl
+/// carries the member synthesizes and CHECKS clean. Lowering that file
+/// refuses inside the impl's own body: constructing a generic
+/// struct's value spans the per-instantiation frames the runtime seam
+/// keeps out of the interpreter (the pre-existing M3 boundary, the
+/// same one a hand-written construction of the same value meets), so
+/// the derive's own product is honest while the body's seam waits on
+/// the JIT tier.
+#[test]
+fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag bool\n",
+        "struct pair[t, u]\n",
+        "struct triple[t, u, v]\n",
+        "impl[t, u] pair[t, u] {\n",
+        "  fn default() -> pair[t, u] { pair { } }\n",
+        "}\n",
+        "impl[t, u, v] triple[t, u, v] {\n",
+        "  fn default() -> triple[t, u, v] { triple { } }\n",
+        "}\n",
+        "#[derive(default)]\n",
+        "struct holder { p: pair[int, string], t: triple[int, string, bool] }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let rendered = refusals(source);
+    assert!(
+        rendered.is_empty(),
+        "both application fields synthesize the instantiated calls and check clean: {rendered:?}"
+    );
+    let mut files = Files::new();
+    let id = files.add_source("applied.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    let Err(err) = lower(
+        "applied",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    ) else {
+        panic!("the impl bodies' own construction refuses under the M3 contract")
+    };
+    assert!(
+        err.to_string().contains("outside the M3 runtime contract"),
+        "the refusal names the body's runtime seam, never the derive: {err}"
+    );
+}
+
+/// The from_json family refuses its own carve-outs at the attribute,
+/// each naming the family and the refusing shape: a function-typed or
+/// `~Copyable` part (the shared part refusal), a generic declaration
+/// (the runtime seam's one-member-body boundary), a tag (no members to
+/// walk), a tuple field (a shape spelling no read over the typed
+/// readers), and the enum shapes the walk cannot name (a tuple payload,
+/// two payloaded cases sharing the object shape, an empty enum). The
+/// attribute-level refusals need no json face: the family refuses
+/// before any name resolves. The optional list field — once the
+/// family's own refusal — now expands clean: the decode walk mirrors
+/// to_json's statement-position member row, the presence narrow's
+/// catchall arm carrying the array walk.
+#[test]
+fn the_from_json_family_refuses_its_carve_outs() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait Copyable { }\n",
+        "struct list[t]\n",
+        "struct wrap { v: int }\n",
+        "#[derive(from_json)]\n",
+        "struct handler { cb: fn(int) -> int, v: int }\n",
+        "struct lease: ~Copyable { }\n",
+        "#[derive(from_json)]\n",
+        "struct holder { kept: lease }\n",
+        "#[derive(from_json)]\n",
+        "struct gen[t] { v: t }\n",
+        "#[derive(from_json)]\n",
+        "tag tone\n",
+        "#[derive(from_json)]\n",
+        "struct pair { both: (int, int) }\n",
+        "#[derive(from_json)]\n",
+        "enum pay { unit, boxed(int) }\n",
+        "#[derive(from_json)]\n",
+        "enum two { go { w: int }, stop { h: int } }\n",
+        "#[derive(from_json)]\n",
+        "enum never { }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 8, "the eight refusals: {rendered:?}");
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `from_json` refuses the field `cb`: a function-typed part")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2026")
+                && r.contains("derive `from_json` refuses the field `kept`")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2029")
+            && r.contains("derive `from_json` refuses a generic declaration")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the declaration `tone`: a tag declares no members")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the field `both`: this shape spells no json read")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum case `boxed`: a tuple payload spells no member names")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum `two`: two payloaded cases share the json object")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum `never`: an enum with no cases")),
+        "{rendered:?}"
+    );
+    // The one clean derive synthesizes its impl beside the declaration;
+    // `wrap` (spelled before the refusing rows) keeps the attribute
+    // consumed and the plain struct after them is not attributed.
+    let mut files = Files::new();
+    let id = files.add_source(
+        "from_json.ds",
+        concat!(
+            "tag int\n",
+            "#[derive(from_json)]\n",
+            "struct wrap { v: int }\n",
+            "fn main() -> int { 0 }\n",
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
+    assert!(
+        diags.is_empty(),
+        "the scalar walk refuses nothing: {diags:?}"
+    );
+    let grown = expanded[0]
+        .blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .count();
+    assert_eq!(grown, 4, "the consumed derive appends its one impl");
+    // The optional list field derives clean: the expansion appends its
+    // impl beside the declaration, the statement-position member row
+    // carrying the array walk the value-position else never could.
+    let mut files = Files::new();
+    let id = files.add_source(
+        "from_json_soft.ds",
+        concat!(
+            "tag int\n",
+            "struct list[t]\n",
+            "#[derive(from_json)]\n",
+            "struct soft { rows: list[int]? }\n",
+            "fn main() -> int { 0 }\n",
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
+    assert!(
+        diags.is_empty(),
+        "the optional list walk refuses nothing: {diags:?}"
+    );
+    let grown = expanded[0]
+        .blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .count();
+    assert_eq!(
+        grown, 5,
+        "the consumed derive appends its one impl beside the four written items"
+    );
+}
+
+/// The to_json family refuses from_json's mirror classes at the
+/// attribute, each naming the family and the refusing shape: a
+/// function-typed or `~Copyable` part (the shared part refusal), a
+/// generic declaration (the runtime seam's one-member-body boundary),
+/// a tag (no members to walk), a tuple field (a shape spelling no json
+/// write), and the enum shapes the object walk cannot name (a tuple
+/// payload, two payloaded cases, an empty enum). The attribute-level
+/// refusals need no json face: the family refuses before any name
+/// resolves. The optional list field — the decode mirror's refusal —
+/// expands clean: the encode walk's member rows are statement-position,
+/// so the presence narrow carries the array walk the value-position
+/// else could not (the checked pin rides the conformance gate's
+/// json-faced ambient).
+#[test]
+fn the_to_json_family_refuses_its_carve_outs() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "trait Copyable { }\n",
+        "struct list[t]\n",
+        "struct wrap { v: int }\n",
+        "#[derive(to_json)]\n",
+        "struct handler { cb: fn(int) -> int, v: int }\n",
+        "struct lease: ~Copyable { }\n",
+        "#[derive(to_json)]\n",
+        "struct holder { kept: lease }\n",
+        "#[derive(to_json)]\n",
+        "struct gen[t] { v: t }\n",
+        "#[derive(to_json)]\n",
+        "tag tone\n",
+        "#[derive(to_json)]\n",
+        "struct pair { both: (int, int) }\n",
+        "#[derive(to_json)]\n",
+        "enum pay { unit, boxed(int) }\n",
+        "#[derive(to_json)]\n",
+        "enum two { go { w: int }, stop { h: int } }\n",
+        "#[derive(to_json)]\n",
+        "enum never { }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 8, "the eight refusals: {rendered:?}");
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("derive `to_json` refuses the field `cb`: a function-typed part")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(
+            |r| r.contains("DS2026") && r.contains("derive `to_json` refuses the field `kept`")
+        ),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2029")
+            && r.contains("derive `to_json` refuses a generic declaration")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the declaration `tone`: a tag declares no members")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the field `both`: this shape spells no json write")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum case `boxed`: a tuple payload spells no member names")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum `two`: two payloaded cases share the json object")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the enum `never`: an enum with no cases")),
+        "{rendered:?}"
+    );
+    // The optional list field derives clean: the expansion appends its
+    // impl beside the declaration, the statement-position member rows
+    // carrying the array walk the decode mirror refuses.
+    let mut files = Files::new();
+    let id = files.add_source(
+        "to_json.ds",
+        concat!(
+            "tag int\n",
+            "struct list[t]\n",
+            "#[derive(to_json)]\n",
+            "struct soft { rows: list[int]? }\n",
+            "fn main() -> int { 0 }\n",
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
+    assert!(
+        diags.is_empty(),
+        "the optional list walk refuses nothing: {diags:?}"
+    );
+    let grown = expanded[0]
+        .blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .count();
+    assert_eq!(
+        grown, 5,
+        "the consumed derive appends its one impl beside the four written items"
     );
 }

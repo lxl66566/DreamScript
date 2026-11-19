@@ -62,7 +62,7 @@ fn banner(comptime label: string, comptime width: int) -> string {
 fn main() -> () {
   println(schema(page))
   println(cases(tone))
-  println(join(field_names(page), ", "))
+  println(join(field_names(page), ','))
   println("fields: ${field_count(page)}")
   println(banner("schema ", 6))
 }

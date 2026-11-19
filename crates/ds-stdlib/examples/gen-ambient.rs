@@ -24,7 +24,7 @@ fn main() {
     let mut bytes = Hash128::compute(AMBIENT_SOURCE.as_bytes())
         .as_bytes()
         .to_vec();
-    bytes.extend(postcard::to_allocvec(&expanded[0]).expect("the expanded AST serializes"));
+    bytes.extend(postcard::to_allocvec(expanded[0].as_ref()).expect("the expanded AST serializes"));
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ambient.ast");
     std::fs::write(&out, &bytes).expect("writing the ambient AST artifact");
     println!("wrote {} bytes to {}", bytes.len(), out.display());

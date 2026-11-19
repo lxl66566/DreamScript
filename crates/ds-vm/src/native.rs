@@ -49,29 +49,29 @@
 //! | 8     | reserved |
 //! | 9     | reserved |
 //! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) |
-//! | 11    | `substring (s, start, end: int) -> string` |
+//! | 11    | `substring (s, start, end: int) -> string | none` (the checked slice) |
 //! | 12    | `concat (a, b: string) -> string` |
 //! | 13    | `to_upper (s: string) -> string` |
 //! | 14    | `to_lower (s: string) -> string` |
 //! | 15    | `trim (s: string) -> string` |
 //! | 16    | `parse_int (s: string) -> int | parse_err` |
 //! | 17    | `split (s, sep: string) -> list[string]` |
-//! | 18    | `char_at (s: string, i: int) -> string` |
+//! | 18    | `char_at (s: string, i: int) -> char | none` (the checked char read) |
 //! | 19    | reserved (the string block's spare slot) |
 //! | 20    | `list_new () -> list` |
 //! | 21    | `list_len[t] (list) -> int` (generic; CALLG) |
 //! | 22    | `list_get[t] (list, i: int) -> t | none` (generic; CALLG) |
 //! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) |
-//! | 24    | `fiber_yield (value: int) -> int` |
+//! | 24    | reserved (the retired `fiber_yield` debug yield's slot; the dev host injects suspension through its own face) |
 //! | 25    | `fiber_resume (fiber, value: int) -> int` |
 //! | 26    | `nursery_join (nursery: int) -> int` |
 //! | 27    | `list_push (xs: list, x: value) -> unit` |
 //! | 28    | `map_new () -> map` |
 //! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) |
 //! | 30    | `map_get[k, v] (map, key: value) -> v | none` (generic; CALLG) |
-//! | 31    | `map_set (map, key, value) -> unit` |
+//! | 31    | `map_set (map, key, value words, variadic) -> unit` — the value's whole inline word span |
 //! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) |
-//! | 33    | `head[t] (xs: list) -> t | none` (generic; CALLG) |
+//! | 33    | reserved (was `head`, retired 2026-11-17; `first` is the one list-front spelling) |
 //! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) |
 //! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) |
 //! | 36    | `first[t] (xs: list) -> t | none` (generic; CALLG) |
@@ -95,6 +95,21 @@
 //! | 54    | `float_hash (f: float) -> int` |
 //! | 55    | `char_hash (c: char) -> int` |
 //! | 56    | `repl_park (answer words, variadic)` (control seam; the REPL's spliced park) |
+//! | 57    | reserved (was parse_json; the reader lives in @std ds source now) |
+//! | 58    | `char_of (code: int) -> char | none` — the codepoint→char reader |
+//! | 59    | `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the entry-order key list |
+//! | 60    | `code_of (c: char) -> int` — the char→codepoint reader |
+//! | 61    | `bytes_of (xs: list[byte]) -> bytes` — the byte string's construction seam |
+//! | 62    | `byte_list (b: bytes) -> list[byte]` — the bridge back out |
+//! | 63    | `byte_at (b: bytes, i: int) -> byte | none` — the checked indexed read |
+//! | 64    | `bytes_eq (a, b: bytes) -> bool` — the structural content compare the `==`/`!=` chain dispatches over bytes operands |
+//! | 65    | `bytes_compare (a, b: bytes) -> int` — the bytes sort key the `ord` derive orders bytes parts through |
+//! | 66    | `bytes_hash (b: bytes) -> int` — the content hash the `hash` derive folds bytes parts through |
+//! | 67    | `utf8_encode (s: string) -> bytes` — the string→bytes bridge, the string's own bytes |
+//! | 68    | `utf8_decode (b: bytes) -> string | utf8_err` — the bytes→string bridge, UTF-8 validated on the way back |
+//! | 69    | `trap (msg: string) -> unit` — the bare trap primitive; never returns, never prints (the die split) |
+//! | 70    | `list_eq (a, b: list) -> bool` — the list collection's structural content compare the `==`/`!=` chain dispatches over list operands |
+//! | 71    | `map_eq (a, b: map) -> bool` — the map collection's structural content compare the `==`/`!=` chain dispatches over map operands |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -106,8 +121,9 @@
 //!
 //! # Result spans and the platform tag ids
 //!
-//! The fallible platform ops (all of the file and net surface but
-//! `file_exists`) touch the world: that is a static fact (the ambient's
+//! The fallible platform ops (the file and net surface but
+//! `file_exists` and the two idempotent close seams `close_raw`/
+//! `net_close`) touch the world: that is a static fact (the ambient's
 //! declared effect rows), so the VM needs no effect machinery — the
 //! natives stay total, OS failures become tag words instead of VM traps.
 //! They answer with a uniform two-word tag+payload span [BL-2] on the
@@ -129,10 +145,12 @@
 //! disambiguates nothing); [`PLATFORM_IO_ERR`] marks IO failure, with the
 //! message `Ref` in the span's payload word.
 //!
-//! The net ops (`crate::net`) extend the same convention: success reuses
-//! `PLATFORM_IO_OK`, and failure carries the platform tag
-//! [`PLATFORM_NET_ERR`] — the file-owned `net_err` type needs its own
-//! cross-module tag, reserved one step below `io_err` in the countdown.
+//! The net ops (`crate::net`) answer the same convention over the
+//! failure taxonomy's error classes: success reuses `PLATFORM_IO_OK`,
+//! and a failure carries the class discriminant of the ambient
+//! `net_err` case it answers by error class —
+//! [`PLATFORM_NET_TIMEOUT`] or [`PLATFORM_NET_REFUSED`] — with the
+//! message `Ref` in the span's payload word.
 //!
 //! # The string natives (indices 11-18; `len` is generic at 10)
 //!
@@ -141,11 +159,13 @@
 //! multi-byte text never cuts a code point. Char positions resolve
 //! through the string object's lazily built boundary map (one
 //! O(length) pass per string object, never per call), so `substring`
-//! and `char_at` answer in O(range) once the bounds are clamped.
-//! Out-of-range access stays
-//! total: `substring` clamps both bounds to the string and answers the
-//! empty string when the clamped range is empty or inverted, and
-//! `char_at` answers the empty string past either end.
+//! and `char_at` answer in O(range) once the bounds are known.
+//! Both are checked reads in `list_get`'s span shape (the
+//! checked-API convention): `substring` answers the slice between the
+//! two positions when `0 <= start <= end` holds inside the string's
+//! char count, `char_at` the char at an in-range position, and every
+//! out-of-range request answers the [`PLATFORM_NONE`] member with the
+//! rejected index as the payload — never clamping, never a trap.
 //!
 //! `concat` is the callable face of the `STRCAT` uop: interpolation
 //! chains emit STRCAT directly, while both call spellings (`a.concat(b)`
@@ -173,7 +193,7 @@
 //! struct) is stored as its whole inline word span at a per-list element
 //! stride taken from `list[t]`'s compile-time shape: the first append
 //! fixes the stride, every later append repeats it, and the readers
-//! (`list_len`, the checked `list_get`/`head` span) slice by it — so a
+//! (`list_len`, the checked `list_get` span) slice by it — so a
 //! wider checked read answers through [`NativeResult::Span`], the span
 //! channel, one payload word per element word with a count per `Ref`
 //! word. Construction (`list_new`, `list_concat`, and the producers
@@ -219,8 +239,9 @@
 //! block, CALLG-addressed like the container reads above them: `cons`,
 //! `tail`, and `collect` are producers — fresh lists over the source's
 //! element words, construction copying per the D2 ruling, the copy
-//! acquiring one count per `Ref` element it adopts; `head` and `first`
-//! are two spellings of one checked first-element body, both answering
+//! acquiring one count per `Ref` element it adopts; `first` is the
+//! one checked first-element body (the retired `head` spelling's
+//! historical slot at 33 stays reserved), answering
 //! `list_get`'s two-word span (the hit is [`PLATFORM_IO_OK`] with the
 //! element handed out under its own count, an empty list the
 //! [`PLATFORM_NONE`] member with the inert unit word as payload —
@@ -302,25 +323,30 @@
 //!
 //! # The fiber control natives (indices 24-26)
 //!
-//! The fiber substrate's debug pair [E2], appended past the list block:
-//! `fiber_yield` parks the running fiber and hands control to its resumer
-//! with a one-word payload; `fiber_resume` parks the caller and enters the
-//! named pool fiber with the payload. They are natives so fixtures address
-//! them with ordinary pool FuncRefs through `CALL` — but the dispatcher,
-//! not the body, performs the switch (the body only answers the bare
-//! [`PLATFORM_NONE`] bounce tag, which is also what a `CALLT` to them
-//! yields: no switch exists in tail position, and what an unreachable or
-//! dead `fiber_resume` target answers on the caller's overlay). The host
-//! face of the same machinery is `Vm::spawn_fiber`/`Vm::resume_fiber`.
+//! The fiber substrate's debug switch [E2], appended past the list block:
+//! `fiber_resume` parks the caller and enters the named pool fiber with
+//! the payload. It is a native so fixtures address it with an ordinary
+//! pool FuncRef through `CALL` — but the dispatcher, not the body,
+//! performs the switch (the body only answers the bare [`PLATFORM_NONE`]
+//! bounce tag, which is also what a `CALLT` to it yields: no switch
+//! exists in tail position, and what an unreachable or dead
+//! `fiber_resume` target answers on the caller's overlay). The host
+//! face of the same machinery is `Vm::spawn_fiber`/`Vm::resume_fiber`;
+//! the substrate's own yield vocabulary is the host's suspension
+//! request (`Vm::request_suspend`), never a user-spellable native.
 //!
-//! `nursery_join` (26) extends the pair with the nursery boundary's debug
-//! face [E2]: the caller parks, the dispatcher drives the named nursery's
-//! children to death (first failure cancels the rest [E5]), and the call
-//! answers the failed-children count. The full per-child outcomes are the
-//! host API's ([`crate::Vm::join_nursery`]); an in-language surface over
-//! them lands with the checker/lowerer rounds.
+//! `nursery_join` (26) extends the switch with the nursery boundary's
+//! debug face [E2]: the caller parks, the dispatcher drives the named
+//! nursery's children to death (first failure cancels the rest [E5]),
+//! and the call answers the failed-children count. The full per-child
+//! outcomes are the host API's ([`crate::Vm::join_nursery`]); an
+//! in-language surface over them lands with the checker/lowerer rounds.
 
-use std::{io::Write, path::Path, time::Duration};
+use std::{
+    io::Write,
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use ds_abi::{SlotType, Staging};
 
@@ -377,16 +403,17 @@ pub const BUILTIN_LIST_GET: u32 = 22;
 /// both element runs; the ONE body lives in [`GENERIC_FUNCTIONS`],
 /// CALLG-addressed).
 pub const BUILTIN_LIST_CONCAT: u32 = 23;
-/// `fiber_yield(value: int) -> int` — the fiber substrate's debug yield
-/// [E2]: parks the current fiber, control returns to its resumer with
-/// `value`, and the call answers the payload of whichever switch re-enters
-/// the fiber. Appended at the end of the table, past the list block.
+/// The retired `fiber_yield` debug yield's historical slot, kept reserved
+/// so the index run never renumbers (the 2026-11-17 ruling: the spelling
+/// leaves the language surface, the dev host injecting suspension through
+/// its own capability face; no native serves the slot, so a CALL naming it
+/// traps like an uninstalled index).
 pub const BUILTIN_FIBER_YIELD: u32 = 24;
 /// `fiber_resume(fiber: int, value: int) -> int` — the substrate's debug
 /// switch [E2]: parks the current fiber and enters `fiber` with `value`
 /// (a never-started fiber drops the payload); the call answers the value
-/// the entered fiber next yields or completes with. An absent, dead, or
-/// self target answers the bare `PLATFORM_NONE` tag (no switch), the
+/// the entered fiber next parks with or completes with. An absent, dead,
+/// or self target answers the bare `PLATFORM_NONE` tag (no switch), the
 /// checked-read convention of `list_get` at one word.
 pub const BUILTIN_FIBER_RESUME: u32 = 25;
 /// `nursery_join(nursery: int) -> int` — the nursery boundary's debug face
@@ -429,10 +456,10 @@ pub const BUILTIN_MAP_SET: u32 = 31;
 /// it adopts; the ONE body lives in [`GENERIC_FUNCTIONS`],
 /// CALLG-addressed).
 pub const BUILTIN_CONS: u32 = 32;
-/// `head[t](xs: list) -> t | none` (generic; the checked first element
-/// in `list_get`'s span shape — an empty list answers the `none` span
-/// member, never a trap; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
+/// The retired `head` spelling's historical slot, kept reserved so the
+/// index run never renumbers (the 2026-11-17 retirement ruling: `first`
+/// is the one list-front spelling; no generic body serves the slot, so
+/// a CALLG naming it traps like an uninstalled native).
 pub const BUILTIN_HEAD: u32 = 33;
 /// `tail[t](xs: list) -> list` (generic; a fresh list over the elements
 /// after the first — construction copies; an empty list answers the
@@ -444,8 +471,8 @@ pub const BUILTIN_TAIL: u32 = 34;
 /// [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_COLLECT: u32 = 35;
 /// `first[t](xs: list) -> t | none` (generic; the checked first element
-/// under the corpus's other spelling — `head`'s one shared body; the
-/// ONE body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
+/// in `list_get`'s span shape, the one list-front spelling; the ONE
+/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
 pub const BUILTIN_FIRST: u32 = 36;
 /// `max[t](a, b: value) -> value` (generic; the greater of the two
 /// numeric words — int compares in i64's total order, float follows
@@ -584,6 +611,92 @@ pub const BUILTIN_CHAR_HASH: u32 = 55;
 /// function's body, so the table row exists for the splice's pool
 /// reference and the dispatcher's interception.
 pub const BUILTIN_REPL_PARK: u32 = 56;
+/// `parse_float(s: string) -> float | parse_err` — `parse_int`'s twin
+/// over the float slot (index 19, the string block's former spare).
+pub const BUILTIN_PARSE_FLOAT: u32 = 19;
+/// `char_of(code: int) -> char | none` — the codepoint→char reader: the
+/// one native seam the @std json parser's `\u` decoding needs.
+pub const BUILTIN_CHAR_OF: u32 = 58;
+/// `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the ordered key
+/// face, entry order, one word per key.
+pub const BUILTIN_MAP_KEYS: u32 = 59;
+/// `code_of(c: char) -> int` — the char→codepoint reader, `char_of`'s
+/// twin, the one seam the @std json serializer's control-char escaping
+/// needs.
+pub const BUILTIN_CODE_OF: u32 = 60;
+/// `bytes_of(xs: list[byte]) -> bytes` — the byte string's construction
+/// seam, the `list[byte]` bridge in: one word per byte element folds
+/// into one counted block.
+pub const BUILTIN_BYTES_OF: u32 = 61;
+/// `byte_list(b: bytes) -> list[byte]` — the bridge back out, one word
+/// per byte.
+pub const BUILTIN_BYTE_LIST: u32 = 62;
+/// `byte_at(b: bytes, i: int) -> byte | none` — the checked indexed
+/// read, the ok/none span shape over the one-word byte payload.
+pub const BUILTIN_BYTE_AT: u32 = 63;
+/// `bytes_eq(a, b: bytes) -> bool` — the bytes collection's structural
+/// content compare [B9]: equal payloads answer true, a different length
+/// or content false. The `==`/`!=` chain over bytes operands dispatches
+/// here — the string's EqStr uop reads string objects, so the one Ref
+/// word's shape needs its own body over the raw payload.
+pub const BUILTIN_BYTES_EQ: u32 = 64;
+/// `bytes_compare(a, b: bytes) -> int` — the bytes sort key the `ord`
+/// derive orders bytes parts through: the lexicographic order over the
+/// payloads, a shorter prefix ordering first, answered as one i64 word
+/// of -1, 0, or 1.
+pub const BUILTIN_BYTES_COMPARE: u32 = 65;
+/// `bytes_hash(b: bytes) -> int` — the content hash the `hash` derive
+/// folds bytes parts through: FNV-1a over the payload bytes (the same
+/// pair the derive's fold mixes through), answered as one i64 word. The
+/// value is an implementation detail; consistency with structural `==`
+/// is the contract [B9].
+pub const BUILTIN_BYTES_HASH: u32 = 66;
+/// `utf8_encode(s: string) -> bytes` — the string→bytes bridge: the
+/// string's own UTF-8 bytes become one counted block, no re-encoding.
+pub const BUILTIN_UTF8_ENCODE: u32 = 67;
+/// `utf8_decode(b: bytes) -> string | utf8_err` — the bytes→string
+/// bridge: the payload validates as UTF-8 on the way back, an invalid
+/// sequence answering the taxonomy's `utf8_err` tag with the rejection
+/// message in the payload word.
+pub const BUILTIN_UTF8_DECODE: u32 = 68;
+/// `trap(msg: string) -> unit` — the bare trap primitive (the 2026-11-17
+/// die split): the message-bearing deliberate trap a `die` spelling's
+/// lowering routes to. Never returns and never prints — the trap carries
+/// the message out to the drive, and what a die trap reports (the printing
+/// and the exit code) is the host's own policy; the unit result shape only
+/// satisfies the call site's width check.
+pub const BUILTIN_TRAP: u32 = 69;
+/// `list_eq(a, b: list) -> bool` — the list collection's structural
+/// content compare [B9]: equal lengths and pairwise-equal element words,
+/// every nested reference pair compared by its content. The `==`/`!=`
+/// chain over list operands dispatches here — the string's EqStr uop
+/// reads string objects alone, so the one Ref word's shape needs its own
+/// body. Both operands stay borrowed.
+pub const BUILTIN_LIST_EQ: u32 = 70;
+/// `map_eq(a, b: map) -> bool` — the map collection's structural content
+/// compare [B9]: equal row counts and, per key of one side, the same row
+/// in the other through the lookup face `map_get` serves (string keys by
+/// content, every other word by identity), the value spans pairwise
+/// equal. The `==`/`!=` chain over map operands dispatches here. Both
+/// operands stay borrowed.
+pub const BUILTIN_MAP_EQ: u32 = 71;
+/// `byte_of(n: int) -> byte | none` — the byte width bridge: the in-range
+/// number's word under the ok discriminant, none outside 0-255 (B8's
+/// convention). ds source cannot cross the width (the atom sits outside
+/// the int conversion family), so the json face's byte readers build
+/// their values through this.
+pub const BUILTIN_BYTE_OF: u32 = 72;
+/// `int_of_byte(b: byte) -> int` — the byte width bridge read back: the
+/// word's 0-255 number, for the json_int construction.
+pub const BUILTIN_INT_OF_BYTE: u32 = 73;
+/// `u32_of(n: int) -> u32 | none` — the u32 width bridge: the in-range
+/// number's word under the ok discriminant, none outside the u32 range.
+/// The width carries no literal or constructor, so the json face's u32
+/// readers build their values through this.
+pub const BUILTIN_U32_OF: u32 = 74;
+/// `int_of_u32(v: u32) -> int` — the u32 width bridge read back: the
+/// word's number, for the json_int construction.
+pub const BUILTIN_INT_OF_U32: u32 = 75;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -592,13 +705,23 @@ pub const PLATFORM_IO_OK: u8 = u8::MAX;
 /// The failure discriminant: the `io_err` tag, payload word holding the
 /// OS-error message `Ref`.
 pub const PLATFORM_IO_ERR: u8 = u8::MAX - 1;
-/// The net natives' failure discriminant: the `net_err` tag, payload word
-/// holding the message `Ref` — one step below `io_err` in the platform
-/// reservation's countdown.
-pub const PLATFORM_NET_ERR: u8 = u8::MAX - 2;
-/// The `parse_int` failure discriminant: the `parse_err` tag, the next id
-/// below `net_err` in the platform reservation's countdown; the payload
-/// word holds the input text `Ref`.
+/// The net natives' timeout-class failure discriminant: a bounded wait
+/// expired (the ambient `net_err` case `timeout`), the message `Ref` in
+/// the payload word. Reserved below the lowerer's claim-band pair in
+/// the platform reservation's countdown.
+pub const PLATFORM_NET_TIMEOUT: u8 = u8::MAX - 10;
+/// The net natives' refused-class failure discriminant: every failure
+/// that is not a bounded wait (the ambient `net_err` case `refused`),
+/// the message `Ref` in the payload word.
+pub const PLATFORM_NET_REFUSED: u8 = u8::MAX - 11;
+/// The utf8 decode failure discriminant: the `utf8_err` tag (the
+/// taxonomy's UTF-8 validation member — `parse_err` names document
+/// shape failures alone), the rejection message `Ref` in the payload
+/// word — the deepest id of the platform reservation's countdown.
+pub const PLATFORM_UTF8_ERR: u8 = u8::MAX - 12;
+/// The `parse_int` failure discriminant: the `parse_err` tag, one id
+/// below the retired `net_err` slot in the platform reservation's
+/// countdown; the payload word holds the input text `Ref`.
 pub const PLATFORM_PARSE_ERR: u8 = u8::MAX - 3;
 /// The `none` discriminant of a checked collection read (`list_get`): the
 /// `t | none` member callers extract, the next id below `parse_err` in the
@@ -626,9 +749,6 @@ pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 /// bounce result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlNative {
-    /// `fiber_yield(value)`: park the current fiber; control returns to its
-    /// resumer with `value`.
-    Yield,
     /// `fiber_resume(target, value)`: park the current fiber; enter `target`
     /// with `value`. An absent, dead, or self target answers the bare
     /// `PLATFORM_NONE` tag instead (the checked-read convention of
@@ -794,17 +914,36 @@ fn substring_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let id = ref_arg(args, 0)?;
+    let start = i64_arg(args, 1)?;
+    let end = i64_arg(args, 2)?;
     let n = i64::try_from(heaps.char_count(id)?).expect("string length fits i64");
-    // clamped to [0, n], so the narrowed index is a valid char position
-    let start = usize::try_from(i64_arg(args, 1)?.clamp(0, n)).expect("index fits usize");
-    let end = usize::try_from(i64_arg(args, 2)?.clamp(0, n)).expect("index fits usize");
-    if start >= end {
-        return Ok(NativeResult::Word(heaps.new_str_part("")));
+    // the checked-API convention (the span shape `parse_int` answers):
+    // the slice in range — `0 <= start <= end <= n`, so both offsets sit
+    // on char boundaries and the cut cannot split a code point — answers
+    // the payload Ref, every out-of-range shape (either side, inverted)
+    // the `none` member with the rejected `start`, never clamping
+    if !(0 <= start && start <= end && end <= n) {
+        return Ok(NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(start),
+        });
     }
-    // both offsets sit on char boundaries, so the slice cannot cut a code point
-    let (begin, stop) = heaps.char_byte_range(id, start, end)?;
+    if start == end {
+        return Ok(NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: heaps.new_str_part(""),
+        });
+    }
+    let (begin, stop) = heaps.char_byte_range(
+        id,
+        usize::try_from(start).expect("in-range start fits usize"),
+        usize::try_from(end).expect("in-range end fits usize"),
+    )?;
     let part = heaps.alloc_substr(id, begin, stop)?;
-    Ok(NativeResult::Word(heaps.word(part)))
+    Ok(NativeResult::Tag {
+        tag: PLATFORM_IO_OK,
+        payload: heaps.word(part),
+    })
 }
 
 fn total_compare_fn(
@@ -1006,6 +1145,340 @@ fn parse_int_fn(
     })
 }
 
+/// `parse_float(s: string) -> float | parse_err` — `parse_int`'s twin
+/// over the float slot: the correctly-rounded decimal reader, strict
+/// about spelling, answering `parse_err` with the input text as the
+/// payload on refusal. The @std json parser's float arm routes through
+/// here, so a parsed float carries the same bits any wider ecosystem
+/// reader would give it.
+fn parse_float_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let id = ref_arg(args, 0)?;
+    let text = heaps.str_at(id)?;
+    Ok(match text.parse::<f64>() {
+        // strict: no implicit whitespace handling (the `trim` native composes)
+        Ok(v) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::F64(v),
+        },
+        Err(_) => NativeResult::Tag {
+            tag: PLATFORM_PARSE_ERR,
+            payload: Value::Ref(id),
+        },
+    })
+}
+
+/// `char_of(code: int) -> char | none` — the codepoint→char reader:
+/// the one seam a ds-source `\u` decoder needs (codepoint arithmetic
+/// stays in ds, the scalar-width UTF-8 encoding stays native). A `code`
+/// outside the scalar range answers `none`, the payload word carrying
+/// the rejected code.
+fn char_of_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let code = i64_arg(args, 0)?;
+    Ok(match u32::try_from(code).ok().and_then(char::from_u32) {
+        Some(c) => {
+            let mut buf = [0u8; 4];
+            NativeResult::Tag {
+                tag: PLATFORM_IO_OK,
+                payload: heaps.new_str_part(c.encode_utf8(&mut buf)),
+            }
+        },
+        None => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(code),
+        },
+    })
+}
+
+/// `code_of(c: char) -> int` — `char_of`'s twin, the char→codepoint
+/// reader the @std json serializer's control-char escaping spells its
+/// `\u00XX` forms through. A malformed word (an empty or multi-char
+/// string riding the char Ref) traps: the checker types the operand,
+/// so only a hand-assembled frame reaches it.
+fn code_of_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let id = ref_arg(args, 0)?;
+    let text = heaps.str_at(id)?;
+    // a char word is a one-char string by construction (the literal
+    // lowering and `char_of` both build exactly that), so only a
+    // hand-assembled frame reaches the empty case — the multi-char case
+    // reads the first scalar rather than trap, matching how the string
+    // natives treat a char word leniently
+    let code = text
+        .chars()
+        .next()
+        .ok_or(Trap::UnknownObject { obj: id.id() })?;
+    Ok(NativeResult::Word(Value::I64(i64::from(u32::from(code)))))
+}
+
+/// `bytes_of(xs: list[byte]) -> bytes` — the byte string's construction
+/// seam: the byte list folds into one counted block, one payload byte
+/// per element word. The list keeps its own counts (a borrow exactly
+/// like every native staging), and the bytes word's birth count is the
+/// calling frame's. An element word outside `0..=255` traps: the
+/// checker types the list, so only a hand-assembled frame reaches it.
+fn bytes_of_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let id = ref_arg(args, 0)?;
+    let elems = {
+        let (elems, stride) = heaps.list_at(id)?;
+        if stride > 1 {
+            return Err(Trap::ElementStride {
+                obj: id.id(),
+                stride,
+                given: 1,
+            });
+        }
+        elems.to_vec()
+    };
+    let mut payload = Vec::with_capacity(elems.len());
+    for word in elems {
+        let Value::I64(byte) = word else {
+            return Err(Trap::SlotTypeMismatch {
+                slot: 0,
+                expected: SlotType::I64,
+                actual: word.slot_type(),
+            });
+        };
+        payload.push(u8::try_from(byte).map_err(|_| Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::I64,
+            actual: SlotType::I64,
+        })?);
+    }
+    Ok(NativeResult::Word(
+        heaps.new_bytes(payload.into_boxed_slice()),
+    ))
+}
+
+/// `byte_list(b: bytes) -> list[byte]` — the bridge back out: one fresh
+/// list, one word per payload byte, the bytes keeping their own count.
+fn byte_list_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let id = ref_arg(args, 0)?;
+    let elems: Vec<Value> = heaps
+        .bytes_at(id)?
+        .iter()
+        .map(|byte| Value::I64(i64::from(*byte)))
+        .collect();
+    Ok(NativeResult::Word(heaps.new_list(elems)))
+}
+
+/// `byte_at(b: bytes, i: int) -> byte | none` — the checked indexed read,
+/// the ok/none span shape `list_get` answers over the one-word byte
+/// payload: the in-range byte under the success discriminant, every
+/// out-of-range shape the `none` member with the rejected index —
+/// never clamping and never a trap.
+fn byte_at_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let id = ref_arg(args, 0)?;
+    let index = i64_arg(args, 1)?;
+    let payload = heaps.bytes_at(id)?;
+    Ok(
+        match usize::try_from(index).ok().filter(|&at| at < payload.len()) {
+            Some(at) => NativeResult::Tag {
+                tag: PLATFORM_IO_OK,
+                payload: Value::I64(i64::from(payload[at])),
+            },
+            None => NativeResult::Tag {
+                tag: PLATFORM_NONE,
+                payload: Value::I64(index),
+            },
+        },
+    )
+}
+
+/// `byte_of(n: int) -> byte | none` — the checked byte construction: the
+/// number's word under the ok discriminant, none outside 0-255 with the
+/// rejected number in the payload (byte_at's span shape).
+fn byte_of_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let n = i64_arg(args, 0)?;
+    Ok(match u8::try_from(n) {
+        Ok(b) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(i64::from(b)),
+        },
+        Err(_) => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(n),
+        },
+    })
+}
+
+/// `int_of_byte(b: byte) -> int` — the byte's 0-255 number.
+fn int_of_byte_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let b = i64_arg(args, 0)?;
+    Ok(NativeResult::Word(Value::I64(b)))
+}
+
+/// `u32_of(n: int) -> u32 | none` — the checked u32 construction: the
+/// number's word under the ok discriminant, none outside the u32 range.
+fn u32_of_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let n = i64_arg(args, 0)?;
+    Ok(match u32::try_from(n) {
+        Ok(u) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(i64::from(u)),
+        },
+        Err(_) => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(n),
+        },
+    })
+}
+
+/// `int_of_u32(v: u32) -> int` — the u32's number.
+fn int_of_u32_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let v = i64_arg(args, 0)?;
+    Ok(NativeResult::Word(Value::I64(v)))
+}
+
+/// `bytes_eq(a, b: bytes) -> bool` — the structural content compare
+/// [B9]: the payloads compare byte for byte, a length mismatch a
+/// certain false. Both operands stay borrowed (the native call
+/// convention's staging owns no count).
+fn bytes_eq_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so one operand copies out
+    let a = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
+    let b = heaps.bytes_at(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::Bool(a == b)))
+}
+
+/// `bytes_compare(a, b: bytes) -> int` — the bytes sort key: the
+/// lexicographic order over the payloads, a shorter prefix ordering
+/// first. Both operands stay borrowed.
+fn bytes_compare_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so one operand copies out
+    let a = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
+    let b = heaps.bytes_at(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::I64(match a.as_slice().cmp(b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })))
+}
+
+/// `bytes_hash(b: bytes) -> int` — the bytes content hash, FNV-1a over
+/// the payload under the hash family's one scheme.
+fn bytes_hash_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so the operand copies out
+    let payload = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
+    Ok(NativeResult::Word(Value::I64(fnv1a(&payload))))
+}
+
+/// `utf8_encode(s: string) -> bytes` — the string→bytes bridge: the
+/// string's own UTF-8 bytes become one fresh counted block, the string
+/// keeping its own count.
+fn utf8_encode_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let payload = heaps.str_at(ref_arg(args, 0)?)?.as_bytes().to_vec();
+    Ok(NativeResult::Word(
+        heaps.new_bytes(payload.into_boxed_slice()),
+    ))
+}
+
+/// `utf8_decode(b: bytes) -> string | utf8_err` — the bytes→string
+/// bridge: the payload validates as UTF-8 on the way back, an invalid
+/// sequence answering the taxonomy's `utf8_err` tag with the rejection
+/// message in the payload word.
+fn utf8_decode_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the routed read borrows the store, so the operand copies out
+    let payload = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
+    match String::from_utf8(payload) {
+        Ok(text) => Ok(NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: heaps.new_str(text),
+        }),
+        Err(_) => Ok(NativeResult::Tag {
+            tag: PLATFORM_UTF8_ERR,
+            payload: heaps.new_str_part("invalid utf-8 payload"),
+        }),
+    }
+}
+
+/// `list_eq(a, b: list) -> bool` — the list collection's structural
+/// content compare [B9]: the content walk over both objects' element
+/// words, every nested reference pair compared the same way. Both
+/// operands stay borrowed (the native call convention's staging owns no
+/// count).
+fn list_eq_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Ok(NativeResult::Word(Value::Bool(
+        heaps.content_eq(ref_arg(args, 0)?, ref_arg(args, 1)?)?,
+    )))
+}
+
+/// `map_eq(a, b: map) -> bool` — the map collection's structural content
+/// compare [B9]: the content walk over both objects' rows, key lookup the
+/// face `map_get` serves and value spans compared word for word. Both
+/// operands stay borrowed.
+fn map_eq_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Ok(NativeResult::Word(Value::Bool(
+        heaps.content_eq(ref_arg(args, 0)?, ref_arg(args, 1)?)?,
+    )))
+}
+
 /// How `split` cuts the subject. The surface separator is a `char` (one
 /// scalar value), and an empty one splits per character rather than trap.
 enum SplitSep {
@@ -1080,17 +1553,25 @@ fn char_at_fn(
 ) -> Result<NativeResult, Trap> {
     let id = ref_arg(args, 0)?;
     let index = i64_arg(args, 1)?;
-    // out of range by either side: the empty string, never a trap
-    if index < 0 {
-        return Ok(NativeResult::Word(heaps.new_str_part("")));
+    // the checked char read in `list_get`'s span shape: an in-range index
+    // answers the one-scalar char word (the hit payload a one-char
+    // string Ref rides, exactly the word `char_of` mints), either side
+    // out of range the `none` member with the rejected index — never a
+    // trap
+    let n = heaps.char_count(id)?;
+    if index < 0 || usize::try_from(index).unwrap_or(usize::MAX) >= n {
+        return Ok(NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(index),
+        });
     }
-    let i = usize::try_from(index).expect("checked index fits usize");
-    if i >= heaps.char_count(id)? {
-        return Ok(NativeResult::Word(heaps.new_str_part("")));
-    }
+    let i = usize::try_from(index).expect("in-range index fits usize");
     let (begin, stop) = heaps.char_byte_range(id, i, i + 1)?;
     let part = heaps.alloc_substr(id, begin, stop)?;
-    Ok(NativeResult::Word(heaps.word(part)))
+    Ok(NativeResult::Tag {
+        tag: PLATFORM_IO_OK,
+        payload: heaps.word(part),
+    })
 }
 
 fn join_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
@@ -1270,8 +1751,26 @@ fn map_len_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let n = i64::try_from(heaps.map_pairs(ref_arg(args, 0)?)?.len()).expect("map length fits i64");
+    let n = i64::try_from(heaps.map_len(ref_arg(args, 0)?)?).expect("map length fits i64");
     Ok(NativeResult::Word(Value::I64(n)))
+}
+
+/// `map_keys[k, v](map) -> list[k]`: the ordered key face — the map's
+/// entry order (the order rows were first stored), one word per key,
+/// the fresh list's edge owning one count per `Ref` key (the sources
+/// keep their own, C4).
+fn map_keys_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let keys = heaps.map_keys(ref_arg(args, 0)?)?;
+    for key in &keys {
+        if let Value::Ref(word) = *key {
+            heaps.inc_edge(word)?;
+        }
+    }
+    Ok(NativeResult::Word(heaps.new_list_strided(keys, 1)))
 }
 
 fn map_get_fn(
@@ -1281,17 +1780,23 @@ fn map_get_fn(
 ) -> Result<NativeResult, Trap> {
     let map = ref_arg(args, 0)?;
     let hit = heaps.map_at(map, args[1])?;
-    Ok(match hit {
-        Some(value) => {
-            // the read hands the value word out: a Ref value gains a
-            // count for the reader, the map keeps its own (C4)
-            if let Value::Ref(word) = value {
+    Ok(match hit.as_deref() {
+        Some([only]) => {
+            // the one-word stride reads through the `Tag` shape: no span
+            // buffer, and the slice dies before the count goes on
+            if let Value::Ref(word) = *only {
                 heaps.inc(word)?;
             }
             NativeResult::Tag {
                 tag: PLATFORM_IO_OK,
-                payload: value,
+                payload: *only,
             }
+        },
+        Some(words) => {
+            // the read hands the value span out: a Ref word gains a count
+            // for the reader per word, the map keeps its own (C4) — the
+            // list checked read's own span shape
+            native_result_span(heaps, words.to_vec())?
         },
         // a miss answers the `none` span member with the probe key, the
         // same checked-read shape `list_get` answers with the index
@@ -1307,7 +1812,15 @@ fn map_set_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    heaps.set_map(ref_arg(args, 0)?, args[1], args[2])?;
+    // the variadic tail is the value's whole inline word span, the
+    // `list_push` staging shape at the value position
+    if args.len() < 3 {
+        return Err(Trap::ArityMismatch {
+            expected: 3,
+            given: args.len(),
+        });
+    }
+    heaps.set_map(ref_arg(args, 0)?, args[1], &args[2..])?;
     // the inert unit word: no caller reads the overlay result
     Ok(NativeResult::Word(Value::I64(0)))
 }
@@ -1391,7 +1904,7 @@ fn collect_fn(
     copy_into_fresh_list(heaps, elems, stride)
 }
 
-/// `head`'s and `first`'s one body: the checked first element in
+/// `first`'s one body: the checked first element in
 /// `list_get`'s span shape — the hit is the first element's whole
 /// inline span, handed out under one count per `Ref` word (C4), and an
 /// empty list answers the `none` span member, never a trap. The miss
@@ -1511,9 +2024,9 @@ pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Tra
 
 /// The generic builtin vocabulary, keyed by the (module, native index)
 /// FuncRef address [H3]. `len[t]`'s one body dispatches on the single
-/// evidence word and answers the string char count or the list element
-/// count. The container reads and counts (`list_len`, `list_get`,
-/// `list_concat`, `map_len`, `map_get`) share the same discipline with
+/// evidence word and answers the string char count, the bytes payload
+/// count, the list element count, or the map pair count. The container reads and counts
+/// (`list_len`, `list_get`, `list_concat`, `map_len`, `map_get`) share the same discipline with
 /// element-agnostic bodies: the container word is one `Ref` whatever the
 /// element, so the evidence words (one per constraint-list entry, each
 /// naming the receiver's container instance) carry no dispatch — they
@@ -1521,8 +2034,8 @@ pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Tra
 /// exists at runtime, and the table slots the entries address stay
 /// reserved, so a plain CALL never reaches a monomorphic fallback. The
 /// container closes past the map block — `cons`, `tail`, `collect`,
-/// `max` — join them with element-agnostic bodies, and `head`/`first`
-/// share the one first-element body; `max` dispatches on the numeric
+/// `first` — join them with element-agnostic bodies, `first` carrying
+/// the checked first-element body; `max` dispatches on the numeric
 /// instance its evidence word names. The lambda-taking combinators —
 /// `map`, `filter`, `reduce`, `partition` — append past the closes with
 /// reentrant bodies that call the staged `Fn` word per element through
@@ -1580,6 +2093,14 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         result_words: 2,
         func: map_get_generic_fn,
     }),
+    (BUILTIN_MODULE, BUILTIN_MAP_KEYS, GenericFunction {
+        name: "map_keys",
+        params: &[SlotType::Ref],
+        staging: Staging::Fixed,
+        evidence: 2,
+        result_words: 1,
+        func: map_keys_generic_fn,
+    }),
     (BUILTIN_MODULE, BUILTIN_CONS, GenericFunction {
         // the staged span is the head element's whole inline span (the
         // front, however wide) then the list `Ref` as the trailing named
@@ -1590,14 +2111,6 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         evidence: 1,
         result_words: 1,
         func: cons_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_HEAD, GenericFunction {
-        name: "head",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 2,
-        func: head_generic_fn,
     }),
     (BUILTIN_MODULE, BUILTIN_TAIL, GenericFunction {
         name: "tail",
@@ -1621,7 +2134,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         staging: Staging::Fixed,
         evidence: 1,
         result_words: 2,
-        func: head_generic_fn,
+        func: first_generic_fn,
     }),
     (BUILTIN_MODULE, BUILTIN_MAX, GenericFunction {
         name: "max",
@@ -1705,7 +2218,8 @@ pub fn resolve_generic(module: &str, index: u32) -> Option<&'static GenericFunct
 /// The one `len` body: dispatch on the call's evidence word, the
 /// statically-resolved builtin instance of the instantiated type
 /// ([`ds_abi::BuiltinInstance`]). The string instance counts unicode
-/// scalar values; the list instance counts elements.
+/// scalar values; the list instance counts elements; the bytes
+/// instance counts payload bytes; the map instance counts pairs.
 fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
     let (mut heaps, _out) = vm.split();
     let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
@@ -1719,6 +2233,15 @@ fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
         Value::I64(id) if id == ds_abi::BuiltinInstance::List as i64 => {
             let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
             let n = i64::try_from(elems.len() / stride.max(1)).expect("list length fits i64");
+            Ok(NativeResult::Word(Value::I64(n)))
+        },
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Bytes as i64 => {
+            let n = i64::try_from(heaps.bytes_at(ref_arg(args, 0)?)?.len())
+                .expect("bytes length fits i64");
+            Ok(NativeResult::Word(Value::I64(n)))
+        },
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Map as i64 => {
+            let n = i64::try_from(heaps.map_len(ref_arg(args, 0)?)?).expect("map length fits i64");
             Ok(NativeResult::Word(Value::I64(n)))
         },
         staged => Err(Trap::UnknownInstance {
@@ -1771,6 +2294,15 @@ fn map_len_generic_fn(
     map_len_fn(&mut heaps, out, args)
 }
 
+fn map_keys_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let (mut heaps, out) = vm.split();
+    map_keys_fn(&mut heaps, out, args)
+}
+
 fn map_get_generic_fn(
     vm: &mut Vm,
     _evidence: &[Value],
@@ -1785,7 +2317,11 @@ fn cons_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<N
     cons_fn(&mut heaps, out, args)
 }
 
-fn head_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+fn first_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
     let (mut heaps, out) = vm.split();
     first_element_fn(&mut heaps, out, args)
 }
@@ -2310,11 +2846,11 @@ reserved!(builtin_reserved_6 in BUILTIN_MODULE at 6); // was write_file
 reserved!(builtin_reserved_7 in BUILTIN_MODULE at 7); // was file_exists
 reserved!(builtin_reserved_8 in BUILTIN_MODULE at 8); // was fs_list
 reserved!(builtin_reserved_9 in BUILTIN_MODULE at 9); // was file_size
-reserved!(builtin_reserved_19 in BUILTIN_MODULE at 19); // the spare slot
 reserved!(builtin_reserved_48 in BUILTIN_MODULE at 48); // par_reduce's generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_21 in BUILTIN_MODULE at 21); // was the monomorphic list_len; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_22 in BUILTIN_MODULE at 22); // was list_get; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_23 in BUILTIN_MODULE at 23); // was list_concat; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_24 in BUILTIN_MODULE at 24); // was fiber_yield; the user-spellable debug yield retired (the 2026-11-17 ruling), the dev host injecting suspension through its own face
 reserved!(builtin_reserved_29 in BUILTIN_MODULE at 29); // was the monomorphic map_len; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_30 in BUILTIN_MODULE at 30); // was map_get; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_10 in BUILTIN_MODULE at 10); // was the string-only len; the generic len body lives in GENERIC_FUNCTIONS
@@ -2329,6 +2865,8 @@ reserved!(builtin_reserved_39 in BUILTIN_MODULE at 39); // filter; the reentrant
 reserved!(builtin_reserved_40 in BUILTIN_MODULE at 40); // reduce; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_46 in BUILTIN_MODULE at 46); // partition; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_47 in BUILTIN_MODULE at 47); // par_map; the fork-join generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_57 in BUILTIN_MODULE at 57); // was parse_json; the reader lives in @std ds source now
+reserved!(builtin_reserved_59 in BUILTIN_MODULE at 59); // map_keys; the generic body lives in GENERIC_FUNCTIONS
 
 /// The one reserved gap entry shape: no parameters, a one-word result
 /// contract (the trap fires before any overlay write matters).
@@ -2348,12 +2886,13 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// the string ops (11-18), and the list and map construction and
 /// mutation surfaces — pure with no world effects. The historical
 /// world-surface indices (0-1, 5-9), the string block's spare slot (19),
-/// and every generic builtin's slot (10, 21-23, 29-30, 32-37 — their ONE
-/// bodies live in [`GENERIC_FUNCTIONS`], CALLG-addressed) stay as
+/// every generic builtin's slot (10, 21-23, 29-30, 32-37 — their ONE
+/// bodies live in [`GENERIC_FUNCTIONS`], CALLG-addressed), and the
+/// retired `fiber_yield` debug yield's slot (24) stay as
 /// reserved trap entries; the list block appends past the historical
-/// run (indices freeze at M7), the fiber substrate's control pair
-/// ([`BUILTIN_FIBER_YIELD`], [`BUILTIN_FIBER_RESUME`]) appends past the
-/// list block, and the nursery boundary's debug join
+/// run (indices freeze at M7), the fiber substrate's debug switch
+/// ([`BUILTIN_FIBER_RESUME`]) appends past the list block, and the
+/// nursery boundary's debug join
 /// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair, the generic
 /// container closes (`cons`, `head`, `tail`, `collect`, `first`,
 /// `max`) append past the map block, the reentrant combinators
@@ -2366,7 +2905,10 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// `total_compare` ([`BUILTIN_TOTAL_COMPARE`], the `ord` derive's) appends
 /// past the generic tail, and the string, char, and byte sort keys
 /// ([`BUILTIN_STR_COMPARE`], [`BUILTIN_CHAR_COMPARE`],
-/// [`BUILTIN_BYTE_COMPARE`]) append past it.
+/// [`BUILTIN_BYTE_COMPARE`]) append past it, the content-eq pair
+/// (`list_eq`, `map_eq`) past those, and the byte/u32 width bridges
+/// ([`BUILTIN_BYTE_OF`]..[`BUILTIN_INT_OF_U32`], the json face's scalar
+/// readers) past the pair.
 // one flat registration table whose entry order is contract (the
 // reserved head and the compare natives' tail positions); splitting it
 // would only relocate entries between functions
@@ -2410,7 +2952,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             name: "substring",
             params: &[SlotType::Ref, SlotType::I64, SlotType::I64],
             variadic: false,
-            result_words: 1,
+            result_words: 2,
             control: None,
             func: substring_fn,
         },
@@ -2466,11 +3008,22 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             name: "char_at",
             params: &[SlotType::Ref, SlotType::I64],
             variadic: false,
-            result_words: 1,
+            result_words: 2,
             control: None,
             func: char_at_fn,
         },
-        reserved_entry(builtin_reserved_19),
+        NativeFunction {
+            // `parse_float(s: string) -> float | parse_err` — the
+            // correctly-rounded decimal reader, `parse_int`'s twin over
+            // the float slot (strict: no implicit whitespace handling,
+            // the `trim` native composes)
+            name: "parse_float",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: parse_float_fn,
+        },
         NativeFunction {
             name: "list_new",
             params: &[],
@@ -2482,14 +3035,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_21),
         reserved_entry(builtin_reserved_22),
         reserved_entry(builtin_reserved_23),
-        NativeFunction {
-            name: "fiber_yield",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: Some(ControlNative::Yield),
-            func: fiber_control_bounce_fn,
-        },
+        reserved_entry(builtin_reserved_24),
         NativeFunction {
             name: "fiber_resume",
             params: &[SlotType::I64, SlotType::I64],
@@ -2526,8 +3072,10 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         reserved_entry(builtin_reserved_30),
         NativeFunction {
             name: "map_set",
-            params: &[SlotType::Ref, SlotType::Raw, SlotType::Raw],
-            variadic: false,
+            // the variadic tail is the value's whole inline word span
+            // (one word per map value word, the `list_push` shape)
+            params: &[SlotType::Ref, SlotType::Raw],
+            variadic: true,
             result_words: 1,
             control: None,
             func: map_set_fn,
@@ -2645,20 +3193,160 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             func: char_hash_fn,
         },
         NativeFunction {
+            name: "repl_park",
             // the REPL's park seam: the staged words are the submission's
             // answer span (word 0 rides the park event to the host), so the
             // arity is whatever the splice staged and no kind is checked
-            name: "repl_park",
             params: &[],
             variadic: true,
             result_words: 1,
             control: Some(ControlNative::ReplPark),
             func: fiber_control_bounce_fn,
         },
+        reserved_entry(builtin_reserved_57), /* was parse_json; the reader lives in @std ds
+                                              * source now */
+        NativeFunction {
+            name: "char_of",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: char_of_fn,
+        },
+        reserved_entry(builtin_reserved_59), /* was map_keys; the generic body lives in
+                                              * GENERIC_FUNCTIONS */
+        NativeFunction {
+            name: "code_of",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: code_of_fn,
+        },
+        NativeFunction {
+            name: "bytes_of",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: bytes_of_fn,
+        },
+        NativeFunction {
+            name: "byte_list",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: byte_list_fn,
+        },
+        NativeFunction {
+            name: "byte_at",
+            params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: byte_at_fn,
+        },
+        NativeFunction {
+            name: "bytes_eq",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: bytes_eq_fn,
+        },
+        NativeFunction {
+            name: "bytes_compare",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: bytes_compare_fn,
+        },
+        NativeFunction {
+            name: "bytes_hash",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: bytes_hash_fn,
+        },
+        NativeFunction {
+            name: "utf8_encode",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: utf8_encode_fn,
+        },
+        NativeFunction {
+            name: "utf8_decode",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: utf8_decode_fn,
+        },
+        NativeFunction {
+            name: "trap",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: trap_fn,
+        },
+        NativeFunction {
+            name: "list_eq",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: list_eq_fn,
+        },
+        NativeFunction {
+            name: "map_eq",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: map_eq_fn,
+        },
+        NativeFunction {
+            name: "byte_of",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: byte_of_fn,
+        },
+        NativeFunction {
+            name: "int_of_byte",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: int_of_byte_fn,
+        },
+        NativeFunction {
+            name: "u32_of",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: u32_of_fn,
+        },
+        NativeFunction {
+            name: "int_of_u32",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: int_of_u32_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_REPL_PARK, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_REPL_PARK as usize + 1);
+    // BUILTIN_INT_OF_U32, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_INT_OF_U32 as usize + 1);
     fns
 }
 
@@ -2676,6 +3364,8 @@ pub struct OutputSink {
     target: SinkTarget,
     /// The connection table of the net natives.
     net: Connections,
+    /// The file-handle table of the fsys natives (`crate::fsys`).
+    files: crate::fsys::Files,
 }
 
 /// The write target of an [`OutputSink`].
@@ -2697,6 +3387,7 @@ impl OutputSink {
         Self {
             target: SinkTarget::Captured(Vec::new()),
             net: Connections::default(),
+            files: crate::fsys::Files::default(),
         }
     }
 
@@ -2720,9 +3411,21 @@ impl OutputSink {
         &mut self.net
     }
 
+    /// The file-handle table of the fsys natives (`crate::fsys`).
+    pub(crate) fn files(&mut self) -> &mut crate::fsys::Files {
+        &mut self.files
+    }
+
     /// Bounds every blocking net wait ([`crate::net`]).
     pub(crate) fn set_net_timeout(&mut self, timeout: Duration) {
         self.net.set_timeout(timeout);
+    }
+
+    /// Pins the TLS client of the net face's tls tier ([`crate::tls`]):
+    /// custom trust roots for an embedding host or a test, the default
+    /// being the webpki root set.
+    pub fn set_tls_config(&mut self, config: std::sync::Arc<rustls::ClientConfig>) {
+        self.net.set_tls_config(config);
     }
 
     /// Writes `text` with no newline.
@@ -2806,6 +3509,20 @@ pub(crate) fn print_fn(
     let text = heaps.str_at(ref_arg(args, 0)?)?;
     out.write_str(text)?;
     Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// The bare trap primitive's body: the message rides the trap out to the
+/// drive; no print, no exit decision — the host's halt policy applies
+/// above the engine. Never answers.
+pub(crate) fn trap_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let text = heaps.str_at(ref_arg(args, 0)?)?;
+    Err(Trap::Die {
+        message: text.to_owned(),
+    })
 }
 
 /// A scalar's rendered text, in a fixed stack buffer: `str_int` and
@@ -2905,7 +3622,12 @@ fn str_bool_fn(
 }
 
 /// The `io_err` span: the OS error rendered as `"<op> <path>: <error>"`.
-fn io_err(heaps: &mut Heaps, op: &str, path: &str, err: &std::io::Error) -> NativeResult {
+pub(crate) fn io_err(
+    heaps: &mut Heaps,
+    op: &str,
+    path: &str,
+    err: &std::io::Error,
+) -> NativeResult {
     NativeResult::Tag {
         tag: PLATFORM_IO_ERR,
         payload: heaps.new_str(format!("{op} {path}: {err}")),
@@ -2991,6 +3713,25 @@ pub(crate) fn fs_list_fn(
     })
 }
 
+/// `time() -> int`: the body behind the platform ABI's `time` op (the
+/// `time` capability's one op) — epoch nanoseconds, the duration since
+/// the Unix epoch clamped at zero before it. The minimal face: every
+/// richer clock (monotonic, zone-aware) layers over this word.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn time_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|span| span.as_nanos())
+        .unwrap_or_default();
+    Ok(NativeResult::Word(Value::I64(
+        i64::try_from(nanos).unwrap_or(i64::MAX),
+    )))
+}
+
 pub(crate) fn file_size_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
@@ -3032,8 +3773,8 @@ mod tests {
             (BUILTIN_LIST_CONCAT, "list_concat", 1, 1),
             (BUILTIN_MAP_LEN, "map_len", 2, 1),
             (BUILTIN_MAP_GET, "map_get", 2, 2),
+            (BUILTIN_MAP_KEYS, "map_keys", 2, 1),
             (BUILTIN_CONS, "cons", 1, 1),
-            (BUILTIN_HEAD, "head", 1, 2),
             (BUILTIN_TAIL, "tail", 1, 1),
             (BUILTIN_COLLECT, "collect", 1, 1),
             (BUILTIN_FIRST, "first", 1, 2),
@@ -3061,7 +3802,6 @@ mod tests {
         assert_eq!(fns[BUILTIN_SPLIT as usize].name, "split");
         assert_eq!(fns[BUILTIN_CHAR_AT as usize].name, "char_at");
         assert_eq!(fns[BUILTIN_LIST_NEW as usize].name, "list_new");
-        assert_eq!(fns[BUILTIN_FIBER_YIELD as usize].name, "fiber_yield");
         assert_eq!(fns[BUILTIN_FIBER_RESUME as usize].name, "fiber_resume");
         assert_eq!(fns[BUILTIN_NURSERY_JOIN as usize].name, "nursery_join");
         assert_eq!(fns[BUILTIN_LIST_PUSH as usize].name, "list_push");
@@ -3083,12 +3823,30 @@ mod tests {
         assert_eq!(fns[BUILTIN_FLOAT_HASH as usize].name, "float_hash");
         assert_eq!(fns[BUILTIN_CHAR_HASH as usize].name, "char_hash");
         assert_eq!(fns[BUILTIN_REPL_PARK as usize].name, "repl_park");
-        assert_eq!(fns.len(), 57);
+        assert_eq!(fns[BUILTIN_PARSE_FLOAT as usize].name, "parse_float");
+        assert_eq!(fns[BUILTIN_CHAR_OF as usize].name, "char_of");
+        assert_eq!(fns[BUILTIN_CODE_OF as usize].name, "code_of");
+        assert_eq!(fns[BUILTIN_BYTES_OF as usize].name, "bytes_of");
+        assert_eq!(fns[BUILTIN_BYTE_LIST as usize].name, "byte_list");
+        assert_eq!(fns[BUILTIN_BYTE_AT as usize].name, "byte_at");
+        assert_eq!(fns[BUILTIN_BYTES_EQ as usize].name, "bytes_eq");
+        assert_eq!(fns[BUILTIN_BYTES_COMPARE as usize].name, "bytes_compare");
+        assert_eq!(fns[BUILTIN_BYTES_HASH as usize].name, "bytes_hash");
+        assert_eq!(fns[BUILTIN_UTF8_ENCODE as usize].name, "utf8_encode");
+        assert_eq!(fns[BUILTIN_UTF8_DECODE as usize].name, "utf8_decode");
+        assert_eq!(fns[BUILTIN_TRAP as usize].name, "trap");
+        assert_eq!(fns[BUILTIN_LIST_EQ as usize].name, "list_eq");
+        assert_eq!(fns[BUILTIN_MAP_EQ as usize].name, "map_eq");
+        assert_eq!(fns[BUILTIN_BYTE_OF as usize].name, "byte_of");
+        assert_eq!(fns[BUILTIN_INT_OF_BYTE as usize].name, "int_of_byte");
+        assert_eq!(fns[BUILTIN_U32_OF as usize].name, "u32_of");
+        assert_eq!(fns[BUILTIN_INT_OF_U32 as usize].name, "int_of_u32");
+        assert_eq!(fns.len(), BUILTIN_INT_OF_U32 as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
-            0u32, 1, 5, 6, 7, 8, 9, 10, 19, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-            46, 47, 48,
+            0u32, 1, 5, 6, 7, 8, 9, 10, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 46,
+            47, 48, 57, 59,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }
@@ -3097,16 +3855,15 @@ mod tests {
             (BUILTIN_STR_INT, 1),
             (BUILTIN_STR_FLOAT, 1),
             (BUILTIN_STR_BOOL, 1),
-            (BUILTIN_SUBSTRING, 1),
+            (BUILTIN_SUBSTRING, 2),
             (BUILTIN_CONCAT, 1),
             (BUILTIN_TO_UPPER, 1),
             (BUILTIN_TO_LOWER, 1),
             (BUILTIN_TRIM, 1),
             (BUILTIN_PARSE_INT, 2),
             (BUILTIN_SPLIT, 1),
-            (BUILTIN_CHAR_AT, 1),
+            (BUILTIN_CHAR_AT, 2),
             (BUILTIN_LIST_NEW, 1),
-            (BUILTIN_FIBER_YIELD, 1),
             (BUILTIN_FIBER_RESUME, 1),
             (BUILTIN_NURSERY_JOIN, 1),
             (BUILTIN_NURSERY_OPEN, 1),
@@ -3124,13 +3881,25 @@ mod tests {
             (BUILTIN_FLOAT_HASH, 1),
             (BUILTIN_CHAR_HASH, 1),
             (BUILTIN_REPL_PARK, 1),
+            (BUILTIN_BYTES_OF, 1),
+            (BUILTIN_BYTE_LIST, 1),
+            (BUILTIN_BYTE_AT, 2),
+            (BUILTIN_BYTES_EQ, 1),
+            (BUILTIN_TRAP, 1),
+            (BUILTIN_LIST_EQ, 1),
+            (BUILTIN_MAP_EQ, 1),
+            (BUILTIN_BYTE_OF, 2),
+            (BUILTIN_INT_OF_BYTE, 1),
+            (BUILTIN_U32_OF, 2),
+            (BUILTIN_INT_OF_U32, 1),
         ] {
             assert_eq!(fns[index as usize].result_words, want);
         }
-        // the control pair is the dispatcher-intercepted tail of the table
+        // the control natives are the dispatcher-intercepted tail of the
+        // table
         assert_eq!(
-            fns[BUILTIN_FIBER_YIELD as usize].control,
-            Some(ControlNative::Yield)
+            fns[BUILTIN_FIBER_YIELD as usize].control, None,
+            "the retired fiber_yield slot is an inert reserved gap"
         );
         assert_eq!(
             fns[BUILTIN_FIBER_RESUME as usize].control,
@@ -3158,7 +3927,7 @@ mod tests {
         );
         assert!(
             fns.iter()
-                .take(BUILTIN_FIBER_YIELD as usize)
+                .take(BUILTIN_FIBER_RESUME as usize)
                 .all(|f| f.control.is_none()),
             "no earlier entry is a control native"
         );
@@ -3184,7 +3953,8 @@ mod tests {
         let core = builtin_module();
         traps_like(BUILTIN_MODULE, 0, &core); // the console pair's slots
         traps_like(BUILTIN_MODULE, 5, &core); // the file-IO slots
-        traps_like(BUILTIN_MODULE, 19, &core); // the spare slot
+        traps_like(BUILTIN_MODULE, 24, &core); // the retired fiber_yield slot
+        traps_like(BUILTIN_MODULE, 57, &core); // the retired parse_json slot
     }
 
     #[test]

@@ -470,16 +470,16 @@ fn parse_blocks(
         let code_bytes = p.run(code_len, 4)?;
         let mut code = Vec::with_capacity(code_len);
         let mut at = code_at;
-        for (pc, chunk) in (0..code_count).zip(code_bytes.chunks_exact(4)) {
-            let word = u32::from_le_bytes(chunk.try_into().expect("a chunk of four bytes"));
+        let (chunks, _) = code_bytes.as_chunks::<4>();
+        for (pc, chunk) in (0..code_count).zip(chunks) {
+            let word = u32::from_le_bytes(*chunk);
             let inst = Inst::decode(pc, word)
                 .map_err(|_| malformed(at, "code word does not decode to an instruction"))?;
-            if let Inst::Uop(uop) = inst {
-                if let Some(target) = jump_target_of(uop) {
-                    if target >= code_count {
-                        return Err(malformed(at, "jump target escapes the function body"));
-                    }
-                }
+            if let Inst::Uop(uop) = inst
+                && let Some(target) = jump_target_of(uop)
+                && target >= code_count
+            {
+                return Err(malformed(at, "jump target escapes the function body"));
             }
             code.push(word);
             at += 4;
@@ -496,7 +496,7 @@ fn parse_blocks(
         functions.push(Function::from_words(name, layout, constants, code));
     }
     let chain_count = p.count()?;
-    let mut chains = Vec::with_capacity(chain_count);
+    let mut chains = Vec::with_capacity(p.capacity_for(chain_count, 2));
     for _ in 0..chain_count {
         let chain_at = p.abs();
         let func = p.uleb()?;
@@ -587,7 +587,7 @@ fn parse_debug_spans(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<Debu
     let spans_at = p.abs();
     let span_bytes = p.run(count, 8)?;
     let mut spans = Vec::with_capacity(count);
-    for (index, span) in span_bytes.chunks_exact(8).enumerate() {
+    for (index, span) in span_bytes.as_chunks::<8>().0.iter().enumerate() {
         let at = spans_at + index * 8;
         let start = u32::from_le_bytes(span[..4].try_into().expect("a half of the span pair"));
         let end = u32::from_le_bytes(span[4..].try_into().expect("a half of the span pair"));

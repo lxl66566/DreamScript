@@ -1,0 +1,23 @@
+// Reproducer (parse-seed carrier; the seam it pinned is fixed — a value
+// block's tail read of a local binder stages its answer's claim past the
+// block's scope end, so the consumer's own claim releases exactly once):
+// `const ys = { var xs = [1, 2]; xs }` followed by any use of `ys` once
+// checked clean and trapped `UnknownObject` at the consumer, the block's
+// scope end dec-ing the slot's count before the consumer claimed it (the
+// const alias spelling the same seam, and a deinit value's claim firing
+// its hook early there too). Found while landing from_json's
+// optional-list row; the e2e pins (value_exit_joins, deinit_e2e,
+// placement) and the exec generator's block-tail episode carry the
+// regression now.
+
+struct list[t]
+
+extern fn list_len[t] (xs: list[t]) -> int
+
+fn main() -> () {
+  const ys = {
+    var xs = [1, 2]
+    xs
+  }
+  println("len ${list_len(ys)}")
+}

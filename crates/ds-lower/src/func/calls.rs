@@ -14,10 +14,14 @@ impl<'a> FnLower<'a, '_, '_> {
     /// struct's flattened field words at the per-list element stride the
     /// first push fixes (the native channel's staged-count and read-out
     /// span seam). Tuple elements ride the same flat span, one word per
-    /// element, gathered positionally. Union elements refuse (the
-    /// checked read extracts one atom), and a
-    /// deinit-carrying element refuses (the list's edge retention owns
-    /// counts, never claims; per-span deinit claims own the seam).
+    /// element, gathered positionally. A union element stages its whole
+    /// tag-plus-region span: the checked read hands the span back
+    /// verbatim when the call's own result union carries the element's
+    /// members (the enum-in-optional shape), so the element's own tag
+    /// already names a result member. A deinit-carrying element refuses
+    /// (the list's edge retention owns counts, never claims; per-span
+    /// deinit claims own the seam), and a union member cannot carry one
+    /// (the union's own shape refuses the declaration).
     /// A callable element must prove scalar provenance: a closure word (or
     /// a callable-defaulted parameter that may hold one at runtime) would
     /// leave its count invisible to the element staging and read back as a
@@ -59,12 +63,26 @@ impl<'a> FnLower<'a, '_, '_> {
                 }
                 Ok(())
             },
-            Shape::Union(_) => Err(LowerError::unsupported(
-                span,
-                what,
-                "a union element stages its whole region, and the checked read extracts one atom; \
-                 narrow the element before the list",
-            )),
+            Shape::Union(u) => {
+                // a callable word inside the region keeps the
+                // scalar-provenance rule (the tuple arm's own contract,
+                // one address per span word)
+                if u.words.contains(&SlotType::Fn) {
+                    let addrs = self.word_addrs(&val.place, val.ty)?;
+                    for (slot, addr) in u.words.iter().zip(addrs.iter()) {
+                        if *slot == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
+                            return Err(LowerError::unsupported(
+                                span,
+                                what,
+                                "a callable element must prove a non-capturing scalar word; a \
+                                 closure or an unproven callable parameter cannot inhabit a \
+                                 collection element",
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            },
             Shape::Word(_) => {
                 if matches!(&*self.shapes.shape(val.ty)?, Shape::Word(SlotType::Fn)) {
                     let addrs = self.word_addrs(&val.place, val.ty)?;
@@ -84,9 +102,11 @@ impl<'a> FnLower<'a, '_, '_> {
     }
 
     /// The staged-span shape guards a call refuses before dispatch.
-    /// `map_set`'s key and value lower as one machine word each: a wider
-    /// argument (a union span) would shift the staged words under the
-    /// native's positional contract. A local callee's slide contract is
+    /// `map_set` stages the map's `Ref`, the key's one word (the probe
+    /// vocabulary hashes whole words), then the value's whole inline span
+    /// — one word per map value word, the `list_push` staging shape — so
+    /// a site with fewer than three staged words mis-stages the native's
+    /// positional contract. A local callee's slide contract is
     /// its parameter span: the widening family re-spans a member or
     /// sub-union argument into the parameter's whole region before the
     /// staging moves, so a remaining width disagreement is a lowerer
@@ -97,28 +117,28 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &[SlotType],
         span: Span,
     ) -> Result<(), LowerError> {
-        if let Callee::Builtin(native) = target {
-            if native.name == "map_set" && staged.len() != 3 {
-                return Err(LowerError::unsupported(
-                    span,
-                    "a map_set argument",
-                    "map keys and values lower as one machine word; wider values arrive when the \
-                     native channel carries whole spans",
-                ));
-            }
+        if let Callee::Builtin(native) = target
+            && native.name == "map_set"
+            && staged.len() < 3
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "a map_set argument",
+                "map_set stages the map, one key word, then the value's whole word span; a \
+                 narrower staging mis-names the value channel",
+            ));
         }
-        if let Callee::Local(index) = target {
-            if let Some(expected) = self.callee_param_words(index) {
-                if staged.len() != expected {
-                    return Err(LowerError::unsupported(
-                        span,
-                        "a call argument",
-                        "the staged words disagree with the callee's parameter span; a \
-                         union-typed parameter re-spans its member argument into the whole region \
-                         at the call, so a disagreement here is a lowerer seam",
-                    ));
-                }
-            }
+        if let Callee::Local(index) = target
+            && let Some(expected) = self.callee_param_words(index)
+            && staged.len() != expected
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "a call argument",
+                "the staged words disagree with the callee's parameter span; a union-typed \
+                 parameter re-spans its member argument into the whole region at the call, so a \
+                 disagreement here is a lowerer seam",
+            ));
         }
         Ok(())
     }
@@ -784,6 +804,16 @@ impl<'a> FnLower<'a, '_, '_> {
                         Some(dispatch),
                     )
                 },
+                // A module alias's qualified call (G4): the receiver is
+                // the alias itself — no word stages — and the dot's
+                // recorded def is the linked package's function, a plain
+                // def call through the import's link facts.
+                Some(Res::Dot(DotRes::Module { func })) => (
+                    Some(*func),
+                    name.span,
+                    args.iter().map(|arg| &arg.value).collect(),
+                    None,
+                ),
                 // An implicit dispatch site (an interpolation hole's
                 // `show`, F6): no surface name sits behind the dot, so
                 // the resolutions carry nothing here — the checker's
@@ -805,7 +835,11 @@ impl<'a> FnLower<'a, '_, '_> {
                         .hole_show_dispatches
                         .contains_key(&call_span) =>
                 {
-                    let candidates = self.analyzed.package.method_candidates(&name.name).to_vec();
+                    let candidates: Vec<_> = self
+                        .analyzed
+                        .package
+                        .method_candidates(&name.name)
+                        .collect();
                     let dispatch = self.resolve_method_dispatch(
                         call_span,
                         name.span,
@@ -928,8 +962,11 @@ impl<'a> FnLower<'a, '_, '_> {
             if let Some(place) = self.ambient_str_place(def, &arg_exprs, callee_span)? {
                 return Ok(place);
             }
-            if self.ambient_cancel_def(def) {
+            if self.ambient_extern(def, AmbientExtern::Cancel) {
                 return self.cancel_call(&arg_exprs, callee_span);
+            }
+            if self.ambient_extern(def, AmbientExtern::Die) {
+                return self.die_call(&arg_exprs, ty, callee_span);
             }
         }
         // a trait-method dispatch names its impl body directly: the call
@@ -981,17 +1018,26 @@ impl<'a> FnLower<'a, '_, '_> {
         // path applies (a struct element stages its flattened words at
         // the stride the first push fixes). `cons` mirrors it with the
         // element's whole span in the receiver position (the stride-aware
-        // prepend's head). `reduce`'s init needs no element guard: the
-        // checker proves it the fold's own type, so any element that
-        // could inhabit the list already passed this guard, and the
-        // fold's interior span carries the init's whole width.
+        // prepend's head). `map_set` stages its value the same way (the
+        // map value channel's whole span at the value stride the first
+        // store fixes) while its key stays one word — the probe
+        // vocabulary hashes whole words. `reduce`'s init needs no element
+        // guard: the checker proves it the fold's own type, so any
+        // element that could inhabit the list already passed this guard,
+        // and the fold's interior span carries the init's whole width.
         let element_slot = match target {
             Callee::Builtin(native) if native.name == "list_push" => {
                 Some((1usize, "a list_push element"))
             },
+            Callee::Builtin(native) if native.name == "map_set" => {
+                Some((2usize, "a map_set value"))
+            },
             Callee::Generic(generic) if generic.name == "cons" => Some((0usize, "a cons element")),
             _ => None,
         };
+        // whether the call is a `map_set` whose key argument (position 1)
+        // must stage exactly one word
+        let map_set_key = matches!(target, Callee::Builtin(native) if native.name == "map_set");
         // stage: evaluate every argument to a place, then move its words
         // into the overlay area (argument evaluation may itself call)
         let mut staged: Vec<SlotType> = Vec::new();
@@ -1020,6 +1066,14 @@ impl<'a> FnLower<'a, '_, '_> {
         // here (the widening family)
         let param_types = match target {
             Callee::Local(index) => self.callee_param_types(index),
+            Callee::Foreign { def, .. } => self
+                .analyzed
+                .checked
+                .def_types
+                .get(&def)
+                .copied()
+                .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                .map(|(params, _)| params.to_vec()),
             _ => None,
         };
         // whether each written argument position feeds a consuming
@@ -1095,9 +1149,47 @@ impl<'a> FnLower<'a, '_, '_> {
                     ));
                 }
             }
-            if let Some((slot, what)) = element_slot {
-                if slot == index {
-                    self.guard_list_element(&arg_val, arg.span(), what)?;
+            let mut arg_val = arg_val;
+            if let Some((slot, what)) = element_slot
+                && slot == index
+            {
+                // A bare member value (a case construction, a
+                // narrowed binding) re-spans into the receiver's
+                // element or value span first — the generic callee
+                // has no static parameter type to drive the widening
+                // family, and the staged words must be the whole
+                // span the channel carries
+                let channel_ty = match target {
+                    Callee::Builtin(native) if native.name == "list_push" => receiver_ty
+                        .as_ref()
+                        .and_then(|ty| self.shapes.list_element(*ty)),
+                    Callee::Builtin(native) if native.name == "map_set" => receiver_ty
+                        .as_ref()
+                        .and_then(|ty| self.shapes.map_value(*ty)),
+                    _ => None,
+                };
+                if let Some(channel_ty) = channel_ty.filter(|ty| *ty != arg_val.ty) {
+                    let temp = self.temp_span(channel_ty)?;
+                    self.widen_into(&temp, channel_ty, &arg_val, arg.span())?;
+                    arg_val = TypedPlace {
+                        place: temp,
+                        ty: channel_ty,
+                    };
+                }
+                self.guard_list_element(&arg_val, arg.span(), what)?;
+            }
+            // a map_set's key stages exactly one word: the probe
+            // resolution and the row index hash whole words, so a wider
+            // key type has no channel yet
+            if map_set_key && index == 1 {
+                let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
+                if addrs.len() != 1 {
+                    return Err(LowerError::unsupported(
+                        arg.span(),
+                        "a map_set key",
+                        "map keys lower as one machine word (the probe vocabulary hashes whole \
+                         words); wider keys arrive when the native channel carries key spans",
+                    ));
                 }
             }
             // a closure argument lands only in a callable-defaulted `Fn`
@@ -1182,8 +1274,11 @@ impl<'a> FnLower<'a, '_, '_> {
                 for addr in addrs {
                     self.rc.native_reads([addr.slot]);
                     moves.push((staged.len(), addr.slot));
-                    // the variable's single word stages as the wildcard: the
-                    // overlay word records Raw (the runtime kind is the
+                    // the variable's single word stages as the wildcard, and
+                    // so does any word whose callee-side formal declares Raw
+                    // (a multi-word parameter over type variables, the
+                    // argument's own words carrying their concrete kinds):
+                    // the overlay word records Raw (the runtime kind is the
                     // callee's fact), so the ABI slide admits the pairing
                     // whatever the source's static kind — a scalar staged at
                     // an overlay index no other type visits would otherwise
@@ -1193,7 +1288,14 @@ impl<'a> FnLower<'a, '_, '_> {
                     // scalar instantiation is a no-op (a variable-keyed union
                     // member's region claim holds a counted reference under a
                     // reference substitution)
-                    staged.push(if var_param { SlotType::Raw } else { addr.slot_ty });
+                    let expected_raw = expected_words
+                        .as_deref()
+                        .is_some_and(|words| words.get(staged.len()) == Some(&SlotType::Raw));
+                    staged.push(if var_param || expected_raw {
+                        SlotType::Raw
+                    } else {
+                        addr.slot_ty
+                    });
                     counted.push(matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) || var_word);
                     word_arg.push(index);
                 }
@@ -1219,7 +1321,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // too: the callee reads the word during the call, so the count
         // cannot ride the abandoned corner nor die at the pre-transfer
         // exit drops
-        let in_place_tail = native_tail_return || closure_tail;
+        // a linked package's tail call lowers in place (CALL plus
+        // return): the frame-reuse transfer is the same-module contract
+        // this round, the cross-module tail waiting on the tail round
+        let foreign_target = tail && matches!(target, Callee::Foreign { .. });
+        let in_place_tail = native_tail_return || closure_tail || foreign_target;
         // the frame-ending transfer: the exit drops and every claim hook
         // stage through the overlay as their own argument windows, so the
         // call's argument span stages after them, ahead of the CALLT
@@ -1277,12 +1383,12 @@ impl<'a> FnLower<'a, '_, '_> {
                         Callee::Local(_) | Callee::Evidence(_) if tail_transfer => {
                             self.rc.staged_tail_local(&mut self.code, slot);
                         },
-                        Callee::Local(_) | Callee::Evidence(_)
+                        Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. }
                             if consumes && self.rc.claim_base_of(slot).is_some() =>
                         {
                             self.rc.staged_move(&mut self.code, slot);
                         },
-                        Callee::Local(_) | Callee::Evidence(_) => {
+                        Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. } => {
                             self.rc.staged_local(&mut self.code, slot);
                         },
                     }
@@ -1295,13 +1401,15 @@ impl<'a> FnLower<'a, '_, '_> {
             }
         }
         self.guard_staged_width(target, &staged, callee_span)?;
-        if let Callee::Builtin(native) = target {
-            if matches!(
+        if let Callee::Builtin(native) = target
+            && matches!(
                 native.shape,
-                NativeShape::Fallible { .. } | NativeShape::Checked
-            ) {
-                return self.native_span_result(native, ty, tail, callee_span, &staged);
-            }
+                NativeShape::Fallible { .. }
+                    | NativeShape::Checked
+                    | NativeShape::FallibleClassed { .. }
+            )
+        {
+            return self.native_span_result(native, ty, tail, callee_span, &staged);
         }
         // a generic call site [H3]: stage the instantiated types as
         // evidence words after the real arguments and dispatch the
@@ -1510,11 +1618,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // ends in its evidence words and the ok/none span re-spans
         // through the checked path, which emits the CALLG with the
         // real-argument count
-        if let Callee::Generic(generic) = target {
-            if matches!(generic.shape, NativeShape::Checked) {
-                let real_args = staged.len() - usize::from(generic.evidence);
-                return self.checked_native_result(target, ty, &staged, real_args);
-            }
+        if let Callee::Generic(generic) = target
+            && matches!(generic.shape, NativeShape::Checked)
+        {
+            let real_args = staged.len() - usize::from(generic.evidence);
+            return self.checked_native_result(target, ty, &staged, real_args);
         }
         let result_words = self
             .callee_result_words(target, generic_instance, ty)
@@ -1965,12 +2073,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // classifies Ref (a binding carrying an unknown fn value keeps
         // the scalar classification — a closure returned through it traps
         // at the call, the recorded return-flow seam)
-        if *result_words == [SlotType::Fn] {
-            if let Some(&index) = self.fn_words.get(&word.slot) {
-                if self.tail_builds_a_closure(index) {
-                    result_words = Rc::from([SlotType::Ref]);
-                }
-            }
+        if *result_words == [SlotType::Fn]
+            && let Some(&index) = self.fn_words.get(&word.slot)
+            && self.tail_builds_a_closure(index)
+        {
+            result_words = Rc::from([SlotType::Ref]);
         }
         self.overlay_site(&staged, &result_words);
         if tail_transfer {
@@ -2041,7 +2148,10 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         if tail {
-            let (what, reason) = if let NativeShape::Fallible { .. } = native.shape {
+            let (what, reason) = if matches!(
+                native.shape,
+                NativeShape::Fallible { .. } | NativeShape::FallibleClassed { .. }
+            ) {
                 (
                     "a tail call to a fallible native",
                     "CALLT-to-fallible stays unsupported: the two-word platform span re-spans \
@@ -2063,6 +2173,13 @@ impl<'a> FnLower<'a, '_, '_> {
         } = native.shape
         {
             return self.fallible_native_result(native, ty, payload, err_prefix, staged);
+        }
+        if let NativeShape::FallibleClassed {
+            payload,
+            err_prefix,
+        } = native.shape
+        {
+            return self.classed_native_result(native, ty, payload, err_prefix, staged);
         }
         self.checked_native_result(Callee::Builtin(native), ty, staged, staged.len())
     }
@@ -2121,7 +2238,7 @@ impl<'a> FnLower<'a, '_, '_> {
             LowerError::unsupported(
                 span,
                 "a generic call",
-                "no builtin instance covers the receiver's type; string, the list and map \
+                "no builtin instance covers the receiver's type; string, bytes, the list and map \
                  constructors, and the int and float scalars are the covered ones",
             )
         })?;
@@ -2879,25 +2996,37 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Some(index) = self.plan.index_of(def) {
             return Ok(Callee::Local(index));
         }
+        // an import-bound def is a linked package's function (G4): the
+        // check comes ahead of the native fallback so a linked function
+        // never silently answers as a same-named native
+        if let Some(link) = self.analyzed.decls.foreign_links.get(&def) {
+            return Ok(Callee::Foreign {
+                def,
+                position: link.position,
+                func: link.func,
+            });
+        }
         let name = self.analyzed.package.def(def).name.clone();
         if let Some(native) = crate::native::lookup(&name) {
             return Ok(Callee::Builtin(native));
         }
-        if let Some(sig) = self.analyzed.decls.fns.get(&def) {
-            if !sig.generics.is_empty() {
-                if let Some(generic) = crate::native::lookup_generic(&name) {
-                    return Ok(Callee::Generic(generic));
-                }
-                return Err(LowerError::unsupported(
-                    span,
-                    "a generic callee",
-                    "the generic body did not plan (an extern, `var`-bound, or bodiless generic \
-                     fn lowers nothing), so no dispatch reaches it",
-                ));
+        if let Some(sig) = self.analyzed.decls.fns.get(&def)
+            && !sig.generics.is_empty()
+        {
+            if let Some(generic) = crate::native::lookup_generic(&name) {
+                return Ok(Callee::Generic(generic));
             }
+            return Err(LowerError::unsupported(
+                span,
+                "a generic callee",
+                "the generic body did not plan (an extern, `var`-bound, or bodiless generic fn \
+                 lowers nothing), so no dispatch reaches it",
+            ));
         }
         // the comptime slice carries only comptime functions: a call
-        // into the package's runtime half refuses here, naming the seam
+        // into the package's runtime half refuses here, naming the seam —
+        // a linked package's body included, the slice planning nothing
+        // outside its own module
         if matches!(self.comptime, ComptimeRun::Slice) {
             return Err(LowerError::unsupported(
                 span,
@@ -3115,6 +3244,12 @@ impl<'a> FnLower<'a, '_, '_> {
     ) -> Vec<bool> {
         let modes: Option<Vec<ds_parse::ParamMode>> = match target {
             Callee::Local(index) => self.planned_param_modes(index),
+            Callee::Foreign { def, .. } => self
+                .analyzed
+                .decls
+                .fns
+                .get(&def)
+                .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
             Callee::Evidence(_) => match dispatch {
                 Some(TraitDispatch::Runtime { method, .. }) => self
                     .analyzed
@@ -3201,6 +3336,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 // their own tag-test paths; this generic copy never sees
                 // them
                 NativeShape::Fallible { .. } => Err(mismatch("a fallible native result")),
+                NativeShape::FallibleClassed { .. } => {
+                    Err(mismatch("a classed fallible native result"))
+                },
                 NativeShape::Checked => Err(mismatch("a checked-read native result")),
                 NativeShape::TotalByInstance => Err(mismatch("an instance-keyed native result")),
                 NativeShape::TotalByResultType => Err(mismatch("a result-keyed native result")),
@@ -3217,11 +3355,11 @@ impl<'a> FnLower<'a, '_, '_> {
                 // type's words with no discriminant (partition's
                 // two-list tuple: two Ref words the destructuring binds)
                 NativeShape::TotalByResultType | NativeShape::TaglessTotal => self.shapes.words(ty),
-                NativeShape::Fallible { .. } | NativeShape::Checked => {
-                    Err(mismatch("a generic builtin result"))
-                },
+                NativeShape::Fallible { .. }
+                | NativeShape::FallibleClassed { .. }
+                | NativeShape::Checked => Err(mismatch("a generic builtin result")),
             },
-            Callee::Evidence(_) => self.shapes.words(ty),
+            Callee::Evidence(_) | Callee::Foreign { .. } => self.shapes.words(ty),
             Callee::Local(index) => {
                 let planned = &self.plan.functions()[index as usize];
                 if planned.free_generic {
@@ -3303,6 +3441,40 @@ impl<'a> FnLower<'a, '_, '_> {
         if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
             return self.fallible_native_union(native, ty, payload, staged);
         }
+        self.fallible_total_result(native, ty, payload, err_prefix, staged)
+    }
+
+    /// One classed fallible native call: the same two-word platform span,
+    /// but failure answers one of the error-class discriminants, so the
+    /// success-typed union spelling may flatten the failure taxonomy's
+    /// whole case set as the error members
+    /// ([`fn classed_native_union`](Self::classed_native_union)); a total
+    /// spelling keeps the shared printing-halt path.
+    fn classed_native_result(
+        &mut self,
+        native: &'static Native,
+        ty: Ty,
+        payload: SlotType,
+        err_prefix: &'static str,
+        staged: &[SlotType],
+    ) -> Result<Place, LowerError> {
+        if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
+            return self.classed_native_union(native, ty, payload, staged);
+        }
+        self.fallible_total_result(native, ty, payload, err_prefix, staged)
+    }
+
+    /// The total spelling of a fallible native's span: extracts the
+    /// payload into the call's result temp, and failure prints
+    /// `<prefix><message>` through println and halts on the discriminant.
+    fn fallible_total_result(
+        &mut self,
+        native: &'static Native,
+        ty: Ty,
+        payload: SlotType,
+        err_prefix: &'static str,
+        staged: &[SlotType],
+    ) -> Result<Place, LowerError> {
         if *self.shapes.words(ty)? != [payload] {
             return Err(LowerError::unsupported(
                 no_span(),
@@ -3527,6 +3699,208 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(result)
     }
 
+    /// The unit-value member: the arity-0 tuple atom [B3] — the `()` of
+    /// a classed fallible native's unit-word success member, distinct
+    /// from the payload-less class members (the unit tags).
+    fn is_unit_member(&self, atom: TypeId) -> bool {
+        matches!(
+            self.analyzed.decls.universe.atom_decl(atom),
+            Ok(decl) if matches!(&decl.kind, AtomKind::Tuple(elements) if elements.is_empty())
+        )
+    }
+
+    /// One classed fallible native call over the success-typed ambient
+    /// spelling: like [`fn fallible_native_union`](Self::fallible_native_union)
+    /// but the checked call union may flatten the
+    /// failure taxonomy's whole case set as the error members — failure
+    /// answers one of the [`NET_CLASSES`] discriminants and lands on the
+    /// member the ambient case name names (the error-class mapping,
+    /// ruled 2026-11-12), so `?`, `.err`, is-narrowing, and match extract
+    /// a real enum case; success re-spans onto the one payload member, or
+    /// the unit value when the payload is the inert unit word
+    /// (`net_send`'s `()`). Every failure carries the message `Ref` in
+    /// word 1 whatever the payload kind, and the members carry no
+    /// payload field, so each failure arm adopts the message off the
+    /// overlay and drops it here.
+    fn classed_native_union(
+        &mut self,
+        native: &'static Native,
+        ty: Ty,
+        payload: SlotType,
+        staged: &[SlotType],
+    ) -> Result<Place, LowerError> {
+        let shape = self.shapes.shape(ty)?;
+        let Shape::Union(u) = &*shape else {
+            return Err(mismatch("a classed fallible native's union result"));
+        };
+        let mut success: Vec<_> = u
+            .members
+            .iter()
+            .filter(|m| m.fields.len() == 1 && m.fields[0].slot() == payload)
+            .collect();
+        if success.is_empty() && payload == SlotType::I64 {
+            success = u
+                .members
+                .iter()
+                .filter(|m| self.is_unit_member(m.atom))
+                .collect();
+        }
+        let [ok] = success.as_slice() else {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a classed fallible native call",
+                "the union's success member must be exactly the native's one payload word, or the \
+                 unit value over the native's inert unit word",
+            ));
+        };
+        let mut classes = Vec::with_capacity(NET_CLASSES.len());
+        for (tag, name) in NET_CLASSES {
+            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a classed fallible native call",
+                    "the union must carry the failure taxonomy's error members by their ambient \
+                     case names (timeout, refused); a differently named error enum has no class \
+                     mapping",
+                ));
+            };
+            let Some(member) = u.member(atom) else {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a classed fallible native call",
+                    "the union must carry the failure taxonomy's whole case set; every class \
+                     member the native answers must be a member",
+                ));
+            };
+            if !member.fields.is_empty() {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a classed fallible native call",
+                    "every error member the failure discriminants map onto must be payload-less",
+                ));
+            }
+            classes.push((*tag, member));
+        }
+        if success.len() + classes.len() != u.members.len() {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a classed fallible native call",
+                "the union must be exactly the success member plus the failure taxonomy's class \
+                 members; a wider union has no member mapping for the native's one failure \
+                 discriminant per class",
+            ));
+        }
+        self.overlay_site(staged, &[SlotType::Tag, payload]);
+        // the failure path lands a message `Ref` in word 1 whatever the
+        // payload kind (net failures allocate one), so the word's
+        // classification mixes
+        self.overlay_len = self.overlay_len.max(2);
+        if self.overlay.len() < self.overlay_len {
+            self.overlay.resize(self.overlay_len, HashSet::new());
+        }
+        self.overlay[1].insert(SlotType::Ref);
+        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
+        self.emit(Op::Call {
+            callee: kidx,
+            nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
+        });
+        self.rc.native_done(&mut self.code);
+        let result = self.temp_span(ty)?;
+        let ok_lbl = self.label();
+        let join = self.label();
+        let cond = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::TagTest {
+            dst: Slot::body(cond),
+            src: Slot::overlay(0),
+            tag: PLATFORM_IO_OK,
+        });
+        self.emit(Op::Jmpif {
+            cond: Slot::body(cond),
+            target: ok_lbl,
+        });
+        // path-fork dispatch: every class but the last jumps to its own
+        // arm, the last class is the fall-through failure
+        let total = classes.len();
+        let mut class_lbls = Vec::with_capacity(total.saturating_sub(1));
+        for (tag, _) in &classes[..total.saturating_sub(1)] {
+            let cond = self.temp_word(SlotType::Bool)?;
+            self.emit(Op::TagTest {
+                dst: Slot::body(cond),
+                src: Slot::overlay(0),
+                tag: *tag,
+            });
+            let lbl = self.label();
+            class_lbls.push(lbl);
+            self.emit(Op::Jmpif {
+                cond: Slot::body(cond),
+                target: lbl,
+            });
+        }
+        // the failure arms in code order: the fall-through last class
+        // first, then every earlier class at its dispatch label
+        let base = self.rc.save();
+        let mut arm_jmps: Vec<usize> = Vec::with_capacity(total);
+        let mut arm_states: Vec<State> = Vec::with_capacity(total);
+        for (index, (_, member)) in classes.iter().enumerate().rev() {
+            if index != total - 1 {
+                self.bind_label(class_lbls[index]);
+            }
+            let tag = self.shapes.tag_id(member.atom)?;
+            self.emit(Op::TagNew {
+                dst: Slot::body(result.base),
+                tag,
+            });
+            self.zero_init_member(result.base, &u.words, &member.fields)?;
+            // the failure message's native-born count has no member field
+            // to live in: adopt it off the overlay and drop it here
+            let message = self.temp_word(SlotType::Ref)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(message),
+                src: Slot::overlay(1),
+            });
+            self.rc.produced(message);
+            self.rc.discard(&mut self.code, &[message]);
+            arm_jmps.push(self.code.len());
+            arm_states.push(self.rc.take());
+            self.emit(Op::Jmp { target: join });
+            self.rc.restore(base.clone());
+        }
+        self.bind_label(ok_lbl);
+        let tag = self.shapes.tag_id(ok.atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(result.base),
+            tag,
+        });
+        self.zero_init_member(result.base, &u.words, &ok.fields)?;
+        if let [field] = ok.fields.as_slice() {
+            self.emit(Op::Mov {
+                dst: Slot::body(result.base + field.word),
+                src: Slot::overlay(1),
+            });
+            if field.slot() == SlotType::Ref {
+                self.rc.produced(result.base + field.word);
+            }
+        }
+        let arm_ok = self.rc.take();
+        let mut arms: Vec<(State, bool)> =
+            arm_states.into_iter().map(|state| (state, false)).collect();
+        arms.push((arm_ok, false));
+        let dying = self.rc.reconcile(&arms);
+        // splice each failure arm's dying drops before its jump to the
+        // join, compensating the shifts the earlier splices introduced
+        let mut shift = 0;
+        for (jmp, drops) in arm_jmps.iter().zip(&dying) {
+            let mut epilogue = Vec::new();
+            Placement::emit_drops(&mut epilogue, drops);
+            let len = epilogue.len();
+            self.splice(epilogue, jmp + shift);
+            shift += len;
+        }
+        self.arm_epilogue(dying.last().expect("the ok arm's dying set"));
+        self.bind_label(join);
+        Ok(result)
+    }
+
     /// Records the words a fallible native's result span lands on: word 0
     /// the discriminant plus the failure handler's println argument, word
     /// 1 the success payload plus the failure message.
@@ -3546,11 +3920,17 @@ impl<'a> FnLower<'a, '_, '_> {
     /// writes the element member with the payload's whole word span (the
     /// native channel: one overlay word per element word, a count per
     /// `Ref` word produced), none the predeclared unit member, so `?`,
-    /// `.ok`, and match see an ordinary optional value. The element must
-    /// be one atom; the rejected index the none side carries has no
-    /// member field to surface in, so it drops. The generic spelling
-    /// routes the same span through CALLG, the evidence words staged
-    /// behind the real arguments.
+    /// `.ok`, and match see an ordinary optional value. A one-atom
+    /// element constructs its member (a tag write plus the payload
+    /// words); a multi-atom element — an enum inside the optional, every
+    /// case atom a member of the call's result union — hands its whole
+    /// span back verbatim, the element's own tag word already naming a
+    /// result member, admitted when the element's own union layout
+    /// equals the result union's (the same atoms claiming the same
+    /// region words in the same order). The rejected index the none side
+    /// carries has no member field to surface in, so it drops. The
+    /// generic spelling routes the same span through CALLG, the evidence
+    /// words staged behind the real arguments.
     fn checked_native_result(
         &mut self,
         target: Callee,
@@ -3570,24 +3950,46 @@ impl<'a> FnLower<'a, '_, '_> {
             .member(TypeId::NONE)
             .ok_or_else(|| mismatch("a checked read's none member"))?;
         let element = set_diff(self.members(ty), &[TypeId::NONE]);
-        let [elem] = element.as_slice() else {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a checked-read native call",
-                "the element type must be one atom; narrow list elements before the read",
-            ));
+        // the ok side's construction: a one-atom element's member entry,
+        // or the multi-atom element's verbatim span copy
+        let elem_member = match element.as_slice() {
+            [] => {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a checked-read native call",
+                    "the element type must be one atom; narrow list elements before the read",
+                ));
+            },
+            [elem] => Some(
+                u.member(*elem)
+                    .ok_or_else(|| mismatch("a checked read's element member"))?,
+            ),
+            many => {
+                let words = shape_words(&self.shapes.members_shape(many, 0)?);
+                if words != u.words {
+                    return Err(LowerError::unsupported(
+                        no_span(),
+                        "a checked-read native call",
+                        "the element union's own span disagrees with the call's result union; the \
+                         verbatim hand-back needs the element's tag-and-region layout to equal \
+                         the result's, and a member the element does not carry widened it",
+                    ));
+                }
+                None
+            },
         };
-        let elem_member = u
-            .member(*elem)
-            .ok_or_else(|| mismatch("a checked read's element member"))?;
-        // the ok payload's flat word span: the member's fields flattened
-        // in declaration order — the native answers the element's whole
-        // span, one overlay word per element word
-        let elem_words: Vec<SlotType> = elem_member
-            .fields
-            .iter()
-            .flat_map(|field| field.slots.iter().copied())
-            .collect();
+        // the ok payload's flat word span — the member's fields flattened
+        // in declaration order, or the multi-atom element's whole span
+        // (its own tag word first): the native answers the element's
+        // whole span, one overlay word per element word
+        let elem_words: Vec<SlotType> = match elem_member {
+            Some(member) => member
+                .fields
+                .iter()
+                .flat_map(|field| field.slots.iter().copied())
+                .collect(),
+            None => u.words.clone(),
+        };
         let mut result_words = vec![SlotType::Tag];
         result_words.extend_from_slice(&elem_words);
         self.guard_staged_count(staged.len().max(result_words.len()))?;
@@ -3609,7 +4011,7 @@ impl<'a> FnLower<'a, '_, '_> {
                     nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
                 });
             },
-            Callee::Local(_) | Callee::Evidence(_) => {
+            Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. } => {
                 return Err(mismatch("a checked-read callee"));
             },
         }
@@ -3640,30 +4042,53 @@ impl<'a> FnLower<'a, '_, '_> {
         self.emit(Op::Jmp { target: join });
         self.rc.restore(base);
         self.bind_label(ok_lbl);
-        let tag = self.shapes.tag_id(*elem)?;
-        self.emit(Op::TagNew {
-            dst: Slot::body(result.base),
-            tag,
-        });
-        self.zero_init_member(result.base, &u.words, &elem_member.fields)?;
-        // the payload copies from the flat overlay span into the member's
-        // claimed words (fields may claim scattered region offsets; the
-        // flat index walks the element's declaration order)
-        let mut flat = 0usize;
-        for field in &elem_member.fields {
-            for (offset, slot) in field.slots.iter().enumerate() {
-                let word = result.base + field.word + u8::try_from(offset).expect("offset fits u8");
-                self.emit(Op::Mov {
-                    dst: Slot::body(word),
-                    src: Slot::overlay(
-                        u8::try_from(1 + flat + offset).expect("overlay word fits u8"),
-                    ),
+        match elem_member {
+            Some(member) => {
+                let tag = self.shapes.tag_id(member.atom)?;
+                self.emit(Op::TagNew {
+                    dst: Slot::body(result.base),
+                    tag,
                 });
-                if *slot == SlotType::Ref {
-                    self.rc.produced(word);
+                self.zero_init_member(result.base, &u.words, &member.fields)?;
+                // the payload copies from the flat overlay span into the member's
+                // claimed words (fields may claim scattered region offsets; the
+                // flat index walks the element's declaration order)
+                let mut flat = 0usize;
+                for field in &member.fields {
+                    for (offset, slot) in field.slots.iter().enumerate() {
+                        let word = result.base
+                            + field.word
+                            + u8::try_from(offset).expect("offset fits u8");
+                        self.emit(Op::Mov {
+                            dst: Slot::body(word),
+                            src: Slot::overlay(
+                                u8::try_from(1 + flat + offset).expect("overlay word fits u8"),
+                            ),
+                        });
+                        if *slot == SlotType::Ref {
+                            self.rc.produced(word);
+                        }
+                    }
+                    flat += field.slots.len();
                 }
-            }
-            flat += field.slots.len();
+            },
+            // the multi-atom element: the native's payload IS the
+            // element's whole span, its tag word first, and every word
+            // copies verbatim into the result's own span — the same
+            // atoms claimed the same region, so word `i` of the payload
+            // is word `i` of the result
+            None => {
+                for (index, slot) in u.words.iter().enumerate() {
+                    let word = result.base + u8::try_from(index).expect("span width fits u8");
+                    self.emit(Op::Mov {
+                        dst: Slot::body(word),
+                        src: Slot::overlay(u8::try_from(1 + index).expect("overlay word fits u8")),
+                    });
+                    if *slot == SlotType::Ref {
+                        self.rc.produced(word);
+                    }
+                }
+            },
         }
         let arm_ok = self.rc.take();
         let dying = self.rc.reconcile(&[(arm_none, false), (arm_ok, false)]);

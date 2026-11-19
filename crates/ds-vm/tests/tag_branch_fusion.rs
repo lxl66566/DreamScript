@@ -11,8 +11,8 @@
 //! unfused.
 
 use ds_vm::{
-    ChildOutcome, Const, FiberState, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
-    ModuleVersion, NurseryId, Trap, Value, Vm,
+    ChildOutcome, Const, FiberState, FrameAnswer, FramePc, FunctionDef, JoinOutcome,
+    ModuleRegistry, ModuleVersion, NurseryId, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, SlotType,
         SlotType::{Bool, I64, Ref, Tag},
@@ -368,7 +368,7 @@ fn an_intervening_rc_word_breaks_the_pair_and_still_executes() {
     );
     // the trap is the second RCDEC at pc 6 — the branch between ran as its
     // own dispatch
-    assert_eq!(vm.backtrace()[0].pc, CodePc(6));
+    assert_eq!(vm.backtrace()[0].pc, FramePc::At(CodePc(6)));
 }
 
 /// A JMPIF adjacent to the tag test but testing a different slot never

@@ -464,6 +464,10 @@ pub enum BuiltinInstance {
     /// span (the native channel's wider list element), recorded by the
     /// element-taking closes whose one bodies stay element-agnostic.
     Record = 5,
+    /// The `bytes` instance: the receiver is a heap byte-string
+    /// reference (the immutable byte sequence, `string`'s shape over
+    /// bytes), whatever the collection seam answering it.
+    Bytes = 6,
 }
 
 /// The biased u16 field for a jump from pc to `target` (BL-1):

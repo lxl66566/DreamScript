@@ -69,7 +69,7 @@ const GENERICS_AMBIENT: &str = concat!(
     "trait Copyable { }\n",
     "struct list[t]\n",
     "extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
-    "extern fn head[t] (xs: list[t]) -> t?\n",
+    "extern fn first[t] (xs: list[t]) -> t?\n",
     "extern fn tail[t] (xs: list[t]) -> list[t]\n",
     "extern fn join (parts: list[string], sep: string) -> string\n",
     "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
@@ -117,6 +117,7 @@ const MAPS_AMBIENT: &str = concat!(
     "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
     "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
+    "extern fn len[t] (xs: t) -> int\n",
     "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
 );
 

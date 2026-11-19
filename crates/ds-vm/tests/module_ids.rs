@@ -185,7 +185,7 @@ fn module_bytes_run_identically_under_either_sibling_install_order() {
     let build = |order: [ModuleVersion; 3]| {
         let mut vm = Vm::new(ModuleRegistry::new());
         for module in order {
-            vm.install_module(module);
+            vm.install_module(module).expect("the swap installs");
         }
         vm
     };
@@ -225,7 +225,8 @@ fn native_names_never_enter_the_id_space() {
             Uop::Ret { src: 0 },
         ])])
         .expect("valid module"),
-    );
+    )
+    .expect("the swap installs");
     // one module minting both kinds: the uop word materializes, the
     // native word refuses at issue
     vm.install_module(
@@ -263,7 +264,8 @@ fn native_names_never_enter_the_id_space() {
             ),
         ])
         .expect("valid module"),
-    );
+    )
+    .expect("the swap installs");
     let expected = Value::Fn(FuncRef::new(
         vm.registry()
             .module_id("u")
@@ -292,9 +294,10 @@ fn native_names_never_enter_the_id_space() {
 #[test]
 fn a_foreign_word_aliases_the_other_registry_s_module_silently() {
     let mut vm1 = Vm::new(ModuleRegistry::new());
-    vm1.install_module(a_module());
-    vm1.install_module(b_module());
-    vm1.install_module(apply_module());
+    vm1.install_module(a_module()).expect("the swap installs");
+    vm1.install_module(b_module()).expect("the swap installs");
+    vm1.install_module(apply_module())
+        .expect("the swap installs");
     let word = Value::Fn(FuncRef::new(
         vm1.registry().module_id("a").expect("installed"),
         0,
@@ -306,9 +309,10 @@ fn a_foreign_word_aliases_the_other_registry_s_module_silently() {
     // the same word under a registry where id 0 is `b`: the call reaches
     // negate, silently — no trap, no wrong-slot diagnostic
     let mut vm2 = Vm::new(ModuleRegistry::new());
-    vm2.install_module(b_module());
-    vm2.install_module(a_module());
-    vm2.install_module(apply_module());
+    vm2.install_module(b_module()).expect("the swap installs");
+    vm2.install_module(a_module()).expect("the swap installs");
+    vm2.install_module(apply_module())
+        .expect("the swap installs");
     assert_eq!(
         vm2.run("app", "apply", &[word]),
         Ok(FrameAnswer::one(Value::I64(-21)))

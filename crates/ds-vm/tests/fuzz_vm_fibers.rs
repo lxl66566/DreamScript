@@ -3,8 +3,10 @@
 //! (the shared generator in fuzz/vm_gen.rs, included by path so target and
 //! mirrors can never drift) run through the writer/reader round trip, the
 //! loader, a budgeted execution, and the host fiber face (spawn with
-//! staged Ref/string words, resume with payloads, join or teardown), and
-//! every stop is structured — never a panic.
+//! staged Ref/string words, resume with payloads, join or teardown),
+//! and — over the vm's own repl face — the trapped line's rollback
+//! tearing its abandoned nursery down (never-entered children released,
+//! the slots recycled), and every stop is structured — never a panic.
 
 #[path = "../../../fuzz/vm_gen.rs"]
 mod vm_gen;
@@ -69,9 +71,15 @@ fn fiber_shapes_stop_structurally_and_cover() {
         total.run_cancelled += shape.run_cancelled;
         total.run_uncontained += shape.run_uncontained;
         total.records += shape.records;
+        total.bytes += shape.bytes;
+        total.reloads += shape.reloads;
+        total.reload_accepted += shape.reload_accepted;
+        total.reload_refused += shape.reload_refused;
         total.sentinel += shape.sentinel;
         total.defaults += shape.defaults;
         total.deinit += shape.deinit;
+        total.repls += shape.repls;
+        total.repl_nursery_released += shape.repl_nursery_released;
     }
     vm_gen::exercise_fibers(&[]);
     vm_gen::exercise_fibers(&[0]);
@@ -100,12 +108,29 @@ fn fiber_shapes_stop_structurally_and_cover() {
     // generator can draw must be drawn somewhere in the sweep (a
     // weighting regression fails loudly); runtime depth is the campaign's
     assert!(total.records > 0, "the records-list template is drawn");
+    assert!(total.bytes > 0, "the bytes-bridge template is drawn");
+    // the hot-reload re-key surface: mid-drive swaps occur, and both the
+    // landing and the structured refusal classes run across the sweep
+    assert!(total.reloads > 0, "the reload phase is drawn");
+    assert!(
+        total.reload_accepted > 0,
+        "a swap lands somewhere in the sweep"
+    );
+    assert!(
+        total.reload_refused > 0,
+        "a swap refuses structurally somewhere in the sweep"
+    );
     assert!(
         total.sentinel > 0,
         "the sentinel evidence template is drawn"
     );
     assert!(total.deinit > 0, "the deinit-claim template is drawn");
     assert!(total.defaults > 0, "the trait-defaults template is drawn");
+    assert!(total.repls > 0, "the repl rollback phase runs");
+    assert!(
+        total.repl_nursery_released > 0,
+        "a trapped line's own nursery tears down at the rollback"
+    );
 }
 
 /// Every committed seed of the cargo-fuzz corpus holds the property. Only

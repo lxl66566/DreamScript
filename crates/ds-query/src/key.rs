@@ -136,6 +136,11 @@ pub enum QueryKey {
     /// provides. The `PackageId` is the package grain, like
     /// [`QueryKey::Resolve`].
     PlatformCheck(PackageId),
+    /// The pooled-body check of one package (E3): every
+    /// `par_map`/`par_reduce` call's callable hunted for the worker-diverging
+    /// members over the [`QueryKey::Analyzed`] value's own bundle. The
+    /// `PackageId` is the package grain, like [`QueryKey::Resolve`].
+    PooledCheck(PackageId),
     /// The whole-package bidirectional check (B2): collection and
     /// resolution, then the declaration and body pass over the
     /// [`QueryKey::Expanded`] value's trees. The substrate every
@@ -188,6 +193,7 @@ impl QueryKey {
             Self::EffectsOf(_) => QueryKind::EffectsOf,
             Self::LinearityCheck(_) => QueryKind::LinearityCheck,
             Self::PlatformCheck(_) => QueryKind::PlatformCheck,
+            Self::PooledCheck(_) => QueryKind::PooledCheck,
             Self::CheckedPackage(_) => QueryKind::CheckedPackage,
             Self::Analyzed(_) => QueryKind::Analyzed,
             Self::PackageLinearity(_) => QueryKind::PackageLinearity,
@@ -222,6 +228,8 @@ pub enum QueryKind {
     LinearityCheck,
     /// Kind of [`QueryKey::PlatformCheck`].
     PlatformCheck,
+    /// Kind of [`QueryKey::PooledCheck`].
+    PooledCheck,
     /// Kind of [`QueryKey::CheckedPackage`].
     CheckedPackage,
     /// Kind of [`QueryKey::Analyzed`].

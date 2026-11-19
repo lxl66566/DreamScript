@@ -286,6 +286,33 @@ fn a_trap_prints_the_backtrace_summary() {
     assert!(err.contains("div::main at pc 3"), "stderr: {err}");
 }
 
+/// A hosted call's caller frame (a `map` combinator's reentrant
+/// per-element call parked inside the native) has no bytecode position:
+/// the backtrace names the hosted seam for it, never the sentinel
+/// integer the synthetic reentry frame carries as its return pc.
+#[test]
+fn a_hosted_callers_backtrace_frame_names_the_seam() {
+    let path = env::temp_dir().join("ds-cli-run-hosted-trap.ds");
+    fs::write(
+        &path,
+        "fn main() -> () {\n  const xs = [1, 0]\n  const ys = xs.map((x: int) => 100 / x)\n}\n",
+    )
+    .expect("the source writes");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(!ok, "a trapped run exits nonzero");
+    assert_eq!(out, "", "stdout stays clean");
+    assert!(err.contains("trap: division by zero"), "stderr: {err}");
+    assert!(
+        err.contains("at hosted"),
+        "the parked caller names the seam: {err}"
+    );
+    assert!(
+        !err.contains("4294967295"),
+        "the sentinel return pc never surfaces: {err}"
+    );
+}
+
 /// A script whose shift leaves the bit width behaves identically on
 /// both sides of the trap: `ds check` accepts it (the types are sound;
 /// the shift amount is a runtime fact), and `ds run` prints the trap

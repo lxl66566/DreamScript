@@ -4,6 +4,40 @@
 
 use super::*;
 
+/// The ambient externs the lowerer routes by def recognition: each
+/// entry carries the ambient name its recognition keys on, so every
+/// site that must answer "is this def the extern" walks the same table
+/// through [`ambient_extern`](FnLower::ambient_extern).
+#[derive(Clone, Copy)]
+pub(super) enum AmbientExtern {
+    /// The ambient `str[t]` conversion extern [F6]: one generic over the
+    /// converted value, one parameter. The lowering routes the call by
+    /// the operand's checked type, mirroring the interpolation hole.
+    Str,
+    /// The ambient `cancel` extern [E1, E2]: the generic one-parameter
+    /// declaration the checker rows with the `cancel` effect — the
+    /// internal effect the nursery boundary dispatches.
+    Cancel,
+    /// A `die` spelling's declaration (the 2026-11-17 split): the
+    /// generic one-parameter extern — the return generic the call
+    /// site's own type answers — wherever the merged reading serves it
+    /// (the host member a CLI entry session registers, or a file-owned
+    /// extern). The declaration is the provider's own code; the
+    /// primitive it routes to is the builtin core's `trap`.
+    Die,
+}
+
+impl AmbientExtern {
+    /// The ambient name the recognition keys on.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Str => "str",
+            Self::Cancel => "cancel",
+            Self::Die => "die",
+        }
+    }
+}
+
 impl FnLower<'_, '_, '_> {
     // ---- the extraction family [E4] ------------------------------------------
 
@@ -33,12 +67,14 @@ impl FnLower<'_, '_, '_> {
         }
     }
 
-    /// The family's receiver decomposition: the checked `t | none`
-    /// union's none member and its extracted t side's atom. The side's
-    /// words may span any width — a struct member's fields claim their
-    /// region spans — and the consumers gather them through
+    /// The family's receiver validation: the checked `t | none` union's
+    /// none member present and its extracted t side non-empty. The
+    /// side's words may span any width — a struct member's fields claim
+    /// their region spans, and an enum-in-optional side (several atoms)
+    /// keeps the whole span verbatim, the checked read's own multi-atom
+    /// shape — and the consumers gather them through
     /// [`fn extracted_words`](Self::extracted_words).
-    fn optional_side(&mut self, recv_ty: Ty, span: Span) -> Result<TypeId, LowerError> {
+    fn guard_optional_side(&mut self, recv_ty: Ty, span: Span) -> Result<(), LowerError> {
         let shape = self.shapes.shape(recv_ty)?;
         let Shape::Union(u) = &*shape else {
             return Err(LowerError::unsupported(
@@ -50,12 +86,25 @@ impl FnLower<'_, '_, '_> {
         if u.member(TypeId::NONE).is_none() {
             return Err(mismatch("an optional receiver's none member"));
         }
+        if set_diff(self.members(recv_ty), &[TypeId::NONE]).is_empty() {
+            return Err(mismatch("an optional receiver's extracted side"));
+        }
+        Ok(())
+    }
+
+    /// The extracted side's single atom, when it is one — `ok_or`'s
+    /// member machinery keys by it, so a several-atom side (an enum
+    /// inside the optional) refuses there naming the shape.
+    fn optional_side_atom(&mut self, recv_ty: Ty, span: Span) -> Result<TypeId, LowerError> {
+        self.guard_optional_side(recv_ty, span)?;
         let diff = set_diff(self.members(recv_ty), &[TypeId::NONE]);
         let [elem] = diff.as_slice() else {
             return Err(LowerError::unsupported(
                 span,
                 "an extraction-family receiver",
-                "the extracted side must be one atom; narrow the receiver first",
+                "the payload side is several atoms (an enum inside the optional); the member \
+                 entry ok_or's constructed result keys on is the sub-union's, which the family \
+                 does not synthesize yet",
             ));
         };
         Ok(*elem)
@@ -81,7 +130,7 @@ impl FnLower<'_, '_, '_> {
     ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        self.optional_side(src_ty, span)?;
+        self.guard_optional_side(src_ty, span)?;
         let fb = self.value(fallback)?;
         let result = self.temp_span(ty)?;
         let cond = self.temp_word(SlotType::Bool)?;
@@ -158,7 +207,7 @@ impl FnLower<'_, '_, '_> {
     ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        self.optional_side(src_ty, span)?;
+        self.guard_optional_side(src_ty, span)?;
         let Expr::Lambda { params, body, .. } = fallback else {
             return Err(LowerError::unsupported(
                 fallback.span(),
@@ -250,7 +299,7 @@ impl FnLower<'_, '_, '_> {
         }
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
-        let elem = self.optional_side(src_ty, span)?;
+        let elem = self.optional_side_atom(src_ty, span)?;
         let ev = self.value(err)?;
         let err_atom = self.only_atom(ev.ty, err.span())?;
         let err_words = self.word_addrs(&ev.place, ev.ty)?;
@@ -424,10 +473,22 @@ impl FnLower<'_, '_, '_> {
         }
     }
 
-    /// The kept set of a `?` extraction: one member addresses its
-    /// payload word; several keep the whole span.
+    /// The kept set of a `?` extraction: one word member addresses its
+    /// payload word; several members keep the whole span. A span member
+    /// (a struct or tuple payload) has no in-place payload word — the
+    /// kept set lives in the operand's region words, which no single
+    /// word place addresses — so it refuses naming the narrow spelling.
     fn extract(&mut self, place: Place, ty: Ty) -> Result<Place, LowerError> {
         if self.members(ty).len() == 1 {
+            if !matches!(&*self.shapes.shape(ty)?, Shape::Word(_)) {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a `?` kept set over a struct or tuple member",
+                    "the kept member has no in-place payload word; bind the union and read it \
+                     behind `is` — `if x is member { ... }` — or unwrap through the member's own \
+                     spelling",
+                ));
+            }
             let addrs = self.word_addrs(&place, ty)?;
             let [only] = addrs.as_slice() else {
                 return Err(mismatch("an extracted member"));
@@ -441,32 +502,28 @@ impl FnLower<'_, '_, '_> {
         }
     }
 
-    /// The extraction-family member a callee def addresses, when the
-    /// ambient's own shape carries it: a non-local function of a family
-    /// name, generic with two parameters — the same name-routing the
-    /// native table performs, gated to match the checker's rule so the
-    /// two passes never disagree [E4].
-    /// Whether `def` is the ambient `str[t]` conversion extern: one
-    /// generic over the converted value, one parameter. The lowering
-    /// routes the call by the operand's checked type, mirroring the
-    /// interpolation hole.
-    pub(super) fn ambient_str_def(&self, def: DefId) -> bool {
-        self.plan.index_of(def).is_none()
-            && self.analyzed.package.def(def).name == "str"
-            && self
-                .analyzed
-                .decls
-                .fns
-                .get(&def)
-                .is_some_and(|sig| sig.generics.len() == 1 && sig.params.len() == 1)
+    /// Whether `def` carries the compiler-wired @std identity the
+    /// recognition below keys on: an import-bound def answers by its
+    /// package's identity alone — the reserved `@std` package's entries
+    /// keep the recognition, every other linked package's def its own
+    /// linked call — and a def no import bound answers by ambient
+    /// position, the def sitting outside this module's own table. Both
+    /// readings stay active until the un-merge retires the ambient one.
+    fn std_recognized(&self, def: DefId) -> bool {
+        match self.analyzed.package.foreign().get(&def) {
+            Some(entry) => entry.std,
+            None => self.plan.index_of(def).is_none(),
+        }
     }
 
-    /// Whether `def` is the ambient `cancel` extern [E1, E2]: the generic
-    /// one-parameter declaration the checker rows with the `cancel`
-    /// effect — the internal effect the nursery boundary dispatches.
-    pub(super) fn ambient_cancel_def(&self, def: DefId) -> bool {
-        self.plan.index_of(def).is_none()
-            && self.analyzed.package.def(def).name == "cancel"
+    /// Whether `def` is the ambient extern `which` names: the
+    /// compiler-wired @std identity
+    /// ([`std_recognized`](Self::std_recognized)), the exact name, and
+    /// the generic one-parameter signature — the checker's own
+    /// recognition rule, so the two passes never disagree.
+    pub(super) fn ambient_extern(&self, def: DefId, which: AmbientExtern) -> bool {
+        self.std_recognized(def)
+            && self.analyzed.package.def(def).name == which.name()
             && self
                 .analyzed
                 .decls
@@ -664,6 +721,39 @@ impl FnLower<'_, '_, '_> {
         Ok(self.unit_value(span)?.place)
     }
 
+    /// The `die(msg)` call (the 2026-11-17 split): the one string word
+    /// stages to the builtin core's bare trap primitive, the message
+    /// riding the trap out to the drive — the engine prints nothing and
+    /// decides no exit code, the host's halt policy applying above it.
+    /// The call never answers, so the call's own checked type names a
+    /// placeholder span no later instruction reads (the trap fires first).
+    pub(super) fn die_call(
+        &mut self,
+        args: &[&Expr],
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let native = crate::native::lookup("trap").ok_or_else(|| mismatch("the trap primitive"))?;
+        let [message] = args else {
+            return Err(LowerError::unsupported(
+                span,
+                "a `die` call",
+                "stage exactly the message; the spelling is `die(msg: string)`",
+            ));
+        };
+        let tp = self.value(message)?;
+        let addr = single(&self.word_addrs(&tp.place, tp.ty)?, message.span())?;
+        if addr.slot_ty != SlotType::Ref {
+            return Err(LowerError::unsupported(
+                message.span(),
+                "a `die` message",
+                "the message must be the one string word the declaration names",
+            ));
+        }
+        self.seam_call(native, &[(addr.slot, SlotType::Ref)], &[SlotType::I64])?;
+        self.temp_span(ty)
+    }
+
     /// The ambient `str[t]` conversion as an explicit call [F6]: the
     /// operand's checked type routes the same conversion the
     /// interpolation holes use — printable primitives pass their Ref
@@ -678,7 +768,7 @@ impl FnLower<'_, '_, '_> {
         args: &[&Expr],
         span: Span,
     ) -> Result<Option<Place>, LowerError> {
-        if !self.ambient_str_def(def) {
+        if !self.ambient_extern(def, AmbientExtern::Str) {
             return Ok(None);
         }
         let [arg] = args else {
@@ -692,8 +782,13 @@ impl FnLower<'_, '_, '_> {
         }))
     }
 
+    /// The extraction-family member a callee def addresses, when the
+    /// ambient's own shape carries it: a non-local function of a family
+    /// name, generic with two parameters — the same name-routing the
+    /// native table performs, gated to match the checker's rule so the
+    /// two passes never disagree [E4].
     pub(super) fn extraction_def(&self, def: DefId) -> Option<Extraction> {
-        if self.plan.index_of(def).is_some() {
+        if !self.std_recognized(def) {
             return None;
         }
         let sig = self.analyzed.decls.fns.get(&def)?;

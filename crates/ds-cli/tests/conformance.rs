@@ -116,6 +116,37 @@ fn a_recursive_nursery_block_drains_the_interlock_iteratively() {
 }
 
 #[test]
+fn the_union_default_annotation_answers_the_member_construction() {
+    // the `#[default]`-annotated case answers the union's default() — a
+    // payloaded struct case through per-part defaults, a tuple case the
+    // call — and a defaulting struct field typing the union answers the
+    // same construction
+    run_golden(
+        "derive_default_union.ds",
+        "tone=loud { volume: 0 } level=big(0) pick=loud { volume: 0 }\n0\n",
+    );
+}
+
+#[test]
+fn the_comptime_fence_admits_pure_row_helpers() {
+    // an ordinary fn admits by its own solved pure row, its body joining
+    // the fenced evaluation (a two-hop chain riding the transitive
+    // closure), the answer embedding at the call site, and the helper
+    // still running on the runtime path
+    run_golden("comptime_admission.ds", "kind=point flat=true\n0\n");
+}
+
+#[test]
+fn the_comptime_fence_admits_trap_row_helpers() {
+    // a callee whose solved row is `trap` alone admits (the 2026-11-17
+    // amendment): the int-arithmetic helper and the string-concat helper
+    // (its row the effects pass's unsolved-type over-approximation) join
+    // the fenced evaluation with their answers embedding, and both still
+    // run on the runtime path
+    run_golden("comptime_trap_row.ds", "page!\n42\n0\n");
+}
+
+#[test]
 fn the_tutorial_surface_interpolates_and_defaults_end_to_end() {
     // the show-carrying holes over a derived struct, a payloaded enum
     // through the union, and an inherent member; the receiverless make
@@ -125,5 +156,99 @@ fn the_tutorial_surface_interpolates_and_defaults_end_to_end() {
         "tutorial_surface.ds",
         "derived shape { label: nut, weight: 3 } / shape { label: nut, weight: 3 }\nunion loud { \
          volume: 7 }\ninherent gauge 4\ndefault 0 0 0\ncase true\n0\n",
+    );
+}
+
+#[test]
+fn the_json_derive_families_round_trip_through_the_parser_and_writer() {
+    // one declaration deriving both families: the optional list field's
+    // presence, presence-empty, and absence survive the encode-decode
+    // walk (the none-side observation beside the re-encoded document),
+    // the enum's two unit cases and one struct-payload case answer both
+    // directions, and every wrong shape answers parse_err — a
+    // non-object, a missing required member, a wrong-typed member, an
+    // unknown case name, a non-string non-object enum shape
+    run_golden(
+        "json_derive_roundtrip.ds",
+        concat!(
+            "{\"name\":\"ada\",\"rows\":[4,5]}\n",
+            "{\"name\":\"ada\"}\n",
+            "{\"name\":\"ada\",\"rows\":[4,5]} false\n",
+            "{\"name\":\"ada\"} true\n",
+            "{\"name\":\"ada\",\"rows\":[]} false\n",
+            "parse_err\n",
+            "parse_err\n",
+            "parse_err\n",
+            "\"left\"\n",
+            "{\"times\":3}\n",
+            "\"left\"\n",
+            "\"right\"\n",
+            "{\"times\":3}\n",
+            "parse_err\n",
+            "parse_err\n",
+            "0\n",
+        ),
+    );
+}
+
+#[test]
+fn the_bytes_surface_renders_orders_and_crosses_the_bridges() {
+    // the byte-list rendering (literal low bytes beside a high byte read
+    // through the checked byte_at, empty printing bytes[]), the derive
+    // families composing over a bytes part (the lexicographic
+    // shorter-prefix-first order, the content hash), the utf8 bridges
+    // round-tripping a multi-byte string with a lone lead byte answering
+    // utf8_err, and list[bytes] answering content equality and in
+    // membership
+    run_golden(
+        "bytes_surface.ds",
+        concat!(
+            "bytes[1, 2, 195]\n",
+            "bytes[]\n",
+            "chunk { label: lead, data: bytes[97, 98] }\n",
+            "-1 1 0\n",
+            "true false\n",
+            "6\n",
+            "héllo\n",
+            "utf8_err\n",
+            "true false\n",
+            "true false\n",
+            "0\n",
+        ),
+    );
+}
+
+#[test]
+fn collection_equality_compares_nested_content_and_membership() {
+    // the content-compare natives over the collections' one Ref word:
+    // nested collections compose (a list of lists, a map over list
+    // values, a struct field of list and map type), and in membership
+    // compares the element by its type (a list element over a list of
+    // lists, a struct element whose fields are collections)
+    run_golden(
+        "collection_equality.ds",
+        "nested true\nmatrix true\nfields true\nmember true\n0\n",
+    );
+}
+
+#[test]
+fn the_json_width_vocabulary_round_trips_both_derive_families() {
+    // byte/char/u32/bytes fields with their edge values through both
+    // json derive families: byte and u32 as json numbers (the u32 words
+    // built through the ambient's u32.of(x) conversion), char as its
+    // one-character string, bytes as its number array (the empty payload
+    // beside a spelled high byte), and every wrong-width or wrong-shape
+    // decode answering parse_err
+    run_golden(
+        "json_width_roundtrip.ds",
+        concat!(
+            "{\"kind\":255,\"serial\":4294967295,\"mark\":\"é\",\"payload\":[0,255]}\n",
+            "{\"kind\":0,\"serial\":0,\"mark\":\"q\",\"payload\":[]}\n",
+            "{\"kind\":0,\"serial\":4294967295,\"mark\":\"é\",\"payload\":[0,255]}\n",
+            "true\n",
+            "true\n",
+            "true\n",
+            "0\n",
+        ),
     );
 }

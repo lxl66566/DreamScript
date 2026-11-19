@@ -24,7 +24,7 @@ fn main() {
     let mut files = ds_diag::Files::new();
     let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
     let ast = ds_parse::parse(&files, id).expect("the ambient parses");
-    let analyzed = ds_meta::analyze_owned(&files, vec![ast], &[false]);
+    let analyzed = ds_meta::analyze_owned(&files, vec![std::sync::Arc::new(ast)], &[false]);
     assert!(
         analyzed.checked.diags.is_empty(),
         "the ambient does not check clean: {:?}",
@@ -39,9 +39,9 @@ fn main() {
     .expect("the ambient lowers");
     let module = lowered.module();
     assert!(
-        module.chains().is_empty() && module.tags().is_empty(),
-        "the ambient's lowering mints a chain or tag table: the splice installs function records \
-         only, so the serving seam needs widening first"
+        module.chains().is_empty(),
+        "the ambient's lowering mints a chain table: the splice installs function records and tag \
+         rows only, so the serving seam needs widening first"
     );
     let mut bytes = Hash128::compute(BUILD_ID.as_bytes()).as_bytes().to_vec();
     bytes.extend_from_slice(&ds_mod::write(module));
@@ -52,9 +52,10 @@ fn main() {
         .join("ambient.dsmod");
     std::fs::write(&out, &bytes).expect("writing the ambient dsmod artifact");
     println!(
-        "wrote {} bytes to {} ({} functions)",
+        "wrote {} bytes to {} ({} functions, {} tag rows)",
         bytes.len(),
         out.display(),
-        module.functions().len()
+        module.functions().len(),
+        module.tags().len()
     );
 }

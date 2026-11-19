@@ -5,19 +5,23 @@
 //! build` compiles a .ds source to a dsmod module, `ds save` installs a
 //! working-tree package into the content-addressed store, `ds fmt`
 //! rewrites .ds sources in place, `ds info` renders a package's `.dsi`
-//! API surface, `ds repl` reads-eval-prints against the in-process
-//! pipeline with a persistent session, and `ds lsp` serves the
-//! language-server protocol on stdin/stdout. Every further subcommand
-//! (dev, bind, link) lands when the backend it drives lands — no stub
-//! commands.
+//! API surface, `ds bind` binds an installed package artifact's native
+//! library and reports its exported C symbols (H5), `ds repl`
+//! reads-eval-prints against the in-process pipeline with a persistent
+//! session, `ds lsp` serves the language-server protocol on
+//! stdin/stdout, and `ds dev` drives the hot-reload loop (compile,
+//! watch, swap). Every further subcommand (link) lands when the backend
+//! it drives lands — no stub commands.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
 mod ambient_dsmod;
+mod bind;
 mod build;
 mod check;
+mod dev;
 mod dsi_cache;
 mod fmt;
 mod info;
@@ -53,8 +57,13 @@ enum Command {
     Save(save::SaveArgs),
     /// Render a package's `.dsi` API surface (G4)
     Info(info::InfoArgs),
+    /// Bind an installed package artifact's native library and report
+    /// its exported C symbols (H5)
+    Bind(bind::BindArgs),
     /// Format .ds sources in place (zero style options)
     Fmt(fmt::FmtArgs),
+    /// Run one .ds source with hot reload: watch, recompile, swap
+    Dev(dev::DevArgs),
     /// Interactive read-eval-print loop over the in-process pipeline
     Repl(repl::ReplArgs),
     /// Serve the language-server protocol on stdin/stdout
@@ -69,7 +78,9 @@ fn main() -> ExitCode {
         Command::Build(args) => build::build(&args).map(|()| ExitCode::SUCCESS),
         Command::Save(args) => save::save(&args).map(|()| ExitCode::SUCCESS),
         Command::Info(args) => info::info(&args).map(|()| ExitCode::SUCCESS),
+        Command::Bind(args) => bind::bind(&args).map(|()| ExitCode::SUCCESS),
         Command::Fmt(args) => Ok(fmt::fmt(&args)),
+        Command::Dev(args) => dev::dev(&args),
         Command::Repl(args) => repl::repl(&args),
         Command::Lsp(args) => lsp::lsp(&args),
     };

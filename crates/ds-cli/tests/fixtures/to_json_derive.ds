@@ -1,0 +1,90 @@
+// purpose: the to_json derive family end to end over the real ambient —
+// `#[derive(to_json)]` on a struct or an enum synthesizes the
+// receiverless encode member whose body builds the json enum value
+// through its own case constructions, the plain to_json writer staying
+// the composition point (every row printing t.to_json(v).to_json()):
+// the struct walk fills one object map with one member per field — a
+// scalar field through its case construction inline, a list field
+// through one json element per position, a nested derive's field
+// through that type's own to_json member, an optional field's presence
+// setting its member and its absence leaving the member out — and the
+// enum walk matches the receiver, the unit cases answering their
+// json_string names and the one struct-payload case its object. The
+// optional list field (the decode mirror's refusal) runs: the encode
+// walk's member rows are statement-position. The roundtrip rows pin
+// the from_json composition both ways over one declaration deriving
+// both families.
+
+#[derive(to_json)]
+struct cell { i: int, f: float, b: bool, s: string }
+
+#[derive(to_json)]
+struct inner { a: int }
+
+#[derive(to_json)]
+struct outer { i: inner, kind: string, port: int?, xs: list[int], grid: list[list[int]] }
+
+#[derive(to_json)]
+struct soft { rows: list[int]? }
+
+#[derive(to_json)]
+enum turn { left, right, spin { times: int } }
+
+#[derive(from_json, to_json)]
+struct rt { a: int, tag: string, xs: list[int], port: int? }
+
+// The width fields' encode target (2026-11-19): byte and u32 as json
+// numbers, char as its one-character string, bytes as a number array —
+// the constructed row spelling the widths from literals (byte
+// literals are ASCII-only, so the 255 edge rides the decoded row).
+#[derive(from_json, to_json)]
+struct words { b: byte, c: char, u: u32, z: bytes }
+
+fn doc (text: string) -> json {
+  const j = parse_json(text)
+  if j is parse_err { json_null } else { j }
+}
+
+fn rt_round (text: string) -> () {
+  const r = rt.from_json(doc(text))
+  if r is parse_err { println("parse_err") } else {
+    println(rt.to_json(r).to_json())
+  }
+}
+
+fn words_round (text: string) -> () {
+  const w = words.from_json(doc(text))
+  if w is parse_err { println("parse_err") } else {
+    println(words.to_json(w).to_json())
+  }
+}
+
+fn main() -> () {
+  const c = cell { i: 12, f: 2.5, b: true, s: "arch" }
+  println(cell.to_json(c).to_json())
+  const full = outer { i: inner { a: 7 }, kind: "t", port: 9, xs: [4, 5], grid: [[1, 2], [3]] }
+  println(outer.to_json(full).to_json())
+  const bare = outer { i: inner { a: 7 }, kind: "t", port: none, xs: [], grid: [] }
+  println(outer.to_json(bare).to_json())
+  const s0 = soft { rows: none }
+  println(soft.to_json(s0).to_json())
+  const s1 = soft { rows: [1, 2] }
+  println(soft.to_json(s1).to_json())
+  println(turn.to_json(left).to_json())
+  println(turn.to_json(right).to_json())
+  const sp = spin(times: 3)
+  println(turn.to_json(sp).to_json())
+  rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": [1, 2], \"port\": 3}")
+  rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": []}")
+  rt_round("{\"tag\": \"t\", \"xs\": []}")
+  words_round("{\"b\": 0, \"c\": \"q\", \"u\": 0, \"z\": []}")
+  words_round("{\"b\": 255, \"c\": \"q\", \"u\": 4294967295, \"z\": [0, 255]}")
+  // The constructed row: field reads of every width flowing into the
+  // literal (u32 carries no literal, so the seed decodes one first —
+  // byte literals are ASCII-only, so the byte edge rides the row above).
+  const seed = words.from_json(doc("{\"b\": 65, \"c\": \"\\u00e9\", \"u\": 4000000000, \"z\": [65, 0]}"))
+  if seed is parse_err { println("parse_err") } else {
+    const built = words { b: seed.b, c: seed.c, u: seed.u, z: seed.z }
+    println(words.to_json(built).to_json())
+  }
+}

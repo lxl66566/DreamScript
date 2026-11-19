@@ -25,11 +25,36 @@ use ds_parse::Ast;
 /// expanded tree.
 static BLOB: &[u8] = include_bytes!("ambient.ast");
 
+/// The artifact's tree, decoded at most once per process and parked
+/// behind one shared handle: every serve hands the same tree out as a
+/// reference-counted clone, so a process that compiles many members
+/// over one ambient (a package graph's member compiles, a query
+/// session) pays the decode once and no tree clone ever — a bundle
+/// holding shared trees adopts the resident tree per compile and drops
+/// a refcount at teardown. A one-compile-per-process run (a cold `ds
+/// run`, the pinned kernels) pays the decode plus one allocation to
+/// park it, nothing more. A decode failure stays cached with it: a
+/// drifted artifact answers every caller with the same miss, only
+/// without re-decoding the bytes per call.
+static TREE: std::sync::OnceLock<Result<std::sync::Arc<Ast>, AmbientBlobError>> =
+    std::sync::OnceLock::new();
+
+/// The artifact bytes' decode, the once-per-process half of [`ambient_ast`].
+fn decode_tree() -> Result<Ast, AmbientBlobError> {
+    let Some((header, payload)) = BLOB.split_first_chunk::<HEADER>() else {
+        return Err(AmbientBlobError::SourceDrift);
+    };
+    if header != Hash128::compute(crate::AMBIENT_SOURCE.as_bytes()).as_bytes() {
+        return Err(AmbientBlobError::SourceDrift);
+    }
+    postcard::from_bytes(payload).map_err(AmbientBlobError::Decode)
+}
+
 /// The source-hash header's size in bytes.
 const HEADER: usize = 16;
 
 /// Why the precompiled ambient AST could not be served.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum AmbientBlobError {
     /// The artifact's source hash does not match `AMBIENT_SOURCE`: the
     /// blob predates a source edit. Regenerate it with the `gen-ambient`
@@ -77,18 +102,13 @@ impl std::error::Error for AmbientBlobError {
 ///
 /// [`AmbientBlobError`]: a stale header, a foreign file id, or a decode
 /// failure — all of them cache misses, never source problems.
-pub fn ambient_ast(file: FileId) -> Result<Ast, AmbientBlobError> {
-    let Some((header, payload)) = BLOB.split_first_chunk::<HEADER>() else {
-        return Err(AmbientBlobError::SourceDrift);
-    };
-    if header != Hash128::compute(crate::AMBIENT_SOURCE.as_bytes()).as_bytes() {
-        return Err(AmbientBlobError::SourceDrift);
-    }
-    let ast: Ast = postcard::from_bytes(payload).map_err(AmbientBlobError::Decode)?;
-    if ast.file != file {
+pub fn ambient_ast(file: FileId) -> Result<std::sync::Arc<Ast>, AmbientBlobError> {
+    let tree = TREE.get_or_init(|| decode_tree().map(std::sync::Arc::new));
+    let tree = tree.as_ref().map_err(Clone::clone)?;
+    if tree.file != file {
         return Err(AmbientBlobError::FileMismatch);
     }
-    Ok(ast)
+    Ok(std::sync::Arc::clone(tree))
 }
 
 #[cfg(test)]
@@ -107,7 +127,7 @@ mod tests {
         let ast = ds_parse::parse(&files, file).expect("the ambient parses");
         let (expanded, diags) = ds_meta::expand_derives(&[&ast]);
         assert!(diags.is_empty(), "the ambient derives refuse: {diags:?}");
-        let bytes = postcard::to_allocvec(&expanded[0]).expect("the AST serializes");
+        let bytes = postcard::to_allocvec(expanded[0].as_ref()).expect("the AST serializes");
         assert_eq!(
             BLOB[..HEADER],
             Hash128::compute(crate::AMBIENT_SOURCE.as_bytes()).as_bytes()[..],
@@ -120,7 +140,8 @@ mod tests {
              gen-ambient`"
         );
         let decoded = ambient_ast(file).expect("the verified artifact decodes");
-        let reserialized = postcard::to_allocvec(&decoded).expect("the served tree reserializes");
+        let reserialized =
+            postcard::to_allocvec(decoded.as_ref()).expect("the served tree reserializes");
         assert_eq!(
             reserialized, bytes,
             "the served tree must be the encoded tree"
@@ -146,10 +167,10 @@ mod tests {
             !carries_derive,
             "the artifact's trees ship pre-expanded, so no derive attribute remains"
         );
-        let (reexpanded, diags) = ds_meta::expand_derives(&[&decoded]);
+        let (reexpanded, diags) = ds_meta::expand_derives(&[decoded.as_ref()]);
         assert!(diags.is_empty(), "an expanded tree re-expands clean");
-        let again = postcard::to_allocvec(&reexpanded[0]).expect("the tree serializes");
-        let before = postcard::to_allocvec(&decoded).expect("the tree serializes");
+        let again = postcard::to_allocvec(reexpanded[0].as_ref()).expect("the tree serializes");
+        let before = postcard::to_allocvec(decoded.as_ref()).expect("the tree serializes");
         assert_eq!(
             again, before,
             "the expansion over an expanded tree is the identity"
@@ -169,7 +190,11 @@ mod tests {
         let user = files.add_source("point.ds", user_source);
         let user_ast = ds_parse::parse(&files, user).expect("the user source parses");
         let served = ambient_ast(ambient).expect("the verified artifact decodes");
-        let owned = ds_meta::analyze_owned(&files, vec![served, user_ast.clone()], &[true, false]);
+        let owned = ds_meta::analyze_owned(
+            &files,
+            vec![served, std::sync::Arc::new(user_ast.clone())],
+            &[true, false],
+        );
         let fresh_ambient = ds_parse::parse(&files, ambient).expect("the ambient parses");
         let fresh = ds_meta::analyze(&files, &[fresh_ambient, user_ast]);
         assert_eq!(
@@ -179,8 +204,9 @@ mod tests {
         assert_eq!(owned.asts.len(), fresh.asts.len());
         for (served_tree, fresh_tree) in owned.asts.iter().zip(fresh.asts.iter()) {
             let served_bytes =
-                postcard::to_allocvec(served_tree).expect("the served tree serializes");
-            let fresh_bytes = postcard::to_allocvec(fresh_tree).expect("the fresh tree serializes");
+                postcard::to_allocvec(served_tree.as_ref()).expect("the served tree serializes");
+            let fresh_bytes =
+                postcard::to_allocvec(fresh_tree.as_ref()).expect("the fresh tree serializes");
             assert_eq!(
                 served_bytes, fresh_bytes,
                 "the trees must answer identically"
@@ -198,5 +224,37 @@ mod tests {
     fn a_foreign_file_id_falls_back() {
         let error = ambient_ast(FileId::new(9)).expect_err("the artifact addresses its own file");
         assert!(matches!(error, AmbientBlobError::FileMismatch));
+    }
+
+    /// Every serve of the decoded tree answers the same tree: the
+    /// once-per-process decode parks one resident handle and every
+    /// serve hands the resident tree out by refcount, so a process that
+    /// compiles many members over one ambient serves every one of them
+    /// the tree it would have decoded, at no clone.
+    #[test]
+    fn every_serve_answers_the_same_tree() {
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source(crate::AMBIENT_FILE, crate::AMBIENT_SOURCE);
+        let encoded = |ast: &Ast| postcard::to_allocvec(ast).expect("the served tree serializes");
+        let first = encoded(
+            ambient_ast(file)
+                .as_deref()
+                .expect("the first serve decodes"),
+        );
+        let second = encoded(
+            ambient_ast(file)
+                .as_deref()
+                .expect("the second serve decodes"),
+        );
+        let third = encoded(
+            ambient_ast(file)
+                .as_deref()
+                .expect("a later serve shares the resident tree"),
+        );
+        assert_eq!(
+            first, second,
+            "the resident-parking serve answers the first"
+        );
+        assert_eq!(first, third, "a later serve clones the resident tree");
     }
 }

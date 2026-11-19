@@ -178,7 +178,6 @@ fn arm_bindings(
 fn arm_member_tests(package: &Package) -> FxHashSet<&str> {
     let mut tests: FxHashSet<&str> = package
         .defs()
-        .iter()
         .filter(|def| def.kind.is_constructor())
         .map(|def| def.name.as_str())
         .collect();

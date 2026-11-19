@@ -178,6 +178,7 @@ impl Db {
         db.set_compute(QueryKind::LinearityCheck, crate::queries::linearity_check);
         db.set_compute(QueryKind::EffectsOf, crate::queries::effects_of);
         db.set_compute(QueryKind::PlatformCheck, crate::queries::platform_check);
+        db.set_compute(QueryKind::PooledCheck, crate::queries::pooled_check);
         db
     }
 

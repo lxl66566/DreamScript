@@ -38,17 +38,15 @@ fn call_spans(ast: &Ast) -> Vec<Span> {
     }
     let mut out = Vec::new();
     for item in ast.blocks.iter().flat_map(|b| b.items.iter()) {
-        if let ItemKind::Local(l) = &item.kind {
-            if let Expr::Lambda {
+        if let ItemKind::Local(l) = &item.kind
+            && let Expr::Lambda {
                 body: lambda_body, ..
             } = &l.init
-            {
-                if let Expr::Block(b) = &**lambda_body {
-                    for stmt in &b.stmts {
-                        if let ds_parse::StmtKind::Expr(e) = &stmt.kind {
-                            expr(e, &mut out);
-                        }
-                    }
+            && let Expr::Block(b) = &**lambda_body
+        {
+            for stmt in &b.stmts {
+                if let ds_parse::StmtKind::Expr(e) = &stmt.kind {
+                    expr(e, &mut out);
                 }
             }
         }
@@ -165,21 +163,16 @@ fn free_functions_win_the_dot_position() {
     let res = &analyzed.resolutions[0];
     let mut dot = None;
     for item in ast.blocks.iter().flat_map(|b| b.items.iter()) {
-        if let ItemKind::Local(l) = &item.kind {
-            if let Expr::Lambda {
+        if let ItemKind::Local(l) = &item.kind
+            && let Expr::Lambda {
                 body: lambda_body, ..
             } = &l.init
-            {
-                if let Expr::Block(b) = &**lambda_body {
-                    if let Some(ds_parse::StmtKind::Expr(Expr::Call { callee, .. })) =
-                        b.stmts.first().map(|s| &s.kind)
-                    {
-                        if let Expr::Field { name, .. } = &**callee {
-                            dot = res.get(name.span);
-                        }
-                    }
-                }
-            }
+            && let Expr::Block(b) = &**lambda_body
+            && let Some(ds_parse::StmtKind::Expr(Expr::Call { callee, .. })) =
+                b.stmts.first().map(|s| &s.kind)
+            && let Expr::Field { name, .. } = &**callee
+        {
+            dot = res.get(name.span);
         }
     }
     assert!(

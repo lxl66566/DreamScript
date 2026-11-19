@@ -139,33 +139,57 @@ pub(super) fn agree_member_signature(
         if index == 0 && trait_recv {
             continue;
         }
-        let declared_ty = declared
-            .ty
-            .as_ref()
-            .map(|t| substitute_type(t, subst))
-            .and_then(|t| this.solve_here(&t));
+        let declared_written = declared.ty.as_ref().map(|t| substitute_type(t, subst));
+        let declared_ty = declared_written.as_ref().and_then(|t| this.solve_here(t));
         let written_ty = written.ty.as_ref().and_then(|t| this.solve_here(t));
-        if let (Some(a), Some(b)) = (declared_ty, written_ty) {
-            if a != b {
-                this.diags.push(
-                    Diagnostic::error(
-                        ErrorCode::ImplMemberSignatureMismatch,
-                        format!(
-                            "impl member `{}`'s parameter `{}` has type `{}`, the trait member \
-                             declares `{}`",
-                            f.name.name,
-                            written.name.name,
-                            this.decls.universe.render(b),
-                            this.decls.universe.render(a),
-                        ),
-                    )
-                    .with_primary(
-                        written.ty.as_ref().map_or(written.name.span, Type::span),
-                        "impl member signature",
-                    )
-                    .with_secondary(declared.span, "trait member signature"),
-                );
-            }
+        match (declared_ty, written_ty) {
+            (Some(a), Some(b)) => {
+                if a != b {
+                    this.diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImplMemberSignatureMismatch,
+                            format!(
+                                "impl member `{}`'s parameter `{}` has type `{}`, the trait \
+                                 member declares `{}`",
+                                f.name.name,
+                                written.name.name,
+                                this.decls.universe.render(b),
+                                this.decls.universe.render(a),
+                            ),
+                        )
+                        .with_primary(
+                            written.ty.as_ref().map_or(written.name.span, Type::span),
+                            "impl member signature",
+                        )
+                        .with_secondary(declared.span, "trait member signature"),
+                    );
+                }
+            },
+            // A side whose annotation fails to solve cannot equal the
+            // contract either way (an impl member naming the trait's own
+            // generic is the spelling at hand): the disagreement reports
+            // on the written spellings instead of vanishing with the
+            // skipped comparison.
+            (a, b) if a.is_some() != b.is_some() => {
+                if let (Some(declared_ty), Some(written_ty)) = (&declared_written, &written.ty) {
+                    this.diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ImplMemberSignatureMismatch,
+                            format!(
+                                "impl member `{}`'s parameter `{}` has type `{}`, the trait \
+                                 member declares `{}`",
+                                f.name.name,
+                                written.name.name,
+                                decls::render_type(written_ty),
+                                decls::render_type(declared_ty),
+                            ),
+                        )
+                        .with_primary(written_ty.span(), "impl member signature")
+                        .with_secondary(declared.span, "trait member signature"),
+                    );
+                }
+            },
+            _ => {},
         }
     }
     let declared_ret = sig
@@ -175,25 +199,25 @@ pub(super) fn agree_member_signature(
         .and_then(|r| this.solve_here(&r))
         .or_else(|| Some(this.unit()));
     let written_ret = f.ret.as_ref().and_then(|r| this.solve_here(r));
-    if let (Some(a), Some(b)) = (declared_ret, written_ret) {
-        if a != b {
-            this.diags.push(
-                Diagnostic::error(
-                    ErrorCode::ImplMemberSignatureMismatch,
-                    format!(
-                        "impl member `{}` returns `{}`, the trait member declares `{}`",
-                        f.name.name,
-                        this.decls.universe.render(b),
-                        this.decls.universe.render(a),
-                    ),
-                )
-                .with_primary(
-                    f.ret.as_ref().map_or(f.name.span, Type::span),
-                    "impl member signature",
-                )
-                .with_secondary(sig_span, "trait member signature"),
-            );
-        }
+    if let (Some(a), Some(b)) = (declared_ret, written_ret)
+        && a != b
+    {
+        this.diags.push(
+            Diagnostic::error(
+                ErrorCode::ImplMemberSignatureMismatch,
+                format!(
+                    "impl member `{}` returns `{}`, the trait member declares `{}`",
+                    f.name.name,
+                    this.decls.universe.render(b),
+                    this.decls.universe.render(a),
+                ),
+            )
+            .with_primary(
+                f.ret.as_ref().map_or(f.name.span, Type::span),
+                "impl member signature",
+            )
+            .with_secondary(sig_span, "trait member signature"),
+        );
     }
 }
 
@@ -214,12 +238,11 @@ fn modes_agree(a: ParamMode, b: ParamMode) -> bool {
 fn substitute_type(ty: &Type, subst: &FxHashMap<String, Type>) -> Type {
     match ty {
         Type::Path { span, path, args } => {
-            if args.is_empty() {
-                if let [only] = path.segments.as_slice() {
-                    if let Some(replacement) = subst.get(&only.name) {
-                        return replacement.clone();
-                    }
-                }
+            if args.is_empty()
+                && let [only] = path.segments.as_slice()
+                && let Some(replacement) = subst.get(&only.name)
+            {
+                return replacement.clone();
             }
             Type::Path {
                 span: *span,
@@ -261,7 +284,24 @@ fn substitute_type(ty: &Type, subst: &FxHashMap<String, Type>) -> Type {
         Type::Unit(span) => Type::Unit(*span),
         Type::Fn { span, params, ret } => Type::Fn {
             span: *span,
-            params: params.clone(),
+            params: params
+                .iter()
+                .map(|p| {
+                    let mut param = p.clone();
+                    match &param.ty {
+                        Some(ty) => param.ty = Some(substitute_type(ty, subst)),
+                        // A bare fn-type parameter (`fn(t) -> r`) names the
+                        // in-scope variable: the substitution rewrites the
+                        // name into the annotation the solver reads.
+                        None => {
+                            if let Some(replacement) = subst.get(&param.name.name) {
+                                param.ty = Some(replacement.clone());
+                            }
+                        },
+                    }
+                    param
+                })
+                .collect(),
             ret: ret.as_ref().map(|r| Box::new(substitute_type(r, subst))),
         },
         Type::Ptr {

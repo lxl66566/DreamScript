@@ -3,7 +3,9 @@
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use pest::iterators::Pair;
 
-use super::{Cooked, Ctx, cook_escape, inner, split_float_suffix, split_int_suffix};
+use super::{
+    Cooked, CookedByte, Ctx, cook_byte, cook_escape, inner, split_float_suffix, split_int_suffix,
+};
 use crate::{Rule, ast::*};
 
 impl Ctx {
@@ -12,15 +14,21 @@ impl Ctx {
     pub(super) fn int_lit(&mut self, p: Pair<'_, Rule>, neg: bool) -> Literal {
         let text = p.as_str().replace('_', "");
         let (digits, suffix) = split_int_suffix(&text);
-        let text = if neg { format!("-{digits}") } else { digits };
-        Literal::Int { suffix, text }
+        let text = if neg { format!("-{digits}") } else { digits.to_owned() };
+        Literal::Int {
+            suffix: suffix.to_owned(),
+            text,
+        }
     }
 
     pub(super) fn float_lit(&mut self, p: Pair<'_, Rule>, neg: bool) -> Literal {
         let text = p.as_str().replace('_', "");
         let (digits, suffix) = split_float_suffix(&text);
-        let text = if neg { format!("-{digits}") } else { digits };
-        Literal::Float { suffix, text }
+        let text = if neg { format!("-{digits}") } else { digits.to_owned() };
+        Literal::Float {
+            suffix: suffix.to_owned(),
+            text,
+        }
     }
 
     pub(super) fn char_lit(&mut self, p: Pair<'_, Rule>) -> Literal {
@@ -49,17 +57,29 @@ impl Ctx {
             .next()
             .map(|c| c.as_str().to_owned())
             .unwrap_or_default();
-        match cook_escape(&raw) {
-            Cooked::Char(ch) if (ch as u32) < 0x80 => Literal::Byte(ch as u8),
-            Cooked::Char(ch) => {
+        match cook_byte(&raw) {
+            CookedByte::Byte(b) => Literal::Byte(b),
+            CookedByte::NotAscii(ch) => {
                 self.err(
                     span,
                     ErrorCode::InvalidLiteral,
-                    format!("`{}` is not a single ASCII byte", ch.escape_debug()),
+                    format!(
+                        "`{}` is not an ASCII byte; a byte literal takes one ASCII char or a \
+                         `\\u{{..}}` escape naming 0-255",
+                        ch.escape_debug()
+                    ),
                 );
                 Literal::Byte(0)
             },
-            Cooked::Invalid(off) => {
+            CookedByte::PastRange(value) => {
+                self.err(
+                    span,
+                    ErrorCode::InvalidLiteral,
+                    format!("`\\u{{{value:x}}}` names {value}, past the byte range 0-255"),
+                );
+                Literal::Byte(0)
+            },
+            CookedByte::Invalid(off) => {
                 self.err(
                     Span::new(self.file, span.start + off, span.start + off + 1),
                     ErrorCode::InvalidLiteral,
@@ -67,7 +87,7 @@ impl Ctx {
                 );
                 Literal::Byte(0)
             },
-            Cooked::Empty => Literal::Byte(0),
+            CookedByte::Empty => Literal::Byte(0),
         }
     }
 

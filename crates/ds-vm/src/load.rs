@@ -23,8 +23,8 @@
 use ds_mod::{Hash128, Module};
 
 use crate::{
-    loader::{LoadError, install},
-    module::{ModuleRegistry, VersionIdx},
+    loader::{LoadError, build},
+    module::{ModuleRegistry, ModuleVersion, VersionIdx},
 };
 
 /// One pending step of the walk's explicit stack (no Rust-stack
@@ -41,8 +41,9 @@ enum Step {
     /// reached twice resolves through its installed slot the second
     /// time.
     Link { dep: ds_mod::Dep, dependent: String },
-    /// Install the module; `root` marks the walk's seed, whose table row
-    /// [`load`] answers.
+    /// Install the module; `root` marks the walk's seed, whose built
+    /// version [`load_built`] answers without installing (the host's swap
+    /// re-checks read the built table before the install lands).
     Install { module: Module, root: bool },
 }
 
@@ -51,13 +52,13 @@ enum Step {
 /// uninstalled dependency from `provider` (answered per `(name, linked
 /// content hash)`, `None` for a miss) and installing dependencies before
 /// their dependent, so first-install ids assign in the deterministic
-/// dep-list depth-first order. The walk installs the root last and
-/// answers its table row; a root name already installed swaps its slot
-/// (hot reload), ids unchanged.
+/// dep-list depth-first order. The walk builds the root last and answers
+/// its built version uninstalled; a root name already installed swaps its
+/// slot (hot reload), ids unchanged.
 ///
 /// The walk never fetches a name twice: each dep entry's link resolves
-/// lazily in list order (so every earlier sibling's subtree has installed
-/// by then), a dep already installed validates through its current slot's
+/// lazily in list order (so every earlier sibling's subtree has fully
+/// installed by then), a dep already installed validates through its current slot's
 /// recorded content hash, and a dep entry naming the enclosing module
 /// stays local to that module's own install. A provider-fetched module
 /// must carry the linked name and source hash. An installed version
@@ -72,14 +73,14 @@ enum Step {
 /// Returns [`LoadError::DepCycle`] when a dep entry names a module still
 /// under construction, [`LoadError::ProviderMiss`] when the provider has
 /// no module for a link, [`LoadError::HashMismatch`] when a link's hash
-/// disagrees with the content the name resolved to, and the install
-/// refusals of [`crate::loader::install`] verbatim.
-pub fn load(
+/// disagrees with the content the name resolved to, and the build
+/// refusals of [`crate::loader::build`] verbatim.
+pub fn load_built(
     registry: &mut ModuleRegistry,
     root: Module,
     mut provider: impl FnMut(&str, Hash128) -> Option<Module>,
-) -> Result<VersionIdx, LoadError> {
-    let mut root_row = None;
+) -> Result<ModuleVersion, LoadError> {
+    let mut root_version = None;
     // names of modules under construction (entered, not yet installed):
     // both the cycle detector and the root marker read it
     let mut path: Vec<String> = Vec::new();
@@ -146,14 +147,37 @@ pub fn load(
             },
             Step::Install { module, root } => {
                 path.pop();
-                let row = install(registry, module)?;
+                // the walk's seed is only built: the host installs it after
+                // the swap re-checks read the built table; every dependency
+                // is already current and swaps no slot
+                let version = build(registry, module)?;
                 if root {
-                    root_row = Some(row);
+                    root_version = Some(version);
+                } else {
+                    registry.install(version);
                 }
             },
         }
     }
-    Ok(root_row.expect("the walk always installs its seed last"))
+    Ok(root_version.expect("the walk always builds its seed last"))
+}
+
+/// Loads a dsmod module with its whole dependency closure and installs
+/// the root's built version: the walk of [`load_built`] plus the root's
+/// slot swap, answering the installed row. The host that needs the swap
+/// re-checks against the incoming table calls [`load_built`] and installs
+/// the answer itself.
+///
+/// # Errors
+///
+/// The refusals of [`load_built`] verbatim.
+pub fn load(
+    registry: &mut ModuleRegistry,
+    root: Module,
+    provider: impl FnMut(&str, Hash128) -> Option<Module>,
+) -> Result<VersionIdx, LoadError> {
+    let version = load_built(registry, root, provider)?;
+    Ok(registry.install(version))
 }
 
 /// Queues one link step per dep entry, in reverse so the stack pops them

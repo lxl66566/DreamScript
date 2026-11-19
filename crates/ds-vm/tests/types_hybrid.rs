@@ -33,19 +33,23 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_BYTE_COMPARE, BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH,
-        BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_FILTER,
-        BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD, BUILTIN_JOIN, BUILTIN_LEN,
-        BUILTIN_LIST_CONCAT, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
-        BUILTIN_LIST_PUSH, BUILTIN_MAP, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
+        BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF,
+        BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF,
+        BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH, BUILTIN_COLLECT, BUILTIN_CONS,
+        BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD,
+        BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_CONCAT,
+        BUILTIN_LIST_EQ, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+        BUILTIN_MAP, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
         BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL,
         BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP,
         BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_STR_BOOL,
         BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL,
-        BUILTIN_TOTAL_COMPARE,
+        BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
+        BUILTIN_UTF8_ENCODE,
     },
     platform::{
-        OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_PRINT, OP_PRINTLN, Platform, STD_NAME,
+        OP_CLOSE_RAW, OP_COUNT, OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_OPEN_FILE, OP_PRINT,
+        OP_PRINTLN, OP_READ_RAW, OP_TIME, Platform, STD_NAME,
     },
     value::RefId,
 };
@@ -993,8 +997,7 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_LIST_LEN).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_LIST_GET).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_LIST_CONCAT).is_some());
-    // the fiber substrate's control pair (24-25) and the nursery join (26)
-    assert!(reg.resolve_native("builtin", BUILTIN_FIBER_YIELD).is_some());
+    // the fiber substrate's control switch (25) and the nursery join (26)
     assert!(
         reg.resolve_native("builtin", BUILTIN_FIBER_RESUME)
             .is_some()
@@ -1069,13 +1072,52 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_STR_HASH).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_FLOAT_HASH).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_CHAR_HASH).is_some());
+    // the float reader (19), the char face (58, 60), and the map key
+    // face (59): the ds-source JSON reader retired its native slot
+    // (57 stays reserved)
+    assert!(reg.resolve_native("builtin", 19).is_some());
+    assert!(reg.resolve_native("builtin", 58).is_some());
+    assert!(reg.resolve_native("builtin", 59).is_some());
+    assert!(reg.resolve_native("builtin", 60).is_some());
+    // the bytes face (61-63): the construction seam, the bridge back
+    // out, and the checked indexed read
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTES_OF).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTE_LIST).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTE_AT).is_some());
+    // the bytes content compare (64): the structural `==`/`!=` chain's body
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTES_EQ).is_some());
+    // the bytes representation rows (65-68): the sort key, the content
+    // hash, and the two UTF-8 bridges
     assert!(
-        reg.resolve_native("builtin", 57).is_none(),
-        "57 table entries: the core's, the list block, the fiber pair, the push, the map block, \
-         the generic container closes, the reentrant combinators, the nursery seams, the join, \
-         the partition, the fork-join combinator, the fork-join fold, the float sort key, the \
-         string, char, and byte sort keys, the string, float, and char content hashes, and the \
-         REPL's spliced park"
+        reg.resolve_native("builtin", BUILTIN_BYTES_COMPARE)
+            .is_some()
+    );
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTES_HASH).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_UTF8_ENCODE).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_UTF8_DECODE).is_some());
+    // the bare trap primitive (69), the `die` spelling's seam
+    assert!(reg.resolve_native("builtin", BUILTIN_TRAP).is_some());
+    // the list and map content compares (70-71): the structural
+    // `==`/`!=` chain's collection bodies
+    assert!(reg.resolve_native("builtin", BUILTIN_LIST_EQ).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_MAP_EQ).is_some());
+    // the byte/u32 width bridges (72-75): the json face's scalar readers
+    // over the widths ds source cannot cross
+    assert!(reg.resolve_native("builtin", BUILTIN_BYTE_OF).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_BYTE).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_U32_OF).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_U32).is_some());
+    assert!(
+        reg.resolve_native("builtin", 76).is_none(),
+        "76 table entries: the core's, the list block, the fiber pair, the push, the map block,
+         the generic container closes, the reentrant combinators, the nursery seams, the join,
+         the partition, the fork-join combinator, the fork-join fold, the float sort key, the
+         string, char, and byte sort keys, the string, float, and char content hashes, the
+         REPL's spliced park, the float reader, the char face, the retired JSON reader's
+         reserved slot, the map key face, the bytes collection's face with its content
+         compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
+         bare trap primitive, the list and map collections' content compares, and the
+         byte/u32 width bridges"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform
@@ -1084,7 +1126,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native(STD_NAME, OP_NET_CONNECT).is_some());
     assert!(reg.resolve_native(STD_NAME, OP_NET_RECV).is_some());
     assert!(reg.resolve_native(STD_NAME, OP_HTTP_GET).is_some());
-    assert!(reg.resolve_native(STD_NAME, 12).is_none());
+    // the file face's raw seams and the clock op
+    assert!(reg.resolve_native(STD_NAME, OP_OPEN_FILE).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_READ_RAW).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_CLOSE_RAW).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_TIME).is_some());
+    assert!(reg.resolve_native(STD_NAME, OP_COUNT).is_none());
     // a bare VM's registry carries no other native module
     let bare = Vm::new(ModuleRegistry::new());
     assert!(bare.registry().resolve_native(STD_NAME, 0).is_none());

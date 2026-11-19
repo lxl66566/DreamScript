@@ -90,8 +90,9 @@
 //!   chunk list that grows by chunk append, never realloc, so frame addresses stay stable [H2]; TCO
 //!   holds per fiber; a switch swaps segment/call-chain ownership (O(1), no copying); a fiber
 //!   completing at its entry frame marks itself dead and switches back to its resumer. The debug
-//!   surface is the builtin control pair (`fiber_yield`/`fiber_resume`) plus
-//!   [`Vm::spawn_fiber`]/[`Vm::resume_fiber`].
+//!   surface is the builtin control switch (`fiber_resume`) plus
+//!   [`Vm::spawn_fiber`]/[`Vm::resume_fiber`]; the host injects suspension at the preemption points
+//!   through [`Vm::request_suspend`].
 //! - Nurseries. Fibers spawn into a nursery (the child-of link) [E2]; the join driver drives
 //!   children to death in spawn order and unions per-child outcomes out at the boundary; a first
 //!   failure raises the nursery's cancel flag, observed only at taken backward branches [E5] — a
@@ -117,6 +118,7 @@ mod claims;
 pub mod comptime;
 pub mod fiber;
 mod forkpool;
+mod fsys;
 pub mod load;
 pub mod loader;
 pub mod module;
@@ -127,6 +129,7 @@ pub mod object;
 pub mod platform;
 pub mod program;
 pub mod repl;
+mod tls;
 pub mod value;
 pub mod vm;
 
@@ -135,7 +138,7 @@ pub use ds_abi as abi;
 pub use ds_rt::{ArenaMisuse, ArenaStats};
 pub use fiber::{FIBER_ROOT, FiberId, FiberState};
 pub use load::load as load_dsmod;
-pub use loader::{LoadError, install as install_dsmod};
+pub use loader::{LoadError, StagedSite, install as install_dsmod};
 pub use module::{
     Function, ModuleBuildError, ModuleRegistry, ModuleSlots, ModuleVersion, VersionIdx,
 };
@@ -147,4 +150,4 @@ pub use repl::{ReplOutcome, SpliceError, splice_park};
 pub use value::{
     ARENA_CHUNK_LIMIT, ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word,
 };
-pub use vm::{BacktraceFrame, FrameAnswer, Trap, Vm};
+pub use vm::{BacktraceFrame, FrameAnswer, FramePc, Trap, Vm};

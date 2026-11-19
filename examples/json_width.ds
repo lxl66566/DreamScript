@@ -1,0 +1,30 @@
+// The width-scalar fields over the json derive families: one declared
+// frame carries all four field kinds, byte and u32 round-trip as json
+// numbers (the range edges included), char as a one-character json
+// string, and bytes as a json array of numbers — the from_json derive
+// decoding a literal document and the to_json derive encoding back
+// through the plain writer, an out-of-range value or a wrong shape
+// answering parse_err.
+
+#[derive(from_json, to_json)]
+struct frame { tag: byte, index: u32, mark: char, payload: bytes }
+
+fn load_frame(text: string) -> string {
+  const j = parse_json(text)
+  if j is parse_err {
+    "parse_err"
+  } else {
+    const f = frame.from_json(j)
+    if f is parse_err { "parse_err" } else { frame.to_json(f).to_json() }
+  }
+}
+
+fn main() -> () {
+  println(load_frame("{\"tag\": 65, \"index\": 4000000000, \"mark\": \"q\", \"payload\": [104, 105]}"))
+  println(load_frame("{\"tag\": 255, \"index\": 4294967295, \"mark\": \"\\u00e9\", \"payload\": [0, 255]}"))
+  println(load_frame("{\"tag\": 0, \"index\": 0, \"mark\": \"q\", \"payload\": []}"))
+  println(load_frame("{\"tag\": 65, \"index\": 4294967296, \"mark\": \"q\", \"payload\": [1]}"))
+  println(load_frame("{\"tag\": 65, \"index\": 7, \"mark\": \"ab\", \"payload\": [1]}"))
+  println(load_frame("{\"tag\": 65, \"index\": 7, \"mark\": \"q\", \"payload\": [1, 300]}"))
+  println(load_frame("{\"tag\": 65, \"index\": 7, \"mark\": \"q\"}"))
+}

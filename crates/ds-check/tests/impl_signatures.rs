@@ -528,6 +528,81 @@ fn omitted_defaulted_member_stays_clean() {
     );
 }
 
+/// A `fn(...)`-typed trait member parameter substitutes its inner
+/// parameter list through the impl's trait reference like any other
+/// spelling (a bare inner name included): the registered signature is
+/// the call-site contract, so an impl member declaring another fn arity
+/// must refuse at the impl's own door instead of staging calls that trap
+/// at the VM.
+#[test]
+fn divergent_fn_type_parameter_refuses() {
+    let source = concat!(
+        "tag int\n",
+        "trait mapper[t] {\n",
+        "  fn apply(self, f: fn(t) -> t) -> t\n",
+        "}\n",
+        "impl mapper[int] for int {\n",
+        "  fn apply(self, f: fn(int, int) -> int) -> int { f(self, self) }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("fnty.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.iter().any(|m| m.contains(
+            "impl member `apply`'s parameter `f` has type `fn(int, int) -> int`, the trait member \
+             declares `fn(int) -> int`"
+        )),
+        "the fn-type arity divergence reports: {rendered:?}"
+    );
+}
+
+/// The agreeing spelling of the same shape checks clean: substituted
+/// inner parameters compare equal, annotations and bare names alike.
+#[test]
+fn substituted_fn_type_parameter_agrees() {
+    let source = concat!(
+        "tag int\n",
+        "trait mapper[t] {\n",
+        "  fn apply(self, f: fn(t) -> t) -> t\n",
+        "}\n",
+        "impl mapper[int] for int {\n",
+        "  fn apply(self, f: fn(int) -> int) -> int { f(self) }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("fnclean.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered.is_empty(),
+        "the substituted fn-type parameter agrees: {rendered:?}"
+    );
+}
+
+/// A written parameter whose type fails to solve cannot equal the
+/// contract either: an impl member naming the trait's own generic once
+/// made the whole comparison vanish with the unsolvable side, so the
+/// disagreement now reports beside the unknown-name refusal.
+#[test]
+fn unsolvable_written_parameter_still_refuses_the_signature() {
+    let source = concat!(
+        "tag int\n",
+        "struct box[t] { n: t }\n",
+        "trait pairs[t] {\n",
+        "  fn same(self, other: t) -> int\n",
+        "}\n",
+        "impl pairs[int] for int {\n",
+        "  fn same(self, other: t) -> int { 0 }\n",
+        "}\n",
+    );
+    let analyzed = analyze_source("oneside.ds", source);
+    let rendered = messages(&analyzed);
+    assert!(
+        rendered
+            .iter()
+            .any(|m| m.starts_with("DS2018") && m.contains("the trait member declares `int`")),
+        "the one-sided disagreement reports on the written spelling: {rendered:?}"
+    );
+}
+
 /// A member signature naming the trait's own generics checks its
 /// arguments against the dispatch's substitution: the receiver's solved
 /// instance fixes what the generic holds at the site (the impl's trait

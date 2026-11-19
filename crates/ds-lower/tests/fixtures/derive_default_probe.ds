@@ -5,7 +5,9 @@
 // instance word: a struct's per-field default keyed by the field's
 // type expression (a bare name the `default` dispatch over the
 // primitives' own impl members, a tuple the per-element construction,
-// an optional `none`, an application the empty construction), an enum
+// an optional `none`, an application over the collection heads the
+// empty construction — an optional element riding the fn-type carrier,
+// since the empty construction never builds an element), an enum
 // its first unit case, a tag itself, and a part-less struct the
 // unit-word construction.
 // items:
@@ -19,6 +21,7 @@
 // map: stage: run
 // cell: stage: run
 // row: stage: run
+// opt: stage: run
 // mood: stage: run
 // tone: stage: run
 // tone-is: stage: run
@@ -58,6 +61,15 @@ struct row {
   table: map[string, int],
 }
 
+// the optional-element applications: the brackets cannot spell the
+// optional, so it rides the fn-type carrier; emptiness never builds an
+// element, so the optional's own default never runs
+#[derive(default)]
+struct opt {
+  xs: list[int?],
+  table: map[string, int?],
+}
+
 #[derive(default)]
 enum mood { calm, eager }
 
@@ -80,6 +92,7 @@ fn main() -> int {
   const m = mood.default()
   const t = tone.default()
   const r = row.default()
+  const o = opt.default()
   const (pn, ps) = r.pair
   const mb = r.maybe
   println("n=${c.n}")
@@ -91,5 +104,7 @@ fn main() -> int {
   match mb { none => println("maybe=none"), n => println("maybe=${n}") }
   println("xs=${list_len(r.xs)}")
   println("table=${map_len(r.table)}")
+  println("oxs=${list_len(o.xs)}")
+  println("otable=${map_len(o.table)}")
   0
 }

@@ -1,0 +1,19 @@
+// Distilled from the linked const and struct-type facts e2e: the import
+// rows name const members (every scalar shape, a negated int among them)
+// and type members (the flat struct whose word layout rides the surface),
+// the consumer embedding the literals at each use and binding signatures
+// over the linked types, beside the surface's own declaration spelling
+// (pub consts over the scalar vocabulary, fact-carrying structs, the
+// refused shapes: a computed const, a mutable const, a generic struct).
+
+import @std/io
+import @facts (limit, step, greeting, ratio, ready, initial, code)
+import @shapes (cell, pair, make, area)
+
+fn main() -> int {
+  println(greeting)
+  println("ratio = ${ratio}")
+  const c = make(limit + step)
+  const p = pair { a: area(c), b: len(c.tags) }
+  if ready { p.a + 1 } else { p.a }
+}

@@ -526,3 +526,53 @@ fn huge_declared_count_rejected() {
     assert_eq!(error, ReadError::UnexpectedEof { at: bytes.len() });
     assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
 }
+
+/// A chain-table count far past the payload: the capacity hint clamps to
+/// the bytes left, so the reader rejects the stream at its first absent
+/// chain record instead of reserving room for the declared table.
+#[test]
+fn huge_chain_count_rejected() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&[FORMAT_VERSION, 0, 0, 0]); // version, target tag, flags, collector flags
+    bytes.extend_from_slice(&[0u8; 16]); // collector hook slots
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // max call depth
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // IR-version checksum
+    bytes.extend_from_slice(&[1, b'm']); // module name
+    bytes.push(0); // dependency count
+    bytes.extend_from_slice(Hash128::ZERO.as_bytes()); // source hash
+    bytes.push(4); // section directory count
+    let dir_entries_at = bytes.len();
+    bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
+    let blocks_at = bytes.len();
+    // blocks payload v3: zero functions, then the chain count uleb (2^40)
+    // — the first chain record is absent, so the stream ends there
+    bytes.extend_from_slice(&[3, 0]);
+    bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x20]);
+    let blocks_len = bytes.len() - blocks_at;
+    let constants_at = bytes.len();
+    bytes.push(0); // zero constants
+    let type_metadata_at = bytes.len();
+    bytes.extend_from_slice(&[0, 0]); // placeholder payload v0 + reserved 0
+    let effect_rows_at = bytes.len();
+    bytes.extend_from_slice(&[0, 0]);
+    // Directory rows in canonical order: kind byte, offset uleb, length
+    // uleb — every value stays under 128, so each entry is exactly three
+    // bytes as reserved above.
+    let rows = [
+        (SectionKind::Blocks.tag(), blocks_at, blocks_len),
+        (SectionKind::Constants.tag(), constants_at, 1),
+        (SectionKind::TypeMetadata.tag(), type_metadata_at, 2),
+        (SectionKind::EffectRows.tag(), effect_rows_at, 2),
+    ];
+    let mut at = dir_entries_at;
+    for (kind, offset, len) in rows {
+        bytes[at] = kind;
+        bytes[at + 1] = u8::try_from(offset).expect("offset under 128");
+        bytes[at + 2] = u8::try_from(len).expect("length under 128");
+        at += 3;
+    }
+    let error = read(&bytes).expect_err("the first chain record is absent");
+    assert_eq!(error, ReadError::UnexpectedEof { at: constants_at });
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+}

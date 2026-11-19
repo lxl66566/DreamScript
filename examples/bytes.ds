@@ -1,0 +1,34 @@
+// The bytes face: bytes_of builds from a byte list and show renders the
+// payload (bytes[...] with decimal per byte, empty printing bytes[]),
+// len counts the payload, byte_at reads checked, == compares content,
+// and the utf8 bridges cross to text — encode taking the string's own
+// bytes, decode validating on the way back and answering
+// string | utf8_err. The show derive composes over a bytes part.
+
+#[derive(show)]
+struct chunk { data: bytes }
+
+fn main() -> () {
+  const ab = bytes_of([b'a', b'b'])
+  println(ab.show())
+  println(bytes_of(list[byte]()).show())
+  println("${len(ab)} ${byte_at(ab, 1).unwrap_or(b'\0') == b'b'}")
+  println("${ab == utf8_encode("ab")}")
+
+  const text = utf8_encode("héllo")
+  println("${len(text)}")
+  match utf8_decode(text) {
+    utf8_err => println("decode refused"),
+    s        => println(s)
+  }
+
+  // the lead byte of a two-byte sequence alone is not valid UTF-8
+  const pair = utf8_encode("é")
+  const orphan = bytes_of([byte_at(pair, 0).unwrap_or(b'\0')])
+  match utf8_decode(orphan) {
+    utf8_err => println("orphan byte refused"),
+    s        => println(s)
+  }
+
+  println(chunk { data: ab }.show())
+}

@@ -954,3 +954,48 @@ fn callable_value_arguments_write_their_overlay_words_directly() {
         FrameAnswer::one(Value::I64(6))
     );
 }
+
+const BLOCK_TAIL_CLAIM_SOURCE: &str = "
+tag int
+tag string
+tag bool
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+fn main() -> int {
+  const ys = {
+    var xs = concat(\"al\", \"pha\")
+    xs
+  }
+  println(ys)
+  0
+}";
+
+/// A value block's tail read of a `var` binder stages the answer's claim
+/// past the block's scope end: the scope once dec'd the slot's count
+/// before the consumer claimed it, so the consumer read a freed word.
+/// The count now releases at the consumer's own death site — the one
+/// drop lands after the consuming call, exactly one, never before it.
+#[test]
+fn a_value_blocks_tail_read_releases_at_the_consumer_not_the_scope_end() {
+    let lowered = lower_inline(BLOCK_TAIL_CLAIM_SOURCE);
+    let placed = lowered.placed("main").expect("main is planned");
+    let ops = rc_ops(placed);
+    assert!(
+        ops.iter().all(|op| matches!(op, RcOp::Dec { .. })),
+        "the staged tail read never dups: {ops:?}"
+    );
+    assert_eq!(ops.len(), 1, "exactly one release for the one reference");
+    let drop_at = placed
+        .iter()
+        .position(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
+        .expect("the release is placed");
+    let before = &placed[drop_at - 1];
+    assert!(
+        matches!(before, PlacedOp::Uop(Uop::Call { .. })),
+        "the release follows the consumer's call: {before:?}"
+    );
+    assert_eq!(
+        run_main(&lowered, BLOCK_TAIL_CLAIM_SOURCE, "alpha\n"),
+        FrameAnswer::one(Value::I64(0))
+    );
+}

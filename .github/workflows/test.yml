@@ -11,11 +11,15 @@ concurrency:
 env:
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # The registry client shells out to system git for `https://` remotes;
+  # a credential prompt must fail fast instead of hanging the job.
+  GIT_TERMINAL_PROMPT: "0"
 
 jobs:
   check:
     name: cargo check
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: cargo-bins/cargo-binstall@main
@@ -34,6 +38,7 @@ jobs:
   ds-fmt:
     name: ds fmt --check examples, kernels, and conformance
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: mozilla-actions/sccache-action@v0.0.11

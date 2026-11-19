@@ -84,6 +84,8 @@ fn generated_programs_never_panic() {
     let mut incomplete_impls = 0u32;
     let mut omitted_defaults = 0u32;
     let mut two_level_calls = 0u32;
+    let mut derive_attrs = 0u32;
+    let mut import_members = 0u32;
     for seed in 0..240u64 {
         let len = 16 + usize::try_from(seed % 24).expect("len fits") * 11;
         let outcome = check_gen::exercise(&rng_bytes(seed, len));
@@ -109,6 +111,8 @@ fn generated_programs_never_panic() {
         incomplete_impls += outcome.drawn.incomplete_impls;
         omitted_defaults += outcome.drawn.omitted_defaults;
         two_level_calls += outcome.drawn.two_level_calls;
+        derive_attrs += outcome.drawn.derive_attrs;
+        import_members += outcome.drawn.import_members;
     }
     // structural generation: the near-totality of programs must parse
     assert!(
@@ -200,6 +204,16 @@ fn generated_programs_never_panic() {
     assert!(
         two_level_calls > 0,
         "two-level instantiations are drawn somewhere in the sweep"
+    );
+    // the json derive families' attribute grammar and the linked-facts
+    // import-row spelling stay in the draw set
+    assert!(
+        derive_attrs > 0,
+        "derive attributes over the json families are drawn somewhere in the sweep"
+    );
+    assert!(
+        import_members > 0,
+        "import rows naming const/type members are drawn somewhere in the sweep"
     );
     // the degenerate inputs: empty and single-byte streams cycle into a
     // full deterministic program too

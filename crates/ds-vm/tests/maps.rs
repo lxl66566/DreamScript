@@ -25,8 +25,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_CONCAT, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_SET,
-        PLATFORM_NONE,
+        BUILTIN_CONCAT, BUILTIN_LEN, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
+        BUILTIN_MAP_SET, PLATFORM_NONE,
     },
 };
 
@@ -58,6 +58,7 @@ fn pool() -> Vec<Const> {
         Const::Str("t".into()),                  // k9
         builtin(BUILTIN_CONCAT),                 // k10
         Const::I64(BuiltinInstance::Map as i64), // k11: the evidence word
+        builtin(BUILTIN_LEN),                    // k12: the free generic's one body
     ]
 }
 
@@ -77,6 +78,7 @@ fn map_registry() -> ModuleRegistry {
             fresh(),
             fill(),
             count(),
+            len_map(),
             at(),
             fresh_key(),
             bogus(),
@@ -157,6 +159,26 @@ fn count() -> FunctionDef {
             nargs: 1,
         },
         Uop::Ret { src: 2 },
+    ])
+}
+
+/// `(map) -> int`: the free `len`'s one body over the map instance —
+/// CALLG with the single evidence word naming the receiver's `Map`
+/// builtin instance, answering the pair count `map_len`'s body does.
+fn len_map() -> FunctionDef {
+    def("len_map", &[Ref, I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 2, src: 0 },
+        Uop::Kimm {
+            dst: 3,
+            kidx: k(11),
+        },
+        Uop::Callg {
+            callee: k(12),
+            nargs: 1,
+        },
+        Uop::Mov { dst: 1, src: 2 },
+        Uop::Ret { src: 1 },
     ])
 }
 
@@ -286,6 +308,22 @@ fn count_of(vm: &mut Vm, map: Value) -> i64 {
     }
 }
 
+/// The free `len`'s Map instance answers the pair count: the same total
+/// `map_len`'s one body computes, dispatched through the single Map
+/// evidence word on the CALLG site.
+#[test]
+fn len_over_a_map_counts_the_pairs() {
+    let mut vm = Vm::new(map_registry());
+    let map = run_value(&mut vm, "fresh", &[]);
+    assert_eq!(run_value(&mut vm, "len_map", &[map]), Value::I64(0));
+    let filled = run_value(&mut vm, "fill", &[map]);
+    assert_eq!(
+        run_value(&mut vm, "len_map", &[filled]),
+        Value::I64(count_of(&mut vm, filled)),
+        "the Map instance agrees with map_len's body"
+    );
+}
+
 #[test]
 fn map_new_answers_the_empty_map() {
     let mut vm = Vm::new(map_registry());
@@ -295,8 +333,8 @@ fn map_new_answers_the_empty_map() {
     };
     assert_eq!(count_of(&mut vm, map), 0);
     assert_eq!(
-        vm.objects().map_pairs(id.id()),
-        Ok(&[] as &[(Value, Value)]),
+        vm.objects().map_len(id.id()),
+        Ok(0),
         "the constructor answers an empty map"
     );
     // the empty map is a fresh object per call, never shared
@@ -317,7 +355,7 @@ fn map_set_fills_overwrites_and_counts() {
         panic!("a map ref, got {filled:?}");
     };
     assert_eq!(
-        vm.objects().map_pairs(id.id()).map(<[_]>::len),
+        vm.objects().map_len(id.id()),
         Ok(2),
         "host was overwritten, not appended"
     );

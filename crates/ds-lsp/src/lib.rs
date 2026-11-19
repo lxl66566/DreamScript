@@ -29,14 +29,27 @@
 //! (ambient declarations first, then the package's, then the enclosing
 //! local scopes innermost-first), the members of a dot receiver with a
 //! checked type (fields, cases, inherent and trait members, UFCS
-//! candidates), the type variables in scope inside a type position, and
-//! prefix ranking over every completion answer, references through the
+//! candidates), the type variables in scope inside a type position, the
+//! fixed declaration and expression skeletons behind a typed keyword
+//! prefix (the site — item level, an impl or trait member list, a body —
+//! decided by probe parses of the source with the prefix replaced, so
+//! every offered expansion parses where it lands), prefix ranking over
+//! every completion answer, and auto-import offers behind an unresolved
+//! typed prefix (the exported ambient members whose names prefix-match,
+//! each item carrying the edit that inserts or merges the `@std` import
+//! row the file needs; private and `pub(pkg)` names never offered),
+//! references through the
 //! resolve value's
 //! reverse-edge index (every use resolving to the same target across the
 //! package, the declaration included when asked), rename and
-//! prepare-rename as a plain identifier substitution over a definition or
-//! local binder and every use of it, document symbols from the parse
-//! tree, whole-document formatting through `ds-fmt`, on-type formatting
+//! prepare-rename as a plain identifier substitution over a definition,
+//! local binder, or registered member and every use of it — a
+//! dot-call's callee names its member through the checker's recorded
+//! type-directed selection, and a member's edit set covers its own
+//! declaration, each of its trait's impl members, its qualified
+//! `Trait::f` uses, and every dot-call that selects it — document symbols
+//! from the parse tree, whole-document formatting through `ds-fmt`,
+//! on-type formatting
 //! of the tightest declaration region the trigger names (a newline
 //! inside a body, a closing `}`) through `ds-fmt`'s per-item seam, and
 //! `textDocument/semanticTokens/full`: a whole-document token stream over
@@ -68,16 +81,28 @@
 //!   the receiver (the tightest expression ending at the dot): a trailing dot on a document the
 //!   parse refuses, a poisoned receiver, or a type narrowed to empty falls back to the ordinary
 //!   scope answer and names no member. UFCS candidates match the first parameter's written head
-//!   name against the receiver's atoms (no argument unification). Items carry label and kind only —
-//!   snippets and auto-import stay out.
+//!   name against the receiver's atoms (no argument unification). Plain items carry label and kind
+//!   only; a skeleton item adds its snippet insert text, answers behind a typed keyword prefix
+//!   alone (never on the empty prefix, never at a member or type position), and only where its
+//!   probe-decided site makes the expansion parse — a document broken beyond the prefix answers
+//!   none. Auto-import serves a bare-name or type position behind an unresolved typed prefix alone
+//!   (never at a member position, never on the empty prefix): the exported ambient members whose
+//!   names prefix-match carry the edit that merges into a plain existing `@std` row or inserts a
+//!   fresh one grouped with the file's imports — private and `pub(pkg)` names never offered, the
+//!   checker's own export gate — and under the merged-ambient reading every such name is visible
+//!   anyway, so the edit is the forward-compatible spelling until the un-merge widens the candidate
+//!   set to the linked packages.
 //! * Rename is a plain identifier substitution over the target's declaration and the uses the
 //!   resolution table recorded — no formatting, and no comment or string awareness (comments and
-//!   strings sit outside every recorded span by construction). Trait and inherent member names
-//!   refuse renaming: a member's declaration, impls, and call sites span tables this slice does not
-//!   index, and a dot-call's candidate set names no single member until the checker's type-directed
-//!   selection. Extern names refuse (they are platform link spellings), and so does any edit
-//!   reaching the ambient stdlib (no open document carries it); references of an ambient name
-//!   answer only the open documents' uses.
+//!   strings sit outside every recorded span by construction). A member's edit set covers its own
+//!   declaration, each of its trait's impl members, its qualified `Trait::f` uses, and every
+//!   dot-call whose checker-recorded type-directed selection names it (a receiverless member
+//!   through the type-keyed tier included); a dot-call whose selection is not recorded failed its
+//!   own check — an ambiguous candidate set even type-direction cannot settle, a receiver no member
+//!   accepts — and refuses, as does renaming the member it would need. Extern names refuse (they
+//!   are platform link spellings), and so does any edit reaching the ambient stdlib (no open
+//!   document carries it — including a trait member an ambient impl implements); references of an
+//!   ambient name answer only the open documents' uses.
 //! * On-type formatting reformats the tightest declaration region the trigger names — the
 //!   declaration enclosing a typed newline or the one a typed `}` just closed — through `ds-fmt`'s
 //!   zero-option canonical form: the client's tab-size and insert-spaces options are unaccepted, a
@@ -95,6 +120,7 @@
 
 #![warn(missing_docs)]
 
+mod autoimport;
 mod completion;
 mod convert;
 mod server;
@@ -107,11 +133,12 @@ use std::{
 };
 
 use anyhow::Result;
-use ds_check::{DefId as PackageDef, DotRes, MethodId, Res};
+use ds_check::{DefId as PackageDef, DotRes, MethodId, MethodOwner, Res};
 use ds_diag::{FileId, Span};
 use ds_query::{
     Analyzed, BlockIndex, CheckedPackage, Db, DefId, EffectsOf, PackageEffects, PackageId,
-    PackageLinearity, ParseFile, PlatformCheck, QueryError, Resolve, Revision, ScopeIndex,
+    PackageLinearity, ParseFile, PlatformCheck, PooledCheck, QueryError, Resolve, Revision,
+    ScopeIndex,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::oneshot;
@@ -242,8 +269,9 @@ enum Target {
     Local(Span),
     /// A registered method (a trait member or an inherent impl fn).
     Method(MethodId),
-    /// A dot-call's method candidates: no single target until the
-    /// checker's type-directed selection.
+    /// A dot-call's method candidates: the checker's type-directed
+    /// selection recorded none for the call, so it names no single
+    /// member.
     Methods(Vec<MethodId>),
 }
 
@@ -397,8 +425,8 @@ impl Session {
     }
 
     /// The document's diagnostics: the parse, resolve, check, linearity,
-    /// and platform classes out of the package-grain query values, each
-    /// class's set filtered to this file's labels (the ambient's
+    /// platform, and pooled classes out of the package-grain query values,
+    /// each class's set filtered to this file's labels (the ambient's
     /// diagnostics carry no label here and drop out), sorted by range.
     fn diagnostics(&mut self, file: FileId) -> Result<Vec<lsp::Diagnostic>, QueryError> {
         let Self { db, docs, .. } = self;
@@ -412,6 +440,7 @@ impl Session {
         let checked = db.get::<CheckedPackage>(PackageId::new(0))?;
         let linear = db.get::<PackageLinearity>(PackageId::new(0))?;
         let platform = db.get::<PlatformCheck>(PackageId::new(0))?;
+        let pooled = db.get::<PooledCheck>(PackageId::new(0))?;
         let mut out = Vec::new();
         for diag in parse
             .diagnostics
@@ -420,6 +449,7 @@ impl Session {
             .chain(checked.diags.iter())
             .chain(linear.diags.iter())
             .chain(platform.diags.iter())
+            .chain(pooled.diags.iter())
         {
             if let Some(mapped) = convert::diagnostic(db.files(), &uri_of, diag, file) {
                 out.push(mapped);
@@ -429,10 +459,12 @@ impl Session {
         Ok(out)
     }
 
-    /// The checked type of the expression at the position, rendered
-    /// through the analysis universe, with the tightest covering
-    /// expression's effect row appended (the enclosing definition's row
-    /// when no recorded expression covers the position).
+    /// The hover answer at the position: the checked type of the covering
+    /// expression, rendered through the analysis universe, with its
+    /// effect row appended (the enclosing definition's row when no
+    /// recorded expression covers the position), preceded by the `.dsi`
+    /// signature spelling when the position names a `pub` package
+    /// declaration — the same line `ds info` prints for that declaration.
     fn hover(
         &mut self,
         file: FileId,
@@ -459,45 +491,111 @@ impl Session {
                 best_val = Some(val);
             }
         }
-        let Some(val) = best_val else {
-            return Ok(None);
-        };
-        let universe = &analyzed.decls.universe;
-        let mut contents = format!("```dreamscript\n{}\n```", universe.render(val.ty));
-        // The effect row prefers the tightest covering expression's own
-        // row (the effects pass's per-span table, the same covering
-        // predicate as the type lookup above); the enclosing definition's
-        // row is the fallback when no recorded span covers the position.
-        let effects = self.db.get::<PackageEffects>(PackageId::new(0))?;
-        if let Some(row) = effects.effects.row_at(file, offset) {
-            contents = format!("{contents}\n~ {}", row.render());
-        } else {
-            let index = self.db.get::<BlockIndex>(file)?;
-            let block = index
-                .blocks
-                .iter()
-                .find(|b| b.span.start <= offset && offset <= b.span.end);
-            if let Some(block) = block {
-                for raw in 0..analyzed.package.len() {
-                    let Ok(raw) = u32::try_from(raw) else { break };
-                    let def = analyzed.package.def(PackageDef::from_raw(raw));
-                    if def.span.file == file
-                        && block.span.start <= def.span.start
-                        && def.span.end <= block.span.end
-                    {
-                        if let Ok(row) = self.db.get::<EffectsOf>(DefId::new(raw)) {
-                            contents = format!("{contents}\n~ {}", row.render());
+        // The checked-expression half, unchanged in shape: the rendered
+        // type plus the row (the expression's own, the enclosing
+        // definition's the fallback).
+        let mut range = None;
+        let mut contents = String::new();
+        if let Some(val) = best_val {
+            let universe = &analyzed.decls.universe;
+            contents = format!("```dreamscript\n{}\n```", universe.render(val.ty));
+            // The effect row prefers the tightest covering expression's own
+            // row (the effects pass's per-span table, the same covering
+            // predicate as the type lookup above); the enclosing definition's
+            // row is the fallback when no recorded span covers the position.
+            let effects = self.db.get::<PackageEffects>(PackageId::new(0))?;
+            if let Some(row) = effects.effects.row_at(file, offset) {
+                contents = format!("{contents}\n~ {}", row.render());
+            } else {
+                let index = self.db.get::<BlockIndex>(file)?;
+                let block = index
+                    .blocks
+                    .iter()
+                    .find(|b| b.span.start <= offset && offset <= b.span.end);
+                if let Some(block) = block {
+                    for raw in 0..analyzed.package.len() {
+                        let Ok(raw) = u32::try_from(raw) else { break };
+                        let def = analyzed.package.def(PackageDef::from_raw(raw));
+                        if def.span.file == file
+                            && block.span.start <= def.span.start
+                            && def.span.end <= block.span.end
+                        {
+                            if let Ok(row) = self.db.get::<EffectsOf>(DefId::new(raw)) {
+                                contents = format!("{contents}\n~ {}", row.render());
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
+            let (start, end) = best.expect("a covering span exists with a value");
+            range = Some(convert::range(self.db.files(), Span::new(file, start, end)));
         }
-        let (start, end) = best.expect("a covering span exists with a value");
-        Ok(Some(HoverAnswer {
-            contents,
-            range: convert::range(self.db.files(), Span::new(file, start, end)),
-        }))
+        // The exported-surface half: a name resolving to a `pub` package
+        // declaration answers its signature spelling first.
+        if let Some((signature, name_range)) = self.surface(file, offset)? {
+            contents = if contents.is_empty() {
+                format!("```dreamscript\n{signature}\n```")
+            } else {
+                format!("```dreamscript\n{signature}\n```\n\n{contents}")
+            };
+            range = range.or(Some(name_range));
+        }
+        match range {
+            Some(range) => Ok(Some(HoverAnswer { contents, range })),
+            // Neither a checked expression nor a package-declared name:
+            // no answer.
+            None => Ok(None),
+        }
+    }
+
+    /// The `.dsi` signature spelling of the name at the position: the
+    /// resolution's target when the position names a use, the
+    /// declaration itself when it names the definition — answered only
+    /// for a `pub` package-level definition, the surface the spelling
+    /// renders (locals, impl and trait members, and non-exported
+    /// declarations have no `.dsi` line; `pub(pkg)` and private stay out
+    /// by G4). The renderer is the one `ds info` prints, one item's
+    /// signature over its own parse tree.
+    fn surface(
+        &mut self,
+        file: FileId,
+        offset: u32,
+    ) -> Result<Option<(String, lsp::Range)>, QueryError> {
+        let Some((name_span, target)) = self.target_at(file, offset)? else {
+            return Ok(None);
+        };
+        let Target::Def(def) = target else {
+            return Ok(None);
+        };
+        let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+        let decl = resolved.package.def(def);
+        let parse = self.db.get::<ParseFile>(decl.span.file)?;
+        let Some(ast) = &parse.ast else {
+            return Ok(None);
+        };
+        // Top-level items never nest, so the item whose span holds the
+        // defining name occurrence is the declaration.
+        let Some(item) = ast
+            .blocks
+            .iter()
+            .flat_map(|block| block.items.iter())
+            .find(|item| item.span.start <= decl.span.start && decl.span.end <= item.span.end)
+        else {
+            return Ok(None);
+        };
+        if !matches!(item.vis, Some(ds_parse::Vis::Pub(_))) {
+            return Ok(None);
+        }
+        let mut line = String::new();
+        ds_fmt::signature::item(&mut line, self.db.files().source(file), item);
+        if line.trim_end().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((
+            line.trim_end().to_owned(),
+            convert::range(self.db.files(), name_span),
+        )))
     }
 
     /// The definitions of the name use at the position, through the
@@ -511,7 +609,7 @@ impl Session {
         let offset = convert::offset(self.db.files(), file, lsp::Position { line, character });
         let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
         let package = &resolved.package;
-        let Some(index) = package.files().iter().position(|f| *f == file) else {
+        let Some(index) = package.file_position(file) else {
             return Ok(Vec::new());
         };
         let Some(res) = resolved.resolutions[index].enclosing(Span::new(file, offset, offset))
@@ -522,13 +620,17 @@ impl Session {
             Res::Def(id) => vec![package.def(*id).span],
             Res::Local { bind } => vec![*bind],
             Res::TraitMethod(id) => vec![package.method(*id).span],
-            Res::Dot(DotRes::Free { func, .. }) => vec![package.def(*func).span],
+            Res::Dot(DotRes::Free { func, .. } | DotRes::Module { func }) => {
+                vec![package.def(*func).span]
+            },
             Res::Dot(DotRes::Methods { candidates } | DotRes::Static { candidates }) => candidates
                 .iter()
                 .map(|id| package.method(*id).span)
                 .collect(),
-            // The handler forms name no definition behind them.
-            Res::Handler => Vec::new(),
+            // The handler forms and a bare module alias name no
+            // definition behind them (the alias's members are the
+            // cross-package scope round's).
+            Res::Handler | Res::Module(_) => Vec::new(),
         };
         let files = self.db.files();
         Ok(targets
@@ -547,7 +649,11 @@ impl Session {
     /// members; a type position answers the in-scope type variables ahead
     /// of the visible type names; every other position answers the names
     /// visible there — the ambient's declarations, the package's others,
-    /// then the enclosing local scopes innermost-first.
+    /// then the enclosing local scopes innermost-first — plus, behind a
+    /// typed keyword prefix, the fixed skeletons the position's
+    /// probe-decided site admits, and, behind an unresolved typed prefix
+    /// at a bare-name or type position, the auto-import tier's edits over
+    /// the exported ambient members whose names prefix-match.
     fn completion(
         &mut self,
         file: FileId,
@@ -581,16 +687,39 @@ impl Session {
                 let frames = self.db.get::<ScopeIndex>(file)?.frames;
                 let entries =
                     ds_check::scope::visible_at(&frames, &resolved.package, self.ambient, offset);
-                return Ok(completion::rank(
-                    completion::type_items(&vars, &entries),
-                    &prefix,
-                ));
+                let mut items = completion::type_items(&vars, &entries);
+                // The auto-import tier serves a type position behind an
+                // unresolved typed prefix: no in-scope type variable,
+                // `Self`, or visible type-namespace name carries the
+                // prefix's own spelling.
+                if !prefix.is_empty()
+                    && vars.names.iter().all(|(name, _)| name != &prefix)
+                    && (!vars.self_in_scope || prefix != "Self")
+                    && entries.iter().all(|entry| {
+                        !completion::type_namespace(entry.kind) || entry.name != prefix
+                    })
+                {
+                    autoimport::attach(
+                        &mut items,
+                        &autoimport::Inputs {
+                            files: self.db.files(),
+                            file,
+                            source: self.db.files().source(file),
+                            ast,
+                            package: &resolved.package,
+                            ambient: self.ambient,
+                        },
+                        &prefix,
+                        autoimport::Namespace::Type,
+                    );
+                }
+                return Ok(completion::rank(items, &prefix));
             }
         }
         let frames = self.db.get::<ScopeIndex>(file)?.frames;
         let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
         let entries = ds_check::scope::visible_at(&frames, &resolved.package, self.ambient, offset);
-        let items = entries
+        let mut items: Vec<lsp::CompletionItem> = entries
             .iter()
             .map(|entry| lsp::CompletionItem {
                 label: entry.name.clone(),
@@ -598,6 +727,37 @@ impl Session {
                 ..lsp::CompletionItem::default()
             })
             .collect();
+        // The skeletons ride the scope answer behind a typed keyword
+        // prefix — never at a member position, where the dot names a
+        // field or member spelling no skeleton expands into — and the
+        // rank's stable sort keeps each behind every same-prefix name.
+        if dot.is_none() {
+            let source = self.db.files().source(file);
+            items.extend(completion::snippets(source, offset, &prefix));
+            // The auto-import tier serves a bare-name position behind an
+            // unresolved typed prefix: no visible name carries the
+            // prefix's own spelling. A member position never takes it —
+            // importing a name serves no dot — and a poisoned parse
+            // answers no edit (no rows to read).
+            if !prefix.is_empty()
+                && entries.iter().all(|entry| entry.name != prefix)
+                && let Some(ast) = &parse.ast
+            {
+                autoimport::attach(
+                    &mut items,
+                    &autoimport::Inputs {
+                        files: self.db.files(),
+                        file,
+                        source,
+                        ast,
+                        package: &resolved.package,
+                        ambient: self.ambient,
+                    },
+                    &prefix,
+                    autoimport::Namespace::Value,
+                );
+            }
+        }
         Ok(completion::rank(items, &prefix))
     }
 
@@ -613,25 +773,32 @@ impl Session {
     ) -> Result<Option<(Span, Target)>, QueryError> {
         let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
         let package = &resolved.package;
-        let covering = package
-            .files()
-            .iter()
-            .position(|registered| *registered == file)
-            .and_then(|index| {
-                resolved.resolutions[index].covering(Span::new(file, offset, offset))
-            });
+        let covering = package.file_position(file).and_then(|index| {
+            resolved.resolutions[index].covering(Span::new(file, offset, offset))
+        });
         if let Some((use_span, res)) = covering {
             return Ok(match res {
                 Res::Def(id) => Some((use_span, Target::Def(*id))),
                 Res::Local { bind } => Some((use_span, Target::Local(*bind))),
                 Res::TraitMethod(id) => Some((use_span, Target::Method(*id))),
                 Res::Dot(DotRes::Free { func, .. }) => Some((use_span, Target::Def(*func))),
-                Res::Dot(DotRes::Methods { candidates }) => {
-                    Some((use_span, Target::Methods(candidates.clone())))
+                Res::Dot(DotRes::Methods { candidates } | DotRes::Static { candidates }) => {
+                    // The checker's type-directed selection names the
+                    // member behind the dot; a call whose selection is
+                    // missing failed its own check, and the raw
+                    // candidates name no single member.
+                    let analyzed = self.db.get::<Analyzed>(PackageId::new(0))?.analyzed;
+                    Some((
+                        use_span,
+                        match analyzed.checked.method_selections.get(&use_span) {
+                            Some(&method) => Target::Method(method),
+                            None => Target::Methods(candidates.clone()),
+                        },
+                    ))
                 },
-                // The type-directed tiers and the handler forms name
-                // no single target behind them.
-                Res::Dot(DotRes::Static { .. }) | Res::Handler => None,
+                // The module-qualified tier, the handler forms, and a
+                // module alias name no single target behind them.
+                Res::Dot(DotRes::Module { .. }) | Res::Handler | Res::Module(_) => None,
             });
         }
         for raw in 0..package.len() {
@@ -647,7 +814,7 @@ impl Session {
                 )));
             }
         }
-        for (raw, method) in package.methods().iter().enumerate() {
+        for (raw, method) in package.methods().enumerate() {
             if method.span.file == file && method.span.start <= offset && offset < method.span.end {
                 return Ok(Some((
                     method.span,
@@ -656,6 +823,12 @@ impl Session {
                     )),
                 )));
             }
+        }
+        // A trait impl's own member fn name is not registered (the
+        // trait's member is the one candidate); a position on it names
+        // that member through the impl's trait reference.
+        if let Some((name_span, id)) = self.impl_member_at(file, offset)? {
+            return Ok(Some((name_span, Target::Method(id))));
         }
         // A local binder's own name: the scope frames carry every binder.
         let frames = self.db.get::<ScopeIndex>(file)?.frames;
@@ -691,6 +864,99 @@ impl Session {
             .map(|binding| binding.span)
             .collect();
         Ok(if binders.is_empty() { vec![bind] } else { binders })
+    }
+
+    /// Every trait impl's own member fn name occurrence with the trait its
+    /// impl resolves to: `(trait def, name span, name text)`, in file then
+    /// source order. The trait reference resolves through the same
+    /// resolution table every other answer reads, so a same-named impl of
+    /// another trait never lands in the set. Trait impls do not
+    /// re-register their members — the trait's own member is the one
+    /// candidate — so this walk is the only place an impl's member name
+    /// occurrence is named.
+    fn impl_member_names(&mut self) -> Result<Vec<(PackageDef, Span, String)>, QueryError> {
+        let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+        let mut out = Vec::new();
+        for (index, file) in resolved.package.files().enumerate() {
+            let Some(res) = resolved.resolutions.get(index) else {
+                continue;
+            };
+            let parse = self.db.get::<ParseFile>(file)?;
+            let Some(ast) = &parse.ast else {
+                continue;
+            };
+            for imp in ast
+                .blocks
+                .iter()
+                .flat_map(|block| block.items.iter())
+                .filter_map(|item| match &item.kind {
+                    ds_parse::ItemKind::Impl(imp) => Some(imp),
+                    _ => None,
+                })
+            {
+                let Some(trait_ref) = &imp.trait_ref else {
+                    continue;
+                };
+                let [head] = trait_ref.path.segments.as_slice() else {
+                    continue;
+                };
+                let Some(Res::Def(def)) = res.get(head.span) else {
+                    continue;
+                };
+                out.extend(
+                    imp.fns
+                        .iter()
+                        .map(|f| (*def, f.name.span, f.name.name.clone())),
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// The registered trait member a trait impl's own member fn name
+    /// occurrence names at the position.
+    fn impl_member_at(
+        &mut self,
+        file: FileId,
+        offset: u32,
+    ) -> Result<Option<(Span, MethodId)>, QueryError> {
+        let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+        let package = &resolved.package;
+        for &(def, span, ref name) in &self.impl_member_names()? {
+            if span.file != file || !(span.start <= offset && offset < span.end) {
+                continue;
+            }
+            let owns = |id: MethodId| {
+                matches!(&package.method(id).owner,
+                    MethodOwner::Trait(owner) if *owner == def)
+            };
+            let Some(id) = package.method_candidates(name).find(|&id| owns(id)) else {
+                continue;
+            };
+            return Ok(Some((span, id)));
+        }
+        Ok(None)
+    }
+
+    /// The declaration-side name occurrences of one registered member: its
+    /// own declaration, plus — when it belongs to a trait — every impl's
+    /// same-named member fn (its own name is the trait member's spelling,
+    /// so a rename covers them alike).
+    fn member_decl_spans(&mut self, id: MethodId) -> Result<Vec<Span>, QueryError> {
+        let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+        let package = &resolved.package;
+        let method = package.method(id);
+        let MethodOwner::Trait(trait_def) = &method.owner else {
+            return Ok(vec![method.span]);
+        };
+        let mut spans = vec![method.span];
+        spans.extend(
+            self.impl_member_names()?
+                .iter()
+                .filter(|&&(def, _, ref name)| def == *trait_def && name == &method.name)
+                .map(|&(_, span, _)| span),
+        );
+        Ok(spans)
     }
 
     /// The source spelling of one span's text.
@@ -747,9 +1013,18 @@ impl Session {
             },
             Target::Method(id) => {
                 if include_declaration {
-                    spans.push(resolved.package.method(id).span);
+                    spans.extend(self.member_decl_spans(id)?);
                 }
                 spans.extend(resolved.uses.method_uses(id).iter().copied());
+                let analyzed = self.db.get::<Analyzed>(PackageId::new(0))?.analyzed;
+                spans.extend(
+                    analyzed
+                        .checked
+                        .method_selections
+                        .iter()
+                        .filter(|&(_, &selected)| selected == id)
+                        .map(|(&span, _)| span),
+                );
             },
             Target::Methods(candidates) => {
                 for id in candidates {
@@ -822,13 +1097,21 @@ impl Session {
                 let range = convert::range(self.db.files(), name_span);
                 Ok(RenameAnswer::Prepare(range, name))
             },
-            Target::Method(_) => Ok(RenameAnswer::Refused(
-                "member names span their impls, which no table indexes yet; renaming is refused"
-                    .to_owned(),
-            )),
+            Target::Method(id) => {
+                let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+                let method = resolved.package.method(id);
+                if self.uri(method.span.file).is_none() {
+                    return Ok(RenameAnswer::Refused(
+                        "the member lives in the stdlib ambient, which no open document can edit"
+                            .to_owned(),
+                    ));
+                }
+                let range = convert::range(self.db.files(), name_span);
+                Ok(RenameAnswer::Prepare(range, method.name.clone()))
+            },
             Target::Methods(_) => Ok(RenameAnswer::Refused(
-                "method selection behind the dot is type-directed; rename the member at its \
-                 declaration"
+                "the dot-call's type-directed selection did not settle; the call itself fails its \
+                 check, so it names no member"
                     .to_owned(),
             )),
         }
@@ -891,17 +1174,24 @@ impl Session {
                 spans.extend(uses);
                 spans
             },
-            Target::Method(_) => {
-                return Ok(RenameAnswer::Refused(
-                    "member names span their impls, which no table indexes yet; renaming is \
-                     refused"
-                        .to_owned(),
-                ));
+            Target::Method(id) => {
+                let mut spans = self.member_decl_spans(id)?;
+                spans.extend(resolved.uses.method_uses(id).iter().copied());
+                let analyzed = self.db.get::<Analyzed>(PackageId::new(0))?.analyzed;
+                spans.extend(
+                    analyzed
+                        .checked
+                        .method_selections
+                        .iter()
+                        .filter(|&(_, &selected)| selected == id)
+                        .map(|(&span, _)| span),
+                );
+                spans
             },
             Target::Methods(_) => {
                 return Ok(RenameAnswer::Refused(
-                    "method selection behind the dot is type-directed; rename the member at its \
-                     declaration"
+                    "the dot-call's type-directed selection did not settle; the call itself fails \
+                     its check, so it names no member"
                         .to_owned(),
                 ));
             },
@@ -1056,17 +1346,17 @@ impl Session {
     /// (a document whose parse failed answers empty, uncached).
     fn semantic_tokens(&mut self, file: FileId) -> Result<Vec<lsp::SemanticToken>, QueryError> {
         let revision = self.db.revision();
-        if let Some((cached_at, stream)) = self.token_cache.get(&file) {
-            if *cached_at == revision {
-                return Ok(stream.clone());
-            }
+        if let Some((cached_at, stream)) = self.token_cache.get(&file)
+            && *cached_at == revision
+        {
+            return Ok(stream.clone());
         }
         let parse = self.db.get::<ParseFile>(file)?;
         let Some(ast) = &parse.ast else {
             return Ok(Vec::new());
         };
         let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
-        let Some(index) = resolved.package.files().iter().position(|f| *f == file) else {
+        let Some(index) = resolved.package.file_position(file) else {
             return Ok(Vec::new());
         };
         let analyzed = self.db.get::<Analyzed>(PackageId::new(0))?.analyzed;
@@ -1174,14 +1464,11 @@ fn handle(request: Request, session: &mut Session) {
             reply,
         } => {
             let answer = guarded(move || {
-                session.file(&path).map_or_else(
-                    || Ok(None),
-                    |file| {
-                        session
-                            .hover(file, line, character)
-                            .map_err(|error| error.to_string())
-                    },
-                )
+                session.file(&path).map_or(Ok(None), |file| {
+                    session
+                        .hover(file, line, character)
+                        .map_err(|error| error.to_string())
+                })
             });
             reply.send(answer).ok();
         },
@@ -1296,10 +1583,9 @@ fn handle(request: Request, session: &mut Session) {
         },
         Request::Format { path, reply } => {
             let answer = guarded(move || {
-                session.file(&path).map_or_else(
-                    || Ok(None),
-                    |file| session.format(file).map_err(|error| error.to_string()),
-                )
+                session.file(&path).map_or(Ok(None), |file| {
+                    session.format(file).map_err(|error| error.to_string())
+                })
             });
             reply.send(answer).ok();
         },
@@ -1311,14 +1597,11 @@ fn handle(request: Request, session: &mut Session) {
             reply,
         } => {
             let answer = guarded(move || {
-                session.file(&path).map_or_else(
-                    || Ok(None),
-                    |file| {
-                        session
-                            .on_type_format(file, line, character, &ch)
-                            .map_err(|error| error.to_string())
-                    },
-                )
+                session.file(&path).map_or(Ok(None), |file| {
+                    session
+                        .on_type_format(file, line, character, &ch)
+                        .map_err(|error| error.to_string())
+                })
             });
             reply.send(answer).ok();
         },
@@ -1381,6 +1664,41 @@ mod tests {
             &mut session,
             "a.ds",
             "const text: string = trim(\" hi \")\n",
+        );
+        let diags = session.diagnostics(file).expect("the pass runs");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// The pooled-body refusal (E3) publishes in the editor like the
+    /// other classes: a `par_map` element body touching the world
+    /// surface answers its diagnostic in the document.
+    #[test]
+    fn a_pooled_body_refusal_publishes_in_the_document() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "pooled.ds",
+            "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => {\n    \
+             println(\"elem\")\n    x\n  })\n}\n",
+        );
+        let diags = session.diagnostics(file).expect("the pass runs");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains("world surface"),
+            "{}",
+            diags[0].message
+        );
+    }
+
+    /// A clean pooled program publishes nothing: the clean callable's
+    /// walk answers no diagnostic.
+    #[test]
+    fn a_clean_pooled_program_publishes_nothing() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "pooled.ds",
+            "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => x * 2)\n}\n",
         );
         let diags = session.diagnostics(file).expect("the pass runs");
         assert!(diags.is_empty(), "{diags:?}");
@@ -1550,6 +1868,88 @@ mod tests {
             .expect("the string literal covers the position");
         assert!(answer.contents.contains("string"), "{}", answer.contents);
         assert!(answer.contents.contains("~ pure"), "{}", answer.contents);
+    }
+
+    /// Hovering an ambient name answers its `.dsi` signature spelling —
+    /// the line `ds info` prints for the declaration — ahead of the
+    /// checked-expression answer.
+    #[test]
+    fn hover_answers_the_dsi_signature_of_an_ambient_name() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "const text: string = trim(\" hi \")\n",
+        );
+        // `trim` sits at chars 21..25; the cursor lands on its `r`.
+        let answer = session
+            .hover(file, 0, 22)
+            .expect("the pass runs")
+            .expect("the call covers the position");
+        assert!(
+            answer
+                .contents
+                .contains("pub extern fn trim(s: string) -> string"),
+            "{}",
+            answer.contents
+        );
+        // The checked-expression answer still follows the signature.
+        assert!(answer.contents.contains("string"), "{}", answer.contents);
+    }
+
+    /// Hovering a use of another user document's `pub` declaration
+    /// answers its signature spelling; the defining document stays
+    /// unopened, so the declaration's own parse still serves the line.
+    #[test]
+    fn hover_answers_the_dsi_signature_across_documents() {
+        let mut session = Session::new();
+        open(
+            &mut session,
+            "lib.ds",
+            "pub fn open_api(mut xs: list[int]) -> int | none {\n  first(xs)\n}\n",
+        );
+        let user = open(
+            &mut session,
+            "main.ds",
+            "fn main() -> int | none {\n  open_api([1])\n}\n",
+        );
+        // `open_api` sits at line 1 chars 2..10; the cursor lands on its `p`.
+        let answer = session
+            .hover(user, 1, 5)
+            .expect("the pass runs")
+            .expect("the call covers the position");
+        assert!(
+            answer
+                .contents
+                .contains("pub fn open_api(mut xs: list[int]) -> int | none"),
+            "{}",
+            answer.contents
+        );
+    }
+
+    /// A non-exported declaration has no `.dsi` line: hovering a use of
+    /// it answers the checked expression alone, never a guessed surface
+    /// (`pub(pkg)` and private stay out of the .dsi by G4).
+    #[test]
+    fn hover_stays_honest_for_non_exported_declarations() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn hidden() -> int {\n  7\n}\n\nfn main() -> int {\n  hidden()\n}\n",
+        );
+        // `hidden` in main's body sits at line 5 chars 2..8; the cursor
+        // lands on its `i`.
+        let answer = session
+            .hover(file, 5, 4)
+            .expect("the pass runs")
+            .expect("the call covers the position");
+        assert!(
+            !answer.contents.contains("pub "),
+            "a private fn renders no .dsi line: {}",
+            answer.contents
+        );
+        assert!(answer.contents.contains("int"), "{}", answer.contents);
     }
 
     /// Completion answers the names visible at the position: the
@@ -1827,6 +2227,324 @@ mod tests {
         );
     }
 
+    /// The fixed skeletons answer behind a typed keyword prefix at the
+    /// site the probe parses name: the declaration spellings at item
+    /// level, the expression skeletons inside a body, the fn skeleton
+    /// alone inside an impl or trait member list — each carrying its
+    /// expansion in snippet format.
+    #[test]
+    fn snippets_answer_at_the_probe_decided_site() {
+        fn snippet<'a>(
+            items: &'a [lsp::CompletionItem],
+            label: &str,
+        ) -> Option<&'a lsp::CompletionItem> {
+            items.iter().find(|item| {
+                item.label == label && item.kind == Some(lsp::CompletionItemKind::SNIPPET)
+            })
+        }
+        let mut session = Session::new();
+        // Top level after `st`: the struct skeleton, never a body's
+        // expression skeletons.
+        let item = open(&mut session, "a.ds", "const one = 1\nst\n");
+        let items = session.completion(item, 1, 2).expect("the pass runs");
+        let skeleton = snippet(&items, "struct").expect("the struct skeleton answers");
+        assert!(
+            skeleton
+                .insert_text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("struct ${1:name}"))
+        );
+        assert_eq!(
+            skeleton.insert_text_format,
+            Some(lsp::InsertTextFormat::SNIPPET)
+        );
+        assert!(
+            snippet(&items, "if").is_none(),
+            "a body skeleton stays out: {items:?}"
+        );
+        assert!(snippet(&items, "spawn").is_none(), "{items:?}");
+        // Inside a fn body after `if`: the expression skeleton, never an
+        // item-level declaration.
+        let body = open(&mut session, "b.ds", "fn probe() {\n  if\n}\n");
+        let items = session.completion(body, 1, 4).expect("the pass runs");
+        let skeleton = snippet(&items, "if").expect("the if skeleton answers");
+        assert!(
+            skeleton
+                .insert_text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("if ${1:cond}"))
+        );
+        assert!(snippet(&items, "struct").is_none(), "{items:?}");
+        // Inside an impl member list after `fn`: the fn skeleton alone.
+        let member = open(&mut session, "c.ds", "impl point {\n  fn\n}\n");
+        let items = session.completion(member, 1, 4).expect("the pass runs");
+        let skeleton = snippet(&items, "fn").expect("the member fn skeleton answers");
+        assert!(
+            skeleton
+                .insert_text
+                .as_deref()
+                .is_some_and(|text| text.starts_with("fn ${1:name}"))
+        );
+        assert!(snippet(&items, "struct").is_none(), "{items:?}");
+        assert!(snippet(&items, "if").is_none(), "{items:?}");
+    }
+
+    /// The skeletons ride the ranked scope answer — behind every
+    /// same-prefix name match — and nothing snippet-shaped answers on an
+    /// empty prefix.
+    #[test]
+    fn snippets_rank_behind_prefix_matches_and_skip_the_empty_prefix() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "const spree = 1\nfn probe() {\n  sp\n}\n",
+        );
+        // The cursor sits right after the typed prefix `sp`.
+        let items = session.completion(file, 2, 4).expect("the pass runs");
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        let idx = |name: &str| {
+            labels
+                .iter()
+                .position(|got| *got == name)
+                .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
+        };
+        assert!(
+            idx("spree") < idx("spawn"),
+            "the name match outranks the skeleton: {labels:?}"
+        );
+        assert!(
+            idx("spawn") < idx("probe"),
+            "the skeleton still outranks the non-matching rest: {labels:?}"
+        );
+        // The same position before any typed character (the cursor behind
+        // the word start) answers no snippet at all.
+        let items = session.completion(file, 2, 2).expect("the pass runs");
+        assert!(
+            items
+                .iter()
+                .all(|item| item.kind != Some(lsp::CompletionItemKind::SNIPPET)),
+            "{items:?}"
+        );
+    }
+
+    /// No skeleton answers where the server serves a position-specific
+    /// answer instead of the scope list: a member position (the checked
+    /// receiver's members, and the honest scope fallback behind an
+    /// unchecked dot alike) and a type position.
+    #[test]
+    fn snippets_stay_out_of_member_and_type_positions() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            concat!(
+                "struct point { x: int, y: int }\n",
+                "fn pick(p: point) -> int {\n",
+                "  p.x\n",
+                "}\n",
+                "fn first[t](v: t) -> t? {\n",
+                "  none\n",
+                "}\n",
+            ),
+        );
+        let no_snippets = |items: &[lsp::CompletionItem]| {
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.kind != Some(lsp::CompletionItemKind::SNIPPET)),
+                "{items:?}"
+            );
+        };
+        // The checked member position of `p.x`.
+        no_snippets(&session.completion(file, 2, 4).expect("the pass runs"));
+        // The type position inside the `t?` return annotation.
+        no_snippets(&session.completion(file, 4, 22).expect("the pass runs"));
+        // The unchecked-dot fallback: a member position no receiver
+        // answers, however keyword-shaped the typed prefix.
+        let broken = open(&mut session, "b.ds", "const broken = missing.fn\n");
+        no_snippets(&session.completion(broken, 0, 24).expect("the pass runs"));
+    }
+
+    /// The auto-import tier offers the exported ambient members behind an
+    /// unresolved typed prefix: each prefix-matching item carries the edit
+    /// that opens the document with the `@std` import row, and accepting
+    /// the offer leaves a document that checks clean. A private ambient
+    /// name — the scope answer still lists it — never carries an edit.
+    #[test]
+    fn auto_import_offers_the_exported_ambient_members() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
+        );
+        // The cursor sits right after the typed prefix `to_up` on line 1.
+        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the exported ambient member answers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(
+            edits[0].range,
+            lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 0))
+        );
+        assert_eq!(edits[0].new_text, "import @std (to_upper)\n\n");
+        // Accepting the offer — the client inserts the name and applies
+        // the edit — parses and validates clean: the row selects a `pub`
+        // ambient member.
+        let accepted = "import @std (to_upper)\n\nfn probe() -> string {\n  to_upper(\"x\")\n}\n";
+        session
+            .set(Path::new("a.ds"), accepted)
+            .expect("the accept applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the imported document checks clean"
+        );
+        // The private ambient helper never carries an edit: the tier's
+        // gate is the checker's own export predicate.
+        let file = open(&mut session, "b.ds", "fn probe() -> int {\n  json_w\n}\n");
+        let items = session.completion(file, 1, 8).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "json_ws")
+            .expect("the scope answer still lists the private name");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "a private name never imports: {item:?}"
+        );
+    }
+
+    /// The offer merges into a plain existing `@std` row instead of
+    /// duplicating it: the edit appends the name to the row's selection,
+    /// and the accepted document validates clean.
+    #[test]
+    fn auto_import_merges_into_a_plain_std_row() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "import @std/io (println)\nconst text: string = to_up\n",
+        );
+        // The cursor sits right after the typed prefix on line 1.
+        let items = session.completion(file, 1, 26).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the exported ambient member answers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(
+            edits[0].range,
+            lsp::Range::new(lsp::Position::new(0, 23), lsp::Position::new(0, 23)),
+            "the edit anchors after the row's last selection"
+        );
+        assert_eq!(edits[0].new_text, ", to_upper");
+        let accepted = "import @std/io (println, to_upper)\nconst text: string = to_upper(\"x\")\n";
+        session
+            .set(Path::new("a.ds"), accepted)
+            .expect("the accept applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the merged row checks clean"
+        );
+    }
+
+    /// The tier stays off behind a resolved prefix (the typed prefix
+    /// names a visible name), an empty prefix, a member position, and a
+    /// row that already selects the name: the offers serve unknown bare
+    /// names alone.
+    #[test]
+    fn auto_import_stays_off_behind_resolved_positions() {
+        let mut session = Session::new();
+        // The file's row already selects `to_upper`: the item answers
+        // plain, nothing to import.
+        let file = open(
+            &mut session,
+            "a.ds",
+            "import @std (to_upper)\n\nconst text: string = to_up\n",
+        );
+        let items = session.completion(file, 2, 26).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the name answers");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "an already-imported name carries no edit: {item:?}"
+        );
+        // A resolved prefix: the typed prefix spells the visible
+        // `to_upper` itself.
+        let file = open(&mut session, "b.ds", "const text: string = to_upper\n");
+        let items = session.completion(file, 0, 29).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the name answers");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "a resolved prefix carries no edit: {item:?}"
+        );
+        // An empty prefix (the cursor before the word) attaches nothing.
+        let file = open(&mut session, "c.ds", "const text: string = nope\n");
+        let items = session.completion(file, 0, 21).expect("the pass runs");
+        assert!(
+            items
+                .iter()
+                .all(|item| item.additional_text_edits.is_none()),
+            "{items:?}"
+        );
+        // A member position never takes the tier — the unchecked-dot
+        // fallback included: importing a name serves no dot.
+        let file = open(&mut session, "d.ds", "const broken = missing.to_up\n");
+        let items = session.completion(file, 0, 28).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the scope answer serves the fallback");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "a member position carries no edit: {item:?}"
+        );
+    }
+
+    /// A type position takes the tier over the type namespace alone: the
+    /// prefix-matching exported type carries the import edit, and no
+    /// value-namespace item does.
+    #[test]
+    fn auto_import_serves_type_positions() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn probe(x: file_han) -> int {\n  1\n}\n",
+        );
+        // The cursor sits right after `file_han` in the parameter's type.
+        let items = session.completion(file, 0, 20).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "file_handle")
+            .expect("the ambient type answers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(edits[0].new_text, "import @std (file_handle)\n\n");
+        assert!(
+            items.iter().all(|item| {
+                item.additional_text_edits.is_none() || item.label == "file_handle"
+            }),
+            "only the type's own item carries the edit: {items:?}"
+        );
+    }
+
     /// Definition follows the resolution side table to the defining name
     /// occurrence, as a location in the same document.
     #[test]
@@ -2003,8 +2721,148 @@ mod tests {
         }
     }
 
+    /// Rename of a registered member covers its own declaration, every
+    /// impl of its trait, its qualified `Trait::f` use, and the dot-call
+    /// sites the checker's type-directed selection names — across
+    /// documents, from the declaration and the call site alike.
+    #[test]
+    fn rename_edits_a_member_declaration_impls_and_call_sites() {
+        let mut session = Session::new();
+        let (a, uri_a) = open_uri(
+            &mut session,
+            "a.ds",
+            concat!(
+                "trait pretty {\n",
+                "  fn show(self) -> string { \"pretty\" }\n",
+                "}\n",
+                "struct dot { v: int }\n",
+            ),
+        );
+        let (b, uri_b) = open_uri(
+            &mut session,
+            "b.ds",
+            concat!(
+                "impl pretty for dot {\n",
+                "  fn show(self) -> string { \"dot\" }\n",
+                "}\n",
+                "fn render(d: dot) -> string {\n",
+                "  pretty::show(d)\n",
+                "}\n",
+                "fn call(d: dot) -> string {\n",
+                "  d.show()\n",
+                "}\n",
+            ),
+        );
+        // Prepare at the dot-call names the callee and its spelling.
+        match session.prepare_rename(b, 7, 6).expect("the pass runs") {
+            RenameAnswer::Prepare(range, name) => {
+                assert_eq!(name, "show");
+                assert_eq!(
+                    range,
+                    lsp::Range::new(lsp::Position::new(7, 4), lsp::Position::new(7, 8))
+                );
+            },
+            other => panic!("a selected dot-call prepares: {other:?}"),
+        }
+        for (file, line, character) in [(b, 7, 6), (b, 4, 10), (a, 1, 6), (b, 1, 6)] {
+            match session
+                .rename(file, line, character, "display")
+                .expect("the pass runs")
+            {
+                RenameAnswer::Edit(edit) => {
+                    let changes = edit.changes.expect("the edit carries changes");
+                    let a_edits = &changes[&uri_a];
+                    assert_eq!(a_edits.len(), 1, "{a_edits:?}");
+                    assert_eq!(
+                        a_edits[0].range,
+                        lsp::Range::new(lsp::Position::new(1, 5), lsp::Position::new(1, 9)),
+                        "the trait member declaration renames"
+                    );
+                    let b_edits = &changes[&uri_b];
+                    assert_eq!(b_edits.len(), 3, "{b_edits:?}");
+                    assert_eq!(
+                        b_edits[0].range,
+                        lsp::Range::new(lsp::Position::new(1, 5), lsp::Position::new(1, 9)),
+                        "the impl's member renames"
+                    );
+                    assert_eq!(
+                        b_edits[1].range,
+                        lsp::Range::new(lsp::Position::new(4, 10), lsp::Position::new(4, 14)),
+                        "the qualified use renames"
+                    );
+                    assert_eq!(
+                        b_edits[2].range,
+                        lsp::Range::new(lsp::Position::new(7, 4), lsp::Position::new(7, 8)),
+                        "the dot-call renames"
+                    );
+                    assert_eq!(a_edits[0].new_text, "display");
+                },
+                other => panic!("every member occurrence renames from {other:?}"),
+            }
+        }
+        // References at the dot-call answer the same set, the declaration
+        // side included when asked: the trait member, the impl member, the
+        // qualified use, and the call site.
+        let locations = session.references(b, 7, 6, true).expect("the pass runs");
+        let got: Vec<(lsp::Url, lsp::Position)> = locations
+            .iter()
+            .map(|location| (location.uri.clone(), location.range.start))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (uri_a.clone(), lsp::Position::new(1, 5)),
+                (uri_b.clone(), lsp::Position::new(1, 5)),
+                (uri_b.clone(), lsp::Position::new(4, 10)),
+                (uri_b.clone(), lsp::Position::new(7, 4)),
+            ],
+            "the declaration side, the qualified use, and the call site answer"
+        );
+        let locations = session.references(b, 7, 6, false).expect("the pass runs");
+        assert_eq!(locations.len(), 2, "{locations:?}");
+    }
+
+    /// Rename of a receiverless inherent member covers its declaration
+    /// and its type-keyed call site (the bare type name as the
+    /// receiver), from either side.
+    #[test]
+    fn rename_edits_a_receiverless_member_and_its_type_keyed_call() {
+        let mut session = Session::new();
+        let (a, uri_a) = open_uri(
+            &mut session,
+            "a.ds",
+            concat!(
+                "struct point { x: int }\n",
+                "impl point {\n",
+                "  fn origin_x() -> int { 0 }\n",
+                "}\n",
+                "const fixed = point.origin_x()\n",
+            ),
+        );
+        for (line, character) in [(2, 6), (4, 22)] {
+            match session
+                .rename(a, line, character, "x0")
+                .expect("the pass runs")
+            {
+                RenameAnswer::Edit(edit) => {
+                    let edits = &edit.changes.expect("the edit carries changes")[&uri_a];
+                    assert_eq!(edits.len(), 2, "{edits:?}");
+                    let starts: Vec<lsp::Position> =
+                        edits.iter().map(|edit| edit.range.start).collect();
+                    assert_eq!(
+                        starts,
+                        vec![lsp::Position::new(2, 5), lsp::Position::new(4, 20)],
+                        "the declaration and the type-keyed call edit alike"
+                    );
+                },
+                other => panic!("the receiverless member renames: {other:?}"),
+            }
+        }
+    }
+
     /// Rename refuses honestly: positions on no name, ambient names,
-    /// extern names, member names, and non-identifiers.
+    /// extern names, ambient members, ambiguous dot-calls, and
+    /// non-identifiers.
     #[test]
     fn rename_refusals_answer_honestly() {
         let mut session = Session::new();
@@ -2014,7 +2872,14 @@ mod tests {
             concat!(
                 "const text: string = trim(\" hi \")\n",
                 "extern fn foreign(x: int) -> int\n",
-                "trait pretty { fn show(self) -> int { 1 } }\n",
+                "const shown = text.show()\n",
+                "trait a { fn f(self) -> int { 1 } }\n",
+                "trait b { fn f(self) -> int { 2 } }\n",
+                "tag unit\n",
+                "impl a for unit { fn f(self) -> int { 1 } }\n",
+                "impl b for unit { fn f(self) -> int { 2 } }\n",
+                "const v = unit\n",
+                "const n = v.f()\n",
             ),
         );
         // A position on the `const` keyword names nothing.
@@ -2041,11 +2906,25 @@ mod tests {
             RenameAnswer::Refused(message) => assert!(message.contains("extern"), "{message}"),
             other => panic!("an extern name refuses: {other:?}"),
         }
-        // A trait member's declaration names a method, whose impls no
-        // table indexes.
-        match session.rename(a, 2, 18, "renamed").expect("the pass runs") {
-            RenameAnswer::Refused(message) => assert!(message.contains("member"), "{message}"),
-            other => panic!("a member name refuses: {other:?}"),
+        // A trait member of the ambient (selected at the dot-call
+        // through the checker's own instance solve) lives in the stdlib
+        // source: no open document can edit it, and both requests refuse.
+        match session.prepare_rename(a, 2, 20).expect("the pass runs") {
+            RenameAnswer::Refused(message) => assert!(message.contains("ambient"), "{message}"),
+            other => panic!("an ambient member refuses: {other:?}"),
+        }
+        match session.rename(a, 2, 20, "renamed").expect("the pass runs") {
+            RenameAnswer::Refused(message) => assert!(message.contains("ambient"), "{message}"),
+            other => panic!("an ambient member refuses the rename: {other:?}"),
+        }
+        // A dot-call whose candidate set even type-direction cannot
+        // settle (two traits claiming the same member name for one
+        // receiver) failed its own check, so it names no member.
+        match session.rename(a, 9, 12, "renamed").expect("the pass runs") {
+            RenameAnswer::Refused(message) => {
+                assert!(message.contains("did not settle"), "{message}");
+            },
+            other => panic!("an ambiguous dot-call refuses: {other:?}"),
         }
         // A fresh name must be a fresh identifier.
         match session.rename(a, 0, 8, "bad name").expect("the pass runs") {

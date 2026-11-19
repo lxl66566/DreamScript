@@ -1,12 +1,17 @@
 // source: the record's construction story (B3, F7) and D2's COW collections — the map literal rides the anonymous-record-literal reservation, builder calls interim
-// purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, the entry count, and the report builder's string `+` operands over the concat call
+// purpose: the map[k, v]() empty constructor, map_set's mut-window construction, the checked read's hit and miss members, the entry count, the report builder's string `+` operands over the concat call, and the map value channel's two-word union values (store, checked read, overwrite, and the ordered key face)
 // items:
 // get: stage: typecheck
 // build_report: stage: run
 // overwritten: stage: run
 // counted: stage: run
+// member_len: stage: run
 // get_spelling: stage: typecheck
 // reject-ctor-args: stage: reject the empty-map constructor takes no value arguments (DS2001)
+// cell: stage: typecheck
+// spell: stage: typecheck
+// union_values: stage: run
+// union_keys: stage: run
 
 // the record's own tutorial-facing lookup, file-owned since the ambient
 // shed its dead declarations (no native answers the callee; the spelling
@@ -41,6 +46,15 @@ fn counted() -> int {
   n
 }
 
+// the member spelling over the same construction: `m.len()` routes
+// through the free generic's Map instance, answering the pair count
+fn member_len() -> int {
+  var m = map[int, string]()
+  map_set(m, 1, "one")
+  map_set(m, 2, "two")
+  m.len()
+}
+
 fn get_spelling() -> string {
   var m = map[string, string]()
   map_set(m, "host", "localhost")
@@ -50,4 +64,52 @@ fn get_spelling() -> string {
 
 fn reject_ctor_args() -> map[string, string] {
   map[string, string]("seed")
+}
+
+// the map value channel: a union value type spans tag-plus-region
+// words, so every store stages the value's whole span and the checked
+// read hands it back into `cell | none` (the file's own two-word
+// family; the bare case constructions re-span at the store)
+enum cell { cnull, cnum { n: int }, cstr { s: string } }
+
+fn spell(c: cell) -> string {
+  match c {
+    cnull => "null",
+    cnum(n) => "n${n}",
+    cstr(s) => "s${s}",
+  }
+}
+
+fn union_values() -> string {
+  var m = map[string, cell]()
+  map_set(m, "one", cnum(1))
+  map_set(m, "two", cstr("deux"))
+  const a = map_get(m, "one")
+  const b = map_get(m, "nope")
+  match a {
+    none => "miss-one",
+    v => spell(v),
+  } + ":" + match b {
+    none => "miss",
+    v => spell(v),
+  }
+}
+
+// the ordered key face: entry order after an overwrite keeps the
+// first-store position, and each key's value reads back through the
+// checked read
+fn union_keys() -> string {
+  var m = map[string, cell]()
+  map_set(m, "b", cnum(2))
+  map_set(m, "a", cnum(1))
+  map_set(m, "b", cstr("be"))
+  var out = ""
+  for k in map_keys(m) {
+    const v = map_get(m, k)
+    out += k + "=" + match v {
+      none => "?",
+      c => spell(c),
+    }
+  }
+  out
 }

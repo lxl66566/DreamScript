@@ -124,6 +124,13 @@ pub(crate) struct Owned {
     /// teardown doors' liveness witness, set at registration and cleared
     /// at every death path. `None` exactly when `hook` is.
     band: Option<u8>,
+    /// Whether the band word reads SET at runtime right now: a
+    /// registration sets it, an intra-frame transfer spends it (the
+    /// claim moves with its word, the band word staying behind), and a
+    /// re-registration at the moved site sets it again — the frame's
+    /// doors must read every live claim's band set wherever the claim
+    /// currently sits.
+    band_live: bool,
     /// Whether the word carries a `Ref` count alongside any hook. A
     /// claimed base word keeps this clear — its decs are the hook's.
     count: bool,
@@ -207,6 +214,12 @@ pub(crate) struct Placement {
     loop_claims: Vec<HashSet<u8>>,
     /// The open native-call borrow windows, outermost first.
     windows: Vec<Window>,
+    /// The words one value block's tail answer stages past its own
+    /// scope end: the block's consumer claims them outside, so the
+    /// leaving binders' release must not spend their counts first.
+    /// Staged right before the block's scope pop and retired right
+    /// after it.
+    tail_staged: Vec<u8>,
     /// Whether the walk's current path exited the frame since the last
     /// fork (an arm that exits never reaches the join, so its state
     /// must not constrain what the join keeps).
@@ -256,6 +269,7 @@ impl Placement {
             loop_depth: 0,
             loop_claims: Vec::new(),
             windows: Vec::new(),
+            tail_staged: Vec::new(),
             diverged: false,
             kstr_slots: HashSet::new(),
             strcat_slots: HashSet::new(),
@@ -275,6 +289,7 @@ impl Placement {
         self.owned.insert(slot, Owned {
             hook: None,
             band: None,
+            band_live: false,
             count: true,
             pinned: self.pin_bound && self.pin_later.remove(&slot),
             depth: self.loop_depth,
@@ -309,6 +324,16 @@ impl Placement {
         self.strcat_slots.remove(&slot);
     }
 
+    /// A word staged into a closure's capture block (the Mov is
+    /// emitted): the construction acquires its own count per `Ref`
+    /// capture inside the op, so the word transits — a produced
+    /// temporary (an arena-served StrCat result, a borrow-loaded KSTR)
+    /// keeps its counted spelling, the only spelling the count-bearing
+    /// capture site accepts.
+    pub(crate) fn captured(&mut self, slot: u8) {
+        self.transit(slot);
+    }
+
     /// The slots that qualified for the borrow rewrite: drained at
     /// finalization, after the whole walk, so a transition on any path
     /// has already disqualified its slot.
@@ -333,9 +358,12 @@ impl Placement {
     /// pins — its uses are borrows, never deaths.
     ///
     /// `band` is the claim's establishment word: this emits its SET,
-    /// the fact the teardown doors read off the dying frame (a site
-    /// re-registered at its binder — a literal's temp — keeps the band
-    /// it already has and writes nothing).
+    /// the fact the teardown doors read off the dying frame. A site
+    /// re-registered at its binder keeps a band that still reads SET
+    /// (a literal's temp bound in place writes nothing) and re-SETs one
+    /// an intra-frame transfer spent — the claim moved with its word
+    /// inside this frame, and the doors must read it live at the slot
+    /// it landed on.
     pub(crate) fn claimed(
         &mut self,
         code: &mut Vec<Op>,
@@ -353,21 +381,29 @@ impl Placement {
             return;
         }
         self.transit(base);
-        match self.owned.get_mut(&base).and_then(|owned| owned.band) {
-            // the site's own band, re-registered at its binder: set once
-            Some(live) if live == band => {},
+        match self.owned.get(&base).map(|owned| owned.band) {
+            // the site's own band, re-registered at its binder: set
+            // once, unless a transfer spent the runtime word on the way
+            Some(Some(live)) if live == band => {
+                if let Some(owned) = self.owned.get_mut(&base)
+                    && !owned.band_live
+                {
+                    Self::emit_band(code, band, true);
+                }
+            },
             // a replaced hook's band retires with it (its drop shapes
             // die at the replacement); the orphan word is never read
-            Some(retired) => {
+            Some(Some(retired)) => {
                 Self::emit_band(code, retired, false);
                 Self::emit_band(code, band, true);
             },
-            None => Self::emit_band(code, band, true),
+            _ => Self::emit_band(code, band, true),
         }
         match self.owned.get_mut(&base) {
             Some(owned) => {
                 owned.hook = Some(hook);
                 owned.band = Some(band);
+                owned.band_live = true;
                 owned.count = false;
                 owned.pinned = true;
             },
@@ -375,6 +411,7 @@ impl Placement {
                 self.owned.insert(base, Owned {
                     hook: Some(hook),
                     band: Some(band),
+                    band_live: true,
                     count: false,
                     pinned: true,
                     depth: self.loop_depth,
@@ -525,13 +562,47 @@ impl Placement {
             }
             self.recompute_death(word);
             // the last alias leaving an owned word kills it here; words
-            // with surviving aliases wait for the outer scope or the exit
+            // with surviving aliases wait for the outer scope or the exit.
+            // A value block's staged tail answer escapes to the consumer
+            // outside the block, so its release is the consumer's, not
+            // the scope's.
             if self.owned.contains_key(&word)
                 && self.binders.get(&word).is_none_or(HashSet::is_empty)
+                && !self.tail_staged.contains(&word)
             {
                 self.drop_word(code, word);
             }
         }
+    }
+
+    /// The staging bracket a value block retires its tail-answer staging
+    /// back to: the staging length before the block lowers (the nested
+    /// blocks inside it retire their own staging first, so the entry
+    /// length is the pre-stage length).
+    pub(crate) fn staging_bracket(&self) -> usize {
+        self.tail_staged.len()
+    }
+
+    /// Stages the words a value block's tail answer carries out of its
+    /// scope: the consumer claims them outside the block (a binding's
+    /// alias, a call's staging, a join's copy), so the scope end must
+    /// not release their counts first. A tail read of a local binder
+    /// answers the binder's own words — a frame tail clears the map at
+    /// its exit, but a value block's scope end runs before any consumer
+    /// exists. Retired by [`Self::unstage_tail_answer`] once the scope
+    /// pop has consumed the staging.
+    pub(crate) fn stage_tail_answer(&mut self, words: &[u8]) {
+        self.tail_staged.extend(words.iter().copied());
+    }
+
+    /// Retires the tail-answer staging back to its bracket: the words
+    /// return to the ordinary death discipline (the consumer's claim or
+    /// the enclosing scope's end releases them). Truncating to the
+    /// bracket pops exactly this block's staging — a clear would also
+    /// drop any outer bracket's words, silently reintroducing the
+    /// premature release the staging exists to prevent.
+    pub(crate) fn unstage_tail_answer(&mut self, bracket: usize) {
+        self.tail_staged.truncate(bracket);
     }
 
     fn recompute_death(&mut self, word: u8) {
@@ -616,19 +687,36 @@ impl Placement {
     /// and owns a fresh one — unless the destination sits inside the
     /// moved claim's own span, where the bits ride the claim.
     pub(crate) fn copied(&mut self, code: &mut Vec<Op>, dst: u8, src: u8) {
-        if let Some(owned) = self.owned.get(&src).cloned() {
+        if let Some(mut owned) = self.owned.get(&src).cloned() {
             // A pinned word belongs to a deinit value: the copy site is
             // the checker's consuming move (a linear value never
             // alias-copies), so the claim and its count transfer with no
             // dup. The transfer spends the site's establishment: the
             // hook rides the word to its new slot and fires at its own
             // death there, so a teardown door never fires a moved claim
-            // where it left (the pinned-transfer rule).
+            // where it left (the pinned-transfer rule). An intra-frame
+            // landing (a var's slot) re-establishes the band at its own
+            // re-registration, which the moved entry's spent marker
+            // drives.
             self.transit(src);
             self.transit(dst);
             if owned.pinned || self.dies_at(src) {
                 if let Some(band) = owned.band {
                     Self::emit_band(code, band, false);
+                    owned.band_live = false;
+                    // a destination already anchoring a claim keeps ITS
+                    // band word (a var's slot re-stored by an assignment):
+                    // the drop sites the directory decodes name that word,
+                    // so the moved claim re-establishes it at its own
+                    // re-registration instead of stranding the site on a
+                    // band no door reads
+                    if let Some(keep) = self
+                        .owned
+                        .get(&dst)
+                        .and_then(|anchored| anchored.band.filter(|_| anchored.hook.is_some()))
+                    {
+                        owned.band = Some(keep);
+                    }
                 }
                 // the count moves with the word
                 self.owned.remove(&src);
@@ -645,6 +733,7 @@ impl Placement {
             self.owned.insert(dst, Owned {
                 hook: None,
                 band: None,
+                band_live: false,
                 count: true,
                 pinned: false,
                 depth: self.loop_depth,
@@ -665,6 +754,7 @@ impl Placement {
             let owned = Owned {
                 hook: None,
                 band: None,
+                band_live: false,
                 count: true,
                 pinned: false,
                 depth: self.loop_depth,
@@ -798,6 +888,24 @@ impl Placement {
     /// the call in place and returns), keeping the borrow window
     /// flushable.
     pub(crate) fn staged_native(&mut self, src: u8, tail: bool) {
+        self.stage_native(src, tail, true);
+    }
+
+    /// One Ref word staged for a native call the window's flush will not
+    /// dec: the CALL still reads the word (the readers pin holds for
+    /// enclosing windows), but the staging never defers a death into the
+    /// window — the equality chain's per-word compares stage this way,
+    /// because the chain's fail-fast exit skips a later compare's flush
+    /// site, so the caller releases every dying operand where the chain's
+    /// exits merge instead.
+    pub(crate) fn staged_native_keep(&mut self, src: u8) {
+        self.stage_native(src, false, false);
+    }
+
+    /// The shared staging front: pins the word in the innermost window's
+    /// reader set; `own` marks whether the window's flush owns a dying
+    /// source's dec.
+    fn stage_native(&mut self, src: u8, tail: bool, own: bool) {
         if !self.owned.contains_key(&src) {
             return;
         }
@@ -816,7 +924,7 @@ impl Placement {
         if let Some(window) = self.windows.last_mut() {
             window.readers.insert(src);
         }
-        if self.dies_at(src) {
+        if own && self.dies_at(src) {
             self.defer_death(src);
         }
     }
@@ -911,6 +1019,7 @@ impl Placement {
         let owned = self.owned.remove(&word).unwrap_or(Owned {
             hook: None,
             band: None,
+            band_live: false,
             count: true,
             pinned: false,
             depth: 0,
@@ -1061,6 +1170,15 @@ impl Placement {
     pub(crate) fn restore(&mut self, state: State) {
         self.owned = state;
         self.diverged = false;
+    }
+
+    /// Reinstalls an ownership snapshot so a sibling emission path drops
+    /// from the fork's own map (the equality chain's per-member fail-fast
+    /// exit releases the member's dying counts again, from the state the
+    /// member's full path forked from) — the walk's divergence marker is
+    /// not the fork's to clear.
+    pub(crate) fn rewind(&mut self, state: State) {
+        self.owned = state;
     }
 
     /// Whether the current path exited the frame since the last fork.
@@ -1334,6 +1452,82 @@ mod tests {
             "the consuming move clears the band this frame's doors read"
         );
         assert_eq!(rc.claim_band(3), None, "the claim left with the word");
+    }
+
+    /// An intra-frame transfer spends the runtime band (the claim moves
+    /// with its word, the band word staying behind), and the
+    /// re-registration at the moved site sets it again: the frame's
+    /// doors must read every live claim's band set wherever the claim
+    /// currently sits — the var-slot shape (a bound temp's claim moved
+    /// into its slot, a store's replacement moved into the var).
+    #[test]
+    fn a_moved_claims_re_registration_re_sets_its_spent_band() {
+        let mut rc = placement();
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 3, hook(42, 1, &[0]), 7, &[3]);
+        assert_eq!(code.len(), 1, "the first registration sets the band");
+        // the transfer into the var's slot: the band clears, the claim
+        // rides the word
+        let mut code = Vec::new();
+        rc.copied(&mut code, 5, 3);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(7),
+                tag: super::super::shape::CLAIM_BAND_CLEAR,
+            }],
+            "the pinned transfer spends the site's establishment"
+        );
+        assert_eq!(rc.claim_band(5), Some(7), "the claim anchors the slot");
+        // the re-registration at the moved site: the band sets again
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 5, hook(42, 1, &[0]), 7, &[5]);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(7),
+                tag: super::super::shape::CLAIM_BAND_SET,
+            }],
+            "the doors read the moved claim live at its slot"
+        );
+        // and a further re-registration over the live band stays silent
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 5, hook(42, 1, &[0]), 7, &[5]);
+        assert_eq!(code, Vec::new(), "the band sets exactly once per landing");
+    }
+
+    /// A transfer into a slot already anchoring a claim adopts the
+    /// anchor's band word: the directory's drop sites for the base name
+    /// that word (a var's slot re-stored by an assignment — the loop
+    /// rollover's carried claim keeping one band across the join), so
+    /// the moved claim's own band retires with its move.
+    #[test]
+    fn a_transfer_into_an_anchored_slot_adopts_its_band() {
+        let mut rc = placement();
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 5, hook(9, 1, &[]), 6, &[5]);
+        rc.claimed(&mut code, 3, hook(9, 1, &[]), 7, &[3]);
+        let mut code = Vec::new();
+        rc.copied(&mut code, 5, 3);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(7),
+                tag: super::super::shape::CLAIM_BAND_CLEAR,
+            }],
+            "the moved claim's own band spends; the anchor's stays"
+        );
+        assert_eq!(rc.claim_band(5), Some(6), "the slot keeps its band word");
+        let mut code = Vec::new();
+        rc.claimed(&mut code, 5, hook(9, 1, &[]), 6, &[5]);
+        assert_eq!(
+            code,
+            vec![Op::TagNew {
+                dst: Slot::body(6),
+                tag: super::super::shape::CLAIM_BAND_SET,
+            }],
+            "the re-registration re-establishes the anchor's band"
+        );
     }
 
     /// A copy of a word folded into a claim borrows: the destination owns

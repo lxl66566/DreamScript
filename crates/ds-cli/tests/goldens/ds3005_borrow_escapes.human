@@ -1,0 +1,8 @@
+error[DS3005]: value `h` is borrowed for this call; a `~Copyable` value cannot escape its window [C2]
+ --> tests/fixtures/negative/ds3005_borrow_escapes.ds:10:30
+   |
+10 | fn id(h: handle) -> handle { h }
+   |                              ^ escape of a borrowed value
+   |
+10 | fn id(h: handle) -> handle { h }
+   |       - borrowed here

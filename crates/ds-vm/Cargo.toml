@@ -24,10 +24,15 @@ ds-mod = { path = "../ds-mod" }
 ds-rt = { path = "../ds-rt" }
 # the fork-join worker pool's scoped scheduler (E3's measured candidate)
 youpipe.workspace = true
+# the platform net face's TLS tier (the host-selected tls capability)
+rustls.workspace       = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+# the local TLS test servers' self-signed certificates
+rcgen.workspace = true
 
 [[bench]]
 name    = "vm"

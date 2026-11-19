@@ -1,12 +1,17 @@
-//! The script-mode dsmod cache behind `ds run <file.ds>`: the CLI-owned
-//! key fold, the mmap hit path, and the temp-plus-rename write, over the
-//! `$DS_CACHE` root ds-pkg resolves (the one authority the package store
-//! shares). The cache never fails a run: a root that
-//! cannot resolve, an artifact that cannot be read or validated, and a
-//! write that cannot land are all silent falls back to the in-process
-//! source pipeline.
+//! The script-mode dsmod caches behind `ds run <file.ds>`: the CLI-owned
+//! key folds, the mmap hit paths, and the temp-plus-rename writes, over
+//! the `$DS_CACHE` root ds-pkg resolves (the one authority the package
+//! store shares). Two artifact families share the root: the package
+//! root's own module, and each linked dep member's compiled module —
+//! keyed on the member's own link name and content identity over the
+//! same graph fold, so a warm package run serves the walk's dep
+//! demands from disk and compiles nothing in-process. Neither cache
+//! ever fails a run: a root that cannot resolve, an artifact that
+//! cannot be read or validated, and a write that cannot land are all
+//! silent falls back to the in-process source pipeline.
 
 use std::{
+    collections::BTreeMap,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -27,6 +32,14 @@ const DEBUG_ENV: &str = "DS_RUN_CACHE_DEBUG";
 /// old artifacts must never answer a new fold.
 const KEY_DOMAIN: &[u8] = b"ds-run-cache-v1";
 
+/// The dep-member fold's domain tag: a linked package's compiled module
+/// is its own artifact family, never the root's — the root compile and
+/// a dep compile of the same name and content answer different modules
+/// (the entry session's host member and the root's entry folding ride
+/// the root compile alone), so the two folds share components but never
+/// a domain.
+const DEP_KEY_DOMAIN: &[u8] = b"ds-dep-cache-v1";
+
 /// The build identity folded into the key: build.rs digests the source
 /// trees of every workspace crate the source pipeline runs through plus
 /// the workspace lock, so any rebuild whose bytecode output can differ
@@ -38,23 +51,40 @@ pub(crate) const BUILD_ID: &str =
     if env!("DS_BUILD_ID").is_empty() { env!("CARGO_PKG_VERSION") } else { env!("DS_BUILD_ID") };
 
 /// One run's cache handle: the resolved root (absent when the run is
-/// uncached) and the ambient identity the key folds.
+/// uncached), the ambient identity the key folds, and the resolved
+/// graph's dep identities (the empty list for a plain script).
 pub(crate) struct RunCache {
     root: Option<PathBuf>,
     ambient: Option<Hash128>,
+    deps: BTreeMap<String, Hash128>,
     debug: bool,
 }
 
 impl RunCache {
-    /// Resolves the cache for one run. `enabled` is the `--no-cache` off
-    /// switch; `no_ambient` picks the ambient identity the key folds
-    /// (the ambient's impl bodies lower into the script module, so the
-    /// ambient text is a bytecode input).
+    /// Resolves the cache for one plain-script run: no dep identity
+    /// beyond the folded components — every name but the ambient
+    /// records the zero marker — so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
+        Self::discover_linked(enabled, no_ambient, &BTreeMap::new())
+    }
+
+    /// Resolves the cache for one package run. `enabled` is the
+    /// `--no-cache` off switch; `no_ambient` picks the ambient identity
+    /// the key folds (the ambient's impl bodies lower into the script
+    /// module, so the ambient text is a bytecode input); `identities`
+    /// are the resolved graph's dep content identities, which the
+    /// source text alone does not determine, so the key folds them and
+    /// a dep whose resolved content changed is another key.
+    pub(crate) fn discover_linked(
+        enabled: bool,
+        no_ambient: bool,
+        identities: &BTreeMap<String, Hash128>,
+    ) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then(ds_pkg::store::cache_root).flatten(),
             ambient: (!no_ambient).then(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
+            deps: identities.clone(),
             debug,
         };
         if cache.debug && cache.root.is_none() {
@@ -127,32 +157,58 @@ impl RunCache {
         }) {
             return;
         }
-        let Some(dir) = artifact.parent() else {
+        write_atomic(&artifact, &ds_mod::write(module));
+    }
+
+    /// The cached compiled module for one linked dep member, when the
+    /// graph resolved the name and the load walk demands exactly the
+    /// content the graph pinned: `None` is the miss every caller falls
+    /// back from. A name the graph never resolved (the ambient's merged
+    /// reading, a zero-marker link) is no lookup — the ordinary serve
+    /// answers those. The header check re-validates the artifact's
+    /// name and source hash against the demand, exactly the pair the
+    /// load walk itself validates.
+    pub(crate) fn lookup_dep(&self, name: &str, linked: Hash128) -> Option<Module> {
+        let root = self.root.as_ref()?;
+        if self.deps.get(name) != Some(&linked) {
+            return None;
+        }
+        let artifact = cache_path(root, TARGET_SEGMENT, self.dep_key(name, linked));
+        let Ok(mapped) = read_mmap(&artifact) else {
+            return self.dep_miss(&artifact);
+        };
+        let module = mapped.module();
+        if module.name() != name || module.source_hash() != linked {
+            return self.dep_miss(&artifact);
+        }
+        self.dep_report("hit", &artifact);
+        Some(mapped.into_module())
+    }
+
+    /// Writes one linked dep member's compiled module under the key
+    /// `lookup_dep` reads: the module the walk just installed for this
+    /// name at the identity the graph pinned. Every failure is silent —
+    /// the run already succeeded.
+    pub(crate) fn store_dep(&self, name: &str, linked: Hash128, module: &Module) {
+        let Some(root) = &self.root else {
             return;
         };
-        if std::fs::create_dir_all(dir).is_err() {
+        if self.deps.get(name) != Some(&linked)
+            || module.name() != name
+            || module.source_hash() != linked
+        {
             return;
         }
-        let bytes = ds_mod::write(module);
-        let Ok(mut temp) = tempfile::NamedTempFile::new_in(dir) else {
-            return;
-        };
-        if temp.write_all(&bytes).is_err() {
+        let artifact = cache_path(root, TARGET_SEGMENT, self.dep_key(name, linked));
+        // content addressing makes an artifact that already validates
+        // against this key the exact bytes this write would produce, so
+        // an existing one is the write
+        if read_mmap(&artifact).is_ok_and(|mapped| {
+            mapped.module().name() == name && mapped.module().source_hash() == linked
+        }) {
             return;
         }
-        // temp-plus-rename in the artifact's own directory: concurrent
-        // writers race to byte-identical content and a reader never sees
-        // a partial file. Windows rename refuses to replace, so a lost
-        // race (or a repair over a corrupt artifact) removes and retries
-        // once; a mapped file that cannot be removed waits for a later
-        // run.
-        if let Err(persist) = temp.persist(&artifact) {
-            if persist.error.kind() == std::io::ErrorKind::AlreadyExists {
-                let _ = std::fs::remove_file(&artifact);
-                let temp = persist.file;
-                let _ = temp.persist(&artifact);
-            }
-        }
+        write_atomic(&artifact, &ds_mod::write(module));
     }
 
     /// The blake3-128 fold over every input that changes the produced
@@ -163,21 +219,36 @@ impl RunCache {
     /// - the entry source hash;
     /// - the ambient identity: the stdlib ambient's text hash when its impl bodies lower into the
     ///   module, a marker byte when `--no-ambient` compiles without it;
-    /// - each linked dep's content hash in link order: the dep-list writer records the source's
-    ///   imports into the header, but this round every recorded hash is a pure function of
-    ///   components already folded — the source hash determines the imports, the ambient identity
-    ///   determines @std's hash, every other name records the zero marker — so folding them adds no
-    ///   key entropy, and the lookup side cannot derive dep content without the front end (the key
-    ///   must be computable before the artifact is read). The fold lands when package resolution
-    ///   produces dep identities the source text alone does not determine;
+    /// - each resolved dep's link name and content hash in ascending name order: the identities
+    ///   package resolution pinned, which the source text alone does not determine, so a dep whose
+    ///   resolved content changed is another key and never serves an artifact linked against the
+    ///   old content. A plain script folds the empty list — its recorded dep hashes are pure
+    ///   functions of the components above (the ambient's for `@std`, the zero marker otherwise);
     /// - the dsmod format version: the reader refuses foreign versions anyway, and folding it
     ///   re-keys instead of paying the refused read;
     /// - the build identity: a build-time digest of the compiler crates' source trees (the package
     ///   version alone in packaged builds), so two builds whose bytecode output can differ never
     ///   share an artifact.
     fn key(&self, module_name: &str, source_hash: Hash128) -> Hash128 {
+        self.fold(KEY_DOMAIN, module_name, source_hash)
+    }
+
+    /// The dep-member fold: the same component set over its own domain
+    /// tag, keyed on the member's link name and content identity. The
+    /// graph identities ride the fold like the root's: a dep module's
+    /// own dep list pins the content its imports linked at, so any
+    /// dep's moved identity is another key for every member — an
+    /// artifact linked against a transitive dep's old content never
+    /// serves a new resolution.
+    fn dep_key(&self, name: &str, identity: Hash128) -> Hash128 {
+        self.fold(DEP_KEY_DOMAIN, name, identity)
+    }
+
+    /// One domain-tagged blake3-128 fold over the shared component set
+    /// (see `key`'s component list).
+    fn fold(&self, domain: &[u8], module_name: &str, source_hash: Hash128) -> Hash128 {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(KEY_DOMAIN);
+        hasher.update(domain);
         fold_str(&mut hasher, module_name);
         hasher.update(source_hash.as_bytes());
         match self.ambient {
@@ -189,9 +260,14 @@ impl RunCache {
                 hasher.update(&[0]);
             },
         }
-        // no dep identity beyond the folded components yet (see `key`'s
-        // doc); resolved dep hashes fold right here when they exist
-        hasher.update(&0u64.to_le_bytes());
+        // the dep identities the resolved graph pinned, each name
+        // framed around its hash so no two pairs splice; a plain
+        // script folds the empty list (see `key`'s doc)
+        hasher.update(&(self.deps.len() as u64).to_le_bytes());
+        for (name, content) in &self.deps {
+            fold_str(&mut hasher, name);
+            hasher.update(content.as_bytes());
+        }
         hasher.update(&[FORMAT_VERSION]);
         fold_str(&mut hasher, BUILD_ID);
         let digest = hasher.finalize();
@@ -209,19 +285,24 @@ impl RunCache {
         }
     }
 
+    /// Reports one dep-member lookup decision on the same debug switch:
+    /// the observable that proves a warm run served the dep members
+    /// from disk instead of compiling them — the module bytes cannot
+    /// prove it, a fresh compile answers the same bytes.
+    fn dep_report(&self, state: &str, artifact: &Path) {
+        if self.debug {
+            eprintln!("ds dep cache: {state} {}", artifact.display());
+        }
+    }
+
     fn miss<T>(&self, artifact: &Path) -> Option<T> {
         self.report("miss", artifact);
         None
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::BUILD_ID;
-
-    #[test]
-    fn the_build_identity_is_present() {
-        assert_ne!(BUILD_ID, "");
+    fn dep_miss<T>(&self, artifact: &Path) -> Option<T> {
+        self.dep_report("miss", artifact);
+        None
     }
 }
 
@@ -253,6 +334,20 @@ pub(crate) enum ServedPlan {
         /// The `none` member's module tag id.
         none: Option<u8>,
     },
+}
+
+impl ServedPlan {
+    /// The staging facts the plan carries: the entry's per-parameter
+    /// plans (none when no function of the name exists, an empty slice
+    /// for a zero-parameter entry) and the int and none member tags its
+    /// optional arm stages.
+    pub(crate) fn entry_facts(&self) -> (Option<&[EntryArg]>, Option<u8>, Option<u8>) {
+        match self {
+            ServedPlan::Raw => (None, None, None),
+            ServedPlan::Empty => (Some(&[][..]), None, None),
+            ServedPlan::Args { plans, int, none } => (Some(plans.as_slice()), *int, *none),
+        }
+    }
 }
 
 /// Which `--args` staging rule an entry can reproduce from the finished
@@ -296,6 +391,35 @@ pub(crate) fn fold_str(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(text.as_bytes());
 }
 
+/// Lands one artifact's bytes under its content-addressed path with
+/// the temp-plus-rename discipline every `$DS_CACHE` writer shares:
+/// concurrent writers race to byte-identical content and a reader
+/// never sees a partial file. Windows rename refuses to replace, so a
+/// lost race (or a repair over a corrupt artifact) removes and retries
+/// once; a mapped file that cannot be removed waits for a later run.
+/// Every failure is silent — the caller's run already succeeded.
+fn write_atomic(artifact: &Path, bytes: &[u8]) {
+    let Some(dir) = artifact.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let Ok(mut temp) = tempfile::NamedTempFile::new_in(dir) else {
+        return;
+    };
+    if temp.write_all(bytes).is_err() {
+        return;
+    }
+    if let Err(persist) = temp.persist(artifact)
+        && persist.error.kind() == std::io::ErrorKind::AlreadyExists
+    {
+        let _ = std::fs::remove_file(artifact);
+        let temp = persist.file;
+        let _ = temp.persist(artifact);
+    }
+}
+
 /// The module name the source path derives (the file stem, lossily) —
 /// the same derivation the compile path records; a path with no stem is
 /// a miss (the compile path reports it).
@@ -303,4 +427,100 @@ fn module_stem(path: &Path) -> Option<String> {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use ds_mod::Hash128;
+
+    use super::{BUILD_ID, RunCache};
+
+    #[test]
+    fn the_build_identity_is_present() {
+        assert_ne!(BUILD_ID, "");
+    }
+
+    /// The dep-identity fold re-keys: one dep's changed content moves
+    /// the key, the link name frames its hash (no two pairs splice),
+    /// and a plain script keeps the empty-list fold its recorded hashes
+    /// (pure functions of the folded components) already determine.
+    #[test]
+    fn the_dep_identity_fold_rekeys() {
+        let source = Hash128::compute(b"fn main() -> () { }");
+        let plain = RunCache::discover(false, false);
+        let at = |identity: &[u8]| {
+            RunCache::discover_linked(
+                false,
+                false,
+                &BTreeMap::from([("@lib".to_owned(), Hash128::compute(identity))]),
+            )
+        };
+        assert_ne!(
+            at(b"one").key("app", source),
+            at(b"two").key("app", source),
+            "a dep's changed content is another key"
+        );
+        assert_ne!(
+            plain.key("app", source),
+            at(b"one").key("app", source),
+            "a resolved identity never serves a plain script's key"
+        );
+        let named = RunCache::discover_linked(
+            false,
+            false,
+            &BTreeMap::from([
+                ("@a".to_owned(), Hash128::compute(b"one")),
+                ("@b".to_owned(), Hash128::compute(b"two")),
+            ]),
+        );
+        let swapped = RunCache::discover_linked(
+            false,
+            false,
+            &BTreeMap::from([
+                ("@a".to_owned(), Hash128::compute(b"two")),
+                ("@b".to_owned(), Hash128::compute(b"one")),
+            ]),
+        );
+        assert_ne!(
+            named.key("app", source),
+            swapped.key("app", source),
+            "the link name frames its hash"
+        );
+    }
+
+    /// The dep-member fold re-keys on the member's own identity and on
+    /// every graph identity, and its domain never collides with the
+    /// root fold — a root artifact and a dep artifact of the same name
+    /// and content are different modules (the entry session's host
+    /// member rides the root compile alone), so the domains must keep
+    /// them apart.
+    #[test]
+    fn the_dep_member_fold_rekeys_and_stays_its_own_domain() {
+        let member = Hash128::compute(b"pub fn twice(n: int) -> int { 2 * n }");
+        let at = |identity: &[u8]| {
+            RunCache::discover_linked(
+                false,
+                false,
+                &BTreeMap::from([("@deep".to_owned(), Hash128::compute(identity))]),
+            )
+        };
+        assert_ne!(
+            at(b"one").dep_key("@lib", member),
+            at(b"two").dep_key("@lib", member),
+            "a graph dep's moved identity re-keys the member fold"
+        );
+        let other_member = Hash128::compute(b"pub fn twice(n: int) -> int { 3 * n }");
+        assert_ne!(
+            at(b"one").dep_key("@lib", member),
+            at(b"one").dep_key("@lib", other_member),
+            "the member's own content identity re-keys"
+        );
+        assert_ne!(
+            at(b"one").dep_key("@lib", member),
+            at(b"one").key("@lib", member),
+            "the dep fold never answers the root fold's domain"
+        );
+    }
 }

@@ -1,0 +1,139 @@
+// purpose: the from_json derive family end to end over the real
+// ambient — `#[derive(from_json)]` on a struct or an enum synthesizes
+// the receiverless decode member whose body walks the landed typed
+// readers (`json_member` plus the `json_as_*` family): the struct walk
+// guards the object shape, reads one member per field (a required
+// member none-testing into parse_err, an optional member reading
+// absence as none — an optional list field through the
+// statement-position member row, to_json's mirror), and answers the
+// construction — a scalar field
+// through its reader inline, a list field through the array read plus
+// one element walk per position, a nested derive's field through that
+// type's own from_json member; the enum walk matches the value's
+// shape, the unit cases reading from their own names and the one
+// struct-payload case from its members. The rows pin every reader kind
+// happy, each wrong shape answering parse_err, the optional absent,
+// present, and wrong-shaped rows, the optional list field's absence,
+// presence, and wrong shapes, the nested composition both ways,
+// the enum's shapes, and the width readers (2026-11-19): byte and u32
+// as json numbers with their range edges, char as a one-character json
+// string, bytes as a json array of numbers, each wrong shape or
+// out-of-range value answering parse_err.
+
+fn doc (text: string) -> json {
+  const j = parse_json(text)
+  if j is parse_err { json_null } else { j }
+}
+
+#[derive(from_json)]
+struct cell { i: int, f: float, b: bool, s: string }
+
+#[derive(from_json)]
+struct inner { a: int }
+
+#[derive(from_json)]
+struct outer { i: inner, kind: string, port: int?, xs: list[int], grid: list[list[int]] }
+
+#[derive(from_json)]
+struct wide { maybe: inner?, plain: int? }
+
+#[derive(from_json, to_json)]
+struct slack { xs: list[int]? }
+
+// The width readers' target (byte and u32 as json numbers, char as a
+// one-character json string, bytes as a number array): the row prints
+// the re-encoded document so every edge value pins exactly.
+#[derive(from_json, to_json)]
+struct scalars { b: byte, c: char, u: u32, z: bytes }
+
+#[derive(from_json)]
+enum turn { left, right, spin { times: int } }
+
+fn cell_row (text: string) -> () {
+  const c = cell.from_json(doc(text))
+  if c is parse_err { println("parse_err") } else {
+    println("cell ${c.i} ${c.f} ${c.b} ${c.s}")
+  }
+}
+
+fn outer_row (text: string) -> () {
+  const o = outer.from_json(doc(text))
+  if o is parse_err { println("parse_err") } else {
+    println("outer ${o.i.a} ${o.kind} ${o.port is none} ${o.xs.len()} ${o.grid.len()}")
+  }
+}
+
+fn wide_row (text: string) -> () {
+  const w = wide.from_json(doc(text))
+  if w is parse_err { println("parse_err") } else {
+    println("wide ${w.maybe is none} ${w.plain is none}")
+  }
+}
+
+fn slack_row (text: string) -> () {
+  const s = slack.from_json(doc(text))
+  if s is parse_err { println("parse_err") } else {
+    println(slack.to_json(s).to_json())
+  }
+}
+
+fn turn_row (text: string) -> () {
+  const t = turn.from_json(doc(text))
+  if t is parse_err { println("parse_err") } else if t is left { println("left") }
+  else if t is right { println("right") } else { println("spin ${t.times}") }
+}
+
+fn scalars_row (text: string) -> () {
+  const s = scalars.from_json(doc(text))
+  if s is parse_err { println("parse_err") } else {
+    println(scalars.to_json(s).to_json())
+  }
+}
+
+fn main() -> () {
+  cell_row("{\"i\": 12, \"f\": 2.5, \"b\": true, \"s\": \"arch\"}")
+  cell_row("{\"i\": \"12\", \"f\": 2.5, \"b\": true, \"s\": \"arch\"}")
+  cell_row("{\"i\": 12, \"f\": \"2.5\", \"b\": true, \"s\": \"arch\"}")
+  cell_row("{\"i\": 12, \"f\": 2.5, \"b\": 1, \"s\": \"arch\"}")
+  cell_row("{\"i\": 12, \"f\": 2.5, \"b\": true, \"s\": 5}")
+  cell_row("[12, 2.5]")
+  cell_row("{\"i\": 12, \"f\": 2.5, \"b\": true}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"xs\": [4, 5], \"grid\": [[1, 2], [3]]}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"xs\": [], \"grid\": []}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"port\": 9, \"xs\": [], \"grid\": []}")
+  outer_row("{\"kind\": \"t\", \"xs\": [], \"grid\": []}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"port\": \"x\", \"xs\": [], \"grid\": []}")
+  outer_row("{\"i\": 3, \"kind\": \"t\", \"xs\": [], \"grid\": []}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": 5, \"xs\": [], \"grid\": []}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"xs\": [1, \"no\"], \"grid\": []}")
+  outer_row("{\"i\": {\"a\": 7}, \"kind\": \"t\", \"xs\": [], \"grid\": [1]}")
+  wide_row("{}")
+  wide_row("{\"maybe\": {\"a\": 1}, \"plain\": 3}")
+  wide_row("{\"maybe\": 5}")
+  wide_row("{\"plain\": \"x\"}")
+  slack_row("{\"xs\": [4, 5]}")
+  slack_row("{}")
+  slack_row("{\"xs\": 5}")
+  slack_row("{\"xs\": [1, \"x\"]}")
+  scalars_row("{\"b\": 7, \"c\": \"q\", \"u\": 4000000000, \"z\": [1, 2, 255]}")
+  scalars_row("{\"b\": 255, \"c\": \"\\u00e9\", \"u\": 4294967295, \"z\": [0, 255]}")
+  scalars_row("{\"b\": 0, \"c\": \"q\", \"u\": 0, \"z\": []}")
+  scalars_row("{\"b\": 256, \"c\": \"q\", \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": -1, \"c\": \"q\", \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": \"7\", \"c\": \"q\", \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": 2.5, \"c\": \"q\", \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": \"ab\", \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": 5, \"u\": 1, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 4294967296, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": -1, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 1.5, \"z\": []}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 1, \"z\": 5}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 1, \"z\": [1, 300]}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 1, \"z\": [1, \"x\"]}")
+  scalars_row("{\"b\": 1, \"c\": \"q\", \"u\": 1}")
+  turn_row("\"left\"")
+  turn_row("\"right\"")
+  turn_row("{\"times\": 3}")
+  turn_row("\"up\"")
+  turn_row("3")
+}

@@ -41,8 +41,10 @@
 //! * `package_linearity` reads the analyzed bundle and the expansion and runs the M2 affine pass
 //!   (C1, C5) over the expansion's own trees — the same trees the check family checked — so a
 //!   derive-synthesized impl body answers linearity facts like a hand-written one, computed from
-//!   the bundle's own tables with no second expansion, resolution, or check. Package grain like
-//!   `checked_package`: the expansion is the identity anchor (its recompute always counts as
+//!   the bundle's own tables with no second expansion, resolution, or check. When the first tree is
+//!   the stdlib ambient, the pass parks behind the process cell the ambient serve owns: the first
+//!   query's walk fills it, later queries install it and walk only their own files. Package grain
+//!   like `checked_package`: the expansion is the identity anchor (its recompute always counts as
 //!   changed), the fact lists are the value's own renewal identity.
 //! * `package_effects` reads the resolve and expanded values and runs the ds-check effects pass
 //!   (E1) over the already collected and resolved expanded trees: the M2 package is all registered
@@ -58,6 +60,9 @@
 //! * `effects_of` reads `package_effects` and answers one definition's row by its package index.
 //! * `platform_check` reads the expanded value and `package_effects`, and runs
 //!   `ds_check::check_platform` over the same trees against the package's platform declaration.
+//! * `pooled_check` reads the analyzed bundle and the fixed declared-row table, and runs
+//!   `ds_check::check_pooled_bodies`: the pooled-body refusal (E3) the CLI compile seam and the
+//!   editor's diagnostics publish alike. Package grain like `platform_check`.
 //!
 //! [`Ctx::file_content`]: crate::Ctx::file_content
 //! [`Ctx::file_count`]: crate::Ctx::file_count
@@ -77,8 +82,8 @@ use crate::{
     value::{
         AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
         ExpandedOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput,
-        PackageLinearityOutput, ParseOutput, PlatformCheckOutput, QueryValue, ResolveOutput,
-        ScopeIndexOutput, TypeOfOutput,
+        PackageLinearityOutput, ParseOutput, PlatformCheckOutput, PooledCheckOutput, QueryValue,
+        ResolveOutput, ScopeIndexOutput, TypeOfOutput,
     },
 };
 
@@ -327,6 +332,12 @@ pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Qu
 /// trees, namespace, resolutions, declaration tables, and binder facts,
 /// so a derive-synthesized impl body answers linearity facts like a
 /// hand-written one and no second expansion, resolution, or check runs.
+/// A package whose first tree is the stdlib ambient walks it behind the
+/// ambient serve's process park (see the compute below): the first
+/// query's own walk fills the park at the ambient's file boundary, and
+/// every later query in the process installs it and walks only its own
+/// files — the same rows the one plain walk answers, since the fresh
+/// analyze mints the ambient's namespace identically to the serve.
 /// Package grain like `checked_package`: the bundle is the data substrate
 /// and the expansion is the identity anchor — the bundle may renew
 /// against an unchanged identity while a span-keyed fact moved, so the
@@ -348,13 +359,42 @@ pub(crate) fn package_linearity(
     ctx.get::<crate::query::Expanded>(package)?;
     let analyzed = ctx.get::<crate::query::Analyzed>(package)?;
     let bundle = &analyzed.analyzed;
-    let lin = ds_check::linearity_check(
-        &bundle.asts,
-        &bundle.package,
-        &bundle.resolutions,
-        &bundle.decls,
-        &bundle.checked,
-    );
+    // The ambient prefix parks behind the process cell the ambient serve
+    // owns whenever the first tree is the standard first-registered
+    // member: the first query's own walk fills the park at the file
+    // boundary, and every later walk in the process (this session's next
+    // edit, another session's, a run-path compile) installs it and walks
+    // only its own files. The rows name spans and the park's definition
+    // ids key a namespace every fresh analyze mints identically (the
+    // serve-vs-fresh equivalence gates pin it), so the query host and the
+    // run path share one park without either serving the other. A
+    // package whose first tree is not the ambient keeps the plain walk —
+    // the park must never fill over a boundary it did not walk.
+    let ambient_files = usize::from(bundle.asts.first().is_some_and(|ast| {
+        ast.file == FileId::new(0)
+            && ctx
+                .file_content(ast.file)
+                .is_ok_and(|source| source.as_ref() == ds_stdlib::AMBIENT_SOURCE)
+    }));
+    let lin = if ambient_files > 0 {
+        ds_check::linearity_check_served(
+            &bundle.asts,
+            &bundle.package,
+            &bundle.resolutions,
+            &bundle.decls,
+            &bundle.checked,
+            ambient_files,
+            ds_stdlib::ambient_linearity(),
+        )
+    } else {
+        ds_check::linearity_check(
+            &bundle.asts,
+            &bundle.package,
+            &bundle.resolutions,
+            &bundle.decls,
+            &bundle.checked,
+        )
+    };
     let blocks: Vec<(u32, Span)> = bundle
         .asts
         .iter()
@@ -463,7 +503,7 @@ pub(crate) fn parse(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Quer
     let source = ctx.file_content(file)?;
     let (ast, diagnostics) = if source.as_ref() == ds_stdlib::AMBIENT_SOURCE {
         match ds_stdlib::ambient_ast(file) {
-            Ok(ast) => (Some(Arc::new(ast)), Vec::new()),
+            Ok(ast) => (Some(ast), Vec::new()),
             Err(_) => parse_fresh(ctx, file),
         }
     } else {
@@ -498,6 +538,25 @@ pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryVa
     let expanded = ctx.get::<crate::query::Expanded>(package)?;
     let diags = ds_check::check_platform(&expanded.asts[..], &effects.effects);
     Ok(QueryValue::PlatformCheck(PlatformCheckOutput {
+        diags: diags.into(),
+    }))
+}
+
+/// The package's pooled-body refusal (E3): every
+/// `par_map`/`par_reduce` call's callable argument hunted for the
+/// worker-diverging members — the sibling-addressing fiber control
+/// natives and the world surface — over the analyzed bundle, with the
+/// declared-row table the effects pass reads (a callee whose declared row
+/// carries `world` refuses). Package grain like `resolve` — the
+/// dependency is the analyzed value alone, and the declared rows are
+/// fixed database inputs.
+pub(crate) fn pooled_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
+    let QueryKey::PooledCheck(package) = key else {
+        return Err(QueryError::KindMismatch(key));
+    };
+    let analyzed = ctx.get::<crate::query::Analyzed>(package)?;
+    let diags = ds_check::check_pooled_bodies(&analyzed.analyzed, ctx.declared_rows());
+    Ok(QueryValue::PooledCheck(PooledCheckOutput {
         diags: diags.into(),
     }))
 }

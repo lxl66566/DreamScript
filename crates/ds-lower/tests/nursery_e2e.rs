@@ -332,6 +332,72 @@ fn main() -> () {
     );
 }
 
+/// A spawned child's tail answer dies as a discarded statement's value
+/// [E2 composes with C5]: the boundary join takes no completed answer,
+/// so each answer's `~Copyable` deinit claim fires exactly once at the
+/// child's own completion — the call answer, the literal answer, and a
+/// join of two answers alike — and the run's heap drains.
+#[test]
+fn a_spawned_tail_answer_fires_its_deinit_claim_once() {
+    let (vm, out) = run_main(
+        r#"
+struct claimed: ~Copyable {
+  id: int
+  deinit {
+    println("freed ${self.id}")
+  }
+}
+
+fn work(n: int) -> claimed { claimed { id: n } }
+
+fn main() -> () {
+  nursery {
+    spawn { work(7) }
+    spawn { claimed { id: 8 } }
+    spawn { if true { work(9) } else { work(10) } }
+  }
+  println("done")
+}
+"#,
+        false,
+    );
+    assert_eq!(out, "freed 7\nfreed 8\nfreed 9\ndone\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// A spawned child answering a non-`~Copyable` reference or a scalar
+/// keeps the balanced answer discipline [E2]: the reference's one dec
+/// runs at the child's own completion instead of riding the join, the
+/// scalar answers nothing, and the run's heap drains with the same
+/// single dec the seam used to owe.
+#[test]
+fn a_spawned_reference_or_scalar_answer_keeps_its_single_dec() {
+    let (vm, out) = run_main(
+        r#"
+fn make() -> list[int] { list[int]() }
+
+fn main() -> () {
+  nursery {
+    spawn { make() }
+    spawn { 1 }
+  }
+  println("done")
+}
+"#,
+        false,
+    );
+    assert_eq!(out, "done\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
 /// Bare `spawn` outside any nursery refuses at lowering, naming the
 /// ruled surface [E2]: bare detach requires an explicit root nursery or
 /// supervisor.

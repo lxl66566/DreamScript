@@ -38,7 +38,14 @@
 //! stays clean), each counted in the census. Every program
 //! runs through parse, the effects walk over rows the generator picked,
 //! the bidirectional check with the affine pass, and both diag renderers;
-//! the property is that none of this panics. Included by the cargo-fuzz
+//! the property is that none of this panics. The json derive families'
+//! attribute grammar rides the generated declarations (the census's
+//! structural carrier a from_json attribute over the guaranteed
+//! nested-carrier struct, occasional attributes over the other structs
+//! and enums), and the import-row vocabulary names const- and type-shaped
+//! members — the linked facts' import-surface spelling, parsed and
+//! checked here; the link walk itself needs a package store this
+//! single-file harness does not carry. Included by the cargo-fuzz
 //! target `fuzz_check_gen` and the nextest mirror in
 //! crates/ds-check/tests/fuzz_check_gen.rs.
 //!
@@ -144,6 +151,15 @@ pub struct Drawn {
     pub omitted_defaults: u32,
     /// Two-level instantiations (list[list[int]]).
     pub two_level_calls: u32,
+    /// Derive attributes over the json families emitted above generated
+    /// struct and enum declarations (the parse-and-check carrier; the
+    /// expansion itself lives behind the analyze entries the source
+    /// pipeline owns).
+    pub derive_attrs: u32,
+    /// Import rows naming const- and type-shaped members (the linked
+    /// facts' import-surface spelling; the link walk itself needs a
+    /// package store this single-file harness does not carry).
+    pub import_members: u32,
 }
 
 /// One generated program plus the effect rows declared around it.
@@ -594,8 +610,21 @@ impl Gen<'_> {
 
     /// The whole program: prelude, declarations, then fn bodies.
     fn module(&mut self) {
-        if self.s.roll(30) {
-            self.line("import @std/io (get)");
+        // the import-row vocabulary: the plain callable member beside the
+        // linked-facts spellings — const members riding the surface as
+        // plain-literal names, struct types as member names (the link
+        // walk's registration vocabulary, parsed and checked here)
+        match self.s.below(18) {
+            0 => self.line("import @std/io (get)"),
+            1 => {
+                self.line("import @facts (limit, step, greeting, ratio, ready, initial, code)");
+                self.drawn.import_members += 1;
+            },
+            2 => {
+                self.line("import @geom (cell, pair)");
+                self.drawn.import_members += 1;
+            },
+            _ => {},
         }
         self.prelude();
         self.gen_structs();
@@ -647,6 +676,18 @@ impl Gen<'_> {
             }
             let supers = if copyable { ": ~Copyable" } else { "" };
             let generics = if generic { "[t]" } else { "" };
+            // the json derive families' attribute grammar over generated
+            // declarations (the families rule structs and enums; the
+            // generic spelling stays attribute-free)
+            if !generic && self.s.roll(3) {
+                let attr = match self.s.below(3) {
+                    0 => "from_json",
+                    1 => "to_json",
+                    _ => "from_json, to_json",
+                };
+                self.line(&format!("#[derive({attr})]"));
+                self.drawn.derive_attrs += 1;
+            }
             self.line(&format!("struct {name}{generics}{supers} {{"));
             self.indent += 1;
             for (fname, ty) in &fields {
@@ -680,6 +721,10 @@ impl Gen<'_> {
             for _ in 0..self.s.below(2) {
                 fields.push((self.fresh("f"), self.pick_base()));
             }
+            // the census's structural carrier: this struct exists in
+            // every program, so its attribute always draws
+            self.line("#[derive(from_json)]");
+            self.drawn.derive_attrs += 1;
             self.line(&format!("struct {name} {{"));
             self.indent += 1;
             for (fname, ty) in &fields {
@@ -734,6 +779,14 @@ impl Gen<'_> {
                     name: self.fresh("c"),
                     payload: Some(payload),
                 });
+            }
+            if self.s.roll(3) {
+                let attr = match self.s.below(2) {
+                    0 => "to_json",
+                    _ => "from_json",
+                };
+                self.line(&format!("#[derive({attr})]"));
+                self.drawn.derive_attrs += 1;
             }
             self.line(&format!("enum {name} {{"));
             self.indent += 1;

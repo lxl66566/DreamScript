@@ -48,19 +48,29 @@
 //! `fn map[t, r]` coexist: brace and type positions resolve the struct,
 //! the dot position resolves the function. Consequences that remain:
 //!
-//! * Per-file types stay file-owned: `file`, `raw_fd`, `url`, `json`, and the stack API
-//!   (`push`/`pop`) are corpus declarations. `open` and `read_exact` are absent for that reason
-//!   (their signatures cannot name the caller's own `file` struct); their uses surface as staged
-//!   run-item noise. The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`,
-//!   `parse_err` — the discriminants the platform natives answer), so the fallible reads
-//!   (`read_file`, `parse_int`) return real success unions.
+//! * The file face is ambient-owned (the package-owned-types round): the `file_handle` struct
+//!   (named apart from the corpus files' own `file` declarations) with the `open_file`/
+//!   `read_raw`/`close_raw` externs and the ds-source `read_exact`/`close_file` handlers over it,
+//!   its deinit closing the handle; `read_exact` answers `bytes | io_err` (the `bytes` collection's
+//!   runtime kind: one immutable byte string behind one Ref word, constructed through `bytes_of`
+//!   over `list[byte]`, read through `len`/`byte_at`/`byte_list`), while `open_file` keeps the
+//!   total spelling because a deinit-carrying union member refuses. The net face rides the same
+//!   ownership: the `net_handle` struct with `net_connect` answering it, the ds-source
+//!   `send`/`recv`/`close_conn` handlers reading its id word out to the raw `net_send`/`net_recv`/
+//!   `net_close` externs, the deinit closing the connection, and `net_close` total and idempotent
+//!   for the deinit pairing. Still file-owned: `json` and the stack API (`push`/`pop`) — the map
+//!   value channel holds one-word values, so the object case of a `json` enum cannot construct
+//!   until the map round widens it, and `parse_json` answers the string channel (validate and
+//!   minify). The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`, `parse_err`
+//!   — the discriminants the platform natives answer), so the fallible reads (`read_file`,
+//!   `parse_int`, the file face's reads) return real success unions.
 //! * `max` carries no bound even though the ambient now owns the `ord` trait: the native's one
 //!   generic body plans against no instance, so the bound would add nothing to route. Likewise
 //!   `u32` is a distinct atom (B7) (mixed-width arithmetic is the corpus's staged noise).
 //! * Every extern names a callee the lowering answers; the dead declarations (declared externs
 //!   whose callee no native or rule answered — `get`, `log`, `close`, `to_u32_le`, `read_config`,
 //!   `default_config`, `load_rows`, `fetch`, `consume`, `die`) are gone, so their uses are unknown
-//!   names at the checker. `parse_json` stays ruled-unnameable (todo 33).
+//!   names at the checker.
 
 #![warn(missing_docs)]
 
@@ -75,7 +85,7 @@ pub mod ambient_dsi;
 #[cfg(feature = "ast-serde")]
 pub use ambient_blob::{AmbientBlobError, ambient_ast};
 #[cfg(feature = "ast-serde")]
-pub use ambient_dsi::ambient_dsi;
+pub use ambient_dsi::{ambient_dsi, ambient_linearity};
 #[cfg(feature = "ast-serde")]
 pub use ds_dsi::{PrefixDsiError, ServedPrefix};
 
@@ -94,6 +104,10 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("net_recv", "net")
         .with("net_close", "net")
         .with("http_get", "net")
+        .with("open_file", "fsys")
+        .with("read_raw", "fsys")
+        .with("close_raw", "fsys")
+        .with("time", "time")
 });
 
 /// The ambient functions' world-capability attribution (E1, H5): the
@@ -105,8 +119,10 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 /// world-bearing platform.
 ///
 /// * `console`: the printing pair.
-/// * `fsys`: the file readers and writers.
-/// * `net`: the TCP surface and `http_get`.
+/// * `fsys`: the file readers, writers, and the handle face (`open_file`, `read_raw`, `close_raw`).
+/// * `net`: the TCP surface, its linear handle face (`net_connect` answering `net_handle`, the
+///   ds-source `send`/`recv`/`close_conn` handlers over it), and `http_get`.
+/// * `time`: the clock op.
 ///
 /// The table is built on first read and shared: a consumer that must own
 /// one clones it.
@@ -121,6 +137,37 @@ pub const AMBIENT_FILE: &str = "std/ambient.ds";
 /// The ambient package member's text: the declarations of the M3 stdlib
 /// surface. Register it as a package member before the user's files.
 pub const AMBIENT_SOURCE: &str = include_str!("ambient.ds");
+
+/// The reserved `@std` package's name in the package namespace: the
+/// ds-source package the toolchain installs beside the ambient, never a
+/// user package's name (a manifest under it refuses, and the default
+/// install answers the name's resolution demands before any store or
+/// registry row can).
+pub const STD_PACKAGE_NAME: &str = "@std";
+
+/// The default `@std` package's bundle: the manifest (`@std` at the
+/// toolchain's own version, dependency-free) plus one member seeded from
+/// the ambient source content verbatim, so the package's member identity
+/// is the ambient's source hash — the same identity the dep-list writer
+/// records for an `@std` import and the checked-in ambient dsmod serves
+/// under. A pure function of the tree: two calls build byte-identical
+/// bundles, so the store's content addressing holds one row per toolchain.
+#[must_use]
+pub fn std_package() -> ds_pkg::Package {
+    let version = ds_pkg::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("the toolchain version parses as a package version");
+    let manifest = ds_pkg::Manifest {
+        name: STD_PACKAGE_NAME.to_owned(),
+        version,
+        deps: std::collections::BTreeMap::new(),
+        artifacts: std::collections::BTreeMap::new(),
+    };
+    ds_pkg::Package::new(&manifest, [(
+        AMBIENT_FILE.to_owned(),
+        AMBIENT_SOURCE.as_bytes().to_vec(),
+    )])
+    .expect("the default @std bundle frames")
+}
 
 /// The checked-in ambient dsmod artifact: a 16-byte build-identity
 /// header followed by the module bytes the `gen-ambient-dsmod` example
@@ -142,13 +189,21 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("net_connect", error | world)
         .with("net_send", error | world)
         .with("net_recv", error | world)
-        .with("net_close", error | world)
+        .with("net_close", world)
         .with("http_get", error | world)
+        .with("open_file", error | world)
+        .with("read_raw", error | world)
+        .with("close_raw", world)
+        .with("time", world)
         .with("parse_json", error)
         .with("println", world)
         .with("print", world)
         .with("parse_int", error)
         .with("cancel", EffectRow::of(Effect::Cancel))
+        // the trap primitive's private spelling (the u32 conversion's
+        // seam): the row rides the declared table the same way the host
+        // provision's die row rides the session rows
+        .with("trap", EffectRow::of(Effect::Trap))
 });
 
 /// The ambient functions' declared effect rows (E1) — the failure and
@@ -156,8 +211,12 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 /// a declared row is a lower bound on the computed row.
 ///
 /// * `error`: failure handed to the caller — the parse and IO readers.
-/// * `world`: the world-touching capability surface — IO and printing.
+/// * `world`: the world-touching capability surface — IO, the file and net handle faces (the reads
+///   and connects fallible, the two idempotent close seams total), the clock, and printing.
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
+/// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
+///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
+///   provision declares for its own member.
 ///
 /// Every other ambient function is row-pure: the combinators run their
 /// lambdas inside the enclosing definition's extent (D3), which the
@@ -206,15 +265,31 @@ mod tests {
             "map_set",
             "map_get",
             "map_len",
+            "map_keys",
+            "bytes_of",
+            "byte_list",
+            "byte_at",
             "unwrap_or",
             "unwrap_or_else",
             "ok_or",
             "map_err",
+            "open_file",
+            "read_raw",
+            "close_raw",
+            "read_exact",
+            "close_file",
+            "net_connect",
+            "send",
+            "recv",
+            "close_conn",
+            "time",
+            "parse_json",
         ] {
             assert!(package.lookup_value(name).is_some(), "`{name}` is ambient");
         }
         for name in [
             "byte",
+            "bytes",
             "list",
             "map",
             "ord",
@@ -226,6 +301,8 @@ mod tests {
             "net_err",
             "Copyable",
             "response",
+            "file_handle",
+            "net_handle",
         ] {
             assert!(package.lookup_type(name).is_some(), "`{name}` is ambient");
         }
@@ -249,18 +326,26 @@ mod tests {
         assert_eq!(rows.row("write_file").render(), "error | world");
         assert_eq!(rows.row("fs_list").render(), "error | world");
         assert_eq!(rows.row("file_size").render(), "error | world");
-        for name in [
-            "net_connect",
-            "net_send",
-            "net_recv",
-            "net_close",
-            "http_get",
-        ] {
+        for name in ["net_connect", "net_send", "net_recv", "http_get"] {
             assert_eq!(rows.row(name).render(), "error | world");
         }
+        assert_eq!(
+            rows.row("net_close").render(),
+            "world",
+            "the idempotent close seam is total"
+        );
         assert_eq!(rows.row("file_exists").render(), "world");
+        assert_eq!(rows.row("open_file").render(), "error | world");
+        assert_eq!(rows.row("read_raw").render(), "error | world");
+        assert_eq!(rows.row("close_raw").render(), "world");
+        assert_eq!(rows.row("time").render(), "world");
         assert_eq!(rows.row("println").render(), "world");
         assert_eq!(rows.row("cancel").render(), "cancel");
+        assert_eq!(
+            rows.row("trap").render(),
+            "trap",
+            "the trap primitive's private spelling rows trap, the die row's own"
+        );
         assert!(rows.row("cons").is_pure(), "the combinators are row-pure");
         assert!(
             rows.row("concat").is_pure(),
@@ -274,9 +359,7 @@ mod tests {
 
     /// The removed dead declarations stay removed at the honest boundary:
     /// a use of any of them is an unknown name at the checker, never a
-    /// callee that checks clean only to refuse at lowering. (`parse_json`
-    /// stays ruled-unnameable — its declaration remains, its callee
-    /// refusing at lowering by todo 33's ruling.)
+    /// callee that checks clean only to refuse at lowering.
     #[test]
     fn the_dead_externs_are_unknown_names() {
         for name in [
@@ -304,5 +387,69 @@ mod tests {
                 "`{name}` must be an unknown name at the checker: {diags:?}"
             );
         }
+    }
+
+    /// The trap primitive's spelling stays the ambient file's own [G4]:
+    /// a user's call resolves the private def but refuses at the file
+    /// grain, and a user redeclaring the name collides like any ambient
+    /// face — no bare trap spelling ever serves below the host.
+    #[test]
+    fn the_trap_spelling_stays_private_to_the_ambient_file() {
+        let mut files = ds_diag::Files::new();
+        let ambient = files.add_source(AMBIENT_FILE, AMBIENT_SOURCE);
+        let user = files.add_source("use.ds", "fn probe() -> () { trap(\"boom\") }\n");
+        let ambient_ast = ds_parse::parse(&files, ambient).expect("the ambient parses");
+        let user_ast = ds_parse::parse(&files, user).expect("the use parses");
+        let (_, _, diags) = ds_check::resolve_package(&[ambient_ast, user_ast]);
+        assert!(
+            diags.iter().any(|diag| diag
+                .message
+                .contains("`trap` is private to its defining file")),
+            "the private extern refuses at the use site: {diags:?}"
+        );
+
+        let mut files = ds_diag::Files::new();
+        let ambient = files.add_source(AMBIENT_FILE, AMBIENT_SOURCE);
+        let user = files.add_source("use.ds", "extern fn trap[t](msg: string) -> t\n");
+        let ambient_ast = ds_parse::parse(&files, ambient).expect("the ambient parses");
+        let user_ast = ds_parse::parse(&files, user).expect("the use parses");
+        let (_, _, diags) = ds_check::resolve_package(&[ambient_ast, user_ast]);
+        assert!(
+            diags
+                .iter()
+                .any(|diag| diag.message.contains("`trap` is already defined")),
+            "the redeclaration collides with the ambient's name: {diags:?}"
+        );
+    }
+
+    /// The default @std package is a pure function of the tree: the
+    /// manifest names the reserved package at the toolchain's version, the
+    /// one member is the ambient source verbatim, and two calls build
+    /// byte-identical bundles.
+    #[test]
+    fn the_default_std_package_is_the_ambient_verbatim() {
+        let package = std_package();
+        let manifest = package
+            .manifest(ds_diag::FileId::new(0))
+            .expect("the bundle's manifest member parses");
+        assert_eq!(manifest.name, STD_PACKAGE_NAME);
+        assert_eq!(
+            manifest.version.to_string(),
+            env!("CARGO_PKG_VERSION"),
+            "the default package rides the toolchain's version"
+        );
+        assert!(manifest.deps.is_empty() && manifest.artifacts.is_empty());
+        let members = package.members();
+        assert!(
+            members
+                .iter()
+                .any(|(path, bytes)| path == AMBIENT_FILE && bytes == AMBIENT_SOURCE.as_bytes()),
+            "the source member is the ambient verbatim under its own file name"
+        );
+        assert_eq!(
+            std_package().to_bytes(),
+            package.to_bytes(),
+            "two calls build byte-identical bundles"
+        );
     }
 }

@@ -112,7 +112,13 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     for &file in &files {
         let index = query(db.get::<BlockIndex>(file), "block index")?;
         for block in index.blocks.iter() {
-            let def = DefId::from_block(block.id)?;
+            let Ok(def) = DefId::from_block(block.id) else {
+                reports.push(Report {
+                    diag: crate::repl::block_key_overflow(block),
+                    fatal: true,
+                });
+                continue;
+            };
             let typed = query(db.get::<TypeOf>(def), "type_of")?;
             for diag in &*typed.diags {
                 reports.push(Report {

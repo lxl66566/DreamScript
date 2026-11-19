@@ -20,12 +20,23 @@ const AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag float\n",
     "pub tag string\n",
+    "pub tag bool\n",
     "pub tag io_err\n",
+    "pub tag parse_err\n",
+    "pub enum json {\n",
+    "  json_null\n",
+    "  json_bool { value: bool }\n",
+    "  json_int { value: int }\n",
+    "  json_float { value: float }\n",
+    "  json_string { value: string }\n",
+    "  json_array { items: list[json] }\n",
+    "  json_object { fields: map[string, json] }\n",
+    "}\n",
     "pub struct list[t]\n",
     "pub struct map[k, v]\n",
     "pub struct config { host: string, port: int?, retries: int }\n",
     "pub fn read_file(path: string) -> string { \"\" }\n",
-    "pub fn parse_json(text: string) -> string { \"\" }\n",
+    "pub fn parse_json(text: string) -> json { json_null }\n",
 );
 
 struct Fixture {
@@ -158,13 +169,13 @@ fn collects_every_declaration_kind() {
         assert_eq!(f.package.def(id).name, name);
     }
     // Trait members and inherent impl fns register in the method tier.
-    let show = f.package.method_candidates("show");
+    let show: Vec<_> = f.package.method_candidates("show").collect();
     assert_eq!(show.len(), 1);
     assert_eq!(
         f.package.method(show[0]).owner,
         MethodOwner::Trait(f.package.lookup_type("pretty").unwrap())
     );
-    let helper = f.package.method_candidates("helper");
+    let helper: Vec<_> = f.package.method_candidates("helper").collect();
     assert_eq!(helper.len(), 1);
     assert_eq!(
         f.package.method(helper[0]).owner,
@@ -621,9 +632,10 @@ fn conformance_types_hybrid_resolves_fully() {
         Some(&Res::Local { bind: binder }),
         "punning uses the `const port` binder"
     );
-    // Types declared in-file resolve to their defs.
+    // The ambient's own json case resolves to its def through the file's
+    // narrowing.
     assert!(matches!(
-        uses.get(span_in(src, file, "is json_obj", 0, "json_obj")),
+        uses.get(span_in(src, file, "is json_object", 0, "json_object")),
         Some(Res::Def(_))
     ));
     assert_eq!(
@@ -766,7 +778,7 @@ fn duplicate_inherent_methods_report_both_spans() {
     assert_eq!(f.collect[0].code, ErrorCode::DuplicateDefinition);
     assert_eq!(f.collect[0].labels.len(), 2, "two-span diagnostic");
     assert_eq!(
-        f.package.method_candidates("m").len(),
+        f.package.method_candidates("m").count(),
         1,
         "the first registration wins"
     );
@@ -778,7 +790,7 @@ fn duplicate_inherent_methods_report_both_spans() {
     ));
     assert!(shared.collect.is_empty(), "{:?}", shared.collect);
     assert_eq!(
-        shared.package.method_candidates("m").len(),
+        shared.package.method_candidates("m").count(),
         2,
         "two traits share the name"
     );
@@ -799,7 +811,7 @@ fn inherent_methods_key_by_owner_type() {
         "impl b { fn m(self) -> unit_one { self.v } }\n",
     ));
     assert!(f.collect.is_empty(), "{:?}", f.collect);
-    let candidates = f.package.method_candidates("m");
+    let candidates: Vec<_> = f.package.method_candidates("m").collect();
     assert_eq!(candidates.len(), 2, "two owners share the name");
     assert_eq!(
         f.package.method(candidates[0]).owner,
@@ -817,7 +829,7 @@ fn inherent_methods_key_by_owner_type() {
     ]);
     assert!(across.collect.is_empty(), "{:?}", across.collect);
     assert_eq!(
-        across.package.method_candidates("m").len(),
+        across.package.method_candidates("m").count(),
         1,
         "the forward reference registers"
     );
@@ -961,7 +973,667 @@ fn use_index_covers_method_and_dot_uses() {
     let dotted = span_in(source, file, "const two = 1.free()", 0, "free");
     assert_eq!(index.def_uses(free), [bare, dotted]);
     // The qualified trait-method use answers under the method id.
-    let show = f.package.method_candidates("show")[0];
+    let show = f.package.method_candidates("show").next().unwrap();
     let qualified = span_in(source, file, "pretty::show(2)", 0, "show");
     assert_eq!(index.method_uses(show), [qualified]);
+}
+
+/// Two imports binding the same module alias refuse once (DS4022) and
+/// the first binding survives: the duplicate never mints a module id
+/// over an unpushed `module_refs` slot, so a later qualified use
+/// resolves through the first import instead of indexing out of bounds.
+#[test]
+fn a_duplicate_module_alias_keeps_the_first_binding_usable() {
+    let mut files = Files::new();
+    let source = concat!(
+        "import @std as a\n",
+        "import @std as a\n",
+        "\n",
+        "pub fn call(n: int) -> int {\n",
+        "  a.println(n)\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let mut imports = ds_check::ImportGraph::new();
+    let spans: Vec<Span> = ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .filter_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spans.len(), 2, "the source carries two imports");
+    for span in spans {
+        imports.add(span, ds_check::ImportSurface::Merged { member: file });
+    }
+    let (_, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    let duplicates = diags
+        .iter()
+        .filter(|diag| diag.code == ErrorCode::ImportDuplicate)
+        .count();
+    assert_eq!(
+        duplicates, 1,
+        "exactly one duplicate-alias refusal: {diags:?}"
+    );
+    assert_eq!(resolutions.len(), 1, "the use still resolved");
+}
+
+/// A linked const binds through its literal fact (G4): the value is the
+/// fact, so a selection registers a const def the file's uses reach with
+/// no linked-module machinery, the alias-qualified spelling binds the
+/// same def in value position, while the alias's call form, a computed
+/// binding, and a type keep their shape refusals.
+#[test]
+fn a_linked_const_binds_through_its_literal_fact() {
+    let mut files = Files::new();
+    let source = concat!(
+        "import @lib (limit, base, point)\n",
+        "import @lib as w\n",
+        "\n",
+        "pub fn take() -> int {\n",
+        "  limit\n",
+        "}\n",
+        "\n",
+        "pub fn alias() -> int {\n",
+        "  w.limit()\n",
+        "}\n",
+        "\n",
+        "pub fn read() -> int {\n",
+        "  w.limit\n",
+        "}\n",
+        "\n",
+        "pub fn refused() -> int {\n",
+        "  w.base\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let entry = |name: &str,
+                 kind: ds_check::ForeignKind,
+                 value: Option<ds_check::ConstFact>|
+     -> ds_check::ForeignEntry {
+        ds_check::ForeignEntry {
+            name: name.to_owned(),
+            vis: ds_check::Vis::Pub,
+            kind,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value,
+            ty: None,
+            link: 0,
+            func: Some(0),
+            std: false,
+        }
+    };
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            entry(
+                "limit",
+                ds_check::ForeignKind::Binding,
+                Some(ds_check::ConstFact::Int(21)),
+            ),
+            entry("base", ds_check::ForeignKind::Binding, None),
+            entry("point", ds_check::ForeignKind::Type, None),
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    let spans: Vec<Span> = ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .filter_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spans.len(), 2, "the source carries two imports");
+    imports.add(spans[0], ds_check::ImportSurface::Linked(surface.clone()));
+    imports.add(spans[1], ds_check::ImportSurface::Linked(surface));
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    let refused: Vec<String> = diags
+        .iter()
+        .filter(|diag| diag.code == ErrorCode::ImportUnsupportedShape)
+        .map(|diag| format!("{diag:?}"))
+        .collect();
+    assert_eq!(
+        refused.len(),
+        4,
+        "the computed binding, the type, the alias call, and the computed alias value use each \
+         refuse once: {diags:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|text| text.contains("reads in value position")),
+        "the alias call names the value seam the const reads through: {refused:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|text| text.contains("its value is no literal")),
+        "the computed consts' refusals name the literal boundary: {refused:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|text| text.contains("layout and tag rows")),
+        "the type's refusal names the artifact-round facts: {refused:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|text| text.contains("binds through its selection import")),
+        "the qualified spelling names the callable-only alias: {refused:?}"
+    );
+    // the literal fact's def is the one foreign const, and the body's use
+    // resolves onto it
+    let consts: Vec<_> = package
+        .foreign()
+        .iter()
+        .filter(|(def, entry)| {
+            package.def(**def).kind == DefKind::Const
+                && entry.kind == ds_check::ForeignKind::Binding
+        })
+        .collect();
+    assert_eq!(
+        consts.len(),
+        1,
+        "exactly the literal const registers: {consts:?}"
+    );
+    let (&def, entry) = consts[0];
+    assert_eq!(entry.name, "limit");
+    assert_eq!(entry.value, Some(ds_check::ConstFact::Int(21)));
+    let index = UseIndex::build(&resolutions);
+    let use_span = span_in(source, file, "  limit", 0, "limit");
+    let alias_span = span_in(source, file, "  w.limit", 1, "limit");
+    assert_eq!(
+        index.def_uses(def),
+        [use_span, alias_span],
+        "the selection's use and the alias's value use resolve onto the linked const's def"
+    );
+}
+
+/// A linked type binds through its structural fact (G4): the fact
+/// registers the type from the member's surface — before any selection
+/// validates, so a signature's type head never depends on the file's
+/// import order — the selection binds a struct def the file's type
+/// positions reach, and a linked fn's signature naming the type stays
+/// spellable beside it, while a type with no fact keeps its refusal.
+#[test]
+fn a_linked_type_registers_before_selections_validate() {
+    let mut files = Files::new();
+    // the fn's import precedes the type's: the two-pass link walk
+    // registers every entry first, so the order never gates spellability
+    let source = concat!(
+        "pub tag int\n",
+        "pub tag bytes\n",
+        "\n",
+        "import @lib (make, area)\n",
+        "import @lib (cell, tone)\n",
+        "\n",
+        "pub fn probe(c: cell) -> int {\n",
+        "  cell { n: c.n, data: c.data }.n\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let name_type = |name: &str| ds_parse::Type::Path {
+        span: at,
+        path: ds_parse::Path {
+            span: at,
+            segments: vec![ds_parse::Ident {
+                span: at,
+                name: name.to_owned(),
+            }],
+        },
+        args: Vec::new(),
+    };
+    let fn_entry = |name: &str, param: &str, param_ty: &str, ret: &str| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Fn,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: Some(std::sync::Arc::new(ds_check::FnSig {
+            generics: Vec::new(),
+            params: vec![ds_check::decls::ParamSig {
+                name: param.to_owned(),
+                span: at,
+                mode: ds_parse::ParamMode::Borrow,
+                ty: Some(name_type(param_ty)),
+                default: None,
+            }],
+            ret: Some(name_type(ret)),
+        })),
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: None,
+        link: 0,
+        func: Some(0),
+        std: false,
+    };
+    let ty_entry = |name: &str, fact: Option<ds_check::TypeFact>| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Type,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: None,
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: fact.map(std::sync::Arc::new),
+        link: 0,
+        func: Some(0),
+        std: false,
+    };
+    let cell_fact = ds_check::TypeFact::Struct(vec![
+        ds_check::import::TypeField {
+            name: "n".to_owned(),
+            word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
+        },
+        ds_check::import::TypeField {
+            name: "data".to_owned(),
+            word: ds_check::import::TypeWord::Bytes,
+        },
+    ]);
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            fn_entry("make", "n", "int", "cell"),
+            fn_entry("area", "c", "cell", "int"),
+            ty_entry("cell", Some(cell_fact)),
+            ty_entry("tone", None),
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    let spans: Vec<Span> = ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .filter_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spans.len(), 2, "the source carries two imports");
+    for span in spans {
+        imports.add(span, ds_check::ImportSurface::Linked(surface.clone()));
+    }
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    let refused: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|diag| diag.code == ErrorCode::ImportUnsupportedShape)
+        .collect();
+    assert_eq!(
+        refused.len(),
+        1,
+        "only the fact-less type refuses: {diags:?}"
+    );
+    assert!(
+        format!("{:?}", refused[0]).contains("tone"),
+        "the refusal names the uncarried type: {refused:?}"
+    );
+    // the registered type is a struct def, and every type-position use
+    // in the body resolves onto it — the annotation and the brace head
+    let (&cell_def, _) = package
+        .foreign()
+        .iter()
+        .find(|(_, entry)| entry.name == "cell")
+        .unwrap_or_else(|| panic!("the type registers"));
+    assert_eq!(package.def(cell_def).kind, DefKind::Struct);
+    let index = UseIndex::build(&resolutions);
+    let annotation = span_in(source, file, "pub fn probe(c: cell)", 0, "cell");
+    let brace_head = span_in(source, file, "  cell { n: c.n, data: c.data }.n", 0, "cell");
+    assert_eq!(
+        index.def_uses(cell_def),
+        [annotation, brace_head],
+        "the annotation and the construction head resolve onto the linked type's def"
+    );
+}
+
+/// Resolves one source over a linked member surface whose only entry is
+/// the fact-carrying struct `cell` (G4): the fixture the linked tier's
+/// receiver and impl seams share.
+fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![ds_check::ForeignEntry {
+            name: "cell".to_owned(),
+            vis: ds_check::Vis::Pub,
+            kind: ds_check::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct(vec![
+                ds_check::import::TypeField {
+                    name: "n".to_owned(),
+                    word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
+                },
+            ]))),
+            link: 0,
+            func: None,
+            std: false,
+        }],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for span in ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .filter_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+    {
+        imports.add(span, ds_check::ImportSurface::Linked(surface.clone()));
+    }
+    let (_, _, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    diags
+}
+
+/// A linked type name as a dot-call receiver enters the type-keyed tier
+/// (G4): the receiver walk consults the file's import bindings after the
+/// package namespace, so a member the linked type does not carry refuses
+/// at the check with the same DS2004 the local spelling answers — not
+/// the value tiers' acceptance the lowering must catch.
+#[test]
+fn a_linked_type_receiver_refuses_its_members_at_the_check() {
+    let diags = resolve_over_linked_cell(concat!(
+        "pub tag int\n",
+        "\n",
+        "import @lib (cell)\n",
+        "\n",
+        "pub fn probe() -> int {\n",
+        "  cell.len()\n",
+        "}\n",
+    ));
+    assert_eq!(diags.len(), 1, "only the member refusal: {diags:?}");
+    assert_eq!(diags[0].code, ErrorCode::UnresolvedName);
+    assert!(
+        format!("{:?}", diags[0]).contains("type `cell` carries no member `len`"),
+        "the refusal answers the local spelling's wording: {diags:?}"
+    );
+}
+
+/// An inherent impl whose target head the file's imports bind refuses at
+/// the declaration (G4): the linked type's minted def answers the layout
+/// seams, but the impl's members register nowhere its receiver resolves,
+/// so the declaration itself is the honest refusal point — cross-package
+/// impls wait on the artifact round's member link facts.
+#[test]
+fn an_impl_over_a_linked_type_refuses_at_the_declaration() {
+    let diags = resolve_over_linked_cell(concat!(
+        "pub tag int\n",
+        "\n",
+        "import @lib (cell)\n",
+        "\n",
+        "impl cell {\n",
+        "  fn extra(self) -> int {\n",
+        "    1\n",
+        "  }\n",
+        "}\n",
+    ));
+    assert_eq!(diags.len(), 1, "the declaration is the refusal: {diags:?}");
+    assert_eq!(diags[0].code, ErrorCode::ImportUnsupportedShape);
+    assert!(
+        format!("{:?}", diags[0]).contains("impl over `cell`"),
+        "the refusal names the linked type: {diags:?}"
+    );
+}
+
+/// A linked enum registers exactly like a local declaration (G4): the
+/// enum's fact registers the enum def and each case's fact its own case
+/// def beside it — one name owner per type-namespace name — the
+/// selections bind all of them into the file, and the declaration pass
+/// mints the same products a local non-generic enum carries (the enum's
+/// case rows, each case's atom and case row, the payloaded case's
+/// struct row). A case whose enum did not register (a local declaration
+/// owns the name) refuses naming its enum.
+#[test]
+fn a_linked_enum_registers_its_cases_beside_it() {
+    let mut files = Files::new();
+    let source = concat!(
+        "pub tag int\n",
+        "pub tag bytes\n",
+        "import @lib (tone, quiet, loud, tagged, make)\n",
+        "\n",
+        "fn probe(t: tone) -> int {\n",
+        "  match t {\n",
+        "    quiet => 1,\n",
+        "    tagged(n, _) => n,\n",
+        "    loud => 2,\n",
+        "  }\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let name_type = |name: &str| ds_parse::Type::Path {
+        span: at,
+        path: ds_parse::Path {
+            span: at,
+            segments: vec![ds_parse::Ident {
+                span: at,
+                name: name.to_owned(),
+            }],
+        },
+        args: Vec::new(),
+    };
+    let fn_entry = |name: &str, param: &str, param_ty: &str, ret: &str| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Fn,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: Some(std::sync::Arc::new(ds_check::FnSig {
+            generics: Vec::new(),
+            params: vec![ds_check::decls::ParamSig {
+                name: param.to_owned(),
+                span: at,
+                mode: ds_parse::ParamMode::Borrow,
+                ty: Some(name_type(param_ty)),
+                default: None,
+            }],
+            ret: Some(name_type(ret)),
+        })),
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: None,
+        link: 0,
+        func: Some(0),
+        std: false,
+    };
+    let ty_entry = |name: &str, fact: Option<ds_check::TypeFact>| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Type,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: None,
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: fact.map(std::sync::Arc::new),
+        link: 0,
+        func: None,
+        std: false,
+    };
+    let unit = || ds_check::import::CasePayload::Unit;
+    let case_fact = || ds_check::import::CaseFact {
+        enum_name: "tone".to_owned(),
+        payload: unit(),
+    };
+    let tagged_payload = || {
+        ds_check::import::CasePayload::Struct(vec![
+            ds_check::import::TypeField {
+                name: "n".to_owned(),
+                word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
+            },
+            ds_check::import::TypeField {
+                name: "data".to_owned(),
+                word: ds_check::import::TypeWord::Bytes,
+            },
+        ])
+    };
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            fn_entry("make", "n", "int", "tone"),
+            ty_entry(
+                "tone",
+                Some(ds_check::TypeFact::Enum(vec![
+                    ds_check::import::TypeCase {
+                        name: "quiet".to_owned(),
+                        payload: unit(),
+                    },
+                    ds_check::import::TypeCase {
+                        name: "loud".to_owned(),
+                        payload: unit(),
+                    },
+                    ds_check::import::TypeCase {
+                        name: "tagged".to_owned(),
+                        payload: tagged_payload(),
+                    },
+                ])),
+            ),
+            ty_entry("quiet", Some(ds_check::TypeFact::Case(case_fact()))),
+            ty_entry("loud", Some(ds_check::TypeFact::Case(case_fact()))),
+            ty_entry(
+                "tagged",
+                Some(ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "tone".to_owned(),
+                    payload: tagged_payload(),
+                })),
+            ),
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    assert!(
+        diags.is_empty(),
+        "the enum, its cases, and the signature over the type all bind: {diags:?}"
+    );
+    // the registered kinds: the enum def and each case's own def
+    let defs: std::collections::HashMap<String, ds_check::DefId> = package
+        .foreign()
+        .iter()
+        .map(|(def, entry)| (entry.name.clone(), *def))
+        .collect();
+    assert_eq!(package.def(defs["tone"]).kind, DefKind::Enum);
+    assert_eq!(package.def(defs["quiet"]).kind, DefKind::Case);
+    assert_eq!(package.def(defs["loud"]).kind, DefKind::Case);
+    assert_eq!(package.def(defs["tagged"]).kind, DefKind::Case);
+    // the file's match arms resolve onto the case defs
+    let index = UseIndex::build(&resolutions);
+    let quiet_arm = span_in(source, file, "    quiet => 1,", 0, "quiet");
+    let tagged_arm = span_in(source, file, "    tagged(n, _) => n,", 0, "tagged");
+    assert_eq!(index.def_uses(defs["quiet"]), [quiet_arm]);
+    assert_eq!(index.def_uses(defs["tagged"]), [tagged_arm]);
+    // the declaration pass mints the local-declaration products
+    let (decls, _) = ds_check::decls::build(&package, &[&ast], &resolutions);
+    let enum_def = defs["tone"];
+    let shape = decls.enums.get(&enum_def).expect("the enum row mints");
+    assert_eq!(
+        shape
+            .cases
+            .iter()
+            .map(|(name, ..)| name.clone())
+            .collect::<Vec<_>>(),
+        vec!["quiet".to_owned(), "loud".to_owned(), "tagged".to_owned()]
+    );
+    for name in ["quiet", "loud", "tagged"] {
+        let def = defs[name];
+        let case = decls
+            .cases
+            .get(&def)
+            .unwrap_or_else(|| panic!("{name} mints a case row"));
+        assert_eq!(case.enum_def, enum_def, "{name} maps back to the enum");
+        assert!(decls.atoms.get(&def).is_some(), "{name} mints its atom");
+        assert_eq!(
+            decls.foreign_type(name).as_ref(),
+            Some(&def),
+            "{name} enters the name index"
+        );
+    }
+    let tagged = decls
+        .structs
+        .get(&defs["tagged"])
+        .expect("the payloaded case's struct row");
+    assert_eq!(
+        tagged
+            .fields
+            .iter()
+            .map(|field| field.name.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["n".to_owned(), "data".to_owned()],
+        "the payload mints its bytes field beside the scalar"
+    );
+    // a case of an enum that did not register refuses naming its enum
+    let mut files = Files::new();
+    let collision = concat!(
+        "pub tag int\n",
+        "import @lib (quiet)\n",
+        "\n",
+        "enum tone {\n",
+        "  quiet,\n",
+        "  loud,\n",
+        "}\n",
+        "\n",
+        "fn main() -> int {\n",
+        "7\n",
+        "}\n",
+    );
+    let file = files.add_source("c.ds", collision);
+    let ast = parse(&files, file).expect("the source parses");
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    let (_, _, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    let refusal = diags
+        .iter()
+        .find(|diag| diag.code == ErrorCode::ImportUnsupportedShape)
+        .expect("the case selection refuses");
+    assert!(
+        format!("{refusal:?}").contains("its enum `tone` did not bind"),
+        "the refusal names the enum: {refusal:?}"
+    );
 }

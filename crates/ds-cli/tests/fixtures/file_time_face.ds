@@ -1,0 +1,56 @@
+// purpose: the user face of the platform file/time surface through the
+// real ambient — the package-owned file struct behind open and the
+// ds-source read_exact handler (each helper call's scope end fires the
+// deinit and closes the handle, so the 2000-iteration loop pins that
+// nothing leaks), the time op's clock word, the bytes collection's
+// members over the reads (the list[byte] bridges, the checked byte_at
+// read, the payload count), and the ambient's own json
+// reader/writer pair. The reads answer the io_err union (`?` and the
+// annotated `.err` handler extract), while `open_file` keeps the total
+// spelling: an io failure there prints the error line and halts. The
+// script runs with the fixture's directory as the working directory.
+
+fn read_head(path: string) -> int | io_err {
+  const f = open_file(path)
+  const a = read_exact(f, 4)?
+  const b = read_exact(f, 4)?
+  len(a) + len(b) * 10
+}
+
+fn one_read(path: string) -> int | io_err {
+  const f = open_file(path)
+  const b = read_exact(f, 4)?
+  len(b)
+}
+
+// The bytes collection over the same reads: the round trip through the
+// list[byte] bridges, the checked indexed read's narrowing, and the
+// payload count.
+fn read_probe(path: string) -> string | io_err {
+  const f = open_file(path)
+  const a = read_exact(f, 4)?
+  const back = bytes_of(byte_list(a))
+  const head = byte_at(a, 0)
+  const c = if head is byte { str(head) } else { "?" }
+  "${len(back)} ${c}"
+}
+
+fn sum_reads(path: string, count: int) -> int {
+  var total = 0
+  var i = 0
+  while i < count {
+    total += one_read(path).err((_: io_err) => 0)
+    i += 1
+  }
+  total
+}
+
+write_file("file_time_probe.txt", "probe bytes")
+const t0 = time()
+println("head ${read_head("file_time_probe.txt").err((_: io_err) => -1)}")
+println("bytes ${read_probe("file_time_probe.txt").err((_: io_err) => "x")}")
+println("total ${sum_reads("file_time_probe.txt", 2000)}")
+const t1 = time()
+println("clock ${t0 <= t1 && t0 > 1700000000000000000}")
+const j = parse_json(" { \"a\" : [ 1 , true , null ] } ")
+if j is parse_err { println("failed") } else { println(to_json(j)) }

@@ -1,0 +1,155 @@
+// purpose: the net handle face's lowering end to end — the package-owned
+// net_handle struct with its closing deinit (a native call cannot borrow
+// a deinit-carrying argument, so the send/recv/close_conn handlers read
+// the id word out first), net_connect answering the handle's one inline
+// word directly, and the deinit pairing: a scope end without an explicit
+// close_conn still closes the connection, and a close the owner already
+// ran stays a clean no-op (net_close total and idempotent). The fallible
+// reads answer the failure taxonomy's union — each class discriminant
+// lands on the net_err case the error class names, so match, ?, and the
+// .err handler extract real enum cases end to end. The connect keeps the
+// total spelling — the handle is deinit-carrying, so a union member
+// holding it refuses — so its failure prints the net error line and
+// halts on the discriminant.
+
+tag int
+tag string
+pub trait Copyable { }
+
+pub enum net_err {
+  timeout
+  refused
+}
+
+pub struct net_handle: ~Copyable {
+  conn: int
+  deinit { net_close(self.conn) }
+}
+extern fn net_connect (host: string, port: int) -> net_handle
+extern fn net_send (conn: int, data: string) -> () | net_err
+extern fn net_recv (conn: int, max_bytes: int) -> string | net_err
+extern fn net_close (conn: int) -> ()
+
+pub fn send (h: net_handle, data: string) -> () | net_err {
+  const sent = net_send(h.conn, data)
+  sent
+}
+
+pub fn recv (h: net_handle, max_bytes: int) -> string | net_err {
+  const reply = net_recv(h.conn, max_bytes)
+  reply
+}
+
+pub fn close_conn (h: net_handle) -> () {
+  net_close(h.conn)
+}
+
+fn main(host: string, port: int) -> string {
+  const conn = net_connect(host, port)
+  send(conn, "ping")
+  const reply = recv(conn, 64)
+  close_conn(conn)
+  match reply {
+    timeout => "timed out",
+    refused => "refused",
+    text => text
+  }
+}
+
+// The scope end fires the deinit: with no explicit close_conn the peer
+// still sees the orderly close. The send's answer is matched to its
+// unit side — a call whose answer is a union needs its failure handled,
+// the fallible face's own discipline.
+fn drop_closes(host: string, port: int) -> () {
+  const conn = net_connect(host, port)
+  match send(conn, "ping") {
+    timeout => (),
+    refused => (),
+    _ => ()
+  }
+}
+
+// The explicit close then the deinit's second close: the idempotent seam
+// keeps the run clean.
+fn closed_then_dropped(host: string, port: int) -> () {
+  const conn = net_connect(host, port)
+  const closed = close_conn(conn)
+  closed
+}
+
+// A refused connect keeps the printing halt of the total spelling.
+fn fail_connect(host: string, port: int) -> string | net_err {
+  const conn = net_connect(host, port)
+  const reply = recv(conn, 64)
+  reply
+}
+
+// The read's answer over the taxonomy: match splits the union, so the
+// closed-handle refused case and the silent-socket timeout case both
+// name their class while a live socket answers the reply itself.
+fn recv_report(h: net_handle, max_bytes: int) -> string {
+  const reply = recv(h, max_bytes)
+  match reply {
+    timeout => "timed out",
+    refused => "refused",
+    text => text
+  }
+}
+
+// `?` propagation: the recv's whole union rides the return, the failure
+// arm re-spanning onto the same cases at the caller.
+fn recv_pass(h: net_handle, max_bytes: int) -> string | net_err {
+  recv(h, max_bytes)?
+}
+
+// `?` propagation over the unit success: the send's failure arm rides
+// the return while the success side answers the unit value.
+fn send_pass(h: net_handle, data: string) -> () | net_err {
+  send(h, data)?
+}
+
+// The send's answer over the taxonomy: a closed handle's stale send is
+// the refused case.
+fn send_report(h: net_handle, data: string) -> string {
+  close_conn(h)
+  match send(h, data) {
+    timeout => "timed out",
+    refused => "refused",
+    _ => "sent"
+  }
+}
+
+// The drivers over a raw (host, port) address: connect inside the
+// driver, then read or send over the handle. Each call binds its
+// answer — a trailing call hands the deinit-carrying handle to a tail
+// transfer, which refuses.
+fn recv_after_close(host: string, port: int) -> string {
+  const conn = net_connect(host, port)
+  close_conn(conn)
+  const report = recv_report(conn, 64)
+  report
+}
+
+fn recv_silent(host: string, port: int) -> string {
+  const conn = net_connect(host, port)
+  const report = recv_report(conn, 64)
+  report
+}
+
+fn send_after_close(host: string, port: int, data: string) -> string {
+  const conn = net_connect(host, port)
+  const report = send_report(conn, data)
+  report
+}
+
+fn pass_recv(host: string, port: int) -> string | net_err {
+  const conn = net_connect(host, port)
+  const reply = recv_pass(conn, 64)
+  reply
+}
+
+fn pass_send(host: string, port: int) -> () | net_err {
+  const conn = net_connect(host, port)
+  const sent = send_pass(conn, "ping")
+  sent
+}

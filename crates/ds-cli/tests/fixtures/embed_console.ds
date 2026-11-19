@@ -1,0 +1,16 @@
+// The embed platform's console face (H5): the package declares its own
+// platform name and the console externs it uses, so the run path's
+// provider install serves the declaration's name — print and println
+// both answer through the console-only handler.
+
+tag string
+
+platform "embed" provides <console>
+
+extern fn println (msg: string) -> ()
+extern fn print (msg: string) -> ()
+
+fn main () -> () {
+  print("hello from ")
+  println("embed")
+}

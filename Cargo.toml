@@ -6,7 +6,7 @@ exclude    = ["fuzz"]
 [workspace.package]
 version     = "0.1.0"
 edition     = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/lxl66566/DreamScript"
 keywords    = ["dreamscript", "language", "compiler"]
@@ -32,18 +32,17 @@ postcard   = { version = "1", default-features = false, features = ["alloc"] }
 # default-features off: rayon/plotters only serve report generation
 criterion  = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # deterministic Valgrind instruction-count pinning (the arc's stage-three gate)
-gungraun   = "0.19.4"
+gungraun   = "0.20"
 anyhow     = "1"
 # the fork-join scheduler backend measurement's candidate (M5's decided-by-measurement seam);
 # the tokio runtime serves async stages only, the bench uses `youpipe::scope`
-youpipe    = { version = "0.8", default-features = false }
+youpipe    = { version = "0.10", default-features = false }
 tempfile   = "3"
 clap       = { version = "4", features = ["derive"] }
 # in-workspace crates, so consumers write `name.workspace = true`
 ds-diag    = { path = "crates/ds-diag" }
 ds-parse   = { path = "crates/ds-parse" }
 ds-check   = { path = "crates/ds-check" }
-ds-meta    = { path = "crates/ds-meta" }
 ds-lower   = { path = "crates/ds-lower" }
 ds-query   = { path = "crates/ds-query" }
 ds-mod     = { path = "crates/ds-mod" }
@@ -51,6 +50,18 @@ ds-pkg     = { path = "crates/ds-pkg" }
 ds-vm      = { path = "crates/ds-vm" }
 ds-stdlib  = { path = "crates/ds-stdlib" }
 ds-dsi     = { path = "crates/ds-dsi" }
+# the H5 FFI substrate: dependency-free library loading and symbol
+# enumeration (no libloading — the dependency policy queues it)
+ds-ffi     = { path = "crates/ds-ffi" }
+# the platform net face's TLS tier: default-features off so the
+# aws-lc-rs provider never enters the tree (ring needs no native
+# tooling on Windows, keeping the build portable)
+rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# the TLS client's static Mozilla root set (no system store, no client
+# certs this round)
+webpki-roots = "1"
+# dev-only: self-signed certificates for the local TLS test servers
+rcgen        = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # dev-only: run-time corpus resolution for the conformance gates
 ds-corpus-path = { path = "crates/ds-corpus-path" }
 

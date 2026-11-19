@@ -101,9 +101,81 @@ pub enum LoadError {
         /// The hash the name actually holds, or no recorded hash.
         found: Option<Hash128>,
     },
+    /// The swap's staged-word re-check refused: a staged callable word
+    /// keys on a function-table index whose function identity (name plus
+    /// frame layout, extended by the content identity — body plus capture
+    /// set — a moved index-embedded name judges by) the incoming table
+    /// drops, so installing would silently misroute the word into
+    /// whatever function now holds the index. The refusal keeps the
+    /// installed version running — a refused swap over a silent
+    /// misroute.
+    StagedFnMisroute {
+        /// The swapped module's name.
+        module: String,
+        /// The function-table index the staged word carries.
+        index: u32,
+        /// The function the index named in the retiring table, or `None`
+        /// when the index already escaped that table (the word's identity
+        /// is unknowable, so no re-key can be proven).
+        func: Option<String>,
+        /// Where the staged word waited.
+        site: StagedSite,
+    },
+    /// The swap's direct-call re-check refused: a live code row's
+    /// CALL/CALLT/CALLG/CALLTG site names the swapped module through
+    /// its constant pool by an index whose named identity the incoming
+    /// table moves or drops — a moved index-embedded name passing only
+    /// when its content identity survives against exactly one incoming
+    /// candidate, since the site's code is immutable and a retiring
+    /// row's site translates at dispatch — so installing would silently
+    /// route every live frame's next direct call into whatever function
+    /// now holds the index. The refusal keeps the installed version
+    /// running, the same contract the staged-word refusal answers.
+    PoolRefMisroute {
+        /// The swapped module's name.
+        module: String,
+        /// The module whose constant pool carries the refused call site.
+        pool: String,
+        /// The function-table index the site carries.
+        index: u32,
+        /// The identity the index held in the installed table, or `None`
+        /// when the index escapes it.
+        func: Option<String>,
+    },
     /// The mapped version failed this VM's load checks (decode canonicity,
     /// FUNCF-vs-layout agreement, pool kinds).
     Build(ModuleBuildError),
+}
+
+/// Where a staged callable word waited across a slot swap: the staged
+/// value a [`LoadError::StagedFnMisroute`] refusal names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StagedSite {
+    /// A closure object's header word, on the owning fiber's heap.
+    ClosureHeader {
+        /// The fiber owning the closure's heap.
+        fiber: u32,
+    },
+    /// A closure object's captured binding word.
+    ClosureCapture {
+        /// The fiber owning the closure's heap.
+        fiber: u32,
+    },
+    /// A list object's element word.
+    ListElement {
+        /// The fiber owning the list's heap.
+        fiber: u32,
+    },
+    /// A map object's key or value word.
+    MapWord {
+        /// The fiber owning the map's heap.
+        fiber: u32,
+    },
+    /// A parked frame's slot word, in the fiber's value-stack segment.
+    FrameSlot {
+        /// The fiber whose segment holds the frame.
+        fiber: u32,
+    },
 }
 
 /// Validates a payload FuncRef and maps it to the pool entry: a
@@ -274,6 +346,27 @@ pub fn install(
     registry: &mut ModuleRegistry,
     module: ds_mod::Module,
 ) -> Result<VersionIdx, LoadError> {
+    let version = build(registry, module)?;
+    Ok(registry.install(version))
+}
+
+/// Builds a dsmod module into a version without touching the registry's
+/// slots: the mapping and validation [`install`] performs, answering the
+/// built version so a host can run a swap's re-checks against the incoming
+/// table before the install lands (the re-check reads the built records'
+/// identities, the same spellings the installed table would carry).
+///
+/// The registry is read, never written: a failed build leaves every slot
+/// untouched, exactly like a refused install.
+///
+/// # Errors
+///
+/// Returns [`LoadError`] for FuncRefs naming no function and for bodies
+/// failing this VM's load checks.
+pub fn build(
+    registry: &ModuleRegistry,
+    module: ds_mod::Module,
+) -> Result<ModuleVersion, LoadError> {
     let name = module.name().to_owned();
     let deps = module.deps().to_vec();
     // the version's content identity: this round a module's content hash
@@ -295,12 +388,11 @@ pub fn install(
             registry, &name, own_id, local_len, &deps, function,
         )?);
     }
-    let version = ModuleVersion::new(name, function_defs)
+    Ok(ModuleVersion::new(name, function_defs)
         .map_err(LoadError::Build)?
         .with_chains(chains)
         .map_err(LoadError::Build)?
-        .with_content_hash(content_hash);
-    Ok(registry.install(version))
+        .with_content_hash(content_hash))
 }
 
 #[cfg(test)]

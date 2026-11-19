@@ -133,7 +133,9 @@ fn run_on_worker(vm: &mut Vm, cargo: ForkCargo) -> ForkReturn {
         vm.claims.push(ClaimTable::new(id));
     }
     let stub = NurseryId(u32::try_from(vm.nurseries.len()).expect("nursery count fits u32"));
-    vm.nurseries.push(Nursery::open());
+    // the stub owns nothing: it exists to take the child's records, and a
+    // worker never runs a release door over its pool
+    vm.nurseries.push(Nursery::open(None));
     vm.nurseries[stub.index()].push_child(child);
     let mut fiber = cargo.fiber;
     fiber.nursery = Some(stub);

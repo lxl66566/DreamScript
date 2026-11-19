@@ -122,10 +122,12 @@ pub use error::QueryError;
 pub use key::{BlockId, DefId, Dependency, InputKey, PackageId, QueryKey, QueryKind};
 pub use query::{
     Analyzed, BlockIndex, BlockSource, CheckedPackage, EffectsOf, Expanded, LinearityCheck,
-    PackageEffects, PackageLinearity, ParseFile, PlatformCheck, Query, Resolve, ScopeIndex, TypeOf,
+    PackageEffects, PackageLinearity, ParseFile, PlatformCheck, PooledCheck, Query, Resolve,
+    ScopeIndex, TypeOf,
 };
 pub use value::{
     AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageOutput, ExpandedOutput,
     LinearityOutput, PackageEffectsOutput, PackageLinearityOutput, ParseOutput,
-    PlatformCheckOutput, QueryValue, ResolveOutput, ScopeIndexOutput, TypeOfOutput,
+    PlatformCheckOutput, PooledCheckOutput, QueryValue, ResolveOutput, ScopeIndexOutput,
+    TypeOfOutput,
 };

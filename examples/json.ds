@@ -1,0 +1,48 @@
+// A JSON round trip over the ambient's json face: parse_json reads one
+// document into the predeclared json enum, the from_json derive decodes
+// it into a declared type (a missing member or a wrong shape answering
+// parse_err, an absent optional reading none), and the to_json derive
+// encodes back through the plain to_json writer (an absent optional
+// leaving its member out, the write minified).
+
+#[derive(from_json, to_json)]
+struct user { name: string, age: int, email: string? }
+
+#[derive(from_json, to_json)]
+enum tone { quiet, loud { volume: int } }
+
+fn spell(text: string) -> string {
+  const j = parse_json(text)
+  if j is parse_err { "parse_err" } else { to_json(j) }
+}
+
+fn load_user(text: string) -> string {
+  const j = parse_json(text)
+  if j is parse_err {
+    "parse_err"
+  } else {
+    const u = user.from_json(j)
+    if u is parse_err { "parse_err" } else { user.to_json(u).to_json() }
+  }
+}
+
+fn load_tone(text: string) -> string {
+  const j = parse_json(text)
+  if j is parse_err {
+    "parse_err"
+  } else {
+    const t = tone.from_json(j)
+    if t is parse_err { "parse_err" } else { tone.to_json(t).to_json() }
+  }
+}
+
+fn main() -> () {
+  println(spell("{\"b\": [1, 2.5, true, null], \"a\": \"x\"}"))
+  println(load_user("{\"name\": \"ada\", \"age\": 45}"))
+  println(load_user("{\"name\": \"bob\", \"age\": 15, \"email\": \"bob@ds.dev\"}"))
+  println(load_user("{\"name\": \"ada\"}"))
+  println(load_user("{\"name\": \"ada\", \"age\": \"45\"}"))
+  println(load_tone("\"quiet\""))
+  println(load_tone("{\"volume\": 3}"))
+  println(load_tone("\"silent\""))
+}

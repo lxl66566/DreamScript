@@ -7,7 +7,7 @@
 //! guarded.
 
 use ds_vm::{
-    Const, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, FrameAnswer, FramePc, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
         CodePc, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{F64, I64, Ref},
@@ -242,12 +242,12 @@ fn fused_arith_traps_attribute_to_the_ariths_own_pc() {
         vm.run("f", "ovf", &[Value::I64(1)]),
         Err(Trap::IntegerOverflow)
     );
-    assert_eq!(vm.backtrace()[0].pc, CodePc(2));
+    assert_eq!(vm.backtrace()[0].pc, FramePc::At(CodePc(2)));
     assert_eq!(
         vm.run("f", "mod0", &[Value::I64(5)]),
         Err(Trap::DivideByZero)
     );
-    assert_eq!(vm.backtrace()[0].pc, CodePc(2));
+    assert_eq!(vm.backtrace()[0].pc, FramePc::At(CodePc(2)));
 }
 
 /// An intervening RC word breaks the pair: the counted word executes in
@@ -281,7 +281,7 @@ fn an_intervening_rc_word_breaks_the_pair_and_still_executes() {
     );
     // the trap is the second RCDEC at pc 5 — the arith between ran as its
     // own dispatch
-    assert_eq!(vm.backtrace()[0].pc, CodePc(5));
+    assert_eq!(vm.backtrace()[0].pc, FramePc::At(CodePc(5)));
 }
 
 /// The end-of-code boundary: a load as the final word peeks nothing and

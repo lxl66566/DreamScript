@@ -633,6 +633,61 @@ fn generic_pair_unprovable_at_declaration_closes_at_link_time() {
 }
 
 #[test]
+fn many_distinct_generic_heads_declare_and_close() {
+    // Any number of same-trait generic impls over distinct constructors:
+    // every pair is structurally disjoint, so declaration decides each
+    // pair once and the closure pass re-probes none. The probe once
+    // minted its groundings into the shared universe, and its own
+    // products became later probes' candidates — five impls never
+    // returned.
+    for count in [5_usize, 50] {
+        let mut f = fixture();
+        for i in 0..count {
+            let ctor = f.universe.declare_struct(&format!("c{i}")).unwrap();
+            let var = f.universe.declare_tag(&format!("$t#{i}")).unwrap();
+            let var_ty = f.universe.atom_ty(var).unwrap();
+            let head = f.universe.apply_atom(ctor, &[var_ty]).unwrap();
+            f.declare(f.json, TypeExpr::atom(head)).unwrap();
+        }
+        assert_eq!(f.env.len(), count);
+        f.env.check_all(&mut f.universe).unwrap();
+    }
+}
+
+#[test]
+fn probes_write_no_atoms_into_the_universe() {
+    // The coherence probe is a pure query: an open pair whose scan finds
+    // no witness still runs the full candidate scan at closure, and the
+    // atom space is untouched after it — a clean check mints nothing, so
+    // the atom order stays independent of probe order.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let list_t = f.universe.apply_atom(list, &[t_ty]).unwrap();
+    let u = f.universe.declare_tag("$u#2").unwrap();
+    let u_ty = f.universe.atom_ty(u).unwrap();
+    let list_u = f.universe.apply_atom(list, &[u_ty]).unwrap();
+    f.declare_conditional(f.json, TypeExpr::atom(list_t), vec![Condition::new(
+        f.eq,
+        TypeExpr::atom(t),
+    )])
+    .unwrap();
+    f.declare_conditional(f.json, TypeExpr::atom(list_u), vec![Condition::new(
+        f.eq,
+        TypeExpr::atom(u),
+    )])
+    .unwrap();
+    let before = f.universe.atom_ids().count();
+    f.env.check_all(&mut f.universe).unwrap();
+    assert_eq!(
+        f.universe.atom_ids().count(),
+        before,
+        "the probe mints nothing into the shared universe"
+    );
+}
+
+#[test]
 fn resolve_is_exact_containment_and_lookup_only() {
     let mut f = fixture();
     let int_ty = f.ty(f.int);

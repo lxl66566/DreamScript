@@ -195,15 +195,15 @@ fn ref_words_inside_elements_balance() {
     assert_eq!(out, FrameAnswer::one(Value::I64(2)));
 }
 
-/// `unwrap_or` and `head`'s checked span ride the same channel: the
+/// `unwrap_or` and `first`'s checked span ride the same channel: the
 /// eager fallback over a wider optional and the first-element read both
 /// re-span whole member fields.
 #[test]
-fn unwrap_or_and_head_read_wider_sides() {
+fn unwrap_or_and_first_read_wider_sides() {
     let out = runs(
         "span_extract",
         &with_ambient(concat!(
-            "extern fn head[t] (xs: list[t]) -> t | none
+            "extern fn first[t] (xs: list[t]) -> t | none
 ",
             "extern fn unwrap_or[t] (x: t?, y: t) -> t
 ",
@@ -215,7 +215,7 @@ fn unwrap_or_and_head_read_wider_sides() {
 ",
             "  const p = unwrap_or(list_get(xs, 0), point { x: -1, y: -1 })
 ",
-            "  const first = match head(xs) {
+            "  const lead = match first(xs) {
 ",
             "    none => 0,
 ",
@@ -225,7 +225,7 @@ fn unwrap_or_and_head_read_wider_sides() {
 ",
             "  const miss = unwrap_or(list_get(xs, 4), point { x: 0, y: 9 })
 ",
-            "  p.x + p.y + first + miss.y
+            "  p.x + p.y + lead + miss.y
 ",
             "}
 ",
@@ -415,7 +415,9 @@ fn the_remaining_openings_keep_honest_names() {
     // a deinit-carrying fold init: the native call borrows the staged
     // words, so the init's hook has no drop position of its own — the
     // elements themselves refuse at the list's own seam first, and the
-    // fold's wide staging carries deinit-free spans only
+    // fold's wide staging carries deinit-free spans only. The fold's
+    // lambda answers a fresh literal: returning a borrowed fold
+    // parameter out would be a DS3005 escape, a different seam
     refuses(
         "refuse_reduce_deinit_init",
         &with_ambient(concat!(
@@ -433,7 +435,8 @@ fn the_remaining_openings_keep_honest_names() {
 ",
             "  const xs = list[session]()
 ",
-            "  const total = reduce(xs, session { user: \"u\" }, (a: session, s: session) => a)
+            "  const total = reduce(xs, session { user: \"u\" }, (a: session, s: session) => \
+             session { user: \"x\" })
 ",
             "  println(\"held ${total.user}\")
 ",
@@ -445,26 +448,10 @@ fn the_remaining_openings_keep_honest_names() {
         "a deinit-carrying argument",
         "the value's deinit runs only at its binding's death",
     );
-    // a union-typed element: the checked read extracts one atom, so the
-    // iteration fetch keeps its refusal (an empty list[union]
-    // constructor checks clean, so the refusal is the fetch's own)
-    refuses(
-        "refuse_union_iter",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "tag none\n",
-            "struct list[t]\n",
-            "type word = int | string\n",
-            "fn main() -> int {\n",
-            "  var total = 0\n",
-            "  for t in list[word]() { total += 1 }\n",
-            "  total\n",
-            "}\n",
-        ),
-        "a list element of this shape",
-        "union elements keep the checked-read refusal",
-    );
+    // the union-element iteration opening landed with the map value
+    // channel round (an empty list[union] iterates zero times, the
+    // fetch's whole-span hand-back the checked read's own multi-atom
+    // shape); its run pin lives in map_value_channel_e2e
 }
 
 /// The tuple-element story: a literal and direct pushes store whole

@@ -1,0 +1,9 @@
+// source: the G4 visibility round 2026-11-15, the cross-file half of the two-file visibility package
+// purpose: pub(pkg) and pub names answer a cross-file use site while a private name refuses per use site with the two-span DS4017 - this file checks together with visibility_surface.ds, never alone
+// items:
+// main: stage: typecheck
+// peek: stage: reject a private name used outside its defining file refuses with the two-span private diagnostic (DS4017)
+
+fn main() -> int { internal() + open() }
+
+fn peek() -> int { hidden() }

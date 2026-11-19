@@ -47,12 +47,16 @@
 //! heads grounded at one atom satisfying both bounds) are rejected as an
 //! overlap before any call exists; a pair no existing atom can prove
 //! declares, and a later conflict surfaces here as true ambiguity and the
-//! caller's diagnostic. A head that matches while a bound fails is
-//! reported as the nearest miss so the diagnostic can name the unsatisfied
-//! bound instead of the receiver alone.
+//! caller's diagnostic. The probe is a pure query over declared atoms —
+//! it grounds heads as structural descriptions and never writes the
+//! universe, so its products cannot become later probes' candidates (and
+//! a clean check mints nothing). A head that matches while a bound fails
+//! is reported as the nearest miss so the diagnostic can name the
+//! unsatisfied bound instead of the receiver alone.
 
 use crate::{
     atom::{AtomKind, TraitId, TypeId},
+    error::Error,
     instance::{Condition, InstanceEnv, InstanceId},
     universe::{Ty, Universe, is_subset},
 };
@@ -146,10 +150,10 @@ fn resolve_members(
         }
         if serves(universe, env, assumptions, id, members, MAX_DEPTH) {
             serving.push(id);
-        } else if miss.is_none() {
-            if let Some(bound) = nearest_miss(universe, env, assumptions, id, members) {
-                miss = Some(bound);
-            }
+        } else if miss.is_none()
+            && let Some(bound) = nearest_miss(universe, env, assumptions, id, members)
+        {
+            miss = Some(bound);
         }
     }
     // A union receiver no single instance serves may still be covered
@@ -291,7 +295,10 @@ fn head_substitution(
 
 /// The shared head-pattern form of [`head_substitution`]: one single-atom
 /// pattern unified against every receiver member under one substitution.
-fn pattern_substitution(
+/// Also serves the inherent side directly: a call site into a generic
+/// inherent impl substitutes the head pattern's variables into the
+/// member's written signature from these pairs.
+pub(crate) fn pattern_substitution(
     universe: &Universe,
     head: Ty,
     recv: Ty,
@@ -311,6 +318,20 @@ fn pattern_substitution(
         return None;
     }
     Some(subst)
+}
+
+/// The written parameter name of one minted type-variable atom
+/// (`$t#12` -> `t`), `None` for any other atom: the name a member's
+/// written signature spells the impl's variable as, so a call site's
+/// substitution keys by it.
+#[must_use]
+pub(crate) fn var_param_name(universe: &Universe, atom: TypeId) -> Option<String> {
+    let decl = universe
+        .atom_decl(atom)
+        .ok()
+        .filter(|decl| decl.name.starts_with('$'))?;
+    let base = decl.name.strip_prefix('$')?;
+    base.rsplit_once('#').map(|(name, _)| name.to_owned())
 }
 
 /// The declared bounds of an inherent impl's head pattern against one
@@ -738,70 +759,164 @@ fn trait_holds(
     false
 }
 
-/// Declaration-time coherence through generic heads (B6): whether two
-/// same-trait heads the set algebra reads disjoint (a generic head is one
+/// The instantiation probe's verdict on one same-trait head pair (B6):
+/// whether two heads the set algebra reads disjoint (a generic head is one
 /// opaque atom, so `list[int]` and `list[$t#1]` never intersect there)
-/// still cover one common instantiation, answered by instantiating the
-/// call-site machinery: every candidate grounding of either head must be
-/// served by both heads under provable conditions.
+/// still cover one common instantiation.
 ///
-/// Candidates ground each head by replacing every one of its variables
-/// with one declared atom (real types only — minted inference variables
-/// name no values), so a two-generic overlap is proven exactly when some
-/// existing atom satisfies both impls' bounds, and a generic head against
-/// a concrete head is decided by unification and the substituted bound.
-/// The probe is conservative where grounding cannot reach (both heads
-/// generic with no bound-satisfying atom yet, a bare-variable head against
-/// an application whose overlap type is not yet minted): those pairs stay
-/// disjoint here and any true conflict still surfaces as call-site
-/// ambiguity (DS2010). Structural application atoms minted by grounding
-/// are ordinary universe atoms — hash-consed, never trait members.
+/// The probe is a pure query over declared atoms: a structural gate
+/// rejects pairs whose shapes cannot meet (distinct constructors,
+/// arities, or nominal atoms) without any candidate, and the pairs that
+/// pass ground each head at every declared non-variable atom — as
+/// [`Ground`] descriptions, never minting — and ask whether both heads
+/// serve one grounding under provable conditions. A pair whose shapes
+/// meet but that no declared atom witnesses is
+/// [`Instantiation::Undecided`]: it declares, and the closure pass over
+/// the closed set re-probes it (later atoms and instances can witness
+/// what declaration order could not); a true conflict nothing ever
+/// witnesses still surfaces at the call site as true ambiguity (DS2010).
 #[must_use]
+pub(crate) enum Instantiation {
+    /// The heads cannot share an instantiation: a structural verdict no
+    /// later declaration undoes, so the pair never needs re-probing.
+    Disjoint,
+    /// The shapes can meet but no declared atom witnesses both bounds
+    /// yet: re-probe over the closed set.
+    Undecided,
+    /// Both heads serve one grounding; the grounds are the overlap's
+    /// witness, materialized once on the error path ([`ground_witness`]).
+    Witness(Vec<Ground>),
+}
+
+/// One member of a probe-side grounding: an atom that exists, or an
+/// application rebuilt structurally without minting — the probe never
+/// writes the universe, so its products never join the candidate set of a
+/// later probe and a clean check leaves the atom space untouched.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Ground {
+    /// An atom as declared.
+    Atom(TypeId),
+    /// An application of the constructor with grounded argument member
+    /// sets.
+    App(TypeId, Vec<Vec<Ground>>),
+}
+
+/// Whether two heads with variables cover one common instantiation (see
+/// [`Instantiation`]). The candidate set is the declared atoms alone, so
+/// the scan is linear in the program's own types no matter how many pairs
+/// probe.
 pub(crate) fn instantiation_overlap(
-    universe: &mut Universe,
+    universe: &Universe,
     env: &InstanceEnv,
     head_a: Ty,
     conds_a: &[Condition<Ty>],
     head_b: Ty,
     conds_b: &[Condition<Ty>],
-) -> Option<Ty> {
-    if !head_carries_vars(universe, head_a) && !head_carries_vars(universe, head_b) {
-        return None;
+) -> Instantiation {
+    let carries_a = head_carries_vars(universe, head_a);
+    let carries_b = head_carries_vars(universe, head_b);
+    if !carries_a && !carries_b {
+        return Instantiation::Disjoint;
     }
-    let candidates: Vec<TypeId> = universe
-        .atom_ids()
-        .filter(|&atom| !is_var(universe, atom))
-        .collect();
-    let mut probed = Vec::new();
-    for &x in &candidates {
+    // A head serves a grounding of itself only as one pattern atom
+    // (containment fails for rebuilt members, unification needs a single
+    // pattern), so a pair is decidable only through single-atom heads:
+    // with both heads generic each must be one, and with one generic the
+    // generic side must be.
+    if carries_a && carries_b {
+        let ([pattern_a], [pattern_b]) = (universe.members(head_a), universe.members(head_b))
+        else {
+            return Instantiation::Disjoint;
+        };
+        if !shapes_meet(universe, *pattern_a, *pattern_b) {
+            return Instantiation::Disjoint;
+        }
+    } else {
+        let (pattern, concrete) = if carries_a {
+            (universe.members(head_a), head_b)
+        } else {
+            (universe.members(head_b), head_a)
+        };
+        let [pattern] = pattern else {
+            return Instantiation::Disjoint;
+        };
+        // A grounding of the generic head is served by the concrete one
+        // only through a member it equals or unifies with, so a pattern
+        // meeting no member decides the pair.
+        if !universe.members(concrete).iter().any(|&member| {
+            let mut shape = Vec::new();
+            unify_atom(universe, &mut shape, *pattern, member)
+        }) {
+            return Instantiation::Disjoint;
+        }
+    }
+    for x in universe.atom_ids().filter(|&atom| !is_var(universe, atom)) {
         for (head, conds_head, other_head, conds_other) in [
             (head_a, conds_a, head_b, conds_b),
             (head_b, conds_b, head_a, conds_a),
         ] {
-            let Some(target) = ground(universe, head, x) else {
+            let Some(target) = ground_head(universe, head, x) else {
                 continue;
             };
-            if probed.contains(&target) {
-                continue;
-            }
-            probed.push(target);
-            let members: &[TypeId] = universe.members(target);
-            if serves_head(universe, env, &[], head, conds_head, members, MAX_DEPTH)
-                && serves_head(
-                    universe,
-                    env,
-                    &[],
-                    other_head,
-                    conds_other,
-                    members,
-                    MAX_DEPTH,
-                )
+            if serves_ground_head(universe, env, head, conds_head, &target, MAX_DEPTH)
+                && serves_ground_head(universe, env, other_head, conds_other, &target, MAX_DEPTH)
             {
-                return Some(target);
+                return Instantiation::Witness(target);
             }
         }
     }
-    None
+    Instantiation::Undecided
+}
+
+/// Whether two pattern atoms can share one instantiation at all: a
+/// variable absorbs anywhere, applications meet on constructor and arity
+/// with argument sets meeting, tuples meet element-wise, and every other
+/// atom meets only itself. The verdict is structural — independent of
+/// which atoms and instances exist — so a pair it rejects is disjoint for
+/// good.
+fn shapes_meet(universe: &Universe, a: TypeId, b: TypeId) -> bool {
+    if is_var(universe, a) || is_var(universe, b) {
+        return true;
+    }
+    let (Ok(adecl), Ok(bdecl)) = (universe.atom_decl(a), universe.atom_decl(b)) else {
+        return false;
+    };
+    match (&adecl.kind, &bdecl.kind) {
+        (AtomKind::Apply(ca, args_a), AtomKind::Apply(cb, args_b)) => {
+            ca == cb
+                && args_a.len() == args_b.len()
+                && args_a
+                    .iter()
+                    .zip(args_b.iter())
+                    .all(|(x, y)| sets_meet(universe, *x, *y))
+        },
+        (AtomKind::Tuple(xs), AtomKind::Tuple(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| shapes_meet(universe, *x, *y))
+        },
+        _ => a == b,
+    }
+}
+
+/// Whether two argument sets can meet: same-size sets meet member-wise,
+/// and different-size sets meet only when either carries a variable — a
+/// lone variable binds a whole set (`unify_set`), while member-wise
+/// pairing of different sizes never completes.
+fn sets_meet(universe: &Universe, x: Ty, y: Ty) -> bool {
+    let (xs, ys) = (universe.members(x), universe.members(y));
+    if xs.is_empty() || ys.is_empty() {
+        return false;
+    }
+    if xs.len() == ys.len() {
+        return xs
+            .iter()
+            .zip(ys.iter())
+            .all(|(&a, &b)| shapes_meet(universe, a, b));
+    }
+    xs.iter().any(|&a| carries_vars(universe, a)) || ys.iter().any(|&b| carries_vars(universe, b))
 }
 
 /// Whether a head can carry variables into the probe: every member
@@ -836,34 +951,233 @@ fn carries_vars(universe: &Universe, atom: TypeId) -> bool {
     }
 }
 
-/// One head grounded at a candidate atom: every variable member becomes
-/// the candidate, applications re-mint structurally, every other atom
-/// stays. A shape the grounding does not reach (a tuple with variable
-/// elements) grounds nothing.
-fn ground(universe: &mut Universe, head: Ty, x: TypeId) -> Option<Ty> {
-    // Grounding mints through the universe, so the head's member set is read
-    // by index; minting appends and never moves an existing handle's set.
-    let len = universe.members(head).len();
-    let mut members = Vec::with_capacity(len);
-    for index in 0..len {
-        members.push(ground_atom(universe, universe.members(head)[index], x)?);
-    }
-    Some(universe.set_ty(&members))
+/// One head grounded at a candidate atom, as descriptions: every variable
+/// member becomes the candidate, applications re-build structurally,
+/// every other atom stays. A shape the grounding does not reach (a tuple
+/// with variable elements) grounds nothing.
+fn ground_head(universe: &Universe, head: Ty, x: TypeId) -> Option<Vec<Ground>> {
+    universe
+        .members(head)
+        .iter()
+        .map(|&atom| ground_atom_desc(universe, atom, x))
+        .collect()
 }
 
-fn ground_atom(universe: &mut Universe, atom: TypeId, x: TypeId) -> Option<TypeId> {
+fn ground_atom_desc(universe: &Universe, atom: TypeId, x: TypeId) -> Option<Ground> {
     if is_var(universe, atom) {
-        return Some(x);
+        return Some(Ground::Atom(x));
     }
-    // The application's own atoms are copied out of the declaration so the
-    // grounding can mint through the universe.
     let (ctor, args) = match &universe.atom_decl(atom).ok()?.kind {
-        AtomKind::Apply(ctor, args) => (*ctor, args.to_vec()),
-        _ => return Some(atom),
+        AtomKind::Apply(ctor, args) => (*ctor, args),
+        _ => return Some(Ground::Atom(atom)),
     };
     let mut grounded = Vec::with_capacity(args.len());
     for arg in args {
-        grounded.push(ground(universe, arg, x)?);
+        grounded.push(ground_head(universe, *arg, x)?);
     }
-    universe.apply_atom(ctor, &grounded).ok()
+    Some(Ground::App(ctor, grounded))
+}
+
+/// [`serves_head`] over grounding descriptions: containment reads only
+/// whole atoms, the structural match unifies the pattern with every
+/// grounding under its own substitution, and the conditions must hold
+/// there.
+fn serves_ground_head(
+    universe: &Universe,
+    env: &InstanceEnv,
+    head: Ty,
+    conditions: &[Condition<Ty>],
+    target: &[Ground],
+    depth: u8,
+) -> bool {
+    let head_members = universe.members(head);
+    if target
+        .iter()
+        .all(|ground| matches!(ground, Ground::Atom(atom) if head_members.contains(atom)))
+    {
+        return ground_conditions_hold(universe, env, conditions, &[], depth);
+    }
+    let [pattern] = head_members else {
+        return false;
+    };
+    target.iter().all(|ground| {
+        let mut subst = Vec::new();
+        unify_ground_atom(universe, &mut subst, *pattern, ground)
+            && ground_conditions_hold(universe, env, conditions, &subst, depth)
+    })
+}
+
+/// [`serves`] over grounding descriptions: the probe's recursion into the
+/// declared bounds a condition demands.
+fn serves_ground(
+    universe: &Universe,
+    env: &InstanceEnv,
+    id: InstanceId,
+    target: &[Ground],
+    depth: u8,
+) -> bool {
+    let (Ok(head), Ok(conditions)) = (env.head(id), env.conditions(id)) else {
+        return false;
+    };
+    serves_ground_head(universe, env, head, conditions, target, depth)
+}
+
+/// [`trait_holds`] over grounding descriptions: some declared instance
+/// serves the target. The probe assumes nothing in scope.
+fn trait_holds_ground(
+    universe: &Universe,
+    env: &InstanceEnv,
+    trait_id: TraitId,
+    target: &[Ground],
+    depth: u8,
+) -> bool {
+    if depth == 0 || target.is_empty() {
+        return false;
+    }
+    for index in 0..env.len() {
+        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
+        if env.trait_of(id) == Ok(trait_id) && serves_ground(universe, env, id, target, depth - 1) {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`conditions_hold`] over grounding descriptions: each condition's type
+/// is rewritten through the substitution and the bound trait must hold
+/// there.
+fn ground_conditions_hold(
+    universe: &Universe,
+    env: &InstanceEnv,
+    conditions: &[Condition<Ty>],
+    subst: &[(TypeId, Vec<Ground>)],
+    depth: u8,
+) -> bool {
+    conditions.iter().all(|cond| {
+        let mut solved = Vec::new();
+        for &member in universe.members(cond.ty) {
+            match subst.iter().find(|(var, _)| *var == member) {
+                Some((_, grounds)) => solved.extend(grounds.iter().cloned()),
+                None => solved.push(Ground::Atom(member)),
+            }
+        }
+        trait_holds_ground(universe, env, cond.trait_id, &solved, depth)
+    })
+}
+
+/// [`unify_atom`] against one grounding description, binding variables.
+/// An existing application atom matches through its declaration, so a
+/// grounding that rebuilds a shape some declaration already solved meets
+/// the atom it would have minted.
+fn unify_ground_atom(
+    universe: &Universe,
+    subst: &mut Vec<(TypeId, Vec<Ground>)>,
+    pattern: TypeId,
+    query: &Ground,
+) -> bool {
+    if is_var(universe, pattern) {
+        return bind_ground(subst, pattern, vec![query.clone()]);
+    }
+    let Ok(decl) = universe.atom_decl(pattern) else {
+        return false;
+    };
+    match (&decl.kind, query) {
+        (AtomKind::Apply(ctor, args), Ground::App(qctor, qargs)) => {
+            ctor == qctor
+                && args.len() == qargs.len()
+                && args
+                    .iter()
+                    .zip(qargs.iter())
+                    .all(|(h, q)| unify_ground_set(universe, subst, *h, q))
+        },
+        (AtomKind::Apply(ctor, args), Ground::Atom(qatom)) => {
+            let Ok(qdecl) = universe.atom_decl(*qatom) else {
+                return false;
+            };
+            let AtomKind::Apply(qctor, qargs) = &qdecl.kind else {
+                return false;
+            };
+            ctor == qctor
+                && args.len() == qargs.len()
+                && args.iter().zip(qargs.iter()).all(|(h, q)| {
+                    let members: Vec<Ground> = universe
+                        .members(*q)
+                        .iter()
+                        .map(|a| Ground::Atom(*a))
+                        .collect();
+                    unify_ground_set(universe, subst, *h, &members)
+                })
+        },
+        (AtomKind::Tuple(elements), Ground::Atom(qatom)) => {
+            let Ok(qdecl) = universe.atom_decl(*qatom) else {
+                return false;
+            };
+            let AtomKind::Tuple(qelements) = &qdecl.kind else {
+                return false;
+            };
+            elements.len() == qelements.len()
+                && elements
+                    .iter()
+                    .zip(qelements.iter())
+                    .all(|(h, q)| unify_ground_atom(universe, subst, *h, &Ground::Atom(*q)))
+        },
+        (_, Ground::Atom(qatom)) => pattern == *qatom,
+        _ => false,
+    }
+}
+
+/// [`unify_set`] against a grounding's member descriptions.
+fn unify_ground_set(
+    universe: &Universe,
+    subst: &mut Vec<(TypeId, Vec<Ground>)>,
+    pattern: Ty,
+    query: &[Ground],
+) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    match universe.members(pattern) {
+        [only] if is_var(universe, *only) => bind_ground(subst, *only, query.to_vec()),
+        [only] => query
+            .iter()
+            .all(|q| unify_ground_atom(universe, subst, *only, q)),
+        _ => query
+            .iter()
+            .all(|q| matches!(q, Ground::Atom(atom) if universe.members(pattern).contains(atom))),
+    }
+}
+
+/// [`bind`] over grounding descriptions: a later demand must stay inside
+/// the earlier binding.
+fn bind_ground(subst: &mut Vec<(TypeId, Vec<Ground>)>, var: TypeId, value: Vec<Ground>) -> bool {
+    if let Some((_, existing)) = subst.iter_mut().find(|(v, _)| *v == var) {
+        return value.iter().all(|g| existing.contains(g));
+    }
+    subst.push((var, value));
+    true
+}
+
+/// Materializes a probe grounding as a type (B6): the error path alone
+/// mints — once an overlap is certain — so the probe itself never writes
+/// the universe. Applications intern structurally, so the witness lands
+/// on the atom a declaration solving the same shape would mint.
+pub(crate) fn ground_witness(universe: &mut Universe, grounds: &[Ground]) -> Result<Ty, Error> {
+    let mut members = Vec::with_capacity(grounds.len());
+    for ground in grounds {
+        members.push(ground_witness_atom(universe, ground)?);
+    }
+    Ok(universe.set_ty(&members))
+}
+
+fn ground_witness_atom(universe: &mut Universe, ground: &Ground) -> Result<TypeId, Error> {
+    match ground {
+        Ground::Atom(atom) => Ok(*atom),
+        Ground::App(ctor, args) => {
+            let mut arg_tys = Vec::with_capacity(args.len());
+            for arg in args {
+                arg_tys.push(ground_witness(universe, arg)?);
+            }
+            universe.apply_atom(*ctor, &arg_tys)
+        },
+    }
 }

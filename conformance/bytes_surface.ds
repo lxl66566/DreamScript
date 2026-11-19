@@ -1,0 +1,62 @@
+// source: the bytes representation round 2026-11-18 (the ambient's bytes collection: show/ord/hash over the payload, the utf8 bridges)
+// purpose: show renders the payload as a byte list (a high byte read through the checked byte_at beside literal low bytes, empty printing bytes[]), the derive families compose over a bytes part (show's rendering, ord's lexicographic shorter-prefix-first order, hash's content fold), the utf8_encode/utf8_decode bridges round-trip a multi-byte string (a lone lead byte answering utf8_err on the way back), and list[bytes] answers content equality and in membership
+// items:
+// chunk: stage: run
+// render: stage: run
+// ordering: stage: run
+// fingerprints: stage: run
+// bridges: stage: run
+// roster: stage: run
+// main: stage: run
+
+#[derive(show, ord, hash)]
+struct chunk { label: string, data: bytes }
+
+fn render() -> () {
+  const high = byte_at(utf8_encode("ÿ"), 0).unwrap_or(b'\0')
+  println(bytes_of([b'\u{1}', b'\u{2}', high]).show())
+  println(bytes_of(list[byte]()).show())
+  println(chunk { label: "lead", data: utf8_encode("ab") }.show())
+}
+
+fn ordering() -> () {
+  const lead = chunk { label: "lead", data: utf8_encode("ab") }
+  const longer = chunk { label: "lead", data: utf8_encode("abc") }
+  const same = chunk { label: "lead", data: utf8_encode("ab") }
+  println("${lead.compare(longer)} ${longer.compare(lead)} ${lead.compare(same)}")
+}
+
+fn fingerprints() -> () {
+  const a = chunk { label: "k", data: utf8_encode("x") }
+  const b = chunk { label: "k", data: utf8_encode("x") }
+  const c = chunk { label: "k", data: utf8_encode("y") }
+  println("${a.hash() == b.hash()} ${a.hash() == c.hash()}")
+}
+
+fn bridges() -> () {
+  const enc = utf8_encode("héllo")
+  println("${len(enc)}")
+  match utf8_decode(enc) {
+    utf8_err => println("utf8_err")
+    text => println(text)
+  }
+  const orphan = bytes_of([byte_at(utf8_encode("ÿ"), 0).unwrap_or(b'\0')])
+  match utf8_decode(orphan) {
+    utf8_err => println("utf8_err")
+    text => println(text)
+  }
+}
+
+fn roster() -> () {
+  const bs = [utf8_encode("ab"), utf8_encode("cd")]
+  println("${bs == [utf8_encode("ab"), utf8_encode("cd")]} ${bs == [utf8_encode("ab"), utf8_encode("ce")]}")
+  println("${utf8_encode("ab") in bs} ${utf8_encode("xy") in bs}")
+}
+
+fn main() -> () {
+  render()
+  ordering()
+  fingerprints()
+  bridges()
+  roster()
+}

@@ -8,7 +8,7 @@ use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{
     Manifest, Package, Store, StoreError, bundle_content_hash,
-    store::{InstalledRow, SEGMENT},
+    store::{ARTIFACT_SEGMENT, InstalledRow, SEGMENT},
 };
 
 /// One fixture package: a manifest plus one source member.
@@ -138,4 +138,75 @@ fn rows_self_describe_while_drifted_files_serve_nothing() {
     // the intact row still loads by its identity
     let row: &InstalledRow = &store.rows()[0];
     assert_eq!(store.load(row.identity).unwrap(), Some(lib));
+}
+
+/// One fixture artifact: raw library bytes and the content identity the
+/// artifact hash domain computes over them.
+fn artifact_of(bytes: &[u8]) -> (Vec<u8>, Hash128) {
+    (bytes.to_vec(), ds_pkg::artifact_content_hash(bytes))
+}
+
+#[test]
+fn an_artifact_installs_content_addressed_under_its_own_segment() {
+    let root = tempfile::tempdir().expect("temp root");
+    let store = Store::open(root.path());
+    let (bytes, identity) = artifact_of(b"ELF-ish library bytes");
+    store
+        .install_artifact(identity, &bytes)
+        .expect("the library installs");
+    // the file sits at its identity below the cache root's artifact
+    // segment, never the pkg segment
+    let file = store.artifact_path(identity);
+    assert_eq!(
+        file,
+        root.path()
+            .join(ARTIFACT_SEGMENT)
+            .join(format!("{identity}.lib"))
+    );
+    assert_eq!(store.load_artifact(identity).unwrap(), Some(bytes.clone()));
+    // a repeated install is the file, and the pkg segment never creates
+    store
+        .install_artifact(identity, &bytes)
+        .expect("the repeat installs");
+    assert!(!store.dir().exists());
+    // the artifact and bundle identity spaces stay separate: a bundle's
+    // bytes do not answer an artifact demand
+    let package = package_of("app", "1.0.0", "fn main() {}");
+    let bundle = package.to_bytes();
+    assert_ne!(
+        ds_pkg::artifact_content_hash(&bundle),
+        bundle_content_hash(&bundle)
+    );
+}
+
+#[test]
+fn an_artifact_install_validates_the_pin_before_it_lands() {
+    let root = tempfile::tempdir().expect("temp root");
+    let store = Store::open(root.path());
+    let (bytes, identity) = artifact_of(b"library bytes");
+    let other = Hash128::new([0x33; 16]);
+    // bytes that do not hash to the demanded pin refuse, nothing lands
+    assert!(matches!(
+        store.install_artifact(other, &bytes),
+        Err(StoreError::Disagreement {
+            expected,
+            found,
+            ..
+        }) if expected == other && found == identity
+    ));
+    assert!(!store.artifact_dir().exists());
+    // and drifted installed bytes never answer a demand
+    store
+        .install_artifact(identity, &bytes)
+        .expect("the install lands");
+    std::fs::write(store.artifact_path(identity), b"drifted").expect("the drift lands");
+    assert!(matches!(
+        store.load_artifact(identity),
+        Err(StoreError::Disagreement { .. })
+    ));
+    // a refetch repairs: the write over disagreeing bytes is the repair
+    store
+        .install_artifact(identity, &bytes)
+        .expect("the repair lands");
+    assert_eq!(store.load_artifact(identity).unwrap(), Some(bytes));
 }

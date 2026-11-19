@@ -2,11 +2,16 @@
 //!
 //! The net ops of the platform ABI's fixed table (the table contract in
 //! `platform`'s module docs): `net_connect`, `net_send`,
-//! `net_recv`, `net_close`, and `http_get`. They answer with the uniform
-//! two-word tag+payload span [BL-2] — the shared success marker on word 0,
-//! the payload on word 1 — and failures carry the [`PLATFORM_NET_ERR`]
-//! tag with the message `Ref` as payload, shaped `"op target: detail"`
-//! like the file natives' `io_err` messages.
+//! `net_recv`, `net_close`, and `http_get`. The fallible four answer with
+//! the uniform two-word tag+payload span [BL-2]
+//! — the shared success marker on word 0, the payload on word 1 — and
+//! failures carry the class discriminant of the ambient `net_err` case
+//! they answer by error class (ruled 2026-11-12): a bounded wait that
+//! expired answers `timeout`, every other failure `refused`, the
+//! message `Ref` as payload shaped `"op target: detail"` like the file
+//! natives' `io_err` messages. `net_close` alone answers the inert unit
+//! word (the idempotent close seam the handle deinit pairs with,
+//! `close_raw`'s contract).
 //!
 //! # Connection handles and lifetime
 //!
@@ -20,7 +25,12 @@
 //! reused, so a closed (or never-opened) id names no connection and every
 //! later native on it answers `net_err` "unknown connection". `net_close`
 //! removes the table entry and closes the socket; a connection left open
-//! stays open until the VM drops.
+//! stays open until the VM drops. The close is total and idempotent: an
+//! unknown handle is a no-op, not an error. The stdlib's `net_handle`
+//! deinit pairs with that contract — the value's scope exit fires the
+//! deinit on the id word even after the owner closed the connection
+//! explicitly, and a second close must not turn a clean scope exit into a
+//! halt.
 //!
 //! # Blocking discipline
 //!
@@ -38,23 +48,31 @@
 //! `http_get` reads at most 1 MiB of response, answering `net_err` past
 //! the cap.
 //!
-//! # The M7 platform tier decision: no TLS
+//! # The TLS tier
 //!
 //! `http_get` speaks HTTP/1.0 over a plain `std::net::TcpStream` — no
-//! async runtime, no TLS. An `https://` URL answers `net_err` "https
-//! unsupported at this platform tier (no TLS)"; `http://` is the only
-//! scheme. The response body (after the `\r\n\r\n` header terminator) is
-//! the success payload; the status line is not inspected, and only
-//! close-delimited HTTP/1.0 responses decode (no chunked transfer).
+//! async runtime. The tls capability (H5.5's 2026-11-17 ruling) is a
+//! host-level selection: where the platform provides it, the `http_get`
+//! slot carries the routing body of [`crate::tls`] (an `https://` URL
+//! rides rustls) and the capability's own `https_get` op is served;
+//! where the host omits it, the plain body below stays and an `https://`
+//! URL answers `net_err` naming the unprovided capability. The response
+//! body (after the `\r\n\r\n` header terminator) is the success payload;
+//! the status line is not inspected, and only close-delimited HTTP/1.0
+//! responses decode (no chunked transfer).
 
 use std::{
     io::{self, ErrorKind, Read, Write},
     net::{TcpStream, ToSocketAddrs},
+    sync::Arc,
     time::Duration,
 };
 
 use crate::{
-    native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ERR, i64_arg, ref_arg},
+    native::{
+        NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT,
+        i64_arg, ref_arg,
+    },
     object::Heaps,
     value::Value,
     vm::Trap,
@@ -81,6 +99,9 @@ pub(crate) struct Connections {
     streams: Vec<(i64, TcpStream)>,
     next_id: i64,
     timeout: Duration,
+    /// The pinned TLS client of a host or test that overrides the
+    /// webpki-rooted default ([`crate::tls`]); `None` serves the default.
+    tls: Option<Arc<rustls::ClientConfig>>,
 }
 
 impl Default for Connections {
@@ -89,6 +110,7 @@ impl Default for Connections {
             streams: Vec::new(),
             next_id: 0,
             timeout: NET_TIMEOUT,
+            tls: None,
         }
     }
 }
@@ -103,6 +125,19 @@ impl Connections {
     #[must_use]
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Pins the TLS client (custom roots), overriding the webpki-rooted
+    /// default — the embedder and test seam ([`crate::Vm::set_tls_config`]).
+    pub(crate) fn set_tls_config(&mut self, config: Arc<rustls::ClientConfig>) {
+        self.tls = Some(config);
+    }
+
+    /// The TLS client in force: the pinned one when a host set it, the
+    /// webpki-rooted default otherwise ([`crate::tls`]).
+    #[must_use]
+    pub(crate) fn tls_config(&self) -> Arc<rustls::ClientConfig> {
+        self.tls.clone().unwrap_or_else(crate::tls::webpki_client)
     }
 
     /// Opens a connected, timeout-bounded stream to `host:port` without
@@ -168,14 +203,10 @@ impl Connections {
     }
 
     /// Closes handle `conn` and removes it from the table; later uses of
-    /// the handle answer "unknown connection".
-    pub(crate) fn close(&mut self, conn: i64) -> io::Result<()> {
-        let Some(at) = self.streams.iter().position(|(id, _)| *id == conn) else {
-            return Err(unknown(conn));
-        };
-        // dropping the stream closes the socket
-        self.streams.remove(at);
-        Ok(())
+    /// the handle answer "unknown connection". Total and idempotent: an
+    /// unknown handle is a no-op (the deinit pairing's contract).
+    pub(crate) fn close(&mut self, conn: i64) {
+        self.streams.retain(|(id, _)| *id != conn);
     }
 }
 
@@ -186,32 +217,158 @@ fn unknown(conn: i64) -> io::Error {
 
 /// Renders a timed-out wait as its own detail instead of the OS's
 /// "resource temporarily unavailable", so the `net_err` message says
-/// what happened.
+/// what happened. The `TimedOut` kind survives the rewrite, so the
+/// class mapping reads the class off the rendered error too.
 fn normalize(err: io::Error, timeout: Duration) -> io::Error {
     match err.kind() {
         // read/write timeouts surface as EAGAIN on Unix, EWOULDBLOCK on
         // Windows; connect timeouts as ETIMEDOUT
         ErrorKind::TimedOut | ErrorKind::WouldBlock => {
-            io::Error::other(format!("timed out after {timeout:?}"))
+            io::Error::new(ErrorKind::TimedOut, format!("timed out after {timeout:?}"))
         },
         _ => err,
     }
 }
 
-/// The `net_err` span: the message `Ref` as the payload word.
-fn net_err(heaps: &mut Heaps, op: &str, target: &str, detail: &str) -> NativeResult {
+/// The class of one net failure: the ambient `net_err` case the
+/// platform discriminant answers by error class (ruled 2026-11-12) — a
+/// bounded wait that expired is `timeout`, every other failure
+/// `refused`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetClass {
+    /// A bounded wait expired (the `net_err` case `timeout`).
+    Timeout,
+    /// Every other failure (the `net_err` case `refused`).
+    Refused,
+}
+
+impl NetClass {
+    /// The platform discriminant the class answers.
+    #[must_use]
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::Timeout => PLATFORM_NET_TIMEOUT,
+            Self::Refused => PLATFORM_NET_REFUSED,
+        }
+    }
+
+    /// The class of one rendered failure: a bounded wait that expired
+    /// (read, write, and connect timeouts) is `timeout`, every other
+    /// failure `refused`.
+    #[must_use]
+    pub(crate) fn of(err: &io::Error) -> Self {
+        if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
+            Self::Timeout
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+/// The net failure span: the class's discriminant with the message
+/// `Ref` as the payload word.
+pub(crate) fn net_err(
+    heaps: &mut Heaps,
+    class: NetClass,
+    op: &str,
+    target: &str,
+    detail: &str,
+) -> NativeResult {
     NativeResult::Tag {
-        tag: PLATFORM_NET_ERR,
+        tag: class.tag(),
         payload: heaps.new_str(format!("{op} {target}: {detail}")),
     }
 }
 
 /// The `ok` span: the success value as the payload word.
-fn ok(payload: Value) -> NativeResult {
+pub(crate) fn ok(payload: Value) -> NativeResult {
     NativeResult::Tag {
         tag: PLATFORM_IO_OK,
         payload,
     }
+}
+
+/// The URL schemes the fetch bodies route on.
+pub(crate) enum Scheme {
+    /// Plain HTTP.
+    Http,
+    /// The tls capability's tier.
+    Https,
+    /// Neither.
+    Other,
+}
+
+/// Splits `url` into its scheme and the rest (authority and path).
+pub(crate) fn scheme_of(url: &str) -> (Scheme, &str) {
+    if let Some(rest) = url.strip_prefix("https://") {
+        (Scheme::Https, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (Scheme::Http, rest)
+    } else {
+        (Scheme::Other, url)
+    }
+}
+
+/// Splits a schemeless URL rest into host, port, authority, and path —
+/// the pieces both the plain and the TLS exchange address.
+pub(crate) fn split_target(rest: &str) -> Result<(String, u16, String, String), String> {
+    let (authority, path) = match rest.find('/') {
+        Some(at) => (rest[..at].to_owned(), rest[at..].to_owned()),
+        None => (rest.to_owned(), "/".to_owned()),
+    };
+    let host = authority.split(':').next().unwrap_or_default().to_owned();
+    let port = match authority.split_once(':') {
+        // IPv6-literal authorities are out of scope at this tier
+        Some((_, port)) => port
+            .parse::<u16>()
+            .map_err(|_| "invalid port in the URL".to_owned())?,
+        None => HTTP_PORT,
+    };
+    Ok((host, port, authority, path))
+}
+
+/// The HTTP/1.0 request both exchanges write.
+pub(crate) fn request(authority: &str, path: &str) -> String {
+    format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+}
+
+/// The shared request/response exchange: write the request, read to the
+/// server's close-delimited end or past the cap, answer the body after
+/// the header terminator. Generic over the stream so the TLS tier rides
+/// the same discipline (its rustls stream honors the socket timeouts
+/// the connection table installs). The failure channel keeps the
+/// `io::Error` whole, so the caller reads the error class off it.
+pub(crate) fn exchange<S>(
+    stream: &mut S,
+    request: &str,
+    timeout: Duration,
+) -> Result<String, io::Error>
+where
+    S: Read + Write,
+{
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|err| normalize(err, timeout))?;
+    let mut response = Vec::new();
+    loop {
+        let mut chunk = [0; HTTP_CHUNK];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                response.extend_from_slice(&chunk[..n]);
+                if response.len() > NET_CAP {
+                    return Err(io::Error::other("response exceeds the 1 MiB cap"));
+                }
+            },
+            Err(err) => return Err(normalize(err, timeout)),
+        }
+    }
+    let Some(at) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(io::Error::other("malformed response: no header terminator"));
+    };
+    String::from_utf8(response[at + 4..].to_owned())
+        .map_err(|_| io::Error::other("invalid UTF-8 in the response body"))
 }
 
 /// `net_connect(host: string, port: int) -> int | net_err`: opens a
@@ -226,6 +383,7 @@ pub(crate) fn net_connect_fn(
     let Some(port) = u16::try_from(port).ok() else {
         return Ok(net_err(
             heaps,
+            NetClass::Refused,
             "net_connect",
             &format!("{host}:{port}"),
             "port out of range",
@@ -238,6 +396,7 @@ pub(crate) fn net_connect_fn(
         },
         Err(err) => Ok(net_err(
             heaps,
+            NetClass::of(&err),
             "net_connect",
             &format!("{host}:{port}"),
             &err.to_string(),
@@ -258,6 +417,7 @@ pub(crate) fn net_send_fn(
         Ok(()) => Ok(ok(Value::I64(0))),
         Err(err) => Ok(net_err(
             heaps,
+            NetClass::of(&err),
             "net_send",
             &conn.to_string(),
             &err.to_string(),
@@ -278,6 +438,7 @@ pub(crate) fn net_recv_fn(
     if max < 1 {
         return Ok(net_err(
             heaps,
+            NetClass::Refused,
             "net_recv",
             &conn.to_string(),
             "max_bytes must be positive",
@@ -291,6 +452,7 @@ pub(crate) fn net_recv_fn(
         Err(err) => {
             return Ok(net_err(
                 heaps,
+                NetClass::of(&err),
                 "net_recv",
                 &conn.to_string(),
                 &err.to_string(),
@@ -303,6 +465,7 @@ pub(crate) fn net_recv_fn(
         Ok(text) => Ok(ok(heaps.new_str(text))),
         Err(_) => Ok(net_err(
             heaps,
+            NetClass::Refused,
             "net_recv",
             &conn.to_string(),
             "invalid UTF-8 in the received bytes",
@@ -310,90 +473,63 @@ pub(crate) fn net_recv_fn(
     }
 }
 
-/// `net_close(conn: int) -> unit | net_err`: closes the socket and
-/// invalidates the handle.
+/// `net_close(conn: int) -> ()`: the raw close seam the stdlib's
+/// ds-source `close_conn` handler and the `net_handle` struct's deinit
+/// call — removes the handle, closing the socket. Total and idempotent:
+/// an unknown handle is a no-op (mirroring `close_raw`, so a deinit
+/// firing on an already-closed handle stays clean).
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn net_close_fn(
-    heaps: &mut Heaps,
+    _heaps: &mut Heaps,
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let conn = i64_arg(args, 0)?;
-    match out.net().close(conn) {
-        Ok(()) => Ok(ok(Value::I64(0))),
-        Err(err) => Ok(net_err(
-            heaps,
-            "net_close",
-            &conn.to_string(),
-            &err.to_string(),
-        )),
+    if let Value::I64(conn) = args.first().copied().unwrap_or(Value::I64(0)) {
+        out.net().close(conn);
     }
+    // the inert unit word
+    Ok(NativeResult::Word(Value::I64(0)))
 }
 
-/// `http_get(url: string) -> string | net_err`: a plain-HTTP/1.0 GET. See
-/// the module docs for the tier decision (no TLS, body-only payload,
-/// close-delimited responses).
+/// `http_get(url: string) -> string | net_err`: the plain body a
+/// tls-omitting host serves — HTTP/1.0 over TCP only, an `https://` URL
+/// answered by the unprovided-capability `net_err`. See the module docs
+/// for the tier decision (body-only payload, close-delimited responses)
+/// and [`crate::tls`] for the routing body a tls-providing host serves.
 pub(crate) fn http_get_fn(
     heaps: &mut Heaps,
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    let detail = http_get(out, &url);
-    match detail {
+    let (scheme, rest) = scheme_of(&url);
+    let fetched = match scheme {
+        Scheme::Http => plain_fetch(out, rest),
+        Scheme::Https => Err(io::Error::other(
+            "https refused: the platform does not provide the tls capability",
+        )),
+        Scheme::Other => Err(io::Error::other("unsupported URL scheme (http:// only)")),
+    };
+    match fetched {
         Ok(body) => Ok(ok(heaps.new_str(body))),
-        Err(detail) => Ok(net_err(heaps, "http_get", &url, &detail)),
+        Err(err) => Ok(net_err(
+            heaps,
+            NetClass::of(&err),
+            "http_get",
+            &url,
+            &err.to_string(),
+        )),
     }
 }
 
-/// The `http_get` body: parse the URL, run the one request/response
-/// exchange, answer the response body, or the `net_err` detail.
-fn http_get(out: &mut OutputSink, url: &str) -> Result<String, String> {
-    let Some(rest) = url.strip_prefix("http://").map(str::to_owned) else {
-        if url.starts_with("https://") {
-            return Err("https unsupported at this platform tier (no TLS)".into());
-        }
-        return Err("unsupported URL scheme (http:// only)".into());
-    };
-    let (authority, path) = match rest.find('/') {
-        Some(at) => (rest[..at].to_owned(), rest[at..].to_owned()),
-        None => (rest, "/".to_owned()),
-    };
-    let host = authority.split(':').next().unwrap_or_default().to_owned();
-    let port = match authority.split_once(':') {
-        // IPv6-literal authorities are out of scope at this tier
-        Some((_, port)) => port
-            .parse::<u16>()
-            .map_err(|_| "invalid port in the URL".to_owned())?,
-        None => HTTP_PORT,
-    };
+/// The plain exchange a scheme-split URL rest names: open the bounded
+/// TCP connection, run the one request/response round, answer the body.
+fn plain_fetch(out: &mut OutputSink, rest: &str) -> Result<String, io::Error> {
+    let (host, port, authority, path) = split_target(rest).map_err(io::Error::other)?;
     let net = out.net();
     let timeout = net.timeout();
-    let mut stream = net.open(&host, port).map_err(|err| err.to_string())?;
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .and_then(|()| stream.flush())
-        .map_err(|err| normalize(err, timeout).to_string())?;
-    // read to the server's close-delimited end, or past the cap
-    let mut response = Vec::new();
-    loop {
-        let mut chunk = [0; HTTP_CHUNK];
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                response.extend_from_slice(&chunk[..n]);
-                if response.len() > NET_CAP {
-                    return Err("response exceeds the 1 MiB cap".into());
-                }
-            },
-            Err(err) => return Err(normalize(err, timeout).to_string()),
-        }
-    }
-    let Some(at) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return Err("malformed response: no header terminator".into());
-    };
-    String::from_utf8(response[at + 4..].to_owned())
-        .map_err(|_| "invalid UTF-8 in the response body".into())
+    let mut stream = net.open(&host, port)?;
+    exchange(&mut stream, &request(&authority, &path), timeout)
 }
 
 #[cfg(test)]
@@ -404,7 +540,9 @@ mod tests {
     use crate::{fiber::FIBER_ROOT, object::Objects, value::RefId};
 
     /// The timeout discipline: a never-answering socket yields the
-    /// timeout detail, not the OS's EAGAIN rendering.
+    /// timeout detail, not the OS's EAGAIN rendering, and the class
+    /// mapping reads the timeout class off the rendered error — every
+    /// other kind stays the refused class.
     #[test]
     fn timeouts_render_as_timed_out() {
         let err = normalize(
@@ -412,14 +550,22 @@ mod tests {
             Duration::from_millis(250),
         );
         assert_eq!(err.to_string(), "timed out after 250ms");
+        assert_eq!(NetClass::of(&err), NetClass::Timeout);
+        let refused = normalize(
+            io::Error::from(ErrorKind::ConnectionRefused),
+            Duration::from_millis(250),
+        );
+        assert_eq!(NetClass::of(&refused), NetClass::Refused);
     }
 
-    /// An unknown handle is the same error everywhere a handle is used.
+    /// An unknown handle is the same error everywhere a handle is used —
+    /// and the close of one stays the idempotent no-op.
     #[test]
     fn unknown_handles_answer_unknown_connection() {
         let mut conns = Connections::default();
-        let err = conns.close(7).expect_err("handle 7 was never opened");
+        let err = conns.send(7, b"x").expect_err("handle 7 was never opened");
         assert_eq!(err.to_string(), "unknown connection 7");
+        conns.close(7);
     }
 
     /// A wrong-typed argument names its own slot: the trap cites the

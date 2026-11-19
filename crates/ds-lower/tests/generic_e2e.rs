@@ -172,28 +172,3 @@ fn len_over_an_uncovered_type_is_a_lowering_error() {
         "the error names the uncovered instantiation: {error}"
     );
 }
-
-/// `len` implements the string and list instances only: a map receiver
-/// names an instance the one body covers nothing of — a lowering error,
-/// never a runtime misdispatch through the list instance.
-#[test]
-fn len_over_a_map_receiver_is_a_lowering_error() {
-    let error = lower_error(concat!(
-        "tag int\n",
-        "tag string\n",
-        "struct map[k, v]\n",
-        "extern fn println (s: string) -> ()\n",
-        "extern fn len[t] (xs: t) -> int\n",
-        "fn main() -> () {\n",
-        "  const m = map[string, int]()\n",
-        "  println(\"${len(m)}\")\n",
-        "}\n",
-    ));
-    let LowerError::Unsupported { reason, .. } = &error else {
-        panic!("the uncovered receiver must report Unsupported, got {error:?}")
-    };
-    assert!(
-        reason.contains("implements no instance"),
-        "the error names the uncovered instance: {error}"
-    );
-}

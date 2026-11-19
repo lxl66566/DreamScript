@@ -134,6 +134,13 @@ fn fields_fn(
         elems.push(Value::Tag(field.type_index));
         elems.push(heaps.new_str_part(&field.tag));
     }
+    // each fresh name/tag word's birth count becomes the list's edge, so
+    // the frame claim its alloc entered leaves with the adoption
+    for elem in &elems {
+        if let Value::Ref(word) = *elem {
+            heaps.release_claim(word);
+        }
+    }
     let stride = if elems.is_empty() { 0 } else { 3 };
     Ok(NativeResult::Word(heaps.new_list_strided(elems, stride)))
 }

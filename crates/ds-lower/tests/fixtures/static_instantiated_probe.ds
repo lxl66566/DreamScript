@@ -1,0 +1,50 @@
+// purpose: the instantiated type-keyed call — a type application in
+// the receiver position of a receiverless member call dispatches the
+// applied type's own impl member with the site's substitution staged:
+// the generic impl's head pattern binds its variables from the
+// receiver's application, the member's written signature reads through
+// them, and a bounded impl's evidence stages at the call exactly like
+// a value-receiver entry (the bounds serving concretely here, so
+// nothing rides the frame). The bare name keeps its refusal (the
+// spelling carries no type arguments), recorded in the checker's
+// inherent-call tests.
+// items:
+// list: stage: run
+// sized: stage: run
+// make: stage: run
+// width: stage: run
+// main: stage: run
+
+tag int
+tag string
+struct list[t]
+
+extern fn println (s: string) -> int
+extern fn list_len[t] (xs: list[t]) -> int
+
+trait sized {
+  fn width(self) -> int
+}
+
+impl sized for int {
+  fn width(self) -> int { 1 }
+}
+
+impl sized for string {
+  fn width(self) -> int { 2 }
+}
+
+impl[t: sized] list[t] {
+  fn make() -> list[t] { list[t]() }
+  fn unit_width() -> int { 3 }
+}
+
+fn main() -> int {
+  const xs: list[int] = list[int].make()
+  const ys = list[string].make()
+  println("xs=${list_len(xs)}")
+  println("ys=${list_len(ys)}")
+  println("int=${list[int].unit_width()}")
+  println("string=${list[string].unit_width()}")
+  0
+}

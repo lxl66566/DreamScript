@@ -6,9 +6,9 @@
 //! the fixtures pin:
 //!
 //! - order determinism: the answers assemble in input order (spawn order is the drive order), and
-//!   an element that parks at a yield mid-flight bounces back in and still lands in place — ten
-//!   fresh runs answer the identical checksum, where the hosted `map` loop refuses the same
-//!   yielding lambda outright.
+//!   an element that parks mid-flight bounces back in and still lands in place — ten fresh runs
+//!   answer the identical checksum, where the hosted `map` loop refuses the same parking lambda
+//!   outright.
 //! - first failure: the failing element cancels the looping sibling at its next backward branch
 //!   (both children dead, no hang) and the trap re-raises at the par_map call site.
 //! - the input list is untouched: its elements read back identical after the join.
@@ -34,7 +34,7 @@
 //! - the whole-span completion channel: a struct-typed callable answer (a RETSPAN) rides the
 //!   spawned child's completion whole, the join assembling each answer's words as one element of
 //!   the result list (the first push fixing the stride) — the wide answers assembling in input
-//!   order, a yielding element landing its wide answer in place, the completion span's `Ref` words
+//!   order, a parking element landing its wide answer in place, the completion span's `Ref` words
 //!   balancing at the join (one count per word, the heap drains through the joiner's single dec), a
 //!   wider outstanding answer surviving the first-failure cancel, and a hand-assembled ragged
 //!   answering width trapping at the list's stride check (a width the checker never proves).
@@ -52,8 +52,8 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_FIBER_YIELD, BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
-        BUILTIN_LIST_PUSH, BUILTIN_PAR_MAP, BUILTIN_STR_INT, PLATFORM_IO_OK,
+        BUILTIN_LIST_GET, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_PAR_MAP,
+        BUILTIN_STR_INT, PLATFORM_IO_OK,
     },
 };
 
@@ -292,26 +292,35 @@ fn doubles_def() -> FunctionDef {
     ])
 }
 
-/// `(x: int) -> int`: parks at `fiber_yield` mid-element (the bounce
-/// answer is ignored), then answers x * 2 — the out-of-order-completion
-/// stand-in the hosted `map` loop refuses.
-fn yielding_doubles_def() -> FunctionDef {
-    // body slots 0..2, overlay word 2
+/// `(x: int) -> int`: parks at its one-shot backward branch mid-element
+/// (the bounce answer is dropped — no call site stands), then answers
+/// x * 2 — the out-of-order-completion stand-in the hosted `map` loop
+/// refuses.
+fn parking_doubles_def() -> FunctionDef {
+    // pool k0=one, k1=two, k2=zero, k3=2
     def(
-        "yielding_doubles",
-        &[I64, I64, Raw],
+        "parking_doubles",
+        &[I64, I64, Bool, I64],
         1,
-        1,
-        vec![builtin(BUILTIN_FIBER_YIELD), Const::I64(2)],
+        0,
+        vec![Const::I64(1), Const::I64(2), Const::I64(0), Const::I64(2)],
         &[
-            Uop::Funcf { frame_slots: 3 },
-            Uop::Mov { dst: 1, src: 0 },
-            Uop::Mov { dst: 2, src: 1 },
-            Uop::Call {
-                callee: k(0),
-                nargs: 1,
+            Uop::Funcf { frame_slots: 4 },
+            Uop::Kimm { dst: 3, kidx: k(2) }, // zero the counter
+            Uop::Kimm { dst: 1, kidx: k(0) }, // one
+            Uop::AddI64 {
+                dst: 3,
+                lhs: 3,
+                rhs: 1,
             },
-            Uop::Kimm { dst: 1, kidx: k(1) },
+            Uop::Kimm { dst: 1, kidx: k(1) }, // two
+            Uop::LtI64 {
+                dst: 2,
+                lhs: 3,
+                rhs: 1,
+            },
+            Uop::Jmpif { cond: 2, target: 3 }, // the one-shot park point
+            Uop::Kimm { dst: 1, kidx: k(3) },
             Uop::MulI64 {
                 dst: 0,
                 lhs: 0,
@@ -719,31 +728,46 @@ fn wide_pairs_def() -> FunctionDef {
     )
 }
 
-/// `(x: int) -> (int, int)`: parks at `fiber_yield` mid-element (the
-/// bounce answer ignored), then answers [x*2, x*3] — the
-/// out-of-order-completion stand-in over wide answers.
-fn yielding_wide_pairs_def() -> FunctionDef {
+/// `(x: int) -> (int, int)`: parks at its one-shot backward branch
+/// mid-element (the bounce answer dropped), then answers [x*2, x*3] —
+/// the out-of-order-completion stand-in over wide answers.
+fn parking_wide_pairs_def() -> FunctionDef {
+    // pool k0=one, k1=two, k2=zero, k3=2, k4=3
     def(
-        "yielding_wide_pairs",
-        &[I64, I64, I64, Raw],
+        "parking_wide_pairs",
+        &[I64, I64, I64, Bool, I64],
         1,
-        1,
-        vec![builtin(BUILTIN_FIBER_YIELD), Const::I64(2), Const::I64(3)],
+        0,
+        vec![
+            Const::I64(1),
+            Const::I64(2),
+            Const::I64(0),
+            Const::I64(2),
+            Const::I64(3),
+        ],
         &[
-            Uop::Funcf { frame_slots: 4 },
-            Uop::Mov { dst: 2, src: 0 },
-            Uop::Mov { dst: 3, src: 2 },
-            Uop::Call {
-                callee: k(0),
-                nargs: 1,
+            Uop::Funcf { frame_slots: 5 },
+            Uop::Kimm { dst: 4, kidx: k(2) }, // zero the counter
+            Uop::Kimm { dst: 1, kidx: k(0) }, // one
+            Uop::AddI64 {
+                dst: 4,
+                lhs: 4,
+                rhs: 1,
             },
-            Uop::Kimm { dst: 1, kidx: k(1) },
+            Uop::Kimm { dst: 2, kidx: k(1) }, // two
+            Uop::LtI64 {
+                dst: 3,
+                lhs: 4,
+                rhs: 2,
+            },
+            Uop::Jmpif { cond: 3, target: 3 }, // the one-shot park point
+            Uop::Kimm { dst: 1, kidx: k(3) },
             Uop::MulI64 {
                 dst: 1,
                 lhs: 0,
                 rhs: 1,
             },
-            Uop::Kimm { dst: 2, kidx: k(2) },
+            Uop::Kimm { dst: 2, kidx: k(4) },
             Uop::MulI64 {
                 dst: 2,
                 lhs: 0,
@@ -1660,12 +1684,12 @@ fn closure_failure_def() -> FunctionDef {
 }
 
 /// The fixture module. Function indices are pool-FuncRef contract:
-/// 0 main_order, 1 main_yield, 2 main_untouched, 3 main_first_failure,
+/// 0 main_order, 1 main_park, 2 main_untouched, 3 main_first_failure,
 /// 4 main_nested, 5 main_bad_callable, 6 main_empty, 7 doubles,
-/// 8 yielding_doubles, 9 guard, 10 nested_fn, 11 main_wide_order,
-/// 12 main_wide_yield, 13 main_wide_untouched, 14 main_ref_span,
+/// 8 parking_doubles, 9 guard, 10 nested_fn, 11 main_wide_order,
+/// 12 main_wide_park, 13 main_wide_untouched, 14 main_ref_span,
 /// 15 main_wide_failure, 16 main_ragged, 17 wide_pairs,
-/// 18 yielding_wide_pairs, 19 wordy, 20 wide_guard, 21 ragged,
+/// 18 parking_wide_pairs, 19 wordy, 20 wide_guard, 21 ragged,
 /// 22 biased, 23 wide_capture, 24 string_capture, 25 capturing_guard,
 /// 26 main_closure_order, 27 main_wide_closure, 28 main_ref_balance,
 /// 29 main_kstr_probe, 30 main_closure_failure.
@@ -1675,24 +1699,24 @@ fn pm_registry() -> ModuleRegistry {
     reg.install(
         ModuleVersion::new("pm", vec![
             par_main_def("main_order", &[1, 2, 3, 4, 5], 7, false),
-            par_main_def("main_yield", &[1, 2, 3, 4, 5], 8, false),
+            par_main_def("main_park", &[1, 2, 3, 4, 5], 8, false),
             par_main_def("main_untouched", &[10, 20, 30], 7, true),
             par_main_def("main_first_failure", &[0, 5], 9, false),
             par_main_def("main_nested", &[7], 10, false),
             bad_callable_def(),
             empty_def(),
             doubles_def(),
-            yielding_doubles_def(),
+            parking_doubles_def(),
             guard_def(),
             nested_fn_def(),
             wide_main_def("main_wide_order", &[1, 2, 3, 4, 5], 17, false),
-            wide_main_def("main_wide_yield", &[1, 2, 3, 4, 5], 18, false),
+            wide_main_def("main_wide_park", &[1, 2, 3, 4, 5], 18, false),
             wide_main_def("main_wide_untouched", &[1, 2, 3, 4, 5], 17, true),
             fork_main_def("main_ref_span", &[1, 2, 3], 19),
             fork_main_def("main_wide_failure", &[7, 0, 5], 20),
             fork_main_def("main_ragged", &[4, 1, 4], 21),
             wide_pairs_def(),
-            yielding_wide_pairs_def(),
+            parking_wide_pairs_def(),
             wordy_def(),
             wide_guard_def(),
             ragged_def(),
@@ -1738,13 +1762,13 @@ fn answers_assemble_in_input_order() {
 }
 
 #[test]
-fn a_yielding_element_lands_in_place_across_ten_runs() {
-    // each element parks at its yield mid-flight and is bounced back in
+fn a_parking_element_lands_in_place_across_ten_runs() {
+    // each element parks mid-flight and is bounced back in
     // by the worklist; the assembly order is spawn order regardless
     for _ in 0..10 {
         let mut vm = Vm::new(pm_registry());
         assert_eq!(
-            vm.run("pm", "main_yield", &[]),
+            vm.run("pm", "main_park", &[]),
             Ok(FrameAnswer::one(Value::I64(2105)))
         );
         assert_children_dead(&vm, 5);
@@ -1889,13 +1913,13 @@ fn wide_answers_assemble_in_input_order() {
 }
 
 #[test]
-fn a_yielding_element_lands_its_wide_answer_in_place_across_ten_runs() {
-    // each element parks at its yield mid-flight and is bounced back in
+fn a_parking_element_lands_its_wide_answer_in_place_across_ten_runs() {
+    // each element parks mid-flight and is bounced back in
     // by the worklist; the wide assembly order is spawn order regardless
     for _ in 0..10 {
         let mut vm = Vm::new(pm_registry());
         assert_eq!(
-            vm.run("pm", "main_wide_yield", &[]),
+            vm.run("pm", "main_wide_park", &[]),
             Ok(FrameAnswer::one(Value::I64(231_155)))
         );
         assert_children_dead(&vm, 5);

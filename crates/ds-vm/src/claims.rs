@@ -278,6 +278,7 @@ impl ClaimTable {
     /// counts a later [`Self::release_since`] diffs against.
     pub(crate) fn reading(&self) -> ClaimReading {
         ClaimReading {
+            owner: self.owner,
             counts: self.counts.clone(),
             foreign: self.foreign.clone(),
         }
@@ -345,8 +346,25 @@ impl ClaimTable {
 /// id-indexed counts plus the foreign rows, both plain snapshots.
 #[derive(Debug)]
 pub(crate) struct ClaimReading {
+    /// The fiber whose ledger was read: the owner axis a word must agree
+    /// with to be local.
+    owner: FiberId,
     counts: Vec<u32>,
     foreign: HashMap<RefId, u32, WordBuild>,
+}
+
+impl ClaimReading {
+    /// The reading's outstanding count on `word` (0 when none): the
+    /// rollback's hook gate reads it so a value already claimed before
+    /// the partial run started survives the rollback through that claim
+    /// — only the run's own acquisitions die at the drain.
+    pub(crate) fn count_of(&self, word: RefId) -> u32 {
+        if word.fiber() == self.owner {
+            self.counts.get(word.id() as usize).copied().unwrap_or(0)
+        } else {
+            self.foreign.get(&word).copied().unwrap_or(0)
+        }
+    }
 }
 
 #[cfg(test)]

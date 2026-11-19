@@ -1,0 +1,14 @@
+// One const-receiver rejection through the member tier [D2, C3]: a
+// `mut self` trait member passes the same exclusivity gate as the
+// free-function spelling of the window.
+
+tag int
+struct point { x: int, y: int }
+trait bump { fn bump(mut self) -> int }
+impl bump for point {
+  fn bump(mut self) -> int { 1 }
+}
+fn f() -> int {
+  const p = point { x: 1, y: 2 }
+  p.bump()
+}

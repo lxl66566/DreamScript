@@ -68,9 +68,17 @@ pub enum FiberState {
     Ready,
     /// Executing; only one fiber at a time holds this state.
     Running,
-    /// Parked at a `fiber_yield`/`fiber_resume` call; its resume point is
-    /// the instruction after that call.
+    /// Parked at a control call (`fiber_resume`, the nursery joins, the
+    /// splice's park): its resume point is the instruction after that
+    /// call, and a resume delivers its payload word onto the call site's
+    /// overlay.
     Suspended,
+    /// Parked by the host's suspension request at a taken backward branch:
+    /// its resume point is the branch instruction itself, and a resume
+    /// re-takes the branch with the frame frozen in between, so the
+    /// branch decides the same; no call site stands, so a resume drops
+    /// its payload instead of writing an overlay word.
+    Preempted,
     /// Ran to completion (entry-frame RET or HALT); its pool slot is
     /// spawn-reusable.
     Dead,
@@ -142,12 +150,15 @@ impl Fiber {
         }
     }
 
-    /// Whether a switch may enter this fiber: never started or parked at a
-    /// call, with a continuation to enter. A trapped fiber (left `Running`
+    /// Whether a switch may enter this fiber: never started or parked
+    /// with a continuation to enter. A trapped fiber (left `Running`
     /// with no resume point when its drive ended in a `Trap`) and a dead
     /// one answer false.
     pub(crate) fn resumable(&self) -> bool {
-        matches!(self.state, FiberState::Ready | FiberState::Suspended) && self.resume.is_some()
+        matches!(
+            self.state,
+            FiberState::Ready | FiberState::Suspended | FiberState::Preempted
+        ) && self.resume.is_some()
     }
 }
 

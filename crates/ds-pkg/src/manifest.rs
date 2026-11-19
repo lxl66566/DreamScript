@@ -1,10 +1,11 @@
 //! The `ds.pkg` manifest: model, structured-diagnostics parser, and
 //! canonical serializer. A manifest is the lock, so its serialized bytes
-//! are a pure function of the model — deps sorted by name, three-component
-//! versions, LF line ends, exactly one trailing newline — and every
-//! non-canonical spelling (unknown key or section, duplicate key, reordered
-//! inline fields, uppercase hex, zero-prefixed components) is drift the
-//! parser reports as a DS4014 diagnostic instead of silently accepting.
+//! are a pure function of the model — deps and artifacts sorted by name,
+//! three-component versions, LF line ends, exactly one trailing newline —
+//! and every non-canonical spelling (unknown key or section, duplicate
+//! key, reordered inline fields, uppercase hex, zero-prefixed components)
+//! is drift the parser reports as a DS4014 diagnostic instead of silently
+//! accepting.
 
 use std::{collections::BTreeMap, fmt::Write};
 
@@ -30,10 +31,10 @@ pub fn valid_name(name: &str) -> bool {
     segments.next().is_some_and(segment) && segments.all(segment)
 }
 
-/// One manifest's model: the package's own identity and its dependency
-/// bounds. Constructed by [`Manifest::parse`] or built by hand; a hand-built
-/// name outside the grammar above is a caller bug the serializer's debug
-/// assertions catch.
+/// One manifest's model: the package's own identity, its dependency
+/// bounds, and its native artifacts. Constructed by [`Manifest::parse`]
+/// or built by hand; a hand-built name outside the grammar above is a
+/// caller bug the serializer's debug assertions catch.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Manifest {
     /// The package's name.
@@ -43,6 +44,10 @@ pub struct Manifest {
     /// The dependency bounds, keyed by package name. The map's name order
     /// is the canonical serialization order.
     pub deps: BTreeMap<String, DepBound>,
+    /// The native artifacts, keyed by artifact name: prebuilt,
+    /// per-target, content-hashed libraries consumed through the C-ABI
+    /// seam. The map's name order is the canonical serialization order.
+    pub artifacts: BTreeMap<String, ArtifactBound>,
 }
 
 /// One declared dependency: a minimum version and the content hash of that
@@ -54,6 +59,34 @@ pub struct DepBound {
     pub ver: Version,
     /// The blake3-128 content hash of the dep's package at `ver`.
     pub hash: Hash128,
+}
+
+/// One declared native artifact: a prebuilt library for one target
+/// triple, pinned by the content hash of its bytes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ArtifactBound {
+    /// The artifact's exact version.
+    pub ver: Version,
+    /// The target triple the library was built for.
+    pub target: String,
+    /// The blake3-128 content hash of the library's bytes.
+    pub hash: Hash128,
+}
+
+/// The target triple grammar: two to four dash-separated segments of
+/// lowercase ASCII letters, digits, and `_` (`x86_64-pc-windows-msvc`,
+/// `aarch64-unknown-linux-gnu`). Triples are ecosystem identifiers, not
+/// free text.
+#[must_use]
+pub fn valid_target(target: &str) -> bool {
+    fn segment(segment: &str) -> bool {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    }
+    let count = target.split('-').count();
+    (2..=4).contains(&count) && target.split('-').all(segment)
 }
 
 impl Manifest {
@@ -86,7 +119,8 @@ impl Manifest {
             Ok(Manifest {
                 name: state.name.unwrap_or_default(),
                 version: state.version.unwrap_or_default(),
-                deps: state.deps.unwrap_or_default(),
+                deps: state.deps,
+                artifacts: state.artifacts,
             })
         } else {
             Err(parse.state.diagnostics)
@@ -102,18 +136,29 @@ impl Manifest {
             "manifest name must be grammar-valid"
         );
         let mut out = format!("name = \"{}\"\nversion = \"{}\"\n", self.name, self.version);
-        if self.deps.is_empty() {
-            return out;
+        if !self.deps.is_empty() {
+            out.push_str("\n[deps]\n");
+            for (name, bound) in &self.deps {
+                debug_assert!(valid_name(name), "dep name must be grammar-valid");
+                // one write per dep line: String formatting never fails
+                let _ = writeln!(
+                    out,
+                    "{name} = {{ ver = \"{}\", hash = \"blake3:{}\" }}",
+                    bound.ver, bound.hash
+                );
+            }
         }
-        out.push_str("\n[deps]\n");
-        for (name, bound) in &self.deps {
-            debug_assert!(valid_name(name), "dep name must be grammar-valid");
-            // one write per dep line: String formatting never fails
-            let _ = writeln!(
-                out,
-                "{name} = {{ ver = \"{}\", hash = \"blake3:{}\" }}",
-                bound.ver, bound.hash
-            );
+        if !self.artifacts.is_empty() {
+            out.push_str("\n[artifacts]\n");
+            for (name, bound) in &self.artifacts {
+                debug_assert!(valid_name(name), "artifact name must be grammar-valid");
+                debug_assert!(valid_target(&bound.target), "target must be grammar-valid");
+                let _ = writeln!(
+                    out,
+                    "{name} = {{ ver = \"{}\", target = \"{}\", hash = \"blake3:{}\" }}",
+                    bound.ver, bound.target, bound.hash
+                );
+            }
         }
         out
     }
@@ -156,6 +201,19 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+/// The section an entry belongs to: nothing opened yet, `[deps]`, or
+/// `[artifacts]` — the two ruled sections, in that canonical order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Section {
+    /// Before any section header; top-level keys.
+    #[default]
+    Head,
+    /// Inside `[deps]`.
+    Deps,
+    /// Inside `[artifacts]`.
+    Artifacts,
+}
+
 /// The accumulating model, the per-line cursor, and the diagnostics. Every
 /// helper records at most one diagnostic and the line loop skips to the
 /// next line, so a broken line never poisons its siblings.
@@ -172,8 +230,12 @@ struct State {
     name: Option<String>,
     /// The package version, once read.
     version: Option<Version>,
-    /// The deps table, `None` until `[deps]` opens it.
-    deps: Option<BTreeMap<String, DepBound>>,
+    /// The section the next entry belongs to.
+    section: Section,
+    /// The deps table.
+    deps: BTreeMap<String, DepBound>,
+    /// The artifacts table.
+    artifacts: BTreeMap<String, ArtifactBound>,
     /// Every drift found so far.
     diagnostics: Vec<Diagnostic>,
 }
@@ -187,7 +249,9 @@ impl State {
             file,
             name: None,
             version: None,
-            deps: None,
+            section: Section::Head,
+            deps: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -301,6 +365,30 @@ impl State {
         Ok((contents, (start - 1, self.at)))
     }
 
+    /// One `key = "value"` field inside an inline table: the canonical
+    /// field name at `place`, then `=`, then a quoted literal. Returns
+    /// the literal's contents and whole span.
+    fn table_field(&mut self, key: &str, place: &str) -> Result<(String, (usize, usize)), ()> {
+        let field = self.word();
+        if self.text(field) != key {
+            self.drift(
+                field.0,
+                field.1.max(field.0 + key.len()),
+                format!("expected `{key}` {place}"),
+            );
+            return Err(());
+        }
+        if !self.eat(b'=') {
+            self.drift(
+                self.at,
+                self.line.len(),
+                format!("expected `=` after `{key}`"),
+            );
+            return Err(());
+        }
+        self.string().map(|(text, span)| (text.to_owned(), span))
+    }
+
     /// Accepts only nothing-or-comment after an entry, refusing trailing
     /// content. Answers whether the rest of the line was clean.
     fn trailing(&mut self, what: &str) -> bool {
@@ -341,7 +429,7 @@ impl Parse {
     }
 
     /// Classifies one line: blank or comment, section header, top-level
-    /// key, or dep entry.
+    /// key, dep entry, or artifact entry.
     fn line_entry(&mut self) {
         let state = &mut self.state;
         state.spaces();
@@ -358,16 +446,17 @@ impl Parse {
             state.drift(key_span.0, state.line.len(), "expected a key".to_owned());
             return;
         }
-        if state.deps.is_some() {
-            self.dep_entry(&key, key_span);
-        } else {
-            self.top_entry(&key, key_span);
+        match state.section {
+            Section::Head => self.top_entry(&key, key_span),
+            Section::Deps => self.dep_entry(&key, key_span),
+            Section::Artifacts => self.artifact_entry(&key, key_span),
         }
     }
 
-    /// `[deps]` is the one ruled section this round; anything else is drift
-    /// (the `[artifacts]` and `[build]` sections join with the registry
-    /// round's model).
+    /// `[deps]` and `[artifacts]` are the ruled sections, in that order;
+    /// `[build]` is deferred (source builds wait on the pinned-toolchain
+    /// reproducibility story, never permanently rejected), and anything
+    /// else is drift.
     fn section(&mut self) {
         let state = &mut self.state;
         let start = state.at;
@@ -386,19 +475,43 @@ impl Parse {
         if !state.trailing("the section header") {
             return;
         }
-        if name != "deps" {
-            state.drift(
+        match name.as_str() {
+            "deps" => {
+                if state.section == Section::Deps {
+                    state.drift(start, end, "duplicate `[deps]` section".to_owned());
+                } else if state.section == Section::Artifacts {
+                    state.drift(
+                        start,
+                        end,
+                        "the `[deps]` section must precede `[artifacts]`".to_owned(),
+                    );
+                } else {
+                    state.section = Section::Deps;
+                }
+            },
+            "artifacts" => {
+                if state.section == Section::Artifacts {
+                    state.drift(start, end, "duplicate `[artifacts]` section".to_owned());
+                } else {
+                    state.section = Section::Artifacts;
+                }
+            },
+            "build" => state.drift(
                 start,
                 end,
-                format!("unknown section `{name}`; the grammar is name, version, and [deps]"),
-            );
-            return;
+                "the `[build]` section is deferred: source builds wait on the pinned-toolchain \
+                 reproducibility story; prebuilt libraries declare under `[artifacts]`"
+                    .to_owned(),
+            ),
+            _ => state.drift(
+                start,
+                end,
+                format!(
+                    "unknown section `{name}`; the grammar is name, version, [deps], and \
+                     [artifacts]"
+                ),
+            ),
         }
-        if state.deps.is_some() {
-            state.drift(start, end, "duplicate `[deps]` section".to_owned());
-            return;
-        }
-        state.deps = Some(BTreeMap::new());
     }
 
     /// `name = "..."` or `version = "..."` before any section.
@@ -444,7 +557,9 @@ impl Parse {
             _ => state.drift(
                 key_span.0,
                 key_span.1,
-                format!("unknown key `{key}`; the grammar is name, version, and [deps]"),
+                format!(
+                    "unknown key `{key}`; the grammar is name, version, [deps], and [artifacts]"
+                ),
             ),
         }
         state.trailing("the value");
@@ -481,27 +596,11 @@ impl Parse {
             );
             return;
         }
-        let field = state.word();
-        if state.text(field) != "ver" {
-            state.drift(
-                field.0,
-                field.1.max(field.0 + 3),
-                "expected `ver` first inside the dep table".to_owned(),
-            );
-            return;
-        }
-        if !state.eat(b'=') {
-            state.drift(
-                state.at,
-                state.line.len(),
-                "expected `=` after `ver`".to_owned(),
-            );
-            return;
-        }
-        let Ok((ver_text, ver_span)) = state.string() else {
+        let Ok((ver_text, ver_span)) = state.table_field("ver", "first inside the dep table")
+        else {
             return;
         };
-        let ver = match Version::parse(ver_text) {
+        let ver = match Version::parse(&ver_text) {
             Ok(ver) => ver,
             Err(error) => {
                 Self::version_drift(state, ver_span, &error);
@@ -516,27 +615,11 @@ impl Parse {
             );
             return;
         }
-        let field = state.word();
-        if state.text(field) != "hash" {
-            state.drift(
-                field.0,
-                field.1.max(field.0 + 4),
-                "expected `hash` second inside the dep table".to_owned(),
-            );
-            return;
-        }
-        if !state.eat(b'=') {
-            state.drift(
-                state.at,
-                state.line.len(),
-                "expected `=` after `hash`".to_owned(),
-            );
-            return;
-        }
-        let Ok((hash_text, hash_span)) = state.string() else {
+        let Ok((hash_text, hash_span)) = state.table_field("hash", "second inside the dep table")
+        else {
             return;
         };
-        let Ok(hash) = parse_hash(hash_text) else {
+        let Ok(hash) = parse_hash(&hash_text) else {
             state.drift(
                 hash_span.0,
                 hash_span.1,
@@ -553,11 +636,8 @@ impl Parse {
             return;
         }
         state.trailing("the dep entry");
-        let deps = state
+        if state
             .deps
-            .as_mut()
-            .expect("dep entries only parse inside [deps]");
-        if deps
             .insert(key.to_owned(), DepBound { ver, hash })
             .is_some()
         {
@@ -565,12 +645,130 @@ impl Parse {
         }
     }
 
+    /// `name = { ver = "...", target = "...", hash = "blake3:..." }`,
+    /// fields in canonical order only: one prebuilt library per target
+    /// triple, pinned by the content hash of its bytes.
+    fn artifact_entry(&mut self, key: &str, key_span: (usize, usize)) {
+        let state = &mut self.state;
+        if !valid_name(key) {
+            state.drift(
+                key_span.0,
+                key_span.1,
+                format!(
+                    "`{key}` is not an artifact name (lowercase `/`-separated segments, optional \
+                     leading `@`)"
+                ),
+            );
+            return;
+        }
+        if !state.eat(b'=') {
+            state.drift(
+                key_span.1,
+                state.line.len(),
+                format!("expected `=` after `{key}`"),
+            );
+            return;
+        }
+        if !state.eat(b'{') {
+            state.drift(
+                state.at,
+                state.line.len(),
+                "expected `{` opening the artifact table".to_owned(),
+            );
+            return;
+        }
+        let Ok((ver_text, ver_span)) = state.table_field("ver", "first inside the artifact table")
+        else {
+            return;
+        };
+        let ver = match Version::parse(&ver_text) {
+            Ok(ver) => ver,
+            Err(error) => {
+                Self::version_drift(state, ver_span, &error);
+                return;
+            },
+        };
+        if !state.eat(b',') {
+            state.drift(
+                state.at,
+                state.line.len(),
+                "expected `,` between the artifact fields".to_owned(),
+            );
+            return;
+        }
+        let Ok((target_text, target_span)) =
+            state.table_field("target", "second inside the artifact table")
+        else {
+            return;
+        };
+        if !valid_target(&target_text) {
+            state.drift(
+                target_span.0,
+                target_span.1,
+                format!(
+                    "`{target_text}` is not a target triple (two to four dash-separated lowercase \
+                     segments)"
+                ),
+            );
+            return;
+        }
+        if !state.eat(b',') {
+            state.drift(
+                state.at,
+                state.line.len(),
+                "expected `,` between the artifact fields".to_owned(),
+            );
+            return;
+        }
+        let Ok((hash_text, hash_span)) =
+            state.table_field("hash", "third inside the artifact table")
+        else {
+            return;
+        };
+        let Ok(hash) = parse_hash(&hash_text) else {
+            state.drift(
+                hash_span.0,
+                hash_span.1,
+                "hash must be `blake3:` followed by 32 lowercase hex digits".to_owned(),
+            );
+            return;
+        };
+        if !state.eat(b'}') {
+            state.drift(
+                state.at,
+                state.line.len(),
+                "expected `}` closing the artifact table".to_owned(),
+            );
+            return;
+        }
+        state.trailing("the artifact entry");
+        if state
+            .artifacts
+            .insert(key.to_owned(), ArtifactBound {
+                ver,
+                target: target_text,
+                hash,
+            })
+            .is_some()
+        {
+            state.drift(
+                key_span.0,
+                key_span.1,
+                format!("duplicate artifact `{key}`"),
+            );
+        }
+    }
+
     /// Lifts a version syntax error into a diagnostic over the offending
-    /// component inside the literal.
+    /// component or identifier inside the literal.
     fn version_drift(state: &mut State, literal: (usize, usize), error: &VersionError) {
         let at = match error {
-            VersionError::Empty | VersionError::TooManyComponents => literal.0 + 1,
-            VersionError::BadComponent { at } => literal.0 + 1 + at,
+            VersionError::Empty | VersionError::TooManyComponents | VersionError::TooLong => {
+                literal.0 + 1
+            },
+            VersionError::BadComponent { at }
+            | VersionError::BadPre { at }
+            | VersionError::BadBuild { at } => literal.0 + 1 + at,
         };
         state.drift(
             at,
@@ -609,7 +807,110 @@ mod tests {
     fn empty_deps_omit_the_section_and_round_trip() {
         let manifest = parse("name = \"app\"\nversion = \"1.0.0\"\n").expect("parses");
         assert!(manifest.deps.is_empty());
+        assert!(manifest.artifacts.is_empty());
         assert_eq!(manifest.to_text(), "name = \"app\"\nversion = \"1.0.0\"\n");
+    }
+
+    #[test]
+    fn artifacts_round_trip_after_deps() {
+        let text = concat!(
+            "name = \"app\"\n",
+            "version = \"1.0.0\"\n",
+            "\n",
+            "[deps]\n",
+            "@std = { ver = \"1.2.0\", hash = \"blake3:0f0e0d0c0b0a09080706050403020100\" }\n",
+            "\n",
+            "[artifacts]\n",
+            "mymath = { ver = \"0.4.1\", target = \"x86_64-pc-windows-msvc\", hash = \
+             \"blake3:100f0e0d0c0b0a090807060504030201\" }\n",
+            "zlib = { ver = \"1.3.0\", target = \"aarch64-unknown-linux-gnu\", hash = \
+             \"blake3:00000000000000000000000000000000\" }\n",
+        );
+        let manifest = parse(text).expect("artifacts parse");
+        assert_eq!(manifest.artifacts["mymath"].ver, Version::new(0, 4, 1));
+        assert_eq!(
+            manifest.artifacts["mymath"].target,
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(manifest.to_text(), text);
+        let again = parse(&manifest.to_text()).expect("round two parses");
+        assert_eq!(again, manifest);
+        // and a short version normalizes to three components on the way out
+        let short = parse(concat!(
+            "name = \"app\"\nversion = \"1.0.0\"\n\n[artifacts]\n",
+            "zlib = { ver = \"1.3\", target = \"a-b\", hash = \
+             \"blake3:00000000000000000000000000000000\" }\n",
+        ))
+        .expect("short versions parse");
+        assert_eq!(short.artifacts["zlib"].ver, Version::new(1, 3, 0));
+        assert!(short.to_text().contains("ver = \"1.3.0\""));
+    }
+
+    #[test]
+    fn artifact_drift_refuses_with_its_own_words() {
+        // a bad target triple points at the literal
+        let diags = parse(concat!(
+            "name = \"app\"\n",
+            "version = \"1.0.0\"\n",
+            "\n",
+            "[artifacts]\n",
+            "mymath = { ver = \"1.0.0\", target = \"Windows\", hash = \
+             \"blake3:00000000000000000000000000000000\" }\n",
+        ))
+        .expect_err("an invalid triple refuses");
+        assert!(
+            diags
+                .iter()
+                .any(|diag| diag.message.contains("not a target triple")),
+            "the drift names the grammar: {:?}",
+            diags[0].message
+        );
+        // the [build] deferral names its own story, never a bare unknown section
+        let diags = parse("name = \"app\"\nversion = \"1.0.0\"\n[build]\n")
+            .expect_err("[build] stays deferred");
+        assert!(diags[0].message.contains("`[build]` section is deferred"));
+        assert!(diags[0].message.contains("[artifacts]"));
+        // field order and duplicate names are drift
+        let cases: &[&str] = &[
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+                "m = { target = \"a-b\", ver = \"1.0.0\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+                "m = { ver = \"1.0.0\", hash = \"blake3:00000000000000000000000000000000\", \
+                 target = \"a-b\" }\n",
+            ),
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+                "m = { ver = \"1.0.0\", target = \"a-b\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n",
+                "m = { ver = \"1.0.0\", target = \"a-b\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+                "m = { ver = \"1.0.0\", target = \"a\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+                "m = { ver = \"1.0.0\", target = \"a-b-c-d-e\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+            "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n[artifacts]\n",
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n[deps]\n",
+                "m = { ver = \"1.0.0\", hash = \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+        ];
+        for &text in cases {
+            let Err(diags) = parse(text) else {
+                panic!("{text:?} must refuse")
+            };
+            assert!(!diags.is_empty(), "{text:?} reports its drift");
+        }
     }
 
     #[test]
@@ -666,7 +967,8 @@ mod tests {
             "name = \"App\"\nversion = \"1.0.0\"\n",
             "name = \"app\"\nversion = \"01.0.0\"\n",
             "name = \"app\"\nversion = \"1.0.0\"\n[deps]\n[deps]\n",
-            "name = \"app\"\nversion = \"1.0.0\"\n[artifacts]\n",
+            "name = \"app\"\nversion = \"1.0.0\"\n[build]\n",
+            "name = \"app\"\nversion = \"1.0.0\"\n[other]\n",
             "name = \"app\"\nversion = \"1.0.0\"\n[deps]\nx = { hash = \
              \"blake3:00000000000000000000000000000000\", ver = \"1.0.0\" }\n",
             "name = \"app\"\nversion = \"1.0.0\"\n[deps]\nx = { ver = \"1.0.0\", hash = \
@@ -707,6 +1009,50 @@ mod tests {
         assert_eq!(
             diags[diags.len() - 1].message,
             "the manifest declares no `version`"
+        );
+    }
+
+    #[test]
+    fn pre_release_and_build_metadata_round_trip() {
+        let text = concat!(
+            "name = \"app\"\n",
+            "version = \"1.2.3-rc.1+build.42\"\n",
+            "\n",
+            "[deps]\n",
+            "@std = { ver = \"1.0.0-alpha\", hash = \"blake3:00000000000000000000000000000000\" \
+             }\n",
+        );
+        let manifest = parse(text).expect("pre-release versions parse");
+        assert_eq!(manifest.version.to_string(), "1.2.3-rc.1+build.42");
+        assert_eq!(manifest.deps["@std"].ver.to_string(), "1.0.0-alpha");
+        assert_eq!(
+            manifest.to_text(),
+            text,
+            "the segments round-trip canonically"
+        );
+    }
+
+    #[test]
+    fn malformed_segments_drift_at_their_offset() {
+        let text = "name = \"app\"\nversion = \"1.0.0-rc.01\"\n";
+        let diags = parse(text).expect_err("the leading-zero pre-release identifier refuses");
+        // the offending identifier `01` sits three bytes into `rc.01`
+        let at = text.find("rc.01").expect("the fixture names its offset") + 3;
+        assert_eq!(
+            diags[0].labels[0].span.start,
+            u32::try_from(at).expect("the offset fits")
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("malformed pre-release identifier")
+        );
+        let diags = parse("name = \"app\"\nversion = \"1.0.0+bui ld\"\n")
+            .expect_err("the malformed build identifier refuses");
+        assert!(
+            diags[0]
+                .message
+                .contains("malformed build-metadata identifier")
         );
     }
 

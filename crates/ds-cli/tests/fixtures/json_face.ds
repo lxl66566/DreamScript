@@ -1,0 +1,152 @@
+// purpose: the ambient's own json face end to end — the ds-source
+// reader over every value shape (literals, numbers with the
+// int-faithful split, strings with every escape class, arrays,
+// objects, nesting, and whitespace), the writer's minified round
+// trip, the invalid documents answering parse_err, the decode
+// surface's typed readers (each case read by its own member, a wrong
+// shape answering parse_err, the member reader answering the E4
+// optional), and the per-target from_json walks a struct and an enum
+// target spell over the readers today (the target-typed construction
+// is per-target, so each walk is the target's own function). The
+// script runs through the served ambient artifacts (the splice the
+// cold path rides).
+
+fn spell(text: string) -> string {
+  const j = parse_json(text)
+  if j is parse_err { "parse_err" } else { to_json(j) }
+}
+
+// One parsed document, json_null standing in for the invalid ones
+// (the spell rows answer those with their own parse_err lines).
+fn doc(text: string) -> json | none {
+  const j = parse_json(text)
+  if j is parse_err { none } else { j }
+}
+
+fn one(text: string) -> json {
+  doc(text).unwrap_or(json_null)
+}
+
+struct spot { name: string, x: int, y: int }
+enum turn { left, right, spin { times: int } }
+
+// The struct target's walk: one member read per field (none-tested
+// first, since the ok_or route over a json payload hits the extraction
+// family's one-atom boundary) and one scalar reader per member, a
+// missing member or a wrong shape answering parse_err.
+fn spot_from_json(v: json) -> spot | parse_err {
+  const name_j = json_member(v, "name")
+  if name_j is none { return parse_err }
+  const x_j = json_member(v, "x")
+  if x_j is none { return parse_err }
+  const y_j = json_member(v, "y")
+  if y_j is none { return parse_err }
+  spot { name: json_as_string(name_j)?, x: json_as_int(x_j)?, y: json_as_int(y_j)? }
+}
+
+// The enum target's walk: the unit cases read from their own names,
+// the payloaded case from the member its payload declares.
+fn turn_from_json(v: json) -> turn | parse_err {
+  if v is json_string {
+    if v.value == "left" { left } else if v.value == "right" { right } else { parse_err }
+  } else if v is json_object {
+    const times_j = json_member(v, "times")
+    if times_j is none { return parse_err }
+    spin(times: json_as_int(times_j)?)
+  } else { parse_err }
+}
+
+fn readers() -> () {
+  const i = json_as_int(one("12"))
+  if i is parse_err { println("parse_err") } else { println("int: ${i}") }
+  const s = json_as_string(one("\"x\""))
+  if s is parse_err { println("parse_err") } else { println("string: ${s}") }
+  const f = json_as_float(one("2.5"))
+  if f is parse_err { println("parse_err") } else { println("float: ${f}") }
+  const fi = json_as_float(one("12"))
+  if fi is parse_err { println("parse_err") } else { println("float: ${fi}") }
+  const b = json_as_bool(one("true"))
+  if b is parse_err { println("parse_err") } else { println("bool: ${b}") }
+  const a = json_as_array(one("[1,2]"))
+  if a is parse_err { println("parse_err") } else { println("array: ${list_len(a)}") }
+  const o = json_as_object(one("{\"k\":1}"))
+  if o is parse_err { println("parse_err") } else { println("object: ${map_len(o)}") }
+  // The width readers (2026-11-19): byte and u32 as numbers (the encode
+  // helper prints the number back, the widths carrying no literal
+  // spelling), char as a one-character string, bytes as a number array.
+  const by = json_as_byte(one("200"))
+  if by is parse_err { println("parse_err") } else { println("byte: ${to_json(json_of_byte(by))}") }
+  const by_bad = json_as_byte(one("256"))
+  if by_bad is parse_err { println("parse_err") } else { println("byte: ok") }
+  const u = json_as_u32(one("4000000000"))
+  if u is parse_err { println("parse_err") } else { println("u32: ${to_json(json_of_u32(u))}") }
+  const u_bad = json_as_u32(one("4294967296"))
+  if u_bad is parse_err { println("parse_err") } else { println("u32: ok") }
+  const c = json_as_char(one("\"q\""))
+  if c is parse_err { println("parse_err") } else { println("char: ${c}") }
+  const c_bad = json_as_char(one("\"ab\""))
+  if c_bad is parse_err { println("parse_err") } else { println("char: ok") }
+  const z = json_as_bytes(one("[1,2,255]"))
+  if z is parse_err { println("parse_err") } else { println("bytes: ${to_json(json_of_bytes(z))}") }
+  const z_bad = json_as_bytes(one("[300]"))
+  if z_bad is parse_err { println("parse_err") } else { println("bytes: ok") }
+}
+
+fn members() -> () {
+  const k = json_member(one("{\"k\":1}"), "k")
+  if k is none {
+    println("none")
+  } else {
+    const n = json_as_int(k)
+    if n is parse_err { println("parse_err") } else { println("k: ${n}") }
+  }
+  const miss = json_member(one("{\"k\":1}"), "z")
+  if miss is none { println("none") } else { println("present") }
+  const nonobj = json_member(one("[1]"), "k")
+  if nonobj is none { println("none") } else { println("present") }
+}
+
+fn targets() -> () {
+  const home = spot_from_json(one("{\"name\": \"home\", \"x\": 1, \"y\": 2}"))
+  if home is spot { println("spot ${home.name} ${home.x} ${home.y}") } else { println("parse_err") }
+  const half = spot_from_json(one("{\"name\": \"home\"}"))
+  if half is parse_err { println("parse_err") }
+  const arr = spot_from_json(one("[1]"))
+  if arr is parse_err { println("parse_err") }
+  const typed = spot_from_json(one("{\"name\": \"home\", \"x\": \"1\", \"y\": 2}"))
+  if typed is parse_err { println("parse_err") }
+  const left = turn_from_json(one("\"left\""))
+  if left is turn { println("left") }
+  const sp = turn_from_json(one("{\"times\": 3}"))
+  if sp is spin { println("spin ${sp.times}") }
+  const other = turn_from_json(one("\"up\""))
+  if other is parse_err { println("parse_err") }
+}
+
+fn main () -> () {
+  println(spell("null"))
+  println(spell("true"))
+  println(spell("false"))
+  println(spell("12"))
+  println(spell("2.5"))
+  println(spell("1e3"))
+  println(spell("-7"))
+  println(spell("12."))
+  println(spell("\"hello\""))
+  println(spell("\"a\\nb\\\"c\\\\d\""))
+  println(spell("\"\\u0041\""))
+  println(spell("[]"))
+  println(spell("[1, 2]"))
+  println(spell("[[true],[null]]"))
+  println(spell("{}"))
+  println(spell("{\"k\":1}"))
+  println(spell("{\"a\":[1,2.5,true,null],\"b\":\"x\"}"))
+  println(spell("  [ 1 , 2 ]  "))
+  println(spell("tru"))
+  println(spell("[1,"))
+  println(spell("1 2"))
+  println(spell("{\"k\"}"))
+  readers()
+  members()
+  targets()
+}

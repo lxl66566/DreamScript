@@ -1,0 +1,59 @@
+// source: the list and map structural equality round 2026-11-18 (todo item 5's collection-equality slice, B9)
+// purpose: structural ==/!= over the collections' one Ref word dispatch the content-compare natives — nested collections compose (a list of lists, a map over list values, a struct field of list and map type), and in membership compares the element by its type (a list element over a list of lists, a struct element whose fields are collections); the spelled refusal (a union element without content equality) lives in collection_equality_refusal.ds
+// items:
+// holds: stage: run
+// nested-rows: stage: run
+// matrix-rows: stage: run
+// field-rows: stage: run
+// member-rows: stage: run
+// main: stage: run
+
+struct holds { tags: list[string], table: map[string, int] }
+
+fn nested_rows() -> bool {
+  const one = [[1, 2], [3]]
+  const two = [[1, 2], [3]]
+  const diff = [[1, 2], [4]]
+  one == two && one != diff
+}
+
+fn matrix_rows() -> bool {
+  var one = map[string, list[int]]()
+  map_set(one, "k", [1, 2])
+  var two = map[string, list[int]]()
+  map_set(two, "k", [1, 2])
+  var diff = map[string, list[int]]()
+  map_set(diff, "k", [1, 3])
+  one == two && one != diff
+}
+
+fn field_rows() -> bool {
+  var t1 = map[string, int]()
+  map_set(t1, "k", 1)
+  var t2 = map[string, int]()
+  map_set(t2, "k", 1)
+  var t3 = map[string, int]()
+  map_set(t3, "k", 2)
+  const one = holds { tags: ["a", "b"], table: t1 }
+  const two = holds { tags: ["a", "b"], table: t2 }
+  const short = holds { tags: ["a"], table: t1 }
+  const swapped = holds { tags: ["a", "b"], table: t3 }
+  one == two && one != short && one != swapped
+}
+
+fn member_rows() -> bool {
+  var t1 = map[string, int]()
+  map_set(t1, "k", 1)
+  var t2 = map[string, int]()
+  map_set(t2, "k", 1)
+  const xs = [["a"], ["b"]]
+  const group = [holds { tags: ["x"], table: t1 }, holds { tags: [], table: t2 }]
+  ["a"] in xs && !(["c"] in xs) && holds { tags: ["x"], table: t1 } in group && !(holds { tags: ["q"], table: t1 } in group)
+}
+
+fn main() -> () {
+  println("nested ${nested_rows()}")
+  println("matrix ${matrix_rows()}")
+  println("fields ${field_rows()}")
+  println("member ${member_rows()}")
+}

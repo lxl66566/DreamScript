@@ -23,13 +23,15 @@ use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 const PRELUDE: &str = "
 tag int
 tag string
+tag char
 tag bool
 
 extern fn println (s: string) -> ()
 extern fn concat (a: string, b: string) -> string
 extern fn len[t] (xs: t) -> int
-extern fn char_at (s: string, i: int) -> string
-extern fn substring (s: string, start: int, end: int) -> string
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+extern fn char_at (s: string, i: int) -> char | none
+extern fn substring (s: string, start: int, end: int) -> string | none
 ";
 
 /// The minimized shape: two loop-carried string vars, the first reset to a
@@ -56,12 +58,13 @@ fn main() -> int {
 /// `concat` at the outer tail — plus the post-loop char scan reading the
 /// carried accumulator.
 const KERNEL_RESET: &str = "
-fn dv(c: string) -> int {
-  if c == \"0\" { 0 } else if c == \"1\" { 1 } else if c == \"2\" { 2 } else { 9 }
+fn dv(c: char) -> int {
+  if c == '0' { 0 } else if c == '1' { 1 } else if c == '2' { 2 } else { 9 }
 }
 
 fn fold3(w: string) -> int {
-  dv(w.char_at(0)) * 100 + dv(w.char_at(1)) * 10 + dv(w.char_at(2))
+  dv(w.char_at(0).unwrap_or('\\0')) * 100 + dv(w.char_at(1).unwrap_or('\\0')) * 10 + \
+                            dv(w.char_at(2).unwrap_or('\\0'))
 }
 
 fn main() -> int {
@@ -83,8 +86,8 @@ fn main() -> int {
   var start: int = 0
   var j: int = 0
   while j < 1000 {
-    if s.char_at(j) == \";\" {
-      sum += fold3(s.substring(start, j))
+    if s.char_at(j).unwrap_or('\\0') == ';' {
+      sum += fold3(s.substring(start, j).unwrap_or(\"\"))
       start = j + 1
     }
     j += 1

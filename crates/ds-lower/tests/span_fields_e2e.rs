@@ -222,23 +222,9 @@ fn the_refusal_openings_keep_their_honest_names() {
         "a multi-word tuple element",
         "tuple elements lower as one plain frame word",
     );
-    // a wider map value under map_set's positional contract
-    refuses(
-        "refuse_map_value",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct map[k, v]\n",
-            "struct point { x: int, y: int }\n",
-            "extern fn map_set (m: mut map[string, point], key: string, value: point) -> ()\n",
-            "fn main() -> () {\n",
-            "  var m = map[string, point]()\n",
-            "  map_set(m, \"origin\", point { x: 0, y: 0 })\n",
-            "}\n",
-        ),
-        "a map_set argument",
-        "map keys and values lower as one machine word",
-    );
+    // the wider map value opening landed with the map value channel
+    // round (map_set stages the value's whole word span); its run
+    // pins live in map_value_channel_e2e
     // a deinit-carrying field type: the inline span has no claim of its
     // own, so the hook would run at the wrong death
     refuses(

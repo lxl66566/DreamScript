@@ -8,9 +8,21 @@
 // be redeclared by a corpus file only in the other namespace. The
 // fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
 // parse_err — the runtime discriminants the platform natives answer), so
-// the fallible reads return real success unions. Still file-owned:
-// file, url, raw_fd, json, and the stack API — `open`/`read_exact`
-// stay absent because their signatures cannot name the caller's `file`.
+// the fallible reads return real success unions. The file face is
+// stdlib-owned: the `file_handle` struct below is the package's own
+// declared type (named apart from the corpus files' own `file`
+// declarations, the `io_err`/`io_error` precedent), its externs name
+// it, and the deinit closes the handle. The json face is the same
+// ownership: the `json` enum and the parse_json/to_json functions
+// below are this file's own declared ds source (the map value channel
+// carries the two-word union spans the object case needs), the one
+// native seam the escapes need being the codepoint pair in the
+// extern block.
+// The net face rides the file face's shape: the `net_handle` struct
+// below is the package's own linear connection handle, `net_connect`
+// answers it directly, and the ds-source `send`/`recv`/`close_conn`
+// handlers read its id word out to the raw `net_send`/`net_recv`/
+// `net_close` externs, the deinit closing the connection.
 // Every extern here names a callee the lowering answers (a native, a
 // generic native, or a rule-routed family); a declaration whose callee
 // no table answers was the dead-name footgun this surface shed.
@@ -47,6 +59,24 @@ impl show for char {
 impl show for string {
   fn show(self) -> string { "$self" }
 }
+// The bytes representation (2026-11-18): `show` renders the payload as
+// a byte list — `bytes[1, 2, 255]`, empty printing `bytes[]` — one
+// decimal per payload byte over the `list[byte]` bridge. The body
+// carries no trapping op (the `concat` extern and a for-in walk, never
+// `+`/`+=`): a method call's effect row unions every registered
+// candidate's, so a trapping show body would name `trap` at every
+// `.show()` call site.
+impl show for bytes {
+  fn show(self) -> string {
+    var out = "bytes["
+    var first = true
+    for b in byte_list(self) {
+      if first { first = false } else { out = concat(out, ", ") }
+      out = concat(out, str(b))
+    }
+    concat(out, "]")
+  }
+}
 
 // The ord derive's target (G1, B9's ruling that ordering is never
 // structural): one member answering the field-order lexicographic
@@ -81,6 +111,11 @@ impl ord for char {
 impl ord for byte {
   fn compare(self, other: Self) -> int { byte_compare(self, other) }
 }
+// Bytes order lexicographically over the payload, a shorter prefix
+// first (2026-11-18), through the collection's own compare native.
+impl ord for bytes {
+  fn compare(self, other: Self) -> int { bytes_compare(self, other) }
+}
 
 // The hash derive's target (G1, B9's ruling that hash stays consistent
 // with universal structural `==`): one member answering the content
@@ -112,6 +147,11 @@ impl hash for char {
 impl hash for byte {
   fn hash(self) -> int { str_hash(str(self)) }
 }
+// Bytes hash their payload content through the FNV-1a native, the one
+// scheme the hash family folds under (2026-11-18).
+impl hash for bytes {
+  fn hash(self) -> int { bytes_hash(self) }
+}
 
 // The clone derive's target (G1): one member answering the shallow
 // duplicate; `#[derive(clone)]` synthesizes the impl. The primitives
@@ -140,6 +180,9 @@ impl clone for char {
 impl clone for byte {
   fn clone(self) -> Self { self }
 }
+impl clone for bytes {
+  fn clone(self) -> Self { self }
+}
 
 // The receiverless member's ambient slice (the 2026-11-15 ruling):
 // every primitive carries `default` in its own impl, callable as
@@ -154,6 +197,18 @@ impl bool { fn default() -> bool { false } }
 impl string { fn default() -> string { "" } }
 impl char { fn default() -> char { '\0' } }
 impl byte { fn default() -> byte { b'\0' } }
+impl bytes { fn default() -> bytes { bytes_of(list[byte]()) } }
+
+// The collection face's member tier (H5.5): the inherent members the
+// runtime seam lowers over the builtin collections. A member whose
+// parameter or answer spans the collection's own type variable has no
+// static word kind (the free generic fn's Raw-word shape is the free
+// tier's alone), so the element-carrying spellings keep their
+// `list_*`/`map_*` native seams and `len` answers through the free
+// generic's instance table; the ordered key face presents as a member.
+impl[k, v] map[k, v] {
+  fn keys (self) -> list[k] { map_keys(self) }
+}
 
 pub tag int
 pub tag float
@@ -163,17 +218,41 @@ pub tag char
 // The b'x' literal's atom [F6]: its own u8 width class, outside
 // the int conversion family.
 pub tag byte
+// The byte sequence's collection atom: one immutable byte string per
+// value — the string face's shape over raw bytes, one counted block
+// behind one Ref word (never a per-element word list). Constructed
+// through `bytes_of` below; `len` counts its payload bytes, `byte_at`
+// reads one checked, and `byte_list` bridges back to `list[byte]`.
 pub tag bytes
 pub tag u32
 
 pub struct list[t]
 pub struct map[k, v]
 
+// The json value family, the typed face over the JSON grammar: one case
+// per grammar shape, the number split kept faithful (a token with a
+// decimal point or an exponent, or an integer literal past the int
+// range, answers json_float — an in-range integer literal answers
+// json_int, and the two never narrow into each other). The parser and
+// the serializer live at the file's end as ordinary ds source.
+pub enum json {
+  json_null
+  json_bool { value: bool }
+  json_int { value: int }
+  json_float { value: float }
+  json_string { value: string }
+  json_array { items: list[json] }
+  json_object { fields: map[string, json] }
+}
+
 // The failure taxonomy of the fallible natives: the platform tags the
 // runtime discriminants answer (io_err for the file surface, parse_err
-// for the pure readers). net_err keeps the record's own two-case shape.
+// for the pure readers, utf8_err for the string-bytes decode bridge —
+// never parse_err, which names document shape failures alone). net_err
+// keeps the record's own two-case shape.
 pub tag io_err
 pub tag parse_err
+pub tag utf8_err
 pub enum net_err {
   timeout
   refused
@@ -193,6 +272,41 @@ pub struct config { host: string, port: int?, retries: int }
 // wanting them declares its own externs over this shape.
 pub struct response
 
+// The file face: the package-owned linear handle over the fsys
+// capability. `open_file` answers this type directly (its one inline word is
+// the handle), while `read_exact` and `close_file` are ds-source
+// handlers over the raw `read_raw`/`close_raw` externs — a native
+// call cannot borrow a deinit-carrying argument, so the handlers read
+// the fd word out and hand the raw seam an int. The deinit closes the
+// handle (a file binding dropped without an explicit close_file still ends
+// clean), and `close_raw` is idempotent because the deinit may fire on
+// a handle the owner already closed. The handle word is an opaque
+// table key, never the OS descriptor, and `read_exact` answers
+// `bytes | io_err` (the read's payload is one immutable byte string,
+// one counted block per read).
+pub struct file_handle: ~Copyable {
+  fd: int
+  deinit { close_raw(self.fd) }
+}
+
+// The net face: the same shape over the net capability — the
+// package-owned linear handle whose one inline word is the connection
+// table's key. `net_connect` answers this type directly (the total
+// spelling, since the handle is deinit-carrying), while `send`,
+// `recv`, and `close_conn` are ds-source handlers over the raw
+// `net_send`/`net_recv`/`net_close` externs — a native call cannot
+// borrow a deinit-carrying argument, so the handlers read the id word
+// out and hand the raw seams an int, the fallible reads answering the
+// `net_err` union. The deinit closes the connection
+// (a binding dropped without an explicit close_conn still ends clean),
+// and `net_close` is idempotent because the deinit may fire on a
+// handle the owner already closed. The handle word is an opaque table
+// key, never the OS descriptor.
+pub struct net_handle: ~Copyable {
+  conn: int
+  deinit { net_close(self.conn) }
+}
+
 // The comptime reflection vocabulary (G1, G2): the one record `fields`
 // answers over declared data — a struct's fields and an enum's cases
 // share the (name, type, tag) triple. A field's record: its declared
@@ -211,7 +325,6 @@ pub const urls = ["https://ds.dev", "https://example.org"]
 
 pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]
-pub extern fn head[t] (xs: list[t]) -> t?
 pub extern fn tail[t] (xs: list[t]) -> list[t]
 pub extern fn list_new[t] () -> list[t]
 pub extern fn list_len[t] (xs: list[t]) -> int
@@ -222,16 +335,86 @@ pub extern fn map_new[k, v] () -> map[k, v]
 pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
 pub extern fn map_len[k, v] (m: map[k, v]) -> int
-pub extern fn join (parts: list[string], sep: string) -> string
+// The ordered key face: the map's entry order, one word per key — the
+// iteration seam the checked reads compose over (the value spans read
+// back through map_get).
+pub extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
+// The bytes collection's native face: `bytes_of` is the construction
+// seam (the `list[byte]` bridge in — one payload byte per element word),
+// `byte_list` the bridge back out (one word per byte), `byte_at`
+// the checked indexed read (B8's convention: the in-range byte under
+// the ok discriminant, none outside the payload's range — never a
+// clamp and never a trap), and the two string bridges one UTF-8 face
+// each way (2026-11-18): `utf8_encode` takes the string's own bytes,
+// and `utf8_decode` validates UTF-8 on the way back, an invalid
+// sequence answering the taxonomy's utf8_err tag.
+pub extern fn bytes_of (xs: list[byte]) -> bytes
+pub extern fn byte_list (b: bytes) -> list[byte]
+pub extern fn byte_at (b: bytes, i: int) -> byte | none
+pub extern fn utf8_encode (s: string) -> bytes
+pub extern fn utf8_decode (b: bytes) -> string | utf8_err
+// The one separator type both ways: `split` slices per its char and
+// `join` renders the neighbors around it. An empty-separator fold has
+// no spelling through the pair, so it composes in ds source.
+pub extern fn join (parts: list[string], sep: char) -> string
 pub extern fn len[t] (xs: t) -> int
 pub extern fn trim (s: string) -> string
 pub extern fn parse_int (s: string) -> int | parse_err
+pub extern fn parse_float (s: string) -> float | parse_err
 pub extern fn split (s: string, sep: char) -> list[string]
-pub extern fn substring (s: string, start: int, end: int) -> string
+// The checked slice (B8): the chars between the two positions, none
+// outside `0 <= start <= end` and the string's char count — never
+// clamping and never a trap.
+pub extern fn substring (s: string, start: int, end: int) -> string | none
 pub extern fn concat (a: string, b: string) -> string
 pub extern fn to_upper (s: string) -> string
 pub extern fn to_lower (s: string) -> string
-pub extern fn char_at (s: string, i: int) -> string
+// The checked char read (B8): the char at the position, none outside
+// the string's range — the old total spelling answered the empty
+// string instead.
+pub extern fn char_at (s: string, i: int) -> char | none
+// The codepoint pair, the json face's one native seam beside the width
+// bridges below: scalar-width UTF-8 encoding is not expressible in ds
+// source, so the escape decoder builds its one-scalar strings through
+// `char_of` and the serializer's control-char escaping reads a codepoint
+// through `code_of`. `char_of` answers none outside the scalar range;
+// `code_of` reads the char's scalar.
+pub extern fn char_of (code: int) -> string | none
+pub extern fn code_of (c: char) -> int
+// The byte and u32 width bridges (2026-11-19): byte sits outside the int
+// conversion family [F6] and u32 carries no literal or constructor, so
+// crossing either width is not expressible in ds source — the json face's
+// byte/u32 readers build their values through these. `byte_of`/`u32_of`
+// answer the in-range word or none (B8's convention); the read-back pair
+// answers the word's number for the json_int construction.
+pub extern fn byte_of (n: int) -> byte | none
+pub extern fn int_of_byte (b: byte) -> int
+pub extern fn u32_of (n: int) -> u32 | none
+pub extern fn int_of_u32 (v: u32) -> int
+// The trap primitive's own spelling (the 2026-11-17 die split's builtin,
+// index 69): private to this file [G4], so no user compile gains a bare
+// trap — the `die` convenience stays the CLI host's provision — while the
+// member below routes through it the way every native-keyed extern does,
+// the lowerer reading the callee by name alone. The message rides the
+// Die trap out to the drive, so the CLI's trap report prints a u32
+// range failure exactly like `die`; the declared return is the member's
+// own checking surface — the primitive never answers.
+extern fn trap (msg: string) -> u32
+// The u32 width's trapping construction (ruled 2026-11-19, B7's family):
+// the receiverless member answers the in-range word and traps out of
+// range naming the value and the range — the checked `u32_of` above
+// stays the fallible form. It rides the u32 type's own static tier (the
+// `int.default()` precedent, called `u32.of(x)`): a free fn named `u32`
+// cannot carry the ruling's bare call form, since a call-form name in
+// both namespaces is F9's ambiguity error and the runtime plan binds a
+// top-level fn's name through the type namespace first — the bare form
+// waits on an author ruling over F9's priority.
+impl u32 {
+  fn of (n: int) -> u32 {
+    const w = u32_of(n)
+    if w is none { trap("u32: ${str(n)} is out of range 0..4294967295") } else { w }
+  }
+}
 pub extern fn collect[t] (xs: list[t]) -> list[t]
 pub extern fn first[t] (xs: list[t]) -> t?
 pub extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
@@ -242,9 +425,14 @@ pub extern fn total_compare (a: float, b: float) -> int
 pub extern fn str_compare (a: string, b: string) -> int
 pub extern fn char_compare (a: char, b: char) -> int
 pub extern fn byte_compare (a: byte, b: byte) -> int
+// The bytes collection's sort key and content hash, the `ord`/`hash`
+// spellings bytes parts ride (lexicographic over the payload, a
+// shorter prefix first; FNV-1a over the payload bytes).
+pub extern fn bytes_compare (a: bytes, b: bytes) -> int
 pub extern fn str_hash (s: string) -> int
 pub extern fn float_hash (f: float) -> int
 pub extern fn char_hash (c: char) -> int
+pub extern fn bytes_hash (b: bytes) -> int
 pub extern fn println (msg: string) -> ()
 pub extern fn print (msg: string) -> ()
 pub extern fn read_file (path: string) -> string | io_err
@@ -252,12 +440,19 @@ pub extern fn write_file (path: string, contents: string) -> ()
 pub extern fn file_exists (path: string) -> bool
 pub extern fn fs_list (dir: string) -> list[string]
 pub extern fn file_size (path: string) -> int
-pub extern fn net_connect (host: string, port: int) -> int
-pub extern fn net_send (conn: int, data: string) -> ()
-pub extern fn net_recv (conn: int, max_bytes: int) -> string
+pub extern fn open_file (path: string) -> file_handle
+pub extern fn read_raw (fd: int, n: int) -> bytes | io_err
+pub extern fn close_raw (fd: int) -> ()
+// The clock: the `time` capability's one op, epoch nanoseconds (the
+// minimal face — a monotonic or zone-aware clock layers over this word).
+pub extern fn time () -> int
+pub extern fn net_connect (host: string, port: int) -> net_handle
+pub extern fn net_send (conn: int, data: string) -> () | net_err
+pub extern fn net_recv (conn: int, max_bytes: int) -> string | net_err
 pub extern fn net_close (conn: int) -> ()
 pub extern fn http_get (url: string) -> string
-pub extern fn parse_json (text: string) -> string
+// The json face's parser and serializer are ds-source functions at the
+// file's end (`parse_json`, `to_json` over the `json` enum above).
 pub extern fn cancel[t] (e: t) -> ()
 pub extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 pub extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
@@ -269,3 +464,609 @@ pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
 pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e
 pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
 pub extern fn max[t] (a: t, b: t) -> t
+
+// The file face's ds-source handlers over the raw externs: the
+// package-owned `file_handle` type never reaches a native call directly —
+// the handlers read the fd word out and pass the raw seam an int,
+// the value staying owned by its binding (the deinit closes what an
+// explicit `close_file` already closed, idempotently). The read's
+// failure rides the io_err union out to the caller, so `?`, the
+// `.ok`/`.err` handlers, is-narrowing, and match all extract it; the
+// total spelling stays `open_file`'s alone, since `file_handle` is
+// deinit-carrying and a union member that declares a deinit refuses.
+pub fn read_exact (f: file_handle, n: int) -> bytes | io_err {
+  const b = read_raw(f.fd, n)
+  b
+}
+pub fn close_file (f: file_handle) -> () {
+  close_raw(f.fd)
+}
+
+// The net face's ds-source handlers over the raw externs: the same
+// discipline as the file handlers — the package-owned `net_handle`
+// type never reaches a native call directly, the handlers read the id
+// word out and pass the raw seams an int, the value staying owned by
+// its binding (the deinit closes what an explicit `close_conn` already
+// closed, idempotently). The fallible reads answer the failure
+// taxonomy's union — the natives' one failure discriminant per class
+// lands on the `net_err` case the error class names (the error-class
+// mapping), so `?`, the `.err` handler, is-narrowing, and match extract
+// a real enum case — and they bind their answer before returning it: a
+// trailing call would sit in tail position and a tail call to a
+// fallible native refuses. `net_connect` keeps the total spelling for
+// `open_file`'s own reason: the handle is deinit-carrying, so a union
+// member holding it refuses.
+pub fn send (h: net_handle, data: string) -> () | net_err {
+  const sent = net_send(h.conn, data)
+  sent
+}
+pub fn recv (h: net_handle, max_bytes: int) -> string | net_err {
+  const reply = net_recv(h.conn, max_bytes)
+  reply
+}
+pub fn close_conn (h: net_handle) -> () {
+  net_close(h.conn)
+}
+
+
+// ---- the json face (the `json` enum's own parser and serializer) ----
+// Ordinary ds source over the string block's primitives: the walk reads
+// the text one char at a time (`char_at`, its checked read narrowing to
+// the char at every guarded position), classifies by compare, and
+// constructs through the enum's own cases, so the compiler knows no json
+// name — the face is this package's. The recursion threads (value, next
+// position) tuples, refusing parse_err at the first grammar violation,
+// with a depth budget keeping a hostile document off the interpreter
+// stack (every recursion carries its depth and a past-budget document
+// answers parse_err, never a stack trap).
+
+// One parsed member with the position past it — a struct, because a
+// tuple over the `json` union distributes member-wise and no single
+// tuple type remains to destructure.
+struct json_step { value: json, next: int }
+
+// The string reader's own step (the same shape over one string).
+struct str_step { value: string, next: int }
+
+fn is_ws (c: char | none) -> bool {
+  if c is char {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+  } else {
+    false
+  }
+}
+
+// The insignificant-whitespace skip, answering the next position.
+fn json_ws (text: string, at: int) -> int {
+  const c = char_at(text, at)
+  if at < len(text) && c is char && is_ws(c) { json_ws(text, at + 1) } else { at }
+}
+
+fn is_digit (c: char | none) -> bool {
+  if c is char {
+    char_compare(c, '0') >= 0 && char_compare(c, '9') <= 0
+  } else {
+    false
+  }
+}
+
+fn has_dot_or_exp (s: string) -> bool {
+  var i = 0
+  var found = false
+  while i < len(s) {
+    const c = char_at(s, i)
+    if c is char {
+      if c == '.' || c == 'e' || c == 'E' { found = true }
+    }
+    i += 1
+  }
+  found
+}
+
+fn hex_digit (c: char | none) -> int | parse_err {
+  var i = 0
+  while i < 16 && char_at("0123456789abcdef", i) != c { i += 1 }
+  if i < 16 { i } else { parse_err }
+}
+
+fn hex4 (text: string, at: int) -> int | parse_err {
+  if at + 4 > len(text) { return parse_err }
+  const a = hex_digit(char_at(text, at))
+  if a is parse_err { return parse_err }
+  const b = hex_digit(char_at(text, at + 1))
+  if b is parse_err { return parse_err }
+  const c = hex_digit(char_at(text, at + 2))
+  if c is parse_err { return parse_err }
+  const e = hex_digit(char_at(text, at + 3))
+  if e is parse_err { return parse_err }
+  a * 4096 + b * 256 + c * 16 + e
+}
+
+fn simple_escape (e: char) -> string | parse_err {
+  if e == '"' { "\"" }
+  else if e == '\\' { "\\" }
+  else if e == '/' { "/" }
+  else if e == 'b' { "\u{8}" }
+  else if e == 'f' { "\u{c}" }
+  else if e == 'n' { "\n" }
+  else if e == 'r' { "\r" }
+  else if e == 't' { "\t" }
+  else { parse_err }
+}
+
+// One \u escape starting at `at` (the first hex digit): the four hex
+// digits name a codepoint, a high surrogate must be followed by its low
+// one (the pair folding into the scalar it names), and a lone low
+// surrogate refuses. Answers the decoded string and the position after
+// the escape.
+fn json_unicode (text: string, at: int) -> str_step | parse_err {
+  const high = hex4(text, at)?
+  if high >= 0xd800 && high <= 0xdbff {
+    if char_at(text, at + 4).unwrap_or('\0') == '\\' && char_at(text, at + 5).unwrap_or('\0') == 'u' {
+      const low = hex4(text, at + 6)?
+      if low >= 0xdc00 && low <= 0xdfff {
+        const code = 65536 + (high - 0xd800) * 1024 + low - 0xdc00
+        const c = char_of(code).ok_or(parse_err)?
+        str_step { value: c, next: at + 10 }
+      } else { parse_err }
+    } else { parse_err }
+  } else if high >= 0xdc00 && high <= 0xdfff {
+    parse_err
+  } else {
+    const c = char_of(high).ok_or(parse_err)?
+    str_step { value: c, next: at + 4 }
+  }
+}
+
+// The empty-separator fold the json face builds its strings with:
+// `join`'s separator is one char, so the parts concatenate per element
+// here.
+fn join_empty (parts: list[string]) -> string {
+  var out = ""
+  var i = 0
+  while i < list_len(parts) {
+    out = out + list_get(parts, i).unwrap_or("")
+    i += 1
+  }
+  out
+}
+
+// One string's content, `at` past the opening quote: raw runs push
+// verbatim, the eight simple escapes and \u (surrogate pairs included)
+// decode, and a raw control character inside the content refuses (the
+// grammar's rule — the escaped spellings carry them). Answers the
+// decoded string and the position past the closing quote.
+fn json_string_body (text: string, at: int) -> str_step | parse_err {
+  var parts = list[string]()
+  var i = at
+  var start = at
+  while i < len(text) {
+    const c = char_at(text, i)
+    if c is none { return parse_err }
+    if c == '"' {
+      if i > start { list_push(parts, substring(text, start, i).unwrap_or("")) }
+      return str_step { value: join_empty(parts), next: i + 1 }
+    } else if c == '\\' {
+      const e = char_at(text, i + 1)
+      if i > start { list_push(parts, substring(text, start, i).unwrap_or("")) }
+      if e is none { return parse_err }
+      if e == 'u' {
+        const step = json_unicode(text, i + 2)
+        if step is parse_err { return parse_err }
+        list_push(parts, step.value)
+        i = step.next
+        start = i
+      } else {
+        const d = simple_escape(e)?
+        list_push(parts, d)
+        i = i + 2
+        start = i
+      }
+    } else if char_compare(c, ' ') < 0 {
+      return parse_err
+    } else {
+      i += 1
+    }
+  }
+  parse_err
+}
+
+// The end of one number token per the JSON grammar, or `at` itself when
+// the token is not a number (`-` alone, a bare `1.`, an exponent with
+// no digits — a leading-zero prefix leaves trailing content the
+// caller's own trailing-content refusal then reports).
+fn json_number_end (text: string, at: int) -> int {
+  var i = at
+  if i < len(text) && char_at(text, i).unwrap_or('\0') == '-' { i += 1 }
+  if i >= len(text) || !is_digit(char_at(text, i)) { return at }
+  if char_at(text, i).unwrap_or('\0') == '0' {
+    i += 1
+  } else {
+    while i < len(text) && is_digit(char_at(text, i)) { i += 1 }
+  }
+  if i < len(text) && char_at(text, i).unwrap_or('\0') == '.' {
+    i += 1
+    if i >= len(text) || !is_digit(char_at(text, i)) { return at }
+    while i < len(text) && is_digit(char_at(text, i)) { i += 1 }
+  }
+  if i < len(text) && (char_at(text, i).unwrap_or('\0') == 'e' || char_at(text, i).unwrap_or('\0') == 'E') {
+    i += 1
+    if i < len(text) && (char_at(text, i).unwrap_or('\0') == '+' || char_at(text, i).unwrap_or('\0') == '-') { i += 1 }
+    if i >= len(text) || !is_digit(char_at(text, i)) { return at }
+    while i < len(text) && is_digit(char_at(text, i)) { i += 1 }
+  }
+  i
+}
+
+// The number token's typed case: an in-range integer literal answers
+// json_int (int kept faithful), everything else — a decimal point, an
+// exponent, or an integer literal past the int range — answers json_float
+// through the correctly-rounded reader.
+fn json_number (text: string, at: int) -> json_step | parse_err {
+  const end = json_number_end(text, at)
+  if end == at { return parse_err }
+  const token = substring(text, at, end).unwrap_or("")
+  if has_dot_or_exp(token) {
+    const f = parse_float(token)?
+    json_step { value: json_float(value: f), next: end }
+  } else {
+    match parse_int(token) {
+      parse_err => {
+        const f = parse_float(token)?
+        json_step { value: json_float(value: f), next: end }
+      }
+      n => json_step { value: json_int(value: n), next: end }
+    }
+  }
+}
+
+// One literal word (`true`, `false`, `null`), answering the position
+// past it.
+fn json_word (text: string, at: int, lit: string, v: json) -> json_step | parse_err {
+  if substring(text, at, at + len(lit)).unwrap_or("") == lit { json_step { value: v, next: at + len(lit) } } else { parse_err }
+}
+
+fn json_array_body (text: string, at: int, depth: int) -> json_step | parse_err {
+  var items = list[json]()
+  var i = json_ws(text, at)
+  var done = false
+  if i < len(text) && char_at(text, i).unwrap_or('\0') == ']' {
+    done = true
+    i = i + 1
+  }
+  while !done {
+    const step = json_value(text, i, depth)
+    if step is parse_err { return parse_err }
+    list_push(items, step.value)
+    const after = json_ws(text, step.next)
+    if after >= len(text) { return parse_err }
+    const c = char_at(text, after)
+    if c is none { return parse_err }
+    if c == ']' {
+      done = true
+      i = after + 1
+    } else if c == ',' {
+      i = json_ws(text, after + 1)
+    } else { return parse_err }
+  }
+  json_step { value: json_array(items: items), next: i }
+}
+
+fn json_object_body (text: string, at: int, depth: int) -> json_step | parse_err {
+  var fields = map[string, json]()
+  var i = json_ws(text, at)
+  var done = false
+  if i < len(text) && char_at(text, i).unwrap_or('\0') == '}' {
+    done = true
+    i = i + 1
+  }
+  while !done {
+    if i >= len(text) || char_at(text, i).unwrap_or('\0') != '"' { return parse_err }
+    const key = json_string_body(text, i + 1)
+    if key is parse_err { return parse_err }
+    const colon = json_ws(text, key.next)
+    if colon >= len(text) || char_at(text, colon).unwrap_or('\0') != ':' { return parse_err }
+    const step = json_value(text, colon + 1, depth)
+    if step is parse_err { return parse_err }
+    map_set(fields, key.value, step.value)
+    const after = json_ws(text, step.next)
+    if after >= len(text) { return parse_err }
+    const c = char_at(text, after)
+    if c is none { return parse_err }
+    if c == '}' {
+      done = true
+      i = after + 1
+    } else if c == ',' {
+      i = json_ws(text, after + 1)
+    } else { return parse_err }
+  }
+  json_step { value: json_object(fields: fields), next: i }
+}
+
+fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
+  if depth > 256 { return parse_err }
+  const i = json_ws(text, at)
+  if i >= len(text) { return parse_err }
+  const c = char_at(text, i)
+  if c is none { return parse_err }
+  if c == '{' { json_object_body(text, i + 1, depth + 1) }
+  else if c == '[' { json_array_body(text, i + 1, depth + 1) }
+  else if c == '"' {
+    const s = json_string_body(text, i + 1)
+    if s is parse_err { return parse_err }
+    json_step { value: json_string(value: s.value), next: s.next }
+  }
+  else if c == 't' { json_word(text, i, "true", json_bool(value: true)) }
+  else if c == 'f' { json_word(text, i, "false", json_bool(value: false)) }
+  else if c == 'n' { json_word(text, i, "null", json_null) }
+  else if c == '-' || is_digit(c) {
+    const step = json_number(text, i)
+    step
+  }
+  else { parse_err }
+}
+
+// The JSON reader: one document answering its typed value, invalid text
+// answering parse_err (the bare tag — the offending position is not
+// carried).
+pub fn parse_json (text: string) -> json | parse_err {
+  const step = json_value(text, 0, 0)
+  if step is parse_err { return parse_err }
+  const rest = json_ws(text, step.next)
+  if rest == len(text) { step.value } else { parse_err }
+}
+
+// The serializer's string escaping: a raw run between the specials, the
+// two escaped specials, and control characters as their \u00XX spellings
+// (a scalar the JSON grammar cannot carry raw).
+fn to_json_string (s: string, acc: list[string]) -> list[string] {
+  var a = acc
+  var i = 0
+  var start = 0
+  while i < len(s) {
+    const c = char_at(s, i).unwrap_or('\0')
+    if c == '"' || c == '\\' {
+      if i > start { list_push(a, substring(s, start, i).unwrap_or("")) }
+      if c == '"' {
+        list_push(a, "\\\"")
+      } else {
+        list_push(a, "\\\\")
+      }
+      i += 1
+      start = i
+    } else if char_compare(c, ' ') < 0 {
+      if i > start { list_push(a, substring(s, start, i).unwrap_or("")) }
+      const code = code_of(c)
+      list_push(a, "\\u00" + substring("0123456789abcdef", code / 16, code / 16 + 1).unwrap_or("") + substring("0123456789abcdef", code % 16, code % 16 + 1).unwrap_or(""))
+      i += 1
+      start = i
+    } else {
+      i += 1
+    }
+  }
+  if start < len(s) { list_push(a, substring(s, start, len(s)).unwrap_or("")) }
+  list_push(a, "\"")
+  a
+}
+
+// The serializer's array walk, one element per step over the accumulator
+// (a linear value: each step consumes it and answers it back).
+fn to_json_array (items: list[json], at: int, acc: list[string]) -> list[string] {
+  if at >= list_len(items) {
+    var close = acc
+    list_push(close, "]")
+    close
+  } else {
+    var a = acc
+    if at > 0 { list_push(a, ",") }
+    const elem = list_get(items, at).unwrap_or(json_null)
+    to_json_array(items, at + 1, to_json_parts(elem, a))
+  }
+}
+
+fn to_json_object (keys: list[string], at: int, fields: map[string, json], acc: list[string]) -> list[string] {
+  if at >= list_len(keys) {
+    var close = acc
+    list_push(close, "}")
+    close
+  } else {
+    var a = acc
+    if at > 0 { list_push(a, ",") }
+    const k = list_get(keys, at).unwrap_or("")
+    var key = a
+    list_push(key, "\"")
+    key = to_json_string(k, key)
+    list_push(key, ":")
+    const v = map_get(fields, k).unwrap_or(json_null)
+    to_json_object(keys, at + 1, fields, to_json_parts(v, key))
+  }
+}
+
+fn to_json_parts (v: json, acc: list[string]) -> list[string] {
+  var a = acc
+  match v {
+    json_null => {
+      list_push(a, "null")
+      a
+    }
+    json_bool { value } => {
+      list_push(a, str(value))
+      a
+    }
+    json_int { value } => {
+      list_push(a, str(value))
+      a
+    }
+    json_float { value } => {
+      // a non-finite float has no JSON spelling, so it serializes as
+      // null (the wider ecosystem's own convention); a finite one keeps
+      // a float spelling (the reader's int-faithful split never narrows
+      // back), appending ".0" to a Display form the grammar would read
+      // back as an integer
+      if value != value || value - value != 0.0 {
+        list_push(a, "null")
+      } else {
+        const s = str(value)
+        if has_dot_or_exp(s) {
+          list_push(a, s)
+        } else {
+          list_push(a, s + ".0")
+        }
+      }
+      a
+    }
+    json_string { value } => {
+      list_push(a, "\"")
+      to_json_string(value, a)
+    }
+    json_array { items } => {
+      list_push(a, "[")
+      to_json_array(items, 0, a)
+    }
+    json_object { fields } => {
+      list_push(a, "{")
+      to_json_object(map_keys(fields), 0, fields, a)
+    }
+  }
+}
+
+// The JSON writer: one typed value answering its minified serialization.
+pub fn to_json (v: json) -> string {
+  join_empty(to_json_parts(v, list[string]()))
+}
+
+// ---- the json face's decode surface ----
+// The typed readers a target's decode walks consume: one reader per
+// case, a wrong shape answering parse_err (the face's own failure
+// member), and the object member answering the E4 optional so a walk
+// none-tests the missing key into the same parse_err. The number
+// split is kept here as the reader keeps it: json_as_int reads
+// json_int alone and json_as_float reads json_float alone, the two
+// never narrowing into each other. These are the per-field halves of
+// the from_json walk; the target-typed construction itself is
+// per-target (each target's members spell it over these readers).
+
+// The object member by key, none over a missing key or a non-object.
+pub fn json_member (v: json, key: string) -> json | none {
+  match v {
+    json_object { fields } => {
+      const m = map_get(fields, key)
+      m
+    }
+    _ => none
+  }
+}
+
+pub fn json_as_int (v: json) -> int | parse_err {
+  match v {
+    json_int { value } => value
+    _ => parse_err
+  }
+}
+
+pub fn json_as_float (v: json) -> float | parse_err {
+  match v {
+    json_float { value } => value
+    _ => parse_err
+  }
+}
+
+pub fn json_as_bool (v: json) -> bool | parse_err {
+  match v {
+    json_bool { value } => value
+    _ => parse_err
+  }
+}
+
+pub fn json_as_string (v: json) -> string | parse_err {
+  match v {
+    json_string { value } => value
+    _ => parse_err
+  }
+}
+
+pub fn json_as_array (v: json) -> list[json] | parse_err {
+  match v {
+    json_array { items } => items
+    _ => parse_err
+  }
+}
+
+pub fn json_as_object (v: json) -> map[string, json] | parse_err {
+  match v {
+    json_object { fields } => fields
+    _ => parse_err
+  }
+}
+
+// The width-bridging readers (2026-11-19): a json number reads as a byte
+// (0-255) or a u32 through the checked bridge natives — an out-of-range
+// number answers parse_err like a wrong shape — and a one-character json
+// string reads as a char (any other length a wrong shape).
+pub fn json_as_byte (v: json) -> byte | parse_err {
+  match v {
+    json_int { value } => {
+      const b = byte_of(value)
+      if b is none { parse_err } else { b }
+    }
+    _ => parse_err
+  }
+}
+
+pub fn json_as_u32 (v: json) -> u32 | parse_err {
+  match v {
+    json_int { value } => {
+      const u = u32_of(value)
+      if u is none { parse_err } else { u }
+    }
+    _ => parse_err
+  }
+}
+
+pub fn json_as_char (v: json) -> char | parse_err {
+  match v {
+    json_string { value } => {
+      if len(value) == 1 {
+        const c = char_at(value, 0)
+        if c is none { parse_err } else { c }
+      } else { parse_err }
+    }
+    _ => parse_err
+  }
+}
+
+// The bytes representation (2026-11-19): a json array of numbers, one
+// element per payload byte — the exact round-trip of the writer below,
+// consistent with the show impl's byte-list rendering. Every element
+// must be an in-range json number; anything else answers parse_err.
+pub fn json_as_bytes (v: json) -> bytes | parse_err {
+  const items = json_as_array(v)?
+  var out = list[byte]()
+  var i = 0
+  while i < list_len(items) {
+    const b = json_as_byte(list_get(items, i).unwrap_or(json_null))
+    if b is parse_err { return parse_err }
+    list_push(out, b)
+    i += 1
+  }
+  bytes_of(out)
+}
+
+// The encode half the to_json walk dispatches through (2026-11-19):
+// byte and u32 write as json numbers, char as its one-character json
+// string, and bytes as the array of numbers the reader above takes
+// back — one construction per value the case vocabulary alone cannot
+// spell from these widths.
+pub fn json_of_byte (b: byte) -> json { json_int(value: int_of_byte(b)) }
+
+pub fn json_of_u32 (v: u32) -> json { json_int(value: int_of_u32(v)) }
+
+pub fn json_of_char (c: char) -> json { json_string(value: "$c") }
+
+pub fn json_of_bytes (b: bytes) -> json {
+  var items = list[json]()
+  for e in byte_list(b) {
+    list_push(items, json_int(value: int_of_byte(e)))
+  }
+  json_array(items: items)
+}

@@ -63,6 +63,9 @@
 mod ctx;
 mod decl;
 mod expr;
+/// The `.dsi` signature spellings (G4): the pub items' re-parsable
+/// declaration lines `ds info` prints and the LSP hover answers.
+pub mod signature;
 mod ty;
 
 use ctx::Ctx;

@@ -32,8 +32,12 @@
 //!
 //! # Modes (C2)
 //!
-//! Borrow and `mut` parameters are windows the caller retains, so their
-//! uses never move anything — in the callee's body or at the call site.
+//! Borrow and `mut` parameters are windows the caller retains: borrowing
+//! uses read freely, and a consuming use whose value stays in scope (a
+//! local alias) keeps the borrow-copy discipline — only a use whose value
+//! leaves the frame (a return, a `move` argument, a tail answer) is an
+//! escape ([`ErrorCode::BorrowEscapes`]), ownership the window does not
+//! hold transferring out, a double deinit at runtime.
 //! Only `move` parameters consume their argument. Unresolvable callees
 //! (an indirect call through a fn-typed value) default to borrowing; the
 //! M4 runtime `rc==1` uniqueness checks close that gap.
@@ -147,7 +151,7 @@ pub struct LastUse {
 
 /// The affine pass over one package: diagnostics plus the placement facts
 /// a lowerer relies on.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Linearity {
     /// Diagnostics in walk order.
     pub diags: Vec<Diagnostic>,
@@ -162,7 +166,10 @@ pub struct Linearity {
 /// The full static check of one package: bidirectional types (B2) then the
 /// affine pass (C1, C5). Callers wanting every diagnostic read both lists.
 #[must_use]
-pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
+pub fn check<T>(files: &ds_diag::Files, asts: &[T]) -> (Checked, Linearity)
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let crate::type_of::Analyzed {
         asts: expanded,
         package,
@@ -179,13 +186,16 @@ pub fn check(files: &ds_diag::Files, asts: &[Ast]) -> (Checked, Linearity) {
 /// ran: `checked` supplies binder facts and top-level types, the tables
 /// come from the same walk (see `type_of::analyze`).
 #[must_use]
-pub fn linearity_check(
-    asts: &[Ast],
+pub fn linearity_check<T>(
+    asts: &[T],
     package: &Package,
     resolutions: &[Resolutions],
     decls: &Decls,
     checked: &Checked,
-) -> Linearity {
+) -> Linearity
+where
+    T: std::borrow::Borrow<Ast>,
+{
     let mut lin = Lin {
         package,
         decls,
@@ -204,6 +214,7 @@ pub fn linearity_check(
         reported: HashSet::new(),
         last_use: FxHashMap::default(),
         epoch: 0,
+        escaping: false,
     };
     // Two package-wide passes [G3]: every file's top-level binder
     // patterns come live before any initializer or body walks — bodied
@@ -213,11 +224,11 @@ pub fn linearity_check(
     // processed before the declaring one.
     for (ast, res) in asts.iter().zip(resolutions.iter()) {
         lin.res = Some(res);
-        lin.register_top_bindings(ast);
+        lin.register_top_bindings(std::borrow::Borrow::borrow(ast));
     }
     for (ast, res) in asts.iter().zip(resolutions.iter()) {
         lin.res = Some(res);
-        lin.top_level_and_bodies(ast);
+        lin.top_level_and_bodies(std::borrow::Borrow::borrow(ast));
     }
     let mut last_uses: Vec<LastUse> = lin
         .last_use
@@ -231,6 +242,132 @@ pub fn linearity_check(
     last_uses.sort_by_key(|use_| use_.binder.start);
     lin.out.last_uses = last_uses;
     lin.out
+}
+
+/// The parked affine facts over one package's served prefix: the prefix
+/// files' output rows plus the walk state their files left behind — the
+/// definition places' static facts, entry states, and last-use entries.
+/// The first walk a process runs over the served trees fills the
+/// [`Park`](crate::Park) cell; every later compile installs it and walks
+/// only its own files. The rows name spans and the park's own definition
+/// ids alone (each serve rebuilds the namespace identically, so the
+/// prefix's ids are the same every compile).
+#[derive(Debug)]
+pub struct ServedLinearity {
+    /// The prefix files' rows, in walk order.
+    out: Linearity,
+    /// The definition places the prefix registered or walked: static
+    /// facts (the per-compile `info` half), names re-borrowed from the
+    /// installing compile's package.
+    defs: FxHashMap<DefId, DefFact>,
+    /// The definition places' states at the prefix boundary — the entry
+    /// state the compiled files' walk continues from.
+    states: FxHashMap<DefId, State>,
+    /// The last use recorded inside the prefix, per place: a compiled
+    /// file's use of a served binding overwrites its entry, exactly as
+    /// the one-walk order does.
+    last_use: FxHashMap<Place, (Span, bool)>,
+}
+
+/// One served definition place's parked static facts.
+#[derive(Clone, Copy, Debug)]
+struct DefFact {
+    copyable: bool,
+    owned: bool,
+}
+
+/// Runs the affine pass over a package whose first `served_files` trees
+/// arrive served behind a walk park: the first process run walks the
+/// served files and parks their facts in `park` (one walk total — the
+/// snapshot sits at the file boundary, before any compiled file walks),
+/// later runs install the park and walk only the remaining files,
+/// prepending the parked rows to their own. A caller without a served
+/// prefix uses [`linearity_check`]; the cell belongs to the serve that
+/// fills it, so two serves never share a park.
+#[must_use]
+pub fn linearity_check_served<T>(
+    asts: &[T],
+    package: &Package,
+    resolutions: &[Resolutions],
+    decls: &Decls,
+    checked: &Checked,
+    served_files: usize,
+    park: &crate::Park<ServedLinearity>,
+) -> Linearity
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut lin = Lin {
+        package,
+        decls,
+        facts: &checked.binders,
+        def_types: &checked.def_types,
+        res: resolutions.first(),
+        hole_dispatches: &checked.trait_calls,
+        hole_inherents: &checked.inherent_calls,
+        hole_runtime: &checked.hole_show_dispatches,
+        out: Linearity::default(),
+        state: FxHashMap::default(),
+        undo: Vec::new(),
+        info: FxHashMap::default(),
+        scopes: vec![Vec::new()],
+        audit: false,
+        reported: HashSet::new(),
+        last_use: FxHashMap::default(),
+        epoch: 0,
+        escaping: false,
+    };
+    let parked = park.get();
+    let mut prefix = None;
+    if let Some(served) = parked {
+        lin.install_served(served, package);
+        prefix = Some(served.out.clone());
+    } else {
+        // The filling walk keeps going through the compiled files
+        // below, so its total cost is the one plain walk's.
+        for (ast, res) in asts.iter().zip(resolutions.iter()).take(served_files) {
+            lin.res = Some(res);
+            lin.register_top_bindings(std::borrow::Borrow::borrow(ast));
+        }
+        for (ast, res) in asts.iter().zip(resolutions.iter()).take(served_files) {
+            lin.res = Some(res);
+            lin.top_level_and_bodies(std::borrow::Borrow::borrow(ast));
+        }
+        let _ = park.fill(lin.snapshot_prefix());
+    }
+    for (ast, res) in asts.iter().zip(resolutions.iter()).skip(served_files) {
+        lin.res = Some(res);
+        lin.register_top_bindings(std::borrow::Borrow::borrow(ast));
+    }
+    for (ast, res) in asts.iter().zip(resolutions.iter()).skip(served_files) {
+        lin.res = Some(res);
+        lin.top_level_and_bodies(std::borrow::Borrow::borrow(ast));
+    }
+    let mut last_uses: Vec<LastUse> = lin
+        .last_use
+        .iter()
+        .map(|(place, &(at, borrowed))| LastUse {
+            binder: place.binder_span(package),
+            at,
+            borrowed,
+        })
+        .collect();
+    last_uses.sort_by_key(|use_| use_.binder.start);
+    lin.out.last_uses = last_uses;
+    match prefix {
+        Some(mut prefix) => {
+            // The prefix's rows come first in walk order; the fresh rows
+            // follow. Last uses were already merged per place by the
+            // install, so the sorted concatenation is the one walk's.
+            prefix.moves.append(&mut lin.out.moves);
+            prefix.drops.append(&mut lin.out.drops);
+            prefix.diags.append(&mut lin.out.diags);
+            prefix.last_uses.append(&mut lin.out.last_uses);
+            prefix.last_uses.sort_by_key(|use_| use_.binder.start);
+            prefix
+        },
+        None => lin.out,
+    }
 }
 
 // ---- copyability [C1] -------------------------------------------------------
@@ -456,6 +593,12 @@ struct Lin<'a> {
     /// Capture depth: inside a lambda or spawn body, every use of a
     /// binding from an outer epoch is a capture and moves it (C1).
     epoch: usize,
+    /// Whether the subtree's value leaves its borrowing frame: a return's
+    /// expression, a `move` argument's staging, a function or lambda
+    /// body's tail. A `~Copyable` window read in such a position escapes
+    /// ([`ErrorCode::BorrowEscapes`]); every other consuming read (a local
+    /// alias, a display hole) keeps the borrow-copy discipline.
+    escaping: bool,
 }
 
 impl<'a> Lin<'a> {
@@ -506,10 +649,10 @@ impl<'a> Lin<'a> {
             },
             ItemKind::Trait(t) => {
                 for member in &t.members {
-                    if let TraitMember::Fn(f) = member {
-                        if f.body.is_some() {
-                            self.fn_decl(f);
-                        }
+                    if let TraitMember::Fn(f) = member
+                        && f.body.is_some()
+                    {
+                        self.fn_decl(f);
                     }
                 }
             },
@@ -542,7 +685,13 @@ impl<'a> Lin<'a> {
             self.bind_param(param);
         }
         if let Some(body) = &f.body {
+            // The body's tail expression is the function's answer, so its
+            // value leaves the frame (an explicit `return` marks its own
+            // subtree).
+            let outer = self.escaping;
+            self.escaping = true;
             self.block(body);
+            self.escaping = outer;
         }
         self.drop_scope(f.body.as_ref().map_or(f.name.span, |b| b.span));
     }
@@ -666,6 +815,71 @@ impl<'a> Lin<'a> {
         crate::pattern::pattern_binders(pat)
     }
 
+    /// Installs a parked prefix: the served definition places' static
+    /// facts (names re-borrowed from this compile's package, whose
+    /// namespace the serve rebuilt identically), their boundary states,
+    /// and their last-use entries — a compiled file's later use of a
+    /// served binding overwrites the entry exactly as the one-walk order
+    /// does.
+    fn install_served(&mut self, served: &ServedLinearity, package: &'a Package) {
+        for (def, fact) in &served.defs {
+            self.info.insert(Place::Def(*def), Info {
+                name: package.def(*def).name.as_str(),
+                copyable: fact.copyable,
+                owned: fact.owned,
+                epoch: 0,
+            });
+        }
+        for (def, state) in &served.states {
+            self.state.insert(Place::Def(*def), *state);
+        }
+        self.last_use.extend(
+            served
+                .last_use
+                .iter()
+                .map(|(&place, &entry)| (place, entry)),
+        );
+    }
+
+    /// The walk so far as a parked prefix, taken at the served boundary —
+    /// after the served files' walks, before any compiled file's. Local
+    /// places never ride: their spans are unreachable from another file,
+    /// and the next item's local-table clear drops them in the one walk
+    /// anyway. Last uses park per place (an installing walk resolves them
+    /// with its own package), so the rows themselves never serialize.
+    fn snapshot_prefix(&self) -> ServedLinearity {
+        let defs = self
+            .info
+            .iter()
+            .filter_map(|(place, info)| match place {
+                Place::Def(def) => Some((*def, DefFact {
+                    copyable: info.copyable,
+                    owned: info.owned,
+                })),
+                Place::Local(_) => None,
+            })
+            .collect();
+        let states = self
+            .state
+            .iter()
+            .filter_map(|(place, state)| match place {
+                Place::Def(def) => Some((*def, *state)),
+                Place::Local(_) => None,
+            })
+            .collect();
+        ServedLinearity {
+            out: Linearity {
+                diags: self.out.diags.clone(),
+                moves: self.out.moves.clone(),
+                drops: self.out.drops.clone(),
+                last_uses: Vec::new(),
+            },
+            defs,
+            states,
+            last_use: self.last_use.clone(),
+        }
+    }
+
     /// Records the scope-exit deaths of one scope's live owned
     /// non-copyable binders (C5), in bind order.
     fn drop_scope(&mut self, at: Span) {
@@ -703,6 +917,28 @@ impl<'a> Lin<'a> {
                 // a capture: the closure owns the value from here on [C1].
                 let captured = self.epoch > info.epoch;
                 let moving = info.owned && !info.copyable && (consuming || captured);
+                // A consuming use of a borrowed `~Copyable` value (a
+                // borrow/`mut` parameter's window) at a position whose
+                // value leaves the frame hands out an ownership the window
+                // does not hold — a double deinit at runtime — so the
+                // escape rejects here [C2]. Local aliases and display
+                // reads keep the borrow-copy discipline (the value dies
+                // inside the window's own scope, the hook staying with the
+                // owner), and a capture's own channel is the lowerer's
+                // deinit-carrying-capture refusal, not this one.
+                if !info.owned && !info.copyable && consuming && self.escaping && !captured {
+                    let diag = Diagnostic::error(
+                        ErrorCode::BorrowEscapes,
+                        format!(
+                            "value `{}` is borrowed for this call; a `~Copyable` value cannot \
+                             escape its window [C2]",
+                            info.name
+                        ),
+                    )
+                    .with_primary(at, "escape of a borrowed value")
+                    .with_secondary(place.binder_span(self.package), "borrowed here");
+                    self.report_once(place, at, diag);
+                }
                 self.last_use.insert(place, (at, !moving));
                 if moving && !self.audit {
                     self.out.moves.push(Move {
@@ -797,10 +1033,21 @@ impl<'a> Lin<'a> {
     fn block(&mut self, block: &'a BlockExpr) -> bool {
         self.scopes.push(Vec::new());
         let mut diverges = false;
-        for stmt in &block.stmts {
+        for (index, stmt) in block.stmts.iter().enumerate() {
+            // The last expression statement is the block's value: it
+            // inherits the enclosing escape context (a returned if-arm's
+            // tail escapes with the return). Every other statement's value
+            // is discarded in scope, so its reads never escape.
+            let tail_value =
+                index + 1 == block.stmts.len() && matches!(stmt.kind, ds_parse::StmtKind::Expr(_));
+            let outer = self.escaping;
+            if !tail_value {
+                self.escaping = false;
+            }
             if self.stmt(stmt) {
                 diverges = true;
             }
+            self.escaping = outer;
         }
         self.drop_scope(block.span);
         diverges
@@ -931,7 +1178,10 @@ impl<'a> Lin<'a> {
             } => self.for_expr(pat, iter, body),
             Expr::Return { expr, .. } => {
                 if let Some(expr) = expr {
+                    let outer = self.escaping;
+                    self.escaping = true;
                     self.expr(expr, true);
+                    self.escaping = outer;
                 }
                 true
             },
@@ -965,7 +1215,7 @@ impl<'a> Lin<'a> {
                     self.read(Place::Def(*def), only.span, consuming);
                 }
             },
-            None | Some(Res::TraitMethod(_) | Res::Dot(_) | Res::Handler) => {},
+            None | Some(Res::TraitMethod(_) | Res::Dot(_) | Res::Handler | Res::Module(_)) => {},
         }
     }
 
@@ -977,7 +1227,7 @@ impl<'a> Lin<'a> {
                     self.read(Place::Def(*def), name.span, consuming);
                 }
             },
-            None | Some(Res::TraitMethod(_) | Res::Dot(_) | Res::Handler) => {},
+            None | Some(Res::TraitMethod(_) | Res::Dot(_) | Res::Handler | Res::Module(_)) => {},
         }
     }
 
@@ -1020,7 +1270,12 @@ impl<'a> Lin<'a> {
         for param in params {
             self.bind_param(param);
         }
+        // The lambda's answer leaves it at its call, so the body
+        // expression is an escape context like a function body's tail.
+        let outer = self.escaping;
+        self.escaping = true;
         let diverges = self.expr(body, true);
+        self.escaping = outer;
         self.epoch -= 1;
         self.drop_scope(*span);
         diverges
@@ -1176,7 +1431,14 @@ impl<'a> Lin<'a> {
     }
 
     fn match_expr(&mut self, scrutinee: &'a Expr, arms: &'a [MatchArm]) -> bool {
+        // The scrutinee feeds its pattern's binders, which are local
+        // registrations (a pattern field never anchors a claim), and a
+        // guard is a bool test: neither value leaves the frame, so the
+        // match's escape context applies to the arm bodies alone.
+        let outer = self.escaping;
+        self.escaping = false;
         self.expr(scrutinee, true);
+        self.escaping = outer;
         // Every arm starts from the scrutinee's state, and each arm's writes
         // are logged and rewound at its end.
         let mark = self.undo.len();
@@ -1280,19 +1542,17 @@ impl<'a> Lin<'a> {
                 [only] => {
                     if let Some(Res::Def(def)) =
                         self.res.and_then(|res| res.get(only.span)).cloned()
+                        && let Some(sig) = self.decls.fns.get(&def).cloned()
                     {
-                        if let Some(sig) = self.decls.fns.get(&def).cloned() {
-                            return self.sig_call(&sig, None, args, trailing.as_deref());
-                        }
+                        return self.sig_call(&sig, None, args, trailing.as_deref());
                     }
                 },
                 [_, method] => {
                     if let Some(Res::TraitMethod(method_id)) =
                         self.res.and_then(|res| res.get(method.span)).cloned()
+                        && let Some(sig) = self.member_sig(method_id)
                     {
-                        if let Some(sig) = self.member_sig(method_id) {
-                            return self.sig_call(&sig, None, args, trailing.as_deref());
-                        }
+                        return self.sig_call(&sig, None, args, trailing.as_deref());
                     }
                 },
                 _ => {},
@@ -1354,11 +1614,18 @@ impl<'a> Lin<'a> {
                 self.borrow_args(args, trailing);
                 false
             },
-            Res::Dot(DotRes::Static { .. }) => {
+            Res::Dot(DotRes::Static { candidates }) => {
                 // The type-keyed member call: the receiver is a type name,
-                // never a value use; the written arguments borrow.
-                self.borrow_args(args, trailing);
-                false
+                // never a value use. The check converged to one member, so
+                // the arguments walk per its signature like a free call — a
+                // `move` parameter consumes, or the use-after-move behind it
+                // stays live and the scope exit double-drops.
+                if let Some(sig) = candidates.first().and_then(|id| self.member_sig(*id)) {
+                    self.sig_call(&sig, None, args, trailing)
+                } else {
+                    self.borrow_args(args, trailing);
+                    false
+                }
             },
             _ => {
                 self.expr(recv, false);
@@ -1397,7 +1664,13 @@ impl<'a> Lin<'a> {
         let slots = Self::slots(fed, 0, args, trailing, sig);
         for (slot, param) in slots.iter().zip(sig.params.iter()) {
             if let Some(arg) = slot {
-                self.expr(arg, matches!(param.mode, ParamMode::Consume(_)));
+                let consume = matches!(param.mode, ParamMode::Consume(_));
+                let outer = self.escaping;
+                if consume {
+                    self.escaping = true;
+                }
+                self.expr(arg, consume);
+                self.escaping = outer;
             }
         }
         false
@@ -1414,19 +1687,19 @@ impl<'a> Lin<'a> {
     ) -> Vec<Option<&'x Expr>> {
         let mut slots: Vec<Option<&'x Expr>> = vec![None; sig.params.len()];
         let mut next = skip;
-        if let Some(fed) = fed {
-            if let Some(first) = slots.first_mut() {
-                *first = Some(fed);
-                next = 1;
-            }
+        if let Some(fed) = fed
+            && let Some(first) = slots.first_mut()
+        {
+            *first = Some(fed);
+            next = 1;
         }
         for arg in args {
             match &arg.name {
                 Some(name) => {
-                    if let Some(index) = sig.params.iter().position(|p| p.name == name.name) {
-                        if slots[index].is_none() {
-                            slots[index] = Some(&arg.value);
-                        }
+                    if let Some(index) = sig.params.iter().position(|p| p.name == name.name)
+                        && slots[index].is_none()
+                    {
+                        slots[index] = Some(&arg.value);
                     }
                 },
                 None => {
@@ -1437,10 +1710,11 @@ impl<'a> Lin<'a> {
                 },
             }
         }
-        if let Some(tail) = trailing {
-            if next < slots.len() && slots[next].is_none() {
-                slots[next] = Some(tail);
-            }
+        if let Some(tail) = trailing
+            && next < slots.len()
+            && slots[next].is_none()
+        {
+            slots[next] = Some(tail);
         }
         slots
     }
@@ -1565,6 +1839,7 @@ mod tests {
             reported: HashSet::new(),
             last_use: FxHashMap::default(),
             epoch: 0,
+            escaping: false,
         };
         lin.read(place, binder, false);
         let [diag] = lin.out.diags.as_slice() else {

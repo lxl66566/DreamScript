@@ -10,14 +10,31 @@
 //! `crates/ds-vm/tests/fuzz_vm_fibers.rs`.
 //!
 //! Vocabulary: the builtin core's scalar, string, list, map, and callable
-//! words plus the fiber/nursery control seams — `fiber_yield`,
-//! `fiber_resume`, `nursery_open`, `nursery_join`, `nursery_boundary`,
+//! words plus the fiber/nursery control seams — `fiber_resume`,
+//! `nursery_open`, `nursery_join`, `nursery_boundary`,
 //! `nursery_cancel` at random call sites, and `nursery_spawn` only inside
 //! the entry's template (see Termination) — plus the std console pair
 //! (captured output; the file and net natives stay unreferenced so
 //! execution is hermetic) and the host fiber face
 //! (`open_root_nursery`/`spawn_fiber_in`/`join_nursery`/`teardown_nursery`/
-//! `resume_fiber`) driven with staged Ref/string words. Four fixed
+//! `resume_fiber`) driven with staged Ref/string words, and the repl
+//! rollback's line-scoped nursery teardown (`repl_start`'s one line,
+//! the trapped line's rollback over the pre-step nursery reading, and
+//! the recycled slots serving a fresh root nursery). The bytes
+//! representation's natives ride both vocabularies: the four bridge and
+//! ordering natives (`bytes_compare`/`bytes_hash`/`utf8_encode`/
+//! `utf8_decode`) sit in the random CALL/CALLT draw (a staged Kstr makes
+//! `utf8_encode` genuinely build bytes; the bytes-reading legs trap
+//! structurally on string refs), and a fifth fixed template walks the
+//! whole bridge — two `utf8_encode` words through the sort key, the
+//! content hash, and the ok-discriminant decode, plus a `bytes_of` word
+//! over a pushed byte whose value flips the decode between the ok and
+//! `utf8_err` discriminants. A drawn reload phase exercises the hot-swap
+//! re-key surface: a freshly drawn module installs under the same name
+//! mid-drive, the swap re-checks reading whatever live rows the parked
+//! children hold, and either outcome (the install, or the structured
+//! refusal that keeps the old version current) leaves the drive
+//! coherent. Four further fixed
 //! templates cover the span/evidence/deinit/defaults landings: the entry's
 //! records-list block (a two-word element span through `list_new`/
 //! `list_push`, the checked `list_get` read with its tag test,
@@ -43,9 +60,9 @@
 //! Termination (why every generated run stops by itself):
 //! - jumps are forward-only except each loop body's one template back-edge, a Jmpif whose counter
 //!   slot the template decrements exactly once per pass; the reserved template blocks (the loop's
-//!   four words, the entry nursery block's three) are excluded from every random write
-//!   (destinations remap around them; call overlays land in the argument area), so the trip count
-//!   is the pool constant, at most 5
+//!   four words, the records word, the bytes block's three, the entry nursery block's three) are
+//!   excluded from every random write (destinations remap around them; call overlays land in the
+//!   argument area), so the trip count is the pool constant, at most 5
 //! - CALL/CALLS recursion consumes stack words per frame and the VM runs under `Vm::with_limit`
 //!   (128 words), so depth is bounded and StackOverflow is a routinely reachable structured stop
 //! - CALLT targets only strictly-lower functions or natives, so a tail chain strictly descends and
@@ -57,13 +74,13 @@
 //!   boundaries (each join drive would nest one `run_nursery_to_death` per level)
 //! - every switch makes progress: a parked fiber re-enters at the instruction after the call that
 //!   parked it, and bodies are finite with bounded loop trips, so each fiber parks finitely often
-//!   per drive; join/teardown drivers enter each ledgered child until it dies (a parked yield is
-//!   bounced back in with the bare PLATFORM_NONE tag), so every drive returns. The substrate can
-//!   hang by construction — a child yielding inside an infinite loop never lets a join driver
-//!   return — and the VM has no step budget (the run limit is stack words; a steps limit is a ds-vm
-//!   change outside this leg's boundary), so the generator's bounded-back-edge discipline is the
-//!   fuzzer's only hang guard: any relaxation of the loop template must keep every backward edge
-//!   passing the decrement exactly once
+//!   per drive; join/teardown drivers enter each ledgered child until it dies (a child parked at a
+//!   switch call is bounced back in with the bare PLATFORM_NONE tag), so every drive returns. The
+//!   substrate can hang by construction — a child parking inside an infinite loop never lets a join
+//!   driver return — and the VM has no step budget (the run limit is stack words; a steps limit is
+//!   a ds-vm change outside this leg's boundary), so the generator's bounded-back-edge discipline
+//!   is the fuzzer's only hang guard: any relaxation of the loop template must keep every backward
+//!   edge passing the decrement exactly once
 //! - work stays bounded: same-module call edges point strictly down the function table (self-calls
 //!   only in the loop-free lowest function, one site), at most two CALL/CALLS sites and one CALLT
 //!   per body, loop trip counts at most 5, and the generated natives are deterministic and
@@ -77,6 +94,9 @@
 //!   dedicated seam functions (the leaves, the serving bodies, the defaults pair, the deinit child
 //!   and its hook) stay out of every random call, spawn, and host-driver path — only the fixed
 //!   templates reach them
+//! - the repl phase adds no termination surface: one bounded entry drive through `repl_start` (the
+//!   same loop discipline), one O(pool) rollback, and the recycled slots' join driving one spawned
+//!   child to death
 //!
 //! Re-audit point: the emit path's target discipline — forward targets computed against the
 //! fixed-part length (a lower bound, since call staging appends words), the retargeting of
@@ -89,13 +109,13 @@
 //! block), and no template word sits between the loop's decrement and its back edge.
 
 use ds_abi::{
-    FrameLayout, SlotType,
+    CodePc, FrameLayout, SlotType,
     uop::{ConstIdx, Inst, RcOp, Uop},
 };
 use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{
     ChildOutcome, FiberId, FiberState, FuncRef, JoinOutcome, ModuleRegistry, NurseryId,
-    NurseryState, Trap, Value, Vm,
+    NurseryState, ReplOutcome, Trap, Value, Vm,
     native::BUILTIN_MODULE,
     platform::{Platform, STD_NAME},
 };
@@ -113,6 +133,10 @@ const STR_KIDX: u16 = 10;
 /// `list_get` (the ok/none extraction's runtime half).
 const PLATFORM_IO_OK: u8 = 255;
 const PLATFORM_NONE: u8 = 251;
+/// The utf8 decode failure discriminant, mirrored from ds-vm's platform
+/// tag-id reservation: `utf8_decode`'s rejection arm answers it with the
+/// message word in the payload.
+const PLATFORM_UTF8_ERR: u8 = u8::MAX - 12;
 /// The reserved establishment-band tags, mirrored from ds-vm's claim-band
 /// reservation: a deinit claim's dedicated band word holds SET from its
 /// registration to its first death path, CLEAR after, and the reserved
@@ -129,7 +153,11 @@ const BAND_CLEAR: u8 = u8::MAX - 9;
 /// bounces or drives a bounded nursery, a random `nursery_cancel` kills the
 /// caller carrying its payload. `nursery_spawn` (42) stays out: a random
 /// spawn site would break the depth-one spawn tree (see Termination), so
-/// it appears only in the entry's template.
+/// it appears only in the entry's template. The bytes representation's
+/// four natives ride the same draw over Ref words: `utf8_encode` on a
+/// staged Kstr builds real bytes, while the bytes-reading legs answer the
+/// structured wrong-object trap on string refs (the fixed bytes template
+/// owns the deep paths, both decode discriminants included).
 const NATIVES: &[(u32, &[SlotType])] = &[
     (2, &[SlotType::I64]),
     (3, &[SlotType::F64]),
@@ -143,7 +171,6 @@ const NATIVES: &[(u32, &[SlotType])] = &[
     (17, &[SlotType::Ref, SlotType::Ref]),
     (18, &[SlotType::Ref, SlotType::I64]),
     (20, &[]),
-    (24, &[SlotType::I64]),
     (25, &[SlotType::I64, SlotType::I64]),
     (26, &[SlotType::I64]),
     (27, &[SlotType::Ref, SlotType::Raw]),
@@ -155,6 +182,10 @@ const NATIVES: &[(u32, &[SlotType])] = &[
     (0, &[]),
     (1, &[]),
     (19, &[]),
+    (65, &[SlotType::Ref, SlotType::Ref]),
+    (66, &[SlotType::Ref]),
+    (67, &[SlotType::Ref]),
+    (68, &[SlotType::Ref]),
 ];
 const STD_CONSOLE: &[(u32, &[SlotType])] = &[(0, &[SlotType::Ref]), (1, &[SlotType::Ref])];
 /// The CALLG-addressed generic bodies: (index, param count, evidence words).
@@ -206,9 +237,9 @@ impl<'a> Stream<'a> {
 
 /// One function's decided shape, fixed before any body is emitted. The
 /// frame is `[params | usable | loop template (4 when looping) | records
-/// list word (1, entry only) | nursery template (3, entry only) | arg
-/// area]`. The flags are independent template decisions, so the count
-/// stands.
+/// list word (1, entry only) | bytes template (3, entry only) | nursery
+/// template (3, entry only) | arg area]`. The flags are independent
+/// template decisions, so the count stands.
 #[allow(clippy::struct_excessive_bools)]
 struct Plan {
     index: usize,
@@ -217,6 +248,8 @@ struct Plan {
     nursery: bool,
     /// Whether this (entry) body carries the records-list template.
     records: bool,
+    /// Whether this (entry) body carries the bytes-bridge template.
+    bytes: bool,
     /// Whether this (entry) body carries the sentinel evidence template.
     sentinel: bool,
     /// Whether this (entry) body carries the trait-defaults template.
@@ -239,9 +272,12 @@ struct Plan {
 
 impl Plan {
     /// The reserved template blocks' total width (loop four, records one,
-    /// nursery three): excluded from every random destination.
+    /// bytes three, nursery three): excluded from every random destination.
     fn reserved(&self) -> usize {
-        usize::from(self.has_loop) * 4 + usize::from(self.records) + usize::from(self.nursery) * 3
+        usize::from(self.has_loop) * 4
+            + usize::from(self.records)
+            + usize::from(self.bytes) * 3
+            + usize::from(self.nursery) * 3
     }
 
     /// The destination domain: every writable slot except the reserved
@@ -285,9 +321,23 @@ impl Plan {
         u8::try_from(at).expect("slot indices are tiny")
     }
 
+    /// The entry's reserved bytes-template block: (the byte-list `Ref`,
+    /// the two encoded-bytes `Ref`s) the template's natives share.
+    fn bytes_slots(&self) -> (u8, u8, u8) {
+        let at = self.body_span + usize::from(self.has_loop) * 4 + usize::from(self.records);
+        (
+            u8::try_from(at).expect("slot indices are tiny"),
+            u8::try_from(at + 1).expect("slot indices are tiny"),
+            u8::try_from(at + 2).expect("slot indices are tiny"),
+        )
+    }
+
     /// The entry's reserved nursery block: (nursery id, fn word, closure).
     fn nursery_slots(&self) -> (u8, u8, u8) {
-        let id = self.body_span + usize::from(self.has_loop) * 4 + usize::from(self.records);
+        let id = self.body_span
+            + usize::from(self.has_loop) * 4
+            + usize::from(self.records)
+            + usize::from(self.bytes) * 3;
         (
             u8::try_from(id).expect("slot indices are tiny"),
             u8::try_from(id + 1).expect("slot indices are tiny"),
@@ -322,6 +372,9 @@ struct Shape {
     /// The entry carries the records-list template (span elements through
     /// the list natives and the hosted combinators).
     records: bool,
+    /// The entry carries the bytes-bridge template (the representation
+    /// natives and both decode discriminants).
+    bytes: bool,
     /// The module gains the sentinel evidence pair and serving body, and
     /// the entry stages the entering call.
     sentinel: bool,
@@ -361,16 +414,21 @@ fn plan_function(
     // is the only spawnable target for its fixed site
     let nursery = is_entry && (shape.deinit || (can_spawn && rng.below(2) == 0));
     let records = is_entry && shape.records;
+    let bytes = is_entry && shape.bytes;
     let sentinel = is_entry && shape.sentinel;
     let defaults = is_entry && shape.defaults;
     let deinit = is_entry && shape.deinit;
-    let reserved = usize::from(has_loop) * 4 + usize::from(records) + usize::from(nursery) * 3;
+    let reserved = usize::from(has_loop) * 4
+        + usize::from(records)
+        + usize::from(bytes) * 3
+        + usize::from(nursery) * 3;
     // the entry's fixed templates need a four-word overlay (the sentinel's
     // staged argument span, the hosted combinator's two arguments plus two
-    // evidence words, the checked read's three-word answer span), five
+    // evidence words, the checked read's three-word answer span, the bytes
+    // compare's two Ref operands), five
     // when the defaults block rides too (its receiver, default, and the
     // three-word evidence area)
-    let wide_entry = records || sentinel;
+    let wide_entry = records || bytes || sentinel;
     let arg_area = if wide_entry || nursery || defaults {
         if defaults { 5 } else { 4 }
     } else if rng.below(10) < 8 {
@@ -420,6 +478,7 @@ fn plan_function(
         has_loop,
         nursery,
         records,
+        bytes,
         sentinel,
         defaults,
         deinit,
@@ -452,6 +511,8 @@ struct Pool {
     nursery: Option<NurserySeams>,
     /// The records-list template's seams, when this body carries it.
     records: Option<RecordsSeams>,
+    /// The bytes-bridge template's seams, when this body carries it.
+    bytes: Option<BytesSeams>,
     /// The sentinel evidence template's seams, when this body carries it.
     sentinel: Option<SentinelSeams>,
     /// The trait-defaults template's seams, when this body carries it.
@@ -471,6 +532,24 @@ struct RecordsSeams {
     /// The hosted combinator: (kidx, native index, evidence words) —
     /// `map` (38, two evidence words) or `filter` (39, one).
     comb: (u16, u32, u8),
+}
+
+/// Pool entries for the entry's bytes-bridge template: the two plain
+/// string constants the two `utf8_encode` legs materialize (distinct, so
+/// the sort key's compare leg genuinely orders), the pushed byte literal
+/// (its value deciding the decode's discriminant), and the five natives
+/// the walk names.
+struct BytesSeams {
+    list_new: u16,
+    push: u16,
+    bytes_of: u16,
+    encode: u16,
+    hash: u16,
+    compare: u16,
+    decode: u16,
+    str_a: u16,
+    str_b: u16,
+    byte: u16,
 }
 
 /// Pool entries for the entry's sentinel evidence template: the serving
@@ -525,6 +604,17 @@ fn build_pool(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool, shap
     }
     fn push_i64(constants: &mut Vec<Constant>, value: i64) -> u16 {
         constants.push(Constant::I64(value));
+        u16::try_from(constants.len() - 1).expect("pools stay far below u16")
+    }
+    fn push_str(constants: &mut Vec<Constant>, text: &str) -> u16 {
+        constants.push(Constant::Str(text.into()));
+        u16::try_from(constants.len() - 1).expect("pools stay far below u16")
+    }
+    fn push_native(constants: &mut Vec<Constant>, func: u32) -> u16 {
+        constants.push(Constant::FuncRef {
+            key: FuncRefKey::Native(BUILTIN_MODULE.to_owned()),
+            func,
+        });
         u16::try_from(constants.len() - 1).expect("pools stay far below u16")
     }
 
@@ -604,6 +694,22 @@ fn build_pool(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool, shap
             ),
         }
     });
+    let bytes = plan.bytes.then(|| {
+        // the pushed byte's value decides the `bytes_of` leg's decode
+        // discriminant: 0xFF is never valid UTF-8, an ASCII letter is
+        BytesSeams {
+            list_new: push_native(&mut constants, 20),
+            push: push_native(&mut constants, 27),
+            bytes_of: push_native(&mut constants, 61),
+            encode: push_native(&mut constants, 67),
+            hash: push_native(&mut constants, 66),
+            compare: push_native(&mut constants, 65),
+            decode: push_native(&mut constants, 68),
+            str_a: push_str(&mut constants, "alpha"),
+            str_b: push_str(&mut constants, "beta"),
+            byte: push_i64(&mut constants, [255, 65][rng.below(2)]),
+        }
+    });
     let defaults = plan.defaults.then(|| {
         let (leaf, serving) = shape
             .defaults_pair
@@ -656,6 +762,7 @@ fn build_pool(rng: &mut Stream, plans: &[Plan], plan: &Plan, garbage: bool, shap
         std,
         nursery,
         records,
+        bytes,
         sentinel,
         defaults,
     }
@@ -1227,6 +1334,194 @@ fn emit_records(
     }
 }
 
+/// The bytes-bridge template's exact word count: every leg is
+/// fixed-shape (one staging word per operand plus the call), so the
+/// block emits its planned length.
+fn bytes_len() -> usize {
+    // encode A (3), encode B (3), hash (2), compare (3), decode A with
+    // its ok tag test (3), the byte-list construction, `bytes_of`, and
+    // the decode whose pushed byte decides the tested discriminant (9)
+    23
+}
+
+/// The entry's bytes-bridge template: two `utf8_encode` words (distinct
+/// strings, so the compare leg orders real content) walk through the
+/// content hash, the lexicographic compare, and the ok-discriminant
+/// decode; then a one-byte list folded through `bytes_of` decodes again,
+/// the pushed byte deciding between the ok and `utf8_err` discriminants
+/// (0xFF is never valid UTF-8).
+fn emit_bytes(rng: &mut Stream, code: &mut Vec<Inst>, plan: &Plan, pool: &Pool) {
+    let seams = pool.bytes.as_ref().expect("the bytes plan built its seams");
+    let (list, word_a, word_b) = plan.bytes_slots();
+    let stage = |code: &mut Vec<Inst>, kidx: u16, dst: u8| {
+        code.push(
+            Uop::Kstr {
+                dst,
+                kidx: ConstIdx(kidx),
+            }
+            .into(),
+        );
+        code.push(
+            Uop::Call {
+                callee: ConstIdx(seams.encode),
+                nargs: 1,
+            }
+            .into(),
+        );
+    };
+    // the two encoded words; their Refs live in the reserved block so the
+    // whole walk shares them
+    stage(code, seams.str_a, plan.ov_slot(0));
+    code.push(
+        Uop::Mov {
+            dst: word_a,
+            src: plan.ov_slot(0),
+        }
+        .into(),
+    );
+    stage(code, seams.str_b, plan.ov_slot(0));
+    code.push(
+        Uop::Mov {
+            dst: word_b,
+            src: plan.ov_slot(0),
+        }
+        .into(),
+    );
+    // the content hash of the first word
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(0),
+            src: word_a,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.hash),
+            nargs: 1,
+        }
+        .into(),
+    );
+    // the sort key over both words: distinct payloads, so the compare
+    // walks to a differing byte
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(0),
+            src: word_a,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(1),
+            src: word_b,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.compare),
+            nargs: 2,
+        }
+        .into(),
+    );
+    // a valid payload decodes to the ok discriminant (the string's own
+    // bytes always validate)
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(0),
+            src: word_a,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.decode),
+            nargs: 1,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::TagTest {
+            dst: plan.typed_dst(rng, SlotType::Bool),
+            src: plan.ov_slot(0),
+            tag: PLATFORM_IO_OK,
+        }
+        .into(),
+    );
+    // the folded byte list: one push fixes the stride at one word, the
+    // pushed value deciding the second decode's discriminant
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.list_new),
+            nargs: 0,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Mov {
+            dst: list,
+            src: plan.ov_slot(0),
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(0),
+            src: list,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Kimm {
+            dst: plan.ov_slot(1),
+            kidx: ConstIdx(seams.byte),
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.push),
+            nargs: 2,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Mov {
+            dst: plan.ov_slot(0),
+            src: list,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.bytes_of),
+            nargs: 1,
+        }
+        .into(),
+    );
+    code.push(
+        Uop::Call {
+            callee: ConstIdx(seams.decode),
+            nargs: 1,
+        }
+        .into(),
+    );
+    let byte = match &pool.constants[usize::from(seams.byte)] {
+        Constant::I64(value) => u8::try_from(*value).unwrap_or(255),
+        _ => 255,
+    };
+    let want = if byte == 255 { PLATFORM_UTF8_ERR } else { PLATFORM_IO_OK };
+    code.push(
+        Uop::TagTest {
+            dst: plan.typed_dst(rng, SlotType::Bool),
+            src: plan.ov_slot(0),
+            tag: want,
+        }
+        .into(),
+    );
+}
+
 /// The entry's sentinel evidence template: the entering site stages the
 /// serving body's whole parameter span — the receiver, the evidence word
 /// naming the dispatch target, two follow words — and CALLs it from the
@@ -1495,12 +1790,14 @@ fn emit_function(
     let records_fixed = records
         .as_ref()
         .map_or(0, |r| records_len(r, comb_evidence));
+    let bytes_fixed = usize::from(plan.bytes) * bytes_len();
     let sentinel_len = if sentinel.is_some() { 5 } else { 0 };
     let defaults_fixed = defaults.as_ref().map_or(0, |d| defaults_len(d.drift));
     let total = 1
         + pre
         + if plan.has_loop { 6 + loop_body } else { 0 }
         + records_fixed
+        + bytes_fixed
         + sentinel_len
         + defaults_fixed
         + nursery_len
@@ -1625,6 +1922,9 @@ fn emit_function(
     }
     if let Some(records) = records {
         emit_records(rng, &mut code, plan, &pool, &records);
+    }
+    if plan.bytes {
+        emit_bytes(rng, &mut code, plan, &pool);
     }
     if let Some(sentinel) = sentinel {
         emit_sentinel(&mut code, plan, &pool, &sentinel);
@@ -1982,8 +2282,8 @@ fn emit_call(
     };
     budgets.call_sites += 1;
     if is_native {
-        if matches!(native_index, Some(24 | 25)) {
-            // the switch pair always stages plausible ids and payloads, so
+        if matches!(native_index, Some(25)) {
+            // the switch always stages a plausible id and payload, so
             // a drive genuinely hops fibers (the O(1) switch path) instead
             // of trapping on stale overlay words
             stage_fiber_args(rng, code, plan, params);
@@ -2199,6 +2499,8 @@ pub struct ChildFn {
 pub struct Drawn {
     /// Entry bodies carrying the records-list template.
     pub records: u32,
+    /// Entry bodies carrying the bytes-bridge template.
+    pub bytes: u32,
     /// Entry bodies carrying the sentinel evidence template.
     pub sentinel: u32,
     /// Entry bodies carrying the trait-defaults template.
@@ -2216,6 +2518,7 @@ fn seam_plan(index: usize, slots: Vec<SlotType>, params: usize, arg_area: usize)
         has_loop: false,
         nursery: false,
         records: false,
+        bytes: false,
         sentinel: false,
         defaults: false,
         deinit: false,
@@ -2441,10 +2744,22 @@ fn emit_deinit_hook(index: usize) -> Function {
 /// host-driver path, and the entry's fixed templates reach them through
 /// their own pool entries.
 pub fn build_planned(rng: &mut Stream) -> (Module, Vec<ChildFn>, Drawn) {
+    build_with(rng, b"vm execution fuzz")
+}
+
+/// A freshly drawn module under the same name but a distinct content
+/// identity: the reload phase's swap candidate, sharing the entry
+/// spelling (`fzm`/`main`) with whatever it would retire.
+pub fn build_reload_variant(rng: &mut Stream) -> (Module, Vec<ChildFn>, Drawn) {
+    build_with(rng, b"vm execution fuzz reload")
+}
+
+fn build_with(rng: &mut Stream, identity: &[u8]) -> (Module, Vec<ChildFn>, Drawn) {
     let funcs = 1 + rng.below(3); // 1..=3 random bodies including the entry
     let garbage = rng.below(32) == 0;
     let mut shape = Shape {
         records: rng.below(3) == 0,
+        bytes: rng.below(3) == 0,
         sentinel: rng.below(3) == 0,
         defaults: rng.below(3) == 0,
         deinit: rng.below(3) == 0,
@@ -2520,11 +2835,12 @@ pub fn build_planned(rng: &mut Stream) -> (Module, Vec<ChildFn>, Drawn) {
     let mut module = Module::new(
         MODULE_NAME,
         TargetClass::Bytecode,
-        Hash128::compute(b"vm execution fuzz"),
+        Hash128::compute(identity),
     );
     let mut entries = Vec::with_capacity(funcs);
     let mut drawn = Drawn {
         records: 0,
+        bytes: 0,
         sentinel: 0,
         defaults: 0,
         deinit: 0,
@@ -2550,6 +2866,9 @@ pub fn build_planned(rng: &mut Stream) -> (Module, Vec<ChildFn>, Drawn) {
         module = module.with_function(function);
         if plan.records {
             drawn.records += 1;
+        }
+        if plan.bytes {
+            drawn.bytes += 1;
         }
         if plan.sentinel {
             drawn.sentinel += 1;
@@ -2595,12 +2914,25 @@ pub struct Fibers {
     pub run_cancelled: u32,
     pub run_uncontained: u32,
     /// Draw counters (plan-level facts, not runtime depth): entry bodies
-    /// carrying the records-list, sentinel evidence, trait-defaults, and
-    /// deinit-claim templates.
+    /// carrying the records-list, bytes-bridge, sentinel evidence,
+    /// trait-defaults, and deinit-claim templates.
     pub records: u32,
+    pub bytes: u32,
     pub sentinel: u32,
     pub defaults: u32,
     pub deinit: u32,
+    /// Mid-drive reload attempts (a fresh module installed under the
+    /// running name while children hold live rows), and their outcomes:
+    /// the swap landing, or the structured refusal keeping the old
+    /// version current (a loader refusal folds into the same class).
+    pub reloads: u32,
+    pub reload_accepted: u32,
+    pub reload_refused: u32,
+    /// Repl lines driven through the repl face (one line per input,
+    /// the trapped ones rolled back), and the line-scoped nursery
+    /// teardowns the rollback fired (the torn slot count).
+    pub repls: u32,
+    pub repl_nursery_released: u32,
 }
 
 /// Stages one host argument word of the child's parameter type: Ref and
@@ -2706,6 +3038,26 @@ fn drive_fibers(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape: &mut 
             }
         }
     }
+    // the reload phase: a freshly drawn module installs under the running
+    // name while the resumed child may still hold a live row (a fiber
+    // parked at a switch call keeps its frame), so the swap re-checks
+    // read real staged words and call sites when one stands — the
+    // surviving-identity re-key or the structured refusal — and either
+    // way the drive below continues over a coherent registry
+    if rng.below(2) == 0 {
+        shape.reloads += 1;
+        let (variant, _variant_entries, _drawn) = build_reload_variant(rng);
+        match vm.install_dsmod(variant) {
+            Ok(row) => {
+                std::hint::black_box(row);
+                shape.reload_accepted += 1;
+            },
+            Err(err) => {
+                std::hint::black_box(&err);
+                shape.reload_refused += 1;
+            },
+        }
+    }
     if rng.below(2) == 0 {
         if let Ok(outcome) = vm.join_nursery(root) {
             shape.joined += 1;
@@ -2755,13 +3107,115 @@ fn drive_fibers(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape: &mut 
     }
 }
 
+/// The repl rollback phase, the landed line-scoped nursery teardown
+/// over the vm's own repl face: one line drives the entry, a trapped
+/// line rolls back, and the rollback's own nurseries diffed against
+/// the pre-step reading tear down with their never-entered children
+/// (counted as observed — a garbage id at a random join or resume
+/// makes the per-slot classification approximate, so the ds-vm suite
+/// owns the machinery pins and the mirror owns the aggregate). The
+/// freed slots then serve a fresh root nursery joined over a spawned
+/// child. The phase is host-driven (one bounded entry drive, one
+/// O(pool) rollback, one join), so it adds no termination surface.
+fn drive_repl_rollback(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape: &mut Fibers) {
+    shape.repls += 1;
+    // the pool's own end bounds the read: the vm's nursery pool is a
+    // growable vec whose dead slots stay in place (spawn-reusable,
+    // never removed), so the allocated ids are exactly the contiguous
+    // prefix nursery_state answers Some for — the scan walks that
+    // prefix and stops at the first None, whatever the drive and the
+    // entry's nursery template allocated, so a drive opening more
+    // slots never under-reads the pre-step reading.
+    let open = |vm: &Vm| {
+        let mut open = Vec::new();
+        let mut slot = 0u32;
+        while let Some(state) = vm.nursery_state(NurseryId(slot)) {
+            if state == NurseryState::Open {
+                open.push(NurseryId(slot));
+            }
+            slot += 1;
+        }
+        open
+    };
+    // the pre-step nursery reading: the nurseries standing when the
+    // line entered (the run phase's abandoned one among them) are not
+    // the line's own, so the diff below spells the rollback gate's own
+    // classification — a slot the line opened fresh
+    let pre_open = open(vm);
+    let line = vm.repl_start(MODULE_NAME, ENTRY_NAME);
+    match line {
+        Ok(ReplOutcome::Parked(answer) | ReplOutcome::Died(answer)) => {
+            std::hint::black_box(&answer);
+            vm.repl_teardown();
+            return;
+        },
+        Err(trap) => {
+            std::hint::black_box(&trap);
+        },
+    }
+    // the line's own: the slots that opened during the line. A garbage
+    // id at a random join or resume makes the classification
+    // approximate (a resumed foreign fiber's own nursery, a child
+    // spawned into a pre-open slot), so the teardown is counted as
+    // observed, never asserted per input — the ds-vm suite owns the
+    // machinery pins, the mirror owns the aggregate
+    let line_open: Vec<_> = open(vm)
+        .iter()
+        .copied()
+        .filter(|id| !pre_open.contains(id))
+        .collect();
+    vm.repl_rollback(MODULE_NAME, ENTRY_NAME, CodePc(0))
+        .expect("the trapped line rolls back");
+    for id in &line_open {
+        if vm.nursery_state(*id) == Some(NurseryState::Dead) {
+            shape.repl_nursery_released += 1;
+        }
+    }
+    // the freed slots serve: a fresh root nursery opens over the
+    // recycled pool, a spawned child joins clean over it — exactly a
+    // healthy next line's shape
+    if !line_open.is_empty() {
+        let root = vm.open_root_nursery();
+        let child = spawn_host_child(vm, rng, entries, Some(root));
+        if child.is_some() {
+            shape.spawned += 1;
+        }
+        let payload = stage_host_word(vm, rng, SlotType::Raw);
+        let _ = child.map(|id| vm.resume_fiber(id, payload));
+        match vm.join_nursery(root) {
+            Ok(JoinOutcome::Joined(spans)) => {
+                for span in &spans {
+                    shape.completed += 1;
+                    for word in span.as_slice() {
+                        if matches!(word, Value::Ref(_)) {
+                            shape.completed_ref += 1;
+                        }
+                    }
+                }
+            },
+            Ok(JoinOutcome::Failed(outcomes)) => record_child_outcomes(&outcomes, shape),
+            Err(trap) => {
+                std::hint::black_box(&trap);
+            },
+        }
+        assert_eq!(
+            vm.nursery_state(root),
+            Some(NurseryState::Dead),
+            "the recycled slot's nursery joins and consumes"
+        );
+    }
+    vm.repl_teardown();
+}
+
 /// Runs the full pipeline over one fuzz input and asserts the discipline:
 /// canonical write-read round trip, natives installed before the loader,
 /// a structured install outcome (pool FuncRefs validate at install; entry
 /// descriptors fill), a structured run stop (a value, or a trap whose
-/// backtrace materializes), the fiber/nursery host phase, and the stack
-/// never passing the limit. Returns 1 for a halted value, 0 for a
-/// structured trap, plus the fiber-phase coverage record.
+/// backtrace materializes), the fiber/nursery host phase, the repl
+/// rollback phase (a trapped line's own nurseries torn down with the
+/// never-entered children released, the pre-step-open ones standing),
+/// and the stack never passing the limit. Returns 1 for a halted value,
+/// 0 for a structured trap, plus the fiber-phase coverage record.
 pub fn exercise_fibers(data: &[u8]) -> (u32, Fibers) {
     let mut rng = Stream::new(data);
     let (module, entries, drawn) = build_planned(&mut rng);
@@ -2791,6 +3245,7 @@ pub fn exercise_fibers(data: &[u8]) -> (u32, Fibers) {
     }
     let mut shape = Fibers::default();
     shape.records += drawn.records;
+    shape.bytes += drawn.bytes;
     shape.sentinel += drawn.sentinel;
     shape.defaults += drawn.defaults;
     shape.deinit += drawn.deinit;
@@ -2819,6 +3274,7 @@ pub fn exercise_fibers(data: &[u8]) -> (u32, Fibers) {
     };
     if installed {
         drive_fibers(&mut vm, &mut rng, &entries, &mut shape);
+        drive_repl_rollback(&mut vm, &mut rng, &entries, &mut shape);
     }
     assert!(
         vm.max_stack_len() <= STACK_LIMIT,

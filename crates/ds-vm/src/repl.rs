@@ -22,24 +22,32 @@
 //!    grows the frame to the new layout (append-only statements grow monotonically, and
 //!    chunk-append growth keeps every live word's address), and drives to the next park. The prior
 //!    statements' code is skipped by the resume point: side effects never repeat.
-//! 4. [`Vm::repl_rollback`] restores a trapped submission's frame: the pushed frames and the
-//!    partial statement's slots die unwired, so the words past the parked extent zero (no stale
-//!    claim band or dangling reference survives into a later version's slot reads), the counts the
-//!    partial run acquired release against a pre-step ledger reading, and the fiber re-parks at the
-//!    same resume position — the ruled behavior that a trapping line never commits.
+//! 4. [`Vm::repl_rollback`] restores a trapped submission's frame: the partial run's own deinit
+//!    claims fire exactly once (the teardown pass over the kept frames, gated by the parked words'
+//!    establishment bands and the pre-step ledger reading — a claim already live when the step
+//!    entered, and a value moved into a dying frame through a parked binding, both survive), then
+//!    the pushed frames and the partial statement's slots die unwired, so the words past the parked
+//!    extent zero (no stale claim band or dangling reference survives into a later version's slot
+//!    reads), the counts the partial run acquired release against a pre-step ledger reading, the
+//!    line's own open nursery tears down beside the same pre-step nursery reading (never-entered
+//!    children release cold, the slot recycles — the trapped-drive release's discipline, the root
+//!    surviving its own rollback being the reason the dead-owner door never catches it), and the
+//!    fiber re-parks at the same resume position — the ruled behavior that a trapping line never
+//!    commits.
 //! 5. [`Vm::repl_drop_binding`] fires one live binding's deinit exactly once at `:drop`, and
 //!    [`Vm::repl_teardown`] is the session-end scope exit: every surviving deinit claim fires, then
 //!    the claims drain.
 //!
 //! # What the model refuses
 //!
-//! A trapped line's own deinit hooks never fire on rollback: its
-//! bindings release their counts unwired, matching the trap path's
-//! honesty elsewhere — effects that already ran stand, nothing fires
-//! twice. The same honesty covers a trapped line's object mutations and
-//! completed assignments (a store that landed stays landed), and its
-//! arena temporaries stay allocated until the session-end drain — the
-//! arena never rewinds below live bindings' bytes. The frame stays
+//! The rollback's honesty: effects that already ran stand (a trapped
+//! line's object mutations and completed assignments — a store that
+//! landed stays landed), nothing fires twice (a hook that traps inside
+//! the rollback pass keeps its effects and ends the pass there, the
+//! remaining claims draining unfired), and a trapped line's arena
+//! temporaries stay allocated until the session-end drain — the arena
+//! never rewinds below live bindings' bytes, a landed store possibly
+//! holding arena bytes above any pre-step mark. The frame stays
 //! consistent through all of this because the resumed-frame mode pins
 //! every binder (the lowerer's rule): a session-live value's count never
 //! leaves at a text-relative last use, so a partial run cannot dec a
@@ -53,6 +61,7 @@ use crate::{
     claims::{CLAIM_BAND_CLEAR, ClaimReading},
     fiber::{FIBER_ROOT, FiberState, ResumePoint},
     native::BUILTIN_REPL_PARK,
+    nursery::NurseryState,
     value::{Value, Word},
     vm::{Active, CallInfo, DriveOutcome, FrameAnswer, Vm},
 };
@@ -218,13 +227,14 @@ fn answer_span(code: &[u32]) -> Option<AnswerSpan> {
 }
 
 /// How one REPL drive ended: parked at the spliced call holding the
-/// submission's answer word, or the entry frame completed (a defensive
+/// submission's answer span, or the entry frame completed (a defensive
 /// outcome — the spliced body has no live exit path, so a completion
 /// means hand-assembled code reached the dead region).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReplOutcome {
-    /// The fiber parked at the seam's call; the answer word rides here.
-    Parked(Value),
+    /// The fiber parked at the seam's call; the whole answer span rides
+    /// here, never a truncated head word.
+    Parked(FrameAnswer),
     /// The entry frame completed anyway; its whole answer span rides
     /// here, and the frame is gone so the caller must rebuild before the
     /// next submission.
@@ -232,8 +242,9 @@ pub enum ReplOutcome {
 }
 
 /// The pre-step state a trapped submission's rollback restores to: where
-/// the parked frame's committed words ended, and the ledger reading the
-/// partial run diffed against.
+/// the parked frame's committed words ended, the parked words themselves
+/// (the partial gate's band witness), and the ledger reading the partial
+/// run diffed against.
 #[derive(Debug)]
 pub(crate) struct ReplPre {
     /// The parked version's body length: words past `1 + body` are the
@@ -241,8 +252,16 @@ pub(crate) struct ReplPre {
     body: usize,
     /// The parked frame's whole extent: the segment truncation target.
     extent: usize,
+    /// The parked frame's words as the step entered: a claim whose
+    /// establishment band was already set here is the parked frame's own,
+    /// surviving the rollback.
+    parked: Vec<Word>,
     /// The claim reading before the step.
     claims: ClaimReading,
+    /// The nursery pool's states as the step entered: the rollback's
+    /// nursery gate — a root-owned open nursery at a slot the reading
+    /// held Dead or never knew is the line's own, torn down with it.
+    nurseries: Vec<NurseryState>,
 }
 
 impl Vm {
@@ -265,7 +284,9 @@ impl Vm {
         self.repl_pre = Some(ReplPre {
             body: 0,
             extent: 0,
+            parked: Vec::new(),
             claims: self.claims[FIBER_ROOT.index()].reading(),
+            nurseries: self.nursery_states(),
         });
         let frame_size = self.frame_size_of(version, func_id);
         let root = &mut self.pool[FIBER_ROOT.index()];
@@ -278,6 +299,7 @@ impl Vm {
         });
         root.state = FiberState::Ready;
         root.resumer = None;
+        self.repl_park = None;
         let (active, pc) = self.switch_in(FIBER_ROOT, Value::I64(0));
         self.repl_drive(active, pc)
     }
@@ -314,7 +336,9 @@ impl Vm {
         let pre = ReplPre {
             body: parked_body,
             extent: root.segment.len(),
+            parked: (0..root.segment.len()).map(|at| root.segment[at]).collect(),
             claims: self.claims[FIBER_ROOT.index()].reading(),
+            nurseries: self.nursery_states(),
         };
         let frame_size = self.frame_size_of(version, func_id);
         if frame_size > self.limit {
@@ -348,14 +372,24 @@ impl Vm {
         });
         root.resumer = None;
         self.repl_pre = Some(pre);
+        self.repl_park = None;
         let (active, at) = self.switch_in(FIBER_ROOT, Value::I64(0));
         self.repl_drive(active, at)
     }
 
-    /// A trapped submission's rollback: zero the partial run's words,
-    /// release the counts it acquired, restore the parked resume at the
-    /// position the failed step entered. The ruled behavior — a trapping
-    /// line never commits, the frame does not advance.
+    /// A trapped submission's rollback: fire the partial run's own deinit
+    /// claims exactly once (the teardown pass over the kept frames, gated
+    /// by the parked words' establishment bands and the pre-step ledger
+    /// reading — a claim already live when the step entered, and a value
+    /// moved into a dying frame through a parked binding, both survive),
+    /// zero the partial run's words, release
+    /// the counts it acquired, tear down the line's own open nursery under
+    /// the pre-step nursery reading (never-entered children release cold,
+    /// the slot recycles), restore the parked resume at the position
+    /// the failed step entered. The ruled behavior — a trapping line never
+    /// commits, the frame does not advance, and its own deinit-carrying
+    /// bindings die their one death here: effects that already ran stand,
+    /// nothing fires twice.
     ///
     /// # Errors
     ///
@@ -366,9 +400,13 @@ impl Vm {
         let pre = self.repl_pre.take().unwrap_or(ReplPre {
             body: 0,
             extent: 0,
+            parked: Vec::new(),
             claims: self.claims[FIBER_ROOT.index()].reading(),
+            nurseries: self.nursery_states(),
         });
+        self.fire_teardown_hooks_past(FIBER_ROOT, &[], Some(&pre.claims), Some(&pre.parked));
         self.claims[FIBER_ROOT.index()].release_since(&pre.claims);
+        self.release_line_nurseries(&pre.nurseries);
         let root = &mut self.pool[FIBER_ROOT.index()];
         // the partial run's region: everything past the parked body —
         // the failed statement's slots (wherever the new layout put
@@ -416,6 +454,7 @@ impl Vm {
         root.state = FiberState::Ready;
         root.resumer = None;
         self.repl_pre = None;
+        self.repl_park = None;
     }
 
     /// `:drop <name>`: one live binding's death, on demand. The words are
@@ -470,7 +509,7 @@ impl Vm {
         let mut hook_trap = None;
         if let Some(site) = site
             && let Some((callee, values)) =
-                self.gate_teardown_site(FIBER_ROOT, 0, version, site, module_id, &[], &[])
+                self.gate_teardown_site(FIBER_ROOT, 0, version, site, module_id, &[], &[], None)
         {
             // the fired claim's band clears in the frame word itself, the
             // collect pass's discipline: no later door fires it twice
@@ -514,6 +553,11 @@ impl Vm {
         self.pool[FIBER_ROOT.index()].resumable()
     }
 
+    /// The nursery pool's states, the rollback's pre-step reading.
+    fn nursery_states(&self) -> Vec<NurseryState> {
+        self.nurseries.iter().map(|n| n.state).collect()
+    }
+
     /// Resolves and checks the session entry (zero arguments: the REPL
     /// owns `main`'s shape).
     fn resolve_repl_entry(
@@ -539,35 +583,52 @@ impl Vm {
             .frame_size() as usize
     }
 
-    /// The shared drive: to the next park (the answer rides) or the
-    /// defensive completion.
-    fn repl_drive(&mut self, active: Active, pc: CodePc) -> Result<ReplOutcome, Trap> {
-        // one host step is the whole drive: it drains every interlock
-        // inside itself and answers a final outcome
-        match self.execute_host_step(active, pc, usize::MAX) {
-            Ok(DriveOutcome::Yielded(value)) => {
-                self.host_release();
-                Ok(ReplOutcome::Parked(value))
-            },
-            Ok(DriveOutcome::Died(answer)) => {
-                self.host_release();
-                for value in answer.as_slice() {
-                    self.host_delivery(value);
-                }
-                Ok(ReplOutcome::Died(answer))
-            },
-            // a host-level drive passes no boundary and answers no
-            // reentry frame
-            Ok(DriveOutcome::Frame(_) | DriveOutcome::Interlock(_)) => {
-                unreachable!("a REPL drive answers no reentry frame or interlock")
-            },
-            Err((trap, at)) => {
-                self.trap_pc = Some(at);
-                self.host_release();
-                self.trap_child(self.current, &trap);
-                self.trap_delivery(&trap);
-                Err(trap)
-            },
+    /// The shared drive: to the next park (the whole answer span rides)
+    /// or the defensive completion. A stop the park seam did not mark is
+    /// the root fiber handing the host its continuation — the drive
+    /// re-enters the root and keeps going, exactly `Vm::run`'s park arm,
+    /// so the submission's code after the stop still runs.
+    fn repl_drive(&mut self, mut active: Active, mut pc: CodePc) -> Result<ReplOutcome, Trap> {
+        loop {
+            // one host step drains every interlock inside itself and
+            // answers a final outcome
+            match self.execute_host_step(active, pc, usize::MAX) {
+                Ok(DriveOutcome::Yielded(_)) => {
+                    if let Some(answer) = self.repl_park.take() {
+                        self.host_release();
+                        return Ok(ReplOutcome::Parked(answer));
+                    }
+                    // an unmarked park left the fiber with the host as
+                    // resumer (a hand-assembled module naming the splice's
+                    // park seam without the marker): the continuation
+                    // stays the submission's own, so the root re-enters at
+                    // the parked call's answer overlay and the drive
+                    // continues
+                    let (next, at) =
+                        self.switch_in(FIBER_ROOT, Value::Tag(crate::native::PLATFORM_NONE));
+                    active = next;
+                    pc = at;
+                },
+                Ok(DriveOutcome::Died(answer)) => {
+                    self.host_release();
+                    for value in answer.as_slice() {
+                        self.host_delivery(value);
+                    }
+                    return Ok(ReplOutcome::Died(answer));
+                },
+                // a host-level drive passes no boundary and answers no
+                // reentry frame
+                Ok(DriveOutcome::Frame(_) | DriveOutcome::Interlock(_)) => {
+                    unreachable!("a REPL drive answers no reentry frame or interlock")
+                },
+                Err((trap, at)) => {
+                    self.trap_pc = Some(at);
+                    self.host_release();
+                    self.trap_child(self.current, &trap);
+                    self.trap_delivery(&trap);
+                    return Err(trap);
+                },
+            }
         }
     }
 }

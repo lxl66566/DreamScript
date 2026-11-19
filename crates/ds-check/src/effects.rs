@@ -555,7 +555,6 @@ where
     let solved = solve(&graph);
     package
         .methods()
-        .iter()
         .enumerate()
         .map(|(index, _)| {
             let method = MethodId::from_raw(u32::try_from(index).expect("method count fits u32"));
@@ -654,6 +653,19 @@ where
         ) {
             graph.entry(Node::Def(def)).or_default();
         }
+    }
+    // An import-bound function's own row rides its link surface (G4): its
+    // body lives in the linked module, never in this package's trees, so
+    // the surface's carried row and capabilities are its base — the same
+    // seeding shape the checked-ambient serve gives the ambient's rows,
+    // and a caller's edge into the node unions exactly what the linked
+    // module computed.
+    for (def, entry) in package.foreign() {
+        graph.insert(Node::Def(*def), Info {
+            base: entry.row,
+            base_caps: entry.caps,
+            edges: Vec::new(),
+        });
     }
     let mut exprs = FxHashMap::default();
     for (ast, res) in asts.iter().zip(resolutions) {
@@ -912,13 +924,13 @@ impl Walker<'_, '_> {
     /// (each binding's row is its own element's), shared whole for every
     /// other shape.
     fn bind_pattern(&mut self, pat: &Pattern, init: &Expr) {
-        if let (Pattern::Tuple { pats, .. }, Expr::Tuple { items, .. }) = (pat, init) {
-            if pats.len() == items.len() {
-                for (pat, item) in pats.iter().zip(items.iter()) {
-                    self.bind_pattern(pat, item);
-                }
-                return;
+        if let (Pattern::Tuple { pats, .. }, Expr::Tuple { items, .. }) = (pat, init)
+            && pats.len() == items.len()
+        {
+            for (pat, item) in pats.iter().zip(items.iter()) {
+                self.bind_pattern(pat, item);
             }
+            return;
         }
         let mut defs = Vec::new();
         self.pattern_defs(pat, &mut defs);
@@ -1000,8 +1012,6 @@ impl Walker<'_, '_> {
                 let Some(m) = self
                     .package
                     .method_candidates(&f.name.name)
-                    .iter()
-                    .copied()
                     .find(|&m| self.package.method(m).span == f.name.span)
                 else {
                     continue;
@@ -1020,8 +1030,6 @@ impl Walker<'_, '_> {
     fn trait_member(&self, trait_def: DefId, f: &FnDecl) -> Option<MethodId> {
         self.package
             .method_candidates(&f.name.name)
-            .iter()
-            .copied()
             .find(|&m| self.package.method(m).owner == MethodOwner::Trait(trait_def))
     }
 
@@ -1029,10 +1037,10 @@ impl Walker<'_, '_> {
     /// through the shared binder walker.
     fn pattern_defs(&self, pat: &Pattern, out: &mut Vec<DefId>) {
         for (_, name) in crate::pattern::pattern_binders(pat) {
-            if let Some(def) = self.package.lookup_value(name) {
-                if !out.contains(&def) {
-                    out.push(def);
-                }
+            if let Some(def) = self.package.lookup_value(name)
+                && !out.contains(&def)
+            {
+                out.push(def);
             }
         }
     }
@@ -1304,13 +1312,15 @@ impl Walker<'_, '_> {
         match self.res.get(span) {
             Some(Res::Def(def)) => self.edge(Node::Def(*def), mask),
             Some(Res::TraitMethod(m)) => self.edge(Node::Method(*m), mask),
-            Some(Res::Dot(DotRes::Free { func, .. })) => self.edge(Node::Def(*func), mask),
+            Some(Res::Dot(DotRes::Free { func, .. } | DotRes::Module { func })) => {
+                self.edge(Node::Def(*func), mask);
+            },
             Some(Res::Dot(DotRes::Methods { candidates } | DotRes::Static { candidates })) => {
                 for m in candidates {
                     self.edge(Node::Method(*m), mask);
                 }
             },
-            Some(Res::Local { .. } | Res::Handler) | None => {},
+            Some(Res::Local { .. } | Res::Handler | Res::Module(_)) | None => {},
         }
     }
 }

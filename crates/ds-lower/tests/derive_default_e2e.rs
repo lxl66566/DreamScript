@@ -8,8 +8,10 @@
 //! expression: a bare type name dispatches `<name>.default()` (the
 //! primitives carrying their own members here, the ambient slice's
 //! shape), a tuple constructs per element, an optional answers `none`,
-//! and an application constructs empty (`list[int]()`,
-//! `map[k, v]()` — the ambient collection slice spelled out here); the
+//! and an application over the collection heads constructs empty
+//! (`list[int]()`, `map[k, v]()` — the ambient collection slice spelled
+//! out here, an optional element riding the fn-type carrier since
+//! emptiness never builds an element); the
 //! enum body answers the first unit case, the tag answers itself, and
 //! the part-less struct the unit-word construction. A field type the
 //! key reaches but the language answers no construction for (a bare
@@ -104,6 +106,8 @@ fn derived_default_answers_through_the_type_keyed_surface() {
         "maybe=none\n", // r.maybe: the optional answers none
         "xs=0\n",       // r.xs: list[int]() constructs empty
         "table=0\n",    // r.table: map[string, int]() constructs empty
+        "oxs=0\n",      // o.xs: list[int?]() constructs empty, the optional never built
+        "otable=0\n",   // o.table: map[string, int?]() constructs empty
     )
     .as_bytes();
     assert_eq!(

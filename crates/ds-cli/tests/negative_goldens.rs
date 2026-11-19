@@ -17,7 +17,10 @@
 //! statement outside the entry file); DS1015, the script-mode collision
 //! with a written `main`, fires only through `parse_script` and is pinned
 //! in ds-parse's unit suite instead. The mut-window round adds DS3006
-//! (a `const` binding fed to a `mut` window parameter [D2]). The
+//! (a `const` binding fed to a `mut` window parameter [D2]) and its
+//! member-tier route (a `mut self` trait member on a `const` receiver);
+//! the affine-window round adds DS3005 (a `~Copyable` borrow returning
+//! out of its call [C2]). The
 //! signature-agreement round adds DS2018 (an impl member diverging from
 //! its trait member's registered signature) and DS2019 (an impl member
 //! re-declaring a defaulted parameter, whose single authority is the
@@ -152,6 +155,16 @@ const CASES: &[Case] = &[
         stem: "ds3006_mut_window_const_receiver",
         human: include_str!("goldens/ds3006_mut_window_const_receiver.human"),
         json: include_str!("goldens/ds3006_mut_window_const_receiver.json"),
+    },
+    Case {
+        stem: "ds3006_member_call_const_receiver",
+        human: include_str!("goldens/ds3006_member_call_const_receiver.human"),
+        json: include_str!("goldens/ds3006_member_call_const_receiver.json"),
+    },
+    Case {
+        stem: "ds3005_borrow_escapes",
+        human: include_str!("goldens/ds3005_borrow_escapes.human"),
+        json: include_str!("goldens/ds3005_borrow_escapes.json"),
     },
     Case {
         stem: "ds3004_deinit_shape",

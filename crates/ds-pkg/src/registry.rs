@@ -2,10 +2,12 @@
 //! content-addressed bundle storage below one root directory, served
 //! by a local-path client behind the store provider's fetch hook. The
 //! row files are the committable metadata of the registry's git story
-//! and the bundle files its content-addressed artifact storage, so the
-//! future remote client reads the same files over https once the net
-//! natives admit it; a local path serves this round (`$DS_REGISTRY`),
-//! the remote client queuing behind the https ruling.
+//! and the bundle files its content-addressed artifact storage: a
+//! local path serves the index directly, and the git client serves
+//! the same files from a remote repository's snapshot clone, its
+//! verified bundles landing in the local content-addressed store
+//! (`$DS_REGISTRY` names either — a root path or a `scheme://` git
+//! remote URL, https the production transport).
 
 use std::{
     collections::BTreeMap,
@@ -19,7 +21,8 @@ use crate::{
     manifest::parse_hash,
     package::{Package, bundle_content_hash},
     provider::Remote,
-    store::SEGMENT,
+    remote::GitRegistry,
+    store::{ARTIFACT_SEGMENT, SEGMENT, artifact_content_hash},
     version::Version,
 };
 
@@ -27,16 +30,77 @@ use crate::{
 /// text file holding its offered version rows.
 pub const INDEX_SEGMENT: &str = "index";
 
-/// The `$DS_REGISTRY` root, the directory the index rows and the bundle
-/// storage sit below: the variable wins, an empty value meaning unset.
-/// Nothing else configures the registry this round — the manifest
-/// grammar carries no registry field, so a manifest section spelling
-/// one would be DS4014 drift the parse already refuses.
-#[must_use]
-pub fn registry_root() -> Option<PathBuf> {
-    std::env::var_os("DS_REGISTRY")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+/// The registry behind `$DS_REGISTRY`: the value names either a local
+/// index root (a filesystem path) or a git remote (a `scheme://` URL
+/// spelling — https the production transport, `file://` the
+/// local-testing one). Nothing else configures the registry — the
+/// manifest grammar carries no registry field, so a manifest section
+/// spelling one is DS4014 drift the parse already refuses.
+pub enum RegistryClient {
+    /// A local index root, served by [`Registry`].
+    Index(Registry),
+    /// A git remote URL, served by [`GitRegistry`].
+    Git(GitRegistry),
+}
+
+impl RegistryClient {
+    /// One `$DS_REGISTRY` value's client: a `scheme://` spelling opens
+    /// the git client, anything else a local index root.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        if value.contains("://") {
+            Self::Git(GitRegistry::open(value))
+        } else {
+            Self::Index(Registry::open(Path::new(value)))
+        }
+    }
+
+    /// The client the `$DS_REGISTRY` variable names, `None` when it is
+    /// unset or empty. URL spellings are ASCII by nature, so a
+    /// non-UTF8 value stays a local root path.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let value = std::env::var_os("DS_REGISTRY").filter(|value| !value.is_empty())?;
+        Some(match value.to_str() {
+            Some(value) if value.contains("://") => Self::Git(GitRegistry::open(value)),
+            _ => Self::Index(Registry::open(Path::new(&value))),
+        })
+    }
+
+    /// One fetch-hook demand over whichever source the value named.
+    #[must_use]
+    pub fn fetch(&self, name: &str, version: &Version) -> Remote {
+        match self {
+            Self::Index(registry) => registry.fetch(name, version),
+            Self::Git(git) => git.fetch(name, version),
+        }
+    }
+
+    /// One native-artifact demand over whichever source the value named:
+    /// the bytes under the demanded content identity or the taxonomy of
+    /// their absence.
+    #[must_use]
+    pub fn fetch_artifact(&self, hash: Hash128) -> ArtifactFetch {
+        match self {
+            Self::Index(registry) => registry.fetch_artifact(hash),
+            Self::Git(git) => git.fetch_artifact(hash),
+        }
+    }
+}
+
+/// A registry's answer for one artifact identity demand: libraries are
+/// content-addressed, so the hash is the whole demand — found bytes,
+/// an absent identity, or a hard refusal naming what failed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ArtifactFetch {
+    /// The library bytes, verified against the demanded identity.
+    Found(Vec<u8>),
+    /// The storage holds no library under the identity.
+    Absent,
+    /// The storage could not be read, or the bytes it holds do not hash
+    /// to the identity they sit under: a hard refusal carrying the
+    /// specifics verbatim.
+    Refused(String),
 }
 
 /// A local-path registry index. Every demand reads one name's row file,
@@ -79,6 +143,44 @@ impl Registry {
     #[must_use]
     pub fn bundle_path(&self, hash: Hash128) -> PathBuf {
         self.root.join(SEGMENT).join(format!("{hash}.pkg"))
+    }
+
+    /// The storage path of one native-artifact identity: the same
+    /// content-addressed layout the store's artifact segment installs
+    /// under.
+    #[must_use]
+    pub fn artifact_path(&self, hash: Hash128) -> PathBuf {
+        self.root.join(ARTIFACT_SEGMENT).join(format!("{hash}.lib"))
+    }
+
+    /// One native-artifact demand: the storage serves the bytes under
+    /// the demanded identity and the bytes must recompute to it — the
+    /// store's own discipline, so the registry cannot serve content
+    /// under an identity its own bytes refute.
+    #[must_use]
+    pub fn fetch_artifact(&self, hash: Hash128) -> ArtifactFetch {
+        let path = self.artifact_path(hash);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return ArtifactFetch::Absent;
+            },
+            Err(source) => {
+                return ArtifactFetch::Refused(format!(
+                    "reading the registry artifact at {} ({source})",
+                    path.display()
+                ));
+            },
+        };
+        let found = artifact_content_hash(&bytes);
+        if found != hash {
+            return ArtifactFetch::Refused(format!(
+                "the registry artifact at {} hashes to blake3:{found}, not the demanded \
+                 blake3:{hash}",
+                path.display()
+            ));
+        }
+        ArtifactFetch::Found(bytes)
     }
 
     /// One fetch-hook demand. The row names the demanded version's
@@ -165,7 +267,7 @@ impl Registry {
                 .map_err(|error| format!("{file} line {number}: {error}"))?;
             if version.to_string() != ver_text {
                 return Err(format!(
-                    "{file} line {number}: row versions are three-component (\"{ver_text}\")"
+                    "{file} line {number}: row versions are canonically spelled (\"{ver_text}\")"
                 ));
             }
             let hash = parse_hash(hash_text).map_err(|_| {

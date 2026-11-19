@@ -47,7 +47,7 @@ use crate::{
     id_table::IdTable,
     instance::{Condition, InherentBounds, InstanceDecl, InstanceEnv, InstanceId},
     resolve::{DefId, MethodId, MethodOwner, Package},
-    universe::{Ty, Universe},
+    universe::{ReplayMint, Ty, Universe},
 };
 
 /// One declared generic parameter, AST-shaped.
@@ -236,16 +236,25 @@ pub struct Decls {
     /// inherent dispatch — a solved inherent call site reaches its impl's
     /// bodies through this tie, never through a package def.
     pub inherent_impls: IdTable<MethodId, Span>,
-    /// The declared generic bounds of every generic inherent impl, keyed by
-    /// the impl item's span: the inherent mirror of [`Decls::instance_impls`]
-    /// plus its instances' conditions — an inherent impl declares no
-    /// instance, so this record is the only place its bounds live. Call
-    /// sites verify the bounds and stage their runtime evidence from it;
-    /// the lowering pass reads it for the evidence-demand walk.
+    /// The solved head pattern and declared bounds of every generic
+    /// inherent impl, keyed by the impl item's span: the inherent mirror
+    /// of [`Decls::instance_impls`] plus its instances' conditions — an
+    /// inherent impl declares no instance, so this record is the only
+    /// place its head and bounds live. A bounds-free generic impl records
+    /// its head with no conditions (the head pattern is what a call
+    /// site's signature substitution reads). Call sites verify the bounds
+    /// and stage their runtime evidence from it; the lowering pass reads
+    /// it for the evidence-demand walk.
     pub inherent_impl_bounds: FxHashMap<Span, InherentBounds>,
     /// Top-level `const`/`var` initializers keyed by every name the
-    /// binding pattern declares (lazy memoized typing (G3)).
-    pub consts: IdTable<DefId, LocalDecl>,
+    /// binding pattern declares (lazy memoized typing (G3)). Shared
+    /// handles one row apiece, and the served prefix's rows arrive as
+    /// one shared base (see [`consts_base`]): the ambient's bodied fns
+    /// are const-of-lambda bindings, so a by-value row cloned per member
+    /// compile deep-cloned every fn body — the reserve walk now borrows
+    /// the base's rows read-only and only the compiled file's own
+    /// bindings insert.
+    pub consts: IdTable<DefId, Arc<LocalDecl>>,
     /// The solved return type of every impl-member function body (trait
     /// and inherent alike), keyed by the declaring `FnDecl`'s span: the
     /// written return solved against `Self`, or the body's own checked
@@ -261,14 +270,53 @@ pub struct Decls {
     /// pre-built from the checked-ambient artifact: zero in a fresh build
     /// (the gates below never fire), and the reserve/shape arms skip a
     /// served def's minting and shape solving because the serve already
-    /// installed those products. The hard tables (aliases, consts, the
-    /// solved span-keyed records) build fresh for every def either way;
-    /// the signature and instance tables slice two serves.
+    /// installed those products. The hard tables (aliases, the solved
+    /// span-keyed records) build fresh for every def either way; the
+    /// signature and instance tables slice two serves, and the const
+    /// rows share the caller's parked base where one is installed.
     pub served_defs: u32,
     /// The count of leading registered methods the checked-ambient
     /// artifact served signatures for: the inherent-registration arm
     /// skips a served method, its products already installed.
     pub served_methods: u32,
+    /// The linked-function facts of every import-bound def (G4): the
+    /// dep-list position and the linked module's function index a call
+    /// site addresses through its pool FuncRef. The signature rides
+    /// [`Decls::fns`] like any def's.
+    pub foreign_links: IdTable<DefId, ForeignLink>,
+    /// The literal fact of every import-bound const (G4): the value a use
+    /// site embeds as the literal a user would have written — the fact is
+    /// the value, so no linked-module machinery serves it. The checked
+    /// type mints from the fact's scalar atom at the use.
+    pub foreign_consts: IdTable<DefId, crate::import::ConstFact>,
+    /// The name index of every import-bound type whose fact minted (G4):
+    /// the def a type spelling resolves to when the package's own
+    /// namespace does not declare the name. The resolver gates a
+    /// consumer's own uses behind the file's import selections; this
+    /// index serves the linked signatures' rebased spellings, which no
+    /// resolution pass covers.
+    pub foreign_type_names: FxHashMap<String, DefId>,
+}
+
+impl Decls {
+    /// The import-bound type a name spells, when the package's own type
+    /// namespace does not declare it and a linked fact minted one.
+    #[must_use]
+    pub fn foreign_type(&self, name: &str) -> Option<DefId> {
+        self.foreign_type_names.get(name).copied()
+    }
+}
+
+/// Where one import-bound function's call site points (G4): the linked
+/// dep entry's position in the consuming module's recorded list and
+/// the function's index inside the linked module's table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ForeignLink {
+    /// The linked dep entry's position in the consuming module's
+    /// recorded dep list.
+    pub position: u32,
+    /// The function's index inside the linked module's table.
+    pub func: u32,
 }
 
 /// The declaration-side prefix a checked-ambient artifact serves: the
@@ -288,8 +336,10 @@ pub struct ServedDecls {
     pub decls: Decls,
     /// `(trait index, atom index)` membership records in any order.
     pub memberships: Vec<(TraitId, TypeId)>,
-    /// The shape-phase atom mints, in mint order.
-    pub mints: Vec<crate::universe::ReplayMint>,
+    /// The shape-phase atom mints, in mint order, each with the
+    /// generation atom id the prefix's recorded data names it by (the
+    /// landing map's key half — see [`Universe::remap_minted_ids`]).
+    pub mints: Vec<(TypeId, ReplayMint)>,
     /// The count of leading trees the prefix covers: the rebuild below
     /// walks exactly these, and the caller aligns one served resolution
     /// table per covered tree ahead of the fresh ones.
@@ -321,8 +371,11 @@ where
 /// reserve pass (which mints every file's def-named atoms first, so the
 /// mints continue the atom space where the declaring pass's impl arms
 /// did) and the shape pass (whose solving reads them), and every table
-/// the serve carries no rows for — aliases, consts, the solved
-/// span-keyed records — builds fresh over all files as in [`build`].
+/// the serve carries no rows for — aliases, the solved span-keyed
+/// records — builds fresh over all files as in [`build`]; the const
+/// rows answer from the shared base the caller installed (the ambient
+/// serve parks one, a user prefix-cache serve has none and builds
+/// fresh exactly as before).
 #[must_use]
 pub fn build_over<T>(
     package: &Package,
@@ -358,10 +411,34 @@ where
     // The replay's failures are ignored like the memberships' above: the
     // artifact's bytes are drift-gate-pinned, so a replay that cannot
     // land is a corrupt artifact (a generation-side failure), never a
-    // run-path condition to diagnose.
-    for mint in &mints {
-        let _ = decls.universe.replay_mint(mint);
+    // run-path condition to diagnose. Each landing records against the
+    // generation id the prefix's recorded data names the mint by, and a
+    // mint's own inputs (a tuple's elements) read the earlier landings —
+    // so one pass remaps the recorded data onto the merged ids before
+    // any later pass reads them.
+    let mut minted: FxHashMap<TypeId, TypeId> = FxHashMap::default();
+    for (gen_id, mint) in &mints {
+        let mint = match mint {
+            ReplayMint::Var(name) => ReplayMint::Var(name.clone()),
+            ReplayMint::Tuple(elements) => ReplayMint::Tuple(
+                elements
+                    .iter()
+                    .map(|&e| minted.get(&e).copied().unwrap_or(e))
+                    .collect(),
+            ),
+            ReplayMint::Apply(ctor, args) => {
+                ReplayMint::Apply(minted.get(ctor).copied().unwrap_or(*ctor), args.clone())
+            },
+            // a linked struct's fields name the ambient's def-named atoms
+            // (identities) and its own later-minted applies, which the
+            // final remap below rewrites once they land
+            ReplayMint::Struct(..) => mint.clone(),
+        };
+        if let Ok(landed) = decls.universe.replay_mint(&mint) {
+            minted.insert(*gen_id, landed);
+        }
     }
+    remap_served_mints(&mut decls, &minted);
     for (index, ast) in trees.iter().enumerate() {
         let served_item = index < served_files;
         for block in &ast.blocks {
@@ -371,8 +448,302 @@ where
         }
     }
     rebuild_solved_records(&trees[..served_files], package, &mut decls);
+    // The import-bound definitions (G4): a linked function's signature
+    // registers from the link pass's surface exactly like an extern's — a
+    // call site checks against the written types — and its link fact
+    // rides the table the call lowering reads; a linked const's literal
+    // fact rides the table the type minting and the embed read; a linked
+    // type's structural fact mints the declaration products a local
+    // struct would carry, so every later pass consumes it unchanged.
+    // The minted atom rides the artifact's mint log (never the def-named
+    // atom log): a served prefix replays the def-named atoms by rank,
+    // and a mint placed this late would record an id the rank replay
+    // lands elsewhere; the mint log's own ids replay in order, and the
+    // re-run takes the replayed atom through the served def-atom rows.
+    let mut linked: Vec<(&DefId, &crate::import::ForeignEntry)> =
+        package.foreign().iter().collect();
+    linked.sort_by_key(|(def, _)| def.index());
+    for (def, entry) in linked {
+        if let Some(sig) = &entry.sig {
+            decls.fns.insert(*def, sig.clone());
+        }
+        if entry.kind == crate::import::ForeignKind::Fn {
+            // a bodiless linked declaration (an extern) carries no link
+            // fact: its callee is the native the consumer's own lowering
+            // answers by name, so the call resolution falls through the
+            // table to the native lookup
+            if let Some(func) = entry.func {
+                decls.foreign_links.insert(*def, ForeignLink {
+                    position: entry.link,
+                    func,
+                });
+            }
+        } else if let Some(fact) = &entry.value {
+            decls.foreign_consts.insert(*def, fact.clone());
+        } else if let Some(fact) = &entry.ty {
+            install_foreign_type(*def, &entry.name, entry.decl_span, fact, &mut decls);
+        }
+    }
     package_coherence(&mut decls, &mut diags);
     (decls, diags)
+}
+
+/// Mints one linked type's structural fact into the declaration tables:
+/// exactly the products a local declaration of the same shape carries,
+/// so every later pass consumes the linked type like a local one and no
+/// second type kind exists — a struct's atom and field signature, an
+/// enum's case rows, a case's own atom, struct row, and case row. The
+/// word kinds resolve by name in this compile's own universe (the
+/// ambient's atoms), the same trust the const fact's scalar atom
+/// enjoys; the link pass's registration gates already proved the mint's
+/// name free, so a failed mint or an unresolvable word skips the def
+/// silently — its uses then fail at their own sites rather than
+/// mis-shaping.
+fn install_foreign_type(
+    def: DefId,
+    name: &str,
+    span: Span,
+    fact: &crate::import::TypeFact,
+    decls: &mut Decls,
+) {
+    match fact {
+        crate::import::TypeFact::Struct(fields) => {
+            install_foreign_struct(def, name, span, fields, decls);
+        },
+        crate::import::TypeFact::Enum(cases) => {
+            install_foreign_enum(def, name, span, cases, decls);
+        },
+        crate::import::TypeFact::Case(fact) => {
+            install_foreign_case(def, name, span, fact, decls);
+        },
+    }
+}
+
+/// One linked field list as the pair of forms the tables carry: the
+/// solved universe fields and the written AST fields (the spelling a
+/// local field of the same word would carry). `None` when a word names
+/// no atom of this universe — the caller skips the whole def silently.
+fn foreign_fields(
+    fields: &[crate::import::TypeField],
+    span: Span,
+    decls: &mut Decls,
+) -> Option<(Vec<Field>, Vec<FieldDecl>)> {
+    let mut universe_fields = Vec::with_capacity(fields.len());
+    let mut ast_fields = Vec::with_capacity(fields.len());
+    for field in fields {
+        let (expr, written) = foreign_field_type(field.word, span, decls)?;
+        universe_fields.push(Field::named(&field.name, expr));
+        ast_fields.push(FieldDecl {
+            span,
+            name: Ident {
+                span,
+                name: field.name.clone(),
+            },
+            ty: written,
+            doc: Vec::new(),
+        });
+    }
+    Some((universe_fields, ast_fields))
+}
+
+/// The struct fact's mint: the reserved atom, its solved field
+/// signature, the def tables the construction and field-access paths
+/// read, and the name index the signature solving falls back to.
+fn install_foreign_struct(
+    def: DefId,
+    name: &str,
+    span: Span,
+    fields: &[crate::import::TypeField],
+    decls: &mut Decls,
+) {
+    let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
+        return;
+    };
+    // The atom: a fresh run declares it, a served prefix's replay
+    // already declared it (the artifact's mint log and def-atom tables
+    // carry this def's atom), so the re-run takes the replayed atom and
+    // still installs the rows below — the name index is the one row the
+    // serve restores through no other table. Any other taken name keeps
+    // the silent skip.
+    let atom = match decls.universe.declare_struct(name) {
+        Ok(atom) => atom,
+        Err(_) => match decls.atoms.get(&def) {
+            Some(&atom) => atom,
+            None => return,
+        },
+    };
+    // The replayed atom already carries its shape — the serve set it —
+    // so both a fresh set and the replay's refusal answer the same
+    // fields; any other shape refusal keeps the silent skip.
+    if !matches!(
+        decls.universe.set_struct_fields(atom, universe_fields),
+        Ok(()) | Err(crate::Error::ShapeAlreadySet(_))
+    ) {
+        return;
+    }
+    decls.atoms.insert(def, atom);
+    decls.defs_of_atoms.insert(atom, def);
+    decls.structs.insert(def, StructShape {
+        params: Vec::new(),
+        fields: ast_fields,
+        linear: false,
+    });
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
+/// The enum fact's mint: the AST-shaped case rows the enum's own union
+/// solving and match coverage read, plus the name index — the case rows
+/// themselves mint at each case's own def (a non-generic enum carries
+/// no atom of its own; its type is the union of its case atoms [B3]).
+fn install_foreign_enum(
+    def: DefId,
+    name: &str,
+    span: Span,
+    cases: &[crate::import::TypeCase],
+    decls: &mut Decls,
+) {
+    let mut ast_cases = Vec::with_capacity(cases.len());
+    for case in cases {
+        let payload = match &case.payload {
+            crate::import::CasePayload::Unit => EnumPayload::None,
+            crate::import::CasePayload::Struct(fields) => {
+                let Some((_, ast_fields)) = foreign_fields(fields, span, decls) else {
+                    return;
+                };
+                EnumPayload::Struct(ast_fields)
+            },
+        };
+        ast_cases.push((case.name.clone(), span, payload));
+    }
+    decls.enums.insert(def, EnumShape {
+        params: Vec::new(),
+        cases: ast_cases,
+        linear: false,
+    });
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
+/// The case fact's mint: the case's atom (a unit tag for a bare case, a
+/// struct atom with its field signature for a payloaded one), the
+/// struct row a payloaded case's field access reads, the case row that
+/// maps back to the enum's def, and the name index — exactly the
+/// products a local non-generic enum's case declaration carries. The
+/// enum's own install ran earlier in def order (the link walk registers
+/// the enum before its cases), so the enum def resolves through the
+/// name index here.
+fn install_foreign_case(
+    def: DefId,
+    name: &str,
+    span: Span,
+    fact: &crate::import::CaseFact,
+    decls: &mut Decls,
+) {
+    let Some(&enum_def) = decls.foreign_type_names.get(&fact.enum_name) else {
+        return;
+    };
+    let payload = match &fact.payload {
+        crate::import::CasePayload::Unit => EnumPayload::None,
+        crate::import::CasePayload::Struct(fields) => {
+            let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
+                return;
+            };
+            let atom = match decls.universe.declare_struct(name) {
+                Ok(atom) => atom,
+                // a served prefix's replay already declared it; the
+                // fresh run's mint would duplicate — take the replayed
+                // atom and still install the rows below
+                Err(_) => match decls.atoms.get(&def) {
+                    Some(&atom) => atom,
+                    None => return,
+                },
+            };
+            if !matches!(
+                decls.universe.set_struct_fields(atom, universe_fields),
+                Ok(()) | Err(crate::Error::ShapeAlreadySet(_))
+            ) {
+                return;
+            }
+            decls.atoms.insert(def, atom);
+            decls.defs_of_atoms.insert(atom, def);
+            decls.structs.insert(def, StructShape {
+                params: Vec::new(),
+                fields: ast_fields.clone(),
+                linear: false,
+            });
+            EnumPayload::Struct(ast_fields)
+        },
+    };
+    if matches!(payload, EnumPayload::None) {
+        let atom = match decls.universe.declare_tag(name) {
+            Ok(atom) => Some(atom),
+            Err(_) => decls.atoms.get(&def).copied(),
+        };
+        let Some(atom) = atom else {
+            return;
+        };
+        decls.atoms.insert(def, atom);
+        decls.defs_of_atoms.insert(atom, def);
+    }
+    decls.cases.insert(def, CaseDecl { enum_def, payload });
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
+/// One linked field's word kind as the pair of forms the tables carry:
+/// the solved [`TypeExpr`] the set algebra and the lowerer read, and the
+/// written [`Type`] the checker's per-use solving reads (a single-segment
+/// path naming the atom — the spelling a local field of the same word
+/// would carry). `None` when a word names no atom of this universe.
+fn foreign_field_type(
+    word: crate::import::TypeWord,
+    span: Span,
+    decls: &mut Decls,
+) -> Option<(TypeExpr, Type)> {
+    use crate::import::TypeWord;
+
+    let named = move |name: &str, args: Vec<Type>| {
+        let ident = Ident {
+            span,
+            name: name.to_owned(),
+        };
+        Type::Path {
+            span,
+            path: ds_parse::Path {
+                span,
+                segments: vec![ident],
+            },
+            args,
+        }
+    };
+    match word {
+        TypeWord::Scalar(word) => {
+            let atom = decls.universe.atom_by_name(word.atom_name())?;
+            Some((TypeExpr::Atom(atom), named(word.atom_name(), Vec::new())))
+        },
+        TypeWord::List(word) => {
+            let element = decls.universe.atom_by_name(word.atom_name())?;
+            let element_ty = decls.universe.atom_ty(element).ok()?;
+            let ctor = decls.universe.atom_by_name("list")?;
+            let apply = decls.universe.apply_atom(ctor, &[element_ty]).ok()?;
+            let written = named("list", vec![named(word.atom_name(), Vec::new())]);
+            Some((TypeExpr::Atom(apply), written))
+        },
+        TypeWord::Bytes => {
+            let atom = decls.universe.atom_by_name("bytes")?;
+            Some((TypeExpr::Atom(atom), named("bytes", Vec::new())))
+        },
+    }
+}
+
+/// Rewrites the served prefix's recorded data onto the merged ids the
+/// mint replay landed at: the universe's atom-kind field signatures,
+/// interned set members, and structural index keys (see
+/// [`Universe::remap_minted_ids`]), plus the served instance rows'
+/// written heads and conditions. The recorded data names minted atoms
+/// by their generation ids, which the merged run's reserve mints shift
+/// — a def-named reference is an identity and stays untouched.
+fn remap_served_mints(decls: &mut Decls, minted: &FxHashMap<TypeId, TypeId>) {
+    decls.universe.remap_minted_ids(minted);
+    decls.instances.remap_served_exprs(minted);
 }
 
 /// Rebuilds the solved span-keyed records of the served prefix's impl
@@ -473,7 +844,7 @@ fn rebuild_solved_records(trees: &[&Ast], package: &Package, decls: &mut Decls) 
                             conditions.push(Condition::new(bound_trait, ty));
                         }
                     }
-                    (!conditions.is_empty()).then_some(Record::Inherent { head, conditions })
+                    Some(Record::Inherent { head, conditions })
                 };
                 match record {
                     Some(Record::Args(args)) => {
@@ -840,8 +1211,6 @@ fn reserve_impl_fns(package: &Package, imp: &ImplDecl, impl_site: Span, decls: &
     for f in &imp.fns {
         if let Some(method) = package
             .method_candidates(&f.name.name)
-            .iter()
-            .copied()
             .find(|&id| package.method(id).span == f.name.span)
         {
             if method.index() < decls.served_methods {
@@ -864,16 +1233,25 @@ fn def_kind_is_binding(package: &Package, def: DefId) -> bool {
 /// this initializer (G3) — a destructuring pattern declares many defs, so
 /// the item's own def is not the gate (a tuple pattern names no single
 /// def). The const-of-lambda registration is the single-name shape only:
-/// a lambda value binds one name.
+/// a lambda value binds one name. A row the serve already carries — the
+/// shared base's, or an earlier file's — stays put: the base owns the
+/// prefix's rows and a compiled file inserts only its own.
 fn reserve_local(package: &Package, local: &LocalDecl, decls: &mut Decls) {
     for binder in pattern_names(&local.pat) {
-        if let Some(def) = package.lookup_value(&binder) {
-            if def_kind_is_binding(package, def) {
-                decls.consts.insert(def, local.clone());
-            }
+        if let Some(def) = package.lookup_value(&binder)
+            && def_kind_is_binding(package, def)
+            && decls.consts.get(&def).is_none()
+        {
+            decls.consts.insert(def, Arc::new(local.clone()));
         }
     }
     let Pattern::Binding { name, .. } = &local.pat else {
+        return;
+    };
+    let Some(def) = package
+        .lookup_value(&name.name)
+        .filter(|def| decls.fns.get(def).is_none())
+    else {
         return;
     };
     if let Some(mut sig) = FnSig::of_lambda(&local.init) {
@@ -883,10 +1261,35 @@ fn reserve_local(package: &Package, local: &LocalDecl, decls: &mut Decls) {
         if sig.ret.is_none() {
             sig.ret.clone_from(&local.ty);
         }
-        if let Some(def) = package.lookup_value(&name.name) {
-            decls.fns.insert(def, Arc::new(sig));
+        decls.fns.insert(def, Arc::new(sig));
+    }
+}
+
+/// The served prefix's shared const rows, built once per artifact from the
+/// prefix's own resident tree: one row per binding-pattern binder, exactly
+/// the rows the reserve walk's own loop would insert, cloned once instead
+/// of per member compile. The caller parks the result behind a
+/// [`Park`](crate::Park) cell and installs it as every serve's
+/// [`Decls::consts`] base, so each member compile's teardown drops a
+/// refcount instead of the rows.
+#[must_use]
+pub fn consts_base(tree: &Ast, package: &Package) -> Arc<IdTable<DefId, Arc<LocalDecl>>> {
+    let mut table = IdTable::default();
+    for block in &tree.blocks {
+        for item in &block.items {
+            let ItemKind::Local(local) = &item.kind else {
+                continue;
+            };
+            for binder in pattern_names(&local.pat) {
+                if let Some(def) = package.lookup_value(&binder)
+                    && def_kind_is_binding(package, def)
+                {
+                    table.insert(def, Arc::new(local.clone()));
+                }
+            }
         }
     }
+    Arc::new(table)
 }
 
 fn struct_fields_ast(members: &[StructMember]) -> Vec<FieldDecl> {
@@ -1132,16 +1535,18 @@ fn path_expr(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeE
         }
         return None;
     }
-    if let Some((params, body)) = decls.aliases.get(&def).cloned() {
-        if params.is_empty() {
-            return conv_expr(package, &body, decls);
-        }
+    if let Some((params, body)) = decls.aliases.get(&def).cloned()
+        && params.is_empty()
+    {
+        return conv_expr(package, &body, decls);
     }
     None
 }
 
 /// The union of one enum's minted case atoms; `None` when a case did
-/// not mint (or the enum is empty, which is uninhabited either way).
+/// not mint (or the enum is empty, which is uninhabited either way). A
+/// linked enum's case defs sit outside the package's own namespace, so
+/// the name index the linked install filled answers them.
 fn enum_case_union(
     package: &Package,
     cases: &[(String, Span, EnumPayload)],
@@ -1151,6 +1556,7 @@ fn enum_case_union(
     for (name, ..) in cases {
         let atom = package
             .lookup_type(name)
+            .or_else(|| decls.foreign_type(name))
             .and_then(|def| decls.atoms.get(&def).copied())?;
         let expr = TypeExpr::Atom(atom);
         union = Some(match union {
@@ -1279,13 +1685,15 @@ fn solve_written(
     })
 }
 
-/// Records one generic inherent impl's declared bounds (F3): minted
-/// variables, the solved head pattern, and one condition per declared
-/// bound — the same shapes the trait arm builds, so the two impl forms
-/// read through the same machinery downstream. An impl declaring no trait
-/// bounds records nothing (a bare `[t]` bounds nothing, and calls on its
-/// variable never check clean); a head the type core cannot solve records
-/// nothing (the impl's own body checking reports the target).
+/// Records one generic inherent impl's solved head pattern and declared
+/// bounds (F3): minted variables, the solved head, and one condition per
+/// declared bound — the same shapes the trait arm builds, so the two impl
+/// forms read through the same machinery downstream. A bounds-free generic
+/// impl records its head with no conditions: the head pattern is what a
+/// call site's signature substitution and the type-keyed surface's
+/// generic-impl refusal read, and an empty bound list stages nothing. A
+/// head the type core cannot solve records nothing (the impl's own body
+/// checking reports the target).
 fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls: &mut Decls) {
     if imp.generics.is_empty() {
         return;
@@ -1320,11 +1728,9 @@ fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls
             conditions.push(Condition::new(bound_trait, ty));
         }
     }
-    if !conditions.is_empty() {
-        decls
-            .inherent_impl_bounds
-            .insert(item.span, InherentBounds { head, conditions });
-    }
+    decls
+        .inherent_impl_bounds
+        .insert(item.span, InherentBounds { head, conditions });
 }
 
 /// Declares one impl's instances into the environment (B6): mints variable
@@ -1474,8 +1880,6 @@ fn instance_diag(
 fn member_id(package: &Package, trait_def: DefId, name: &str) -> Option<MethodId> {
     package
         .method_candidates(name)
-        .iter()
-        .copied()
         .find(|&id| package.method(id).owner == MethodOwner::Trait(trait_def))
 }
 

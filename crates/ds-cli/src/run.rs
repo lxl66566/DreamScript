@@ -3,8 +3,13 @@
 //! pipeline (parse, check, lower, install), with the script-mode dsmod
 //! cache consulted before that pipeline — resolving one entry function
 //! and reporting its result. A .ds source with a `ds.pkg` beside it runs
-//! as a package: the manifest resolves over the store and the deps-first
-//! walk installs the linked graph before the root.
+//! as a package: the manifest resolves over the store, the deps-first
+//! walk installs the linked graph before the root, and the same
+//! script-mode caches — the dsmod artifact, the checked-prefix `.dsi`,
+//! and the dep-member dsmod artifacts, each linked package's own
+//! compiled module keyed on its content identity — serve the root and
+//! the walk's dep demands across runs under keys that fold the graph's
+//! dep identities.
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +18,12 @@ use clap::Args;
 use ds_diag::{Files, human};
 use ds_mod::{EntryArg, LoadError as ModLoadError, Module, ReadError, read_mmap};
 use ds_vm::{
-    ArenaMisuse, ArenaPackError, LoadError as VmLoadError, ModuleBuildError, ModuleRegistry, Trap,
-    Value, Vm,
-    native::{PLATFORM_IO_ERR, PLATFORM_NET_ERR, PLATFORM_NONE, PLATFORM_PARSE_ERR},
+    ArenaMisuse, ArenaPackError, FramePc, LoadError as VmLoadError, ModuleBuildError,
+    ModuleRegistry, StagedSite, Trap, Value, Vm,
+    native::{
+        PLATFORM_IO_ERR, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT, PLATFORM_NONE,
+        PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR,
+    },
     platform::Platform,
 };
 
@@ -25,15 +33,20 @@ use crate::{
     source,
 };
 
-/// The CLI is the default platform provider (H5.5, E1): every run
-/// installs the default `std` platform handler (console, fsys, net,
-/// time) into its registry. This must precede [`Vm::install_dsmod`] —
-/// the loader validates pool FuncRefs against the platform's served
-/// ops at install time, so a world call site in the module would fail
-/// as an unprovided or unresolved op otherwise (`Vm::new` installs the
-/// builtin core only, and too late for this path regardless).
+/// The CLI is the platform provider (H5, E1): every run installs the
+/// default `std` platform handler (console, fsys, net, time) into its
+/// registry, and the console-only `embed` handler beside it under its
+/// own name, so a source declaring `platform "embed"` runs against
+/// the bare face — every world op beyond print/println refusing at
+/// install as an unprovided op. This must precede [`Vm::install_dsmod`]
+/// — the loader validates pool FuncRefs against the installed
+/// platforms' served ops at install time, so a world call site in the
+/// module would fail as an unprovided or unresolved op otherwise
+/// (`Vm::new` installs the builtin core only, and too late for this
+/// path regardless).
 fn provide_platform(registry: &mut ModuleRegistry) {
     registry.install_platform(Platform::std());
+    registry.install_platform(Platform::embed());
 }
 
 /// The `ds run` surface: one module or source file, one entry name, i64
@@ -145,33 +158,97 @@ fn run_source(args: &RunArgs) -> Result<PreparedRun> {
     if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
         return run_cached(module, &plan, args);
     }
-    let compiled = source::compile(&args.file, &args.entry, args.no_ambient, Some(&prefix))?;
+    let compiled = source::compile(
+        &args.file,
+        &args.entry,
+        args.no_ambient,
+        Some(&prefix),
+        source::BundleAfter::Keep,
+    )?;
     cache.store(&args.entry, compiled.lowered.module());
     compile_source(args, compiled)
 }
 
-/// The package path: compile the root against the resolved graph, then
-/// install through the deps-first walk — `@std` and every linked package
-/// serving through the graph, dependencies before their dependent. The
-/// script cache stays out: the artifact's link table records identities
-/// the source text alone does not determine, so the plain key cannot pin
-/// them; package runs compile cold until the key folds dep identities.
+/// The package path: the script-mode dsmod cache first, keyed on the
+/// resolved graph's dep identities — a servable cached artifact
+/// installs without the front end — then the compile against the graph
+/// and the install through the deps-first walk, caching what a later
+/// run of the same source over the same resolution can serve: the dsmod
+/// artifact and the checked prefix alike, both keyed on the graph's
+/// dep identities. The artifact's link table records the graph's
+/// identities and both keys fold exactly those, so a dep whose resolved
+/// content changed is another key: an artifact or prefix linked against
+/// old content never serves a new resolution.
 fn run_package(args: &RunArgs, graph: &package::Graph) -> Result<PreparedRun> {
-    let compiled = package::compile_root(&args.file, &args.entry, graph)?;
+    let cache = RunCache::discover_linked(!args.no_cache, args.no_ambient, graph.identities());
+    if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
+        return run_cached_package(module, &plan, graph, &cache, args);
+    }
+    // the same dep identities key the prefix tier: a prefix linked
+    // against a dep's old content never serves a new resolution
+    let prefix = crate::dsi_cache::PrefixCache::discover_linked(
+        !args.no_cache,
+        args.no_ambient,
+        graph.identities(),
+    );
+    let compiled = package::compile_root(&args.file, &args.entry, graph, Some(&prefix))?;
     let name = compiled.name.clone();
     let functions = compiled.lowered.functions().to_vec();
     let int_member = compiled.lowered.tag("int");
     let none_member = compiled.lowered.tag("none");
     let entry_args = compiled.entry_args;
+    cache.store(&args.entry, compiled.lowered.module());
+    let vm = install_package_root(
+        compiled.lowered.into_module(),
+        graph,
+        &cache,
+        &name,
+        functions.len(),
+    )?;
+    Ok(PreparedRun {
+        staged: stage_source_args(
+            &name,
+            entry_args.as_deref(),
+            int_member,
+            none_member,
+            &args.args,
+        )?,
+        functions,
+        name,
+        vm,
+    })
+}
+
+/// Installs one package root — compiled or served from the script cache
+/// — through the deps-first walk over the resolved graph: `@std` and
+/// every linked package serving through the graph, dependencies before
+/// their dependent, each recorded link validated against the identity
+/// it pins. The walk's dep demands consult the dep-member cache first,
+/// so a warm run installs the linked members' own artifacts without
+/// compiling them.
+fn install_package_root(
+    module: Module,
+    graph: &package::Graph,
+    cache: &RunCache,
+    name: &str,
+    function_count: usize,
+) -> Result<Vm> {
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
     // a member that fails to compile refuses through the walk's provider
     // miss, so its failure rides the stash out of the provider closure
     let failed = std::cell::RefCell::new(None);
-    let walk = vm.load(compiled.lowered.into_module(), |dep, _| {
+    let walk = vm.load(module, |dep, linked| {
+        if let Some(served) = cache.lookup_dep(dep, linked) {
+            return Some(served);
+        }
         match graph.serve(dep) {
-            Ok(module) => module,
+            Ok(Some(served)) => {
+                cache.store_dep(dep, linked, &served);
+                Some(served)
+            },
+            Ok(None) => None,
             Err(error) => {
                 *failed.borrow_mut() = Some(error);
                 None
@@ -181,15 +258,31 @@ fn run_package(args: &RunArgs, graph: &package::Graph) -> Result<PreparedRun> {
     if let Some(error) = failed.into_inner() {
         return Err(error);
     }
-    walk.map_err(|error| install_error(&name, functions.len(), &error))?;
+    walk.map_err(|error| install_error(name, function_count, &error))?;
+    Ok(vm)
+}
+
+/// The package hit path: install the served artifact through the same
+/// deps-first walk as the compile path — its link table pins the
+/// identities the key folded — and stage exactly as the compile path
+/// does.
+fn run_cached_package(
+    module: Module,
+    plan: &ServedPlan,
+    graph: &package::Graph,
+    cache: &RunCache,
+    args: &RunArgs,
+) -> Result<PreparedRun> {
+    let name = module.name().to_owned();
+    let functions: Vec<String> = module
+        .functions()
+        .iter()
+        .map(|function| function.name().to_owned())
+        .collect();
+    let (entry_args, int_member, none_member) = plan.entry_facts();
+    let vm = install_package_root(module, graph, cache, &name, functions.len())?;
     Ok(PreparedRun {
-        staged: stage_source_args(
-            &name,
-            entry_args.as_deref(),
-            int_member,
-            none_member,
-            &args.args,
-        )?,
+        staged: stage_source_args(&name, entry_args, int_member, none_member, &args.args)?,
         functions,
         name,
         vm,
@@ -209,11 +302,7 @@ fn run_cached(module: Module, plan: &ServedPlan, args: &RunArgs) -> Result<Prepa
         .iter()
         .map(|function| function.name().to_owned())
         .collect();
-    let (entry_args, int_member, none_member) = match &plan {
-        ServedPlan::Raw => (None, None, None),
-        ServedPlan::Empty => (Some(&[][..]), None, None),
-        ServedPlan::Args { plans, int, none } => (Some(plans.as_slice()), *int, *none),
-    };
+    let (entry_args, int_member, none_member) = plan.entry_facts();
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
@@ -284,11 +373,18 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
             [Value::Tag(tag), ..] if *tag == PLATFORM_IO_ERR => Err(anyhow!(
                 "the run halted on an unhandled io failure (the message is on stdout)"
             )),
-            [Value::Tag(tag), ..] if *tag == PLATFORM_NET_ERR => Err(anyhow!(
-                "the run halted on an unhandled net failure (the message is on stdout)"
-            )),
+            [Value::Tag(tag), ..]
+                if matches!(*tag, PLATFORM_NET_TIMEOUT | PLATFORM_NET_REFUSED) =>
+            {
+                Err(anyhow!(
+                    "the run halted on an unhandled net failure (the message is on stdout)"
+                ))
+            },
             [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => Err(anyhow!(
                 "the run halted on an unhandled parse failure (the message is on stdout)"
+            )),
+            [Value::Tag(tag), ..] if *tag == PLATFORM_UTF8_ERR => Err(anyhow!(
+                "the run halted on an unhandled utf8 failure (the message is on stdout)"
             )),
             // The `none` member of a checked read is a plain result: print
             // its name, not the platform reservation's raw id.
@@ -317,7 +413,7 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
 /// value stages as its own i64 word, the dsmod rule.
 // the i64->f64 staging of --args is a lossy host conversion by design
 #[allow(clippy::cast_precision_loss)]
-fn stage_source_args(
+pub(crate) fn stage_source_args(
     entry: &str,
     plans: Option<&[EntryArg]>,
     int_member: Option<u8>,
@@ -459,6 +555,59 @@ fn install_error(name: &str, function_count: usize, error: &VmLoadError) -> Erro
             "module `{name}` fails the VM load checks: {}",
             describe_build_error(error)
         ),
+        VmLoadError::StagedFnMisroute {
+            module,
+            index,
+            func,
+            site,
+        } => match func {
+            Some(func) => anyhow!(
+                "swapping module `{module}` would misroute a staged callable word ({}) keyed to \
+                 its function index {index}, which named `{func}` — the incoming table drops that \
+                 function; the installed version keeps running",
+                describe_staged_site(site)
+            ),
+            None => anyhow!(
+                "swapping module `{module}` would misroute a staged callable word ({}) keyed to \
+                 function index {index}, which no longer names any function in the retiring \
+                 table; the installed version keeps running",
+                describe_staged_site(site)
+            ),
+        },
+        VmLoadError::PoolRefMisroute {
+            module,
+            pool,
+            index,
+            func,
+        } => match func {
+            Some(func) => anyhow!(
+                "swapping module `{module}` would misroute a direct call in `{pool}` keyed to its \
+                 function index {index}, which named `{func}` — the incoming table moves or drops \
+                 that function; the installed version keeps running"
+            ),
+            None => anyhow!(
+                "swapping module `{module}` would misroute a direct call in `{pool}` keyed to \
+                 function index {index}, which no longer names any function in the installed \
+                 table; the installed version keeps running"
+            ),
+        },
+    }
+}
+
+/// One phrase naming where a refused swap's staged callable word waited.
+fn describe_staged_site(site: &StagedSite) -> String {
+    match site {
+        StagedSite::ClosureHeader { fiber } => {
+            format!("a closure header on fiber {fiber}'s heap")
+        },
+        StagedSite::ClosureCapture { fiber } => {
+            format!("a closure capture on fiber {fiber}'s heap")
+        },
+        StagedSite::ListElement { fiber } => format!("a list element on fiber {fiber}'s heap"),
+        StagedSite::MapWord { fiber } => {
+            format!("a map key or value on fiber {fiber}'s heap")
+        },
+        StagedSite::FrameSlot { fiber } => format!("a frame slot of fiber {fiber}"),
     }
 }
 
@@ -532,11 +681,17 @@ pub(crate) fn trap_error(vm: &Vm, trap: &Trap) -> Error {
     if !frames.is_empty() {
         message.push_str("\nbacktrace (innermost first):");
         for frame in frames {
-            let _ = write!(
-                message,
-                "\n  {}::{} at pc {}",
-                frame.module, frame.func, frame.pc.0
-            );
+            let _ = write!(message, "\n  {}::{} ", frame.module, frame.func);
+            match frame.pc {
+                FramePc::At(pc) => {
+                    let _ = write!(message, "at pc {}", pc.0);
+                },
+                // a caller parked inside a hosted native call names no
+                // bytecode position: the seam, not a sentinel integer
+                FramePc::Hosted => {
+                    let _ = write!(message, "at hosted");
+                },
+            }
             if frame.elided > 0 {
                 let _ = write!(message, " (+{} tail frames elided)", frame.elided);
             }
@@ -554,6 +709,10 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::DivideByZero => "division by zero".to_owned(),
         Trap::OversizedShift => "oversized shift".to_owned(),
         Trap::CvtOutOfRange => "float-to-int conversion out of range".to_owned(),
+        // the die row of the CLI's halt policy (the 2026-11-17 split):
+        // the message prints through the trap report and the run exits
+        // failed, exactly the io|net|utf8 halt rows' contract
+        Trap::Die { message } => format!("die: {message}"),
         Trap::UnknownFunction { module, func } => {
             format!("module `{module}` has no function `{func}`")
         },

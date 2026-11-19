@@ -34,9 +34,12 @@
 //! counts release at the next resume without its value ever recomputing;
 //! a declaration round re-parks at the boundary, restaging the last
 //! answer. A failing or trapping line never commits: the frame rolls
-//! back to the parked extent (the partial run's words zero, its acquired
-//! counts released against a pre-step ledger reading) — its own deinit
-//! hooks never fire, matching the trap path's honesty. `:drop <name>`
+//! back to the parked extent — the partial run's own deinit-carrying
+//! bindings fire their hooks exactly once on the rollback's drain
+//! (effects that already ran stand; a value the frame still holds
+//! through a parked binding survives untouched), then the partial run's
+//! words zero and its acquired counts release against a pre-step ledger
+//! reading. `:drop <name>`
 //! fires one live binding's deinit exactly once and neuters its words
 //! (the binding's line is renamed so later lines cannot resolve it, the
 //! text-level death that keeps every later binding's placement stable;
@@ -68,15 +71,15 @@ use ds_lower::{LowerMode, lower_in_mode};
 use ds_mod::Hash128;
 use ds_parse::{Ast, ItemKind, LocalDecl, Pattern, StmtKind};
 use ds_query::{
-    Analyzed, BlockIndex, Db, DefId, EffectsOf, LinearityCheck, PackageEffects, PackageId,
-    ParseFile, PlatformCheck, QueryError, Resolve, TypeOf,
+    Analyzed, BlockIndex, BlockInfo, Db, DefId, EffectsOf, LinearityCheck, PackageEffects,
+    PackageId, ParseFile, PlatformCheck, QueryError, Resolve, TypeOf,
 };
 use ds_vm::{
-    LoadError, ModuleRegistry, Platform, ReplOutcome, SpliceError, Value, Vm, abi::CodePc, native,
-    splice_park,
+    FrameAnswer, LoadError, ModuleRegistry, Platform, ReplOutcome, SpliceError, Value, Vm,
+    abi::CodePc, native, splice_park,
 };
 
-use crate::run;
+use crate::{run, source};
 
 /// The session module's name (the reserved stems `builtin`/`std` are not
 /// taken).
@@ -210,12 +213,14 @@ impl Session {
     }
 
     fn new() -> Self {
-        let mut db = Db::with_declared_rows(ds_stdlib::declared_rows().clone())
+        let mut db = Db::with_declared_rows(source::session_rows().clone())
             .with_world_caps(ds_stdlib::world_caps().clone());
         // The ambient is a session package member (G3): its definitions
         // resolve for every submission, and its file id is never needed
-        // again.
+        // again. The host provision rides beside it (the die split): the
+        // entry session's own declaration member, rows included.
         let _ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+        let _host = db.add_file(source::HOST_FILE, source::HOST_SOURCE);
         let file = db.add_file(SESSION_FILE, &Self::text(&[], &[]));
         Self {
             db,
@@ -286,7 +291,10 @@ impl Session {
         );
         let index = query(self.db.get::<BlockIndex>(self.file), "block index")?;
         for block in index.blocks.iter() {
-            let def = DefId::from_block(block.id)?;
+            let Ok(def) = DefId::from_block(block.id) else {
+                reports.push(block_key_overflow(block));
+                continue;
+            };
             let typed = query(self.db.get::<TypeOf>(def), "type_of")?;
             reports.extend(typed.diags.iter().cloned());
             let linear = query(self.db.get::<LinearityCheck>(def), "linearity_check")?;
@@ -377,7 +385,7 @@ impl Session {
             self.vm.repl_start(MODULE, "main")
         };
         match driven {
-            Ok(ReplOutcome::Parked(value)) => {
+            Ok(ReplOutcome::Parked(answer)) => {
                 self.binders = binders;
                 let session =
                     query(self.db.get::<ParseFile>(self.file), "parse").map_err(Failure::Engine)?;
@@ -385,7 +393,7 @@ impl Session {
                 let Some(session_ast) = session.ast.as_deref() else {
                     return Err(Failure::Engine(anyhow!("the session parse lost its tree")));
                 };
-                self.report(session_ast, &analyzed, &value, zone)
+                self.report(session_ast, &analyzed, &answer, zone)
                     .map_err(Failure::Engine)
             },
             Ok(ReplOutcome::Died(_)) => {
@@ -422,7 +430,7 @@ impl Session {
         &mut self,
         ast: &Ast,
         analyzed: &ds_check::Analyzed,
-        value: &Value,
+        span: &FrameAnswer,
         zone: Zone,
     ) -> Result<()> {
         let universe = &analyzed.decls.universe;
@@ -458,7 +466,7 @@ impl Session {
                         // the inert unit word).
                         if let Some(ret) = main_return(analyzed, universe) {
                             if ret != "()" {
-                                print_result(value);
+                                print_result(span);
                             }
                             println!(": {ret}");
                         }
@@ -699,13 +707,13 @@ impl Failure {
 }
 
 /// One query failure, self-describing with the pass that failed.
-fn query<T>(result: Result<T, QueryError>, pass: &str) -> Result<T> {
+pub(crate) fn query<T>(result: Result<T, QueryError>, pass: &str) -> Result<T> {
     result.with_context(|| format!("{pass} query failed"))
 }
 
 /// A fresh VM with the default platform installed (H5.5): the CLI is the
 /// provider, and the install validates pool FuncRefs against it.
-fn fresh_vm() -> Vm {
+pub(crate) fn fresh_vm() -> Vm {
     let mut registry = ModuleRegistry::new();
     registry.install_platform(Platform::std());
     Vm::new(registry)
@@ -1011,15 +1019,43 @@ fn answer_name(decls: &[String], stmts: &[String]) -> String {
 /// neutering): only the identifier after the `const`/`var` head changes,
 /// so the line's shape, placement, and every later line's offsets stay.
 fn rename_binding(line: &str, fresh: &str) -> String {
-    let first = first_line(line);
-    let Some(head) = first.split_whitespace().next() else {
+    let Some((old, at)) = binding_name_at(line) else {
         return line.to_owned();
     };
-    let Some(old) = ident_after(first, head) else {
-        return line.to_owned();
-    };
-    let at = line.find(&old).unwrap_or(0);
     format!("{}{}{}", &line[..at], fresh, &line[at + old.len()..])
+}
+
+/// The bound identifier of a `const`/`var` binding submission and its
+/// byte offset in the whole text: the first content line's head token
+/// names the kind, the next identifier token after it is the bound name.
+/// The offset is the token's own position — never a substring hit inside
+/// the head keyword (an `n` bound is not the `n` of `const`) or an
+/// earlier occurrence of the name on the line.
+fn binding_name_at(line: &str) -> Option<(String, usize)> {
+    let mut line_at = 0;
+    for raw in line.split('\n') {
+        let trimmed = raw.trim_start();
+        let lead = raw.len() - trimmed.len();
+        if !trimmed.is_empty() && !trimmed.starts_with("//") {
+            let head = trimmed.split_whitespace().next()?;
+            let after_head = line_at + lead + head.len();
+            let rest = &line[after_head..];
+            let mut chars = rest.char_indices().skip_while(|(_, c)| c.is_whitespace());
+            let (start, _) = chars.next()?;
+            let mut end = rest.len();
+            for (index, c) in rest[start..].char_indices() {
+                if !(c.is_alphanumeric() || c == '_') {
+                    end = start + index;
+                    break;
+                }
+            }
+            let ident = &rest[start..end];
+            return (!ident.is_empty() && ident.chars().next().is_some_and(char::is_alphabetic))
+                .then(|| (ident.to_owned(), after_head + start));
+        }
+        line_at += raw.len() + 1;
+    }
+    None
 }
 
 /// The REPL-owned `main`'s body block.
@@ -1129,13 +1165,33 @@ fn pattern_names(pattern: &Pattern, out: &mut Vec<ds_parse::Ident>) {
 }
 
 /// Whether any label of the diagnostic addresses the session file.
-fn touches(diag: &Diagnostic, file: FileId) -> bool {
+pub(crate) fn touches(diag: &Diagnostic, file: FileId) -> bool {
     diag.labels.iter().any(|label| label.span.file == file)
+}
+
+/// The spanned diagnostic for a block past the DefId block-key budget: a
+/// block whose index does not fit the 8-bit packing cannot be keyed for
+/// its typed and linearity slices, so the block skips with its own span
+/// and the pass continues — never a bare engine escape that would swallow
+/// every diagnostic already collected.
+pub(crate) fn block_key_overflow(block: &BlockInfo) -> Diagnostic {
+    Diagnostic::error(
+        ds_diag::ErrorCode::DefIdBlockOverflow,
+        format!(
+            "block {} of file {} does not fit the DefId packing",
+            block.id.index,
+            block.id.file.as_u32()
+        ),
+    )
+    .with_primary(
+        block.span,
+        "this block is past the 256-block per-file budget; its checks are skipped",
+    )
 }
 
 /// Sort key of one diagnostic: the focus span (primary label, else
 /// first), source position order like `ds check`.
-fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
+pub(crate) fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
     diag.labels
         .iter()
         .find(|label| label.style == LabelStyle::Primary)
@@ -1145,23 +1201,37 @@ fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
         })
 }
 
-/// Prints one run result: the platform failure tags are halted runs (the
-/// lowered unhandled-failure handler already printed the message), the
-/// `none` member of a checked read prints by name, everything else like
-/// `ds run`.
-fn print_result(value: &Value) {
-    match value {
-        Value::Tag(tag) if *tag == native::PLATFORM_IO_ERR => {
+/// Prints one run result's whole answer span: the platform failure tags
+/// are halted runs (the lowered unhandled-failure handler already printed
+/// the message) and the `none` member of a checked read prints by name,
+/// both riding the span's head word; everything else prints one line per
+/// word exactly like `ds run`, so a multi-word answer never truncates to
+/// its head word.
+fn print_result(span: &FrameAnswer) {
+    match span.as_slice() {
+        [Value::Tag(tag), ..] if *tag == native::PLATFORM_IO_ERR => {
             println!("halted on an unhandled io failure");
         },
-        Value::Tag(tag) if *tag == native::PLATFORM_NET_ERR => {
+        [Value::Tag(tag), ..]
+            if matches!(
+                *tag,
+                native::PLATFORM_NET_TIMEOUT | native::PLATFORM_NET_REFUSED
+            ) =>
+        {
             println!("halted on an unhandled net failure");
         },
-        Value::Tag(tag) if *tag == native::PLATFORM_PARSE_ERR => {
+        [Value::Tag(tag), ..] if *tag == native::PLATFORM_PARSE_ERR => {
             println!("halted on an unhandled parse failure");
         },
-        Value::Tag(tag) if *tag == native::PLATFORM_NONE => println!("none"),
-        value => run::print_value(value),
+        [Value::Tag(tag), ..] if *tag == native::PLATFORM_UTF8_ERR => {
+            println!("halted on an unhandled utf8 failure");
+        },
+        [Value::Tag(tag), ..] if *tag == native::PLATFORM_NONE => println!("none"),
+        words => {
+            for value in words {
+                run::print_value(value);
+            }
+        },
     }
 }
 
@@ -1258,5 +1328,29 @@ mod read_tests {
         let mut editor = EditorInput::new().expect("the editor starts without a terminal");
         editor.record("1 + 1");
         assert_eq!(editor.editor.history_mut().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::{binding_name_at, rename_binding};
+
+    /// The rename lands on the binding-name token's own position: a name
+    /// that is a substring of the `const`/`var` head, of a leading
+    /// comment, or of the initializer never captures the rewrite, and a
+    /// multi-line binding renames at its first content line.
+    #[test]
+    fn the_rename_lands_on_the_bound_name_token() {
+        assert_eq!(binding_name_at("const n = 5"), Some(("n".to_owned(), 6)));
+        assert_eq!(rename_binding("const n = 5", "__x"), "const __x = 5");
+        assert_eq!(rename_binding("var a = a + 1", "__x"), "var __x = a + 1");
+        assert_eq!(
+            rename_binding("// n note\nconst n = 5", "__x"),
+            "// n note\nconst __x = 5"
+        );
+        assert_eq!(
+            rename_binding("const m = (\n1,\n2)", "__x"),
+            "const __x = (\n1,\n2)"
+        );
     }
 }

@@ -195,9 +195,10 @@ error_codes! {
     PooledWorldCall => "DS2036", Type,
     /// The comptime fence's callee admission refuses a runtime callee: an impure effect row, a generic body's evidence seam, or a member call the slice plans no body for (G1).
     ComptimeCalleeRefusal => "DS2037", Type,
-||||||| parent of f55bb44 (Land the union-default member annotation for the default derive)
     /// The `#[default]` union-member annotation's refusals: a second annotated member of one union, an annotation no default derivation reads, or one outside an enum case (G1).
     DeriveMemberAnnotation => "DS2038", Type,
+    /// A `return` in a value-consumed position: an early exit is a statement, so a block whose value feeds a binding, an argument, or a join arm refuses it (F2).
+    ReturnInValuePosition => "DS2039", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -251,6 +252,12 @@ error_codes! {
     ImportNameMissing => "DS4019", Module,
     /// A visibility modifier on an item that declares no package name, or a re-export whose semantics land with cross-package linking (G4).
     VisNoTarget => "DS4020", Module,
+    /// An import selects an exported name whose shape cannot bind across packages this round: a generic fn, a defaulted parameter, a computed or mutable binding, a type whose layout the surface vocabulary cannot spell (or whose name a local declaration or another linked package owns), or a linked member a module alias serves neither at a call site nor in value position (a function value, a type name) (G4).
+    ImportUnsupportedShape => "DS4021", Module,
+    /// Two imports of one file bind the same name (G4).
+    ImportDuplicate => "DS4022", Module,
+    /// A file's `##` block index exceeds the checker's DefId block-key budget (256); the block is skipped.
+    DefIdBlockOverflow => "DS4023", Module,
 }
 
 #[cfg(test)]
@@ -319,8 +326,8 @@ mod tests {
             ("PooledControlNative", "DS2035", ErrorClass::Type),
             ("PooledWorldCall", "DS2036", ErrorClass::Type),
             ("ComptimeCalleeRefusal", "DS2037", ErrorClass::Type),
-||||||| parent of f55bb44 (Land the union-default member annotation for the default derive)
             ("DeriveMemberAnnotation", "DS2038", ErrorClass::Type),
+            ("ReturnInValuePosition", "DS2039", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
@@ -347,6 +354,9 @@ mod tests {
             ("ImportNotExported", "DS4018", ErrorClass::Module),
             ("ImportNameMissing", "DS4019", ErrorClass::Module),
             ("VisNoTarget", "DS4020", ErrorClass::Module),
+            ("ImportUnsupportedShape", "DS4021", ErrorClass::Module),
+            ("ImportDuplicate", "DS4022", ErrorClass::Module),
+            ("DefIdBlockOverflow", "DS4023", ErrorClass::Module),
         ];
         assert_eq!(
             ErrorCode::ALL.len(),
@@ -363,7 +373,7 @@ mod tests {
     /// Machine checks the snapshot cannot express alone: every code string is
     /// a well-formed `DSnnnn`, its number sits inside its class's thousands
     /// range, strings are unique, `ALL` is strictly ascending, and the table
-    /// is terminal at DS4020.
+    /// is terminal at DS4022.
     #[test]
     fn all_codes_well_formed_in_range_unique_and_ascending() {
         let mut prev = 0;
@@ -384,6 +394,6 @@ mod tests {
             assert!(n > prev, "{code} ({n}) breaks ascending order after {prev}");
             prev = n;
         }
-        assert_eq!(prev, 4020, "the table's highest code is DS4020");
+        assert_eq!(prev, 4023, "the table's highest code is DS4023");
     }
 }

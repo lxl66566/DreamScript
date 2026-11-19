@@ -492,3 +492,136 @@ fn two_resolutions_produce_byte_identical_locks() {
     let text = String::from_utf8_lossy(&first).into_owned();
     assert!(text.contains("name = \"base\"\nversion = \"1.3.0\"\n"));
 }
+
+/// Builds a manifest with deps plus one artifact declaration.
+fn manifest_with_artifact(
+    name: &str,
+    version: &str,
+    deps: &[(&str, &str, Hash128)],
+    artifact: &str,
+    art_ver: &str,
+    target: &str,
+    hash: Hash128,
+) -> Manifest {
+    let base = manifest_of(name, version, deps);
+    let text = format!(
+        "{}\n[artifacts]\n{artifact} = {{ ver = \"{art_ver}\", target = \"{target}\", hash = \
+         \"blake3:{hash}\" }}\n",
+        base.to_text()
+    );
+    Manifest::parse(&text, FileId::new(0)).expect("fixture manifest parses")
+}
+
+#[test]
+fn artifacts_fold_from_the_root_and_deps_under_one_name() {
+    // root and lib both declare `mymath` at the same identity: the graph
+    // carries one artifact, every declarer agreeing
+    let art = Hash128::new([0x44; 16]);
+    let lib = package_of(&manifest_with_artifact(
+        "lib",
+        "1.0.0",
+        &[],
+        "mymath",
+        "1.2.0",
+        "x86_64-pc-windows-msvc",
+        art,
+    ));
+    let root = manifest_with_artifact(
+        "app",
+        "1.0.0",
+        &[("lib", "1.0.0", lib.content_hash())],
+        "mymath",
+        "1.2.0",
+        "x86_64-pc-windows-msvc",
+        art,
+    );
+    let mut registry = Registry::new(&[lib]);
+    let resolved = resolve(&root, |name, ver| registry.fetch(name, ver)).expect("resolves");
+    let folded = resolved.artifacts();
+    assert_eq!(folded.len(), 1);
+    assert_eq!(folded["mymath"].ver, Version::new(1, 2, 0));
+    assert_eq!(folded["mymath"].target, "x86_64-pc-windows-msvc");
+    assert_eq!(folded["mymath"].hash, art);
+    // and the artifact's pin rides the lock: the manifest texts carry it
+    let lock = String::from_utf8_lossy(&resolved.lock_bytes()).into_owned();
+    assert!(lock.contains("[artifacts]"));
+    assert!(lock.contains("mymath"));
+}
+
+#[test]
+fn a_second_artifact_identity_under_one_name_refuses() {
+    // lib pins `mymath` at one hash, the root at another: one version
+    // per name this round, the refusal naming both declarers
+    let pinned = Hash128::new([0x44; 16]);
+    let found = Hash128::new([0x55; 16]);
+    let lib = package_of(&manifest_with_artifact(
+        "lib",
+        "1.0.0",
+        &[],
+        "mymath",
+        "1.2.0",
+        "x86_64-pc-windows-msvc",
+        pinned,
+    ));
+    let root = manifest_with_artifact(
+        "app",
+        "1.0.0",
+        &[("lib", "1.0.0", lib.content_hash())],
+        "mymath",
+        "2.0.0",
+        "aarch64-unknown-linux-gnu",
+        found,
+    );
+    let mut registry = Registry::new(&[lib]);
+    let error =
+        resolve(&root, |name, ver| registry.fetch(name, ver)).expect_err("the conflict refuses");
+    let ResolveError::ArtifactConflict {
+        name,
+        pinned: pin,
+        found: other,
+        dependent,
+        declarer,
+    } = &error
+    else {
+        panic!("expected ArtifactConflict, got {error:?}")
+    };
+    assert_eq!(name, "mymath");
+    // the root records first, so its pin is the recorded one and lib's
+    // the disagreeing bound
+    assert_eq!(pin.hash, found);
+    assert_eq!(other.hash, pinned);
+    assert_eq!(pin.ver, Version::new(2, 0, 0));
+    assert_eq!(other.target, "x86_64-pc-windows-msvc");
+    assert_eq!(dependent, "app");
+    assert_eq!(declarer, "lib");
+    // the message names both identities and the one-slot rule
+    let message = error.to_string();
+    assert!(message.contains("blake3:44"), "{message}");
+    assert!(message.contains("blake3:55"), "{message}");
+    assert!(message.contains("one version per name"), "{message}");
+}
+
+#[test]
+fn an_artifact_edit_rekeys_the_lock() {
+    // two roots differing only in the artifact's pin produce different
+    // locks: the artifact identity flows into the lock bytes
+    let one = Hash128::new([0x44; 16]);
+    let two = Hash128::new([0x55; 16]);
+    let lock_of = |hash| {
+        let root = manifest_with_artifact(
+            "app",
+            "1.0.0",
+            &[],
+            "mymath",
+            "1.2.0",
+            "x86_64-pc-windows-msvc",
+            hash,
+        );
+        let mut registry = Registry::new(&[]);
+        resolve(&root, |name, ver| registry.fetch(name, ver))
+            .expect("an artifact-only root resolves")
+            .lock_bytes()
+    };
+    assert_ne!(lock_of(one), lock_of(two));
+    assert_eq!(lock_of(one), lock_of(one));
+}

@@ -37,7 +37,7 @@ const TRAIT_STORY: &str = concat!(
     "struct list[t]\n",
     "extern fn println (s: string) -> ()\n",
     "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
-    "extern fn head[t] (xs: list[t]) -> t | none\n",
+    "extern fn first[t] (xs: list[t]) -> t | none\n",
     "trait shows {\n",
     "  fn show(self) -> string\n",
     "}\n",
@@ -188,7 +188,7 @@ fn a_multi_word_instantiated_pair_variable_refuses() {
 fn a_checked_read_spanning_the_variable_word_refuses() {
     let source = format!(
         "{}\n{}",
-        loop_body("      const y = self.head()\n      acc = \"${acc}\""),
+        loop_body("      const y = self.first()\n      acc = \"${acc}\""),
         concat!(
             "fn main() -> int {\n",
             "  println([1].show())\n",

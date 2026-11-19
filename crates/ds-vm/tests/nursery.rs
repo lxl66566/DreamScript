@@ -29,14 +29,11 @@ use ds_vm::{
     ModuleRegistry, ModuleVersion, NurseryId, NurseryState, Trap, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
-        SlotType::{I64, Raw},
+        SlotType::{Bool, I64, Raw},
         uop::Uop,
     },
     assemble,
-    native::{
-        BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD, BUILTIN_NURSERY_JOIN, PLATFORM_CANCELLED,
-        PLATFORM_NONE,
-    },
+    native::{BUILTIN_FIBER_RESUME, BUILTIN_NURSERY_JOIN, PLATFORM_CANCELLED, PLATFORM_NONE},
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -137,7 +134,7 @@ fn straight_def() -> FunctionDef {
 fn spin_def() -> FunctionDef {
     def(
         "spin",
-        &[I64, I64, I64, SlotType::Bool, Raw, Raw],
+        &[I64, I64, I64, Bool, Raw, Raw],
         2,
         2,
         vec![Const::I64(1), Const::I64(0), nb_ref(3)],
@@ -175,23 +172,33 @@ fn spin_def() -> FunctionDef {
     )
 }
 
-/// `(v: int) -> int`: yield `v` (park), then return `v + 1` — the re-entry
-/// answer slot stays `Raw`, so the bounce tag lands without a trap.
+/// `(v: int) -> int`: park at its one-shot backward branch under the
+/// host's suspension request, then return `v + 1` — the park's resume
+/// drops its payload (no call site stands).
 fn half_def() -> FunctionDef {
+    // pool k0=one, k1=two, k2=zero
     def(
         "half",
-        &[I64, I64, Raw],
+        &[I64, I64, Bool, I64, I64],
         1,
-        1,
-        vec![Const::I64(1), builtin(BUILTIN_FIBER_YIELD)],
+        0,
+        vec![Const::I64(1), Const::I64(2), Const::I64(0)],
         &[
-            Uop::Funcf { frame_slots: 3 },
-            Uop::Kimm { dst: 1, kidx: k(0) },
-            Uop::Mov { dst: 2, src: 0 },
-            Uop::Call {
-                callee: k(1),
-                nargs: 1,
+            Uop::Funcf { frame_slots: 5 },
+            Uop::Kimm { dst: 3, kidx: k(2) }, // zero the counter
+            Uop::Kimm { dst: 1, kidx: k(0) }, // one
+            Uop::AddI64 {
+                dst: 3,
+                lhs: 3,
+                rhs: 1,
             },
+            Uop::Kimm { dst: 4, kidx: k(1) }, // two
+            Uop::LtI64 {
+                dst: 2,
+                lhs: 3,
+                rhs: 4,
+            },
+            Uop::Jmpif { cond: 2, target: 3 }, // the one-shot park point
             Uop::AddI64 {
                 dst: 0,
                 lhs: 0,
@@ -529,12 +536,13 @@ fn teardown_cuts_a_parked_child_at_its_resume_under_the_flag() {
     let looper = vm
         .spawn_fiber_in(n, "nb", "loop_forever", &[])
         .expect("spawn looper");
-    // park the first child mid-flight at its yield
+    // park the first child mid-flight under the host's suspension request
+    vm.request_suspend(half);
     assert_eq!(
         vm.resume_fiber(half, Value::I64(0)),
-        Ok(FrameAnswer::one(Value::I64(5)))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NONE)))
     );
-    assert_eq!(vm.fiber_state(half), Some(FiberState::Suspended));
+    assert_eq!(vm.fiber_state(half), Some(FiberState::Preempted));
     // teardown: the flag goes up first, then each child in spawn order —
     // the parked one is cut at its next resume (never resuming: its
     // straight-line tail no longer lands), the looper stops at its first
@@ -579,9 +587,11 @@ fn per_child_tco_stays_intact_inside_a_nursery() {
 fn join_survives_a_child_left_parked_on_a_dead_resumer() {
     let mut vm = Vm::new(nb_registry());
     let n = vm.open_root_nursery();
-    // the resumer is driven first: it resumes the half-fiber (which yields
-    // back), returns, and dies — leaving the half parked at its yield with
-    // a dead resumer, the leftover pattern
+    // the resumer is driven first: it resumes the half-fiber, which parks
+    // at its requested suspension mid-drive (the host request armed below),
+    // the drive bouncing the resumer back in — its resume call answers the
+    // bare none tag — and it dies on that answer, leaving the half parked
+    // with a dead resumer, the leftover pattern
     let resumer = vm
         .spawn_fiber_in(n, "nb", "resume_like", &[Value::I64(2)])
         .expect("spawn resumer");
@@ -590,12 +600,15 @@ fn join_survives_a_child_left_parked_on_a_dead_resumer() {
         .spawn_fiber_in(n, "nb", "half", &[Value::I64(5)])
         .expect("spawn half");
     assert_eq!(half, FiberId(2));
-    // the join drives the leftover next: its yield and its completion both
-    // deliver to the driver (the resumer is gone), never into a corpse
+    vm.request_suspend(half);
+    // the join drives the leftover next: its bounce re-entry and its
+    // completion both deliver to the driver (the resumer is gone), never
+    // into a corpse — the resumer's own answer is the bare-tag bounce its
+    // parked resume call received
     assert_eq!(
         vm.join_nursery(n),
         Ok(JoinOutcome::Joined(vec![
-            FrameAnswer::one(Value::I64(5)),
+            FrameAnswer::one(Value::Tag(PLATFORM_NONE)),
             FrameAnswer::one(Value::I64(6))
         ]))
     );

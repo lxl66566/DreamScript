@@ -1,7 +1,6 @@
 // source: frozen archive catalog 01-types (seed corpus)
 // purpose: config parser exercising enum-minted cases, set-typed errors, is-narrowing, bare return, ?, .err, structural ==
 // items:
-// json: stage: typecheck
 // cfg_err: stage: typecheck
 // log: stage: typecheck
 // default_config: stage: typecheck
@@ -12,17 +11,8 @@
 // kv: stage: run
 // same: stage: run
 
-// the json value family: bare and payload cases minted by one enum [B3];
-// `pub` opens the value to the gate's ambient stub, whose parse_json
-// names it [G4]
-pub enum json {
-  json_null
-  json_bool
-  json_num { value: float }
-  json_str { value: string }
-  json_arr { items: list[json] }
-  json_obj { fields: map[string, json] }
-}
+// the json value family: the ambient's own enum [B3] (payloaded cases
+// minted by one enum), whose parse_json names it [G4]
 
 // the config error family: one bare case and one payload case; case
 // names enter the tag namespace, so `int | missing | bad_port` is a set
@@ -41,16 +31,16 @@ extern fn default_config() -> config
 extern fn get[k, v](m: map[k, v], key: k) -> v | none
 
 fn get_port(j: json) -> int | missing | bad_port {
-  if j is json_obj {
+  if j is json_object {
     const pv = j.fields.get("port")
     if pv is none { return missing }
-    if pv is int && pv >= 1 && pv <= 65535 { pv } else { bad_port(got: -1) }
+    if pv is json_int && pv.value >= 1 && pv.value <= 65535 { pv.value } else { bad_port(got: -1) }
   } else {
     missing
   }
 }
 
-fn load(path: string) -> config | io_err | cfg_err {
+fn load(path: string) -> config | io_err | parse_err | cfg_err {
   const text = read_file(path)?
   const port = get_port(parse_json(text)?)?
   config { host: "localhost", port, retries: 3 }

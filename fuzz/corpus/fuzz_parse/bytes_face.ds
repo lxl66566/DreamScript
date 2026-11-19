@@ -1,0 +1,52 @@
+// The bytes face over the ambient through the `ds` binary: show renders
+// the payload as a byte list (decimal per byte, ", " between, empty
+// printing bytes[]), the derive families compose over a bytes part
+// (show/ord/hash dispatching through the ambient's impls), and the
+// UTF-8 bridges take the string's own bytes each way, the decode
+// answering the taxonomy's string | utf8_err union.
+
+#[derive(show)]
+struct wrap { b: bytes }
+
+#[derive(ord)]
+struct order { b: bytes }
+
+#[derive(hash)]
+struct digest { b: bytes }
+
+fn take (b: bytes) -> string | utf8_err {
+  const text = utf8_decode(b)
+  text
+}
+
+fn main() -> () {
+  const ab = bytes_of([b'a', b'b'])
+  println(ab.show())
+  println(bytes_of(list[byte]()).show())
+  const high = byte_at(utf8_encode("ÿ"), 0).unwrap_or(b'\0')
+  var xs = list[byte]()
+  list_push(xs, b'1')
+  list_push(xs, b'2')
+  list_push(xs, high)
+  println(bytes_of(xs).show())
+  const w = wrap { b: ab }
+  println(w.show())
+  println("$w")
+  const short = order { b: utf8_encode("ab") }
+  const long = order { b: utf8_encode("abc") }
+  const same = order { b: utf8_encode("ab") }
+  println(str(short.compare(long)))
+  println(str(long.compare(short)))
+  println(str(short.compare(same)))
+  const d1 = digest { b: utf8_encode("x") }
+  const d2 = digest { b: utf8_encode("x") }
+  const d3 = digest { b: utf8_encode("y") }
+  println(str(d1.hash() == d2.hash()))
+  println(str(d1.hash() == d3.hash()))
+  const encoded = utf8_encode("héllo")
+  println(str(len(encoded)))
+  match take(encoded) {
+    utf8_err => println("decode refused"),
+    text => println(text)
+  }
+}

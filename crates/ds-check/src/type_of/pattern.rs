@@ -166,11 +166,11 @@ impl Bodies<'_> {
                 // Substitute the constructor's parameters from the
                 // scrutinee application, like field access.
                 let mut subst = FxHashMap::default();
-                if let Some((ctor, args)) = members.first().and_then(|m| self.single_apply_of(*m)) {
-                    if ctor == atom {
-                        for (param, arg) in shape.params.iter().zip(args.iter()) {
-                            subst.insert(param.name.clone(), *arg);
-                        }
+                if let Some((ctor, args)) = members.first().and_then(|m| self.single_apply_of(*m))
+                    && ctor == atom
+                {
+                    for (param, arg) in shape.params.iter().zip(args.iter()) {
+                        subst.insert(param.name.clone(), *arg);
                     }
                 }
                 self.type_vars.push(subst);
@@ -238,25 +238,25 @@ impl Bodies<'_> {
                 }
                 let mut matched = Vec::new();
                 for member in &members {
-                    if let Some(elements) = self.tuple_elements(*member) {
-                        if elements.len() == pats.len() {
-                            matched.push(*member);
-                            for (sub, element) in pats.iter().zip(elements.iter()) {
-                                let element_ty = self
-                                    .decls
-                                    .universe
-                                    .atom_ty(*element)
-                                    .unwrap_or_else(|_| self.empty());
-                                self.pattern_walk(
-                                    sub,
-                                    element_ty,
-                                    None,
-                                    covered,
-                                    binders,
-                                    depth + 1,
-                                    arm,
-                                );
-                            }
+                    if let Some(elements) = self.tuple_elements(*member)
+                        && elements.len() == pats.len()
+                    {
+                        matched.push(*member);
+                        for (sub, element) in pats.iter().zip(elements.iter()) {
+                            let element_ty = self
+                                .decls
+                                .universe
+                                .atom_ty(*element)
+                                .unwrap_or_else(|_| self.empty());
+                            self.pattern_walk(
+                                sub,
+                                element_ty,
+                                None,
+                                covered,
+                                binders,
+                                depth + 1,
+                                arm,
+                            );
                         }
                     }
                 }
@@ -324,11 +324,9 @@ impl Bodies<'_> {
         // when the type namespace carries it [F9]: bare tags are
         // constructor values, so the type entry wins over any
         // same-named local and nothing binds.
-        if arm {
-            if let Some(atom) = self.unit_pattern_atom(&name.name) {
-                self.case_cover(name.span, atom, members, scrut, covered);
-                return;
-            }
+        if arm && let Some(atom) = self.unit_pattern_atom(&name.name) {
+            self.case_cover(name.span, atom, members, scrut, covered);
+            return;
         }
         let ty = match ann {
             Some(ann) => match self.solve_here(ann) {
@@ -432,11 +430,19 @@ impl Bodies<'_> {
             [only] => self.unit_pattern_atom(&only.name),
             [head, tail] => {
                 // A qualified case path tests the CASE's own minted atom
-                // [B3], never the enum's name.
-                let def = self.package.lookup_type(&head.name)?;
+                // [B3], never the enum's name. A linked enum and its
+                // cases answer through the name index the linked
+                // install filled.
+                let def = self
+                    .package
+                    .lookup_type(&head.name)
+                    .or_else(|| self.decls.foreign_type(&head.name))?;
                 let shape = self.decls.enums.get(&def)?;
                 let (case_name, ..) = shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
-                let case_def = self.package.lookup_type(case_name)?;
+                let case_def = self
+                    .package
+                    .lookup_type(case_name)
+                    .or_else(|| self.decls.foreign_type(case_name))?;
                 self.decls.atoms.get(&case_def).copied()
             },
             _ => None,
@@ -469,7 +475,10 @@ impl Bodies<'_> {
         if name == "none" && !self.package.declares("none") {
             return Some(TypeId::NONE);
         }
-        let def = self.package.lookup_type(name)?;
+        let def = self
+            .package
+            .lookup_type(name)
+            .or_else(|| self.decls.foreign_type(name))?;
         self.decls.atoms.get(&def).copied()
     }
 }

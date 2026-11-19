@@ -99,14 +99,44 @@ fn format_file(path: &Path, check_only: bool) -> Result<Action> {
         Err(_) => parse_script(&files, id).map_err(|diags| reject(&files, &diags, path))?,
     };
     let formatted = format_source(&files, id, &ast);
-    if formatted == source {
+    // The comparison and the write-back both speak the source's dominant
+    // line ending: the canonical form is about layout, not EOL style, and
+    // a CRLF workspace file is byte-stable under fmt instead of being
+    // rewritten to LF wholesale.
+    let written = with_source_newlines(&source, formatted);
+    if written == source {
         return Ok(Action::Unchanged);
     }
     if check_only {
         return Ok(Action::WouldReformat);
     }
-    std::fs::write(path, &formatted).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, &written).with_context(|| format!("writing {}", path.display()))?;
     Ok(Action::Formatted)
+}
+
+/// Re-spells `text` with the source's dominant line ending: the count of
+/// CRLF breaks vs bare-LF ones picks the winner (ties and an all-LF file
+/// stay LF, the formatter's native spelling). Verbatim string literals
+/// can carry either spelling, so the text folds to LF before re-emitting
+/// the winner — CRLF content round-trips byte for byte.
+fn with_source_newlines(source: &str, text: String) -> String {
+    let bytes = source.as_bytes();
+    let (mut crlf, mut lf) = (0usize, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                crlf += 1;
+                i += 2;
+            },
+            b'\n' => {
+                lf += 1;
+                i += 1;
+            },
+            _ => i += 1,
+        }
+    }
+    if crlf > lf { text.replace("\r\n", "\n").replace('\n', "\r\n") } else { text }
 }
 
 /// Renders every syntax diagnostic to stderr and summarizes the report as

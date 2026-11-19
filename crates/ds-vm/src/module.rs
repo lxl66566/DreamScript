@@ -8,7 +8,7 @@ use ds_abi::{EntryDescriptor, Inst, InstDecodeError, Uop};
 use crate::{
     native::NativeFunction,
     platform::Platform,
-    program::{Const, ConstKind, FunctionDef},
+    program::{Const, ConstFuncRef, ConstKind, FunctionDef},
 };
 
 /// Why a module version cannot be loaded.
@@ -102,8 +102,77 @@ pub struct Function {
     pub pool: Vec<Const>,
     /// The encoded uop body [BL-1].
     pub code: Vec<u32>,
+    /// The function's content identity — the body (code words and pool
+    /// constants) plus the frame layout, whose parameter words carry a
+    /// lambda's capture set — hashed once at table build. The name is
+    /// excluded on purpose: a synthesized lambda's name embeds its table
+    /// index, so hashing it would turn every table-order move into a
+    /// content change. Session-internal identity (two tables of one VM
+    /// compare); never serialized.
+    content: u64,
     /// The two-word entry descriptor; word 0 is this function's table index.
     pub entry: EntryDescriptor,
+}
+
+impl Function {
+    /// The function's content identity: body plus capture set, the value a
+    /// moved lambda's re-key judges (two functions hashing equal are
+    /// behaviorally identical, so the re-key only preserves identity).
+    #[must_use]
+    pub const fn content_hash(&self) -> u64 {
+        self.content
+    }
+
+    /// Whether the name embeds a table index: the synthesized spelling
+    /// `{enclosing}${index}` (a value-position lambda or a spawn child),
+    /// minted with `$` outside the identifier charset so a user-declared
+    /// name never carries it. Such a name moves with the table's order, so
+    /// identity questions about it fall to the content judge; every other
+    /// name (`{name}$deinit`, the `#`-mangled impl members, declared
+    /// names) is position-stable and owns its identity outright.
+    #[must_use]
+    pub fn embeds_table_index(&self) -> bool {
+        self.name
+            .rsplit_once('$')
+            .is_some_and(|(_, tail)| tail.parse::<u32>().is_ok())
+    }
+}
+
+/// One function's content hash: the frame layout (slots, parameter count,
+/// argument area — the parameter words are a lambda's capture set), the
+/// encoded body, and the pool constants, in order. The FuncRef entries
+/// hash by their resolved spelling, which is stable across a module's own
+/// swaps (module ids never move), so a reordered table and its retiring
+/// predecessor compare like for like.
+fn content_hash(def: &FunctionDef) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    def.layout.slots().hash(&mut hasher);
+    def.layout.params_len().hash(&mut hasher);
+    def.layout.arg_area_len().hash(&mut hasher);
+    for word in &def.code {
+        hasher.write_u32(*word);
+    }
+    for entry in &def.pool {
+        std::mem::discriminant(entry).hash(&mut hasher);
+        match entry {
+            Const::I64(v) => hasher.write_i64(*v),
+            Const::F64(v) => hasher.write_u64(v.to_bits()),
+            Const::Bool(v) => hasher.write_u8(u8::from(*v)),
+            Const::Str(s) => s.hash(&mut hasher),
+            Const::FuncRef(ConstFuncRef::Uop { module, func }) => {
+                hasher.write_u8(0);
+                hasher.write_u32(*module);
+                hasher.write_u32(*func);
+            },
+            Const::FuncRef(ConstFuncRef::Named { module, func }) => {
+                hasher.write_u8(1);
+                module.hash(&mut hasher);
+                hasher.write_u32(*func);
+            },
+        }
+    }
+    hasher.finish()
 }
 
 /// One immutable version of a module: a name, a function table, its name
@@ -148,6 +217,7 @@ impl ModuleVersion {
             validate_body(&def)?;
             functions.push(Function {
                 entry: EntryDescriptor::new_interpreted(position),
+                content: content_hash(&def),
                 name: def.name,
                 layout: def.layout,
                 pool: def.pool,
@@ -240,6 +310,45 @@ impl ModuleVersion {
         let &func_id = self.index.get(name)?;
         self.functions.get(func_id as usize)
     }
+
+    /// The position in `incoming` whose function is the surviving identity
+    /// of this table's function `at`: the name-plus-layout judge first (the
+    /// ordinary redirect, at whatever position the name landed), then — for
+    /// a name that embeds its table index (a synthesized lambda, renamed by
+    /// any reorder that moves it) — the content judge: body plus capture
+    /// set hashing equal against exactly one incoming candidate. Zero or
+    /// multiple content matches answer `None`: the re-key never guesses.
+    #[must_use]
+    pub(crate) fn surviving_index(&self, at: u32, incoming: &Self) -> Option<u32> {
+        let old = self.functions.get(usize::try_from(at).ok()?)?;
+        let by_identity = incoming
+            .functions
+            .iter()
+            .position(|f| f.name == old.name && f.layout == old.layout)
+            .and_then(|at| u32::try_from(at).ok());
+        by_identity.or_else(|| {
+            old.embeds_table_index()
+                .then(|| incoming.content_unique(old.content_hash()))
+                .flatten()
+        })
+    }
+
+    /// The one function whose content identity hashes to `content`, or
+    /// `None` when none or several do (the ambiguous match no re-key may
+    /// resolve).
+    #[must_use]
+    pub(crate) fn content_unique(&self, content: u64) -> Option<u32> {
+        let mut matches = self
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.content == content);
+        let (at, _) = matches.next()?;
+        matches
+            .next()
+            .is_none()
+            .then(|| u32::try_from(at).expect("function tables fit u32"))
+    }
 }
 
 /// Load-time body validation: canonical decode, FUNCF-vs-layout agreement,
@@ -272,26 +381,26 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
             // operand
             Inst::Rc(_) => continue,
         };
-        if let Uop::Funcf { frame_slots } = op {
-            if usize::from(frame_slots) != def.layout.slots().len() {
-                return Err(ModuleBuildError::FuncfMismatch {
-                    func: def.name.clone(),
-                    funcef: frame_slots,
-                    layout: def.layout.slots().len(),
-                });
-            }
+        if let Uop::Funcf { frame_slots } = op
+            && usize::from(frame_slots) != def.layout.slots().len()
+        {
+            return Err(ModuleBuildError::FuncfMismatch {
+                func: def.name.clone(),
+                funcef: frame_slots,
+                layout: def.layout.slots().len(),
+            });
         }
         // the RETSPAN span is a static frame-layout fact: it must fit
         // inside the callee's own slots
-        if let Uop::RetSpan { src, n } = op {
-            if usize::from(src) + usize::from(n) > def.layout.slots().len() {
-                return Err(ModuleBuildError::RetSpanLayout {
-                    func: def.name.clone(),
-                    src,
-                    span: n,
-                    slots: def.layout.slots().len(),
-                });
-            }
+        if let Uop::RetSpan { src, n } = op
+            && usize::from(src) + usize::from(n) > def.layout.slots().len()
+        {
+            return Err(ModuleBuildError::RetSpanLayout {
+                func: def.name.clone(),
+                src,
+                span: n,
+                slots: def.layout.slots().len(),
+            });
         }
         // which pool kinds each loading opcode accepts, and the primary
         // kind its trap names: KIMM loads i64 entries, KCONST the non-i64
@@ -630,10 +739,12 @@ impl ModuleRegistry {
     pub fn resolve(&self, module: &str, func: &str) -> Option<(VersionIdx, u32)> {
         {
             let entry = self.entry.borrow();
-            if let Some(entry) = entry.as_ref() {
-                if entry.stamp == self.generation && entry.module == module && entry.func == func {
-                    return Some((entry.version, entry.func_id));
-                }
+            if let Some(entry) = entry.as_ref()
+                && entry.stamp == self.generation
+                && entry.module == module
+                && entry.func == func
+            {
+                return Some((entry.version, entry.func_id));
             }
         }
         let slots = self.modules.get(module)?;
@@ -660,6 +771,24 @@ impl ModuleRegistry {
         self.version(version)
             .filter(|v| bounds(&v.functions))
             .map(|_| (version, func))
+    }
+
+    /// Resolves a function-table index against one named version row: the
+    /// teardown pass's drive routing — a dying frame's deinit hook is its
+    /// own code's declaration, so the hosted drive resolves the derived
+    /// FuncRef against the frame's row (never the module's current slot,
+    /// whose swap recompiles the hook body). The row is pinned by the
+    /// frame the pass walks (the sweep's own discipline), so the answer
+    /// names the same row back.
+    pub(crate) fn resolve_indexed_in(
+        &self,
+        row: VersionIdx,
+        func: u32,
+    ) -> Option<(VersionIdx, u32)> {
+        let bounds = |functions: &[_]| usize::try_from(func).is_ok_and(|i| i < functions.len());
+        self.version(row)
+            .filter(|v| bounds(&v.functions))
+            .map(|_| (row, func))
     }
 
     /// Whether a uop module under `module`'s current slot would resolve

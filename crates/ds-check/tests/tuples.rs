@@ -345,10 +345,10 @@ impl TupleFixture {
     /// invariant).
     fn tuple_bit(&self, combo: &[TypeId]) -> u64 {
         for id in &self.atoms {
-            if let AtomKind::Tuple(elements) = &self.universe.atom_decl(*id).unwrap().kind {
-                if elements.as_slice() == combo {
-                    return 1 << self.position(*id);
-                }
+            if let AtomKind::Tuple(elements) = &self.universe.atom_decl(*id).unwrap().kind
+                && elements.as_slice() == combo
+            {
+                return 1 << self.position(*id);
             }
         }
         panic!("combination {combo:?} was not pre-minted");

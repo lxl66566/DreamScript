@@ -5,13 +5,17 @@
 //! network), the orderly-close empty string, the bounded-timeout path
 //! against a socket that never answers, refused ports, https and
 //! bad-scheme rejection, the http_get response-size cap, handle
-//! invalidation after `net_close`, and the drop discipline (a connection
-//! left open closes when the VM drops).
+//! invalidation after `net_close` (the close itself total and
+//! idempotent — an unknown handle is a no-op, `close_raw`'s contract),
+//! and the drop discipline (a connection left open closes when the VM
+//! drops).
 //!
-//! Layout conventions follow the file-IO fixtures: every net native's
-//! result is the two-word tag+payload span on the caller's overlay slots
-//! 0 and 1 — the failure tag is `PLATFORM_NET_ERR`, success reuses
-//! `PLATFORM_IO_OK` — and the overlay slots declare `Raw`.
+//! Layout conventions follow the file-IO fixtures: every fallible net
+//! native's result is the two-word tag+payload span on the caller's
+//! overlay slots 0 and 1 — the failure tags are the two error classes
+//! (`PLATFORM_NET_REFUSED`, `PLATFORM_NET_TIMEOUT`), success reuses
+//! `PLATFORM_IO_OK` — and the overlay slots declare `Raw`. `net_close`
+//! answers the one-word inert unit.
 
 use std::{
     io::{Read, Write},
@@ -29,9 +33,10 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{PLATFORM_IO_OK, PLATFORM_NET_ERR},
+    native::{PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT},
     platform::{
-        OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform, STD_NAME,
+        Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform,
+        STD_NAME,
     },
 };
 
@@ -77,9 +82,25 @@ fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     reg
 }
 
+/// The std platform minus the tls capability: a tls-omitting host (the
+/// "selected or omitted per host" ruling), its `http_get` slot carrying
+/// the plain body that refuses https URLs.
+fn no_tls_registry() -> ModuleRegistry {
+    let mut reg = ModuleRegistry::new();
+    reg.install_platform(Platform::new("std", &[
+        Capability::Console,
+        Capability::Fsys,
+        Capability::Net,
+        Capability::Time,
+    ]));
+    reg.install(ModuleVersion::new("net", vec![fetch()]).expect("valid fixture module"));
+    reg
+}
+
 /// `(host: string, port: int, data: string) -> string`: the golden round
-/// trip — connect, send, recv, close — halting on the `net_err` tag word
-/// at any failure so the run result itself is the failure shape.
+/// trip — connect, send, recv, close — halting on the refused-class tag
+/// word at any failure so the run result itself is the failure shape
+/// (the close is total, so no failure branch follows it).
 ///
 /// Slots: [host, port, data, conn, got, t, overlay tag, overlay payload].
 fn echo() -> FunctionDef {
@@ -94,11 +115,11 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: PLATFORM_NET_ERR,
+            tag: PLATFORM_NET_REFUSED,
         },
         Uop::Jmpif {
             cond: 5,
-            target: 23,
+            target: 21,
         },
         Uop::Mov { dst: 3, src: 7 },
         Uop::Mov { dst: 6, src: 3 },
@@ -110,11 +131,11 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: PLATFORM_NET_ERR,
+            tag: PLATFORM_NET_REFUSED,
         },
         Uop::Jmpif {
             cond: 5,
-            target: 23,
+            target: 21,
         },
         Uop::Mov { dst: 6, src: 3 },
         Uop::Kimm { dst: 7, kidx: k(5) },
@@ -125,26 +146,17 @@ fn echo() -> FunctionDef {
         Uop::TagTest {
             dst: 5,
             src: 6,
-            tag: PLATFORM_NET_ERR,
+            tag: PLATFORM_NET_REFUSED,
         },
         Uop::Jmpif {
             cond: 5,
-            target: 23,
+            target: 21,
         },
         Uop::Mov { dst: 4, src: 7 },
         Uop::Mov { dst: 6, src: 3 },
         Uop::Call {
             callee: k(3),
             nargs: 1,
-        },
-        Uop::TagTest {
-            dst: 5,
-            src: 6,
-            tag: PLATFORM_NET_ERR,
-        },
-        Uop::Jmpif {
-            cond: 5,
-            target: 23,
         },
         Uop::Ret { src: 4 },
         Uop::Halt { slot: 6 },
@@ -183,7 +195,9 @@ fn connect_payload() -> FunctionDef {
 
 /// `(host: string, port: int, max_bytes: int) -> string`: connect, recv,
 /// close, returning the recv payload — the received text (empty on an
-/// orderly close) or, on any failure, the failing call's message.
+/// orderly close) or, on any failure, the failing call's message. The
+/// failure guards test both error classes, so the timeout fixture rides
+/// the same fail arm as the refused one.
 ///
 /// Slots: [host, port, max, conn, got, t, overlay tag, overlay payload].
 fn recv_payload() -> FunctionDef {
@@ -203,11 +217,20 @@ fn recv_payload() -> FunctionDef {
             Uop::TagTest {
                 dst: 5,
                 src: 6,
-                tag: PLATFORM_NET_ERR,
+                tag: PLATFORM_NET_REFUSED,
             },
             Uop::Jmpif {
                 cond: 5,
-                target: 18,
+                target: 20,
+            },
+            Uop::TagTest {
+                dst: 5,
+                src: 6,
+                tag: PLATFORM_NET_TIMEOUT,
+            },
+            Uop::Jmpif {
+                cond: 5,
+                target: 20,
             },
             Uop::Mov { dst: 3, src: 7 },
             Uop::Mov { dst: 6, src: 3 },
@@ -219,26 +242,26 @@ fn recv_payload() -> FunctionDef {
             Uop::TagTest {
                 dst: 5,
                 src: 6,
-                tag: PLATFORM_NET_ERR,
+                tag: PLATFORM_NET_REFUSED,
             },
             Uop::Jmpif {
                 cond: 5,
-                target: 18,
+                target: 20,
+            },
+            Uop::TagTest {
+                dst: 5,
+                src: 6,
+                tag: PLATFORM_NET_TIMEOUT,
+            },
+            Uop::Jmpif {
+                cond: 5,
+                target: 20,
             },
             Uop::Mov { dst: 4, src: 7 },
             Uop::Mov { dst: 6, src: 3 },
             Uop::Call {
                 callee: k(3),
                 nargs: 1,
-            },
-            Uop::TagTest {
-                dst: 5,
-                src: 6,
-                tag: PLATFORM_NET_ERR,
-            },
-            Uop::Jmpif {
-                cond: 5,
-                target: 18,
             },
             Uop::Ret { src: 4 },
             Uop::Ret { src: 7 }, // the failing call's message payload
@@ -247,7 +270,8 @@ fn recv_payload() -> FunctionDef {
 }
 
 /// `(host: string, port: int, data: string) -> string`: connect, close,
-/// then send — the send on a closed handle yields the `net_err` message.
+/// then send — the send on a closed handle yields the `net_err` message
+/// (the close itself is total, so no failure branch follows it).
 ///
 /// Slots: [host, port, data, conn, t, overlay tag, overlay payload].
 fn stale_send() -> FunctionDef {
@@ -267,26 +291,17 @@ fn stale_send() -> FunctionDef {
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: PLATFORM_NET_ERR,
+                tag: PLATFORM_NET_REFUSED,
             },
             Uop::Jmpif {
                 cond: 4,
-                target: 17,
+                target: 15,
             },
             Uop::Mov { dst: 3, src: 6 },
             Uop::Mov { dst: 5, src: 3 },
             Uop::Call {
                 callee: k(3),
                 nargs: 1,
-            },
-            Uop::TagTest {
-                dst: 4,
-                src: 5,
-                tag: PLATFORM_NET_ERR,
-            },
-            Uop::Jmpif {
-                cond: 4,
-                target: 17,
             },
             Uop::Mov { dst: 5, src: 3 },
             Uop::Mov { dst: 6, src: 2 },
@@ -297,11 +312,11 @@ fn stale_send() -> FunctionDef {
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: PLATFORM_NET_ERR,
+                tag: PLATFORM_NET_REFUSED,
             },
             Uop::Jmpif {
                 cond: 4,
-                target: 17,
+                target: 15,
             },
             Uop::Ret { src: 2 }, // unreachable: the stale send fails
             Uop::Ret { src: 6 }, // the net_err message payload
@@ -309,8 +324,9 @@ fn stale_send() -> FunctionDef {
     )
 }
 
-/// `(conn: int) -> tag`: the close result's tag word alone — `io_ok` on a
-/// closed handle, `net_err` on an unknown one.
+/// `(conn: int) -> word`: the close's inert unit word — on a live
+/// handle, on an already-closed one, and on a never-opened one alike
+/// (the idempotent close contract).
 fn close_tag() -> FunctionDef {
     def("close_tag", &[I64, Raw, Raw], 1, 2, &[
         Uop::Funcf { frame_slots: 3 },
@@ -495,22 +511,26 @@ fn a_silent_socket_times_out_within_the_bound() {
 
 #[test]
 fn https_and_other_schemes_are_rejected_without_sockets() {
-    let mut vm = Vm::new(net_registry());
+    // the https refusal is the tls-omitting host's plain body
+    let mut vm = Vm::new(no_tls_registry());
     let https = [string(&mut vm, "https://example.com/path")];
     let result = vm
         .run("net", "fetch", &https)
         .expect("rejection is a net_err, not a trap");
     assert_eq!(
         payload_string(&mut vm, &result),
-        "http_get https://example.com/path: https unsupported at this platform tier (no TLS)"
+        "http_get https://example.com/path: https refused: the platform does not provide the tls \
+         capability"
     );
+    // the bad scheme is every host's refusal (the routing body's Other arm)
+    let mut vm = Vm::new(net_registry());
     let ftp = [string(&mut vm, "ftp://example.com/path")];
     let result = vm
         .run("net", "fetch", &ftp)
         .expect("rejection is a net_err, not a trap");
     assert_eq!(
         payload_string(&mut vm, &result),
-        "http_get ftp://example.com/path: unsupported URL scheme (http:// only)"
+        "http_get ftp://example.com/path: unsupported URL scheme (http:// and https:// only)"
     );
 }
 
@@ -562,6 +582,9 @@ fn http_get_rejects_an_over_cap_response() {
     assert_eq!(payload_string(&mut vm, &result), expected);
 }
 
+/// A stale handle names no connection — the send on it answers the
+/// net_err message — while the close of it (and of a never-opened id)
+/// stays the idempotent no-op.
 #[test]
 fn a_stale_handle_is_unknown_after_close() {
     let (listener, port) = local_listener();
@@ -577,15 +600,16 @@ fn a_stale_handle_is_unknown_after_close() {
         .expect("the stale send is a net_err, not a trap");
     let message = payload_string(&mut vm, &result);
     assert_eq!(message, "net_send 0: unknown connection 0");
-    // and a close of the same handle fails the same way
+    // the close of the same handle is the idempotent no-op: the inert
+    // unit word, never a net_err
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(0)]),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NET_ERR)))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
     // a handle that was never opened too
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(999)]),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_NET_ERR)))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
 }
 
@@ -633,9 +657,9 @@ fn connection_handles_are_vm_state_not_run_state() {
         vm.run("net", "leak", &b),
         Ok(FrameAnswer::one(Value::I64(1)))
     );
-    // and closing the second handle succeeds
+    // and closing the second handle answers the inert unit word
     assert_eq!(
         vm.run("net", "close_tag", &[Value::I64(1)]),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_OK)))
+        Ok(FrameAnswer::one(Value::I64(0)))
     );
 }
