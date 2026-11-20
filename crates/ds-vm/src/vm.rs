@@ -281,6 +281,19 @@ pub enum Trap {
         /// The width the call staged.
         given: usize,
     },
+    /// A map store staged a fresh row under a reference word foreign to
+    /// the map's heap: the content probe reads a stored key's payload on
+    /// the map's own store and ids are per-store, so the row would be
+    /// storable yet unfindable by any content probe — the store refuses
+    /// before any count moves. A content-equal foreign probe still
+    /// overwrites an existing row (the stored key never changes), and
+    /// foreign value words stay storable.
+    ForeignMapKey {
+        /// The map object's table id.
+        obj: u32,
+        /// The refused key word.
+        key: RefId,
+    },
     /// An arena concatenation or its packed handle hit a field limit: a
     /// slice at or past the 24-bit length field, an offset at it, or a
     /// chunk index at the 16-bit field. Lowered code traps at the

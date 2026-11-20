@@ -1381,13 +1381,20 @@ impl Objects {
     /// stored. A content-equal key overwrites: the old value span's
     /// counts drop, and the row keeps its original key word (the map
     /// already owns that count; the caller keeps its own probe word), so
-    /// the row index keeps its entry too.
+    /// the row index keeps its entry too. A fresh row's key must be a
+    /// scalar or a word of the map's own heap: the content probe reads a
+    /// stored key's payload on this store and ids are per-store, so a
+    /// row under a foreign word would answer no content probe from any
+    /// heap — the store refuses the insert before any count moves, while
+    /// a content-equal foreign probe overwriting an existing row stays
+    /// legal (the foreign word never lands).
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no map object;
     /// [`Trap::ElementStride`] when the staged span's width disagrees
-    /// with the non-empty map's value stride.
+    /// with the non-empty map's value stride; [`Trap::ForeignMapKey`]
+    /// when a fresh row's key word is foreign to this store.
     pub fn set_map(
         &mut self,
         obj: u32,
@@ -1443,6 +1450,14 @@ impl Objects {
                 }
             }
             return Ok(());
+        }
+        // the fresh row's key must resolve on this store: a foreign word
+        // refuses here, before any count moves, so the map is untouched
+        // (a content-equal foreign probe found above overwrites instead)
+        if let Value::Ref(word) = key
+            && word.fiber() != self.owner
+        {
+            return Err(Trap::ForeignMapKey { obj, key: word });
         }
         // the acquires happen before the store: a bogus reference word
         // leaves the map untouched
@@ -2036,7 +2051,10 @@ impl<'a> Heaps<'a> {
     }
 
     /// Stores one key and its value span into map object `map`, routed,
-    /// with the queues drained.
+    /// with the queues drained. A fresh row refuses a key word foreign
+    /// to the map's heap at the store seam ([`Trap::ForeignMapKey`]);
+    /// a content-equal foreign probe overwriting an existing row stays
+    /// legal.
     pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: &[Value]) -> Result<(), Trap> {
         let mut probe_text = String::new();
         let res = self.resolve_key_staged(map.fiber(), key, &mut probe_text)?;
@@ -2591,6 +2609,128 @@ mod tests {
             current.queued() + pool[other.index()].objects.queued(),
             0,
             "the walk queues no cross-heap operation"
+        );
+    }
+
+    /// The store seam's key-localness gate: a fresh row under a word
+    /// foreign to the map's heap refuses before any count moves — the
+    /// stored key's payload is readable only on the map's own store, so
+    /// the row would answer no content probe from any heap. Both foreign
+    /// classes refuse (a string, the content class, and a list, the
+    /// identity class), the map stays empty, the foreign words keep
+    /// their birth counts, and no queue holds a pending operation.
+    #[test]
+    fn a_fresh_row_refuses_a_key_word_foreign_to_the_maps_heap() {
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let map = current.alloc_map();
+        let foreign_str = pool[other.index()].objects.alloc_str("key".to_owned());
+        let foreign_list = pool[other.index()].objects.alloc_list(vec![Value::I64(1)]);
+        let (str_word, list_word) = (
+            RefId::new(other, foreign_str),
+            RefId::new(other, foreign_list),
+        );
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        for key in [Value::Ref(str_word), Value::Ref(list_word)] {
+            assert_eq!(
+                heaps.set_map(RefId::new(FIBER_ROOT, map), key, &[Value::I64(1)]),
+                Err(Trap::ForeignMapKey {
+                    obj: map,
+                    key: match key {
+                        Value::Ref(word) => word,
+                        _ => unreachable!("the fixture stages reference words"),
+                    },
+                }),
+                "the fresh row refuses the foreign key word"
+            );
+        }
+        assert_eq!(
+            heaps.map_len(RefId::new(FIBER_ROOT, map)),
+            Ok(0),
+            "no row landed"
+        );
+        assert_eq!(
+            pool[other.index()].objects.rc_at(foreign_str),
+            Ok(1),
+            "the refused key kept its birth count"
+        );
+        assert_eq!(
+            current.queued() + pool[other.index()].objects.queued(),
+            0,
+            "the refusals queue no cross-heap operation"
+        );
+    }
+
+    /// What the gate leaves legal: a content-equal foreign probe
+    /// overwrites an existing row (the row keeps its local key word, so
+    /// every later probe finds it), a foreign value word stores into a
+    /// fresh row (values carry no probe, counts route cross-heap), a
+    /// local identity key's own word finds its row, and the read funnel
+    /// keeps serving foreign probes by content.
+    #[test]
+    fn foreign_probes_overwrite_and_foreign_values_stay_storable() {
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let map = current.alloc_map();
+        let local_key = current.alloc_str("key 3".to_owned());
+        let local_word = RefId::new(FIBER_ROOT, local_key);
+        current
+            .set_map(map, Value::Ref(local_word), &ResolvedKey::Word, &[
+                Value::I64(3),
+            ])
+            .expect("the local row stores");
+        let foreign_eq = pool[other.index()].objects.alloc_str("key 3".to_owned());
+        let foreign_val = pool[other.index()].objects.alloc_list(vec![Value::I64(7)]);
+        let second_key = current.alloc_str("row two".to_owned());
+        let identity_key = current.alloc_list(vec![Value::I64(5)]);
+        let identity_word = RefId::new(FIBER_ROOT, identity_key);
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        let map_word = RefId::new(FIBER_ROOT, map);
+        // the foreign equal-content probe overwrites: the row keeps its
+        // local key word
+        heaps
+            .set_map(map_word, Value::Ref(RefId::new(other, foreign_eq)), &[
+                Value::I64(9),
+            ])
+            .expect("the content-equal foreign probe overwrites");
+        assert_eq!(
+            heaps.map_at(map_word, Value::Ref(local_word)),
+            Ok(Some(vec![Value::I64(9)]))
+        );
+        assert_eq!(
+            heaps.map_keys(map_word),
+            Ok(vec![Value::Ref(local_word)]),
+            "the row kept its original local key"
+        );
+        // a foreign value word stores into a fresh row under a local key
+        heaps
+            .set_map(map_word, Value::Ref(RefId::new(FIBER_ROOT, second_key)), &[
+                Value::Ref(RefId::new(other, foreign_val)),
+            ])
+            .expect("a foreign value word stores");
+        assert_eq!(heaps.map_len(map_word), Ok(2));
+        // the read funnel keeps serving the foreign probe by content
+        assert_eq!(
+            heaps.map_at(map_word, Value::Ref(RefId::new(other, foreign_eq))),
+            Ok(Some(vec![Value::I64(9)]))
+        );
+        // a local identity key's own word finds its row
+        heaps
+            .set_map(map_word, Value::Ref(identity_word), &[Value::Bool(true)])
+            .expect("the local identity key stores");
+        assert_eq!(
+            heaps.map_at(map_word, Value::Ref(identity_word)),
+            Ok(Some(vec![Value::Bool(true)]))
+        );
+        assert_eq!(heaps.map_len(map_word), Ok(3));
+        assert_eq!(
+            pool[other.index()].objects.rc_at(foreign_val),
+            Ok(2),
+            "the stored foreign value gained the map's count"
         );
     }
 
