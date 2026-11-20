@@ -135,9 +135,33 @@ fn rows_self_describe_while_drifted_files_serve_nothing() {
         .map(|row| (row.manifest.name.clone(), row.identity))
         .collect();
     assert_eq!(rows, [("lib".to_owned(), lib_identity)]);
-    // the intact row still loads by its identity
+    // the intact row still loads by its identity, and it carries the
+    // member identity the provider seam serves for it
     let row: &InstalledRow = &store.rows()[0];
-    assert_eq!(store.load(row.identity).unwrap(), Some(lib));
+    assert_eq!(store.load(row.identity).unwrap(), Some(lib.clone()));
+    assert_eq!(row.member_identity, lib.member_identity().unwrap());
+}
+
+#[test]
+fn a_bundle_whose_member_fold_refuses_serves_no_row() {
+    let root = tempfile::tempdir().expect("temp root");
+    let store = Store::open(root.path());
+    let manifest = Manifest::parse("name = \"app\"\nversion = \"1.0.0\"\n", FileId::new(0))
+        .expect("fixture manifest parses");
+    // the bundle frames and installs over raw bytes, but a member the
+    // compile cannot read never folds an identity, so its row cannot
+    // serve the seam's answer
+    let unservable = Package::new(&manifest, [("app.ds".to_owned(), vec![0xff, 0xfe])])
+        .expect("the bundle builds over raw bytes");
+    store.install(&unservable).expect("the install lands");
+    let servable = package_of("lib", "1.0.0", "fn f() {}");
+    store.install(&servable).expect("the servable installs");
+    let rows: Vec<String> = store
+        .rows()
+        .iter()
+        .map(|row| row.manifest.name.clone())
+        .collect();
+    assert_eq!(rows, ["lib".to_owned()]);
 }
 
 /// One fixture artifact: raw library bytes and the content identity the

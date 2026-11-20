@@ -102,6 +102,10 @@ pub struct InstalledRow {
     pub identity: Hash128,
     /// The manifest read from the bundle's reserved member.
     pub manifest: Manifest,
+    /// The member identity the bundle's source members fold — the value
+    /// the provider seam serves for the row, so a demand's caller keys
+    /// a cache without decoding the bundle again.
+    pub member_identity: Hash128,
 }
 
 impl Store {
@@ -310,11 +314,12 @@ impl Store {
 
     /// Every installed row the store self-describes: each `*.pkg` file
     /// read, its identity recomputed from its own bytes, the bundle
-    /// decoded, and the manifest read from the reserved member. A file
-    /// that fails any step — unreadable, hashing to another identity,
-    /// refusing the decode or the manifest parse — serves no row and is
-    /// skipped; the next install of its true content repairs it. An
-    /// absent directory answers empty.
+    /// decoded, the manifest read from the reserved member, and the
+    /// member identity folded over the source members. A file that
+    /// fails any step — unreadable, hashing to another identity,
+    /// refusing the decode, the manifest parse, or the member fold —
+    /// serves no row and is skipped; the next install of its true
+    /// content repairs it. An absent directory answers empty.
     #[must_use]
     pub fn rows(&self) -> Vec<InstalledRow> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
@@ -347,10 +352,14 @@ impl Store {
             let Ok(manifest) = package.manifest(FileId::new(0)) else {
                 continue;
             };
+            let Ok(member_identity) = package.member_identity() else {
+                continue;
+            };
             rows.push(InstalledRow {
                 package,
                 identity,
                 manifest,
+                member_identity,
             });
         }
         rows

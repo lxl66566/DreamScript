@@ -33,7 +33,9 @@ pub mod store;
 pub mod version;
 
 pub use manifest::{ArtifactBound, DepBound, Manifest, valid_name, valid_target};
-pub use package::{BundleError, MANIFEST_MEMBER, Package, bundle_content_hash, valid_member_path};
+pub use package::{
+    BundleError, MANIFEST_MEMBER, Package, bundle_content_hash, member_identity, valid_member_path,
+};
 pub use provider::{Remote, StoreProvider};
 pub use registry::{ArtifactFetch, INDEX_SEGMENT, Registry, RegistryClient};
 pub use remote::GitRegistry;

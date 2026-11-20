@@ -190,6 +190,27 @@ impl Package {
     pub fn content_hash(&self) -> Hash128 {
         bundle_content_hash(&self.to_bytes())
     }
+
+    /// The member identity over this bundle's source members (the
+    /// reserved manifest member aside): the composed fold
+    /// [`member_identity`] records, answered over the members in hand —
+    /// the identity a cache key or a dep-list writer folds for the
+    /// package, so the provider seam computes it once where the bundle
+    /// is decoded instead of every consumer decoding again.
+    ///
+    /// # Errors
+    ///
+    /// [`BundleError::NoSources`] when the bundle carries no source
+    /// member, and [`BundleError::MemberNotUtf8`] for a member whose
+    /// bytes are not UTF-8 text.
+    pub fn member_identity(&self) -> Result<Hash128, BundleError> {
+        member_identity(
+            self.members
+                .iter()
+                .filter(|(path, _)| path.as_str() != MANIFEST_MEMBER)
+                .map(|(path, bytes)| (path.as_str(), bytes.as_slice())),
+        )
+    }
 }
 
 /// The content identity of bundle bytes: the domain tag folded before
@@ -204,6 +225,48 @@ pub fn bundle_content_hash(bytes: &[u8]) -> Hash128 {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
     Hash128::new(bytes)
+}
+
+/// The composed member identity over one member set: a single member's
+/// bytes hashed alone, several members folded as one length-prefixed
+/// path-and-content record each in ascending path order — byte-stable
+/// whatever order the members arrived in, so a member rename or text
+/// edit re-keys it. A bundle's own fold ([`Package::member_identity`])
+/// and a package root's walked files share this one definition, so a
+/// dep's identity and a root's stay the same fold by construction.
+///
+/// # Errors
+///
+/// [`BundleError::NoSources`] when the set is empty, and
+/// [`BundleError::MemberNotUtf8`] for a member whose bytes are not
+/// UTF-8 text (a member the compile cannot read never keys a cache).
+pub fn member_identity<'m>(
+    members: impl IntoIterator<Item = (&'m str, &'m [u8])>,
+) -> Result<Hash128, BundleError> {
+    let mut ordered: Vec<(&str, &[u8])> = Vec::new();
+    for (path, bytes) in members {
+        if std::str::from_utf8(bytes).is_err() {
+            return Err(BundleError::MemberNotUtf8 {
+                path: path.to_owned(),
+            });
+        }
+        ordered.push((path, bytes));
+    }
+    if ordered.is_empty() {
+        return Err(BundleError::NoSources);
+    }
+    let [one] = ordered.as_slice() else {
+        ordered.sort_by(|left, right| left.0.cmp(right.0));
+        let mut buffer = Vec::new();
+        for (path, bytes) in ordered {
+            buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(path.as_bytes());
+            buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(bytes);
+        }
+        return Ok(Hash128::compute(&buffer));
+    };
+    Ok(Hash128::compute(one.1))
 }
 
 /// The member path grammar: relative, `/`-separated, printable ASCII, no
@@ -285,6 +348,12 @@ pub enum BundleError {
     /// A package with no source member.
     #[error("a package needs at least one source member")]
     NoSources,
+    /// A source member whose bytes are not UTF-8 text.
+    #[error("member `{path}` is not UTF-8 text")]
+    MemberNotUtf8 {
+        /// The offending member's path.
+        path: String,
+    },
 }
 
 impl BundleError {
@@ -317,6 +386,64 @@ mod tests {
             source.as_bytes().to_vec(),
         )])
         .expect("fixture package builds")
+    }
+
+    #[test]
+    fn the_member_identity_folds_the_sources_alone() {
+        // a single source member's bytes hash alone, the manifest member
+        // aside
+        let one = package("app", "fn main() {}");
+        assert_eq!(
+            one.member_identity().unwrap(),
+            Hash128::compute(b"fn main() {}")
+        );
+        // a manifest-only edit (a version bump over the same sources)
+        // keeps the member identity while the content identity moves
+        let bumped = Manifest::parse("name = \"app\"\nversion = \"2.0.0\"\n", FileId::new(0))
+            .expect("fixture manifest parses");
+        let bumped = Package::new(&bumped, [("app.ds".to_owned(), b"fn main() {}".to_vec())])
+            .expect("fixture package builds");
+        assert_eq!(
+            one.member_identity().unwrap(),
+            bumped.member_identity().unwrap()
+        );
+        assert_ne!(one.content_hash(), bumped.content_hash());
+        // several members compose the ascending-path fold whatever
+        // order they arrived in
+        let sources = vec![
+            ("b.ds".to_owned(), b"two".to_vec()),
+            ("a.ds".to_owned(), b"one".to_vec()),
+        ];
+        let composed = Package::new(&manifest("app"), sources)
+            .unwrap()
+            .member_identity()
+            .unwrap();
+        let mut buffer = Vec::new();
+        for (path, bytes) in [("a.ds", &b"one"[..]), ("b.ds", &b"two"[..])] {
+            buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(path.as_bytes());
+            buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(bytes);
+        }
+        assert_eq!(composed, Hash128::compute(&buffer));
+    }
+
+    #[test]
+    fn a_member_set_that_cannot_serve_refuses_the_fold() {
+        // no source member at all
+        assert_eq!(
+            Package::default().member_identity(),
+            Err(BundleError::NoSources)
+        );
+        // a member the compile cannot read as text never keys a cache
+        let bad = Package::new(&manifest("app"), [("app.ds".to_owned(), vec![0xff, 0xfe])])
+            .expect("the bundle builds over raw bytes");
+        assert_eq!(
+            bad.member_identity(),
+            Err(BundleError::MemberNotUtf8 {
+                path: "app.ds".to_owned()
+            })
+        );
     }
 
     #[test]

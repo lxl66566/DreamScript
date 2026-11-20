@@ -1,10 +1,13 @@
 //! The store-backed provider seam: resolution's fetch interface
 //! answered from the content-addressed cache, misses filled by a
-//! caller-supplied remote fetch hook. The net natives stay out of
-//! scope here — the platform's tls capability serves https, but the
-//! remote side stays abstract: the registry client serves the hook —
-//! a local index root or a git remote's snapshot — the verified
-//! bundles installing through the store either way.
+//! caller-supplied remote fetch hook. Every answer carries the
+//! bundle's member identity beside its manifest, folded where the
+//! content was decoded, so a consumer keying a cache never loads and
+//! decodes the bundle again. The net natives stay out of scope here —
+//! the platform's tls capability serves https, but the remote side
+//! stays abstract: the registry client serves the hook — a local index
+//! root or a git remote's snapshot — the verified bundles installing
+//! through the store either way.
 
 use std::collections::BTreeMap;
 
@@ -49,12 +52,16 @@ pub enum Remote {
 /// so a cache-only provider needs no hook closure.
 type NoRemote = fn(&str, &Version) -> Remote;
 
+/// One indexed row: the manifest beside the member identity folded over
+/// the row's decoded bundle, the pair a demand's answer carries.
+type IndexedRow = (Manifest, Hash128);
+
 /// The demand index: the store's installed rows keyed by the manifest's
-/// self-described `(name, version)`, each identity carrying its manifest.
+/// self-described `(name, version)`, each identity carrying its row.
 /// A `(name, version)` self-described at two identities is registry
 /// drift; the lowest identity serves deterministically and resolution's
 /// pin validation refuses a wrong pick.
-type Index = BTreeMap<(String, Version), BTreeMap<Hash128, Manifest>>;
+type Index = BTreeMap<(String, Version), BTreeMap<Hash128, IndexedRow>>;
 
 /// The provider over the store: every demand answers from the installed
 /// rows first — a valid bundle is never fetched again, with or without a
@@ -105,13 +112,14 @@ where
         self.ensure_index();
         let index = self.index.as_ref().expect("the index is built");
         if let Some(candidates) = index.get(&(name.to_owned(), *version)) {
-            let (identity, manifest) = candidates
+            let (identity, (manifest, member_identity)) = candidates
                 .iter()
                 .next()
                 .expect("a key holds at least one identity");
             return Fetched::Found(ProvidedPackage {
                 manifest: manifest.clone(),
                 content_hash: *identity,
+                member_identity: *member_identity,
             });
         }
         let Some(hook) = self.hook.as_mut() else {
@@ -136,7 +144,7 @@ where
             index
                 .entry((row.manifest.name.clone(), row.manifest.version))
                 .or_default()
-                .insert(row.identity, row.manifest);
+                .insert(row.identity, (row.manifest, row.member_identity));
         }
         self.index = Some(index);
     }
@@ -159,7 +167,9 @@ where
 
     /// A hook-fetched bundle: the manifest must self-describe through
     /// the reserved member (a bundle that does not parse serves
-    /// nothing), the content installs under its own identity — an
+    /// nothing), the source members must fold an identity (a bundle
+    /// whose member set cannot serve a compile refuses, never keys a
+    /// cache), the content installs under its own identity — an
     /// install failure degrades to serving without caching, never a
     /// wrong answer — and the row joins the index under the manifest's
     /// own name and version, so the content the bundle is serves later
@@ -168,17 +178,26 @@ where
         let Ok(manifest) = package.manifest(FileId::new(0)) else {
             return self.unserved(name);
         };
+        let member_identity = match package.member_identity() {
+            Ok(member_identity) => member_identity,
+            Err(error) => {
+                return Fetched::Refused(format!(
+                    "the fetched bundle for `{name}` does not serve a member set: {error}"
+                ));
+            },
+        };
         let identity = package.content_hash();
         if self.store.install(package).is_ok() {
             let index = self.index.get_or_insert_with(Index::new);
             index
                 .entry((manifest.name.clone(), manifest.version))
                 .or_default()
-                .insert(identity, manifest.clone());
+                .insert(identity, (manifest.clone(), member_identity));
         }
         Fetched::Found(ProvidedPackage {
             manifest,
             content_hash: identity,
+            member_identity,
         })
     }
 }

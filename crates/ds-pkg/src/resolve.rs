@@ -19,13 +19,17 @@ use crate::{
 
 /// One row of provider metadata: the manifest the provider serves plus
 /// the content hash of the package it names (a registry index row's
-/// pin).
+/// pin) and the member identity folded over the bundle's source
+/// members where the provider decoded them — the value a consumer keys
+/// a cache with, so asking for an identity never decodes a bundle.
 #[derive(Clone, Debug)]
 pub struct ProvidedPackage {
     /// The served manifest; its name and version must match the demand.
     pub manifest: Manifest,
     /// The package's blake3-128 content identity at that version.
     pub content_hash: Hash128,
+    /// The composed member identity over the package's source members.
+    pub member_identity: Hash128,
 }
 
 /// The provider seam's answer for one `(name, version)` demand. The
@@ -190,13 +194,18 @@ impl core::fmt::Display for ResolveError {
 }
 
 /// One resolved dependency: the winning version, its validated content
-/// identity, and its manifest.
+/// identity, its member identity (the provider's fold over the decoded
+/// bundle's source members), and its manifest.
 #[derive(Clone, Debug)]
 pub struct ResolvedPackage {
     /// The resolved version (the maximum declared minimum).
     pub version: Version,
     /// The content pin that validated this package.
     pub content_hash: Hash128,
+    /// The composed member identity over the package's source members,
+    /// carried from the provider seam: the fold a cache key or a
+    /// dep-list writer records, available without loading the bundle.
+    pub member_identity: Hash128,
     /// The manifest at the resolved version.
     pub manifest: Manifest,
 }
@@ -375,6 +384,7 @@ pub fn resolve(
                 walk.resolved.insert(name, ResolvedPackage {
                     version: demanded,
                     content_hash: pinned,
+                    member_identity: provided.member_identity,
                     manifest: provided.manifest,
                 });
             },

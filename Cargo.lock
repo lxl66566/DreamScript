@@ -676,6 +676,7 @@ name = "ds-pkg"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "criterion",
  "ds-diag",
  "ds-mod",
  "ds-vm",

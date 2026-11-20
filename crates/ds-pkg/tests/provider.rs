@@ -162,6 +162,69 @@ fn a_valid_bundle_is_fetched_once_and_never_again() {
 }
 
 #[test]
+fn the_seam_carries_each_dep_s_member_identity() {
+    let fixture = fixture();
+    // the fixture's lib folds one member, so the seam's identity is the
+    // raw member hash — the same value a cache probe keys with, served
+    // without loading the bundle again
+    let expected = Hash128::compute(b"fn inc(x: int) { x + 37 }");
+    let (resolved, _remote) = resolve_with(&fixture, std::slice::from_ref(&fixture.lib));
+    assert_eq!(resolved.deps()["lib"].member_identity, expected);
+    // a second, cache-only provider over the installed rows serves the
+    // same identity (the fold landed with the row)
+    let mut provider = StoreProvider::cached(&fixture.store);
+    let again = resolve(&fixture.root, |name, version| provider.fetch(name, version))
+        .expect("the store alone resolves");
+    assert_eq!(again.deps()["lib"].member_identity, expected);
+    // a multi-member dep composes the ascending-path fold through the
+    // seam, fetched and installed alike
+    let multi = Package::new(&manifest_of("multi", "1.0.0", &[]), vec![
+        ("b.ds".to_owned(), b"two".to_vec()),
+        ("a.ds".to_owned(), b"one".to_vec()),
+    ])
+    .expect("fixture bundle builds");
+    let root = manifest_of("app", "1.0.0", &[("multi", "1.0.0", multi.content_hash())]);
+    let mut remote = RemoteRegistry::new(remote_dir(&fixture.store), std::slice::from_ref(&multi));
+    let mut provider =
+        StoreProvider::with_remote(&fixture.store, |name, version| remote.fetch(name, version));
+    let resolved = resolve(&root, |name, version| provider.fetch(name, version))
+        .expect("the multi-member fixture resolves");
+    assert_eq!(
+        resolved.deps()["multi"].member_identity,
+        multi.member_identity().unwrap()
+    );
+}
+
+#[test]
+fn a_fetched_bundle_without_a_servable_member_set_refuses() {
+    let fixture = fixture();
+    // a hook serving a bundle whose member is not UTF-8 text: the
+    // member fold refuses and the seam carries the hard refusal
+    let unservable = Package::new(&manifest_of("lib", "1.0.0", &[]), [(
+        "lib.ds".to_owned(),
+        vec![0xff, 0xfe],
+    )])
+    .expect("the bundle builds over raw bytes");
+    let root = manifest_of("app", "1.0.0", &[(
+        "lib",
+        "1.0.0",
+        unservable.content_hash(),
+    )]);
+    let refused = unservable.clone();
+    let mut provider =
+        StoreProvider::with_remote(&fixture.store, move |_, _| Remote::Found(refused.clone()));
+    let error = resolve(&root, |name, version| provider.fetch(name, version))
+        .expect_err("the unservable member set refuses");
+    assert_eq!(
+        error.to_string(),
+        "`lib` at 1.0.0: the fetched bundle for `lib` does not serve a member set: member \
+         `lib.ds` is not UTF-8 text"
+    );
+    // the refused bundle never installed
+    assert_eq!(fixture.store.load(unservable.content_hash()).unwrap(), None);
+}
+
+#[test]
 fn a_corrupt_cached_bundle_refetches_and_repairs() {
     let fixture = fixture();
     let (_, remote) = resolve_with(&fixture, std::slice::from_ref(&fixture.lib));

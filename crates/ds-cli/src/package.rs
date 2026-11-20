@@ -13,8 +13,10 @@
 //! writer so the artifacts pin the content they link. The light key
 //! entry [`resolve_identities`] serves the cache probes — `ds info`'s
 //! prefix tier, the LSP's linked surfaces — the resolved graph's key
-//! inputs alone, stopping ahead of the artifact installs and the graph
-//! assembly the run paths pay.
+//! inputs alone, the deps' member identities carried from the provider
+//! seam (folded where the provider decoded each bundle, so the probe
+//! loads and decodes no dep bundle), stopping ahead of the artifact
+//! installs and the graph assembly the run paths pay.
 
 use std::{
     cell::RefCell,
@@ -49,26 +51,21 @@ pub(crate) struct Member {
 }
 
 /// The member identity the dep-list writer records and the walk
-/// validates (G3.5): a single member's source hash, or the composed fold
-/// over every member in ascending path order — one length-prefixed path
-/// and text pair per member, so the composition is byte-stable and a
-/// member rename or text edit changes it. The package-root caches fold
-/// the same identity over the root's own members, so a sibling edit
+/// validates (G3.5), delegated to the ds-pkg fold so a root's walked
+/// members and a dep's resolved bundle share one identity definition:
+/// a single member's source hash, or the composed fold over every
+/// member in ascending path order — one length-prefixed path and text
+/// pair per member, so the composition is byte-stable and a member
+/// rename or text edit changes it. The package-root caches fold the
+/// same identity over the root's own members, so a sibling edit
 /// re-keys them exactly as a dep's moved content re-keys the dep folds.
 pub(crate) fn member_identity(members: &[Member]) -> Hash128 {
-    let [one] = members else {
-        let mut ordered: Vec<&Member> = members.iter().collect();
-        ordered.sort_by(|left, right| left.path.cmp(&right.path));
-        let mut buffer = Vec::new();
-        for member in ordered {
-            buffer.extend_from_slice(&(member.path.len() as u64).to_le_bytes());
-            buffer.extend_from_slice(member.path.as_bytes());
-            buffer.extend_from_slice(&(member.text.len() as u64).to_le_bytes());
-            buffer.extend_from_slice(member.text.as_bytes());
-        }
-        return Hash128::compute(&buffer);
-    };
-    Hash128::compute(one.text.as_bytes())
+    ds_pkg::member_identity(
+        members
+            .iter()
+            .map(|member| (member.path.as_str(), member.text.as_bytes())),
+    )
+    .expect("a walked member set carries at least one UTF-8 member")
 }
 
 /// One linked package's compiled module and member surfaces (G4): the
@@ -110,11 +107,11 @@ pub(crate) struct Graph {
 }
 
 /// The resolved graph's cache-key inputs: each resolved dep's link name
-/// over the member identity the load walk records, and each declared
-/// native artifact's name over its content pin — the maps the script
-/// and prefix cache keys fold. [`resolve_identities`] answers these
-/// alone, so a cache probe pays no artifact install and no graph
-/// assembly.
+/// over the member identity the resolution seam carries, and each
+/// declared native artifact's name over its content pin — the maps the
+/// script and prefix cache keys fold. [`resolve_identities`] answers
+/// these alone, so a cache probe pays no dep bundle load, no artifact
+/// install, and no graph assembly.
 #[derive(Clone)]
 pub(crate) struct GraphKeys {
     /// Each resolved dep's identity.
@@ -200,19 +197,19 @@ type Members = BTreeMap<String, Rc<[Member]>>;
 /// The per-dep identities the dep-list writer records, link-name keyed.
 type Identities = BTreeMap<String, Hash128>;
 
-/// Each resolved dep's member set and identity, the shared fold both
-/// graph entries run: one store bundle load and validation per dep,
-/// the members the run's graph retains beside the member identity the
-/// cache keys and the dep-list writer record — so the light key entry
-/// answers the same values the heavy graph's own identities hold.
+/// Each resolved dep's member set, the run path's own fold: one store
+/// bundle load and validation per dep, the members the run's graph
+/// retains — the identities both graph entries record ride the
+/// resolution seam instead (the provider folded them where it decoded
+/// the bundle), so the light key entry never loads a bundle and the
+/// heavy entry's own identities are the seam's by construction.
 ///
 /// # Errors
 ///
 /// A dep whose installed bundle will not validate, and one framing no
 /// source member.
-fn dep_members(store: &Store, resolved: &ds_pkg::Resolved) -> Result<(Members, Identities)> {
+fn dep_members(store: &Store, resolved: &ds_pkg::Resolved) -> Result<Members> {
     let mut members = BTreeMap::new();
-    let mut identities = BTreeMap::new();
     for (name, package) in resolved.deps() {
         let bundle = store
             .load(package.content_hash)
@@ -224,34 +221,45 @@ fn dep_members(store: &Store, resolved: &ds_pkg::Resolved) -> Result<(Members, I
                 )
             })?;
         let package_members = members_of(name, &bundle)?;
-        identities.insert(name.clone(), member_identity(&package_members));
         members.insert(name.clone(), package_members.into());
     }
-    Ok((members, identities))
+    Ok(members)
+}
+
+/// The resolved graph's per-dep identities, link-name keyed: the member
+/// folds the resolution seam carried out of the provider, one value for
+/// the light key entry and the run's graph alike.
+fn identities_of(resolved: &ds_pkg::Resolved) -> Identities {
+    resolved
+        .deps()
+        .iter()
+        .map(|(name, package)| (name.clone(), package.member_identity))
+        .collect()
 }
 
 /// The resolved graph's cache-key inputs, the light entry: the same
-/// manifest read, resolution, and per-dep identity fold `open` runs,
-/// stopping ahead of the native-artifact installs (each `[artifacts]`
-/// entry's `ensure_artifact`, a cold artifact store behind a git
-/// registry paying a snapshot clone) and the graph assembly the run
-/// paths add — a cache probe (`ds info`'s prefix tier, the LSP's linked
-/// surfaces) reads its key inputs without touching the artifacts.
-/// `None` names a manifest-free entry.
+/// manifest read and resolution `open` runs, the deps' identities read
+/// off the seam (the provider folded them where it decoded each
+/// bundle, so no dep bundle loads here), stopping ahead of the
+/// native-artifact installs (each `[artifacts]` entry's
+/// `ensure_artifact`, a cold artifact store behind a git registry
+/// paying a snapshot clone) and the graph assembly the run paths add —
+/// a cache probe (`ds info`'s prefix tier, the LSP's linked surfaces)
+/// reads its key inputs without touching the artifacts or a dep's
+/// bundle. `None` names a manifest-free entry.
 ///
 /// # Errors
 ///
 /// Every refusal `open` reports ahead of its artifact installs: an
-/// unreadable or drifting manifest, an unresolvable cache root, a
-/// resolution refusal, and a dep whose installed bundle will not
-/// validate.
+/// unreadable or drifting manifest, an unresolvable cache root, and a
+/// resolution refusal (a dep whose bundle folds no servable member set
+/// included, the provider's own refusal).
 pub(crate) fn resolve_identities(entry: &Path) -> Result<Option<GraphKeys>> {
     let Some(front) = resolve_front(entry)? else {
         return Ok(None);
     };
-    let (_, identities) = dep_members(&front.store, &front.resolved)?;
     Ok(Some(GraphKeys {
-        identities,
+        identities: identities_of(&front.resolved),
         artifact_pins: artifact_pins_of(front.resolved.artifacts()),
     }))
 }
@@ -275,7 +283,8 @@ pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
     for (name, artifact) in front.resolved.artifacts() {
         ensure_artifact(&front.store, front.registry.as_ref(), name, artifact)?;
     }
-    let (members, identities) = dep_members(&front.store, &front.resolved)?;
+    let members = dep_members(&front.store, &front.resolved)?;
+    let identities = identities_of(&front.resolved);
     let artifacts = front.resolved.artifacts().clone();
     Ok(Some(Graph {
         members,
@@ -327,10 +336,10 @@ fn default_std_members() -> Vec<Member> {
 /// `[deps]` row folds and an artifact the merged reading wrote never
 /// serves.
 pub(crate) fn implicit_std_identities() -> BTreeMap<String, Hash128> {
-    BTreeMap::from([(
-        ds_stdlib::STD_PACKAGE_NAME.to_owned(),
-        member_identity(&default_std_members()),
-    )])
+    let identity = ds_stdlib::std_package()
+        .member_identity()
+        .expect("the default @std bundle folds its member identity");
+    BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), identity)])
 }
 
 /// The bare script's implicit graph (the bare-specifier switch): a
@@ -577,10 +586,16 @@ fn default_std(store: &Store, ver: &Version) -> Fetched {
             best: Some(manifest.version),
         };
     }
+    let Ok(member_identity) = package.member_identity() else {
+        return Fetched::Refused(
+            "the default @std bundle does not fold its member identity".to_owned(),
+        );
+    };
     match store.install(&package) {
         Ok(content_hash) => Fetched::Found(ProvidedPackage {
             manifest,
             content_hash,
+            member_identity,
         }),
         Err(error) => Fetched::Refused(format!(
             "the default @std package does not install into the store: {error}"
@@ -1203,7 +1218,8 @@ mod tests {
     /// two-package tree — the dep installed in the store, the root
     /// manifest pinning it — so the identities and pins the cache keys
     /// fold are the same values either entry computes, and the dep's
-    /// single member lands its text hash.
+    /// two members land the composed ascending-path fold through the
+    /// seam.
     #[test]
     fn the_light_key_entry_answers_the_heavy_graph_folds() {
         let work =
@@ -1223,10 +1239,11 @@ mod tests {
         let manifest = ds_pkg::Manifest::parse(dep_manifest_text, ds_diag::FileId::new(0))
             .expect("the fixture manifest parses");
         let member = "pub fn base() -> int {\n21\n}\n";
-        let bundle = ds_pkg::Package::new(&manifest, [(
-            "dep.ds".to_owned(),
-            member.as_bytes().to_vec(),
-        )])
+        let sibling = "pub fn extra() -> int {\n1\n}\n";
+        let bundle = ds_pkg::Package::new(&manifest, [
+            ("dep.ds".to_owned(), member.as_bytes().to_vec()),
+            ("extra.ds".to_owned(), sibling.as_bytes().to_vec()),
+        ])
         .expect("the fixture bundle builds");
         let hash = ds_pkg::Store::open(&cache)
             .install(&bundle)
@@ -1271,6 +1288,13 @@ mod tests {
             "one pin fold, two entries"
         );
         let dep = light.identities.get("@dep").expect("the dep resolved");
-        assert_eq!(*dep, Hash128::compute(member.as_bytes()));
+        assert_eq!(
+            *dep,
+            ds_pkg::member_identity([
+                ("dep.ds", member.as_bytes()),
+                ("extra.ds", sibling.as_bytes()),
+            ])
+            .expect("the fixture members fold")
+        );
     }
 }

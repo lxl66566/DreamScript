@@ -55,6 +55,9 @@ impl Registry {
                 ProvidedPackage {
                     manifest,
                     content_hash: package.content_hash(),
+                    member_identity: package
+                        .member_identity()
+                        .expect("fixture bundle folds its members"),
                 },
             );
         }
@@ -280,10 +283,12 @@ fn the_taxonomy_refuses() {
         "ca" => Fetched::Found(ProvidedPackage {
             manifest: ca.clone(),
             content_hash: hash_a,
+            member_identity: Hash128::ZERO,
         }),
         "cb" => Fetched::Found(ProvidedPackage {
             manifest: cb.clone(),
             content_hash: hash_b,
+            member_identity: Hash128::ZERO,
         }),
         _ => Fetched::UnknownName,
     })
@@ -321,6 +326,7 @@ fn a_served_mismatch_is_the_demand_unserved() {
         versions.insert(Version::new(1, 0, 0), ProvidedPackage {
             manifest: other.manifest(FileId::new(0)).unwrap(),
             content_hash: other.content_hash(),
+            member_identity: other.member_identity().unwrap(),
         });
         rows.insert("swap".to_owned(), versions);
         rows
@@ -415,6 +421,7 @@ fn content_under_another_name_is_the_demand_unserved() {
     let row = ProvidedPackage {
         manifest: other.manifest(FileId::new(0)).unwrap(),
         content_hash: other.content_hash(),
+        member_identity: other.member_identity().unwrap(),
     };
     let root = manifest_of("app", "1.0.0", &[("swap", "1.0.0", other.content_hash())]);
     let error = resolve(&root, |name, _ver| match name {
