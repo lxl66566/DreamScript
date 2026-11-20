@@ -17,6 +17,13 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
+      # The release build rides the runner's stable toolchain; gate the tag on
+      # the same channel, since local checks ride nightly and its borrow
+      # checker accepts code that stable rejects.
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.os == 'ubuntu-latest'
+      - run: cargo check --locked -p ds-cli
+        if: matrix.os == 'ubuntu-latest'
       - name: release rust project
         uses: lxl66566/rust-simple-release@main
         with:
