@@ -16,6 +16,8 @@ const AMBIENT: &str = concat!(
     "pub extern fn list_len[t] (xs: list[t]) -> int\n",
     "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub struct map[k, v]\n",
+    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
     "pub trait Copyable { }\n",
     "pub struct link: ~Copyable { slot: int }\n",
     "pub extern fn tweak (l: mut link) -> ()\n",
@@ -145,6 +147,85 @@ fn var_and_fresh_receivers_type_the_window() {
         "pub fn f() -> int {\n  var xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n",
         "pub fn fill(xs: mut list[int]) -> () {\n  xs.list_push(1)\n}\n",
         "pub fn f() -> () {\n  list_push(list[page](), page { url: \"u\" })\n}\n",
+    ] {
+        assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
+    }
+}
+
+#[test]
+fn for_in_rejects_mut_windows_over_the_iterated_binding() {
+    // the frozen entry count makes the body's own `mut` window over the
+    // iterated binding misleading [D3]: every call spelling refuses, an
+    // enclosing loop's iterable included
+    const REJECTED: &str = "DS3007 `xs` is this loop's iterated binding; its element count froze \
+                            at loop entry, so a `mut` window over it inside the body never joins \
+                            this loop's walk [D3]";
+    // the dot spelling over the iterated var
+    assert_eq!(
+        check(
+            "fn f() -> int {\n  var xs = [1]\n  for x in xs {\n    xs.list_push(2)\n  }\n  \
+             list_len(xs)\n}\n"
+        ),
+        [REJECTED],
+    );
+    // the free spelling
+    assert_eq!(
+        check(
+            "fn f() -> int {\n  var xs = [1]\n  for x in xs {\n    list_push(xs, 2)\n  }\n  \
+             list_len(xs)\n}\n"
+        ),
+        [REJECTED],
+    );
+    // a mut-mode parameter carries the same window at the call site
+    assert_eq!(
+        check(
+            "pub fn fill(xs: mut list[int]) -> () {\n  for x in xs {\n    xs.list_push(1)\n  }\n             }\n"
+        ),
+        [REJECTED],
+    );
+    // the inner loop's body mutates the outer loop's iterable
+    assert_eq!(
+        check(
+            "fn f() -> int {\n  var xs = [1]\n  var ys = [2]\n  for x in xs {\n    for y in ys \
+             {\n      xs.list_push(y)\n    }\n  }\n  list_len(xs)\n}\n"
+        ),
+        [REJECTED],
+    );
+    // the map face refuses the same way
+    assert_eq!(
+        check(
+            "fn f() -> () {\n  var m = map[string, int]()\n  for k in m {\n    map_set(m, k, \
+             1)\n  }\n}\n"
+        ),
+        ["DS3007 `m` is this loop's iterated binding; its element count froze at loop entry, \
+          so a `mut` window over it inside the body never joins this loop's walk [D3]"],
+    );
+    // a const iterable keeps its own receiver refusal: the window never
+    // records, so DS3006 stands alone [D2, C3]
+    assert_eq!(
+        check(
+            "fn f() -> int {\n  const xs = [1]\n  for x in xs {\n    xs.list_push(2)\n  }\n  \
+             list_len(xs)\n}\n"
+        ),
+        ["DS3006 `xs` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]"],
+    );
+}
+
+#[test]
+fn for_in_keeps_reads_and_foreign_windows_free() {
+    // the refusal names the iterated binding alone: reads over it, mut
+    // windows over other bindings (an aliased var included — the frozen
+    // count is the runtime guarantee), and windows past the loop stay
+    // free [D3]
+    for source in [
+        "pub fn f() -> int {\n  var xs = [1]\n  var n = 0\n  for x in xs {\n    n += \
+         list_len(xs)\n  }\n  n\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  var ys = [2]\n  for x in xs {\n    \
+         ys.list_push(x)\n  }\n  list_len(ys)\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  var ys = xs\n  var n = 0\n  for x in xs {\n         \n    ys.list_push(x)\n    n += 1\n  }\n  n\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  var n = 0\n  for x in xs {\n    n += x\n  }\n         \n  xs.list_push(2)\n  list_len(xs)\n}\n",
+        "pub fn f() -> int {\n  var xs = [1]\n  var n = 0\n  for i in 0..3 {\n    \
+         xs.list_push(i)\n    n += 1\n  }\n  n\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
     }

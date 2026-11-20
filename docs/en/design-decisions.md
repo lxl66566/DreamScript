@@ -80,7 +80,7 @@ Collections expose a functional API and mutate in place iff uniquely owned (guar
 
 ### D3 — combinators over a hidden linear cursor
 
-The user surface is combinators (`map`/`filter`/`reduce`) plus `for`, the hidden protocol a linear cursor fused into loops by the compiler; no public generator syntax in 1.0. Iteration-count ruling (2026-11-20): a `for` over a list takes the element count once at loop entry, so a body appending to its own iterable never visits the appended elements this loop; a checker-side borrow-conflict refusal over the iterated window stays a queued refinement.
+The user surface is combinators (`map`/`filter`/`reduce`) plus `for`, the hidden protocol a linear cursor fused into loops by the compiler; no public generator syntax in 1.0. Iteration-count ruling (2026-11-20): a `for` over a list takes the element count once at loop entry, so a body appending to its own iterable never visits the appended elements this loop; the checker's borrow-conflict refusal over the iterated binding (2026-11-21, DS3007) is a diagnostic refinement over this: the body's `mut` window over the very iterable refuses, while the frozen count stays the runtime guarantee.
 
 ## 5. Errors, effects, async, parallelism
 

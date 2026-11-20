@@ -277,6 +277,19 @@ const RECORDS_LISTS_AMBIENT: &str = concat!(
     "pub extern fn println (msg: string) -> ()\n",
 );
 
+/// Ambient stdlib stubs for frozen_iteration: the ambient list surface
+/// the builder calls and the mutation ride, the free `len`, and
+/// `println`; the file owns nothing.
+const FROZEN_ITER_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub trait Copyable { }\n",
+    "pub struct list[t]\n",
+    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
+    "pub extern fn println (msg: string) -> ()\n",
+);
+
 /// Ambient stdlib stubs for transitive_dispatch: the primitives, the
 /// list type (the generic impl heads name it), and `println`; the file
 /// owns both traits and the four impls.
@@ -842,6 +855,7 @@ fn affine_diagnostics_stay_in_reject_or_later_milestone_items() {
             "../../conformance/toplevel_consumption.ds",
             concat!("pub tag int\n", "pub trait Copyable { }\n"),
         ),
+        ("../../conformance/frozen_iteration.ds", FROZEN_ITER_AMBIENT),
     ];
     for (corpus, ambient) in corpus {
         let path = ds_corpus_path::resolve(corpus);
@@ -1068,6 +1082,52 @@ fn records_lists_items_check_clean() {
         rejects.is_empty(),
         "the records lists surface declares no reject item"
     );
+}
+
+/// frozen_iteration.ds: the D3 iteration ruling and its borrow-conflict
+/// refinement — the body's direct `mut` window over the iterated
+/// binding is the file's one reject (DS3007), while the aliased-var run
+/// item (the runtime guarantee: the frozen entry count bounds the walk)
+/// and main check clean; the alias shape's run golden lives in the
+/// ds-lower list_for_in suite.
+#[test]
+fn frozen_iteration_rejects_the_iterated_mut_window() {
+    let rejects = gate("../../conformance/frozen_iteration.ds", FROZEN_ITER_AMBIENT);
+    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    assert_eq!(id, "grow-while-iterating");
+    assert!(what.contains("DS3007"), "the reject text names the code");
+    assert_eq!(diag.code.as_str(), "DS3007");
+    assert!(
+        diag.message.contains("this loop's iterated binding"),
+        "the iterated-window refusal: {}",
+        diag.message
+    );
+
+    // every other item checks clean under the same stubs
+    let path = ds_corpus_path::resolve("../../conformance/frozen_iteration.ds");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let stages = stages(&source);
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", FROZEN_ITER_AMBIENT);
+    let cor = files.add_source("corpus.ds", &source);
+    let asts = [parse(&files, amb).unwrap(), parse(&files, cor).unwrap()];
+    let checked = type_check(&files, &asts);
+    let items = items_of(&asts[1]);
+    for (item, stage) in items.iter().zip(stages.iter()) {
+        if stage.stage.starts_with("reject") {
+            continue;
+        }
+        let diags: Vec<&ds_diag::Diagnostic> = checked
+            .diags
+            .iter()
+            .filter(|d| d.labels.iter().any(|l| within(l.span, item)))
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "item `{}` carries diagnostics: {diags:?}",
+            stage.id
+        );
+    }
 }
 
 /// transitive_dispatch.ds: the transitive evidence round — every item

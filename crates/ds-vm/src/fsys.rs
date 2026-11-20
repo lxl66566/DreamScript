@@ -194,9 +194,15 @@ mod tests {
         body(&mut heaps, &mut out)
     }
 
-    /// The interned path word of the fixture `name`.
-    fn path_word(heaps: &mut Heaps, name: &str) -> Value {
-        let path = std::env::temp_dir().join(name);
+    /// The fixture's temp path: concurrent lane gates share the temp
+    /// dir, so the stem takes the same pid suffix ds-cli's fixtures took.
+    fn probe_path(stem: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{stem}-{}.bin", std::process::id()))
+    }
+
+    /// The interned path word of the fixture `stem`.
+    fn path_word(heaps: &mut Heaps, stem: &str) -> Value {
+        let path = probe_path(stem);
         heaps.new_str(path.to_str().expect("a UTF-8 temp path").to_owned())
     }
 
@@ -206,10 +212,10 @@ mod tests {
     #[test]
     fn open_read_close_round_trip() {
         with_store(|heaps, out| {
-            let path = std::env::temp_dir().join("ds_vm_fsys_round_trip.bin");
+            let path = probe_path("ds_vm_fsys_round_trip");
             std::fs::write(&path, b"probe-bytes!!").expect("the fixture writes");
 
-            let word = path_word(heaps, "ds_vm_fsys_round_trip.bin");
+            let word = path_word(heaps, "ds_vm_fsys_round_trip");
             let open = open_fn(heaps, out, &[word]).expect("the call traps nothing");
             let NativeResult::Tag {
                 tag,
@@ -251,9 +257,9 @@ mod tests {
     #[test]
     fn short_reads_and_the_cap_refuse() {
         with_store(|heaps, out| {
-            let path = std::env::temp_dir().join("ds_vm_fsys_short.bin");
+            let path = probe_path("ds_vm_fsys_short");
             std::fs::write(&path, b"abc").expect("the fixture writes");
-            let word = path_word(heaps, "ds_vm_fsys_short.bin");
+            let word = path_word(heaps, "ds_vm_fsys_short");
             let NativeResult::Tag {
                 payload: Value::I64(handle),
                 ..

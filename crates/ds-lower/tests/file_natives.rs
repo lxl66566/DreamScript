@@ -50,7 +50,10 @@ fn build_vm() -> (Vm, Lowered) {
 #[test]
 fn the_written_bytes_read_back_through_the_platform_spans() {
     let (mut vm, _) = build_vm();
-    let path = std::env::temp_dir().join("ds_lower_file_native_probe.txt");
+    let path = std::env::temp_dir().join(format!(
+        "ds_lower_file_native_probe-{}.txt",
+        std::process::id()
+    ));
     let staged = [vm.intern_str(path.to_str().expect("a UTF-8 temp path"))];
     vm.capture_output();
     assert_eq!(
@@ -65,7 +68,10 @@ fn the_written_bytes_read_back_through_the_platform_spans() {
 #[test]
 fn a_failed_read_prints_the_message_and_halts_on_the_tag() {
     let (mut vm, _) = build_vm();
-    let missing = std::env::temp_dir().join("ds_lower_file_native_probe_absent.txt");
+    let missing = std::env::temp_dir().join(format!(
+        "ds_lower_file_native_probe_absent-{}.txt",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&missing);
     let staged = [vm.intern_str(missing.to_str().expect("a UTF-8 temp path"))];
     vm.capture_output();

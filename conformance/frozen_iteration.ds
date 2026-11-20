@@ -1,7 +1,8 @@
-// source: the review fix round 2026-11-20 (bug B6, the frozen-iteration ruling)
-// purpose: a for-in over a list freezes the element count at loop entry, so a body appending to the iterable terminates after the entry count's visits
+// source: the frozen-iteration ruling 2026-11-20 (bug B6) and the for-in borrow-conflict refinement 2026-11-21 (todo item 83, D3)
+// purpose: a for-in over a list freezes the element count at loop entry; the body's direct `mut` window over the iterated binding refuses at the check (the misleading spelling, DS3007), while an aliased var's push during iteration stays legal and visits exactly the entry count — the frozen count itself is the runtime guarantee
 // items:
-// grow_while_iterating: stage: run
+// grow-while-iterating: stage: reject the body's `xs.list_push` opens a `mut` window over the loop's own iterated binding; the entry count froze, so the append never joins this loop's walk (DS3007) [D3]
+// aliased-grow-visits-the-entry-count: stage: run
 // main: stage: run
 
 fn grow_while_iterating() -> int {
@@ -16,6 +17,19 @@ fn grow_while_iterating() -> int {
   visits * 10 + len(xs)
 }
 
+fn aliased_grow_visits_the_entry_count() -> int {
+  var xs = list[int]()
+  xs.list_push(1)
+  xs.list_push(2)
+  var ys = xs
+  var visits: int = 0
+  for x in xs {
+    visits += 1
+    ys.list_push(x + 10)
+  }
+  visits * 10 + len(xs)
+}
+
 fn main() -> () {
-  println("frozen ${grow_while_iterating()}")
+  println("frozen ${aliased_grow_visits_the_entry_count()}")
 }

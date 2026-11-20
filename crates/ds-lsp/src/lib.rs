@@ -3053,7 +3053,8 @@ mod tests {
         // An absolute path: the client's file:// URIs always decode to
         // absolute on-disk paths, and the definition answer needs the
         // reverse mapping.
-        let path = std::env::temp_dir().join("ds_lsp_definition.ds");
+        let path =
+            std::env::temp_dir().join(format!("ds_lsp_definition-{}.ds", std::process::id()));
         let uri = lsp::Url::from_file_path(&path).expect("an absolute path has a URI");
         let file = session
             .open(
@@ -3619,7 +3620,7 @@ mod tests {
     #[test]
     fn answers_echo_the_client_uri_verbatim() {
         let mut session = Session::new();
-        let path = std::env::temp_dir().join("ds+lsp.ds");
+        let path = std::env::temp_dir().join(format!("ds+lsp-{}.ds", std::process::id()));
         let uri = lsp::Url::from_file_path(&path).expect("an absolute path has a URI");
         let spelled = lsp::Url::parse(&uri.as_str().replace('+', "%2B"))
             .expect("the percent-encoded spelling parses");

@@ -278,7 +278,11 @@ fn a_generic_tuple_element_iteration_drains_the_handed_counts() {
 /// count freezes at entry (one `list_len` read before the head), so the
 /// index walk visits exactly the entry count and the appended elements
 /// stay unvisited this loop — the live-length read looped forever with
-/// no diagnostic.
+/// no diagnostic. The body's direct `mut` window over the iterated
+/// binding now refuses at the check (DS3007, a diagnostic refinement
+/// over this ruling), so the pin reaches the same runtime through an
+/// aliased `var`: the alias's push mutates the shared list in place,
+/// which only the frozen count keeps terminating.
 #[test]
 fn appending_during_iteration_terminates_at_the_entry_count() {
     let source = concat!(
@@ -296,10 +300,11 @@ fn appending_during_iteration_terminates_at_the_entry_count() {
         "  var xs = list[int]()\n",
         "  xs.list_push(1)\n",
         "  xs.list_push(2)\n",
+        "  var ys = xs\n",
         "  var visits: int = 0\n",
         "  for x in xs {\n",
         "    visits += 1\n",
-        "    xs.list_push(x + 10)\n",
+        "    ys.list_push(x + 10)\n",
         "  }\n",
         "  println(\"visits ${visits} len ${len(xs)}\")\n",
         "  visits\n",
@@ -312,8 +317,8 @@ fn appending_during_iteration_terminates_at_the_entry_count() {
         Ok(FrameAnswer::one(Value::I64(2))),
         "the two entry elements are the whole visit count"
     );
-    // the two appended elements extend the live list to four but never
-    // this loop
+    // the alias's two pushes extend the shared live list to four but
+    // never this loop
     assert_eq!(
         String::from_utf8_lossy(vm.captured_output()),
         "visits 2 len 4\n",

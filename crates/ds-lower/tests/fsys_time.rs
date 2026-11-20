@@ -56,9 +56,18 @@ fn build_vm() -> (Vm, Lowered) {
     (Vm::new(registry), lowered)
 }
 
+/// The probe path: concurrent lane gates share the temp dir, so the
+/// fixed stem takes the same pid suffix ds-cli's fixtures took.
+fn probe_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "ds_lower_fsys_time_probe_{tag}-{}.bin",
+        std::process::id()
+    ))
+}
+
 /// Writes the probe file and answers its path's interned word.
 fn probe_file(vm: &mut Vm, tag: &str) -> Value {
-    let path = std::env::temp_dir().join(format!("ds_lower_fsys_time_probe_{tag}.bin"));
+    let path = probe_path(tag);
     std::fs::write(&path, b"probe-bytes!!").expect("the fixture writes");
     vm.intern_str(path.to_str().expect("a UTF-8 temp path"))
 }
@@ -74,7 +83,7 @@ fn the_read_cycle_and_the_clock_run_green() {
         "the reads, the loop of scoped opens, and the clock all answered"
     );
     assert_eq!(vm.captured_output(), b"", "the clean run prints nothing");
-    let _ = std::fs::remove_file(std::env::temp_dir().join("ds_lower_fsys_time_probe_cycle.bin"));
+    let _ = std::fs::remove_file(probe_path("cycle"));
 }
 
 /// A read over a closed handle answers the io_err member through the
@@ -95,14 +104,13 @@ fn a_failed_read_answers_the_io_err_member_without_halting() {
         b"",
         "the handled failure prints nothing"
     );
-    let _ =
-        std::fs::remove_file(std::env::temp_dir().join("ds_lower_fsys_time_probe_fail_read.bin"));
+    let _ = std::fs::remove_file(probe_path("fail_read"));
 }
 
 #[test]
 fn a_failed_open_prints_the_message_and_halts_on_the_tag() {
     let (mut vm, _) = build_vm();
-    let missing = std::env::temp_dir().join("ds_lower_fsys_time_probe_absent.bin");
+    let missing = probe_path("absent");
     let _ = std::fs::remove_file(&missing);
     let word = vm.intern_str(missing.to_str().expect("a UTF-8 temp path"));
     vm.capture_output();

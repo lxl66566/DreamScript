@@ -16,9 +16,12 @@ use tower_lsp::lsp_types::Url;
 /// path: the server syncs `file://` documents only, and `Url::to_file_path`
 /// refuses a Unix path spelling on Windows, so a hardcoded `file:///tmp/...`
 /// never opens there and the session hangs waiting for its diagnostics.
-/// The path need not exist on disk (the server never reads behind a URI).
-fn document_uri() -> String {
-    Url::from_file_path(std::env::temp_dir().join("ds_lsp_smoke.ds"))
+/// The path need not exist on disk (the server never reads behind a URI),
+/// and concurrent lane gates share the temp dir, so the probe stem takes
+/// the same pid suffix ds-cli's fixtures took.
+fn document_uri(stem: &str) -> String {
+    let path = std::env::temp_dir().join(format!("{stem}-{}.ds", std::process::id()));
+    Url::from_file_path(path)
         .expect("the temp path carries a file URI")
         .to_string()
 }
@@ -93,7 +96,7 @@ async fn expect(stream: &mut DuplexStream, wanted: Wanted) -> Value {
 #[tokio::test]
 async fn the_handshake_diagnoses_and_answers() {
     timeout(Duration::from_secs(120), async {
-        let uri = document_uri();
+        let uri = document_uri("ds_lsp_smoke");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         // The server's streams are one duplex pair split into its halves,
@@ -391,9 +394,7 @@ async fn the_handshake_diagnoses_and_answers() {
 #[tokio::test]
 async fn on_type_formatting_answers_over_the_wire() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_ontype.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_ontype");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -502,7 +503,7 @@ async fn on_type_formatting_answers_over_the_wire() {
 #[tokio::test]
 async fn completion_answers_members_types_and_ranking() {
     timeout(Duration::from_secs(120), async {
-        let uri = document_uri();
+        let uri = document_uri("ds_lsp_smoke");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -613,9 +614,7 @@ async fn completion_answers_members_types_and_ranking() {
 
         // A dot over an unresolved expression answers the ordinary scope
         // names honestly, never a guessed member.
-        let broken = Url::from_file_path(std::env::temp_dir().join("ds_lsp_broken.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let broken = document_uri("ds_lsp_broken");
         let broken = broken.as_str();
         send(
             &mut client,
@@ -649,9 +648,7 @@ async fn completion_answers_members_types_and_ranking() {
         // at item level carries the declaration skeleton in snippet
         // format, ranked behind every same-prefix name match (the parseable
         // document's `fnord`, whose own document stays the skeleton's).
-        let skeleton = Url::from_file_path(std::env::temp_dir().join("ds_lsp_skeleton.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let skeleton = document_uri("ds_lsp_skeleton");
         let skeleton = skeleton.as_str();
         send(
             &mut client,
@@ -733,9 +730,7 @@ impl ImportCase {
                 "import @std (to_upper)\nconst text: string = to_up\n",
             ),
         };
-        let uri = Url::from_file_path(std::env::temp_dir().join(format!("ds_lsp_{name}.ds")))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri(&format!("ds_lsp_{name}"));
         (uri, source.to_owned())
     }
 }
@@ -854,9 +849,7 @@ async fn completion_offers_auto_imports_over_the_wire() {
 #[tokio::test]
 async fn completion_offers_the_std_members_over_the_wire() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_std_member.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_std_member");
         let source = "fn probe() -> list[string] {\n  url\n}\n";
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -943,9 +936,7 @@ async fn completion_offers_the_std_members_over_the_wire() {
 #[tokio::test]
 async fn hover_answers_the_tightest_expression_row() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_rows.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_rows");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -1030,9 +1021,7 @@ async fn hover_answers_the_tightest_expression_row() {
 #[tokio::test]
 async fn semantic_tokens_answer_over_the_wire() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_tokens.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_tokens");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -1169,9 +1158,7 @@ async fn semantic_tokens_answer_over_the_wire() {
 #[tokio::test]
 async fn incremental_sync_debounces_the_publish() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_incremental.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_incremental");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -1376,9 +1363,7 @@ async fn incremental_sync_debounces_the_publish() {
 #[tokio::test]
 async fn rename_answers_members_over_the_wire() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_member.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_member");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -1557,9 +1542,7 @@ async fn rename_answers_members_over_the_wire() {
 #[tokio::test]
 async fn rename_refuses_where_no_member_is_selected() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_refuse.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_refuse");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);
@@ -1670,9 +1653,7 @@ async fn rename_refuses_where_no_member_is_selected() {
 #[tokio::test]
 async fn hover_answers_linked_names_over_the_wire() {
     timeout(Duration::from_secs(120), async {
-        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_linked.ds"))
-            .expect("the temp path carries a file URI")
-            .to_string();
+        let uri = document_uri("ds_lsp_linked");
         let uri = uri.as_str();
         let (server, mut client) = tokio::io::duplex(16 << 10);
         let (stdin, stdout) = tokio::io::split(server);

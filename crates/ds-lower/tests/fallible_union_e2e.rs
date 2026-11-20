@@ -81,10 +81,14 @@ fn uop_kind(op: &PlacedOp) -> Option<String> {
 #[test]
 fn success_typed_fallible_natives_extract_through_every_spelling() {
     let mut vm = build_vm();
-    let dir = std::env::temp_dir();
-    let path = dir.join("ds_lower_fallible_union_probe.txt");
-    let bad = dir.join("ds_lower_fallible_union_probe_bad.txt");
-    let missing = dir.join("ds_lower_fallible_union_probe_absent.txt");
+    let dir = std::env::temp_dir().join(format!(
+        "ds_lower_fallible_union_probe-{pid}",
+        pid = std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("the probe directory creates");
+    let path = dir.join("probe.txt");
+    let bad = dir.join("probe_bad.txt");
+    let missing = dir.join("probe_absent.txt");
     let _ = std::fs::remove_file(&missing);
     let good = vm.intern_str(path.to_str().expect("a UTF-8 temp path"));
     let unparsable = vm.intern_str(bad.to_str().expect("a UTF-8 temp path"));
@@ -104,8 +108,7 @@ fn success_typed_fallible_natives_extract_through_every_spelling() {
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&bad);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The placed shape of one union-spelled read: the call answers the
@@ -315,9 +318,13 @@ fn main(path: string, missing: string) -> bool {
     registry.install_platform(Platform::std());
     loader::install(&mut registry, module).expect("the module installs");
     let mut vm = Vm::new(registry);
-    let dir = std::env::temp_dir();
-    let path = dir.join("ds_lower_fallible_respelled.txt");
-    let missing = dir.join("ds_lower_fallible_respelled_absent.txt");
+    let dir = std::env::temp_dir().join(format!(
+        "ds_lower_fallible_respelled-{pid}",
+        pid = std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("the probe directory creates");
+    let path = dir.join("probe.txt");
+    let missing = dir.join("probe_absent.txt");
     let _ = std::fs::remove_file(&missing);
     let good = vm.intern_str(path.to_str().expect("a UTF-8 temp path"));
     let absent = vm.intern_str(missing.to_str().expect("a UTF-8 temp path"));
@@ -331,7 +338,7 @@ fn main(path: string, missing: string) -> bool {
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A `?` propagation whose return union re-spells the failure member

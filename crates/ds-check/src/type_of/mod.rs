@@ -88,6 +88,26 @@ struct Binding {
     mutable: bool,
 }
 
+/// One enclosing for-in's iterated binding: its resolved identity plus
+/// the iterable's own use in the loop head. The loop froze its element
+/// count at entry, so a body `mut` window over the same binding refuses
+/// [D3].
+#[derive(Clone, Copy)]
+struct IterWindow {
+    bind: IterBind,
+    iter_at: Span,
+}
+
+/// A binding's resolved identity, shared by the loop head and the body's
+/// `mut` window site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IterBind {
+    /// A local binder by its introducing span.
+    Local(Span),
+    /// A top-level binding by its definition.
+    Def(DefId),
+}
+
 /// One scope boundary's rollback point: both binder tables' undo-log
 /// marks, the assumption stack's length, and the enclosing return union.
 /// Cheap by construction — restoring replays only what the scope changed.
@@ -587,6 +607,7 @@ where
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
+            for_iters: Vec::new(),
             refined: ScopedMap::default(),
             type_vars: Vec::new(),
             assumptions: Vec::new(),
@@ -636,6 +657,7 @@ where
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
+            for_iters: Vec::new(),
             refined: ScopedMap::default(),
             type_vars: Vec::new(),
             assumptions: Vec::new(),
@@ -774,6 +796,11 @@ struct Bodies<'a> {
     /// Declared types of locals, keyed by binder span; snapshot/restore
     /// at scope boundaries runs through its undo log, never a clone.
     locals: ScopedMap<Binding>,
+    /// The enclosing for-ins' iterated bindings, innermost last: the
+    /// body's `mut` window over one of them refuses [D3]. Pushed and
+    /// popped around each body walk, so the stack is empty at every
+    /// frame boundary.
+    for_iters: Vec<IterWindow>,
     /// The refinement overlay, keyed by binder span (B2).
     refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
@@ -3861,6 +3888,44 @@ impl Bodies<'_> {
         }
     }
 
+    /// The iterated iterable's binding identity when it is a bare name
+    /// [D3]: only a mutable binding (a local `var` or a top-level `var`)
+    /// can open a `mut` window over it later, so a const or computed
+    /// iterable records nothing and every body read stays free.
+    fn iter_window(&self, iter: &Expr) -> Option<IterWindow> {
+        let Expr::Path { path, .. } = iter else {
+            return None;
+        };
+        let [only] = path.segments.as_slice() else {
+            return None;
+        };
+        let bind = match self.res.get(only.span) {
+            Some(Res::Local { bind }) => self
+                .locals
+                .get(*bind)
+                .is_some_and(|binding| binding.mutable)
+                .then_some(IterBind::Local(*bind)),
+            Some(Res::Def(def)) => {
+                (self.package.def(*def).kind == DefKind::Var).then_some(IterBind::Def(*def))
+            },
+            _ => None,
+        }?;
+        Some(IterWindow {
+            bind,
+            iter_at: only.span,
+        })
+    }
+
+    /// The innermost enclosing for-in iterating `bind`, by its loop
+    /// head's iterable use.
+    fn iterated_at(&self, bind: IterBind) -> Option<Span> {
+        self.for_iters
+            .iter()
+            .rev()
+            .find(|window| window.bind == bind)
+            .map(|window| window.iter_at)
+    }
+
     /// A `mut` window parameter over a copyable binding takes only a
     /// `var` receiver (D2, C3): copyable Ref words alias with no
     /// checker-visible trace, so exclusivity is proven by spelling the
@@ -3884,6 +3949,36 @@ impl Bodies<'_> {
             let Some(res) = self.res.get(only.span).cloned() else {
                 continue;
             };
+            // A `mut` window over an enclosing for-in's iterated binding
+            // refuses [D3]: the loop's element count froze at entry, so
+            // the mid-loop mutation never joins this loop's walk — a
+            // diagnostic refinement over the frozen-count semantics,
+            // which stay the runtime guarantee. Only a mutable binding
+            // records a window, so the const-receiver refusal below
+            // never doubles with this one.
+            let windowed = match &res {
+                Res::Local { bind } => Some(IterBind::Local(*bind)),
+                Res::Def(def) => Some(IterBind::Def(*def)),
+                _ => None,
+            };
+            if let Some(bind) = windowed
+                && let Some(iter_at) = self.iterated_at(bind)
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ForIterMutWindow,
+                        format!(
+                            "`{}` is this loop's iterated binding; its element count froze at \
+                             loop entry, so a `mut` window over it inside the body never joins \
+                             this loop's walk [D3]",
+                            only.name
+                        ),
+                    )
+                    .with_primary(only.span, "mut window over the iterated binding")
+                    .with_secondary(iter_at, "iterated here"),
+                );
+                continue;
+            }
             let (binder, mutable, ty) = match res {
                 Res::Local { bind } => {
                     let Some(binding) = self.locals.get(bind) else {
@@ -5632,6 +5727,14 @@ impl Bodies<'_> {
                 poisoned: false,
             };
         };
+        // A bare-name iterable of a mutable binding records its window:
+        // the body's own `mut` window over it refuses below, since the
+        // entry count froze [D3]. A range head or a computed iterable
+        // records nothing.
+        let iter_window = self.iter_window(peel_paren(iter));
+        if let Some(window) = iter_window {
+            self.for_iters.push(window);
+        }
         let saved = self.snapshot();
         self.refined.clear();
         self.loop_depth += 1;
@@ -5642,6 +5745,9 @@ impl Bodies<'_> {
         self.loop_breaks.pop();
         self.loop_depth -= 1;
         self.restore(saved);
+        if iter_window.is_some() {
+            self.for_iters.pop();
+        }
         Val {
             ty: unit,
             diverges: false,

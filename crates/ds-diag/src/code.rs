@@ -213,6 +213,8 @@ error_codes! {
     BorrowEscapes => "DS3005", Linearity,
     /// A `mut` window parameter receives a `const` binding; spell the binder `var`.
     MutWindowConstReceiver => "DS3006", Linearity,
+    /// A for-in body opens a `mut` window over its own iterated binding; the loop's element count froze at entry, so the mutation never joins this loop's walk (D3).
+    ForIterMutWindow => "DS3007", Linearity,
 
     /// Stored source hash does not match the module's source.
     ModuleHashMismatch => "DS4001", Module,
@@ -337,6 +339,7 @@ mod tests {
             ("DeinitIllFormed", "DS3004", ErrorClass::Linearity),
             ("BorrowEscapes", "DS3005", ErrorClass::Linearity),
             ("MutWindowConstReceiver", "DS3006", ErrorClass::Linearity),
+            ("ForIterMutWindow", "DS3007", ErrorClass::Linearity),
             ("ModuleHashMismatch", "DS4001", ErrorClass::Module),
             ("ModuleBadMagic", "DS4002", ErrorClass::Module),
             ("ModuleVersionUnsupported", "DS4003", ErrorClass::Module),

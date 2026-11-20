@@ -86,7 +86,7 @@ fn ok_handler_transforms_the_ok_side_and_the_difference_flows() {
 fn fs_list_reports_the_sorted_directory_names() {
     // a fresh directory holds exactly the two probe files; fs_list sorts,
     // so a.ds is first
-    let dir = std::env::temp_dir().join("ds_lower_list_probe_dir");
+    let dir = std::env::temp_dir().join(format!("ds_lower_list_probe_dir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("the probe directory creates");
     std::fs::write(dir.join("a.ds"), "1").expect("a.ds writes");
