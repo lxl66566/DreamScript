@@ -802,7 +802,7 @@ enum ModuleSurface {
 /// which is what makes intra-package definition cycles legal. The
 /// resolutions align with `asts` positionally. The diagnostics are the
 /// collection class (duplicate definitions) and the resolution class; the
-/// typed half ([`crate::type_of::check_resolved`]) adds the declaration
+/// typed half ([`crate::type_of::analyze_resolved`]) adds the declaration
 /// and body classes.
 #[must_use]
 pub fn resolve_package<T>(asts: &[T]) -> (Package, Vec<Resolutions>, Vec<Diagnostic>)

@@ -2,7 +2,7 @@
 //! cost is one lookup plus that block's facts, not a scan of the whole
 //! package- or file-grain pass it slices.
 
-use ds_diag::Span;
+use ds_diag::{Diagnostic, LabelStyle, Span};
 use rustc_hash::FxHashMap;
 
 use crate::key::BlockId;
@@ -106,6 +106,22 @@ impl BlockFacts {
         out.dedup();
         out
     }
+}
+
+/// The `(fact index, span)` pairs of a diagnostic list's primary labels:
+/// the spans the per-definition slices attribute a diagnostic by.
+pub(crate) fn primary_label_spans(diags: &[Diagnostic]) -> Vec<(u32, Span)> {
+    let mut out = Vec::new();
+    for (index, diag) in diags.iter().enumerate() {
+        let index = u32::try_from(index).expect("diagnostic count fits u32");
+        out.extend(
+            diag.labels
+                .iter()
+                .filter(|label| label.style == LabelStyle::Primary)
+                .map(|label| (index, label.span)),
+        );
+    }
+    out
 }
 
 #[cfg(test)]

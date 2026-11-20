@@ -474,7 +474,7 @@ where
 /// Computes the package's effect rows over an already collected and
 /// resolved package: `asts` and `resolutions` align positionally with the
 /// package's collected files, like
-/// [`check_resolved`](crate::type_of::check_resolved). Same contract as
+/// [`analyze_resolved`](crate::type_of::analyze_resolved). Same contract as
 /// [`effects_of`], which collects and resolves the trees first; callers
 /// holding a resolve result pass it in instead of re-running the pass per
 /// file. `holes` carries the checker's implicit hole dispatch records

@@ -152,9 +152,9 @@ impl Db {
     /// diagnostics, the tree's block spans for the index, the block-text
     /// seam for sources, the ds-check derive expansion of every parse
     /// (G1), the ds-check collection and resolution passes over the
-    /// expanded trees (G3), the bidirectional check (B2) over each of the
-    /// two halves — the checked package and the full analyzed bundle the
-    /// run path lowers from — the M2 affine pass (C1, C5) over the
+    /// expanded trees (G3), the bidirectional check (B2) once, in the
+    /// checked package whose bundle the analyzed query slices — the value
+    /// the run path lowers from — the M2 affine pass (C1, C5) over the
     /// expanded trees, the ds-check effects pass over the expanded trees
     /// (E1), and the per-definition slices of those (see the crate
     /// docs).

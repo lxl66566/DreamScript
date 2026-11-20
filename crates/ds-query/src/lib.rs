@@ -53,10 +53,12 @@
 //! expansion (G1) once over the parse set, and `Resolve` with the check
 //! family computes over its trees, so a derived member's call resolves and
 //! checks at the ordinary grain — `ds check` and a REPL session's check
-//! no longer refuse it. `Analyzed` reuses the expansion and resolve values
-//! and runs the analyzer's check half once per package; its bundle carries
-//! the expansion's own trees, so the run path lowers from it instead of
-//! re-expanding or re-resolving the queries' inputs.
+//! no longer refuse it. `Analyzed` slices the checked package's own
+//! bundle — the one bidirectional run that value paid — so a round that
+//! reads both check-family queries (an editor's diagnostics plus a hover)
+//! checks the package once; the bundle carries the expansion's own trees,
+//! so the run path lowers from it instead of re-expanding or re-resolving
+//! the queries' inputs.
 //!
 //! # Cycle policy
 //!

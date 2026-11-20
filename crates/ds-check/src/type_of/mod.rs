@@ -283,20 +283,6 @@ pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
     Arc::unwrap_or_clone(analyze(files, asts).checked)
 }
 
-/// The typed result of one resolved package: the full bidirectional check
-/// plus every top-level binding's solved type, rendered through the
-/// package universe. Types render as names because solved handles are
-/// meaningful only inside the universe that minted them, and the query
-/// layer stores values across computes.
-pub struct TypedPackage {
-    /// The check: declaration and body diagnostics plus the binder facts
-    /// the affine pass reads.
-    pub checked: Checked,
-    /// The solved type of every top-level const/var binding, keyed by its
-    /// package definition id.
-    pub type_names: FxHashMap<DefId, String>,
-}
-
 /// The full bidirectional check bundled with the tables later passes read:
 /// the package namespace, per-file resolutions, declaration tables, and
 /// the typed result. Every `Ty` inside `Checked` was minted by
@@ -374,6 +360,7 @@ pub fn analyze_resolved(
 ) -> Analyzed {
     let (decls, checked) = check_bodies(files, &asts[..], &package, &resolutions[..], None);
     let mut diags = resolve_diags;
+    let resolve_diag_count = u32::try_from(diags.len()).expect("diagnostic count fits u32");
     diags.extend(checked.diags);
     let checked = Checked {
         diags,
@@ -396,6 +383,7 @@ pub fn analyze_resolved(
         decls: Rc::new(decls),
         artifacts,
         checked: Arc::new(checked),
+        resolve_diag_count,
     }
 }
 
@@ -499,6 +487,7 @@ fn analyze_served_over(
         diags.append(&mut file_diags);
     }
     let (decls, checked) = check_bodies(files, &asts[..], &package, &tables[..], Some(served));
+    let resolve_diag_count = u32::try_from(diags.len()).expect("diagnostic count fits u32");
     diags.extend(checked.diags);
     let checked = Checked {
         diags,
@@ -521,41 +510,13 @@ fn analyze_served_over(
         decls: Rc::new(decls),
         artifacts,
         checked: Arc::new(checked),
+        resolve_diag_count,
     }
 }
 
-/// Checks a resolved package (B2): builds the declaration tables and
-/// body-checks every item against the package namespace and per-file
-/// resolutions from
-/// [`resolve_package`](crate::resolve_package). `asts` and `resolutions`
-/// align positionally; `asts` may hold shared trees (`Borrow<Ast>`, like
-/// [`effects_of`](crate::effects_of)). `checked.diags` carries the
-/// declaration and body classes only — collection and resolution
-/// diagnostics belong to the resolve half.
-#[must_use]
-pub fn check_resolved<T>(
-    files: &Files,
-    asts: &[T],
-    package: &Package,
-    resolutions: &[Resolutions],
-) -> TypedPackage
-where
-    T: std::borrow::Borrow<Ast>,
-{
-    let (decls, checked) = check_bodies(files, asts, package, resolutions, None);
-    let type_names = checked
-        .def_types
-        .iter()
-        .map(|(&id, &ty)| (id, decls.universe.render(ty)))
-        .collect();
-    TypedPackage {
-        checked,
-        type_names,
-    }
-}
-
-/// The declaration and body half of the check, exposed as
-/// [`check_resolved`] plus the declaration tables the affine pass reads.
+/// The declaration and body half of the check the analyze entries
+/// bundle: the declaration tables the affine pass reads beside the
+/// checked result.
 /// Iterates `asts` and `resolutions` positionally: the files a caller
 /// registers may leave holes in the file-id space (unparseable files
 /// contribute no tree), so positions — not file ids — align the two.
@@ -742,6 +703,38 @@ pub struct Analyzed {
     /// declaration and body classes, like [`analyze`]), top-level types,
     /// binder facts, per-expression types.
     pub checked: Arc<Checked>,
+    /// The count of leading resolve-half diagnostics in `checked.diags`
+    /// (see [`check_diags`](Self::check_diags)): the merge order both
+    /// analyze constructors build, kept private so the split stays this
+    /// module's own contract.
+    resolve_diag_count: u32,
+}
+
+impl Analyzed {
+    /// The declaration and body diagnostics alone: the merged list in
+    /// `checked.diags` minus its resolve-half prefix (expansion
+    /// refusals, collection, and resolution — the classes the resolve
+    /// half owns and reports through its own value). A consumer
+    /// publishing the check family's classes reads them off the one
+    /// bundle instead of re-running the check for the split.
+    #[must_use]
+    pub fn check_diags(&self) -> &[Diagnostic] {
+        &self.checked.diags[self.resolve_diag_count as usize..]
+    }
+
+    /// Every top-level binding's solved type rendered through the
+    /// bundle's own universe, keyed by definition id. Solved handles
+    /// are meaningful only inside the universe that minted them, and
+    /// consumers store values across computes, so the render belongs to
+    /// the bundle's own surface.
+    #[must_use]
+    pub fn type_names(&self) -> FxHashMap<DefId, String> {
+        self.checked
+            .def_types
+            .iter()
+            .map(|(&id, &ty)| (id, self.decls.universe.render(ty)))
+            .collect()
+    }
 }
 
 /// The tree position of each file id: file ids index a `Files` registry

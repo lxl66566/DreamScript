@@ -10,7 +10,10 @@ use ds_check::{
 use ds_diag::{Diagnostic, LabelStyle, Span};
 use ds_parse::Ast;
 
-use crate::{facts::BlockFacts, key::BlockId};
+use crate::{
+    facts::{BlockFacts, primary_label_spans},
+    key::BlockId,
+};
 
 /// Result of the [`ParseFile`](crate::QueryKey::ParseFile) query.
 ///
@@ -303,9 +306,10 @@ pub struct TypeOfOutput {
 
 /// Result of the [`CheckedPackage`](crate::QueryKey::CheckedPackage) query:
 /// the whole-package bidirectional check (B2), the substrate every
-/// definition's [`TypeOfOutput`] slices. The payloads are shared, so a
-/// memo hit clones arcs, not the package.
-#[derive(Clone, Debug)]
+/// definition's [`TypeOfOutput`] and the
+/// [`Analyzed`](crate::QueryKey::Analyzed) query's bundle both slice. The
+/// payloads are shared, so a memo hit clones arcs, not the package.
+#[derive(Clone)]
 pub struct CheckedPackageOutput {
     /// The package namespace the slices key their definitions on: the same
     /// arc the `resolve` query carries.
@@ -320,11 +324,55 @@ pub struct CheckedPackageOutput {
     /// the same walk: a definition's story is one bucket, not a scan of
     /// every definition and diagnostic in the package.
     pub(crate) facts: Arc<CheckedPackageFacts>,
+    /// The analyzer's bundle this value's own payloads were derived from:
+    /// the one bidirectional run a round pays however many check-family
+    /// queries it reads, handed to the `analyzed` query as its substrate.
+    pub(crate) bundle: Analyzed,
+}
+
+impl CheckedPackageOutput {
+    /// Derives the slice payloads off the freshly checked bundle: the
+    /// check-family diagnostics split out of the merged list, the
+    /// rendered type names, and the block-grain fact index over the
+    /// bundle's own trees and namespace.
+    pub(crate) fn new(bundle: Analyzed) -> Self {
+        let blocks: Vec<(u32, Span)> = bundle
+            .asts
+            .iter()
+            .flat_map(|ast| {
+                ast.blocks
+                    .iter()
+                    .map(|block| (ast.file.as_u32(), block.span))
+            })
+            .collect();
+        let defs = (0..bundle.package.len()).map(|raw| {
+            let raw = u32::try_from(raw).expect("def count fits u32");
+            let def = bundle.package.def(ds_check::DefId::from_raw(raw));
+            (raw, def.span)
+        });
+        let diags: Arc<[Diagnostic]> = bundle.check_diags().to_vec().into();
+        let facts = Arc::new(CheckedPackageFacts {
+            defs: BlockFacts::build(blocks.iter().copied(), defs),
+            diags: BlockFacts::build(blocks, primary_label_spans(&diags)),
+        });
+        Self {
+            package: Arc::clone(&bundle.package),
+            type_names: Arc::new(bundle.type_names()),
+            diags,
+            facts,
+            bundle,
+        }
+    }
 }
 
 impl PartialEq for CheckedPackageOutput {
     // The fact index is derived from these three payloads: equal payloads
     // build equal buckets, so comparing them would walk the package twice.
+    // The bundle is data, not identity: the engine stores the freshly
+    // computed value even on a renewal, and the reader whose facts key on
+    // spans (the analyzed query slicing it) anchors on the expansion
+    // itself, so the substrate it slices is never staler than the last
+    // compute.
     fn eq(&self, other: &Self) -> bool {
         self.package == other.package
             && self.diags == other.diags
@@ -333,6 +381,18 @@ impl PartialEq for CheckedPackageOutput {
 }
 
 impl Eq for CheckedPackageOutput {}
+
+impl fmt::Debug for CheckedPackageOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The bundle owns no renderable summary beyond counts, like the
+        // diagnostics and definitions it carries.
+        f.debug_struct("CheckedPackageOutput")
+            .field("diags", &self.diags.len())
+            .field("defs", &self.package.len())
+            .field("type_names", &self.type_names.len())
+            .finish_non_exhaustive()
+    }
+}
 
 /// The block-grain index of one checked package.
 #[derive(Clone, Debug, Default)]
@@ -543,6 +603,35 @@ mod tests {
     fn a_same_range_diagnostic_in_another_file_differs() {
         assert!(same_diags(&[moved(0)], &[moved(0)]));
         assert!(!same_diags(&[moved(0)], &[moved(1)]));
+    }
+
+    /// The checked package and the analyzed query share one substrate: a
+    /// round that reads both runs the bidirectional check once, and the
+    /// bundle the analyzed query hands out is the very value the checked
+    /// package derived its own payloads from — not a second check's
+    /// equal-looking twin, whose universe would mint unrelated handles.
+    #[test]
+    fn the_analyzed_query_slices_the_checked_package_s_bundle() {
+        let mut db = crate::Db::new();
+        let _ = db.add_file("plain.ds", "tag int\n##\nconst answer = 42\n");
+        let checked = db
+            .get::<crate::query::CheckedPackage>(crate::PackageId::new(0))
+            .unwrap();
+        let analyzed = db
+            .get::<crate::query::Analyzed>(crate::PackageId::new(0))
+            .unwrap();
+        assert!(std::rc::Rc::ptr_eq(
+            &checked.bundle.decls,
+            &analyzed.analyzed.decls
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &checked.bundle.checked,
+            &analyzed.analyzed.checked
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &checked.bundle.asts,
+            &analyzed.analyzed.asts
+        ));
     }
 
     /// A primary/secondary swap moves the fact between blocks (the slice

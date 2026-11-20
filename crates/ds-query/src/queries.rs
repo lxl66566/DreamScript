@@ -31,13 +31,15 @@
 //!   tables are), and the expansion-refusal, collection, and resolution diagnostics; its dependency
 //!   is the expansion alone, so the query invalidates at file grain and on registration through it
 //!   (collection is package-wide, so any parse edit can change any resolution).
-//! * `checked_package` reads the resolve and expanded values, runs the ds-check bidirectional pass
-//!   (B2) over the expanded trees once, and carries the package's diagnostics plus every top-level
-//!   binding's rendered type. Package grain: its dependencies are the two values.
-//! * `analyzed` reads the expanded and resolve values and runs the analyzer's check half over them
-//!   (B2), bundling the shared trees, namespace, resolutions, declaration tables, and typed result:
-//!   the value the run path lowers from, over the expansion's own trees, so no consumer re-expands
-//!   or re-resolves the queries' inputs. Package grain like `checked_package`.
+//! * `checked_package` reads the resolve and expanded values and runs the ds-check bidirectional
+//!   pass (B2) over the expanded trees once, carrying the analyzer's whole bundle beside the
+//!   package's check-family diagnostics and every top-level binding's rendered type. Package grain:
+//!   its dependencies are the two values.
+//! * `analyzed` reads the expansion as its identity anchor and slices the checked package's own
+//!   bundle (B2): the shared trees, namespace, resolutions, declaration tables, and typed result —
+//!   the value the run path lowers from, over the expansion's own trees — so a round that reads
+//!   both check-family queries runs the bidirectional pass once, and no consumer re-expands or
+//!   re-resolves the queries' inputs. Package grain like `checked_package`.
 //! * `package_linearity` reads the analyzed bundle and the expansion and runs the M2 affine pass
 //!   (C1, C5) over the expansion's own trees — the same trees the check family checked — so a
 //!   derive-synthesized impl body answers linearity facts like a hand-written one, computed from
@@ -70,20 +72,20 @@
 
 use std::sync::Arc;
 
-use ds_diag::{Diagnostic, FileId, LabelStyle, Span};
+use ds_diag::{Diagnostic, FileId, Span};
 use ds_parse::Ast;
 
 use crate::{
     db::Ctx,
     error::QueryError,
-    facts::BlockFacts,
+    facts::{BlockFacts, primary_label_spans},
     key::{BlockId, DefId, PackageId, QueryKey},
     query::{BlockIndex, ParseFile},
     value::{
-        AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageFacts, CheckedPackageOutput,
-        ExpandedOutput, LinearityFacts, LinearityOutput, PackageEffectsOutput,
-        PackageLinearityOutput, ParseOutput, PlatformCheckOutput, PooledCheckOutput, QueryValue,
-        ResolveOutput, ScopeIndexOutput, TypeOfOutput,
+        AnalyzedOutput, BlockIndexOutput, BlockInfo, CheckedPackageOutput, ExpandedOutput,
+        LinearityFacts, LinearityOutput, PackageEffectsOutput, PackageLinearityOutput, ParseOutput,
+        PlatformCheckOutput, PooledCheckOutput, QueryValue, ResolveOutput, ScopeIndexOutput,
+        TypeOfOutput,
     },
 };
 
@@ -193,22 +195,6 @@ fn def_block(ctx: &mut Ctx<'_>, def: DefId) -> Result<(BlockId, Span), QueryErro
     Ok((block, span))
 }
 
-/// The `(fact index, span)` pairs of a diagnostic list's primary labels:
-/// the spans the per-definition slices attribute a diagnostic by.
-fn primary_label_spans(diags: &[Diagnostic]) -> Vec<(u32, Span)> {
-    let mut out = Vec::new();
-    for (index, diag) in diags.iter().enumerate() {
-        let index = u32::try_from(index).expect("diagnostic count fits u32");
-        out.extend(
-            diag.labels
-                .iter()
-                .filter(|label| label.style == LabelStyle::Primary)
-                .map(|label| (index, label.span)),
-        );
-    }
-    out
-}
-
 /// The `(fact index, span)` pairs of a placement list, for bucketing.
 fn placement_spans(facts: impl Iterator<Item = Span>) -> Vec<(u32, Span)> {
     facts
@@ -217,73 +203,55 @@ fn placement_spans(facts: impl Iterator<Item = Span>) -> Vec<(u32, Span)> {
         .collect()
 }
 
-/// The whole-package bidirectional check (B2): the ds-check declaration
-/// and body pass over the package's expanded trees, after the collection
-/// and resolution over the same trees. The substrate every definition's
-/// typed story slices, so the pass runs once per package; its fact index
+/// The whole-package bidirectional check (B2): the analyzer's bundle
+/// over the package's expanded trees, after the collection and
+/// resolution over the same trees. The substrate every definition's
+/// typed story and the `analyzed` query's bundle both slice, so the pass
+/// runs once per package however many check-family queries a round
+/// reads; the value derives its own payloads — the check-family
+/// diagnostics, the rendered type names, and the fact index that
 /// buckets every definition and every diagnostic's primary label by the
-/// block it addresses, so a story is one lookup instead of a scan of the
-/// package.
+/// block it addresses — off that one bundle.
 pub(crate) fn checked_package(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::CheckedPackage(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
     let resolved = ctx.get::<crate::query::Resolve>(package)?;
     let expanded = ctx.get::<crate::query::Expanded>(package)?;
-    let checked = ds_check::check_resolved(
+    let bundle = ds_check::analyze_resolved(
         ctx.files(),
-        &expanded.asts[..],
-        &resolved.package,
-        &resolved.resolutions,
+        expanded.asts,
+        Arc::clone(&resolved.package),
+        Arc::clone(&resolved.resolutions),
+        resolved.diags.to_vec(),
+        Arc::default(),
     );
-    let blocks: Vec<(u32, Span)> = expanded
-        .asts
-        .iter()
-        .flat_map(|ast| {
-            ast.blocks
-                .iter()
-                .map(|block| (ast.file.as_u32(), block.span))
-        })
-        .collect();
-    let defs = (0..resolved.package.len()).map(|raw| {
-        let raw = u32::try_from(raw).expect("def count fits u32");
-        let def = resolved.package.def(ds_check::DefId::from_raw(raw));
-        (raw, def.span)
-    });
-    let facts = Arc::new(CheckedPackageFacts {
-        defs: BlockFacts::build(blocks.iter().copied(), defs),
-        diags: BlockFacts::build(blocks, primary_label_spans(&checked.checked.diags)),
-    });
-    Ok(QueryValue::CheckedPackage(CheckedPackageOutput {
-        package: resolved.package,
-        diags: checked.checked.diags.into(),
-        type_names: Arc::new(checked.type_names),
-        facts,
-    }))
+    Ok(QueryValue::CheckedPackage(CheckedPackageOutput::new(
+        bundle,
+    )))
 }
 
-/// The analyzed package (B2): the analyzer's check half over the
-/// expansion and resolve values — the trees, namespace, resolutions,
-/// and resolution-time diagnostics the memos already hold — bundled as
-/// the value the run path lowers from, over the expansion's own trees,
-/// so the run path never re-expands or re-resolves the queries' inputs.
-/// Package grain like `checked_package`: its dependencies are the two
-/// package-grain values.
+/// The analyzed package (B2): the checked package's own bundle, sliced
+/// — the one bidirectional run that value already paid serves both
+/// check-family queries, so a keystroke a session reads both (the
+/// editor's diagnostics plus a hover) checks the package once. The
+/// expansion read is the identity anchor alone: the bundle's span-keyed
+/// tables move only when the expansion does, and a renewal that pinned
+/// the bundle against a shifted span would serve stale facts, so the
+/// recompute keys on the expansion's always-changed rule and slices the
+/// fresh substrate the checked package just built.
 pub(crate) fn analyzed(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::Analyzed(package) = key else {
         return Err(QueryError::KindMismatch(key));
     };
-    let expanded = ctx.get::<crate::query::Expanded>(package)?;
-    let resolved = ctx.get::<crate::query::Resolve>(package)?;
+    // The expansion read is the identity anchor, not a data source: the
+    // bundle below may renew against an unchanged identity while a
+    // span-keyed fact moved, so the recompute must key on the
+    // expansion's always-changed rule.
+    ctx.get::<crate::query::Expanded>(package)?;
+    let checked = ctx.get::<crate::query::CheckedPackage>(package)?;
     Ok(QueryValue::Analyzed(AnalyzedOutput::new(
-        ds_check::analyze_resolved(
-            ctx.files(),
-            expanded.asts,
-            resolved.package,
-            resolved.resolutions,
-            resolved.diags.to_vec(),
-            Arc::default(),
-        ),
+        checked.bundle.clone(),
     )))
 }
 

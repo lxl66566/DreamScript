@@ -177,6 +177,7 @@ where
         decls,
         artifacts: _,
         checked,
+        ..
     } = crate::type_of::analyze(files, asts);
     let lin = linearity_check(&expanded, &package, &resolutions, &decls, &checked);
     // The bundle's refcount is one here, so the unwrap moves the tables.

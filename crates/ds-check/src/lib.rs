@@ -189,8 +189,7 @@ pub use resolve::{
 pub use scope::{ScopeBinding, ScopeEntry, ScopeFrame, ScopeKind, scope_frames, visible_at};
 pub use type_of::{
     Analyzed, ArtifactSymbols, Checked, GenericCallBounds, HoleShowDispatches, InherentCallBounds,
-    TraitCall, TypedPackage, Val, analyze, analyze_owned, analyze_resolved, analyze_served,
-    check_resolved, type_check,
+    TraitCall, Val, analyze, analyze_owned, analyze_resolved, analyze_served, type_check,
 };
 pub use universe::{ReplayMint, Ty, Universe};
 pub use witness::{Witness, WitnessField};

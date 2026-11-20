@@ -242,7 +242,8 @@ impl Query for PooledCheck {
 
 /// Marker for the checked-package query: [`QueryKey::CheckedPackage`]. The
 /// key is the package id; the value is the whole-package bidirectional
-/// check (B2) the per-definition stories slice.
+/// check (B2) the per-definition stories and the
+/// [`Analyzed`](crate::Analyzed) query's bundle slice.
 pub struct CheckedPackage;
 
 impl Query for CheckedPackage {
@@ -263,7 +264,8 @@ impl Query for CheckedPackage {
 
 /// Marker for the analyzed-package query: [`QueryKey::Analyzed`]. The key
 /// is the package id; the value is the full check bundle (B2) the run path
-/// lowers from, the analyzer's own pass over the parse memos' trees.
+/// lowers from, sliced off the checked package's own pass over the parse
+/// memos' trees.
 pub struct Analyzed;
 
 impl Query for Analyzed {
