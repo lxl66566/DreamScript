@@ -807,13 +807,14 @@ fn tail_called_span_returns_through_the_reused_frame() {
     });
     let mut vm = Vm::new(registry("t", vec![caller, callee]));
     vm.capture_output();
-    // the whole span answers: the tag, the summed payload (8079 from the
-    // caller's three staged constants), and the trailing kimm word
+    // the whole span answers: the tag, the summed payload (the caller's
+    // three staged constants -1 + 8080 + 1, delivered by the one-call-word
+    // slide the pure-argument-area frame needs), and the trailing kimm word
     assert_eq!(
         vm.run("t", "tc", &[]),
         Ok(FrameAnswer::many(vec![
             Value::Tag(tags::CONFIG),
-            Value::I64(8079),
+            Value::I64(8080),
             Value::I64(3),
         ]))
     );

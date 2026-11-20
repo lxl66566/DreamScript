@@ -66,6 +66,7 @@ fn pooled_linked_of(
         package.into(),
         resolutions.into(),
         Vec::new(),
+        std::sync::Arc::default(),
     );
     check_pooled_bodies(&analyzed, ds_stdlib::declared_rows())
 }
@@ -104,12 +105,14 @@ fn linked_fn(
                 })
                 .collect(),
             ret: Some(int_type(at)),
+            bind: None,
         })),
         row,
         caps: 0,
         value: None,
         ty: None,
         link: 0,
+        origin: None,
         func: Some(0),
         std: false,
     }

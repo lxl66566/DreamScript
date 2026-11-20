@@ -30,3 +30,6 @@ ds-stdlib = { workspace = true, features = ["ast-serde"] }
 [[bench]]
 name    = "query_loop"
 harness = false
+[[bench]]
+name    = "renewal_loop"
+harness = false

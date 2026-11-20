@@ -184,6 +184,151 @@ fn mutual_even_odd_at_ten_million_runs_at_constant_stack() {
     );
 }
 
+/// The M0 pair split across two module tables: `even` in `half_a`, `odd`
+/// in `half_b`, each hop a cross-module transfer through the other
+/// module's named FuncRef — the frame-reuse slide over the dsmod seam
+/// (the registry install carries no package graph, so the pair cycles
+/// freely where the package resolver would refuse). `tail` picks the
+/// CALLT transfer; `false` authors the stacked reference (CALL plus RET
+/// of the overlaid result) for the differential. Per-module pools:
+/// k0=0, k1=1, k2=true, k3=the sibling's FuncRef, k4=false.
+fn cross_module_even_odd_fixture(tail: bool) -> ModuleRegistry {
+    let pool = |sibling: &str| {
+        vec![
+            Const::I64(0),
+            Const::I64(1),
+            Const::Bool(true),
+            funcref(sibling, 0),
+            Const::Bool(false),
+        ]
+    };
+    let body = |base: u16| {
+        if tail {
+            vec![
+                Uop::Funcf { frame_slots: 4 },
+                Uop::Kimm { dst: 2, kidx: k(0) },
+                Uop::EqI64 {
+                    dst: 1,
+                    lhs: 0,
+                    rhs: 2,
+                },
+                Uop::Jmpif { cond: 1, target: 7 },
+                Uop::Kimm { dst: 2, kidx: k(1) },
+                Uop::SubI64 {
+                    dst: 3,
+                    lhs: 0,
+                    rhs: 2,
+                },
+                Uop::Callt {
+                    callee: k(3),
+                    nargs: 1,
+                },
+                Uop::Kconst {
+                    dst: 1,
+                    kidx: k(base),
+                },
+                Uop::Ret { src: 1 },
+            ]
+        } else {
+            // the stacked mirror: CALL pushes the sibling's frame, and its
+            // RET overlays the result on this frame's staged word (slot
+            // 3, the ABI's result alias) which the fall-through returns
+            // verbatim; the base arm answers the Bool temp
+            vec![
+                Uop::Funcf { frame_slots: 4 },
+                Uop::Kimm { dst: 2, kidx: k(0) },
+                Uop::EqI64 {
+                    dst: 1,
+                    lhs: 0,
+                    rhs: 2,
+                },
+                Uop::Jmpif { cond: 1, target: 8 },
+                Uop::Kimm { dst: 2, kidx: k(1) },
+                Uop::SubI64 {
+                    dst: 3,
+                    lhs: 0,
+                    rhs: 2,
+                },
+                Uop::Call {
+                    callee: k(3),
+                    nargs: 1,
+                },
+                Uop::Ret { src: 3 },
+                Uop::Kconst {
+                    dst: 1,
+                    kidx: k(base),
+                },
+                Uop::Ret { src: 1 },
+            ]
+        }
+    };
+    let defs = |name: &str, sibling: &str, base: u16| FunctionDef {
+        pool: pool(sibling),
+        ..def(name, &[I64, Bool, I64, I64], 1, 1, &body(base))
+    };
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("half_a", vec![defs("even", "half_b", 2)])
+            .expect("valid fixture module"),
+    );
+    reg.install(
+        ModuleVersion::new("half_b", vec![defs("odd", "half_a", 4)]).expect("valid fixture module"),
+    );
+    reg
+}
+
+/// The M0 acceptance's cross-module mirror: even/odd split across two
+/// module tables, 10^7 mutual hops each crossing the boundary, and the
+/// value stack stays at one frame's span throughout — the frame-reuse
+/// transfer slides arguments and rewires the frame exactly like the
+/// in-module CALLT, the module identity riding the pool constant alone.
+#[test]
+fn mutual_even_odd_across_two_modules_at_ten_million_runs_at_constant_stack() {
+    let mut vm = Vm::new(cross_module_even_odd_fixture(true));
+    let depth = 10_000_000_i64;
+    assert_eq!(
+        vm.run("half_a", "even", &[Value::I64(depth)]),
+        Ok(FrameAnswer::one(Value::Bool(true)))
+    );
+    assert_eq!(vm.max_stack_len(), 6, "one frame's span across every hop");
+    assert_eq!(vm.stack_len(), 2);
+    assert_eq!(
+        vm.run("half_b", "odd", &[Value::I64(depth)]),
+        Ok(FrameAnswer::one(Value::Bool(false)))
+    );
+    assert_eq!(
+        vm.max_stack_len(),
+        6,
+        "the entry-side module answers at the same constant span"
+    );
+}
+
+/// The cross-module transfer answers byte-identically to the stacked
+/// reference: the same two-module pair authored with CALL plus RET
+/// (every hop a pushed frame) returns the same word at small depth,
+/// both parities and the zero edge included.
+#[test]
+fn the_cross_module_tail_transfer_answers_like_the_stacked_reference() {
+    for depth in [0_i64, 1, 2, 3, 1000] {
+        let mut reuse = Vm::new(cross_module_even_odd_fixture(true));
+        let mut stacked = Vm::new(cross_module_even_odd_fixture(false));
+        for (module, func) in [("half_a", "even"), ("half_b", "odd")] {
+            let expected = reuse
+                .run(module, func, &[Value::I64(depth)])
+                .unwrap_or_else(|_| panic!("{func} at depth {depth} transfers clean"));
+            assert_eq!(
+                stacked.run(module, func, &[Value::I64(depth)]),
+                Ok(expected.clone()),
+                "{func} at depth {depth}: frame reuse and stacking answer identically"
+            );
+        }
+        assert!(
+            stacked.max_stack_len() > 6 || depth < 2,
+            "the stacked reference really stacks at depth {depth}"
+        );
+    }
+}
+
 /// Self tail recursion that traps after N slides: `countdown(n)` tail-calls
 /// itself until n == 0, then adds i64::MAX to itself. The trap's backtrace
 /// must report the one real frame plus the tail chain's elided count [H2].
@@ -358,6 +503,39 @@ fn callt_wide_callee_receives_all_params_in_order() {
     );
     // the tail call still reuses the frame: both frames are 6 words
     assert_eq!(vm.max_stack_len(), 6);
+}
+
+/// Regression: a CALLT from a pure-argument-area frame — the caller has
+/// no body slots (body_len == 0), so the staged words sit directly above
+/// the call word at fp+2 while the callee's param slots sit at fp+1: the
+/// slide's ends differ by one call word even though the logical starts
+/// coincide. A direction read off the logical starts would answer None,
+/// skip the copy, and the callee would return the stale call-word slot.
+/// `g` stages 41 and tail-calls `f(n) = n`; only the intact slide yields 41.
+#[test]
+fn callt_from_a_pure_arg_area_frame_delivers_the_argument() {
+    let reg = registry("pure", &[Const::I64(41), funcref("pure", 1)], vec![
+        def("g", &[I64], 0, 1, &[
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Kimm { dst: 0, kidx: k(0) }, // stage 41 in the overlay
+            Uop::Callt {
+                callee: k(1),
+                nargs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ]),
+        def("f", &[I64], 1, 0, &[
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Ret { src: 0 },
+        ]),
+    ]);
+    let mut vm = Vm::new(reg);
+    assert_eq!(
+        vm.run("pure", "g", &[]),
+        Ok(FrameAnswer::one(Value::I64(41)))
+    );
+    // the tail call still reuses the frame: metadata + call word + one slot
+    assert_eq!(vm.max_stack_len(), 3);
 }
 
 /// Deep NON-tail recursion: every CALL grows the stack by the callee frame,

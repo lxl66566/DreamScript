@@ -1,0 +1,5 @@
+// One term past the parser's 128-term chain fold budget: the parse
+// must answer the NestingTooDeep diagnostic instead of building the
+// tree.
+
+fn past(x: int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int) -> int { x }

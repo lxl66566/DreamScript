@@ -873,3 +873,91 @@ fn exhaustive_lookup_unique_for_non_empty_queries() {
         }
     }
 }
+
+/// The per-trait row index keeps the solve's answers and the scan's row
+/// order: rows a checked-ambient artifact served join before the package's
+/// own declarations, every list stays ascending in id order across a link
+/// merge, and a solve over the indexed table answers exactly what the
+/// full-table scan did (two same-trait instances disambiguated by the
+/// receiver's shape).
+#[test]
+fn indexed_solve_answers_and_row_order_match_the_scan() {
+    use ds_check::{
+        InstanceId, ServedInstance,
+        instance_solve::{Resolution, resolve},
+    };
+
+    let mut f = fixture();
+    let int_head = f.universe.atom_ty(f.int).unwrap();
+    let string_head = f.universe.atom_ty(f.string).unwrap();
+    f.env.serve(vec![
+        ServedInstance {
+            trait_id: f.json,
+            head_expr: TypeExpr::atom(f.int),
+            head: int_head,
+            written: int_head,
+            condition_exprs: Vec::new(),
+            conditions: Vec::new(),
+        },
+        ServedInstance {
+            trait_id: f.json,
+            head_expr: TypeExpr::atom(f.string),
+            head: string_head,
+            written: string_head,
+            condition_exprs: Vec::new(),
+            conditions: Vec::new(),
+        },
+    ]);
+    let fresh = f.declare(f.json, TypeExpr::atom(f.boolean)).unwrap();
+    assert_eq!(fresh.len(), 1);
+
+    // The index names the served rows first, then the package's own.
+    assert_eq!(f.env.of_trait(f.json), &[
+        InstanceId::from_raw(0),
+        InstanceId::from_raw(1),
+        fresh[0]
+    ]);
+    assert_eq!(f.env.of_trait(f.show), &[] as &[InstanceId]);
+
+    // A solve over the indexed table picks by receiver shape, exactly as
+    // the full-table scan did.
+    for (atom, want) in [
+        (f.int, InstanceId::from_raw(0)),
+        (f.string, InstanceId::from_raw(1)),
+        (f.boolean, fresh[0]),
+    ] {
+        let ty = f.universe.atom_ty(atom).unwrap();
+        let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.json, ty) else {
+            panic!("the receiver shape must solve uniquely");
+        };
+        assert_eq!(id, want);
+    }
+    assert!(matches!(
+        resolve(&f.universe, &f.env, &[], f.show, int_head),
+        Resolution::None
+    ));
+
+    // A link merge renumbers the appended rows; the index rebuilds with
+    // them and both traits still answer.
+    let mut other = InstanceEnv::new();
+    let show_int = other
+        .declare(
+            &mut f.universe,
+            &InstanceDecl::new(f.show, TypeExpr::atom(f.int)),
+        )
+        .unwrap();
+    assert_eq!(other.of_trait(f.show), show_int.as_slice());
+    f.env.merge(other);
+    assert_eq!(f.env.of_trait(f.json), &[
+        InstanceId::from_raw(0),
+        InstanceId::from_raw(1),
+        fresh[0]
+    ]);
+    // The appended rows renumber at the merge, so the show row lands at 3.
+    let merged_show = InstanceId::from_raw(3);
+    assert_eq!(f.env.of_trait(f.show), &[merged_show]);
+    let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.show, int_head) else {
+        panic!("the merged row must serve the receiver");
+    };
+    assert_eq!(id, merged_show);
+}

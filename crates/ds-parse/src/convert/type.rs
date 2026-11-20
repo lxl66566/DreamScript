@@ -13,7 +13,11 @@ impl Ctx {
         match p.as_rule() {
             Rule::type_union => {
                 let span = self.span(&p);
-                let mut iter = inner(&p).filter(|c| is_type_rule(c));
+                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
+                if self.chain_guard(terms.len(), span) {
+                    return Type::TypeKw(span);
+                }
+                let mut iter = terms.into_iter();
                 let first = iter
                     .next()
                     .map_or(Type::TypeKw(span), |c| self.type_expr(c));
@@ -28,7 +32,11 @@ impl Ctx {
             },
             Rule::type_inter => {
                 let span = self.span(&p);
-                let mut iter = inner(&p).filter(|c| is_type_rule(c));
+                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
+                if self.chain_guard(terms.len(), span) {
+                    return Type::TypeKw(span);
+                }
+                let mut iter = terms.into_iter();
                 let first = iter
                     .next()
                     .map_or(Type::TypeKw(span), |c| self.type_expr(c));
@@ -43,7 +51,11 @@ impl Ctx {
             },
             Rule::type_diff => {
                 let span = self.span(&p);
-                let mut iter = inner(&p).filter(|c| is_type_rule(c));
+                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
+                if self.chain_guard(terms.len(), span) {
+                    return Type::TypeKw(span);
+                }
+                let mut iter = terms.into_iter();
                 let first = iter
                     .next()
                     .map_or(Type::TypeKw(span), |c| self.type_expr(c));
@@ -66,6 +78,9 @@ impl Ctx {
                         _ => inner_ty = self.type_expr(c),
                     }
                 }
+                if self.chain_guard(marks as usize + 1, span) {
+                    return Type::TypeKw(span);
+                }
                 (0..marks).fold(inner_ty, |acc, _| Type::Optional {
                     span,
                     inner: Box::new(acc),
@@ -82,6 +97,9 @@ impl Ctx {
                     }
                 }
                 let inner_ty = atom.unwrap_or(Type::TypeKw(span));
+                if self.chain_guard(negs as usize + 1, span) {
+                    return Type::TypeKw(span);
+                }
                 (0..negs).fold(inner_ty, |acc, _| Type::Negation {
                     span,
                     inner: Box::new(acc),

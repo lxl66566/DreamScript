@@ -199,6 +199,13 @@ impl Frames {
 
 /// Scans `src`; returns diagnostics if anything is lexically broken.
 pub(crate) fn scan(file: FileId, src: &str) -> Option<Vec<Diagnostic>> {
+    // A leading BOM is invisible in editors and no token in the grammar,
+    // and the scan dispatch itself never reacts to its bytes, so it is
+    // refused by name up front instead of leaving the grammar to fail at
+    // it with a message about an invisible character.
+    if src.starts_with('\u{feff}') {
+        return Some(vec![leading_bom(file)]);
+    }
     let b = src.as_bytes();
     let mut diags = Vec::new();
     let mut frames = Frames::new();
@@ -570,8 +577,17 @@ fn end_of_block_comment(frames: &mut Frames, b: &[u8], mut i: usize) -> usize {
     }
 }
 
-/// Advances past a raw string's body, popping the frame once the terminator
-/// (a quote followed by the opening hash count) is consumed.
+/// Advances past a raw string's body, popping the frame at the
+/// terminator: a quote followed by at least the opening hash count, the
+/// grammar's PUSH/POP rule (POP matches the opening hashes as a prefix,
+/// never requiring the count to match exactly). The terminator consumes
+/// the quote and exactly the opening count's hashes, leaving surplus
+/// hashes in the code stream for the invalid-`#` diagnostic; a quote
+/// followed by fewer hashes is body content, and the walk continues from
+/// past it -- the answer never lands on a quote for the dispatch to eat
+/// unjudged (the raw frame's dispatch arm takes whole body bytes, so a
+/// closing quote reaching it would read as content and the string would
+/// falsely report unterminated).
 fn end_of_raw(
     frames: &mut Frames,
     b: &[u8],
@@ -579,20 +595,20 @@ fn end_of_raw(
     hashes: usize,
     arrows: &mut ArrowBudget,
 ) -> usize {
-    match memchr::memchr(b'"', &b[i..]) {
-        Some(p) => {
-            let mut k = 0;
-            while b.get(i + p + 1 + k) == Some(&b'#') {
-                k += 1;
-            }
-            if k == hashes {
-                frames.pop();
-                arrows.after_literal();
-            }
-            i + p + 1 + k
-        },
-        None => b.len(),
+    let mut i = i;
+    while let Some(p) = memchr::memchr(b'"', &b[i..]) {
+        let mut k = 0;
+        while b.get(i + p + 1 + k) == Some(&b'#') {
+            k += 1;
+        }
+        if k >= hashes {
+            frames.pop();
+            arrows.after_literal();
+            return i + p + 1 + hashes;
+        }
+        i += p + 1 + k;
     }
+    b.len()
 }
 
 /// Reports every frame still open at EOF. The innermost terminator frame
@@ -715,6 +731,20 @@ fn lone_cr(file: FileId, i: usize) -> Diagnostic {
     .with_primary(Span::new(file, i as u32, i as u32 + 1), "invalid character")
 }
 
+/// The leading UTF-8 byte-order mark: the three bytes are invisible in most
+/// editors and part of no token, so the diagnostic names them and offers
+/// removal. Stripping the bytes instead would shift every later span against
+/// the registered source, so the file is refused, never silently re-keyed.
+fn leading_bom(file: FileId) -> Diagnostic {
+    let span = Span::new(file, 0, 3);
+    Diagnostic::error(
+        ErrorCode::InvalidChar,
+        "a leading byte-order mark is not part of the source; save the file as UTF-8 without BOM",
+    )
+    .with_primary(span, "byte-order mark here")
+    .with_suggestion(Suggestion::Remove { span })
+}
+
 fn stray_semicolon(file: FileId, i: usize) -> Diagnostic {
     Diagnostic::error(
         ErrorCode::UnexpectedToken,
@@ -733,7 +763,10 @@ mod tests {
     use ds_diag::Files;
 
     use super::*;
-    use crate::arrowbudget::{MAX_ARROWS, MAX_ELSES};
+    use crate::{
+        arrowbudget::{MAX_ARROWS, MAX_ELSES},
+        ast::{Expr, ItemKind},
+    };
 
     fn first_diag(src: &str) -> Diagnostic {
         let mut files = Files::new();
@@ -849,6 +882,43 @@ mod tests {
     fn escape_errors_are_positioned() {
         let d = first_diag("\"a\\q\"");
         assert_eq!(d.code, ErrorCode::InvalidEscape);
+    }
+
+    /// A quote followed by more hashes than the opening count ends the
+    /// string at the opening count (the grammar's POP matches the opening
+    /// hashes as a prefix), so the surplus hashes land in the code stream
+    /// as the invalid-`#` diagnostic instead of a bogus unterminated-string
+    /// report at the opener -- the two passes agree on the string's end.
+    #[test]
+    fn surplus_closing_hashes_flag_the_hash_not_the_string() {
+        let src = "const s = r##\"a\"###\n";
+        let d = first_diag(src);
+        assert_eq!(d.code, ErrorCode::InvalidChar);
+        assert_eq!(d.labels[0].span.start as usize, src.len() - 2);
+
+        // the one-hash spelling the parse-error suite once rode: the
+        // string closes at its own `"#`, the surplus `#` answers first
+        let d = first_diag("const s = r#\"a\"##b\"#\n");
+        assert_eq!(d.code, ErrorCode::InvalidChar);
+    }
+
+    /// Escalating the opening count embeds quote-plus-hash text, and both
+    /// passes read the same extent: the inner quote and its two hashes are
+    /// content, the string closes at the opening count.
+    #[test]
+    fn escalated_hashes_embed_quote_hash_text() {
+        let src = "const s = r###\"\"##\"###\nconst t = 1\n";
+        let mut files = Files::new();
+        let f = files.add_source("t.ds", src);
+        assert!(scan(f, src).is_none());
+        let ast = crate::parse(&files, f).expect("the escalated raw string parses");
+        let ItemKind::Local(decl) = &ast.blocks[0].items[0].kind else {
+            panic!("the const binding stays a binding");
+        };
+        let Expr::RawStr { hashes, text, .. } = &decl.init else {
+            panic!("the bound value is a raw string");
+        };
+        assert_eq!((*hashes, text.as_str()), (3, "\"##"));
     }
 
     /// Builders for the arrow-budget tests; every chain sits inside a fn

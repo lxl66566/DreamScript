@@ -234,19 +234,36 @@ impl<'a> FnLower<'a, '_, '_> {
             return Err(mismatch("a list literal"));
         };
         let list = self.list_new_word()?;
-        for item in items {
-            // the push's borrow window opens before the element
-            // evaluation (an element expression may itself call) and
-            // pins the list word plus every word the push stages
-            self.rc.native_open();
-            self.rc.native_reads([list]);
-            let item_val = self.value(item)?;
-            self.list_push_word(list, &item_val, item.span())?;
-        }
+        self.list_push_each(list, items.iter(), |this, item| {
+            Ok((this.value(item)?, item.span()))
+        })?;
         Ok(Place {
             base: list,
             shape: PlaceShape::Word(SlotType::Ref),
         })
+    }
+
+    /// Every element staged and pushed onto a list under construction:
+    /// the shared per-element discipline — the push's borrow window
+    /// opened ahead of the element's own staging, the list word
+    /// read-pinned per push — the staging closure naming the staged
+    /// element and its own diagnostic span.
+    pub(super) fn list_push_each<E>(
+        &mut self,
+        list: u8,
+        items: impl IntoIterator<Item = E>,
+        mut stage: impl FnMut(&mut Self, E) -> Result<(TypedPlace, Span), LowerError>,
+    ) -> Result<(), LowerError> {
+        for item in items {
+            // the push's borrow window opens before the element
+            // staging (an element expression may itself call) and pins
+            // the list word plus every word the push stages
+            self.rc.native_open();
+            self.rc.native_reads([list]);
+            let (item_val, span) = stage(self, item)?;
+            self.list_push_word(list, &item_val, span)?;
+        }
+        Ok(())
     }
 
     /// One element's push onto a list under construction: the guarded
@@ -254,7 +271,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// literal construction and the embedded comptime answer share the
     /// spelling; the caller owns the borrow window and the element's own
     /// lowering.
-    fn list_push_word(
+    pub(super) fn list_push_word(
         &mut self,
         list: u8,
         item_val: &TypedPlace,
@@ -298,7 +315,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// Ref result lands on the overlay (the empty `list_new` call still
     /// needs its one-word overlay area — the result must land
     /// somewhere), copied into a fresh body word the frame owns.
-    fn list_new_word(&mut self) -> Result<u8, LowerError> {
+    pub(super) fn list_new_word(&mut self) -> Result<u8, LowerError> {
         let native = crate::native::lookup("list_new")
             .expect("the list surface is covered by the native table");
         self.overlay_site(&[], &[SlotType::Ref]);
@@ -550,14 +567,9 @@ impl<'a> FnLower<'a, '_, '_> {
     ) -> Result<Place, LowerError> {
         let elem_ty = self.embedded_list_element_ty(span)?;
         let list = self.list_new_word()?;
-        for item in items {
-            // the push's borrow window opens before the element staging,
-            // the literal construction's own discipline
-            self.rc.native_open();
-            self.rc.native_reads([list]);
-            let item_val = self.embedded_scalar(item, elem_ty, span)?;
-            self.list_push_word(list, &item_val, span)?;
-        }
+        self.list_push_each(list, items, |this, item| {
+            Ok((this.embedded_scalar(item, elem_ty, span)?, span))
+        })?;
         Ok(Place {
             base: list,
             shape: PlaceShape::Word(SlotType::Ref),
@@ -935,13 +947,7 @@ impl<'a> FnLower<'a, '_, '_> {
             if let Some(constant) = values.get(call_span) {
                 return self.embedded_value(constant, ty, call_span);
             }
-            let is_comptime = def.is_some_and(|def| {
-                self.analyzed.decls.fns.get(&def).is_some_and(|sig| {
-                    sig.params
-                        .iter()
-                        .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)))
-                })
-            });
+            let is_comptime = def.is_some_and(|def| self.comptime_def(def));
             if is_comptime {
                 return Err(LowerError::unsupported(
                     call_span,
@@ -1131,7 +1137,10 @@ impl<'a> FnLower<'a, '_, '_> {
             }
             let deinit = self.deinit_claim(arg_val.ty, arg.span())?;
             if deinit.is_some() {
-                if matches!(target, Callee::Builtin(_) | Callee::Generic(_)) {
+                if matches!(
+                    target,
+                    Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }
+                ) {
                     return Err(LowerError::unsupported(
                         arg.span(),
                         "a deinit-carrying argument",
@@ -1139,7 +1148,10 @@ impl<'a> FnLower<'a, '_, '_> {
                          the value's deinit runs only at its binding's death",
                     ));
                 }
-                if tail && matches!(target, Callee::Local(_)) && !consuming[index] {
+                if tail
+                    && matches!(target, Callee::Local(_) | Callee::Foreign { .. })
+                    && !consuming[index]
+                {
                     return Err(LowerError::unsupported(
                         arg.span(),
                         "a deinit-carrying argument in tail position",
@@ -1307,25 +1319,32 @@ impl<'a> FnLower<'a, '_, '_> {
         // under the callee's read. Its tail lowers in place instead (CALL
         // plus flush plus return, the R13 native-tail shape) —
         // stack-identical and count-exact; the frame-reuse guarantee
-        // [H2] keeps every scalar-staging tail site
-        let closure_tail = !defaulted.is_empty() && tail && matches!(target, Callee::Local(_));
+        // [H2] keeps every scalar-staging tail site, a linked callee's
+        // included
+        let closure_tail = !defaulted.is_empty()
+            && tail
+            && matches!(target, Callee::Local(_) | Callee::Foreign { .. });
         // a trait-method tail transfers through CALLTG now (the dispatch
         // tail form, H2's guarantee closure): a Static site's evidence and
         // instance words and a Runtime site's sentinel FuncRef ride the
         // same frame-reuse slide a local tail's arguments take, staged
         // after the exit claims. An inherent dispatch stays excluded — it
         // is a plain local callee taking the CALLT transfer below
-        let native_tail_return =
-            tail && !self.root && matches!(target, Callee::Builtin(_) | Callee::Generic(_));
+        let native_tail_return = tail
+            && !self.root
+            && matches!(
+                target,
+                Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }
+            );
         // a closure-staging local tail lowers in place for the root frame
         // too: the callee reads the word during the call, so the count
         // cannot ride the abandoned corner nor die at the pre-transfer
         // exit drops
-        // a linked package's tail call lowers in place (CALL plus
-        // return): the frame-reuse transfer is the same-module contract
-        // this round, the cross-module tail waiting on the tail round
-        let foreign_target = tail && matches!(target, Callee::Foreign { .. });
-        let in_place_tail = native_tail_return || closure_tail || foreign_target;
+        // a linked package's tail call takes the same CALLT frame-reuse
+        // transfer a local's does (H2): the pool FuncRef carries the
+        // module boundary, the slide a pure fact of the two layouts, so
+        // the transfer crosses the dsmod seam with the stack flat
+        let in_place_tail = native_tail_return || closure_tail;
         // the frame-ending transfer: the exit drops and every claim hook
         // stage through the overlay as their own argument windows, so the
         // call's argument span stages after them, ahead of the CALLT
@@ -1374,13 +1393,17 @@ impl<'a> FnLower<'a, '_, '_> {
                     self.rc.staged_native(slot, false);
                 } else {
                     match target {
-                        Callee::Builtin(_) | Callee::Generic(_) => {
+                        Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. } => {
                             self.rc.staged_native(slot, tail && self.root);
                         },
-                        Callee::Local(_) | Callee::Evidence(_) if tail_transfer && consumes => {
+                        Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. }
+                            if tail_transfer && consumes =>
+                        {
                             self.rc.staged_move(&mut self.code, slot);
                         },
-                        Callee::Local(_) | Callee::Evidence(_) if tail_transfer => {
+                        Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. }
+                            if tail_transfer =>
+                        {
                             self.rc.staged_tail_local(&mut self.code, slot);
                         },
                         Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. }
@@ -1649,9 +1672,9 @@ impl<'a> FnLower<'a, '_, '_> {
             );
         if tail_transfer {
             // control transfers to the callee; the stack never grows [H2].
-            // A local callee owns its handed words (their counts ride the
-            // transfer, its own exit drops them); every other owned
-            // reference drops before the transfer, and a root-frame
+            // A local or linked callee owns its handed words (their counts
+            // ride the transfer, its own exit drops them); every other
+            // owned reference drops before the transfer, and a root-frame
             // native's staged borrows are the abandoned corner above. The
             // exit drops and every claim hook staged through the overlay
             // as their own argument windows, so the call's argument span
@@ -3006,6 +3029,21 @@ impl<'a> FnLower<'a, '_, '_> {
                 func: link.func,
             });
         }
+        // a bound extern's declaration names an artifact (H5): the call
+        // resolves through the graph's fold — the artifact's exported
+        // symbols in enumeration order, the same table the run installs
+        // as the artifact's native module — ahead of the compiler-wired
+        // native fallback, so a same-named builtin never shadows a
+        // declared bind
+        if let Some(bind) = self
+            .analyzed
+            .decls
+            .fns
+            .get(&def)
+            .and_then(|sig| sig.bind.clone())
+        {
+            return self.bound_callee(def, &bind, span);
+        }
         let name = self.analyzed.package.def(def).name.clone();
         if let Some(native) = crate::native::lookup(&name) {
             return Ok(Callee::Builtin(native));
@@ -3040,6 +3078,82 @@ impl<'a> FnLower<'a, '_, '_> {
             "a callee",
             "extern non-builtin and method callees are outside the contract",
         ))
+    }
+
+    /// Resolves one bound extern's declaration (H5): the bind target
+    /// names an artifact the graph resolved, the extern's name a symbol
+    /// its installed library exports — the FuncRef addressing the
+    /// artifact's native module at the symbol's enumeration index. The
+    /// signature must be the marshaling slice's own shape (scalar words,
+    /// at most [`ds_ffi::MAX_PARAMS`] of them); anything richer refuses
+    /// here naming the seam, before any run starts.
+    fn bound_callee(&self, def: DefId, bind: &str, span: Span) -> Result<Callee, LowerError> {
+        let sig = self
+            .analyzed
+            .decls
+            .fns
+            .get(&def)
+            .expect("a bound callee reads the signature that named its target");
+        let name = self.analyzed.package.def(def).name.clone();
+        let refuse = |reason: String| LowerError::ForeignBind {
+            span,
+            name: name.clone(),
+            reason,
+        };
+        let Some(symbols) = self.analyzed.artifacts.get(bind) else {
+            return Err(refuse(format!(
+                "the resolved graph declares no [artifacts] entry `{bind}`; declare the library \
+                 in ds.pkg, or run the source as a package — externs bind only package-pinned \
+                 libraries"
+            )));
+        };
+        let Some(index) = symbols.iter().position(|symbol| *symbol == name) else {
+            return Err(refuse(format!(
+                "artifact `{bind}` exports no `{name}`; `ds bind` reports the exported spellings"
+            )));
+        };
+        if !sig.generics.is_empty() {
+            return Err(refuse(
+                "a C symbol has no generic body; the signature must be scalar and monomorphic"
+                    .to_owned(),
+            ));
+        }
+        if sig.params.len() > ds_ffi::MAX_PARAMS {
+            return Err(refuse(format!(
+                "the scalar C-ABI marshaling slice serves at most {} parameters",
+                ds_ffi::MAX_PARAMS
+            )));
+        }
+        let scalar_slice = "the scalar C-ABI marshaling slice rules int, bool, and float words; \
+                            string, bytes, handle, and aggregate marshaling is the marshaling \
+                            round's next slice";
+        for param in &sig.params {
+            let Some(ty) = &param.ty else {
+                return Err(refuse(
+                    "an inferred parameter has no written scalar word; write the int, bool, or \
+                     float annotation"
+                        .to_owned(),
+                ));
+            };
+            if scalar_word(ty).is_none() {
+                return Err(refuse(scalar_slice.to_owned()));
+            }
+        }
+        match &sig.ret {
+            Some(ret) if scalar_word(ret).is_some() => {},
+            Some(_) => return Err(refuse(scalar_slice.to_owned())),
+            None => {
+                return Err(refuse(
+                    "the slice answers one scalar word; a unit return needs the marshaling \
+                     round's next slice"
+                        .to_owned(),
+                ));
+            },
+        }
+        Ok(Callee::Bound {
+            def,
+            index: u32::try_from(index).expect("the export enumeration fits u32"),
+        })
     }
 
     /// The literal-only parameter defaults [F7] a local call stages
@@ -3259,7 +3373,7 @@ impl<'a> FnLower<'a, '_, '_> {
                     .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
                 _ => None,
             },
-            Callee::Builtin(_) | Callee::Generic(_) => None,
+            Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. } => None,
         };
         match modes {
             Some(modes) => (0..args)
@@ -3359,7 +3473,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 | NativeShape::FallibleClassed { .. }
                 | NativeShape::Checked => Err(mismatch("a generic builtin result")),
             },
-            Callee::Evidence(_) | Callee::Foreign { .. } => self.shapes.words(ty),
+            Callee::Evidence(_) | Callee::Foreign { .. } | Callee::Bound { .. } => {
+                self.shapes.words(ty)
+            },
             Callee::Local(index) => {
                 let planned = &self.plan.functions()[index as usize];
                 if planned.free_generic {
@@ -4011,7 +4127,10 @@ impl<'a> FnLower<'a, '_, '_> {
                     nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
                 });
             },
-            Callee::Local(_) | Callee::Evidence(_) | Callee::Foreign { .. } => {
+            Callee::Local(_)
+            | Callee::Evidence(_)
+            | Callee::Foreign { .. }
+            | Callee::Bound { .. } => {
                 return Err(mismatch("a checked-read callee"));
             },
         }
@@ -4460,4 +4579,26 @@ fn embedded_const_expr(constant: &crate::ComptimeConst, span: Span) -> Result<Ex
             ));
         },
     })
+}
+
+/// The scalar word a written type names, when it is one of the
+/// marshaling slice's atoms (H5): `int` the i64 word, `bool` the bool
+/// word, `float` the f64 word. Shared with the pool constant's return
+/// payload, the same slice the callee resolution validated.
+pub(super) fn scalar_word(ty: &Type) -> Option<SlotType> {
+    let Type::Path { path, args, .. } = ty else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let [one] = &path.segments[..] else {
+        return None;
+    };
+    match one.name.as_str() {
+        "int" => Some(SlotType::I64),
+        "bool" => Some(SlotType::Bool),
+        "float" => Some(SlotType::F64),
+        _ => None,
+    }
 }

@@ -1,6 +1,6 @@
 //! The real `resolve` and `type_of` computes: package-level resolution
 //! and the per-definition typed story, memoized through the engine and
-//! recomputed when the file's parse changes [B2, G3].
+//! recomputed when the file's parse changes `[B2, G3]`.
 
 use std::fmt::Write;
 

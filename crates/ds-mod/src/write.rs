@@ -322,6 +322,12 @@ fn put_constant<S: Sink>(out: &mut S, constant: &Constant) {
             }
             out.uleb(u64::from(*func));
         },
+        Constant::Bound { module, index, ret } => {
+            out.push(5);
+            put_str(out, module);
+            out.uleb(u64::from(*index));
+            out.push(slot_tag(*ret));
+        },
     }
 }
 

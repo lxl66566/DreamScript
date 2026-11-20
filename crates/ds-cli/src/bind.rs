@@ -4,11 +4,12 @@
 //! refusing before anything binds), then binds: the host loader takes
 //! the installed file by its path, and the export reader enumerates the
 //! library's C symbols — the report naming what a source-level extern
-//! round will address. Binding today reports and never calls: the
-//! consumption seam still refuses at lowering until the C-ABI
-//! marshaling round, whose H5 contract clauses (a bound extern means
-//! panic=abort, a blocking foreign call pins its fiber) hold from the
-//! first bound library.
+//! round will address. Binding reports the symbols the consumption seam
+//! routes calls through: a scalar-signature extern binds to the installed
+//! library and calls the symbol at run, the wider marshaling surface
+//! refusing at lowering with the seam named, and the H5 contract clauses
+//! (a bound extern means panic=abort, a blocking foreign call pins its
+//! fiber) hold from the first bound library.
 
 use std::{
     collections::BTreeMap,
@@ -26,7 +27,7 @@ pub struct BindArgs {
     /// Path of a .ds source with a ds.pkg beside it, or of the package
     /// root holding the ds.pkg
     target: PathBuf,
-    /// Bind only the named [artifacts] entry (default: every artifact
+    /// Bind only the named `[artifacts]` entry (default: every artifact
     /// the graph resolves)
     #[arg(long)]
     artifact: Option<String>,

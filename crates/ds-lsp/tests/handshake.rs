@@ -847,6 +847,95 @@ async fn completion_offers_auto_imports_over_the_wire() {
     .expect("the cycle finishes");
 }
 
+/// The std-member wire: the composed candidate set's member half answers
+/// over the wire — the `@std` package's own member (`urls`, the members'
+/// table's name riding inside the merged ambient's own item) behind an
+/// unresolved typed prefix, carrying the fresh `@std` row.
+#[tokio::test]
+async fn completion_offers_the_std_members_over_the_wire() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_std_member.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let source = "fn probe() -> list[string] {\n  url\n}\n";
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        tokio::spawn(async move {
+            ds_lsp::serve(stdin, stdout)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        expect(&mut client, Wanted::Id(1)).await;
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        send(
+            &mut client,
+            &request(
+                2,
+                "textDocument/completion",
+                &json!({
+                    "textDocument": {"uri": uri},
+                    // The cursor sits right after the typed prefix `url`.
+                    "position": {"line": 1, "character": 5},
+                }),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let items = reply["result"]
+            .as_array()
+            .expect("completion answers a list");
+        let item = items
+            .iter()
+            .find(|item| item["label"] == "urls")
+            .expect("the std member answers");
+        let edit = item["additionalTextEdits"]
+            .as_array()
+            .and_then(|edits| edits.first())
+            .expect("the offer imports");
+        assert_eq!(
+            edit["range"],
+            json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}),
+            "{edit}"
+        );
+        assert_eq!(edit["newText"], "import @std (urls)\n\n", "{edit}");
+
+        send(
+            &mut client,
+            r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
 /// Hover's effect row reads the tightest covering expression, not the
 /// enclosing definition: the world-effecting call inside a function whose
 /// definition row also traps answers `world`, the trapping arithmetic
@@ -1567,6 +1656,101 @@ async fn rename_refuses_where_no_member_is_selected() {
         )
         .await;
         let reply = expect(&mut client, Wanted::Id(4)).await;
+        assert!(reply.get("error").is_none(), "{reply}");
+        send(&mut client, &notification("exit", &json!({}))).await;
+    })
+    .await
+    .expect("the cycle finishes");
+}
+
+/// The linked-name hover wire: a document importing `@lib` and using the
+/// selection hovers the served surface's signature line — the provider
+/// the embedder installs over the duplex pair serving what a run of the
+/// same package graph cached beside the dep's compiled module.
+#[tokio::test]
+async fn hover_answers_linked_names_over_the_wire() {
+    timeout(Duration::from_secs(120), async {
+        let uri = Url::from_file_path(std::env::temp_dir().join("ds_lsp_linked.ds"))
+            .expect("the temp path carries a file URI")
+            .to_string();
+        let uri = uri.as_str();
+        let (server, mut client) = tokio::io::duplex(16 << 10);
+        let (stdin, stdout) = tokio::io::split(server);
+        let surface = std::sync::Arc::new(ds_lsp::LinkedSurface {
+            signatures: std::collections::HashMap::from([(
+                "pick".to_owned(),
+                "pub fn pick(n: int) -> int".to_owned(),
+            )]),
+        });
+        let provider = std::sync::Arc::new(move |_doc: &std::path::Path, link: &str| {
+            (link == "@lib").then(|| surface.clone())
+        });
+        tokio::spawn(async move {
+            ds_lsp::serve_with(stdin, stdout, provider)
+                .await
+                .expect("the server serves");
+        });
+
+        send(
+            &mut client,
+            &request(
+                1,
+                "initialize",
+                &json!({"processId": null, "rootUri": null, "capabilities": {}}),
+            ),
+        )
+        .await;
+        expect(&mut client, Wanted::Id(1)).await;
+        send(&mut client, &notification("initialized", &json!({}))).await;
+
+        let source = concat!(
+            "import @lib (pick)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  pick(3)\n",
+            "}\n",
+        );
+        send(
+            &mut client,
+            &notification(
+                "textDocument/didOpen",
+                &json!({"textDocument": {
+                    "uri": uri,
+                    "languageId": "dreamscript",
+                    "version": 1,
+                    "text": source,
+                }}),
+            ),
+        )
+        .await;
+        // The open publishes the unresolved-use diagnostics (the session
+        // carries no package graph); the request loop below skips them.
+
+        // `pick` in the body sits at line 3 chars 2..6.
+        send(
+            &mut client,
+            &request(
+                2,
+                "textDocument/hover",
+                &json!({"textDocument": {"uri": uri}, "position": {"line": 3, "character": 4}}),
+            ),
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(2)).await;
+        let value = reply["result"]["contents"]["value"]
+            .as_str()
+            .expect("the hover carries markdown contents");
+        assert!(
+            value.contains("pub fn pick(n: int) -> int"),
+            "the linked tier's line answers: {value}"
+        );
+
+        send(
+            &mut client,
+            r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#,
+        )
+        .await;
+        let reply = expect(&mut client, Wanted::Id(3)).await;
         assert!(reply.get("error").is_none(), "{reply}");
         send(&mut client, &notification("exit", &json!({}))).await;
     })

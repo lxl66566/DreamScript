@@ -1,7 +1,7 @@
 //! The real `linearity_check` compute: per-definition facts sliced out of
 //! the package's M2 affine pass over the expansion's own trees, memoized
 //! through the engine, and recomputed when the package's expansion changes
-//! [C1, C5].
+//! `[C1, C5]`.
 
 use ds_diag::FileId;
 use ds_query::{BlockId, Db, DefId, LinearityCheck, PackageId, QueryKey, Resolve};

@@ -49,7 +49,7 @@ fn len_prints_distinct_outputs_per_receiver_shape() {
 /// The compiled round trip reproduces the source run exactly.
 #[test]
 fn built_module_reproduces_the_source_run() {
-    let module = env::temp_dir().join("ds_generic_len_probe.dsmod");
+    let module = env::temp_dir().join(format!("ds_generic_len_probe-{}.dsmod", std::process::id()));
     let _ = fs::remove_file(&module);
     let out = ds()
         .arg("build")

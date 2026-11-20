@@ -199,6 +199,8 @@ error_codes! {
     DeriveMemberAnnotation => "DS2038", Type,
     /// A `return` in a value-consumed position: an early exit is a statement, so a block whose value feeds a binding, an argument, or a join arm refuses it (F2).
     ReturnInValuePosition => "DS2039", Type,
+    /// A written type application disagrees with its head declaration: a generic applied with the wrong number of type arguments, or a head that takes none (a tag, a case, a value-namespace name, a non-generic declaration).
+    TypeApplicationMismatch => "DS2040", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -328,6 +330,7 @@ mod tests {
             ("ComptimeCalleeRefusal", "DS2037", ErrorClass::Type),
             ("DeriveMemberAnnotation", "DS2038", ErrorClass::Type),
             ("ReturnInValuePosition", "DS2039", ErrorClass::Type),
+            ("TypeApplicationMismatch", "DS2040", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

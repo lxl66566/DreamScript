@@ -307,14 +307,12 @@ pub fn resolve(
         demands: BTreeMap::new(),
         pins: BTreeMap::new(),
         resolved: BTreeMap::new(),
-        artifacts: BTreeMap::new(),
         queue: VecDeque::new(),
         queued: BTreeSet::new(),
     };
     for (name, bound) in &root.deps {
         walk.record(&root.name, name, *bound)?;
     }
-    walk.record_artifacts(&root.name, &root.artifacts)?;
     while let Some(name) = walk.queue.pop_front() {
         walk.queued.remove(&name);
         let (demanded, dependent) = walk
@@ -374,7 +372,6 @@ pub fn resolve(
                 for (dep, bound) in &provided.manifest.deps {
                     walk.record(&name, dep, *bound)?;
                 }
-                walk.record_artifacts(&name, &provided.manifest.artifacts)?;
                 walk.resolved.insert(name, ResolvedPackage {
                     version: demanded,
                     content_hash: pinned,
@@ -384,15 +381,57 @@ pub fn resolve(
         }
     }
     walk.refuse_cycles(root)?;
+    let artifacts = fold_artifacts(root, &walk.resolved)?;
     Ok(Resolved {
         root: root.clone(),
         deps: walk.resolved,
-        artifacts: walk
-            .artifacts
-            .into_iter()
-            .map(|(name, (bound, _))| (name, bound))
-            .collect(),
+        artifacts,
     })
+}
+
+/// Folds the graph's native artifacts over the settled resolution: the
+/// root's manifest first, then every resolved package's in ascending
+/// name order — only the versions the final graph resolved, so a
+/// version a later demand retired never pins. The first declarer of a
+/// name records it, and a later declarer's disagreement refuses — one
+/// version per name this round, the dep walk's one-slot rule over
+/// exact pins instead of declared minima.
+#[allow(clippy::result_large_err)]
+fn fold_artifacts(
+    root: &Manifest,
+    resolved: &BTreeMap<String, ResolvedPackage>,
+) -> Result<BTreeMap<String, ArtifactBound>, ResolveError> {
+    let mut folded: BTreeMap<String, (ArtifactBound, String)> = BTreeMap::new();
+    let mut record = |dependent: &str,
+                      artifacts: &BTreeMap<String, ArtifactBound>|
+     -> Result<(), ResolveError> {
+        for (name, bound) in artifacts {
+            match folded.get(name) {
+                Some((pinned, first)) if *pinned != *bound => {
+                    return Err(ResolveError::ArtifactConflict {
+                        name: name.clone(),
+                        pinned: pinned.clone(),
+                        found: bound.clone(),
+                        dependent: first.clone(),
+                        declarer: dependent.to_owned(),
+                    });
+                },
+                Some(_) => {},
+                None => {
+                    folded.insert(name.clone(), (bound.clone(), dependent.to_owned()));
+                },
+            }
+        }
+        Ok(())
+    };
+    record(&root.name, &root.artifacts)?;
+    for (name, package) in resolved {
+        record(name, &package.manifest.artifacts)?;
+    }
+    Ok(folded
+        .into_iter()
+        .map(|(name, (bound, _))| (name, bound))
+        .collect())
 }
 
 /// The walk's accumulators.
@@ -407,9 +446,6 @@ struct Walk {
     pins: BTreeMap<(String, Version), (Hash128, String)>,
     /// The manifest at each name's current demanded version.
     resolved: BTreeMap<String, ResolvedPackage>,
-    /// The graph's folded artifacts: each name's agreed bound and the
-    /// first declarer that recorded it (the conflict refusal's dependent).
-    artifacts: BTreeMap<String, (ArtifactBound, String)>,
     /// Names whose demand needs a (re)fetch, in first-raise order; a name
     /// holds at most one pending entry, so one pop means one fetch per
     /// demand raise.
@@ -451,37 +487,6 @@ impl Walk {
                 .insert(name.to_owned(), (bound.ver, dependent.to_owned()));
             if self.queued.insert(name.to_owned()) {
                 self.queue.push_back(name.to_owned());
-            }
-        }
-        Ok(())
-    }
-
-    /// Records one manifest's artifact declarations: the first declarer of
-    /// a name pins it, and a later declarer's disagreement refuses — one
-    /// version per name this round, the dep walk's one-slot rule over
-    /// exact pins instead of declared minima.
-    #[allow(clippy::result_large_err)]
-    fn record_artifacts(
-        &mut self,
-        dependent: &str,
-        artifacts: &BTreeMap<String, ArtifactBound>,
-    ) -> Result<(), ResolveError> {
-        for (name, bound) in artifacts {
-            match self.artifacts.get(name) {
-                Some((pinned, first)) if *pinned != *bound => {
-                    return Err(ResolveError::ArtifactConflict {
-                        name: name.clone(),
-                        pinned: pinned.clone(),
-                        found: bound.clone(),
-                        dependent: first.clone(),
-                        declarer: dependent.to_owned(),
-                    });
-                },
-                Some(_) => {},
-                None => {
-                    self.artifacts
-                        .insert(name.clone(), (bound.clone(), dependent.to_owned()));
-                },
             }
         }
         Ok(())

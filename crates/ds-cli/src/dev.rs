@@ -26,10 +26,12 @@
 //! version: the entry re-enters and the old code keeps running.
 //!
 //! A `ds.pkg` beside the target turns the loop over a package root: the
-//! watched bytes compose the target (the package's entry member) and the
-//! manifest, every changed round re-resolving the manifest graph and
-//! recompiling the root through the same compile `ds run` drives, the
-//! swap installing through the deps-first load walk — an
+//! watched bytes compose every member below the root (the entry among
+//! them) and the manifest, every changed round re-resolving the manifest
+//! graph and recompiling the root through the same compile `ds run`
+//! drives — the root's whole member set composing one namespace (G3), so
+//! a sibling member's edit reloads like the entry's own — the swap
+//! installing through the deps-first load walk — an
 //! already-installed dep validates at its recorded identity and skips,
 //! so only the root's slot moves. A linked dep's members join the watch
 //! through the manifest's pins — the store serves content-addressed
@@ -136,9 +138,10 @@ struct DevSession {
     path: PathBuf,
     /// The last watched bytes a round loaded: the poll gate, so an
     /// unchanged watch costs one read and a refused round reports once
-    /// per distinct content — the target alone for a script, the target
-    /// and the manifest composed for a package root. `None` until the
-    /// first load — an empty source is a load too, not "never loaded".
+    /// per distinct content — the target alone for a script, every
+    /// member plus the manifest composed for a package root. `None`
+    /// until the first load — an empty source is a load too, not
+    /// "never loaded".
     loaded: Option<String>,
     name: String,
     entry: String,
@@ -211,7 +214,8 @@ impl DevSession {
     /// to restart on. The poll interval is therefore also the parked
     /// entry's tick rate: the program advances one park per round
     /// whether or not the watch changed, so a loop-driving entry keeps
-    /// running while the host watches.
+    /// running while the host watches. A package root's watch composes
+    /// every member below the root, so a sibling edit is a change.
     fn round(&mut self, watched: Option<&str>) -> Result<()> {
         let mut installed = false;
         if let Some(watched) = watched.filter(|watched| self.loaded.as_deref() != Some(watched)) {
@@ -390,7 +394,16 @@ impl DevSession {
                 return None;
             },
         };
-        let compiled = match package::compile_root(path, entry, &graph, None) {
+        // the round's graph binds its artifacts into the session's VM
+        // (H5) ahead of the compile and the walk: the same install the
+        // run path performs, so a bound extern dev-sessions like it runs.
+        // A load that refused leaves the artifact uninstalled and a
+        // binding module answers the standard install refusal per round
+        let (modules, _) = graph.bound_modules();
+        for (name, module) in modules {
+            vm.install_bound(&name, module);
+        }
+        let compiled = match package::compile_root(path, entry, &graph, false, None, None) {
             Ok(compiled) => compiled,
             Err(error) => {
                 eprintln!("dev: {error:#}");
@@ -415,7 +428,7 @@ impl DevSession {
             if !moved {
                 continue;
             }
-            let module = match graph.serve(name) {
+            let module = match graph.serve(name, None) {
                 Ok(Some(module)) => module,
                 // identities hold resolved names, so a miss here names a
                 // graph the walk would refuse anyway
@@ -451,7 +464,7 @@ impl DevSession {
         // provider closure
         let failed = RefCell::new(None);
         let walk = vm.load(compiled.lowered.into_module(), |dep, _| {
-            match graph.serve(dep) {
+            match graph.serve(dep, None) {
                 Ok(module) => module,
                 Err(error) => {
                     *failed.borrow_mut() = Some(error);
@@ -613,40 +626,60 @@ impl DevSession {
     }
 }
 
-/// The watched bytes' first read: the target alone for a script, the
-/// target and the manifest composed for a package root — the poll gate
-/// compares the composed string, so a member edit or a manifest edit
-/// is one change.
+/// The watched bytes' first read: the target alone for a script, every
+/// member below the root plus the manifest for a package root — the
+/// poll gate compares the composed string, so any member edit or a
+/// manifest edit is one change.
 fn read_watched(path: &Path, manifest: Option<&Path>) -> Result<String> {
-    let target =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let Some(manifest) = manifest else {
-        return Ok(target);
+        return std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()));
     };
-    let manifest_text = std::fs::read_to_string(manifest)
-        .with_context(|| format!("reading {}", manifest.display()))?;
-    Ok(target + "\0" + &manifest_text)
+    let mut parts = Vec::new();
+    for member in package::walk_sources(&watch_root(manifest))? {
+        parts.push(
+            std::fs::read_to_string(&member)
+                .with_context(|| format!("reading {}", member.display()))?,
+        );
+    }
+    parts.push(
+        std::fs::read_to_string(manifest)
+            .with_context(|| format!("reading {}", manifest.display()))?,
+    );
+    Ok(parts.join("\0"))
 }
 
 /// One poll's read of the watched bytes: an editor's atomic replace can
 /// leave a transient miss, so a read failure reports and answers `None`
 /// — the previous version keeps running and the next poll retries.
 fn poll_watched(path: &Path, manifest: Option<&Path>) -> Option<String> {
-    let target = match std::fs::read_to_string(path) {
-        Ok(text) => text,
+    let Some(manifest) = manifest else {
+        return std::fs::read_to_string(path).ok();
+    };
+    let mut parts = Vec::new();
+    let members = match package::walk_sources(&watch_root(manifest)) {
+        Ok(members) => members,
         Err(error) => {
             eprintln!(
                 "dev: reading {} failed ({error}); still watching",
-                path.display()
+                watch_root(manifest).display()
             );
             return None;
         },
     };
-    let Some(manifest) = manifest else {
-        return Some(target);
-    };
-    let manifest_text = match std::fs::read_to_string(manifest) {
-        Ok(text) => text,
+    for member in members {
+        match std::fs::read_to_string(&member) {
+            Ok(text) => parts.push(text),
+            Err(error) => {
+                eprintln!(
+                    "dev: reading {} failed ({error}); still watching",
+                    member.display()
+                );
+                return None;
+            },
+        }
+    }
+    match std::fs::read_to_string(manifest) {
+        Ok(text) => parts.push(text),
         Err(error) => {
             eprintln!(
                 "dev: reading {} failed ({error}); still watching",
@@ -654,8 +687,18 @@ fn poll_watched(path: &Path, manifest: Option<&Path>) -> Option<String> {
             );
             return None;
         },
-    };
-    Some(target + "\0" + &manifest_text)
+    }
+    Some(parts.join("\0"))
+}
+
+/// The package root a manifest sits in: the manifest's own directory
+/// (`.` when it sits in the working directory), the tree the member
+/// watch walks.
+fn watch_root(manifest: &Path) -> PathBuf {
+    manifest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// Runs the dev loop: the first round compiles and drives, then `--hot`

@@ -55,17 +55,24 @@ pub enum LoadError {
 /// Memory-maps `path` read-only and parses the module from the mapped
 /// bytes.
 ///
+/// # Safety
+///
+/// The caller guarantees the file is neither truncated nor rewritten in
+/// place for as long as the returned [`MappedModule`] lives: mapping a
+/// file that shrinks or mutates under the mapping is undefined behavior
+/// (`Mmap::map`'s own contract, which the type system cannot carry). The
+/// in-tree discipline is the content-addressed cache artifact, written
+/// by temp-plus-rename and never touched again, so each caller states
+/// that guarantee at its own `unsafe` block.
+///
 /// # Errors
 ///
 /// Returns [`LoadError::Io`] for open/map failures and
 /// [`LoadError::Format`] with the first structural [`ReadError`] found.
-pub fn read_mmap(path: &Path) -> Result<MappedModule, LoadError> {
+pub unsafe fn read_mmap(path: &Path) -> Result<MappedModule, LoadError> {
     let file = File::open(path)?;
-    // SAFETY: mapping a file another process truncates while we hold the
-    // read-only map would be undefined behavior. DreamScript cache files
-    // are content-addressed (`ir/<triple>/<hash>.dsmod`) and immutable
-    // once written, so callers must only map such stable artifacts. The
-    // map keeps `file` open for the lifetime of the returned value.
+    // SAFETY: the caller owns the file-stability contract this
+    // function's safety section documents.
     let map = unsafe { Mmap::map(&file) }?;
     let module = crate::read(&map)?;
     Ok(MappedModule { map, module })

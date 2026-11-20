@@ -602,6 +602,49 @@ fn a_second_artifact_identity_under_one_name_refuses() {
 }
 
 #[test]
+fn a_lifted_dep_retires_its_superseded_artifact_pin() {
+    // c@1.0.0 and c@2.0.0 each declare `libfoo` at different hashes; d
+    // lifts c to 2.0.0 after the walk fetched 1.0.0 — the retired
+    // version's declaration never pins: the fold reads the settled
+    // graph, so the diamond resolves with c@2.0.0's pin instead of
+    // fabricating a conflict with c@1.0.0's
+    let pin_1 = Hash128::new([0x11; 16]);
+    let pin_2 = Hash128::new([0x22; 16]);
+    let c_10 = package_of(&manifest_with_artifact(
+        "c",
+        "1.0.0",
+        &[],
+        "libfoo",
+        "1.0.0",
+        "x86_64-pc-windows-msvc",
+        pin_1,
+    ));
+    let c_20 = package_of(&manifest_with_artifact(
+        "c",
+        "2.0.0",
+        &[],
+        "libfoo",
+        "1.0.0",
+        "x86_64-pc-windows-msvc",
+        pin_2,
+    ));
+    let d = package_of(&manifest_of("d", "1.0.0", &[(
+        "c",
+        "2.0.0",
+        c_20.content_hash(),
+    )]));
+    let root = manifest_of("app", "1.0.0", &[
+        ("c", "1.0.0", c_10.content_hash()),
+        ("d", "1.0.0", d.content_hash()),
+    ]);
+    let mut registry = Registry::new(&[c_10, c_20, d]);
+    let resolved =
+        resolve(&root, |name, ver| registry.fetch(name, ver)).expect("the lifted diamond resolves");
+    assert_eq!(resolved.deps()["c"].version, Version::new(2, 0, 0));
+    assert_eq!(resolved.artifacts()["libfoo"].hash, pin_2);
+}
+
+#[test]
 fn an_artifact_edit_rekeys_the_lock() {
     // two roots differing only in the artifact's pin produce different
     // locks: the artifact identity flows into the lock bytes

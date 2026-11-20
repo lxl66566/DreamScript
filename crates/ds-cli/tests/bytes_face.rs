@@ -74,7 +74,7 @@ fn the_bytes_face_runs_over_the_ambient() {
 /// The built round trip reproduces the source run exactly.
 #[test]
 fn built_module_reproduces_the_source_run() {
-    let module = env::temp_dir().join("ds_bytes_face_probe.dsmod");
+    let module = env::temp_dir().join(format!("ds_bytes_face_probe-{}.dsmod", std::process::id()));
     let _ = fs::remove_file(&module);
     let build = run(ds()
         .arg("build")

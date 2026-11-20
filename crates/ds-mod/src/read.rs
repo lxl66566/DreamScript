@@ -403,6 +403,16 @@ fn parse_constant(p: &mut Cursor<'_>, dep_count: usize) -> Result<Constant, Read
                 .map_err(|_| malformed(at, "FuncRef function index exceeds u32"))?;
             Ok(Constant::FuncRef { key, func })
         },
+        5 => {
+            let module = p.utf8()?.to_owned();
+            let index = p.uleb()?;
+            let index = u32::try_from(index)
+                .map_err(|_| malformed(at, "bound symbol index exceeds u32"))?;
+            let ret_at = p.abs();
+            let ret = slot_from_tag(p.u8()?)
+                .ok_or_else(|| malformed(ret_at, "unknown bound return slot type"))?;
+            Ok(Constant::Bound { module, index, ret })
+        },
         _ => Err(malformed(at, "unknown constant tag")),
     }
 }

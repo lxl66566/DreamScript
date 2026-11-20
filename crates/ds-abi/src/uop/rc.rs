@@ -1,5 +1,5 @@
 //! The M4 reference-counting ops (C4): RCINC/RCDEC in the reserved major
-//! 0xE of the fixed 32-bit format [BL-1].
+//! 0xE of the fixed 32-bit format `[BL-1]`.
 //!
 //! These live beside [`super::Uop`](crate::uop::Uop) instead of inside it
 //! on purpose: the tier-1 dispatch match stays exhaustive over `Uop`, and
@@ -48,7 +48,7 @@ pub enum RcOp {
 }
 
 impl RcOp {
-    /// The opcode byte: `major << 4 | minor`, matching the [BL-1] pair the
+    /// The opcode byte: `major << 4 | minor`, matching the `[BL-1]` pair the
     /// `Uop` encoding uses.
     #[must_use]
     pub fn opcode(&self) -> u8 {

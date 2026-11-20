@@ -1,11 +1,12 @@
-// source: the list and map structural equality round 2026-11-18 (todo item 5's collection-equality slice, B9)
-// purpose: structural ==/!= over the collections' one Ref word dispatch the content-compare natives — nested collections compose (a list of lists, a map over list values, a struct field of list and map type), and in membership compares the element by its type (a list element over a list of lists, a struct element whose fields are collections); the spelled refusal (a union element without content equality) lives in collection_equality_refusal.ds
+// source: the list and map structural equality round 2026-11-18 (todo item 5's collection-equality slice, B9), the bit-structural float judge round 2026-11-21 (the 2026-11-21 ruling closing review B10)
+// purpose: structural ==/!= over the collections' one Ref word dispatch the content-compare natives — nested collections compose (a list of lists, a map over list values, a struct field of list and map type), and in membership compares the element by its type (a list element over a list of lists, a struct element whose fields are collections); the float judge is the one bit-structural word equality everywhere (scalar ==, in, collection content equality, and map key matching: a NaN is reflexive, the two zeros distinct), and the spelled refusal (a union element without content equality) lives in collection_equality_refusal.ds
 // items:
 // holds: stage: run
 // nested-rows: stage: run
 // matrix-rows: stage: run
 // field-rows: stage: run
 // member-rows: stage: run
+// float-rows: stage: run
 // main: stage: run
 
 struct holds { tags: list[string], table: map[string, int] }
@@ -51,9 +52,41 @@ fn member_rows() -> bool {
   ["a"] in xs && !(["c"] in xs) && holds { tags: ["x"], table: t1 } in group && !(holds { tags: ["q"], table: t1 } in group)
 }
 
+// the one bit-structural judge over floats: scalar == and in, collection
+// content equality, and map key matching all answer the same — a NaN
+// equals itself (reflexive), the two zeros differ, a NaN key overwrites
+// its own row, and the two zeros hold two distinct findable rows
+fn float_rows() -> bool {
+  const n = 0.0 / 0.0
+  const z = 0.0
+  const nz = parse_float("-0").ok((v: float) => v).err((_: parse_err) => 0.0)
+  const scalar = n == n && !(z == nz)
+  const lists = [n] == [n] && !([z] == [nz])
+  const member = n in [n] && !(nz in [z])
+  var nans = map[float, int]()
+  map_set(nans, n, 1)
+  map_set(nans, n, 2)
+  const nan_rows = map_len(nans) == 1 && match map_get(nans, n) {
+    none => false
+    v => v == 2
+  }
+  var zeros = map[float, int]()
+  map_set(zeros, z, 1)
+  map_set(zeros, nz, 2)
+  const zero_rows = map_len(zeros) == 2 && match map_get(zeros, z) {
+    none => false
+    v => v == 1
+  } && match map_get(zeros, nz) {
+    none => false
+    v => v == 2
+  }
+  scalar && lists && member && nan_rows && zero_rows
+}
+
 fn main() -> () {
   println("nested ${nested_rows()}")
   println("matrix ${matrix_rows()}")
   println("fields ${field_rows()}")
   println("member ${member_rows()}")
+  println("float ${float_rows()}")
 }

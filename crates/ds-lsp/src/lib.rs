@@ -35,9 +35,10 @@
 //! decided by probe parses of the source with the prefix replaced, so
 //! every offered expansion parses where it lands), prefix ranking over
 //! every completion answer, and auto-import offers behind an unresolved
-//! typed prefix (the exported ambient members whose names prefix-match,
-//! each item carrying the edit that inserts or merges the `@std` import
-//! row the file needs; private and `pub(pkg)` names never offered),
+//! typed prefix (the exported ambient members and the `@std` package's
+//! own members whose names prefix-match, each item carrying the edit
+//! that inserts or merges the `@std` import row the file needs; private
+//! and `pub(pkg)` names never offered),
 //! references through the
 //! resolve value's
 //! reverse-edge index (every use resolving to the same target across the
@@ -86,12 +87,14 @@
 //!   alone (never on the empty prefix, never at a member or type position), and only where its
 //!   probe-decided site makes the expansion parse — a document broken beyond the prefix answers
 //!   none. Auto-import serves a bare-name or type position behind an unresolved typed prefix alone
-//!   (never at a member position, never on the empty prefix): the exported ambient members whose
-//!   names prefix-match carry the edit that merges into a plain existing `@std` row or inserts a
-//!   fresh one grouped with the file's imports — private and `pub(pkg)` names never offered, the
-//!   checker's own export gate — and under the merged-ambient reading every such name is visible
-//!   anyway, so the edit is the forward-compatible spelling until the un-merge widens the candidate
-//!   set to the linked packages.
+//!   (never at a member position, never on the empty prefix): the exported ambient members and the
+//!   `@std` package's own members (the tree's sources, the same export gate) whose names
+//!   prefix-match carry the edit that merges into a plain existing `@std` row or inserts a fresh
+//!   one grouped with the file's imports — private and `pub(pkg)` names never offered. Under the
+//!   merged registration the members ride inside the ambient, so every such name is visible anyway
+//!   and the edit is the forward-compatible spelling; a core-shaped registration (a declaring
+//!   graph's) carries none of them, and each member joins the answer as its own item — while the
+//!   session runs no link pass, so the row's own validation stays in the graph's compile.
 //! * Rename is a plain identifier substitution over the target's declaration and the uses the
 //!   resolution table recorded — no formatting, and no comment or string awareness (comments and
 //!   strings sit outside every recorded span by construction). A member's edit set covers its own
@@ -108,8 +111,12 @@
 //!   zero-option canonical form: the client's tab-size and insert-spaces options are unaccepted, a
 //!   poisoned parse answers nothing (broken code never reformats its neighbors), and one trimmed
 //!   edit covers the changed middle of the region alone, never the whole document.
-//! * `.dsi` hover waits on the interface-artifact round (M7); hover answers the checked type of the
-//!   expression at the position.
+//! * `.dsi` hover serves three tiers: the checked type of the expression at the position, the `pub`
+//!   package declaration's signature line when the position names one, and — for a name one of the
+//!   package's imports selects that the session's package-free resolution left unknown — the linked
+//!   tier's line from the embedder's surface provider, the `.dsi` artifact a run of the same
+//!   package graph cached beside the dep's compiled module (the ambient path answers through the
+//!   ambient's own parse, never the provider).
 //! * Ambient stdlib names resolve (the ambient registers first), but the ambient file has no client
 //!   URI, so definitions pointing into it answer none.
 //! * Change and save notifications defer their diagnostics publish through a short trailing
@@ -151,6 +158,28 @@ struct HoverAnswer {
     contents: String,
     /// The source range the answer covers.
     range: lsp::Range,
+}
+
+/// One linked package's served `.dsi` surface: each exported name with
+/// its signature line, the rendering a run of the same package graph
+/// cached beside the dep's compiled module. The embedder builds this
+/// from the written artifact; the server only reads it.
+#[derive(Debug, Clone)]
+pub struct LinkedSurface {
+    /// Each exported definition's `.dsi` signature line, keyed by name.
+    pub signatures: std::collections::HashMap<String, String>,
+}
+
+/// The embedder's linked-surface provider: one document's path and one
+/// import's link name to the surface that name serves, `None` when
+/// nothing serves it (no manifest beside the document, no resolved
+/// graph, no cached compile). The call must not re-enter the session.
+pub type SurfaceProvider =
+    std::sync::Arc<dyn Fn(&Path, &str) -> Option<std::sync::Arc<LinkedSurface>> + Send + Sync>;
+
+/// The provider that serves nothing: the bare server's linked tier.
+fn no_surface() -> SurfaceProvider {
+    std::sync::Arc::new(|_doc: &Path, _link: &str| None)
 }
 
 /// The reply channel of one worker command.
@@ -301,6 +330,56 @@ fn fresh_name(name: &str) -> bool {
     ds_parse::parse(&files, file).is_ok()
 }
 
+/// The word covering the byte offset (an identifier's contiguous
+/// alphanumeric-and-underscore run), when the offset sits inside one or
+/// just past its last character. Word characters are ASCII, so the run's
+/// ends are always char boundaries.
+fn word_at(src: &str, offset: u32) -> Option<(String, u32, u32)> {
+    let bytes = src.as_bytes();
+    let mut at = (offset as usize).min(bytes.len());
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    // a cursor just past the word's last character still names it
+    if at == bytes.len() || !is_word(bytes[at]) {
+        at = at.checked_sub(1)?;
+    }
+    if at >= bytes.len() || !is_word(bytes[at]) {
+        return None;
+    }
+    let mut start = at;
+    while start > 0 && is_word(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at + 1;
+    while end < bytes.len() && is_word(bytes[end]) {
+        end += 1;
+    }
+    Some((
+        src.get(start..end)?.to_owned(),
+        u32::try_from(start).expect("the offset came from a u32"),
+        u32::try_from(end).expect("the offset came from a u32"),
+    ))
+}
+
+/// The link name one import declaration links under (G3.5): an
+/// at-sigil path's package stem with the sigil, a bare path whole — the
+/// one rule the dep-list writer, the link positions, and the surface
+/// builder all derive from.
+fn link_name(import: &ds_parse::ImportDecl) -> String {
+    let mut name = String::new();
+    if import.path.at_sign {
+        name.push('@');
+        name.push_str(&import.path.segments[0].name);
+    } else {
+        for (at, segment) in import.path.segments.iter().enumerate() {
+            if at > 0 {
+                name.push('/');
+            }
+            name.push_str(&segment.name);
+        }
+    }
+    name
+}
+
 /// One open (or once-opened) document: its file id and the client's own
 /// URI spelling, which answers echo verbatim instead of re-synthesizing
 /// a URI from the decoded path (a path that is not valid UTF-8 cannot
@@ -336,22 +415,53 @@ struct Session {
     /// How many times the token walk has actually run (test
     /// introspection; cache hits are invisible here by design).
     token_walks: usize,
+    /// The embedder's linked-surface tier: the `.dsi` artifacts a run of
+    /// the document's own package graph cached, consulted only after the
+    /// session's own resolution tiers answer nothing (the session
+    /// carries no package graph, so an import-bound def resolves
+    /// nothing).
+    linked: SurfaceProvider,
 }
 
 impl Session {
     /// A session with the stdlib ambient registered as the package's
-    /// first member (G3): stdlib names resolve in every document, and the
-    /// ambient's file id never gains a client URI.
+    /// first member (G3): stdlib names resolve in every document, and
+    /// the ambient's file id never gains a client URI.
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_linked(no_surface())
+    }
+
+    /// [`Session::new`] over the embedder's linked-surface provider.
+    fn with_linked(linked: SurfaceProvider) -> Self {
+        Self::with_ambient(linked, ds_stdlib::AMBIENT_SOURCE)
+    }
+
+    /// A session over the shrunk ambient core: a declaring graph's
+    /// registration shape, where the migrated `@std` members are not
+    /// ambient members and stay unknown bare — the session runs no link
+    /// pass, so an `@std` row's selection keeps its validation in the
+    /// graph's compile alone. The auto-import tier's members' table
+    /// serves the offers over this shape.
+    #[cfg(test)]
+    fn over_core_ambient() -> Self {
+        Self::with_ambient(no_surface(), ds_stdlib::AMBIENT_CORE_SOURCE)
+    }
+
+    /// [`Session::with_linked`] over a chosen ambient registration: the
+    /// merged source every undeclaring registration serves, or the shrunk
+    /// core a declaring graph's registration takes.
+    fn with_ambient(linked: SurfaceProvider, ambient_source: &str) -> Self {
         let mut db = Db::with_declared_rows(ds_stdlib::declared_rows().clone())
             .with_world_caps(ds_stdlib::world_caps().clone());
-        let ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+        let ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ambient_source);
         Self {
             db,
             docs: FxHashMap::default(),
             ambient,
             token_cache: FxHashMap::default(),
             token_walks: 0,
+            linked,
         }
     }
 
@@ -465,8 +575,12 @@ impl Session {
     /// recorded expression covers the position), preceded by the `.dsi`
     /// signature spelling when the position names a `pub` package
     /// declaration — the same line `ds info` prints for that declaration.
+    /// A name one of the package's imports selects that resolution could
+    /// not bind answers the linked tier's line when the embedder serves
+    /// that package's cached `.dsi`.
     fn hover(
         &mut self,
+        path: &Path,
         file: FileId,
         line: u32,
         character: u32,
@@ -532,8 +646,15 @@ impl Session {
             range = Some(convert::range(self.db.files(), Span::new(file, start, end)));
         }
         // The exported-surface half: a name resolving to a `pub` package
-        // declaration answers its signature spelling first.
-        if let Some((signature, name_range)) = self.surface(file, offset)? {
+        // declaration answers its signature spelling first; a name one of
+        // the package's imports selects — the import-bound def the
+        // session's package-free resolution left unknown — answers the
+        // linked tier's line instead, never displacing a resolved name.
+        let linked = match self.surface(file, offset)? {
+            Some(found) => Some(found),
+            None => self.linked_surface(path, file, offset),
+        };
+        if let Some((signature, name_range)) = linked {
             contents = if contents.is_empty() {
                 format!("```dreamscript\n{signature}\n```")
             } else {
@@ -543,10 +664,67 @@ impl Session {
         }
         match range {
             Some(range) => Ok(Some(HoverAnswer { contents, range })),
-            // Neither a checked expression nor a package-declared name:
-            // no answer.
+            // Neither a checked expression, a package-declared name, nor
+            // an import-selected one: no answer.
             None => Ok(None),
         }
+    }
+
+    /// The linked-name tier: a word one of the open documents' imports
+    /// selects — the import-bound def the session's package-free
+    /// resolution left unknown — answers its `.dsi` signature line from
+    /// the embedder's surface provider, covering the word's range. A
+    /// selection's alias binds the name the way the checker's link pass
+    /// would, so both spellings serve; a word nothing selects answers
+    /// nothing, exactly as before.
+    fn linked_surface(
+        &mut self,
+        path: &Path,
+        file: FileId,
+        offset: u32,
+    ) -> Option<(String, lsp::Range)> {
+        let (word, start, end) = word_at(self.db.files().source(file), offset)?;
+        // every open document's imports: the selection may sit in another
+        // member of the package (the cross-document hover precedent)
+        let mut hits = Vec::new();
+        for doc in self.docs.values() {
+            let Ok(parse) = self.db.get::<ParseFile>(doc.file) else {
+                continue;
+            };
+            let Some(ast) = &parse.ast else {
+                continue;
+            };
+            for import in ast
+                .blocks
+                .iter()
+                .flat_map(|block| block.items.iter())
+                .filter_map(|item| match &item.kind {
+                    ds_parse::ItemKind::Import(import) => Some(import),
+                    _ => None,
+                })
+            {
+                for selection in &import.select {
+                    let binds = selection
+                        .alias
+                        .as_ref()
+                        .unwrap_or(&selection.name)
+                        .name
+                        .as_str();
+                    if binds == word {
+                        hits.push((link_name(import), selection.name.name.clone()));
+                    }
+                }
+            }
+        }
+        let (package, selected) = hits.first()?;
+        let line = (self.linked)(path, package)?
+            .signatures
+            .get(selected)?
+            .clone();
+        Some((
+            line,
+            convert::range(self.db.files(), Span::new(file, start, end)),
+        ))
     }
 
     /// The `.dsi` signature spelling of the name at the position: the
@@ -1381,11 +1559,11 @@ impl Session {
 /// holds only the `Send` channel. The stack is generous (16 MiB) for the
 /// checker's recursive walks, mirroring the parse seam's own
 /// dedicated-stack arrangement.
-fn spawn_worker() -> mpsc::Sender<Request> {
+fn spawn_worker(linked: SurfaceProvider) -> mpsc::Sender<Request> {
     let (tx, rx) = mpsc::channel::<Request>();
     std::thread::Builder::new()
         .stack_size(16 << 20)
-        .spawn(move || worker(&rx))
+        .spawn(move || worker(&rx, linked))
         .expect("the engine worker thread spawns");
     tx
 }
@@ -1394,8 +1572,8 @@ fn spawn_worker() -> mpsc::Sender<Request> {
 /// each command's oneshot. Engine errors and panics become reply
 /// strings, never thread deaths; `shutdown` drops the session (so its
 /// database dies before the reply lands) and ends the thread.
-fn worker(rx: &mpsc::Receiver<Request>) {
-    let mut session = Some(Session::new());
+fn worker(rx: &mpsc::Receiver<Request>, linked: SurfaceProvider) {
+    let mut session = Some(Session::with_linked(linked));
     while let Ok(request) = rx.recv() {
         if let Request::Shutdown { reply } = request {
             session.take();
@@ -1466,7 +1644,7 @@ fn handle(request: Request, session: &mut Session) {
             let answer = guarded(move || {
                 session.file(&path).map_or(Ok(None), |file| {
                     session
-                        .hover(file, line, character)
+                        .hover(&path, file, line, character)
                         .map_err(|error| error.to_string())
                 })
             });
@@ -1636,7 +1814,23 @@ where
     I: tokio::io::AsyncRead + Unpin,
     O: tokio::io::AsyncWrite + Unpin,
 {
-    let (service, socket) = LspService::new(server::Backend::spawn);
+    serve_with(stdin, stdout, no_surface()).await
+}
+
+/// [`serve`] over the embedder's linked-surface provider: the CLI hands
+/// the provider that serves the `.dsi` artifacts a run of the edited
+/// package's graph cached, so hover over an import-bound name answers
+/// its signature line.
+///
+/// # Errors
+///
+/// Stream failures only; the engine's diagnostics are published as data.
+pub async fn serve_with<I, O>(stdin: I, stdout: O, linked: SurfaceProvider) -> Result<()>
+where
+    I: tokio::io::AsyncRead + Unpin,
+    O: tokio::io::AsyncWrite + Unpin,
+{
+    let (service, socket) = LspService::new(move |client| server::Backend::spawn(client, linked));
     Server::new(stdin, stdout, socket).serve(service).await;
     Ok(())
 }
@@ -1863,7 +2057,7 @@ mod tests {
         // The position sits inside the string literal (chars 21..25),
         // whose checked type is the ambient's `string`.
         let answer = session
-            .hover(file, 0, 22)
+            .hover(Path::new("a.ds"), file, 0, 22)
             .expect("the pass runs")
             .expect("the string literal covers the position");
         assert!(answer.contents.contains("string"), "{}", answer.contents);
@@ -1883,7 +2077,7 @@ mod tests {
         );
         // `trim` sits at chars 21..25; the cursor lands on its `r`.
         let answer = session
-            .hover(file, 0, 22)
+            .hover(Path::new("a.ds"), file, 0, 22)
             .expect("the pass runs")
             .expect("the call covers the position");
         assert!(
@@ -1915,7 +2109,7 @@ mod tests {
         );
         // `open_api` sits at line 1 chars 2..10; the cursor lands on its `p`.
         let answer = session
-            .hover(user, 1, 5)
+            .hover(Path::new("main.ds"), user, 1, 5)
             .expect("the pass runs")
             .expect("the call covers the position");
         assert!(
@@ -1941,7 +2135,7 @@ mod tests {
         // `hidden` in main's body sits at line 5 chars 2..8; the cursor
         // lands on its `i`.
         let answer = session
-            .hover(file, 5, 4)
+            .hover(Path::new("a.ds"), file, 5, 4)
             .expect("the pass runs")
             .expect("the call covers the position");
         assert!(
@@ -1950,6 +2144,113 @@ mod tests {
             answer.contents
         );
         assert!(answer.contents.contains("int"), "{}", answer.contents);
+    }
+
+    /// One linked surface the provider tier serves: the `@lib` fixture's
+    /// exported `pick`, spelled as its cached `.dsi` renders it.
+    fn lib_surface() -> std::sync::Arc<LinkedSurface> {
+        std::sync::Arc::new(LinkedSurface {
+            signatures: std::collections::HashMap::from([(
+                "pick".to_owned(),
+                "pub fn pick(n: int) -> int".to_owned(),
+            )]),
+        })
+    }
+
+    fn linking_session() -> Session {
+        Session::with_linked(std::sync::Arc::new(|doc: &Path, link: &str| {
+            (link == "@lib" && doc.file_name().is_some_and(|name| name == "main.ds"))
+                .then(lib_surface)
+        }))
+    }
+
+    /// Hovering a name an import selects — a use the session's
+    /// package-free resolution leaves unknown — answers the linked
+    /// tier's `.dsi` line from the embedder's provider, at the use and
+    /// at the selection itself alike.
+    #[test]
+    fn hover_answers_a_linked_names_signature() {
+        let mut session = linking_session();
+        let file = open(
+            &mut session,
+            "main.ds",
+            "import @lib (pick)\n\nfn main() -> int {\n  pick(3)\n}\n",
+        );
+        // `pick` in the body sits at line 3 chars 2..6; the cursor lands
+        // on its `i`.
+        let answer = session
+            .hover(Path::new("main.ds"), file, 3, 4)
+            .expect("the pass runs")
+            .expect("the linked tier answers");
+        assert!(
+            answer.contents.contains("pub fn pick(n: int) -> int"),
+            "{}",
+            answer.contents
+        );
+        // the selection in the import row answers the same line
+        let answer = session
+            .hover(Path::new("main.ds"), file, 0, 15)
+            .expect("the pass runs")
+            .expect("the selection answers");
+        assert!(
+            answer.contents.contains("pub fn pick(n: int) -> int"),
+            "{}",
+            answer.contents
+        );
+    }
+
+    /// The linked tier never displaces the session's own answers: an
+    /// ambient name resolves through the ambient's parse and keeps its
+    /// own `.dsi` line even when a provider offers a bogus one for the
+    /// same name, and a word no import selects answers nothing.
+    #[test]
+    fn the_linked_tier_never_displaces_resolution() {
+        let mut session = Session::with_linked(std::sync::Arc::new(|_doc, link| {
+            (link == "@std").then(|| {
+                std::sync::Arc::new(LinkedSurface {
+                    signatures: std::collections::HashMap::from([(
+                        "trim".to_owned(),
+                        "pub fn trim(s: bogus) -> bogus".to_owned(),
+                    )]),
+                })
+            })
+        }));
+        let file = open(
+            &mut session,
+            "a.ds",
+            "const text: string = trim(\" hi \")\n",
+        );
+        let answer = session
+            .hover(Path::new("a.ds"), file, 0, 22)
+            .expect("the pass runs")
+            .expect("the ambient name answers");
+        assert!(
+            answer
+                .contents
+                .contains("pub extern fn trim(s: string) -> string"),
+            "the ambient path answers through the ambient's own parse: {}",
+            answer.contents
+        );
+        assert!(
+            !answer.contents.contains("bogus"),
+            "the provider never displaces a resolved name: {}",
+            answer.contents
+        );
+        // a word no import selects answers no `.dsi` line: an unresolved
+        // name's hover keeps whatever checked-expression answer covers it
+        // (here the enclosing body's annotated type) and never a
+        // provider's guess
+        let file = open(&mut session, "c.ds", "fn main() -> int {\n  nowhere\n}\n");
+        let answer = session
+            .hover(Path::new("c.ds"), file, 1, 4)
+            .expect("the pass runs");
+        if let Some(answer) = answer {
+            assert!(
+                !answer.contents.contains("pub "),
+                "an unknown name no import selects renders no surface line: {}",
+                answer.contents
+            );
+        }
     }
 
     /// Completion answers the names visible at the position: the
@@ -2545,6 +2846,205 @@ mod tests {
         );
     }
 
+    /// The composed candidate set serves the `@std` package's own members
+    /// under the merged registration: the members ride inside the ambient,
+    /// so the scope answer lists them and the tier enriches those items
+    /// with the same row edit — a prefix that spells a member exactly names
+    /// a visible name, so nothing imports. Accepting an offer leaves a
+    /// document that checks clean: the merged namespace validates the
+    /// row's selection.
+    #[test]
+    fn auto_import_offers_the_std_members_under_the_merged_registration() {
+        let mut session = Session::new();
+        // The value-namespace member behind a partial prefix.
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn probe_urls() -> list[string] {\n  url\n}\n",
+        );
+        // The cursor sits right after the typed prefix `url` on line 1.
+        let items = session.completion(file, 1, 5).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "urls")
+            .expect("the std member answers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(edits[0].new_text, "import @std (urls)\n\n");
+        // Accepting the offer checks clean: the row selects the exported
+        // member, and the body reads it.
+        let accepted = "import @std (urls)\n\nfn probe_urls() -> list[string] {\n  urls\n}\n";
+        session
+            .set(Path::new("a.ds"), accepted)
+            .expect("the accept applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the imported document checks clean"
+        );
+        // The type-namespace members answer at a type position behind a
+        // partial prefix: the config struct constructs and reads, while
+        // the opaque response binds its name in a signature — its value
+        // uses keep the M3 refusal, a checker matter that never gates the
+        // offer.
+        let file = open(
+            &mut session,
+            "b.ds",
+            "fn probe_config(c: confi) -> int {\n  1\n}\n",
+        );
+        // The cursor sits right after `confi` in the parameter's type.
+        let items = session.completion(file, 0, 24).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "config")
+            .expect("the std member answers");
+        assert_eq!(
+            item.additional_text_edits
+                .as_ref()
+                .expect("the offer imports")[0]
+                .new_text,
+            "import @std (config)\n\n"
+        );
+        let accepted =
+            "import @std (config)\n\nfn probe_config(c: config) -> int {\n  c.retries\n}\n";
+        session
+            .set(Path::new("b.ds"), accepted)
+            .expect("the accept applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the imported annotation checks clean"
+        );
+        // The opaque member's name binds the same way: the offer carries
+        // the edit, the accepted signature the name alone — no value use
+        // exists to construct over.
+        let file = open(
+            &mut session,
+            "d.ds",
+            "fn probe_response(r: respo) -> int {\n  1\n}\n",
+        );
+        let items = session.completion(file, 0, 26).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "response")
+            .expect("the std member answers");
+        assert_eq!(
+            item.additional_text_edits
+                .as_ref()
+                .expect("the offer imports")[0]
+                .new_text,
+            "import @std (response)\n\n"
+        );
+        let accepted =
+            "import @std (response)\n\nfn probe_response(r: response) -> int {\n  1\n}\n";
+        session
+            .set(Path::new("d.ds"), accepted)
+            .expect("the accept applies");
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the opaque member's name binds in a signature"
+        );
+        // A prefix that spells a member exactly names a visible name under
+        // the merged reading: nothing imports.
+        let file = open(
+            &mut session,
+            "c.ds",
+            "fn probe_row(x: row) -> int {\n  1\n}\n",
+        );
+        let items = session.completion(file, 0, 19).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "row")
+            .expect("the merged reading keeps the member visible");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "a resolved prefix carries no edit: {item:?}"
+        );
+    }
+
+    /// The core-shaped registration (a declaring graph's ambient) carries
+    /// none of the migrated members: the tier's members' table serves
+    /// their offers there, each member joining the answer as its own item
+    /// behind any prefix it matches — an exact spelling included, since
+    /// the name stays unknown bare over the core. The ambient's own
+    /// members keep their offers, a row that already selects a member
+    /// answers none, and the session runs no link pass, so the row's own
+    /// validation stays in the graph's compile (never asserted clean
+    /// here).
+    #[test]
+    fn auto_import_offers_the_std_members_over_the_core_ambient() {
+        let mut session = Session::over_core_ambient();
+        // The exact spelling is the widening's own case: over the core
+        // `row` is unknown bare, so the tier fires and offers the member.
+        let file = open(&mut session, "a.ds", "fn probe(x: row) -> int {\n  1\n}\n");
+        // The cursor sits right after `row` in the parameter's type.
+        let items = session.completion(file, 0, 15).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "row")
+            .expect("the members' table offers the unknown name");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(edits[0].new_text, "import @std (row)\n\n");
+        // The member's own kind rides the item: an alias renders through
+        // the protocol's struct kind.
+        assert_eq!(item.kind, Some(lsp::CompletionItemKind::STRUCT));
+        // The value-namespace member joins at a bare-name position the
+        // same way, its fresh row opening the document.
+        let file = open(
+            &mut session,
+            "b.ds",
+            "fn probe() -> list[string] {\n  url\n}\n",
+        );
+        let items = session.completion(file, 1, 5).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "urls")
+            .expect("the value member offers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(
+            edits[0].range,
+            lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 0))
+        );
+        assert_eq!(edits[0].new_text, "import @std (urls)\n\n");
+        // A row that already selects the member answers no edit: the
+        // file imports it, the graph's link pass owning the binding.
+        let file = open(
+            &mut session,
+            "c.ds",
+            "import @std (row)\n\nfn probe(x: row) -> int {\n  1\n}\n",
+        );
+        let items = session.completion(file, 2, 15).expect("the pass runs");
+        assert!(
+            items.iter().all(|item| item.label != "row"),
+            "an already-selected member offers nothing: {items:?}"
+        );
+        // The ambient's own members keep their offers over the core: the
+        // composed set's ambient half.
+        let file = open(
+            &mut session,
+            "d.ds",
+            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
+        );
+        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the ambient member answers");
+        assert_eq!(
+            item.additional_text_edits
+                .as_ref()
+                .expect("the offer imports")[0]
+                .new_text,
+            "import @std (to_upper)\n\n"
+        );
+    }
+
     /// Definition follows the resolution side table to the defining name
     /// occurrence, as a location in the same document.
     #[test]
@@ -2956,7 +3456,9 @@ mod tests {
         let mut session = Session::new();
         let file = open(&mut session, "a.ds", "const one = 1\n");
         assert!(
-            session.hover(file, u32::MAX, u32::MAX).is_ok(),
+            session
+                .hover(Path::new("a.ds"), file, u32::MAX, u32::MAX)
+                .is_ok(),
             "hover survives a u32::MAX position"
         );
         assert!(

@@ -3,9 +3,10 @@
 
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
-use ds_abi::{EntryDescriptor, Inst, InstDecodeError, Uop};
+use ds_abi::{EntryDescriptor, Inst, InstDecodeError, SlotType, Uop};
 
 use crate::{
+    bound::BoundModule,
     native::NativeFunction,
     platform::Platform,
     program::{Const, ConstFuncRef, ConstKind, FunctionDef},
@@ -169,6 +170,21 @@ fn content_hash(def: &FunctionDef) -> u64 {
                 hasher.write_u8(1);
                 module.hash(&mut hasher);
                 hasher.write_u32(*func);
+            },
+            Const::FuncRef(ConstFuncRef::Bound { module, index, ret }) => {
+                hasher.write_u8(2);
+                module.hash(&mut hasher);
+                hasher.write_u32(*index);
+                hasher.write_u8(match ret {
+                    SlotType::I32 => 0,
+                    SlotType::I64 => 1,
+                    SlotType::F64 => 2,
+                    SlotType::Bool => 3,
+                    SlotType::Ref => 4,
+                    SlotType::Tag => 5,
+                    SlotType::Fn => 6,
+                    SlotType::Raw => 7,
+                });
             },
         }
     }
@@ -495,6 +511,14 @@ pub struct ModuleRegistry {
     /// through the platform's table only when the platform serves the
     /// op's capability.
     platforms: BTreeMap<String, Arc<Platform>>,
+    /// The installed bound-artifact modules, by manifest artifact name
+    /// (H5): each `[artifacts]` library the run's graph resolved, its
+    /// exported symbols in enumeration order — the tables pool
+    /// `Constant::Bound` callees address. Host-side like the platforms:
+    /// the workers' code snapshot never carries them, so a foreign call
+    /// inside a pooled child refuses with the standard unresolved-callee
+    /// trap.
+    bound: BTreeMap<String, Arc<BoundModule>>,
     /// The module-id space scalar FuncRef words address (F2): one id per
     /// module name, assigned at first install and stable across swaps.
     /// Name-keyed modules are the interim until the M7 loading round's
@@ -881,6 +905,27 @@ impl ModuleRegistry {
     pub fn native_table(&self, module: &str) -> Option<&Arc<Vec<NativeFunction>>> {
         self.natives.get(module)
     }
+
+    /// Installs a bound-artifact module under its manifest artifact name
+    /// (H5): the loaded library's exported symbols in enumeration order,
+    /// the table a pool `Constant::Bound` callee resolves its symbol
+    /// through. A same-named prior module replaces it, the same
+    /// replacement discipline a native table takes.
+    // the Arc is the CALL-site cache's stable handle, not a thread share:
+    // the tier stays host-side (the workers' snapshot strips it), and
+    // the loader handle needs no Sync to serve the inline cache
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn install_bound(&mut self, name: &str, module: BoundModule) {
+        self.bound.insert(name.to_owned(), Arc::new(module));
+        self.generation += 1;
+    }
+
+    /// The bound module installed under `name`, if any: the shared
+    /// handle the CALL-site inline cache stores for a bound callee.
+    #[must_use]
+    pub fn bound_table(&self, name: &str) -> Option<&Arc<BoundModule>> {
+        self.bound.get(name)
+    }
 }
 
 impl CodeSnapshot {
@@ -893,6 +938,7 @@ impl CodeSnapshot {
             modules: self.modules.clone(),
             natives: self.natives.clone(),
             platforms: BTreeMap::new(),
+            bound: BTreeMap::new(),
             id_names: self.id_names.clone(),
             versions: self.versions.clone(),
             entry: RefCell::new(None),
@@ -1065,7 +1111,7 @@ mod tests {
         // width check fails here, never at a runtime slot conversion
         let mut def = empty_def("wide");
         def.layout =
-            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::I64; 256], 0, 0).expect("valid layout");
+            ds_abi::FrameLayout::new(vec![SlotType::I64; 256], 0, 0).expect("valid layout");
         assert_eq!(
             ModuleVersion::new("m", vec![def]).unwrap_err(),
             ModuleBuildError::FrameTooWide {
@@ -1076,7 +1122,7 @@ mod tests {
         // u8::MAX slots is the widest addressable frame and loads
         let mut def = empty_def("edge");
         def.layout =
-            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::I64; 255], 0, 0).expect("valid layout");
+            ds_abi::FrameLayout::new(vec![SlotType::I64; 255], 0, 0).expect("valid layout");
         assert!(ModuleVersion::new("m", vec![def]).is_ok());
     }
 
@@ -1114,8 +1160,7 @@ mod tests {
         // the 0xE pair loads as part of the body (C4): no pool operand,
         // no layout fact; the word stream carries both majors
         let mut def = empty_def("rc");
-        def.layout =
-            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::Ref], 0, 0).expect("valid layout");
+        def.layout = ds_abi::FrameLayout::new(vec![SlotType::Ref], 0, 0).expect("valid layout");
         def.code = assemble(&[
             Inst::Uop(Uop::Funcf { frame_slots: 1 }),
             Inst::Rc(ds_abi::RcOp::Inc { src: 0 }),
@@ -1129,8 +1174,7 @@ mod tests {
     #[test]
     fn funcf_disagreement_with_the_layout_is_rejected_at_load() {
         let mut def = empty_def("bad");
-        def.layout =
-            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::I64], 0, 0).expect("valid layout");
+        def.layout = ds_abi::FrameLayout::new(vec![SlotType::I64], 0, 0).expect("valid layout");
         def.code = assemble(&[Uop::Funcf { frame_slots: 2 }]).expect("encodes");
         assert_eq!(
             ModuleVersion::new("m", vec![def]).unwrap_err(),
@@ -1146,8 +1190,7 @@ mod tests {
     fn pool_kind_and_index_disagreements_are_rejected_at_load() {
         // KIMM addressing a bool entry
         let mut def = empty_def("k");
-        def.layout =
-            ds_abi::FrameLayout::new(vec![ds_abi::SlotType::Bool], 0, 0).expect("valid layout");
+        def.layout = ds_abi::FrameLayout::new(vec![SlotType::Bool], 0, 0).expect("valid layout");
         def.pool = vec![Const::Bool(true)];
         def.code = assemble(&[Uop::Funcf { frame_slots: 1 }, Uop::Kimm {
             dst: 0,
@@ -1221,11 +1264,11 @@ mod tests {
             name: "sum_to".into(),
             layout: ds_abi::FrameLayout::new(
                 vec![
-                    ds_abi::SlotType::I64,
-                    ds_abi::SlotType::I64,
-                    ds_abi::SlotType::Bool,
-                    ds_abi::SlotType::I64,
-                    ds_abi::SlotType::I64,
+                    SlotType::I64,
+                    SlotType::I64,
+                    SlotType::Bool,
+                    SlotType::I64,
+                    SlotType::I64,
                 ],
                 1,
                 0,

@@ -239,6 +239,72 @@ fn arrow_chains_never_panic() {
     parses("if c { 1 } else\nif x => { 2 } { 3 } else { 0 }\n");
 }
 
+/// Type chains around and past the conversion layer's chain budget
+/// (128 terms): `?` postfix runs, `|`/`&`/`-` chains, and `~`
+/// negation runs, drawn at the positions types are written (parameter,
+/// return, and binding annotations, and a union whose members carry
+/// their own postfix runs). Random bytes almost never build a
+/// hundred-term chain, so the chain fold's refusal path needs these:
+/// below the limit the chains parse; past it the fold answers
+/// NestingTooDeep instead of building a tree whose recursive drop
+/// would abort the process.
+#[test]
+fn type_chains_never_panic() {
+    use std::fmt::Write as _;
+
+    let op_chain = |atom: &str, op: &str, members: usize| {
+        let mut out = String::from(atom);
+        for _ in 1..members {
+            let _ = write!(out, " {op} {atom}");
+        }
+        out
+    };
+    let param = |ty: String| format!("fn f(x: {ty}) -> int {{ 0 }}\n");
+    let ret = |ty: String| format!("fn f() -> {ty} {{ 0 }}\n");
+    let ann = |ty: String| format!("fn f() -> int {{\n  const c: {ty} = 1\n  0\n}}\n");
+    for n in [1usize, 8, 60, 127, 128, 129, 300] {
+        for source in [
+            param(op_chain("int", "|", n)),
+            ret(op_chain("int", "&", n)),
+            ann(op_chain("int", "-", n)),
+            param(format!("int{}", "?".repeat(n))),
+            ann(format!("int{}", "?".repeat(n))),
+            param(format!("{}int", "~".repeat(n))),
+            param(op_chain("int?", "|", n)),
+        ] {
+            property(source.as_bytes());
+            let mut truncated = source.clone();
+            truncated.truncate(truncated.len() / 2);
+            property(truncated.as_bytes());
+        }
+    }
+    // At-budget chains parse to completion; one term past the budget
+    // answers the fold's diagnostic end to end (128 terms admit, 129
+    // refuse; 127 marks and negations admit — the guard charges
+    // marks + 1 — and 128 refuse).
+    let parses = |src: &str| {
+        let mut files = Files::new();
+        let file = files.add_source("chain.ds", src);
+        parse_script(&files, file)
+    };
+    parses(&param(op_chain("int", "|", 128))).expect("a 128-term chain parses");
+    parses(&param(op_chain("int", "&", 128))).expect("a 128-term chain parses");
+    parses(&param(format!("int{}", "?".repeat(127)))).expect("a 127-mark chain parses");
+    parses(&param(format!("{}int", "~".repeat(127)))).expect("a 127-neg chain parses");
+    for over in [
+        param(op_chain("int", "|", 129)),
+        ret(op_chain("int", "&", 129)),
+        ann(op_chain("int", "-", 129)),
+        param(format!("int{}", "?".repeat(128))),
+        param(format!("{}int", "~".repeat(128))),
+    ] {
+        let mut files = Files::new();
+        let file = files.add_source("over.ds", &over);
+        let diags = parse(&files, file).expect_err("the past-budget chain refuses");
+        assert_eq!(diags[0].code, ErrorCode::NestingTooDeep);
+    }
+}
+
 /// `else if` chains around and past the scanner's else budget — the
 /// second bracket-free recursion class (`if_expr` right-recurses through
 /// its else clause after the block has closed). Below the limit real

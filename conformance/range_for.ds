@@ -4,6 +4,7 @@
 // empty_total: stage: run
 // steps: stage: run
 // within: stage: run
+// ceiling_bound: stage: run (the review fix round 2026-11-20, bug B11)
 // main: stage: run
 
 fn empty_total() -> int {
@@ -34,6 +35,16 @@ fn within(x: int, n: int) -> bool {
   x in 1..n
 }
 
+// the inclusive bound at the int ceiling runs its final iteration and
+// exits without the step (the add would trap)
+fn ceiling_bound() -> int {
+  var n: int = 0
+  for i in 9223372036854775806..=9223372036854775807 {
+    n += 1
+  }
+  n
+}
+
 fn main() -> () {
   println("empty_total: ${empty_total()}")
   println("steps: ${steps()}")
@@ -44,4 +55,5 @@ fn main() -> () {
   println("hits: ${hits}")
   println("within: ${within(3, 10)}")
   println("without: ${within(10, 10)}")
+  println("ceiling: ${ceiling_bound()}")
 }

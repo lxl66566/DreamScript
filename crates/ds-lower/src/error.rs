@@ -20,6 +20,18 @@ pub enum LowerError {
         /// Which seam the construct needs.
         reason: &'static str,
     },
+    /// A bound extern's declaration refuses at the C-ABI seam (H5): the
+    /// artifact the graph resolves, the symbol the library exports, or
+    /// the signature shape the scalar marshaling slice serves.
+    #[error("the bound extern `{name}` refuses at the C-ABI seam: {reason}")]
+    ForeignBind {
+        /// Span of the offending call site.
+        span: Span,
+        /// The extern's name.
+        name: String,
+        /// Why the bind refused.
+        reason: String,
+    },
     /// No lowerable `main` entry: the module needs one.
     #[error("no lowerable `main` entry in the package")]
     NoMain,
@@ -76,7 +88,7 @@ impl LowerError {
     #[must_use]
     pub fn span(&self) -> Option<Span> {
         match self {
-            Self::Unsupported { span, .. } => Some(*span),
+            Self::Unsupported { span, .. } | Self::ForeignBind { span, .. } => Some(*span),
             _ => None,
         }
     }

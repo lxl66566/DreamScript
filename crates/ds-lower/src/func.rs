@@ -34,7 +34,7 @@ use crate::{
         GENERIC_NATIVES, GenericNative, NET_CLASSES, NURSERY_BOUNDARY_ERR, Native, NativeShape,
         PLATFORM_IO_OK,
     },
-    place::{Hook, Owned, Placement, State},
+    place::{AffineFacts, Hook, Owned, Placement, State},
     shape::{MemberField, Shape, Shapes, SpanWords, StructShape, expr_members, shape_words},
 };
 
@@ -1859,9 +1859,9 @@ enum Callee {
     /// surface entry — its checked fn type serves the parameter reads
     /// exactly like a planned def's — and the FuncRef addresses the
     /// linked dep position and the linked module's function index. The
-    /// call stages like a local's; the tail form lowers in place (CALL
-    /// plus return), the cross-module frame-reuse transfer waiting on
-    /// the tail round.
+    /// call stages like a local's and a tail site takes the same CALLT
+    /// frame-reuse transfer (H2: the module boundary rides the pool
+    /// constant alone, the slide a pure fact of the two layouts).
     Foreign {
         /// The import-bound def: the signature's checker facts.
         def: DefId,
@@ -1874,6 +1874,18 @@ enum Callee {
     /// frame's evidence slot whose word names the serving member body in
     /// the enclosing module (the sentinel FuncRef the CALLG carries).
     Evidence(u8),
+    /// A bound extern's C symbol (H5): the def carries the declaration's
+    /// bind target and written signature, the index the symbol's
+    /// position in the artifact's enumeration-ordered table — the same
+    /// table the run installs as the artifact's native module under its
+    /// manifest name. The call stages and borrows exactly like a native
+    /// callee's (the staged words are the scalar signature's own).
+    Bound {
+        /// The extern's def: the bind target and signature facts.
+        def: DefId,
+        /// The symbol's index in the artifact's export enumeration.
+        index: u32,
+    },
 }
 
 /// One function's lowering state.
@@ -1983,7 +1995,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         res: &'a Resolutions,
         plan: &'p mut Plan,
         shapes: &'s mut Shapes<'a>,
-        lin: &ds_check::Linearity,
+        facts: &Rc<AffineFacts>,
         planned: &PlannedFn,
         index: u32,
         run: RunContext<'a>,
@@ -2116,7 +2128,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             overlay_len: 0,
             scalar_dst: None,
             rc: {
-                let mut rc = Placement::from_linearity(lin);
+                let mut rc = Placement::new(Rc::clone(facts));
                 if run.mode == crate::LowerMode::ResumedFrame && planned.name == "main" {
                     rc.pinning_binders();
                 }
@@ -3602,7 +3614,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// A `for x in a..b` over an int range: a counted loop with one
     /// induction slot. The endpoints evaluate once; the step test
-    /// re-runs per iteration against the frozen end. The pattern binder
+    /// re-runs per iteration against the frozen end. An inclusive back
+    /// edge parked at i64::MAX exits instead of stepping (the add has
+    /// no successor word). The pattern binder
     /// names the induction word, so every body read sees the current
     /// step [F7].
     fn for_range_value(
@@ -3710,6 +3724,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let body_end = self.rc.take();
         self.rc.join(&[entry, body_end]);
         self.bind_label(back);
+        if inclusive {
+            // an inclusive count parked at i64::MAX has no successor
+            // step (the add would trap), so the back edge exits there;
+            // continue lands here too, so the guard covers every exit
+            // from the final iteration
+            let ceiling = self.temp_word(SlotType::I64)?;
+            let max = self.pool(Constant::I64(i64::MAX));
+            self.emit(Op::Kimm {
+                dst: Slot::body(ceiling),
+                kidx: max,
+            });
+            let at_max = self.temp_word(SlotType::Bool)?;
+            self.emit(Op::Data {
+                op: DataOp::EqI64,
+                dst: Slot::body(at_max),
+                lhs: Slot::body(ind),
+                rhs: Slot::body(ceiling),
+            });
+            self.emit(Op::Jmpif {
+                cond: Slot::body(at_max),
+                target: exit,
+            });
+        }
         self.emit(Op::Data {
             op: DataOp::AddI64,
             dst: Slot::body(ind),
@@ -3723,11 +3760,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(self.unit_value(span)?.place)
     }
 
-    /// A `for x in xs` over one list [F7]: the iterable evaluates once,
-    /// then an index-counted fetch loop — one hidden induction word,
-    /// `list_get` per iteration over its ok/none span (one payload word
-    /// per element word at the list's stride), the none span exits. The
-    /// pattern binder names the gathered element — one word or a whole
+    /// A `for x in xs` over one list [F7]: the iterable evaluates once
+    /// and its element count freezes at loop entry (one `list_len` call
+    /// into a hidden count word) — elements the body appends are not
+    /// visited this loop — then an index-counted fetch loop: one hidden
+    /// induction word, `list_get` per iteration over its ok/none span
+    /// (one payload word per element word at the list's stride), the
+    /// frozen count bounds the loop while the none span stays the
+    /// fetch's fail-closed guard. The pattern binder names the
+    /// gathered element — one word or a whole
     /// struct span: the native's handed-out counts (one per `Ref` word)
     /// die at the binding's scope end each rollover, never carried
     /// across the back edge, while the iterable's count survives the
@@ -3768,6 +3809,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // decs it in-body
         let entry = self.rc.save();
         self.rc.loop_enter();
+        // the frozen element count: one length read here bounds the
+        // whole loop, so a body appending to the iterable never extends
+        // it. The read sits after loop_enter (these pre-head ops run
+        // once) so the iterable is already loop-carried: an anonymous
+        // iterable dies at first consumption, and the length read would
+        // otherwise consume its count before the fetch runs.
+        let len = self.temp_word(SlotType::I64)?;
+        self.list_len_word(list_w.slot, len)?;
         self.loop_spans.push(LoopSpan {
             head: self.code.len(),
             back: usize::MAX,
@@ -3785,6 +3834,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             body_depth: self.scopes.len(),
         });
         self.bind_label(head);
+        // the frozen count is the loop's exit test: the index check runs
+        // before the fetch, so indices past the entry count never stage
+        // a borrow or hand out counts
+        let bound = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::Data {
+            op: DataOp::LtI64,
+            dst: Slot::body(bound),
+            lhs: Slot::body(ind),
+            rhs: Slot::body(len),
+        });
+        self.emit(Op::JmpifNot {
+            cond: Slot::body(bound),
+            target: exit,
+        });
         self.fetch_element(list_w.slot, ind, &elem_words)?;
         let cond = self.temp_word(SlotType::Bool)?;
         self.emit(Op::TagTest {
@@ -3902,6 +3965,40 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let dying = self.rc.loop_exit_drops(&doomed);
         Placement::emit_drops(&mut self.code, &dying);
+    }
+
+    /// Stages one `list_len` call through CALLG [H3]: the list word as
+    /// the single real argument, the list instance as the one evidence
+    /// word behind it, the total i64 result moved into the caller's
+    /// word. The list word stages as the native's transient borrow
+    /// window.
+    fn list_len_word(&mut self, list: u8, dst: u8) -> Result<(), LowerError> {
+        let generic = GENERIC_NATIVES
+            .iter()
+            .find(|native| native.name == "list_len")
+            .expect("the list_len body is tabled");
+        self.guard_staged_count(2)?;
+        self.rc.native_open();
+        self.rc.native_reads([list]);
+        self.overlay_site(&[SlotType::Ref, SlotType::I64], &[SlotType::I64]);
+        self.emit(Op::Mov {
+            dst: Slot::overlay(0),
+            src: Slot::body(list),
+        });
+        self.rc.staged_native(list, false);
+        let evidence = self.pool(Constant::I64(BuiltinInstance::List as i64));
+        self.emit(Op::Kimm {
+            dst: Slot::overlay(1),
+            kidx: evidence,
+        });
+        let callee = self.pool(self.funcref_const(Callee::Generic(generic)));
+        self.emit(Op::Callg { callee, nargs: 1 });
+        self.rc.native_done(&mut self.code);
+        self.emit(Op::Mov {
+            dst: Slot::body(dst),
+            src: Slot::overlay(0),
+        });
+        Ok(())
     }
 
     /// Stages one `list_get` fetch through CALLG [H3]: the list word and
@@ -4238,9 +4335,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// One linked const's value fact as a place: the literal embeds at the
     /// use site over the same word shapes and RC treatment the owning
     /// module's own literal lowering gives it — a string or char through
-    /// the produced-Kstr channel (an arena temporary), everything else a
-    /// scalar constant word.
-    fn embed_const_fact(&mut self, fact: ConstFact, _span: Span) -> Result<Place, LowerError> {
+    /// the produced-Kstr channel (an arena temporary), a list through the
+    /// `list_new`/`list_push` seam a local list literal lowers through
+    /// (the element type read immutably from the use's checked type,
+    /// `ty`), everything else a scalar constant word.
+    fn embed_const_fact(
+        &mut self,
+        fact: ConstFact,
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
         let text = match fact {
             ConstFact::Int(value) => {
                 let dst = self.temp_word(SlotType::I64)?;
@@ -4294,12 +4398,44 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             ConstFact::Str(text) => text,
             ConstFact::Char(c) => c.encode_utf8(&mut [0u8; 4]).to_owned(),
+            ConstFact::List(items) => return self.embed_list_fact(items, ty, span),
         };
         let dst = self.temp_word(SlotType::Ref)?;
         let kidx = self.pool_str(&text);
         self.kstr(dst, kidx);
         Ok(Place {
             base: dst,
+            shape: PlaceShape::Word(SlotType::Ref),
+        })
+    }
+
+    /// One linked list-const's elements onto a fresh list word: the same
+    /// construction a local list literal lowers through — `list_new`,
+    /// then each element's literal embed staged through `list_push`'s
+    /// overlay — so the RC discipline (the frame-owned list borrowing
+    /// itself per push, each Ref element staged for the native's own
+    /// count) is the local spelling's.
+    fn embed_list_fact(
+        &mut self,
+        items: Vec<ConstFact>,
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let elem = self.shapes.list_element(ty).ok_or_else(|| {
+            LowerError::unsupported(
+                span,
+                "a linked list const",
+                "the use's checked type is not the applied list constructor the fact's elements \
+                 stage over",
+            )
+        })?;
+        let list = self.list_new_word()?;
+        self.list_push_each(list, items, |this, fact| {
+            let place = this.embed_const_fact(fact, elem, span)?;
+            Ok((TypedPlace { place, ty: elem }, span))
+        })?;
+        Ok(Place {
+            base: list,
             shape: PlaceShape::Word(SlotType::Ref),
         })
     }
@@ -4876,7 +5012,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         match target {
             Callee::Builtin(_) | Callee::Evidence(_) => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
-            Callee::Foreign { def, .. } => self
+            // a bound extern's staged words are its written signature's
+            // (H5): the scalar slice validated at resolution, the same
+            // derivation the linked arm takes
+            Callee::Bound { def, .. } | Callee::Foreign { def, .. } => self
                 .analyzed
                 .checked
                 .def_types
@@ -5393,7 +5532,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         // word shapes and RC treatment the owning module's
                         // own literal lowering gives it.
                         if let Some(fact) = self.analyzed.decls.foreign_consts.get(def).cloned() {
-                            return self.embed_const_fact(fact, span);
+                            return self.embed_const_fact(fact, ty, span);
                         }
                         // A named fn used as a value (F2, functions are
                         // values): the same pool FuncRef const channel a
@@ -5633,7 +5772,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// `x.f`: the member payload word, addressed through the receiver's
     /// checked (possibly refined) type.
-    fn field_access(&mut self, e: &Expr, _static_ty: Ty) -> Result<Place, LowerError> {
+    fn field_access(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {
         let Expr::Field { recv, name, .. } = e else {
             return Err(mismatch("a field access"));
         };
@@ -5644,7 +5783,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if let Some(&Res::Def(def)) = self.res.get(name.span)
             && let Some(fact) = self.analyzed.decls.foreign_consts.get(&def).cloned()
         {
-            return self.embed_const_fact(fact, name.span);
+            return self.embed_const_fact(fact, static_ty, name.span);
         }
         let recv_val = self.value(recv)?;
         // the receiver's recorded type carries the refinement: a member
@@ -7226,6 +7365,29 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn unary(&mut self, op: UnaryOp, expr: &Expr, span: Span, ty: Ty) -> Result<Place, LowerError> {
+        // `-9223372036854775808` writes i64::MIN: the checker folds the
+        // sign into the literal's range check, and the exact min
+        // magnitude lowers as the min constant (every other negative
+        // keeps the `0 - a` lowering below).
+        if op == UnaryOp::Neg
+            && let Expr::Literal {
+                lit: Literal::Int { suffix, text },
+                ..
+            } = expr
+            && suffix.is_empty()
+            && negated_int_min(text)
+        {
+            let dst = self.temp_word(SlotType::I64)?;
+            let kidx = self.pool(Constant::I64(i64::MIN));
+            self.emit(Op::Kimm {
+                dst: Slot::body(dst),
+                kidx,
+            });
+            return Ok(Place {
+                base: dst,
+                shape: PlaceShape::Word(SlotType::I64),
+            });
+        }
         let operand = self.value(expr)?;
         let addrs = self.word_addrs(&operand.place, operand.ty)?;
         let [only] = addrs.as_slice() else {
@@ -7667,6 +7829,30 @@ impl FnLower<'_, '_, '_> {
                 key: self.native_key(native.module),
                 func: native.index,
             },
+            Callee::Bound { def, index } => {
+                // the pool constant carries the return word's scalar kind
+                // (H5): the parameters marshal per the staged words' own
+                // kinds, so the return alone needs a payload — read off
+                // the signature the resolution already validated
+                let sig = self
+                    .analyzed
+                    .decls
+                    .fns
+                    .get(&def)
+                    .expect("a bound callee resolved against its signature");
+                Constant::Bound {
+                    module: sig
+                        .bind
+                        .clone()
+                        .expect("the resolution validated the bind target"),
+                    index,
+                    ret: sig
+                        .ret
+                        .as_ref()
+                        .and_then(calls::scalar_word)
+                        .expect("the resolution validated the scalar return"),
+                }
+            },
             Callee::Generic(generic) => Constant::FuncRef {
                 key: self.native_key(generic.module),
                 func: generic.index,
@@ -7996,18 +8182,30 @@ fn pattern_span(pat: &Pattern) -> Span {
     }
 }
 
+fn int_radix(text: &str) -> (u32, &str) {
+    if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        (2, rest)
+    } else if let Some(rest) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        (8, rest)
+    } else {
+        (10, text)
+    }
+}
+
 fn parse_int(text: &str) -> Option<i64> {
-    let (radix, digits) =
-        if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-            (16, rest)
-        } else if let Some(rest) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
-            (2, rest)
-        } else if let Some(rest) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
-            (8, rest)
-        } else {
-            (10, text)
-        };
+    let (radix, digits) = int_radix(text);
     i64::from_str_radix(digits, radix).ok()
+}
+
+/// Whether one integer literal's magnitude is exactly i64::MIN's: the
+/// sign-folded range check admits the negation as the min value, while
+/// the magnitude alone sits outside the positive range, so the direct
+/// `-` over the literal lowers as the min constant at the unary seam.
+fn negated_int_min(text: &str) -> bool {
+    let (radix, digits) = int_radix(text);
+    u64::from_str_radix(digits, radix).is_ok_and(|m| m == 1u64 << 63)
 }
 
 /// The constant one scalar literal writes: the direct-store fast paths

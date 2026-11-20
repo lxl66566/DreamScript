@@ -1,6 +1,7 @@
 //! End-to-end `ds fmt` through the binary: library files rewrite in place
-//! and the second run is a no-op, script entry files fold to the written
-//! `fn main` shape and round-trip (their `##` separators surviving), syntax
+//! and the second run is a no-op, plain script entry files fold to the
+//! written `fn main` shape and round-trip, `##`-separated script entries
+//! keep their statement groups with the separators in place, syntax
 //! errors render structured diagnostics without touching the file, and
 //! `--check` gates CI without writing.
 
@@ -97,13 +98,13 @@ fn mixed_files_report_per_file_actions() {
     );
 }
 
-/// A script entry file folds into the written `fn main` (the R20 synthetic
-/// path); the formatted output re-parses and re-formats identically, and
-/// its `##` separator survives on its own line.
+/// A plain script entry file folds into the written `fn main` (the R20
+/// synthetic path); the formatted output re-parses and re-formats
+/// identically.
 #[test]
 fn a_script_entry_folds_to_written_main_and_round_trips() {
     let scratch = Scratch::new("entry");
-    let path = scratch.write("entry.ds", "const a = 1\n## section\nprintln(a + 1)\n");
+    let path = scratch.write("entry.ds", "const   a=1\nprintln(a + 1)\n");
     let out = ds_fmt(&["fmt", path.to_str().expect("temp path is UTF-8")]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(
@@ -112,10 +113,43 @@ fn a_script_entry_folds_to_written_main_and_round_trips() {
     );
     assert_eq!(
         fs::read_to_string(&path).expect("the file rewrote"),
-        "## section\nfn main() -> () {\n  const a = 1\n\n  println(a + 1)\n}\n"
+        "fn main() -> () {\n  const a = 1\n  println(a + 1)\n}\n"
     );
     // The written form is fixed point: library-mode parse, no rewrite.
     let out = ds_fmt(&["fmt", path.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", path.display())
+    );
+}
+
+/// A `##`-separated script entry keeps its script shape: the separator
+/// stays between the statement groups it separates (the grammar admits
+/// `##` only between top-level blocks, so the fold's one-`fn main`
+/// spelling cannot carry it), and the written form is a fixed point
+/// under both `fmt` and `--check`.
+#[test]
+fn a_separated_script_entry_keeps_its_statement_groups() {
+    let scratch = Scratch::new("groups");
+    let path = scratch.write(
+        "groups.ds",
+        "const   a=1\nprintln(\"hi\")\n## part two\nconst   b=2\nprintln(\"bye\")\n",
+    );
+    let arg = path.to_str().expect("temp path is UTF-8");
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file rewrote"),
+        "const a = 1\nprintln(\"hi\")\n## part two\nconst b = 2\nprintln(\"bye\")\n"
+    );
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", path.display())
+    );
+    let out = ds_fmt(&["fmt", "--check", arg]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -168,6 +202,55 @@ fn check_mode_gates_without_writing() {
         String::from_utf8_lossy(&out.stdout),
         format!("unchanged {}\n", messy.display())
     );
+}
+
+/// A mixed-EOL file folds its layout to the dominant CRLF while a raw
+/// string's bare-LF line survives byte for byte — line-ending
+/// normalization is layout-only, never program data. The result is a
+/// fixed point under both `fmt` and `--check`.
+#[test]
+fn mixed_eol_files_fold_layout_only() {
+    let scratch = Scratch::new("eol");
+    let src = "fn a() -> int {\r\n1\r\n}\r\n\r\nfn b() -> string \
+               {\r\nr\"one\ntwo\"\r\n}\r\n\r\nfn c() -> int {\r\n2\r\n}\r\n";
+    let path = scratch.write("eol.ds", src);
+    let arg = path.to_str().expect("temp path is UTF-8");
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("formatted {}\n", path.display())
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file rewrote"),
+        "fn a() -> int {\r\n  1\r\n}\r\n\r\nfn b() -> string {\r\n  r\"one\ntwo\"\r\n}\r\n\r\nfn \
+         c() -> int {\r\n  2\r\n}\r\n"
+    );
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", path.display())
+    );
+    let out = ds_fmt(&["fmt", "--check", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("unchanged {}\n", path.display())
+    );
+    // The minority spelling keeps its own bytes too: a bare-LF file with
+    // a CRLF raw string stays LF around the untouched literal.
+    let src = "const s =   r\"x\r\ny\"\n";
+    let path = scratch.write("eol2.ds", src);
+    let arg = path.to_str().expect("temp path is UTF-8");
+    let out = ds_fmt(&["fmt", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file rewrote"),
+        "const s = r\"x\r\ny\"\n"
+    );
+    let out = ds_fmt(&["fmt", "--check", arg]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
 }
 
 /// Files that are not .ds sources are refused up front, like `ds run`.

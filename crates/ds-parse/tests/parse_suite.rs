@@ -902,7 +902,8 @@ fn parse_error_messages_name_rules_in_user_terms() {
     // internal rule name (`kw_*`, `*_lvl`, comment tokens) reaches the user.
     for (src, want) in [
         ("pub \n", "`const` or `var`"),
-        ("extern \n", "`fn`"),
+        ("extern \n", "a string literal"),
+        ("extern \"lib\" \n", "`fn`"),
         ("const a = 1 +\n", "an expression"),
         ("const a:  = 1\n", "a type"),
         ("for x of y { 0 }\n", "`in`"),
@@ -1767,7 +1768,7 @@ fn name_headed_patterns_split_binding_call_and_struct() {
     );
 }
 
-/// The tuple corners [B3]: `(e)` is grouping, `(e,)` a 1-tuple, `()` the
+/// The tuple corners `[B3]`: `(e)` is grouping, `(e,)` a 1-tuple, `()` the
 /// unit construction; the trailing comma is the only disambiguator, and
 /// both layers keep the distinction (the formatter re-emits the comma).
 #[test]
@@ -1805,4 +1806,74 @@ fn tuple_corners_split_grouping_one_element_and_unit() {
         matches!(&items[0], Expr::Tuple { items, .. } if items.len() == 2),
         "the first element is itself a tuple construction"
     );
+}
+
+// ===== type-chain budgets and parse-error messages =====
+
+/// The code and message of a failed parse's first diagnostic.
+fn first_diag(src: &str) -> (ErrorCode, String, usize) {
+    let mut files = Files::new();
+    let f = files.add_source("t.ds", src);
+    let diags = parse(&files, f).expect_err("should fail");
+    let first = &diags[0];
+    (first.code, first.message.clone(), first.suggestions.len())
+}
+
+/// Every unbracketed type chain folds under the same budget as the
+/// expression chains: an oversized chain reports a diagnostic instead of
+/// building a tree whose recursive drop or downstream walk aborts the
+/// process.
+#[test]
+fn long_type_chains_report_depth_diagnostics() {
+    let cases = [
+        format!("fn f(x: int{}) -> int {{ 0 }}\n", "?".repeat(4000)),
+        format!("fn f() -> int{} {{ 0 }}\n", " | int".repeat(50_000)),
+        format!("fn f() -> int{} {{ 0 }}\n", " & int".repeat(400)),
+        format!("fn f() -> int{} {{ 0 }}\n", " - int".repeat(400)),
+        format!("fn f() -> {}int {{ 0 }}\n", "~".repeat(4000)),
+    ];
+    for src in &cases {
+        let (code, ..) = first_diag(src);
+        assert_eq!(code, ErrorCode::NestingTooDeep);
+    }
+}
+/// The expected-phrase list repeats a rule across the precedence chain's
+/// attempts; each phrase appears once, in report order.
+#[test]
+fn expected_phrases_dedup_preserving_report_order() {
+    let (code, message, ..) = first_diag("const x = @\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+    assert_eq!(
+        message,
+        "unexpected token, expected one of: a comment, an expression"
+    );
+}
+
+/// Grammar-internal rule names never reach the message: the fallback is a
+/// natural phrase, never a variant name like `postfix_op`. (The raw-string
+/// hash-mismatch shape this test once rode no longer reaches the grammar:
+/// the pre-scan ends the string at the opening hash count and answers the
+/// surplus hashes itself.)
+#[test]
+fn internal_rule_names_never_reach_error_messages() {
+    let (code, message, ..) = first_diag("const s = r#\"a\"#1\n");
+    assert_eq!(code, ErrorCode::UnexpectedToken);
+    assert!(!message.contains("postfix_op"), "{message}");
+    assert!(
+        message.contains("a call, index, field access, or `?`"),
+        "{message}"
+    );
+    // The phrase list is deduped: `a comment` reports once.
+    assert!(!message.contains("a comment, a comment"), "{message}");
+}
+
+/// A leading BOM is invisible and part of no token, so it is refused by
+/// name with a removal suggestion, never as a generic `expected one of:
+/// a top-level declaration` pointing at the invisible bytes.
+#[test]
+fn a_leading_bom_is_refused_by_name() {
+    let (code, message, suggestions) = first_diag("\u{feff}fn main() -> () { 0 }\n");
+    assert_eq!(code, ErrorCode::InvalidChar);
+    assert!(message.contains("byte-order mark"), "{message}");
+    assert_eq!(suggestions, 1, "the diagnostic offers removal");
 }

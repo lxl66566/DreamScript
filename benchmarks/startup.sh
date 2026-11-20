@@ -43,6 +43,17 @@ set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 sdir="$here/startup"
 
+# Per-invocation timeout guard: `timeout` when the platform has it
+# (GNU coreutils ships it on the Linux runners and Git-for-Windows),
+# else a passthrough — a hung interpreter then fails the invocation
+# itself instead of wedging a bench round.
+TIMEOUT_SECS=600
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT() { timeout "$TIMEOUT_SECS" "$@"; }
+else
+    TIMEOUT() { "$@"; }
+fi
+
 # ---- arguments ---------------------------------------------------------------
 
 mode=${1:-}
@@ -155,9 +166,9 @@ die() {
 run_stage() {
     stage=$1
     case $stage in
-    floor) "$ds_bin" --version ;;
-    warm) DS_CACHE=$warm_cache "$ds_bin" run "$sdir/trivial.ds" ;;
-    *) "$ds_bin" run --no-cache "$sdir/$stage.ds" ;;
+    floor) TIMEOUT "$ds_bin" --version ;;
+    warm) DS_CACHE=$warm_cache TIMEOUT "$ds_bin" run "$sdir/trivial.ds" ;;
+    *) TIMEOUT "$ds_bin" run --no-cache "$sdir/$stage.ds" ;;
     esac >"$outtmp" 2>/dev/null
 }
 
@@ -179,8 +190,20 @@ check_stage() {
     [ "$out" = "$golden" ] || die "$stage: expected [$golden] got [$out]"
 }
 
+# `date +%s%N` prints nanoseconds on GNU date only; BSD date answers
+# seconds plus a literal `N`. These numbers gate M9 perf records, so a
+# non-digit answer refuses loudly instead of timing on a broken scale
+# (the portable fallback would be `date +%s` whole seconds).
+probe=$(date +%s%N)
+case $probe in
+'' | *[!0-9]*)
+    echo "startup.sh: \`date +%s%N\` answered [$probe] — this date has no nanoseconds (BSD); the bench needs GNU date, or a rework over the \`date +%s\` fallback" >&2
+    exit 1
+    ;;
+esac
+
 if [ "$json" = 0 ]; then
-    printf '# ds: %s (%s) runs=%s\n' "$ds_bin" "$("$ds_bin" --version 2>/dev/null)" "$runs"
+    printf '# ds: %s (%s) runs=%s\n' "$ds_bin" "$(TIMEOUT "$ds_bin" --version 2>/dev/null)" "$runs"
     printf '%-12s %5s %11s %11s %11s\n' METRIC RUNS MEDIAN_MS MIN_MS P95_MS
 fi
 

@@ -2,14 +2,19 @@
 //! layout probes (single-line spans, blank-line gaps) that drive the
 //! formatter's source-driven layout decisions.
 
+use std::cell::RefCell;
+
 use ds_diag::Span;
-use ds_parse::Trivia;
 
 /// Rendering context over one file's source text.
 pub(crate) struct Ctx<'s> {
     src: &'s str,
     /// Byte offsets where each line starts; line 0 starts at 0.
     line_starts: Vec<u32>,
+    /// Output byte ranges of verbatim text pushed since the last
+    /// [`Ctx::take_verbatim`], in output order. Interior mutability keeps
+    /// the render functions on `&Ctx`.
+    verbatim: RefCell<Vec<(usize, usize)>>,
 }
 
 impl<'s> Ctx<'s> {
@@ -18,12 +23,33 @@ impl<'s> Ctx<'s> {
         // Offsets are u32 by the Files contract.
         #[allow(clippy::cast_possible_truncation)]
         line_starts.extend(memchr::memchr_iter(b'\n', src.as_bytes()).map(|i| i as u32 + 1));
-        Self { src, line_starts }
+        Self {
+            src,
+            line_starts,
+            verbatim: RefCell::new(Vec::new()),
+        }
     }
 
     /// Source text of a span (verbatim, for comments and string literals).
     pub(crate) fn text(&self, span: Span) -> &'s str {
         &self.src[span.start as usize..span.end as usize]
+    }
+
+    /// Appends one span's source text verbatim, recording the output
+    /// range: line-ending normalization must leave these bytes alone (a
+    /// literal's or comment's own line endings are program data).
+    pub(crate) fn push_verbatim(&self, out: &mut String, span: Span) {
+        let text = self.text(span);
+        let start = out.len();
+        self.verbatim.borrow_mut().push((start, start + text.len()));
+        out.push_str(text);
+    }
+
+    /// The verbatim output ranges recorded so far, in output order; the
+    /// whole-file assembly shifts each block's ranges by the block's
+    /// offset in the assembled text.
+    pub(crate) fn take_verbatim(&self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut *self.verbatim.borrow_mut())
     }
 
     /// The whole source, for separator recovery over gap windows.
@@ -63,10 +89,5 @@ impl<'s> Ctx<'s> {
     /// allows across lines.
     pub(crate) fn newline_between(&self, prev_end: u32, next_start: u32) -> bool {
         self.src[prev_end as usize..next_start as usize].contains('\n')
-    }
-
-    /// Comments render verbatim on their own line.
-    pub(crate) fn comment_text(&self, t: &Trivia) -> &'s str {
-        self.text(t.span)
     }
 }

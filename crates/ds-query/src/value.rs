@@ -386,21 +386,31 @@ pub struct AnalyzedOutput {
     /// The bundle: everything the affine pass (C1) and the lowering pass
     /// (M3) read, the analyzer's own pass over the parse memos' trees.
     pub analyzed: Analyzed,
+    /// Every top-level binding's id and rendered solved type, order-stable
+    /// across the type map's iteration order. Solved handles are
+    /// meaningless outside the universe that minted them, so renewal
+    /// compares rendered names; the rows render once here at construction
+    /// so the compare walks cached strings instead of re-rendering both
+    /// sides through their universes.
+    pub(crate) rendered_def_types: Arc<[(u32, String)]>,
 }
 
-/// The identity of one analyzed package: the raw index and rendered type
-/// of every top-level binding, order-stable across the map's iteration
-/// order. Solved handles are meaningless outside the universe that minted
-/// them, so renewal compares rendered names.
-fn rendered_def_types(bundle: &Analyzed) -> Vec<(u32, String)> {
-    let mut names: Vec<_> = bundle
-        .checked
-        .def_types
-        .iter()
-        .map(|(&def, &ty)| (def.index(), bundle.decls.universe.render(ty)))
-        .collect();
-    names.sort_unstable();
-    names
+impl AnalyzedOutput {
+    /// Wraps a freshly checked bundle with its rendered type rows.
+    #[must_use]
+    pub(crate) fn new(analyzed: Analyzed) -> Self {
+        let mut rows: Vec<_> = analyzed
+            .checked
+            .def_types
+            .iter()
+            .map(|(&def, &ty)| (def.index(), analyzed.decls.universe.render(ty)))
+            .collect();
+        rows.sort_unstable();
+        Self {
+            analyzed,
+            rendered_def_types: rows.into(),
+        }
+    }
 }
 
 impl PartialEq for AnalyzedOutput {
@@ -414,12 +424,18 @@ impl PartialEq for AnalyzedOutput {
     // expansion recomputes only when some parse value moved — its source
     // text did — so a reader whose tables went stale re-derives through
     // its own dependency chain, never through this renewal alone.
+    //
+    // The package and the resolutions ride as the resolve memo's own
+    // arcs, and `Arc` equality answers pointer-identical arcs without a
+    // walk, so a bundle recomputed against a renewed resolve skips both
+    // deep walks; the type rows are cached per value (see
+    // [`AnalyzedOutput::new`]), so the compare never renders.
     fn eq(&self, other: &Self) -> bool {
         let (left, right) = (&self.analyzed, &other.analyzed);
         left.package == right.package
             && left.resolutions == right.resolutions
             && left.checked.diags == right.checked.diags
-            && rendered_def_types(left) == rendered_def_types(right)
+            && self.rendered_def_types == other.rendered_def_types
     }
 }
 
@@ -432,6 +448,7 @@ impl fmt::Debug for AnalyzedOutput {
         f.debug_struct("AnalyzedOutput")
             .field("diags", &self.analyzed.checked.diags.len())
             .field("defs", &self.analyzed.package.len())
+            .field("def_type_rows", &self.rendered_def_types.len())
             .finish()
     }
 }

@@ -71,16 +71,27 @@ fn wide_callable_source() -> String {
 }
 
 /// `count` unit tags whose one union return mints them all, in
-/// declaration order.
+/// declaration order. The union groups its members into parenthesized
+/// segments of 100 so no single chain runs past the parser's 128-term
+/// budget while the return still names every atom.
 fn many_atoms_source(count: usize) -> String {
     let mut source = String::from("tag int\n");
     for i in 0..count {
         let _ = writeln!(source, "tag m{i}");
     }
-    let members = (0..count)
-        .map(|i| format!("m{i}"))
+    let groups: Vec<String> = (0..count)
         .collect::<Vec<_>>()
-        .join(" | ");
+        .chunks(100)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|i| format!("m{i}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .map(|group| format!("({group})"))
+        .collect();
+    let members = groups.join(" | ");
     let _ = writeln!(source, "fn u() -> {members} {{ m0 }}");
     let _ = writeln!(source, "fn main() -> int {{ 0 }}");
     source

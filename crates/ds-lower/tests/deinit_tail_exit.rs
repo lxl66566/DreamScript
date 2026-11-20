@@ -20,6 +20,8 @@ const ATOMS: &str = concat!(
     "tag int\n",
     "tag string\n",
     "tag oops\n",
+    "tag e\n",
+    "tag bool\n",
     "trait Copyable { }\n",
     "extern fn println (msg: string) -> ()\n",
 );
@@ -304,5 +306,90 @@ fn a_script_entry_call_final_transfers_cleanly() {
         vm.captured_output(),
         concat!("have 7\n", "dying 7\n", "called\n").as_bytes(),
         "the golden stdout"
+    );
+}
+
+/// The multi-member tail `?` fires the exit drops on every member's
+/// path: the first exit's emission cleared the ownership map, so the
+/// historical miss released nothing on the later members' paths — the
+/// deinit hook never ran and the hook's Ref words kept their counts.
+/// Both calls fire the hook exactly once (the ok member's respan and
+/// the error member's), and the named variant's string count drains.
+#[test]
+fn a_tail_try_fires_the_exit_drops_on_every_member_path() {
+    let source = format!(
+        "{ATOMS}{RES}{NAMED}{}",
+        concat!(
+            "fn inner (bad: bool) -> int | oops {\n",
+            "  if bad { return oops }\n",
+            "  7\n",
+            "}\n",
+            "\n",
+            "fn with_res (bad: bool) -> int | oops {\n",
+            "  const r = res { id: 88 }\n",
+            "  inner(bad)?\n",
+            "}\n",
+            "\n",
+            "fn with_named (bad: bool) -> int | oops {\n",
+            "  const r = named { label: \"tail\" }\n",
+            "  inner(bad)?\n",
+            "}\n",
+            "\n",
+            "fn main () -> int {\n",
+            "  const a = with_res(false)\n",
+            "  const b = with_res(true)\n",
+            "  const c = with_named(false)\n",
+            "  const d = with_named(true)\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    drained(
+        "deinit_tail_try_members",
+        &source,
+        Value::I64(0),
+        concat!("dying 88\n", "dying 88\n", "bye tail\n", "bye tail\n").as_bytes(),
+    );
+}
+
+/// The narrow union returned as a wider union (the multi-member
+/// tag-dispatch of a union tail return) releases the frame on every
+/// member's exit the same way: the respan keeps its answer words, and
+/// the deinit claim and Ref counts of a value the exits never transfer
+/// die on each member's path exactly once.
+#[test]
+fn a_narrow_union_tail_return_drops_on_every_member_path() {
+    let source = format!(
+        "{ATOMS}{RES}{NAMED}{}",
+        concat!(
+            "fn inner (bad: bool) -> int | oops {\n",
+            "  if bad { return oops }\n",
+            "  7\n",
+            "}\n",
+            "\n",
+            "fn widen_res (bad: bool) -> int | oops | e {\n",
+            "  const r = res { id: 77 }\n",
+            "  inner(bad)\n",
+            "}\n",
+            "\n",
+            "fn widen_named (bad: bool) -> int | oops | e {\n",
+            "  const r = named { label: \"wide\" }\n",
+            "  inner(bad)\n",
+            "}\n",
+            "\n",
+            "fn main () -> int {\n",
+            "  const a = widen_res(false)\n",
+            "  const b = widen_res(true)\n",
+            "  const c = widen_named(false)\n",
+            "  const d = widen_named(true)\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    drained(
+        "deinit_tail_widen_members",
+        &source,
+        Value::I64(0),
+        concat!("dying 77\n", "dying 77\n", "bye wide\n", "bye wide\n").as_bytes(),
     );
 }

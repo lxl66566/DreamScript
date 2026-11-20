@@ -47,6 +47,10 @@ pub enum ReplayMint {
     /// rank replay could not place it — the mint log's ids replay in
     /// order, so the atom rides here.
     Struct(String, Vec<Field>),
+    /// A minted linked opaque struct: its declared name, identity alone
+    /// — the reserve a local bodiless `struct x` performs, its shape
+    /// never set.
+    Reserved(String),
 }
 
 /// Cap on the combinations one tuple distribution may mint. Each combination
@@ -459,6 +463,7 @@ impl Universe {
                 self.set_struct_fields(id, fields.clone())?;
                 Ok(id)
             },
+            ReplayMint::Reserved(name) => self.declare_struct(name),
         }
     }
 

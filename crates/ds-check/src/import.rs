@@ -1,10 +1,10 @@
 //! The G4 import surface: the linked half of name binding. An import's
 //! selected symbols bind at use sites through a caller-supplied surface —
 //! one entry per import declaration, keyed by the declaration's span —
-//! while an `@std` import keeps the merged-ambient reading (its selections
-//! validate against the compile unit's merged namespace, the landed
-//! visibility-round behavior) and an import no linked package serves
-//! stays declarative for the link walk.
+//! while an `@std` import no graph serves keeps the merged-ambient
+//! reading (its selections validate against the compile unit's merged
+//! namespace, the landed visibility-round behavior) and an import no
+//! linked package serves stays declarative for the link walk.
 
 use std::sync::Arc;
 
@@ -33,20 +33,46 @@ pub enum ConstFact {
     Char(char),
     /// A byte literal (stages as its 0-255 integer value).
     Byte(u8),
+    /// A list literal of one scalar word's plain literals, non-empty and
+    /// homogeneous: the list-typed initializer a local `const` of the
+    /// same spelling carries, one Ref word the embed builds element by
+    /// element over the same `list_new`/`list_push` seam a local list
+    /// literal lowers through. An empty literal carries no fact (the
+    /// local spelling itself has no element evidence to infer from), and
+    /// a nested or mixed list carries none (each element must be a plain
+    /// literal of the one word).
+    List(Vec<Self>),
 }
 
 impl ConstFact {
     /// The fact one initializer expression carries, when the expression is
     /// a plain literal (parenthesization peels, a unary minus folds over a
-    /// numeric literal). Every other shape — a computed value, an
-    /// interpolated string, a suffixed literal, a list — answers `None`
-    /// and keeps its selection refused.
+    /// numeric literal) or a list of one scalar word's plain literals.
+    /// Every other shape — a computed value, an interpolated string, a
+    /// suffixed literal, an empty or nested or mixed list — answers
+    /// `None` and keeps its selection refused.
     #[must_use]
     pub fn of_expr(expr: &ds_parse::Expr) -> Option<Self> {
         let mut expr = expr;
         loop {
             match expr {
                 ds_parse::Expr::Paren { inner, .. } => expr = inner,
+                ds_parse::Expr::List { items, .. } => {
+                    // the local spelling's own rules: non-empty (an empty
+                    // literal has no element evidence to infer from) and
+                    // one scalar word across every element
+                    let [first, rest @ ..] = &items[..] else {
+                        return None;
+                    };
+                    let word = Self::of_expr(first)?.scalar_word()?;
+                    let mut items = Vec::with_capacity(1 + rest.len());
+                    for item in std::iter::once(first).chain(rest) {
+                        let fact = Self::of_expr(item)?;
+                        (fact.scalar_word() == Some(word)).then_some(())?;
+                        items.push(fact);
+                    }
+                    return Some(Self::List(items));
+                },
                 ds_parse::Expr::Unary {
                     op, expr: operand, ..
                 } => {
@@ -103,26 +129,44 @@ impl ConstFact {
         }
     }
 
-    /// The scalar word the fact's value types as in the consuming
-    /// compile — the one vocabulary every fact kind maps into.
-    #[must_use]
-    pub const fn word(&self) -> ScalarWord {
+    /// The scalar word a scalar fact's value types as; `None` for the
+    /// list fact (its vocabulary is the element word inside).
+    const fn scalar_word(&self) -> Option<ScalarWord> {
         match self {
-            Self::Int(_) => ScalarWord::Int,
-            Self::Float(_) => ScalarWord::Float,
-            Self::Bool(_) => ScalarWord::Bool,
-            Self::Str(_) => ScalarWord::Str,
-            Self::Char(_) => ScalarWord::Char,
-            Self::Byte(_) => ScalarWord::Byte,
+            Self::Int(_) => Some(ScalarWord::Int),
+            Self::Float(_) => Some(ScalarWord::Float),
+            Self::Bool(_) => Some(ScalarWord::Bool),
+            Self::Str(_) => Some(ScalarWord::Str),
+            Self::Char(_) => Some(ScalarWord::Char),
+            Self::Byte(_) => Some(ScalarWord::Byte),
+            Self::List(_) => None,
         }
     }
 
-    /// The scalar atom the fact's value types as in the consuming
-    /// compile, by the [`word`](Self::word) the fact carries.
-    #[must_use]
-    pub const fn atom_name(&self) -> &'static str {
-        self.word().atom_name()
+    /// The type the fact's value carries in the consuming compile, minted
+    /// in that compile's own universe: a scalar fact's ambient atom, a
+    /// list fact the applied `list` constructor over its element word's
+    /// atom — the same mints a local initializer's own solving produces.
+    /// `None` when a name resolves to no atom there (the uses then fail
+    /// at their own sites rather than mis-shaping).
+    pub(crate) fn ty(&self, universe: &mut crate::Universe) -> Option<crate::Ty> {
+        match self {
+            Self::List(items) => {
+                let word = items.first()?.scalar_word()?;
+                let element = scalar_ty(universe, word)?;
+                let ctor = universe.atom_by_name("list")?;
+                let apply = universe.apply_atom(ctor, &[element]).ok()?;
+                universe.atom_ty(apply).ok()
+            },
+            fact => scalar_ty(universe, fact.scalar_word()?),
+        }
     }
+}
+
+/// One scalar word's ambient atom type in the consuming universe.
+fn scalar_ty(universe: &mut crate::Universe, word: ScalarWord) -> Option<crate::Ty> {
+    let atom = universe.atom_by_name(word.atom_name())?;
+    universe.atom_ty(atom).ok()
 }
 
 /// One integer literal's digit text (radix prefix kept, separators already
@@ -142,9 +186,11 @@ fn parse_int(text: &str) -> Option<i64> {
 /// compile mints the same declaration products a local declaration
 /// would — one atom, one field signature, one AST-shaped row per
 /// declaration product. The vocabulary carries a flat struct's named
-/// fields and an enum's tag rows; every other type-namespace shape (a
-/// tag, an alias, a trait) and every field outside the vocabulary
-/// carries no fact and keeps its selection refused.
+/// fields, an enum's tag rows, a non-generic alias's resolved word, and
+/// a bodiless struct's opaque identity; every other type-namespace
+/// shape (a tag, a trait, a generic or linear declaration) and every
+/// field outside the vocabulary carries no fact and keeps its selection
+/// refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeFact {
     /// A flat, non-generic struct: named fields over the word
@@ -163,6 +209,21 @@ pub enum TypeFact {
     /// type namespace, naming its enum so the consuming compile's case
     /// row maps back. Registers only beside its enum's registration.
     Case(CaseFact),
+    /// A non-generic alias whose body spells in the word vocabulary: the
+    /// resolved word rides, and the consuming compile's mint rewrites it
+    /// as the written type a local alias of the same body would carry —
+    /// the name expands in that compile's own universe exactly like a
+    /// local spelling. An alias naming anything the vocabulary cannot
+    /// spell directly (another alias, a local type, a union) carries no
+    /// fact.
+    Alias(Box<TypeWord>),
+    /// A bodiless, non-generic, non-linear struct declaration: the
+    /// opaque handle a local `struct x` with no body reserves — identity
+    /// alone, no layout. The consuming compile's mint reserves the same
+    /// shape-pending atom, so the name binds in signatures while every
+    /// value use keeps the local spelling's own refusals (no
+    /// construction lowers, no witness exists).
+    Opaque,
 }
 
 /// One case of a linked enum: its name and payload shape.
@@ -205,9 +266,12 @@ pub struct TypeField {
 
 /// The word vocabulary a linked struct's fields spell in: the scalar
 /// atoms by their ambient names, `bytes` (the immutable byte sequence's
-/// one Ref word), and a list of one scalar (the heap reference's single
-/// Ref word). The names resolve in the consuming compile's own universe
-/// — the same trust the const fact's scalar atom enjoys.
+/// one Ref word), a list of one scalar and a map of two scalars (the
+/// heap references' single Ref words), and an optional scalar (the
+/// scalar's union with `none`: one presence tag word over the scalar's
+/// own payload region, exactly `t?`'s local lowering). The names
+/// resolve in the consuming compile's own universe — the same trust the
+/// const fact's scalar atom enjoys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TypeWord {
     /// A scalar atom word.
@@ -218,11 +282,19 @@ pub enum TypeWord {
     /// shape over raw bytes. No plain literal spells it, so it rides
     /// the type vocabulary alone, never the const fact's scalar words.
     Bytes,
+    /// `map[scalar, scalar]`: one Ref word over the runtime's map
+    /// object, the list word's own shape over two key/value members.
+    Map(ScalarWord, ScalarWord),
+    /// `scalar?`: the scalar's union with `none` — one presence tag
+    /// word over the scalar's own payload word(s), the same span a
+    /// local optional field lowers to. An optional over any wider word
+    /// (a list, a map, `bytes`) carries no fact this round.
+    Optional(ScalarWord),
 }
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
-/// the const and type facts spell in — each fact kind maps into it
-/// ([`ConstFact::word`], [`by_name`](Self::by_name)), and the ambient
+/// the const and type facts spell in — each scalar fact maps into it
+/// (`[ConstFact::scalar_word]`, [`by_name`](Self::by_name)), and the ambient
 /// atom names resolve in the consuming compile's own universe, the same
 /// trust the const fact's scalar atom enjoys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,11 +347,12 @@ impl ScalarWord {
 
 impl TypeFact {
     /// The fact one declared struct carries, when its whole shape spells
-    /// in the vocabulary: non-generic, not linear, every field a scalar
-    /// word, `bytes`, or a list of one scalar. The caller gates the def's
-    /// kind — a struct-payload enum case mints a struct atom but is not a
-    /// type-namespace struct export. Everything else answers `None` and
-    /// keeps its selection refused.
+    /// in the vocabulary: non-generic, not linear, every field a word the
+    /// vocabulary carries. A bodiless declaration (its atom still
+    /// shape-pending) carries the opaque identity alone. The caller gates
+    /// the def's kind — a struct-payload enum case mints a struct atom
+    /// but is not a type-namespace struct export. Everything else
+    /// answers `None` and keeps its selection refused.
     #[must_use]
     pub fn of_struct(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
         let shape = decls.structs.get(&def)?;
@@ -289,6 +362,9 @@ impl TypeFact {
         let atom = decls.atoms.get(&def)?;
         let fields = match decls.universe.atom_decl(*atom).ok()?.kind {
             crate::AtomKind::Struct(ref fields) => fields.clone(),
+            // the bodiless declaration: identity reserved, no layout —
+            // the atom stays shape-pending exactly like a local spelling
+            crate::AtomKind::Reserved => return Some(Self::Opaque),
             _ => return None,
         };
         let mut out = Vec::with_capacity(fields.len());
@@ -299,6 +375,21 @@ impl TypeFact {
             });
         }
         Some(Self::Struct(out))
+    }
+
+    /// The fact one declared alias carries, when its body spells directly
+    /// in the word vocabulary: non-generic (an alias with parameters
+    /// resolves through use-site args and is no single word), the body a
+    /// word the vocabulary names. Everything else — a body naming
+    /// another alias, a local type, a union — answers `None` and keeps
+    /// its selection refused.
+    #[must_use]
+    pub fn of_alias(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+        let (params, body) = decls.aliases.get(&def)?;
+        if !params.is_empty() {
+            return None;
+        }
+        Some(Self::Alias(Box::new(word_of_written(body)?)))
     }
 
     /// The fact one declared enum carries, when every case spells in the
@@ -368,33 +459,115 @@ fn case_payload(decls: &crate::Decls, def: crate::DefId) -> Option<CasePayload> 
 
 /// One solved field type's word kind, when it spells in the vocabulary.
 fn word_of_expr(decls: &crate::Decls, expr: &crate::TypeExpr) -> Option<TypeWord> {
-    let crate::TypeExpr::Atom(id) = expr else {
-        return None;
-    };
-    let decl = decls.universe.atom_decl(*id).ok()?;
-    match &decl.kind {
-        // a bare scalar atom, or the bytes word
-        crate::AtomKind::Unit => {
-            if decl.name == "bytes" {
-                Some(TypeWord::Bytes)
+    match expr {
+        crate::TypeExpr::Atom(id) => {
+            let decl = decls.universe.atom_decl(*id).ok()?;
+            match &decl.kind {
+                // a bare scalar atom, or the bytes word
+                crate::AtomKind::Unit => {
+                    if decl.name == "bytes" {
+                        Some(TypeWord::Bytes)
+                    } else {
+                        ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
+                    }
+                },
+                // a heap-reference constructor applied to scalar members
+                crate::AtomKind::Apply(ctor, args) => {
+                    let ctor = decls.universe.atom_decl(*ctor).ok()?;
+                    let scalar = |ty| {
+                        let [member] = decls.universe.members(ty) else {
+                            return None;
+                        };
+                        let name = decls.universe.atom_decl(*member).ok()?.name.clone();
+                        ScalarWord::by_name(&name)
+                    };
+                    if ctor.name == "list" {
+                        let [arg] = &**args else {
+                            return None;
+                        };
+                        scalar(*arg).map(TypeWord::List)
+                    } else if ctor.name == "map" {
+                        let [key, value] = &**args else {
+                            return None;
+                        };
+                        Some(TypeWord::Map(scalar(*key)?, scalar(*value)?))
+                    } else {
+                        None
+                    }
+                },
+                _ => None,
+            }
+        },
+        // `t | none` in either order is exactly `t?` (B4): the optional
+        // scalar's presence-tag word
+        crate::TypeExpr::Union(left, right) => {
+            let atom = |expr: &crate::TypeExpr| match expr {
+                crate::TypeExpr::Atom(id) => Some(*id),
+                _ => None,
+            };
+            let (left, right) = (atom(left)?, atom(right)?);
+            let scalar = if right == crate::TypeId::NONE {
+                left
+            } else if left == crate::TypeId::NONE {
+                right
             } else {
-                ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
-            }
-        },
-        // a list of exactly one scalar member
-        crate::AtomKind::Apply(ctor, args) => {
-            if decls.universe.atom_decl(*ctor).ok()?.name != "list" {
-                return None;
-            }
-            let [arg] = &**args else {
                 return None;
             };
-            let [member] = decls.universe.members(*arg) else {
+            let name = decls.universe.atom_decl(scalar).ok()?.name.clone();
+            ScalarWord::by_name(&name).map(TypeWord::Optional)
+        },
+        _ => None,
+    }
+}
+
+/// One written type's word kind, when it spells directly in the
+/// vocabulary by name — the alias body's resolver. A path segments
+/// through exactly one ambient spelling (a scalar, `bytes`, or the `list`
+/// /`map` constructors over scalar members), an optional marker wraps
+/// one scalar, and parenthesization peels; every other written shape (a
+/// union, a tuple, a fn type, a multi-segment path) answers `None`.
+/// Spelling-resolution equals universe-resolution only because ambient
+/// names are unshadowable (`Universe::declare_atom` refuses
+/// `DuplicateName`): resolving the body in the consuming universe
+/// would admit alias-of-alias chains this refusal excludes.
+fn word_of_written(ty: &ds_parse::Type) -> Option<TypeWord> {
+    let scalar_path = |ty: &ds_parse::Type| -> Option<ScalarWord> {
+        let ds_parse::Type::Path { path, args, .. } = ty else {
+            return None;
+        };
+        let [only] = path.segments.as_slice() else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        ScalarWord::by_name(&only.name)
+    };
+    match ty {
+        ds_parse::Type::Path { path, args, .. } => {
+            let [only] = path.segments.as_slice() else {
                 return None;
             };
-            let name = decls.universe.atom_decl(*member).ok()?.name.clone();
-            ScalarWord::by_name(&name).map(TypeWord::List)
+            match only.name.as_str() {
+                "bytes" if args.is_empty() => Some(TypeWord::Bytes),
+                name if args.is_empty() => ScalarWord::by_name(name).map(TypeWord::Scalar),
+                "list" => {
+                    let [arg] = &**args else {
+                        return None;
+                    };
+                    scalar_path(arg).map(TypeWord::List)
+                },
+                "map" => {
+                    let [key, value] = &**args else {
+                        return None;
+                    };
+                    Some(TypeWord::Map(scalar_path(key)?, scalar_path(value)?))
+                },
+                _ => None,
+            }
         },
+        ds_parse::Type::Optional { inner, .. } => scalar_path(inner).map(TypeWord::Optional),
+        ds_parse::Type::Paren { inner, .. } => word_of_written(inner),
         _ => None,
     }
 }
@@ -478,8 +651,18 @@ pub struct ForeignEntry {
     /// other kind and for every shape the vocabulary cannot spell.
     pub ty: Option<Arc<TypeFact>>,
     /// The linked dep entry's position in the consuming module's
-    /// recorded list.
+    /// recorded list. For a re-exported entry (`pub import`) this is the
+    /// ORIGIN package's position — the body lives in the origin's
+    /// module, so the call's FuncRef addresses it there — while a direct
+    /// member's position names the linked package itself.
     pub link: u32,
+    /// The origin package's link name when this entry re-exports
+    /// transitively (a `pub import` row of a package that itself
+    /// imported the member): the name the next consumer's dep-list walk
+    /// records for the entry's `link` position, so the closure composes
+    /// over package chains. `None` for a direct member of the linked
+    /// package.
+    pub origin: Option<String>,
     /// The function's index inside the linked module's table; `None`
     /// for a bodiless declaration (an extern), whose callee is the
     /// native the consumer's own lowering answers by name — the
@@ -487,7 +670,9 @@ pub struct ForeignEntry {
     pub func: Option<u32>,
     /// The entry links the reserved `@std` package: the compiler-wired
     /// identity the @std spellings and recognitions key on — this round
-    /// the package's member is the ambient source verbatim, so a type
+    /// the package's first member is the ambient core itself (the
+    /// migrated members riding beside it), and a declaring compile
+    /// registers that same core as its ambient, so a word-shaped atom
     /// head the consuming ambient also declares is the same declaration,
     /// and the lowerer's compiler-wired recognition keeps serving its
     /// @std-linked defs. Every other linked package's entries carry
@@ -527,10 +712,22 @@ impl MemberSurface {
 }
 
 /// The import surfaces one compile binds through: one entry per import
-/// declaration the caller linked, keyed by the declaration's span.
+/// declaration the caller linked, keyed by the declaration's span, plus
+/// the link-name walk the surfaces' positions and the module's dep list
+/// both derive from — the source's own import names in first-occurrence
+/// order, then each surface's re-export origins as the walk met them
+/// (`pub import`), so a transitive entry's FuncRef addresses the origin
+/// package the same dep list names. The graph also carries the run's
+/// bound artifacts (H5): each `[artifacts]` name the manifest graph
+/// resolved mapped to its installed library's exported C symbols in
+/// enumeration order — the fold a bound extern's declaration resolves
+/// through, exactly the table the run installs as the artifact's native
+/// module.
 #[derive(Clone, Debug, Default)]
 pub struct ImportGraph {
     surfaces: FxHashMap<Span, ImportSurface>,
+    link_order: Vec<String>,
+    artifacts: std::collections::BTreeMap<String, Arc<Vec<String>>>,
 }
 
 impl ImportGraph {
@@ -545,16 +742,42 @@ impl ImportGraph {
         self.surfaces.insert(span, surface);
     }
 
+    /// Adds one resolved artifact's exported-symbol table, in
+    /// enumeration order (the same sorted report `enumerate` answers).
+    pub fn add_artifact(&mut self, name: &str, symbols: Vec<String>) {
+        self.artifacts.insert(name.to_owned(), Arc::new(symbols));
+    }
+
     /// One import declaration's surface.
     #[must_use]
     pub fn get(&self, span: Span) -> Option<&ImportSurface> {
         self.surfaces.get(&span)
     }
 
+    /// The resolved artifacts' exported-symbol tables.
+    #[must_use]
+    pub fn artifacts(&self) -> &std::collections::BTreeMap<String, Arc<Vec<String>>> {
+        &self.artifacts
+    }
+
     /// Whether nothing linked.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.surfaces.is_empty()
+    }
+
+    /// Records the link-name walk the surfaces' positions assigned: the
+    /// ordered names the dep-list writer reuses, so the two never drift.
+    pub fn set_link_order(&mut self, order: Vec<String>) {
+        self.link_order = order;
+    }
+
+    /// The ordered link names the surfaces' positions assigned, the
+    /// dep-list writer's walk: empty until the builder that assigned the
+    /// positions records it.
+    #[must_use]
+    pub fn link_order(&self) -> &[String] {
+        &self.link_order
     }
 }
 
@@ -571,6 +794,7 @@ impl PartialEq for ForeignEntry {
             && self.value == other.value
             && self.ty == other.ty
             && self.link == other.link
+            && self.origin == other.origin
             && self.func == other.func
             && self.std == other.std
     }
@@ -623,23 +847,40 @@ mod tests {
             literal("const a = r\"raw\""),
             Some(ConstFact::Str("raw".to_owned()))
         );
-        // the refusals: computed, interpolated, suffixed, list, the
-        // wrapping negation (a different operation than the literal's
-        // own), and the unspellable int-min operand
+        // a list of one scalar word's plain literals carries, elements
+        // verbatim in order
+        assert_eq!(
+            literal("const a = [1, 2]"),
+            Some(ConstFact::List(vec![ConstFact::Int(1), ConstFact::Int(2)]))
+        );
+        assert_eq!(
+            literal("const a = [\"x\", \"y\"]"),
+            Some(ConstFact::List(vec![
+                ConstFact::Str("x".to_owned()),
+                ConstFact::Str("y".to_owned())
+            ]))
+        );
+        // the refusals: computed, interpolated, suffixed, an empty or
+        // nested or mixed list, the wrapping negation (a different
+        // operation than the literal's own), and the unspellable int-min
+        // operand
         assert_eq!(literal("const a = 2 * 3"), None);
         assert_eq!(literal("const a = \"n = ${n}\""), None);
         assert_eq!(literal("const a = 1i64"), None);
-        assert_eq!(literal("const a = [1, 2]"), None);
+        assert_eq!(literal("const a = []"), None);
+        assert_eq!(literal("const a = [1, \"a\"]"), None);
+        assert_eq!(literal("const a = [[1]]"), None);
         assert_eq!(literal("const a = -%5"), None);
         assert_eq!(literal("const a = -other"), None);
         assert_eq!(literal("const a = -9223372036854775808"), None);
     }
 
     /// The structural vocabulary carries: a flat struct's named fields
-    /// over every scalar word, `bytes`, and a list of one scalar, and the
-    /// part-less struct; a generic struct, a linear declaration, an enum,
-    /// a tag, and a field outside the vocabulary (a nested struct, a
-    /// tuple, an optional) carry nothing — those keep their selection
+    /// over every scalar word, `bytes`, a list of one scalar, a map of
+    /// two scalars, an optional scalar, and the part-less struct; a
+    /// generic struct, a linear declaration, an enum, a tag, and a field
+    /// outside the vocabulary (a nested struct, a tuple, an optional over
+    /// a wider word) carry nothing — those keep their selection
     /// refusals.
     #[test]
     fn the_fact_is_the_flat_struct_s_word_layout() {
@@ -652,12 +893,21 @@ mod tests {
             "pub tag bytes\n",
             "pub struct list[t] {\n",
             "}\n",
+            "pub struct map[k, v] {\n",
+            "}\n",
             "pub struct cell {\n",
             "  n: int,\n",
             "  label: string,\n",
             "  tags: list[string],\n",
             "  code: byte,\n",
             "  data: bytes,\n",
+            "}\n",
+            "pub struct keyed {\n",
+            "  index: map[string, int],\n",
+            "  seen: map[byte, byte],\n",
+            "}\n",
+            "pub struct opt {\n",
+            "  n: int?,\n",
             "}\n",
             "pub struct bare {\n",
             "}\n",
@@ -670,14 +920,17 @@ mod tests {
             "pub struct holder {\n",
             "  c: cell,\n",
             "}\n",
-            "pub struct opt {\n",
-            "  n: int?,\n",
+            "pub struct opt_list {\n",
+            "  xs: list[int]?,\n",
             "}\n",
             "pub struct twin {\n",
             "  p: (int, int),\n",
             "}\n",
             "pub struct guard: ~Copyable {\n",
             "  n: int,\n",
+            "}\n",
+            "pub struct keyed_wide {\n",
+            "  index: map[string, cell],\n",
             "}\n",
             "pub tag point\n",
             "fn main() -> int {\n",
@@ -721,8 +974,36 @@ mod tests {
             ]))
         );
         assert_eq!(fact("bare"), Some(super::TypeFact::Struct(Vec::new())));
+        assert_eq!(
+            fact("keyed"),
+            Some(super::TypeFact::Struct(vec![
+                super::TypeField {
+                    name: "index".to_owned(),
+                    word: super::TypeWord::Map(super::ScalarWord::Str, super::ScalarWord::Int),
+                },
+                super::TypeField {
+                    name: "seen".to_owned(),
+                    word: super::TypeWord::Map(super::ScalarWord::Byte, super::ScalarWord::Byte),
+                },
+            ]))
+        );
+        assert_eq!(
+            fact("opt"),
+            Some(super::TypeFact::Struct(vec![super::TypeField {
+                name: "n".to_owned(),
+                word: super::TypeWord::Optional(super::ScalarWord::Int),
+            }]))
+        );
         for refused in [
-            "boxed", "shade", "holder", "opt", "twin", "guard", "point", "list",
+            "boxed",
+            "shade",
+            "holder",
+            "opt_list",
+            "twin",
+            "guard",
+            "keyed_wide",
+            "point",
+            "list",
         ] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
@@ -857,6 +1138,111 @@ mod tests {
             case_fact("one", "wide"),
             None,
             "a payload field outside the vocabulary carries no fact"
+        );
+    }
+
+    /// The alias vocabulary carries: a non-generic alias whose body spells
+    /// directly in the word vocabulary rides as its resolved word — the
+    /// scalar, `bytes`, list, map, and optional spellings, parentheses
+    /// peeling; a generic alias and a body naming anything else (another
+    /// alias, a local struct, a union, a tuple) carry nothing. A bodiless
+    /// struct carries the opaque identity (its atom stays shape-pending),
+    /// distinct from the part-less struct's empty field list.
+    #[test]
+    fn the_fact_is_the_alias_s_word_and_the_bodiless_struct_s_identity() {
+        let source = concat!(
+            "pub tag int\n",
+            "pub tag string\n",
+            "pub tag byte\n",
+            "pub tag bytes\n",
+            "pub struct list[t] {\n",
+            "}\n",
+            "pub struct map[k, v] {\n",
+            "}\n",
+            "pub struct cell {\n",
+            "  n: int,\n",
+            "}\n",
+            "pub type row = map[string, string]\n",
+            "pub type words = list[string]\n",
+            "pub type port = int?\n",
+            "pub type name = string\n",
+            "pub type raw = bytes\n",
+            "pub type paren = (int)\n",
+            "pub type pair[k, v] = map[k, v]\n",
+            "pub type chain = row\n",
+            "pub type local = cell\n",
+            "pub type either = int | string\n",
+            "pub type two = (int, int)\n",
+            "pub struct opaque\n",
+            "pub struct empty {\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("alias_fact.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let alias = |name: &str| {
+            let def = analyzed
+                .package
+                .lookup_type(name)
+                .unwrap_or_else(|| panic!("{name} declares"));
+            super::TypeFact::of_alias(&analyzed.decls, def)
+        };
+        assert_eq!(
+            alias("row"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Map(
+                super::ScalarWord::Str,
+                super::ScalarWord::Str
+            ))))
+        );
+        assert_eq!(
+            alias("words"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::List(
+                super::ScalarWord::Str
+            ))))
+        );
+        assert_eq!(
+            alias("port"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Optional(
+                super::ScalarWord::Int
+            ))))
+        );
+        assert_eq!(
+            alias("name"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Scalar(
+                super::ScalarWord::Str
+            ))))
+        );
+        assert_eq!(
+            alias("raw"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Bytes)))
+        );
+        assert_eq!(
+            alias("paren"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Scalar(
+                super::ScalarWord::Int
+            ))))
+        );
+        // the refusals: generic parameters, and bodies the vocabulary
+        // cannot spell directly — another alias, a local struct, a
+        // union, a tuple
+        for refused in ["pair", "chain", "local", "either", "two"] {
+            assert_eq!(alias(refused), None, "{refused} carries no fact");
+        }
+        let struct_fact = |name: &str| {
+            let def = analyzed
+                .package
+                .lookup_type(name)
+                .unwrap_or_else(|| panic!("{name} declares"));
+            super::TypeFact::of_struct(&analyzed.decls, def)
+        };
+        assert_eq!(struct_fact("opaque"), Some(super::TypeFact::Opaque));
+        assert_eq!(
+            struct_fact("empty"),
+            Some(super::TypeFact::Struct(Vec::new()))
         );
     }
 }

@@ -18,6 +18,8 @@ use std::{
     process::Command,
 };
 
+use ds_mod::Hash128;
+
 /// A written zero-parameter entry: the shape the cache serves.
 const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n";
 
@@ -488,36 +490,88 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
     let _ = fs::remove_dir_all(&cache);
 }
 
-/// Both artifact writers record the dep list a load walk resolves: a
-/// source importing two @std members leaves one recorded entry — the
-/// @-sigil package stem at the ambient's content identity — in both the
-/// script-cache artifact and `ds build`'s output, and the deps-first
-/// walk over the cached artifact serves @std from the checked-in dsmod
-/// ahead of the dependent and runs its entry.
+/// The default @std bundle's member identity — the ascending-path fold
+/// over path-and-text pairs the implicit resolution records for the
+/// manifest-free run's `@std` dep entry, computed over the tree's own
+/// member texts (the ambient core member beside the migrated members'
+/// source).
+fn std_member_identity() -> Hash128 {
+    let members = [
+        (ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE),
+        (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
+    ];
+    let mut ordered: Vec<&(&str, &str)> = members.iter().collect();
+    ordered.sort_by(|left, right| left.0.cmp(right.0));
+    let mut buffer = Vec::new();
+    for (path, text) in ordered {
+        buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(path.as_bytes());
+        buffer.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(text.as_bytes());
+    }
+    Hash128::compute(&buffer)
+}
+
+/// Both artifact writers record the dep list the bare-specifier switch
+/// pins: a manifest-free script importing `@std` through two rows records
+/// one entry — the package stem at the bundle's member identity, the
+/// composed fold the implicit resolution resolves — in both the
+/// script-cache artifact and `ds build`'s output, the cold run writes
+/// the `@std` dep member's dsmod beside the root's, the warm run
+/// serves both families from disk (the debug markers proving the walk
+/// never compiled), and the checked-in merged ambient dsmod no longer
+/// answers the bundle's identity (the un-merge split the two: the walk
+/// refuses the stale artifact naming both hashes).
 #[test]
 fn both_writers_record_the_dep_list_a_walk_resolves() {
     const IMPORT_MAIN: &str =
-        "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n  7\n}\n";
+        "import @std (concat)\nimport @std (urls)\n\nfn main() -> int {\n  7\n}\n";
     let cache = cache_dir("deps");
     let source = source_file("deps", IMPORT_MAIN);
 
-    let (ok, _, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the importing run succeeds (stderr: {err})");
+    assert_eq!(out, "7\n");
     let written = artifacts(&cache);
-    assert_eq!(written.len(), 1, "exactly one artifact lands");
-    let recorded = ds_mod::read(&fs::read(&written[0]).expect("the artifact reads"))
-        .expect("the artifact decodes")
-        .deps()
-        .to_vec();
+    assert_eq!(
+        written.len(),
+        2,
+        "the root's and the @std dep member's artifacts land: {written:?}"
+    );
+    let module = written
+        .iter()
+        .map(|path| {
+            ds_mod::read(&fs::read(path).expect("the artifact reads"))
+                .expect("the artifact decodes")
+        })
+        .find(|module| module.name() == "deps")
+        .expect("the root artifact lands among the family");
+    let recorded = module.deps().to_vec();
     assert_eq!(
         recorded,
         vec![ds_mod::Dep {
             name: "@std".to_owned(),
-            content_hash: ds_mod::Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()),
+            content_hash: std_member_identity(),
         }],
-        "both member imports link the package stem once at the ambient identity"
+        "both rows link the package stem once at the bundle identity"
     );
 
+    // the warm run serves the root and the dep member from disk: the
+    // debug markers name both families' hits, so the walk compiled
+    // nothing in-process
+    let (ok, warm_out, warm_err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(ok, "the warm run succeeds (stderr: {warm_err})");
+    assert_eq!(warm_out, out, "the warm run prints the cold output");
+    assert!(
+        warm_err.contains("ds run cache: hit"),
+        "the root artifact serves warm: {warm_err}"
+    );
+    assert!(
+        warm_err.contains("ds dep cache: hit"),
+        "the @std dep member serves warm: {warm_err}"
+    );
+
+    // `ds build` of the same source records the same dep list
     let built = source
         .parent()
         .expect("the source dir")
@@ -537,22 +591,25 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
         "ds build records the same dep list"
     );
 
-    // the walk over the cached artifact: @std installs ahead of the
-    // dependent at the identity the entry recorded
+    // the merged ambient dsmod no longer answers the bundle's identity:
+    // the walk over the cached artifact refuses the stale served bytes
+    // naming both hashes — the un-merge split the merged artifact's
+    // identity from the bundle the implicit resolution records
     let mut registry = ds_vm::ModuleRegistry::new();
     registry.install_platform(ds_vm::Platform::std());
     let mut vm = ds_vm::Vm::new(registry);
-    let served =
+    let merged =
         ds_mod::read(&ds_stdlib::AMBIENT_DSMOD[16..]).expect("the embedded @std artifact reads");
-    let module = ds_mod::read(&fs::read(&written[0]).expect("the artifact reads"))
-        .expect("the artifact decodes");
-    vm.load(module, |name, _| (name == "@std").then(|| served.clone()))
-        .expect("the cached artifact loads over the served @std");
-    assert_eq!(vm.registry().module_id("@std"), Some(0));
-    assert_eq!(vm.registry().module_id("deps"), Some(1));
+    let walk = vm.load(module, |name, _| (name == "@std").then(|| merged.clone()));
     assert_eq!(
-        vm.run("deps", "main", &[]),
-        Ok(ds_vm::FrameAnswer::one(ds_vm::Value::I64(7)))
+        walk.unwrap_err(),
+        ds_vm::LoadError::HashMismatch {
+            dep: "@std".to_owned(),
+            dependent: "deps".to_owned(),
+            linked: std_member_identity(),
+            found: Some(Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
+        },
+        "the merged artifact refuses the bundle identity naming both hashes"
     );
 
     let _ = fs::remove_dir_all(&cache);

@@ -16,6 +16,9 @@ workspace = true
 [dependencies]
 ds-check = { workspace = true }
 ds-diag  = { workspace = true, features = ["ast-serde"] }
+# the surface conversion renders through the one signature renderer the
+# source path serves (no second rendering forked)
+ds-fmt   = { path = "../ds-fmt" }
 ds-parse = { workspace = true, features = ["ast-serde"] }
 # the artifact header's hash and the payload's embedded written types
 # (ds-parse's serde surface, on like the AST blob's)

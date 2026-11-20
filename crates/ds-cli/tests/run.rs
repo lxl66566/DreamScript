@@ -292,7 +292,7 @@ fn a_trap_prints_the_backtrace_summary() {
 /// integer the synthetic reentry frame carries as its return pc.
 #[test]
 fn a_hosted_callers_backtrace_frame_names_the_seam() {
-    let path = env::temp_dir().join("ds-cli-run-hosted-trap.ds");
+    let path = env::temp_dir().join(format!("ds-cli-run-hosted-trap-{}.ds", std::process::id()));
     fs::write(
         &path,
         "fn main() -> () {\n  const xs = [1, 0]\n  const ys = xs.map((x: int) => 100 / x)\n}\n",
@@ -319,7 +319,7 @@ fn a_hosted_callers_backtrace_frame_names_the_seam() {
 /// like division by zero does.
 #[test]
 fn an_oversized_shift_checks_clean_and_traps_at_run() {
-    let path = env::temp_dir().join("ds-cli-run-shift-trap.ds");
+    let path = env::temp_dir().join(format!("ds-cli-run-shift-trap-{}.ds", std::process::id()));
     fs::write(&path, "fn main() -> int { 1 << 64 }\n").expect("the source writes");
     let (ok, _, err) = ds_run(&["check", path.to_str().expect("temp path is UTF-8")]);
     assert!(ok, "the trapping script checks clean: {err}");
@@ -328,6 +328,60 @@ fn an_oversized_shift_checks_clean_and_traps_at_run() {
     assert!(!ok, "a trapped run exits nonzero");
     assert_eq!(out, "", "stdout stays clean");
     assert!(err.contains("trap: oversized shift"), "stderr: {err}");
+}
+
+/// A trapped run releases the interrupted root after the trap report:
+/// the kept frames' deinit hooks fire exactly once, so a `~Copyable`
+/// holder's cleanup survives a bug-panic path while the report and the
+/// nonzero exit stay unchanged. The untrapped counterpart pins that the
+/// hook fires exactly once there too — the release never double-fires.
+#[test]
+fn a_trapped_run_fires_the_kept_frames_deinit_after_the_report() {
+    let source = |divisor: &str| {
+        format!(
+            concat!(
+                "struct holder: ~Copyable {{\n",
+                "  id: int\n",
+                "  deinit {{ println(\"freed ${{self.id}}\") }}\n",
+                "}}\n",
+                "fn boom(h: holder) -> int {{\n",
+                "  const keep = h\n",
+                "  const z = 10 / {divisor}\n",
+                "  z + keep.id\n",
+                "}}\n",
+                "fn main() -> int {{\n",
+                "  println(\"${{boom(holder {{ id: 7 }})}}\")\n",
+                "  0\n",
+                "}}\n",
+            ),
+            divisor = divisor,
+        )
+    };
+    let path = env::temp_dir().join(format!("ds-cli-run-trap-deinit-{}.ds", std::process::id()));
+    fs::write(&path, source("0")).expect("the source writes");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(!ok, "a trapped run exits nonzero");
+    assert!(err.contains("trap: division by zero"), "stderr: {err}");
+    assert!(
+        err.contains("boom at pc"),
+        "the backtrace names the frame: {err}"
+    );
+    assert_eq!(
+        out.matches("freed 7").count(),
+        1,
+        "the trapped frame's deinit fires exactly once: {out}"
+    );
+
+    fs::write(&path, source("2")).expect("the source writes");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(ok, "the untrapped run exits 0 (stderr: {err})");
+    assert_eq!(
+        out.matches("freed 7").count(),
+        1,
+        "the completed frame's deinit fires exactly once: {out}"
+    );
 }
 
 #[test]
@@ -455,5 +509,70 @@ fn run_refuses_a_moved_then_used_value_at_the_linearity_gate() {
     assert!(
         err.contains("the source fails the linearity check"),
         "the refusal names the stage: {err}"
+    );
+}
+
+/// The comptime fence's step budget end to end: a healthy source embeds
+/// its comptime answer while an ordinary runtime `while` in `main` still
+/// runs, and a comptime fn whose loop never terminates checks clean but
+/// refuses `ds run` with the budget's diagnostic at the call site —
+/// bounded wall time instead of the pre-budget hang.
+#[test]
+fn a_runaway_comptime_loop_answers_the_step_budget_at_the_run() {
+    let path = env::temp_dir().join(format!(
+        "ds-cli-run-comptime-budget-{}.ds",
+        std::process::id()
+    ));
+    fs::write(
+        &path,
+        concat!(
+            "fn twice(comptime n: int) -> int { n + n }\n",
+            "fn main() -> () {\n",
+            "  var t = 0\n",
+            "  var j = 0\n",
+            "  while j < 3 {\n",
+            "    t = t + j\n",
+            "    j = j + 1\n",
+            "  }\n",
+            "  println(\"${twice(21)} ${t}\")\n",
+            "}\n",
+        ),
+    )
+    .expect("the source writes");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(ok, "the healthy source runs (stderr: {err})");
+    assert_eq!(out, "42 3\n0\n");
+
+    let path = env::temp_dir().join(format!(
+        "ds-cli-run-comptime-spin-{}.ds",
+        std::process::id()
+    ));
+    fs::write(
+        &path,
+        concat!(
+            "fn spin(comptime n: int) -> int {\n",
+            "  var i = n\n",
+            "  while i > 0 {\n",
+            "    i = i + 1\n",
+            "  }\n",
+            "  i\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${spin(1)}\")\n",
+            "}\n",
+        ),
+    )
+    .expect("the source writes");
+    let (ok, _, err) = ds_run(&["check", path.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the runaway body checks clean: {err}");
+    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    fs::remove_file(&path).expect("temp source removes");
+    assert!(!ok, "the runaway comptime run exits nonzero");
+    assert_eq!(out, "", "stdout stays clean before the refusal");
+    assert!(err.contains("DS2034"), "the budget refusal prints: {err}");
+    assert!(
+        err.contains("step budget"),
+        "the refusal names the budget: {err}"
     );
 }

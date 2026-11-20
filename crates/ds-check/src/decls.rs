@@ -46,7 +46,7 @@ use crate::{
     atom::{Case, Field, TraitId, TypeId},
     id_table::IdTable,
     instance::{Condition, InherentBounds, InstanceDecl, InstanceEnv, InstanceId},
-    resolve::{DefId, MethodId, MethodOwner, Package},
+    resolve::{DefId, DefKind, MethodId, MethodOwner, Package},
     universe::{ReplayMint, Ty, Universe},
 };
 
@@ -99,6 +99,11 @@ pub struct FnSig {
     pub params: Vec<ParamSig>,
     /// The written return type; absent means inferred or unit.
     pub ret: Option<Type>,
+    /// The extern's bind target (H5): the `[artifacts]` name a bound
+    /// extern declares, `None` on every other signature. Pure
+    /// declaration data — the graph fold that resolves the name to an
+    /// installed library is the lowerer's seam.
+    pub bind: Option<String>,
 }
 
 impl FnSig {
@@ -107,6 +112,7 @@ impl FnSig {
             generics: f.generics.iter().map(GenericParam::from).collect(),
             params: f.params.iter().map(ParamSig::from).collect(),
             ret: f.ret.clone(),
+            bind: f.bind.as_ref().map(|bind| bind.name.clone()),
         }
     }
 
@@ -124,6 +130,7 @@ impl FnSig {
             generics: generics.iter().map(GenericParam::from).collect(),
             params: params.iter().map(ParamSig::from).collect(),
             ret: ret.clone(),
+            bind: None,
         })
     }
 }
@@ -362,7 +369,7 @@ where
     build_over(package, asts, resolutions, None)
 }
 
-/// [`build`](self::build) over a checked-ambient prefix: the pass starts
+/// [`build`] over a checked-ambient prefix: the pass starts
 /// from the served [`Decls`] instead of an empty one, the reserve and
 /// shape arms skip every served def's minting and shape solving (the
 /// serve installed those products), the served member's own impl items
@@ -431,8 +438,9 @@ where
             },
             // a linked struct's fields name the ambient's def-named atoms
             // (identities) and its own later-minted applies, which the
-            // final remap below rewrites once they land
-            ReplayMint::Struct(..) => mint.clone(),
+            // final remap below rewrites once they land; a linked opaque
+            // struct carries no shape to remap
+            ReplayMint::Struct(..) | ReplayMint::Reserved(_) => mint.clone(),
         };
         if let Ok(landed) = decls.universe.replay_mint(&mint) {
             minted.insert(*gen_id, landed);
@@ -492,7 +500,8 @@ where
 /// exactly the products a local declaration of the same shape carries,
 /// so every later pass consumes the linked type like a local one and no
 /// second type kind exists — a struct's atom and field signature, an
-/// enum's case rows, a case's own atom, struct row, and case row. The
+/// enum's case rows, a case's own atom, struct row, and case row, an
+/// alias's written body, an opaque struct's reserved atom. The
 /// word kinds resolve by name in this compile's own universe (the
 /// ambient's atoms), the same trust the const fact's scalar atom
 /// enjoys; the link pass's registration gates already proved the mint's
@@ -515,6 +524,12 @@ fn install_foreign_type(
         },
         crate::import::TypeFact::Case(fact) => {
             install_foreign_case(def, name, span, fact, decls);
+        },
+        crate::import::TypeFact::Alias(word) => {
+            install_foreign_alias(def, name, span, **word, decls);
+        },
+        crate::import::TypeFact::Opaque => {
+            install_foreign_opaque(def, name, span, decls);
         },
     }
 }
@@ -688,6 +703,49 @@ fn install_foreign_case(
     decls.foreign_type_names.insert(name.to_owned(), def);
 }
 
+/// The alias fact's mint: the written body a local alias of the same
+/// word would carry — no atom (an alias is its body's set, never a
+/// constructor), so a use site's solving expands the body in this
+/// compile's own universe exactly like the local spelling's.
+fn install_foreign_alias(
+    def: DefId,
+    name: &str,
+    span: Span,
+    word: crate::import::TypeWord,
+    decls: &mut Decls,
+) {
+    let Some((_, written)) = foreign_field_type(word, span, decls) else {
+        return;
+    };
+    decls.aliases.insert(def, (Vec::new(), written));
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
+/// The opaque fact's mint: exactly the products a local bodiless
+/// `struct x` reserves — the shape-pending atom, the def tables the
+/// construction and field-access paths read, and the name index — with
+/// no field signature ever set, so the name binds in signatures while
+/// every value use keeps the local spelling's own refusals.
+fn install_foreign_opaque(def: DefId, name: &str, _span: Span, decls: &mut Decls) {
+    let atom = match decls.universe.declare_struct(name) {
+        Ok(atom) => atom,
+        // a served prefix's replay already declared it; take the
+        // replayed atom and still install the rows below
+        Err(_) => match decls.atoms.get(&def) {
+            Some(&atom) => atom,
+            None => return,
+        },
+    };
+    decls.atoms.insert(def, atom);
+    decls.defs_of_atoms.insert(atom, def);
+    decls.structs.insert(def, StructShape {
+        params: Vec::new(),
+        fields: Vec::new(),
+        linear: false,
+    });
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
 /// One linked field's word kind as the pair of forms the tables carry:
 /// the solved [`TypeExpr`] the set algebra and the lowerer read, and the
 /// written [`Type`] the checker's per-use solving reads (a single-segment
@@ -714,18 +772,46 @@ fn foreign_field_type(
             args,
         }
     };
+    let scalar_atom = |decls: &mut Decls, word: crate::import::ScalarWord| {
+        decls.universe.atom_by_name(word.atom_name())
+    };
     match word {
         TypeWord::Scalar(word) => {
-            let atom = decls.universe.atom_by_name(word.atom_name())?;
+            let atom = scalar_atom(decls, word)?;
             Some((TypeExpr::Atom(atom), named(word.atom_name(), Vec::new())))
         },
         TypeWord::List(word) => {
-            let element = decls.universe.atom_by_name(word.atom_name())?;
+            let element = scalar_atom(decls, word)?;
             let element_ty = decls.universe.atom_ty(element).ok()?;
             let ctor = decls.universe.atom_by_name("list")?;
             let apply = decls.universe.apply_atom(ctor, &[element_ty]).ok()?;
             let written = named("list", vec![named(word.atom_name(), Vec::new())]);
             Some((TypeExpr::Atom(apply), written))
+        },
+        TypeWord::Map(key, value) => {
+            let key_atom = scalar_atom(decls, key)?;
+            let value_atom = scalar_atom(decls, value)?;
+            let key_ty = decls.universe.atom_ty(key_atom).ok()?;
+            let value_ty = decls.universe.atom_ty(value_atom).ok()?;
+            let ctor = decls.universe.atom_by_name("map")?;
+            let apply = decls.universe.apply_atom(ctor, &[key_ty, value_ty]).ok()?;
+            let written = named("map", vec![
+                named(key.atom_name(), Vec::new()),
+                named(value.atom_name(), Vec::new()),
+            ]);
+            Some((TypeExpr::Atom(apply), written))
+        },
+        TypeWord::Optional(word) => {
+            let atom = scalar_atom(decls, word)?;
+            // `t?` is exactly `t | none` (B4): the union tree the local
+            // optional's own conversion builds, the presence tag over
+            // the scalar's payload word
+            let solved = TypeExpr::Atom(atom).union(TypeId::NONE.into());
+            let written = Type::Optional {
+                span,
+                inner: Box::new(named(word.atom_name(), Vec::new())),
+            };
+            Some((solved, written))
         },
         TypeWord::Bytes => {
             let atom = decls.universe.atom_by_name("bytes")?;
@@ -1223,10 +1309,7 @@ fn reserve_impl_fns(package: &Package, imp: &ImplDecl, impl_site: Span, decls: &
 }
 
 fn def_kind_is_binding(package: &Package, def: DefId) -> bool {
-    matches!(
-        package.def(def).kind,
-        crate::resolve::DefKind::Const | crate::resolve::DefKind::Var
-    )
+    matches!(package.def(def).kind, DefKind::Const | DefKind::Var)
 }
 
 /// One top-level binding: every binder the pattern declares maps back to
@@ -1325,7 +1408,7 @@ fn shape_item(
             };
             register_supers(package, &s.supers, atom, decls);
             if s.generics.is_empty() && s.has_body {
-                let fields = universe_fields(package, &struct_fields_ast(&s.members), decls);
+                let fields = universe_fields(package, &struct_fields_ast(&s.members), decls, diags);
                 let _ = decls.universe.set_struct_fields(atom, fields);
             }
         },
@@ -1359,10 +1442,12 @@ fn shape_item(
                         EnumPayload::None => Vec::new(),
                         EnumPayload::Tuple(types) => types
                             .iter()
-                            .filter_map(|t| conv_expr(package, t, decls))
+                            .filter_map(|t| conv_expr(package, t, decls, diags))
                             .map(Field::positional)
                             .collect(),
-                        EnumPayload::Struct(fields) => universe_fields(package, fields, decls),
+                        EnumPayload::Struct(fields) => {
+                            universe_fields(package, fields, decls, diags)
+                        },
                     };
                     if !fields.is_empty() {
                         let _ = decls.universe.set_struct_fields(atom, fields);
@@ -1381,10 +1466,12 @@ fn shape_item(
                         EnumPayload::None => Vec::new(),
                         EnumPayload::Tuple(types) => types
                             .iter()
-                            .filter_map(|t| conv_expr(package, t, decls))
+                            .filter_map(|t| conv_expr(package, t, decls, diags))
                             .map(Field::positional)
                             .collect(),
-                        EnumPayload::Struct(fields) => universe_fields(package, fields, decls),
+                        EnumPayload::Struct(fields) => {
+                            universe_fields(package, fields, decls, diags)
+                        },
                     };
                     cases.push(Case::new(&case.name.name, fields));
                 }
@@ -1445,50 +1532,127 @@ fn trait_of_type(package: &Package, ty: &Type, decls: &Decls) -> Option<TraitId>
 /// field whose type does not live in the [`TypeExpr`] world (function
 /// types, foreign types) contributes nothing — the checker works from the
 /// AST shape regardless, only witnesses degrade.
-fn universe_fields(package: &Package, fields: &[FieldDecl], decls: &mut Decls) -> Vec<Field> {
+fn universe_fields(
+    package: &Package,
+    fields: &[FieldDecl],
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) -> Vec<Field> {
     let mut out = Vec::with_capacity(fields.len());
     for field in fields {
-        if let Some(expr) = conv_expr(package, &field.ty, decls) {
+        if let Some(expr) = conv_expr(package, &field.ty, decls, diags) {
             out.push(Field::named(&field.name.name, expr));
         }
     }
     out
 }
 
+/// A written type application's shape refusal against its head
+/// declaration: the applied argument count against the head's declared
+/// parameter count, or a head whose kind never takes type arguments.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ApplicationMismatch {
+    /// A head applied with the wrong argument count.
+    Arity {
+        /// The head's declared type-parameter count.
+        declared: usize,
+        /// The argument count the application spells.
+        given: usize,
+    },
+    /// A head that takes no type arguments at all.
+    Kind { word: &'static str },
+}
+
+impl ApplicationMismatch {
+    /// The refusal sentence, naming the declaration and both counts.
+    pub(crate) fn message(&self, name: &str) -> String {
+        match self {
+            Self::Arity { declared, given } => format!(
+                "`{name}` declares {declared} type parameter(s); the application spells {given}"
+            ),
+            Self::Kind { word } => format!("`{name}` is a {word} and takes no type arguments"),
+        }
+    }
+}
+
+/// Validates one written type application against its head declaration
+/// by `DefKind`: struct, enum, alias, and trait heads carry their declared
+/// parameter count, while tags, cases, value-namespace names, and every
+/// non-generic head take zero arguments. The conversion seams call this
+/// ahead of `apply_atom`, which internal structural application also
+/// reuses.
+pub(crate) fn check_application(
+    package: &Package,
+    def: DefId,
+    given: usize,
+    decls: &Decls,
+) -> Result<(), ApplicationMismatch> {
+    let declared = match package.def(def).kind {
+        DefKind::Struct => decls
+            .structs
+            .get(&def)
+            .map_or(0, |shape| shape.params.len()),
+        DefKind::Enum => decls.enums.get(&def).map_or(0, |shape| shape.params.len()),
+        DefKind::TypeAlias => decls
+            .aliases
+            .get(&def)
+            .map_or(0, |(params, _)| params.len()),
+        DefKind::Trait => decls.trait_generics.get(&def).map_or(0, Vec::len),
+        kind => return Err(ApplicationMismatch::Kind { word: kind.word() }),
+    };
+    if declared == given { Ok(()) } else { Err(ApplicationMismatch::Arity { declared, given }) }
+}
+
 /// Converts a written type into the [`TypeExpr`] world for non-generic
 /// universe shapes; `None` marks a type the core cannot express.
-fn conv_expr(package: &Package, ty: &Type, decls: &mut Decls) -> Option<TypeExpr> {
+fn conv_expr(
+    package: &Package,
+    ty: &Type,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<TypeExpr> {
     Some(match ty {
-        Type::Path { path, args, .. } => {
+        Type::Path { span, path, args } => {
             let [only] = path.segments.as_slice() else {
                 return None
             };
             if args.is_empty() {
-                path_expr(package, only, decls)?
+                path_expr(package, only, decls, diags)?
             } else {
-                let ctor = atom_of_path(package, only, decls)?;
-                let args = conv_args(package, args, &FxHashMap::default(), decls)?;
+                let def = package.lookup_type(&only.name)?;
+                if let Err(mismatch) = check_application(package, def, args.len(), decls) {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::TypeApplicationMismatch,
+                            mismatch.message(&only.name),
+                        )
+                        .with_primary(*span, "type application"),
+                    );
+                    return None;
+                }
+                let ctor = decls.atoms.get(&def).copied()?;
+                let args = conv_args(package, args, &FxHashMap::default(), decls, diags)?;
                 TypeExpr::Atom(decls.universe.apply_atom(ctor, &args).ok()?)
             }
         },
         Type::Optional { inner, .. } => {
-            conv_expr(package, inner, decls)?.union(TypeId::NONE.into())
+            conv_expr(package, inner, decls, diags)?.union(TypeId::NONE.into())
         },
         Type::Negation { inner, .. } => TypeExpr::Not(trait_of_type(package, inner, decls)?),
-        Type::Paren { inner, .. } => conv_expr(package, inner, decls)?,
+        Type::Paren { inner, .. } => conv_expr(package, inner, decls, diags)?,
         Type::Union { left, right, .. } => {
-            conv_expr(package, left, decls)?.union(conv_expr(package, right, decls)?)
+            conv_expr(package, left, decls, diags)?.union(conv_expr(package, right, decls, diags)?)
         },
         Type::Intersect { left, right, .. } => {
-            conv_expr(package, left, decls)?.inter(conv_expr(package, right, decls)?)
+            conv_expr(package, left, decls, diags)?.inter(conv_expr(package, right, decls, diags)?)
         },
         Type::Difference { left, right, .. } => {
-            conv_expr(package, left, decls)?.diff(conv_expr(package, right, decls)?)
+            conv_expr(package, left, decls, diags)?.diff(conv_expr(package, right, decls, diags)?)
         },
         Type::Tuple { items, .. } => {
             let mut elements = Vec::new();
             for item in items {
-                elements.push(conv_expr(package, item, decls)?);
+                elements.push(conv_expr(package, item, decls, diags)?);
             }
             TypeExpr::Tuple(elements)
         },
@@ -1507,11 +1671,12 @@ fn conv_args(
     args: &[Type],
     vars: &FxHashMap<String, TypeId>,
     decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
 ) -> Option<Vec<Ty>> {
     let _ = vars;
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
-        let expr = conv_expr(package, arg, decls)?;
+        let expr = conv_expr(package, arg, decls, diags)?;
         out.push(decls.universe.solve(&expr).ok()?);
     }
     Some(out)
@@ -1520,7 +1685,12 @@ fn conv_args(
 /// A single-segment type path in expression position: a declared atom, a
 /// trait as its member set, or a non-generic alias expanded to its full
 /// written union — never a set's single member.
-fn path_expr(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeExpr> {
+fn path_expr(
+    package: &Package,
+    name: &Ident,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<TypeExpr> {
     let def = package.lookup_type(&name.name)?;
     if let Some(&atom) = decls.atoms.get(&def) {
         return Some(TypeExpr::Atom(atom));
@@ -1538,7 +1708,7 @@ fn path_expr(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeE
     if let Some((params, body)) = decls.aliases.get(&def).cloned()
         && params.is_empty()
     {
-        return conv_expr(package, &body, decls);
+        return conv_expr(package, &body, decls, diags);
     }
     None
 }
@@ -1639,8 +1809,12 @@ fn solve_written(
                     decls.universe.atom_ty(atom).ok()?
                 } else {
                     // A trait as a set, or a non-generic alias: solve its
-                    // written expression in full.
-                    path_expr(package, only, decls)
+                    // written expression in full. An alias body expanded
+                    // here reports no application mismatch: an impl-head
+                    // conversion degrades silently like its other
+                    // unsolvable shapes, and the impl's own body checking
+                    // reports the unsolved target.
+                    path_expr(package, only, decls, &mut Vec::new())
                         .and_then(|expr| decls.universe.solve(&expr).ok())?
                 }
             } else {

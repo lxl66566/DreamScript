@@ -5,7 +5,11 @@
 
 use std::{rc::Rc, sync::Arc};
 
-use ds_query::{Analyzed, Db, Expanded, PackageId, ParseFile, QueryKey, Resolve};
+use ds_diag::FileId;
+use ds_query::{
+    Analyzed, AnalyzedOutput, BlockId, Db, DefId, Expanded, PackageId, ParseFile, QueryKey,
+    Resolve, TypeOf,
+};
 
 /// A package without derives: the expansion is an identical clone, so
 /// the bundle's tables answer the package's own facts. The tag declares
@@ -17,6 +21,17 @@ const PLAIN: &str = concat!(
     "##\n",
     "const answer = 42\n",
 );
+
+/// A typed const with both atom tags declared: a later edit moves the
+/// binding's type text between two declared atoms without any other
+/// fact moving (no diagnostic, no namespace change), so a renewal
+/// compare that misses the type rows would wrongly answer equal.
+const TYPED: &str = concat!("tag int\n", "tag string\n", "##\n", "const answer = 42\n",);
+
+/// `TYPED` with the binding retyped to the string atom.
+fn retyped() -> String {
+    TYPED.replace("42", "\"note\"")
+}
 
 /// One derive attribute: the expansion strips it and appends one
 /// synthesized impl item beside the attributed declaration.
@@ -173,4 +188,69 @@ fn an_edit_recomputes_the_bundle_once() {
         .unwrap();
     let _ = db.get::<Analyzed>(PackageId::new(0)).unwrap();
     assert_eq!(db.compute_count(&analyzed()), 2);
+}
+
+/// One bundle over `source`: an independent database, so nothing is
+/// shared with another bundle and the equality walks the facts
+/// themselves.
+fn bundle_of(source: &str) -> AnalyzedOutput {
+    let mut db = Db::new();
+    let _ = db.add_file("plain.ds", source);
+    db.get::<Analyzed>(PackageId::new(0)).unwrap()
+}
+
+#[test]
+fn bundles_compare_by_facts_across_databases() {
+    // No arc is shared between two databases, so pointer identity answers
+    // nothing and the compare walks every fact: equal sources compare
+    // equal through the whole package, resolutions, diagnostics, and
+    // rendered type rows.
+    let typed = bundle_of(TYPED);
+    let twin = bundle_of(TYPED);
+    assert_eq!(typed, twin);
+
+    // One def's type text moved (int -> string) and nothing else did: the
+    // rendered rows compare unequal, so a renewal against this bundle
+    // must flip, never serve the stale type.
+    let retyped = bundle_of(&retyped());
+    assert_ne!(typed, retyped);
+}
+
+/// The renewal compare's decision is observable through the check's
+/// readers: a fact-free edit (bytes move, facts hold) recomputes the
+/// checked package but renews it, so the per-definition story's memo
+/// verifies without recomputing; a def's type-text change flips the
+/// decision, the check's change-revision moves, and the story
+/// recomputes.
+#[test]
+fn a_fact_free_edit_renews_the_check_and_a_type_text_change_flips_it() {
+    let mut db = Db::new();
+    let file = db.add_file("typed.ds", TYPED);
+    let answer = DefId::from_block(BlockId {
+        file: FileId::new(0),
+        index: 1,
+    })
+    .expect("the fixture's files stay under the packing bounds");
+    let story = db.get::<TypeOf>(answer).unwrap();
+    assert_eq!(story.types.len(), 1);
+    assert_eq!(story.types[0].1, "int");
+    assert!(db.is_fresh(&QueryKey::TypeOf(answer)));
+
+    // A comment-only edit moves the bytes the parse depends on, so the
+    // checked package recomputes — but its facts compare equal and the
+    // memo renews: the change-revision stays put and the story verifies
+    // against it without a recompute.
+    db.set_file_content(file, &format!("{TYPED}\n// note\n"))
+        .unwrap();
+    db.get::<TypeOf>(answer).unwrap();
+    assert_eq!(db.compute_count(&QueryKey::TypeOf(answer)), 1);
+    assert!(db.is_fresh(&QueryKey::TypeOf(answer)));
+
+    // One def's type text moved (int -> string): the recomputed check
+    // compares unequal, the renewal flips, and the story recomputes to
+    // the moved type.
+    db.set_file_content(file, &retyped()).unwrap();
+    let story = db.get::<TypeOf>(answer).unwrap();
+    assert_eq!(db.compute_count(&QueryKey::TypeOf(answer)), 2);
+    assert_eq!(story.types[0].1, "string");
 }

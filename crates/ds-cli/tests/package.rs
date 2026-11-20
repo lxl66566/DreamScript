@@ -700,6 +700,193 @@ fn a_multi_member_package_composes_one_module() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// Runs the binary with both script-mode cache-debug observables on:
+/// the `ds run cache:` and `ds prefix cache:` lines on stderr name
+/// which tier each lookup took, the observable byte-identical output
+/// cannot prove.
+fn ds_caches_debug(cache: &Path, args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ds"))
+        .env("DS_CACHE", cache)
+        .env("DS_RUN_CACHE_DEBUG", "1")
+        .env("DS_PREFIX_CACHE_DEBUG", "1")
+        .env_remove("DS_REGISTRY")
+        .args(args)
+        .output()
+        .expect("the ds binary runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A multi-member package root composes one namespace at the root
+/// (G3): `ds run` and `ds build` compile the entry member and every
+/// sibling below the root into one module — the same member walk a
+/// dep-side compile rides — so the root that resolves when it is a dep
+/// resolves when it runs. Both script-mode caches key on the composed
+/// member fold, so a sibling edit is another key (the warm legs prove
+/// both tiers re-serve) and the built artifact's header carries the
+/// composed identity, exactly a dep-side dsmod's. A broken sibling
+/// refuses under the sibling's own member path, the member grammar's
+/// diagnostic spelling.
+#[test]
+fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
+    let work = temp_dir("multi-root");
+    let root = work.join("root");
+    let manifest = "name = \"app\"\nversion = \"0.1.0\"\n".to_owned();
+    let entry_source = "fn main() -> int {\ntwice(3)\n}\n";
+    let helper = "pub fn twice(n: int) -> int {\n2 * n\n}\n";
+    let members = [("app.ds", entry_source), ("helper.ds", helper)];
+    write_pkg(&root, &manifest, &members);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let cache = work.join("cache");
+
+    // the cold run: both tiers miss and the compose answers
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    assert!(ok, "the multi-member root run exits 0 (stderr: {err})");
+    assert_eq!(out, "6\n", "the sibling member binds inside the root");
+    assert!(err.contains("ds run cache: miss"), "the root misses: {err}");
+    assert!(
+        err.contains("ds prefix cache: miss"),
+        "the prefix misses: {err}"
+    );
+
+    // the warm run: the run artifact serves, byte-identical output (a
+    // run-cache hit installs without the front end, so the prefix tier's
+    // own observable rides the build leg below)
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    assert!(ok, "the warm multi-member root run exits 0 (stderr: {err})");
+    assert_eq!(out, "6\n", "the warm run prints the cold output");
+    assert!(err.contains("ds run cache: hit"), "the root serves: {err}");
+
+    // the build leg carries the prefix tier's observable: a build always
+    // compiles, so the stored prefix's hit line proves the same member
+    // set's `.dsi` serves; the artifact is one module over both members,
+    // its header the composed fold, exactly a dep-side dsmod's
+    let out_path = work.join("app.dsmod");
+    let (ok, _, err) = ds_caches_debug(&cache, &[
+        "build",
+        entry,
+        "--out",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the multi-member root build exits 0 (stderr: {err})");
+    assert!(
+        err.contains("ds prefix cache: hit"),
+        "the stored prefix serves the same member set: {err}"
+    );
+    let bytes = fs::read(&out_path).expect("the artifact writes");
+    let module = ds_mod::read(&bytes).expect("the built artifact reads");
+    assert_eq!(module.name(), "app");
+    let folded = {
+        let mut buffer = Vec::new();
+        for (path, text) in members {
+            buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(path.as_bytes());
+            buffer.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            buffer.extend_from_slice(text.as_bytes());
+        }
+        Hash128::compute(&buffer)
+    };
+    assert_eq!(
+        module.source_hash(),
+        folded,
+        "the artifact's header carries the composed member identity"
+    );
+    let (ok, out, err) = ds(&["run", out_path.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the built artifact runs (stderr: {err})");
+    assert_eq!(out, "6\n");
+
+    // the sibling edit: the composed fold moves, so both tiers re-key
+    // and the run answers the new member set, never a warm artifact of
+    // the old one
+    fs::write(
+        root.join("helper.ds"),
+        "pub fn twice(n: int) -> int {\n3 * n\n}\n",
+    )
+    .expect("the sibling edit writes");
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    assert!(ok, "the sibling-edited run exits 0 (stderr: {err})");
+    assert_eq!(out, "9\n", "the new member set serves");
+    assert!(
+        err.contains("ds run cache: miss"),
+        "the sibling edit re-keys: {err}"
+    );
+    assert!(
+        err.contains("ds prefix cache: miss"),
+        "the sibling edit re-keys the prefix tier: {err}"
+    );
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    assert!(ok, "the re-keyed warm run exits 0 (stderr: {err})");
+    assert_eq!(out, "9\n");
+    assert!(
+        err.contains("ds run cache: hit"),
+        "the new key serves warm: {err}"
+    );
+    let (ok, _, err) = ds_caches_debug(&cache, &[
+        "build",
+        entry,
+        "--out",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the sibling-edited build exits 0 (stderr: {err})");
+    assert!(
+        err.contains("ds prefix cache: hit"),
+        "the new member set's prefix serves warm: {err}"
+    );
+
+    // a broken sibling refuses under its own member path: the sibling
+    // joined the compile, so its diagnostic names it
+    fs::write(root.join("helper.ds"), "fn broken {\n").expect("the broken sibling writes");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "a broken sibling member refuses the run");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("--> helper.ds:"),
+        "the diagnostic names the sibling: {err}"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A three-member root binds a cross-member impl: the struct lives in
+/// one member, its trait impl in a second, and the entry calls through
+/// the trait's dispatch from the third — one namespace (G3), the members
+/// composing exactly as `ds check` over the same three files checks.
+#[test]
+fn a_three_member_root_binds_a_cross_member_impl() {
+    let work = temp_dir("three-root");
+    let root = work.join("root");
+    let manifest = "name = \"app\"\nversion = \"0.1.0\"\n".to_owned();
+    write_pkg(&root, &manifest, &[
+        ("cell.ds", "pub struct cell {\n  n: int,\n}\n"),
+        (
+            "impls.ds",
+            "impl show for cell {\n  fn show(self) -> string {\n    \"cell ${self.n}\"\n  }\n}\n",
+        ),
+        (
+            "app.ds",
+            concat!(
+                "import @std/io\n",
+                "\n",
+                "fn main() -> int {\n",
+                "  const c = cell { n: 3 }\n",
+                "  println(\"${c.show()}\")\n",
+                "  len(c.show())\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the three-member root run exits 0 (stderr: {err})");
+    assert_eq!(out, "cell 3\n6\n", "the cross-member impl dispatches");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A whole-package import and a module alias bind (G4): `import @wide`
 /// selects from every member's exports, and `as` binds a reference the
 /// dotted call sites resolve through the linked member surface.
@@ -1230,6 +1417,10 @@ version = \"1.0.0\"
         "pub struct nested {\n",
         "  c: cell,\n",
         "}\n",
+        "pub type words = list[string]\n",
+        "pub type chain = words\n",
+        "pub type wide[k] = map[k, int]\n",
+        "pub type either = int | string\n",
     );
     let members = [("shapes.ds", member)];
     write_pkg(&pkg, &manifest, &members);
@@ -1333,6 +1524,12 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "}\n",
         "pub struct maybe {\n",
         "  n: int?,\n",
+        "}\n",
+        "pub struct optlist {\n",
+        "  xs: list[int]?,\n",
+        "}\n",
+        "pub struct widemap {\n",
+        "  index: map[string, blob],\n",
         "}\n",
         "pub struct pairfield {\n",
         "  p: (int, int),\n",
@@ -1455,19 +1652,21 @@ fn linked_bytes_field_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The field shapes the bytes widening leaves outside the vocabulary
-/// keep their refusals at the same walk (G4): an optional field and a
-/// tuple field carry no fact, so their selections still refuse — the
-/// same DS4021 the nested struct answers.
+/// The field shapes the widened word vocabulary leaves outside itself
+/// keep their refusals at the same walk (G4): a tuple field, an optional
+/// over a wider word than a scalar, and a map over a non-scalar member
+/// carry no fact, so their selections still refuse — the same DS4021 the
+/// nested struct answers. The optional scalar field binds now (the
+/// shrunk-core e2e's config leg).
 #[test]
-fn the_optional_and_tuple_field_shapes_still_refuse() {
+fn the_wider_word_field_shapes_still_refuse() {
     let (work, pkg_id) = blobs_fixtures("blobs-tiers");
     let root_manifest = blobs_root_manifest(&pkg_id);
     for (tag, source, refused) in [
         (
-            "optional-field",
+            "tuple-field",
             concat!(
-                "import @blobs (maybe)\n",
+                "import @blobs (pairfield)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -1476,9 +1675,20 @@ fn the_optional_and_tuple_field_shapes_still_refuse() {
             "layout and tag rows are the artifact round",
         ),
         (
-            "tuple-field",
+            "optional-over-list",
             concat!(
-                "import @blobs (pairfield)\n",
+                "import @blobs (optlist)\n",
+                "\n",
+                "fn main() -> int {\n",
+                "7\n",
+                "}\n",
+            ),
+            "layout and tag rows are the artifact round",
+        ),
+        (
+            "map-over-struct",
+            concat!(
+                "import @blobs (widemap)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -1609,11 +1819,13 @@ fn linked_enum_facts_bind_and_run() {
 /// declaration or the consumer itself owns keep their refusals at the
 /// same walk (G4): an enum with a tuple payload, an empty enum, a
 /// generic enum, a generic struct, a linear struct, and a struct with a
-/// field outside the word vocabulary each carry no fact; a locally
-/// declared spelling of a linked type name refuses both at the type's
-/// selection and at any linked signature naming it — the local would
-/// mis-shape every spelling — and a case selection whose enum refused
-/// the same way names its enum.
+/// field outside the word vocabulary each carry no fact; the alias
+/// shapes outside the vocabulary — a body naming another alias, a
+/// generic alias, and a union body — carry none the same way; a
+/// locally declared spelling of a linked type name refuses both at the
+/// type's selection and at any linked signature naming it — the local
+/// would mis-shape every spelling — and a case selection whose enum
+/// refused the same way names its enum.
 #[test]
 fn the_uncarried_type_shapes_refuse() {
     let (work, pkg_id) = shapes_fixtures("shapes-tiers");
@@ -1678,6 +1890,39 @@ fn the_uncarried_type_shapes_refuse() {
             "nested-field",
             concat!(
                 "import @shapes (nested)\n",
+                "\n",
+                "fn main() -> int {\n",
+                "7\n",
+                "}\n",
+            ),
+            "layout and tag rows are the artifact round",
+        ),
+        (
+            "alias-of-alias",
+            concat!(
+                "import @shapes (chain)\n",
+                "\n",
+                "fn main() -> int {\n",
+                "7\n",
+                "}\n",
+            ),
+            "layout and tag rows are the artifact round",
+        ),
+        (
+            "generic-alias",
+            concat!(
+                "import @shapes (wide)\n",
+                "\n",
+                "fn main() -> int {\n",
+                "7\n",
+                "}\n",
+            ),
+            "layout and tag rows are the artifact round",
+        ),
+        (
+            "union-body-alias",
+            concat!(
+                "import @shapes (either)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -2218,10 +2463,13 @@ fn ds_both_debug(cache: &Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// Every `.dsi` prefix artifact below a cache root, recursively.
+/// Every `.dsi` prefix artifact below the cache root's prefix tier: the
+/// composed-prefix family under `dsi/` alone — each linked member's own
+/// `.dsi` lands beside its dsmod under `ir/bytecode/` (its own family,
+/// the surface round's), not here.
 fn dsi_artifacts(cache: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![cache.to_path_buf()];
+    let mut stack = vec![cache.join("dsi")];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -2713,6 +2961,27 @@ fn std_package_facts() -> (Package, Hash128, String) {
     (package, identity, version)
 }
 
+/// The default @std bundle's member identity — the same ascending-path
+/// fold over path-and-text pairs the load walk records for one package's
+/// members, computed over the tree's own member texts: the ambient core
+/// member beside the migrated members' source.
+fn std_member_identity() -> Hash128 {
+    let members = [
+        (ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE),
+        (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
+    ];
+    let mut ordered: Vec<&(&str, &str)> = members.iter().collect();
+    ordered.sort_by(|left, right| left.0.cmp(right.0));
+    let mut buffer = Vec::new();
+    for (path, text) in ordered {
+        buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(path.as_bytes());
+        buffer.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(text.as_bytes());
+    }
+    Hash128::compute(&buffer)
+}
+
 /// A root manifest declaring the @std dep at the given version and pin.
 fn std_root_manifest(ver: &str, hash: &str) -> String {
     format!(
@@ -2728,8 +2997,9 @@ fn std_root_manifest(ver: &str, hash: &str) -> String {
 /// extern's callee the compiler-wired native, a plain fact of the
 /// reserved package's face), the run installs the compiled @std module
 /// through the deps-first walk, and the built artifact pins `@std` at
-/// the ambient source hash — the member identity the verbatim seeding
-/// guarantees, the same identity the merged-ambient reading records.
+/// the bundle's member identity — the composed fold over the ambient
+/// core member and the migrated members' own source, the identity the
+/// resolution installed and the walk validates.
 #[test]
 fn a_declared_std_dep_serves_the_default_install() {
     let work = temp_dir("std-default");
@@ -2760,8 +3030,9 @@ fn a_declared_std_dep_serves_the_default_install() {
         "the tree's @std bundle installs under its own identity"
     );
 
-    // the built artifact pins @std at the ambient source hash — the
-    // verbatim seeding's identity coincidence with the merged reading
+    // the built artifact pins @std at the bundle's member identity — the
+    // ambient's source hash no longer coincides with it since the members
+    // migrated into the package's own source
     let out_path = work.join("app.dsmod");
     let (ok, _, err) = ds_env(&cache, None, &[
         "build",
@@ -2776,9 +3047,410 @@ fn a_declared_std_dep_serves_the_default_install() {
         module.deps(),
         &[Dep {
             name: "@std".to_owned(),
-            content_hash: Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()),
+            content_hash: std_member_identity(),
         }],
-        "the writer records @std at the ambient's source hash"
+        "the writer records @std at the bundle's member identity"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The un-merge's reading switch: a graph declaring the @std dep
+/// compiles over the shrunk ambient core (the demo residue's names gone
+/// from its namespace — a bare use is an unknown name), the extern face
+/// still binds through the linked surface, and the migrated shapes bind
+/// through the widened link vocabulary — the map alias annotates and
+/// constructs, the optional-field record constructs and reads through
+/// the presence-tag word, the list-literal const embeds its elements
+/// over the same `list_new`/`list_push` seam a local literal lowers
+/// through, and the opaque bodiless struct binds its name in the type
+/// namespace while every value use keeps the local spelling's own M3
+/// contract refusal (no construction lowers, no witness exists).
+#[test]
+fn a_declared_std_dep_compiles_over_the_shrunk_core() {
+    let work = temp_dir("std-migrated");
+    let (_package, std_id, ver) = std_package_facts();
+    let root = write_root(
+        &work,
+        &std_root_manifest(&ver, &std_id.to_string()),
+        concat!(
+            "import @std (to_upper)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  println(to_upper(\"core\"))\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let cache = work.join("cache");
+
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(ok, "the shrunk-core run exits 0 (stderr: {err})");
+    assert_eq!(
+        out, "CORE\n0\n",
+        "the linked extern face answers over the core"
+    );
+
+    // the migrated residue binds through the linked surface: the alias
+    // annotates a map construction, the optional-field record constructs
+    // and narrows, the list const embeds, and the opaque selection binds
+    // (its name resolving is the pin — the pre-widening vocabulary
+    // refused the selection itself at the walk)
+    let residue = concat!(
+        "import @std (row, config, response, urls)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  var rows: row = map[string, string]()\n",
+        "  map_set(rows, \"a\", \"1\")\n",
+        "  const c = config { host: \"localhost\", port: 8080, retries: 3 }\n",
+        "  const port = c.port\n",
+        "  if port is none {\n",
+        "    println(\"no port\")\n",
+        "  } else {\n",
+        "    println(\"port ${port}\")\n",
+        "  }\n",
+        "  for u in urls {\n",
+        "    println(u)\n",
+        "  }\n",
+        "  println(\"${c.host} ${c.retries} ${map_len(rows)} ${list_len(urls)}\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let root = write_root(
+        &work,
+        &std_root_manifest(&ver, &std_id.to_string()),
+        residue,
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(
+        ok,
+        "the migrated residue binds through the link (stderr: {err})"
+    );
+    let expected = concat!(
+        "port 8080\n",
+        "https://ds.dev\n",
+        "https://example.org\n",
+        "localhost 3 1 2\n",
+        "0\n",
+    );
+    assert_eq!(out, expected, "the four migrated shapes answer end to end");
+
+    // the warm run: the debug observable proves the warm serve — the
+    // root and the @std member's dsmods read from disk — where
+    // byte-identical stdout alone cannot (a fresh compile answers the
+    // same bytes). The `.dsi` tiers have no line on this leg, and
+    // honestly cannot: a fully-warm run serves the whole compile from
+    // the run cache and runs no front end, so no path consults a
+    // prefix (the composed prefix serves a dsmod miss's compile and
+    // `ds info`'s file target, the dep `.dsi` only the `ds lsp` hover)
+    let (ok, warm, warm_err) = ds_both_debug(&cache, &["run", entry]);
+    assert!(ok, "the warm residue run exits 0 (stderr: {warm_err})");
+    assert_eq!(warm, expected, "the warm run answers the same bytes");
+    assert!(
+        warm_err.contains("ds run cache: hit"),
+        "the root dsmod serves from disk: {warm_err}"
+    );
+    assert_eq!(
+        warm_err.matches("ds dep cache: hit").count(),
+        1,
+        "the @std member's dsmod serves from disk: {warm_err}"
+    );
+    assert_eq!(
+        warm_err.matches("ds run cache: miss").count()
+            + warm_err.matches("ds dep cache: miss").count(),
+        0,
+        "the warm run compiles nothing in-process: {warm_err}"
+    );
+
+    // the opaque shape's honest boundary: the name binds, but every
+    // value use keeps the local spelling's own M3 contract refusal —
+    // the parameter spelling here, the construction spelling below
+    let root = write_root(
+        &work,
+        &std_root_manifest(&ver, &std_id.to_string()),
+        concat!(
+            "import @std (response)\n",
+            "\n",
+            "fn pass(r: response) -> response {\n",
+            "  r\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(!ok, "the opaque value use refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("outside the M3 lowering contract"),
+        "the refusal is the local spelling's own (stderr: {err})"
+    );
+
+    // the construction spelling splits the same way: the checker
+    // accepts the part-less construction (resolve's zero-field rows
+    // assert the walk clean), while the lowerer refuses it through
+    // the M3 arm — no construction lowers, no witness exists
+    let root = write_root(
+        &work,
+        &std_root_manifest(&ver, &std_id.to_string()),
+        concat!(
+            "import @std (response)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const r = response { }\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(!ok, "the opaque construction refuses at the lowering");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("outside the M3 lowering contract"),
+        "the checker accepted the construction; the lowerer owns the refusal (stderr: {err})"
+    );
+
+    // the shrunk core really is the declaring graph's ambient: the demo
+    // residue's names are unknown bare (their @std selections bind —
+    // this test's residue leg — but a use without the import row never
+    // resolves)
+    let root = write_root(
+        &work,
+        &std_root_manifest(&ver, &std_id.to_string()),
+        concat!(
+            "fn take(c: config, r: response) -> int {\n",
+            "  1\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  0\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(!ok, "the bare demo-residue names refuse over the core");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("unknown type `config`"),
+        "the refusal names the migrated-out record: {err}"
+    );
+    assert!(
+        err.contains("unknown type `response`"),
+        "the refusal names the migrated-out opaque value: {err}"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The bare-specifier switch: a manifest-free script's implicit
+/// resolution treats `@std` like a declaring graph — the default bundle
+/// resolves ahead of the compile, the ambient the shrunk core, the
+/// script's selections binding through the linked surface — so the
+/// migrated shapes construct and read end to end over a plain script
+/// (the alias annotating a map construction, the optional-field record
+/// constructing and reading through the presence tag, the list const
+/// embedding its elements), the opaque name binds while its value uses
+/// keep the local spelling's lowering refusal, the @std path segments
+/// are real member selectors (a segment the bundle does not carry
+/// refusing), the warm run serves root and dep artifacts from the
+/// cache byte-identically, and the built artifact records `@std` at the
+/// bundle's member identity — the composed fold the declaring-graph
+/// writer records too.
+#[test]
+fn a_plain_script_resolves_std_through_the_implicit_graph() {
+    let work = temp_dir("std-script");
+    let script_dir = work.join("script");
+    fs::create_dir_all(&script_dir).expect("the script dir creates");
+    let script = script_dir.join("app.ds");
+    fs::write(
+        &script,
+        concat!(
+            "import @std (row, config, response, urls)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  var rows: row = map[string, string]()\n",
+            "  map_set(rows, \"a\", \"1\")\n",
+            "  const c = config { host: \"localhost\", port: 8080, retries: 3 }\n",
+            "  const port = c.port\n",
+            "  if port is none {\n",
+            "    println(\"no port\")\n",
+            "  } else {\n",
+            "    println(\"port ${port}\")\n",
+            "  }\n",
+            "  for u in urls {\n",
+            "    println(u)\n",
+            "  }\n",
+            "  println(\"${c.host} ${c.retries} ${map_len(rows)} ${list_len(urls)}\")\n",
+            "  0\n",
+            "}\n",
+        ),
+    )
+    .expect("the script writes");
+    let entry = script.to_str().expect("temp path is UTF-8");
+    let cache = work.join("cache");
+
+    // the migrated shapes bind through the linked surface over the
+    // implicit resolution, answering exactly the declaring-graph bytes
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(
+        ok,
+        "the implicit-resolution script run exits 0 (stderr: {err})"
+    );
+    let expected = concat!(
+        "port 8080\n",
+        "https://ds.dev\n",
+        "https://example.org\n",
+        "localhost 3 1 2\n",
+        "0\n",
+    );
+    assert_eq!(out, expected, "the four migrated shapes answer end to end");
+
+    // the warm run serves the root and the @std dep member from the
+    // cached artifacts, answering byte-identically
+    let (ok, warm, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(ok, "the warm script run exits 0 (stderr: {err})");
+    assert_eq!(warm, expected, "the warm run answers the same bytes");
+
+    // the opaque shape's honest boundary: the name binds through the
+    // link, but every value use keeps the local spelling's M3 contract
+    // refusal
+    let opq = script_dir.join("opq.ds");
+    fs::write(
+        &opq,
+        concat!(
+            "import @std (response)\n",
+            "\n",
+            "fn pass(r: response) -> response {\n",
+            "  r\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  0\n",
+            "}\n",
+        ),
+    )
+    .expect("the opaque script writes");
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        opq.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(!ok, "the opaque value use refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("outside the M3 lowering contract"),
+        "the refusal is the local spelling's own (stderr: {err})"
+    );
+
+    // the @std path segments are real member selectors over the bundle:
+    // a segment naming no member file refuses at the import
+    let seg = script_dir.join("seg.ds");
+    fs::write(
+        &seg,
+        "import @std/csv (split)\n\nfn main() -> int {\n  7\n}\n",
+    )
+    .expect("the segment script writes");
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        seg.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(!ok, "the phantom member segment refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("`csv` names no member of the linked package"),
+        "the refusal names the member segment: {err}"
+    );
+
+    // the built artifact records @std at the bundle's member identity —
+    // the same composed fold the declaring-graph writer records
+    let out_path = work.join("app.dsmod");
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "build",
+        entry,
+        "--out",
+        out_path.to_str().expect("path is UTF-8"),
+    ]);
+    assert!(ok, "the script build exits 0 (stderr: {err})");
+    let bytes = fs::read(&out_path).expect("the artifact writes");
+    let module = ds_mod::read(&bytes).expect("the built artifact reads");
+    assert_eq!(
+        module.deps(),
+        &[Dep {
+            name: "@std".to_owned(),
+            content_hash: std_member_identity(),
+        }],
+        "the script writer records @std at the bundle's member identity"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A graph that does not declare the @std dep keeps the merged-ambient
+/// reading exactly as before the un-merge: the demo residue stays bare
+/// (a row-typed binding constructing through the map face, the config
+/// record), and an `@std` import's selections validate against the merged
+/// namespace (the opaque response names a merged declaration) — while
+/// the same source as a manifest-free script takes the implicit
+/// resolution instead (the bare-specifier switch): the ambient is the
+/// shrunk core, so the bare migrated names refuse as unknown types, the
+/// honest merged-reading differential the script-mode e2e pins end to
+/// end.
+#[test]
+fn an_undeclaring_graph_keeps_the_merged_ambient_reading() {
+    let work = temp_dir("std-merged");
+    let source = concat!(
+        "import @std (response)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  const cfg = config { host: \"localhost\", port: 8080, retries: 3 }\n",
+        "  var rows: row = map[string, string]()\n",
+        "  map_set(rows, \"a\", \"1\")\n",
+        "  println(\"${cfg.host} ${cfg.retries} ${map_len(rows)}\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let root = write_root(&work, "name = \"app\"\nversion = \"0.1.0\"\n", source);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let cache = work.join("cache");
+
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    assert!(ok, "the merged-reading package run exits 0 (stderr: {err})");
+    let expected = "localhost 3 1\n0\n";
+    assert_eq!(
+        out, expected,
+        "the demo residue answers bare through the merged ambient"
+    );
+
+    // the same source as a plain script (no manifest beside it) takes
+    // the implicit resolution: the ambient is the shrunk core, so the
+    // bare migrated names refuse as unknown types — the merged-reading
+    // differential
+    let script_dir = work.join("script");
+    fs::create_dir_all(&script_dir).expect("the script dir creates");
+    let script = script_dir.join("app.ds");
+    fs::write(&script, source).expect("the script writes");
+    let (ok, script_out, err) = ds_env(&cache, None, &["run", script.to_str().expect("UTF-8")]);
+    assert!(!ok, "the script run refuses the bare migrated names");
+    assert_eq!(script_out, "", "nothing executes");
+    assert!(
+        err.contains("unknown struct `config`"),
+        "the refusal names the migrated-out record: {err}"
+    );
+    assert!(
+        err.contains("unknown type `row`"),
+        "the refusal names the migrated-out alias: {err}"
     );
 
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2842,8 +3514,10 @@ fn a_std_demand_above_the_tree_s_offering_refuses() {
 /// The @std linked surface keeps its tier refusals at the same walk as
 /// every linked package: a generic member, a signature unioning over a
 /// tag-bearing @std type (the cross-module tag seam), a signature naming
-/// a @std-owned non-word type bare, and a member segment the verbatim
-/// member set does not carry.
+/// a @std-owned non-word type bare, and a member segment the bundle's
+/// member set does not carry. The migrated demo residue binds through
+/// the widened vocabulary now (the shrunk-core test's residue leg), so
+/// no residue row refuses here anymore.
 #[test]
 fn the_std_linked_surface_tiers_refuse() {
     let work = temp_dir("std-tiers");
@@ -2905,6 +3579,543 @@ fn the_std_linked_surface_tiers_refuse() {
             "the {tag} refusal names its tier (stderr: {err})"
         );
         fs::remove_dir_all(&root).expect("the temp tree removes");
+    }
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The re-export fixture's deepest member: exported functions, a literal
+/// const, and a flat struct, the middle package re-exporting the first
+/// of each kind and privately importing the other function.
+const REEXPORT_DEEP_MEMBER: &str = concat!(
+    "pub fn base() -> int {\n",
+    "21\n",
+    "}\n",
+    "\n",
+    "pub fn secret() -> int {\n",
+    "7\n",
+    "}\n",
+    "\n",
+    "pub const step = 2\n",
+    "\n",
+    "pub struct unit {\n",
+    "  n: int,\n",
+    "}\n",
+);
+
+/// The re-export fixture's middle member: `pub import` re-exports the
+/// deepest package's callable, const, and struct onto its own export
+/// surface (the transitive surface closure), while the private row
+/// binding `secret` stays out.
+const REEXPORT_LIB_MEMBER: &str = concat!(
+    "pub import @deep (base, step, unit)\n",
+    "import @deep (secret)\n",
+    "\n",
+    "pub fn twice(n: int) -> int {\n",
+    "base() + n\n",
+    "}\n",
+    "\n",
+    "fn main() -> int {\n",
+    "twice(21)\n",
+    "}\n",
+);
+
+/// The re-export fixture's root: imports the middle package only, the
+/// re-exported callable, const, and struct answering through one row
+/// beside the middle package's own function.
+const REEXPORT_ROOT_SOURCE: &str = concat!(
+    "import @std/io\n",
+    "import @lib (twice, base, step, unit)\n",
+    "\n",
+    "fn main() -> int {\n",
+    "println(\"hi\")\n",
+    "const one = unit { n: 1 }\n",
+    "base() + twice(21) + step + one.n\n",
+    "}\n",
+);
+
+/// The re-export fixture packages saved into the test store, and the
+/// identity the root pins the middle package at.
+fn reexport_fixtures(tag: &str) -> (PathBuf, Hash128) {
+    let work = temp_dir(tag);
+    let deep = work.join("deep");
+    write_pkg(&deep, &deep_manifest(), &[(
+        "deep.ds",
+        REEXPORT_DEEP_MEMBER,
+    )]);
+    let deep_id = bundle_identity(&deep_manifest(), &[("deep.ds", REEXPORT_DEEP_MEMBER)]);
+    let lib_manifest = lib_manifest(deep_id);
+    let lib = work.join("lib");
+    write_pkg(&lib, &lib_manifest, &[("helper.ds", REEXPORT_LIB_MEMBER)]);
+    for dir in [&deep, &lib] {
+        let (ok, out, err) = ds(&["save", dir.to_str().expect("temp path is UTF-8")]);
+        assert!(ok, "ds save {} exits 0 (stderr: {err})", dir.display());
+        assert!(
+            out.starts_with("saved "),
+            "the install reports the identity it pinned (stdout: {out})"
+        );
+    }
+    let lib_id = bundle_identity(&lib_manifest, &[("helper.ds", REEXPORT_LIB_MEMBER)]);
+    (work, lib_id)
+}
+
+/// A `pub import` re-export crosses the middle package (todo item 58's
+/// transitive surface closure): the middle package's `pub import` row
+/// joins the deepest member onto its own export surface, so the root —
+/// importing the middle package alone — selects and calls the re-exported
+/// member through the ordinary linked surface; the call's FuncRef
+/// addresses the ORIGIN package, so the root's own dep list records
+/// `@deep` beside its declared imports and the load walk installs it.
+/// The middle package's private import of `secret` keeps today's skip:
+/// the name never joins the surface, so a root selecting it refuses
+/// naming the missing export.
+#[test]
+fn a_pub_import_reexport_crosses_the_middle_package() {
+    let (work, lib_id) = reexport_fixtures("reexport");
+    let root = write_root(&work, &root_manifest(lib_id, false), REEXPORT_ROOT_SOURCE);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the re-exported call serves the run (stderr: {err})");
+    assert_eq!(
+        out, "hi\n66\n",
+        "the re-exported callable, const, and struct answer beside the middle package's own"
+    );
+
+    // the built artifact's link table records the origin: the root's
+    // FuncRef for the re-exported call addresses @deep's position, so
+    // the dep list the walk validates names it beside the declared rows
+    let out_path = work.join("app.dsmod");
+    let (ok, _, err) = ds(&[
+        "build",
+        entry,
+        "--out",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the package build exits 0 (stderr: {err})");
+    let bytes = fs::read(&out_path).expect("the artifact writes");
+    let module = ds_mod::read(&bytes).expect("the built artifact reads");
+    assert_eq!(
+        module.deps(),
+        &[
+            Dep {
+                name: "@std".to_owned(),
+                content_hash: Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()),
+            },
+            Dep {
+                name: "@lib".to_owned(),
+                content_hash: Hash128::compute(REEXPORT_LIB_MEMBER.as_bytes()),
+            },
+            Dep {
+                name: "@deep".to_owned(),
+                content_hash: Hash128::compute(REEXPORT_DEEP_MEMBER.as_bytes()),
+            },
+        ],
+        "the writer records the declared rows and the re-export's origin"
+    );
+
+    // the private import's binding never joins the surface: a root
+    // selecting the privately-imported name refuses at the ordinary seam
+    let refused = concat!(
+        "import @std/io\n",
+        "import @lib (secret)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "secret()\n",
+        "}\n",
+    );
+    let root = write_root(&work, &root_manifest(lib_id, false), refused);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert!(!ok, "the privately-imported name refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("`secret` names no definition the imported member exports"),
+        "the refusal names the missing export (stderr: {err})"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+// ---- the cross-module tail transfer (H2 over the linked surface) ------------
+
+/// The linked tail-loop package's member: the M0 mutual pair (ping/pong)
+/// inside one linked module — the deepest loop shape the acyclic package
+/// graph permits the cross-module mirror, since a cycle between two
+/// packages refuses at resolve, so the pair lives in the linked module
+/// and the root's tail transfer crosses the boundary into it. The bases
+/// differ so a direction bug cannot pass as the right parity.
+const TAIL_LOOP_MEMBER: &str = concat!(
+    "pub fn ping(n: int) -> int {\n",
+    "  if n == 0 { 4242 } else { pong(n - 1) }\n",
+    "}\n",
+    "\n",
+    "fn pong(n: int) -> int {\n",
+    "  if n == 0 { 2424 } else { ping(n - 1) }\n",
+    "}\n",
+);
+
+/// Installs the tail-loop package and answers the root manifest pinning
+/// it plus the app tree for one source spelling. The root tree is one
+/// shared directory: a later call overwrites the earlier source, so a
+/// test writes, runs, and builds one spelling before writing the next.
+fn tail_loop_tree(work: &Path, source: &str) -> PathBuf {
+    let pkg = work.join("tloop");
+    let manifest = "name = \"@tloop\"\nversion = \"1.0.0\"\n".to_owned();
+    let members = [("loop.ds", TAIL_LOOP_MEMBER)];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the loop package installs (stderr: {err})");
+    let pkg_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@tloop = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{pkg_id}\" }}\n"
+    );
+    write_root(work, &root_manifest, source)
+}
+
+/// The dep-keyed FuncRefs one built function's pool carries: the uop form
+/// each Callt/Call site addressed, with its dependency position.
+fn dep_funcrefs(function: &ds_mod::Function) -> Vec<(String, u32)> {
+    function
+        .code()
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, &word)| {
+            let pc = u32::try_from(pc).expect("code length fits u32");
+            let ds_vm::abi::Inst::Uop(uop) = ds_vm::abi::Inst::decode(pc, word).ok()? else {
+                return None;
+            };
+            let (ds_vm::abi::uop::Uop::Callt { callee: index, .. }
+            | ds_vm::abi::uop::Uop::Call { callee: index, .. }) = uop
+            else {
+                return None;
+            };
+            match function.constants().get(usize::from(index.0)) {
+                Some(ds_mod::Constant::FuncRef {
+                    key: ds_mod::FuncRefKey::Dep(position),
+                    ..
+                }) => Some((repr_op(uop), *position)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// One uop's alphabetic kind, the call-site rows' own label.
+fn repr_op(uop: ds_vm::abi::uop::Uop) -> String {
+    let repr = format!("{uop:?}");
+    repr.chars().take_while(char::is_ascii_alphabetic).collect()
+}
+
+/// The cross-module tail transfer's acceptance (H2 over the linked
+/// surface): the root's tail call into the linked package's function
+/// lowers to CALLT — the frame-reuse transfer across the dsmod seam —
+/// and the ten-million-hop mutual loop it enters runs to completion on
+/// the constant stack the transfer leaves (a stacked 10^7-deep chain
+/// would need ~60M stack words against the VM's 1Mi-word limit and traps
+/// instead of exiting). The built artifact pins the lowering: main's
+/// body carries a Callt whose pool FuncRef addresses the dep position,
+/// never the plain Call the stacked reference lowers to.
+#[test]
+fn a_cross_module_tail_transfer_runs_a_ten_million_hop_loop_over_a_linked_package() {
+    let (work, _lib_id) = fixtures("tailloop");
+    let source = concat!(
+        "import @tloop/loop (ping)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  ping(10000000)\n",
+        "}\n",
+    );
+    let root = tail_loop_tree(&work, source);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the ten-million-hop run exits 0 (stderr: {err})");
+    assert_eq!(
+        out, "4242\n",
+        "the even-depth base answers across the boundary"
+    );
+
+    let out_path = work.join("tail.dsmod");
+    let (ok, _, err) = ds(&[
+        "build",
+        entry.to_str().expect("temp path is UTF-8"),
+        "--out",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the tail variant builds (stderr: {err})");
+    let module = ds_mod::read(&fs::read(&out_path).expect("the artifact writes"))
+        .expect("the artifact reads");
+    assert_eq!(
+        module.deps(),
+        &[Dep {
+            name: "@tloop".to_owned(),
+            content_hash: Hash128::compute(TAIL_LOOP_MEMBER.as_bytes()),
+        }],
+        "the writer records the linked loop package at its member identity"
+    );
+    let main = module
+        .functions()
+        .iter()
+        .find(|f| f.name() == "main")
+        .expect("main lowers");
+    assert_eq!(
+        dep_funcrefs(main),
+        vec![("Callt".to_owned(), 1)],
+        "the foreign tail lowers to the frame-reuse transfer over the first linked dep"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The differential: at small depth the frame-reuse path answers
+/// byte-identically to the stacked reference — the same source with the
+/// call as an arithmetic operand (a plain CALL, every hop a pushed
+/// frame) — both parities of the loop's base and the built artifacts
+/// pinning the two uop shapes apart.
+#[test]
+fn the_cross_module_frame_reuse_answers_like_the_stacked_reference() {
+    let (work, _lib_id) = fixtures("taildiff");
+    for (depth, base) in [(1001_usize, "2424"), (1000, "4242")] {
+        // one spelling at a time over the shared root tree: write, run,
+        // and build the transfer source, then the stacked one
+        let mut answers = Vec::new();
+        let mut shapes = Vec::new();
+        for (source, artifact) in [
+            (
+                format!("import @tloop/loop (ping)\n\nfn main() -> int {{\n  ping({depth})\n}}\n"),
+                work.join(format!("tail-{depth}.dsmod")),
+            ),
+            (
+                format!(
+                    "import @tloop/loop (ping)\n\nfn main() -> int {{\n  ping({depth}) + 0\n}}\n"
+                ),
+                work.join(format!("stacked-{depth}.dsmod")),
+            ),
+        ] {
+            let root = tail_loop_tree(&work, &source);
+            let entry = root.join("app.ds");
+            let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+            assert!(ok, "the variant at depth {depth} exits 0 (stderr: {err})");
+            answers.push(out);
+            let (ok, _, err) = ds(&[
+                "build",
+                entry.to_str().expect("temp path is UTF-8"),
+                "--out",
+                artifact.to_str().expect("temp path is UTF-8"),
+            ]);
+            assert!(ok, "the variant builds (stderr: {err})");
+            let module = ds_mod::read(&fs::read(&artifact).expect("the artifact writes")).unwrap();
+            let main = module
+                .functions()
+                .iter()
+                .find(|f| f.name() == "main")
+                .expect("main lowers");
+            shapes.push(dep_funcrefs(main));
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "frame reuse and stacking answer byte-identically at depth {depth}"
+        );
+        assert_eq!(answers[0], format!("{base}\n"));
+        assert_eq!(
+            shapes[0],
+            vec![("Callt".to_owned(), 1)],
+            "the tail variant transfers through the dep FuncRef"
+        );
+        assert_eq!(
+            shapes[1],
+            vec![("Call".to_owned(), 1)],
+            "the stacked variant keeps the plain call"
+        );
+    }
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A fn word staged into a linked function's callable-defaulted parameter
+/// splits exactly like a local site's: a non-capturing lambda mints the
+/// count-free scalar FuncRef word, so the tail transfers through CALLT
+/// across the boundary; a capturing lambda's closure word is a borrow the
+/// callee reads during the call, so that tail lowers in place (CALL plus
+/// return) — the count cannot ride a frame-reuse transfer.
+#[test]
+fn a_closure_word_into_a_linked_fn_parameter_keeps_the_in_place_tail() {
+    let (work, _lib_id) = fixtures("tailclos");
+    let pkg = work.join("fnlib");
+    let manifest = "name = \"@fnlib\"\nversion = \"1.0.0\"\n".to_owned();
+    let member = "pub fn apply(f: fn(int) -> int, n: int) -> int {\n  f(n)\n}\n";
+    let members = [("fnlib.ds", member)];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the fn package installs (stderr: {err})");
+    let pkg_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@fnlib = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{pkg_id}\" }}\n"
+    );
+    // one spelling at a time over the shared root tree, the differential's
+    // own discipline: the scalar word transfers, the closure word stays
+    for (tag, body, expected) in [
+        ("scalar", "  apply((x: int) => x + 1, 41)\n", "Callt"),
+        (
+            "closure",
+            "  const bump = 1\n  apply((x: int) => x + bump, 41)\n",
+            "Call",
+        ),
+    ] {
+        let source = format!("import @fnlib/fnlib (apply)\n\nfn main() -> int {{\n{body}}}\n");
+        let root = write_root(&work, &root_manifest, &source);
+        let entry = root.join("app.ds");
+        let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+        assert!(ok, "the {tag} run exits 0 (stderr: {err})");
+        assert_eq!(out, "42\n");
+        let out_path = work.join(format!("{tag}.dsmod"));
+        let (ok, _, err) = ds(&[
+            "build",
+            entry.to_str().expect("temp path is UTF-8"),
+            "--out",
+            out_path.to_str().expect("temp path is UTF-8"),
+        ]);
+        assert!(ok, "the {tag} variant builds (stderr: {err})");
+        let module = ds_mod::read(&fs::read(&out_path).expect("the artifact writes"))
+            .expect("the artifact reads");
+        let main = module
+            .functions()
+            .iter()
+            .find(|f| f.name() == "main")
+            .expect("main lowers");
+        assert_eq!(
+            dep_funcrefs(main),
+            vec![(expected.to_owned(), 1)],
+            "the {tag} fn word takes its own tail shape"
+        );
+    }
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The counted-word member: a string param rides the cross-module tail
+/// transfer — the Ref word's claim hands to the linked callee like a
+/// local's, its count riding the frame-reuse transfer and the callee's
+/// own exit dropping it — and the mutual pair then carries the word
+/// down its local hops, so the base's content test reads the word after
+/// it survived the seam and every slide below it. The bases answer
+/// through the string's content (the local analogue of the claim,
+/// ds-lower's deinit tail exit, stages the string the same way), so a
+/// slide that lands the Ref word one slot off — or a transfer that
+/// drops it early — answers the miss branch instead.
+const LEND_MEMBER: &str = concat!(
+    "pub fn ping(s: string, n: int) -> int {\n",
+    "  if n == 0 {\n",
+    "    if s == \"alpha\" { 42 } else { 24 }\n",
+    "  } else {\n",
+    "    pong(s, n - 1)\n",
+    "  }\n",
+    "}\n",
+    "\n",
+    "fn pong(s: string, n: int) -> int {\n",
+    "  if n == 0 {\n",
+    "    if s == \"alpha\" { 12 } else { 21 }\n",
+    "  } else {\n",
+    "    ping(s, n - 1)\n",
+    "  }\n",
+    "}\n",
+    "\n",
+);
+
+/// Installs the counted-word package and answers the root manifest
+/// pinning it plus the app tree for one source spelling, over the
+/// shared root tree like the loop package's own helper.
+fn lend_tree(work: &Path, source: &str) -> PathBuf {
+    let pkg = work.join("lend");
+    let manifest = "name = \"@lend\"\nversion = \"1.0.0\"\n".to_owned();
+    let members = [("loop.ds", LEND_MEMBER)];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the counted-word package installs (stderr: {err})");
+    let pkg_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@lend = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{pkg_id}\" }}\n"
+    );
+    write_root(work, &root_manifest, source)
+}
+
+/// The counted Ref word rides the cross-module tail transfer: the
+/// root's tail call into the linked package's function hands a string
+/// — its claim crossing the dsmod seam with the word, the callee owning
+/// it like a local's — and the differential answers byte-identically to
+/// the stacked reference at small depth both parities, the built
+/// artifacts pinning Callt against Call over the dep-keyed FuncRef.
+/// The content-decided bases keep the pin honest: a transfer that
+/// lands the Ref word wrong answers the miss branch, not the base.
+#[test]
+fn a_cross_module_tail_transfer_hands_a_counted_ref_word() {
+    let (work, _lib_id) = fixtures("tailref");
+    for (depth, base) in [(1001_usize, "12"), (1000, "42")] {
+        // one spelling at a time over the shared root tree, the loop
+        // package differential's own discipline
+        let mut answers = Vec::new();
+        let mut shapes = Vec::new();
+        for (index, source) in [
+            format!(
+                "import @lend/loop (ping)\n\nfn main() -> int {{\n  ping(\"alpha\", {depth})\n}}\n"
+            ),
+            format!(
+                "import @lend/loop (ping)\n\nfn main() -> int {{\n  ping(\"alpha\", {depth}) + \
+                 0\n}}\n"
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = lend_tree(&work, &source);
+            let entry = root.join("app.ds");
+            let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+            assert!(
+                ok,
+                "the spelling {index} at depth {depth} exits 0 (stderr: {err})"
+            );
+            answers.push(out);
+            let out_path = work.join(format!("lend-{index}-{depth}.dsmod"));
+            let (ok, _, err) = ds(&[
+                "build",
+                entry.to_str().expect("temp path is UTF-8"),
+                "--out",
+                out_path.to_str().expect("temp path is UTF-8"),
+            ]);
+            assert!(ok, "the spelling {index} builds (stderr: {err})");
+            let module = ds_mod::read(&fs::read(&out_path).expect("the artifact writes"))
+                .expect("the artifact reads");
+            assert_eq!(
+                module.deps(),
+                &[Dep {
+                    name: "@lend".to_owned(),
+                    content_hash: Hash128::compute(LEND_MEMBER.as_bytes()),
+                }],
+                "the writer records the counted-word package at its member identity"
+            );
+            let main = module
+                .functions()
+                .iter()
+                .find(|f| f.name() == "main")
+                .expect("main lowers");
+            shapes.push(dep_funcrefs(main));
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "the handed Ref word answers byte-identically to the stacked reference at depth \
+             {depth}"
+        );
+        assert_eq!(answers[0], format!("{base}\n"));
+        assert_eq!(
+            shapes[0],
+            vec![("Callt".to_owned(), 1)],
+            "the tail variant transfers the counted word through the dep FuncRef"
+        );
+        assert_eq!(
+            shapes[1],
+            vec![("Call".to_owned(), 1)],
+            "the stacked variant keeps the plain call"
+        );
     }
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }

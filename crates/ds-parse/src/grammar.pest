@@ -401,7 +401,11 @@ generics = { "[" ~ sp ~ (gparam ~ (sp ~ "," ~ sp ~ gparam)* ~ sp ~ ","?)? ~ sp ~
 gparam = { ident ~ (h ~ ":" ~ sp ~ type_expr)? }
 
 fn_item = { kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? ~ (sp ~ block_expr)? }
-extern_fn_item = { kw_extern ~ h ~ kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? }
+// H5: `extern fn name(params) -> t` keeps the compiler-wired reading
+// (the name addresses a native the lowering answers), while the optional
+// plain string names the bind target — the `[artifacts]` entry whose
+// installed library owns the C symbol the declaration binds.
+extern_fn_item = { kw_extern ~ (sp ~ string_lit)? ~ h ~ kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? }
 
 super_list = { type_expr ~ (sp ~ "," ~ sp ~ type_expr)* }
 struct_item = { kw_struct ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ (sp ~ struct_body)? }

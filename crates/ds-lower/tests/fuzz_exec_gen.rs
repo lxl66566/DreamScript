@@ -16,11 +16,33 @@
 //! transfers, two-level instantiations, and inert uncalled
 //! declarations) — the json derive roundtrip legs (an optional list
 //! field encoded through to_json and decoded back through from_json,
-//! presence and absence), and the cross-package linked-enum legs (a
+//! presence and absence), the cross-package linked-enum legs (a
 //! two-module compile: the consumer constructs, matches, narrows, and
 //! scores over the linked enum while union-typed answers cross the
 //! boundary both directions, plus the drawn variant whose second
-//! linked surface claims a seeded tag id and refuses at lowering).
+//! linked surface claims a seeded tag id and refuses at lowering),
+//! the `pub import` chain legs (a three-module compile: the consumer
+//! binds a re-exported callable, const, and struct through the middle
+//! package's surface with the calls addressing the origin's module,
+//! beside the three drawn refusal variants — the privately-imported
+//! name refusing the consumer's link walk, the selectionless pub row
+//! refusing the middle's own compile, and the `pub import` of `@std`
+//! refusing the merged-ambient seam — and the @std declaration-graph
+//! legs: a second consumer compiling over a core-shaped ambient with
+//! the reserved package's linked surface answering through the `std`
+//! identity — the extern face beside the migrated members' bindable
+//! shapes (the map alias annotating a keyed map value, the optional-field
+//! record constructing and reading through the presence-tag word, the
+//! list const embedding its elements over the list seam) and the drawn
+//! refusal variant whose `response` value use keeps the M3 contract
+//! refusal at lowering) — and the parser-budget episode: long type
+//! chains (a `?` postfix run, an `|`/`&` chain) in a helper's
+//! parameter, return, and binding annotations beside near-budget typed
+//! lambda chains and paren nesting (checking clean, erasing at
+//! lowering, a constant answer), and the two drawn refusal variants (a
+//! past-budget chain refusing the parse with the chain fold's
+//! NestingTooDeep diagnostic, a past-budget arrow run refusing the
+//! pre-scan's live-arrow diagnostic), each input never running.
 
 #[path = "../../../fuzz/exec_gen.rs"]
 mod exec_gen;
@@ -90,6 +112,19 @@ fn generated_programs_answer_their_oracle() {
         total.json_derive += drawn.json_derive;
         total.linked_enums += drawn.linked_enums;
         total.linked_refusals += drawn.linked_refusals;
+        total.pub_imports += drawn.pub_imports;
+        total.pub_private_refusals += drawn.pub_private_refusals;
+        total.pub_selectionless_refusals += drawn.pub_selectionless_refusals;
+        total.pub_std_refusals += drawn.pub_std_refusals;
+        total.std_graphs += drawn.std_graphs;
+        total.std_rows += drawn.std_rows;
+        total.std_configs += drawn.std_configs;
+        total.std_url_consts += drawn.std_url_consts;
+        total.std_opaque_refusals += drawn.std_opaque_refusals;
+        total.type_chain_oks += drawn.type_chain_oks;
+        total.type_chain_over += drawn.type_chain_over;
+        total.depth_oks += drawn.depth_oks;
+        total.depth_over += drawn.depth_over;
     }
     assert!(total.or_patterns > 0, "value-level or-patterns are drawn");
     assert!(total.struct_patterns > 0, "struct patterns are drawn");
@@ -145,6 +180,49 @@ fn generated_programs_answer_their_oracle() {
         total.linked_refusals > 0,
         "the linked surface's conflicting-tag-row refusal is drawn"
     );
+    assert!(total.pub_imports > 0, "pub import chains are drawn");
+    assert!(
+        total.pub_private_refusals > 0,
+        "the chain's privately-imported-name refusal is drawn"
+    );
+    assert!(
+        total.pub_selectionless_refusals > 0,
+        "the chain's selectionless-pub-row refusal is drawn"
+    );
+    assert!(
+        total.pub_std_refusals > 0,
+        "the chain's merged-ambient @std refusal is drawn"
+    );
+    assert!(total.std_graphs > 0, "@std declaration graphs are drawn");
+    assert!(
+        total.std_rows > 0,
+        "the `row` alias's keyed map value is drawn"
+    );
+    assert!(
+        total.std_configs > 0,
+        "the `config` record's construction and presence read are drawn"
+    );
+    assert!(
+        total.std_url_consts > 0,
+        "the `urls` list const's element embed is drawn"
+    );
+    assert!(
+        total.std_opaque_refusals > 0,
+        "the `response` value use's M3 contract refusal is drawn"
+    );
+    assert!(
+        total.type_chain_oks > 0,
+        "type chains at or under the chain budget are drawn"
+    );
+    assert!(
+        total.type_chain_over > 0,
+        "the episode's past-budget chain refusal is drawn"
+    );
+    assert!(total.depth_oks > 0, "near-budget lambda chains are drawn");
+    assert!(
+        total.depth_over > 0,
+        "the episode's past-budget arrow refusal is drawn"
+    );
     // the degenerate inputs: empty and single-byte streams cycle into a
     // full deterministic program too
     exec_gen::exercise(&[]);
@@ -163,8 +241,8 @@ fn repeated_generated_programs_answer_their_oracle() {
 }
 
 /// Generation is deterministic per input: the same bytes always produce
-/// the same program, library, oracle, and census, so any campaign finding
-/// reproduces from the raw input alone.
+/// the same program, library, chain members, std episode, oracle, and
+/// census, so any campaign finding reproduces from the raw input alone.
 #[test]
 fn generation_is_deterministic() {
     for seed in [1u64, 42, 97531] {
@@ -173,7 +251,40 @@ fn generation_is_deterministic() {
         let b = exec_gen::generate(&data);
         assert_eq!(a.source, b.source, "same input, same program");
         assert_eq!(a.library, b.library, "same input, same library");
+        assert_eq!(a.origin, b.origin, "same input, same origin member");
+        assert_eq!(a.mid, b.mid, "same input, same middle member");
+        assert_eq!(
+            a.pub_variant, b.pub_variant,
+            "same input, same drawn refusal variant"
+        );
+        assert_eq!(a.std_core, b.std_core, "same input, same std core");
+        assert_eq!(
+            a.std_members, b.std_members,
+            "same input, same std members file"
+        );
+        assert_eq!(a.std_source, b.std_source, "same input, same std consumer");
+        assert_eq!(
+            a.std_opaque, b.std_opaque,
+            "same input, same drawn std refusal"
+        );
         assert_eq!(a.expected, b.expected, "same input, same oracle");
+        assert_eq!(
+            a.std_expected, b.std_expected,
+            "same input, same std oracle"
+        );
         assert_eq!(a.drawn.or_patterns, b.drawn.or_patterns, "same census");
+        assert_eq!(
+            a.drawn.pub_imports, b.drawn.pub_imports,
+            "same chain census"
+        );
+        assert_eq!(a.drawn.std_graphs, b.drawn.std_graphs, "same std census");
+        assert_eq!(
+            a.drawn.std_opaque_refusals, b.drawn.std_opaque_refusals,
+            "same std refusal census"
+        );
+        assert_eq!(
+            a.chain_over, b.chain_over,
+            "same input, same drawn budget variant"
+        );
     }
 }

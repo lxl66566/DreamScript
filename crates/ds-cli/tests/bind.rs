@@ -4,6 +4,8 @@
 //! the library bytes — `ds bind` then binds the installed library and
 //! reports its exported C symbols, while the extern consumption seam
 //! keeps its honest lowering refusal (the marshaling round's own).
+//! The host's rustc (cargo sets `RUSTC` for the test binary) builds the
+//! fixtures, so a build failure is a test failure, never a silent pass.
 
 use std::{
     env, fs,
@@ -45,45 +47,65 @@ fn host_triple() -> &'static str {
 }
 
 /// The fixture source the host's rustc compiles as a cdylib: a real
-/// C-ABI shared object, no C toolchain involved.
+/// C-ABI shared object, no C toolchain involved. The exports cover the
+/// marshaling slice's register classes the run pins: the i64 GP pair,
+/// the f64 FP pair, and the u8 GP word.
 const FIXTURE_SOURCE: &str = r#"
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ds_add(left: i64, right: i64) -> i64 {
     left.wrapping_add(right)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ds_answer() -> i64 {
     42
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_scale(value: f64, by: f64) -> f64 {
+    value * by
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_not(flag: u8) -> u8 {
+    u8::from(flag == 0)
+}
 "#;
 
-/// Compiles the fixture cdylib into `dir`, `None` when the host's rustc
-/// cannot run (the gated legs skip).
-fn build_fixture(dir: &Path) -> Option<Vec<u8>> {
+/// Compiles one fixture source as the cdylib into `dir` and answers its
+/// bytes. Cargo sets `RUSTC` for the test binary, so a build failure is
+/// a test failure carrying rustc's own stderr — never a silent pass.
+fn build_fixture_source(dir: &Path, source: &str) -> Vec<u8> {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
-    let source = dir.join("fixture.rs");
-    fs::write(&source, FIXTURE_SOURCE).expect("the fixture source writes");
+    let source_path = dir.join("fixture.rs");
+    fs::write(&source_path, source).expect("the fixture source writes");
     let out = dir.join(library_name());
     let built = Command::new(rustc)
         .arg("--edition=2024")
         .arg("--crate-type=cdylib")
         .arg("--crate-name=dscli_bind_fixture")
-        .arg(&source)
+        .arg(&source_path)
         .arg("-o")
         .arg(&out)
         .output()
-        .ok()?;
-    if !built.status.success() {
-        return None;
-    }
-    fs::read(&out).ok()
+        .unwrap_or_else(|error| panic!("the fixture's rustc runs: {error}"));
+    assert!(
+        built.status.success(),
+        "the fixture cdylib builds (rustc stderr: {})",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    fs::read(&out).expect("the built fixture reads back")
 }
 
-/// The fixture root's source: it declares the extern the artifact
-/// exports, the spelling the marshaling round will route.
+/// The marshaling-slice fixture over its own source.
+fn build_fixture(dir: &Path) -> Vec<u8> {
+    build_fixture_source(dir, FIXTURE_SOURCE)
+}
+
+/// The fixture root's source: it declares the bound extern the artifact
+/// exports, the spelling the consumption seam routes.
 const ROOT_SOURCE: &str = concat!(
-    "extern fn ds_add (left: int, right: int) -> int\n",
+    "extern \"math\" fn ds_add (left: int, right: int) -> int\n",
     "\n",
     "fn main() -> int {\n",
     "ds_add(20, 22)\n",
@@ -139,17 +161,21 @@ fn ds(cache: &Path, args: &[&str]) -> (bool, String, String) {
 /// the root tree saved into the cache's store (the bundle only — the
 /// artifact bytes install separately, the registry fetch the run path
 /// composes).
-fn fixture(tag: &str, install_artifact: bool) -> Option<(PathBuf, PathBuf, Hash128)> {
+fn fixture(tag: &str, install_artifact: bool) -> (PathBuf, PathBuf, Hash128) {
+    fixture_source(tag, install_artifact, ROOT_SOURCE)
+}
+
+/// The same fixture with a custom root source: the source writes before
+/// the save, so the installed bundle's identity covers the exact bytes
+/// the run compiles.
+fn fixture_source(tag: &str, install_artifact: bool, source: &str) -> (PathBuf, PathBuf, Hash128) {
     let work = temp_dir(tag);
-    let Some(dylib) = build_fixture(&work) else {
-        eprintln!("skipping: the host's rustc cannot build the fixture cdylib");
-        return None;
-    };
+    let dylib = build_fixture(&work);
     let identity = ds_pkg::artifact_content_hash(&dylib);
     let root = work.join("root");
     fs::create_dir_all(&root).expect("the root dir creates");
     fs::write(root.join("ds.pkg"), root_manifest(identity)).expect("the manifest writes");
-    fs::write(root.join("app.ds"), ROOT_SOURCE).expect("the source writes");
+    fs::write(root.join("app.ds"), source).expect("the source writes");
     let cache = test_cache();
     let (ok, out, err) = ds(&cache, &["save", root.to_str().expect("the path is UTF-8")]);
     assert!(ok, "ds save exits 0 (stderr: {err})");
@@ -162,16 +188,14 @@ fn fixture(tag: &str, install_artifact: bool) -> Option<(PathBuf, PathBuf, Hash1
             .install_artifact(identity, &dylib)
             .expect("the fixture library installs into the store");
     }
-    Some((root, cache, identity))
+    (root, cache, identity)
 }
 
 /// A package with its artifact installed binds: the report names the
 /// artifact's identity and every exported C symbol.
 #[test]
 fn a_bound_artifact_reports_its_exported_c_symbols() {
-    let Some((root, cache, identity)) = fixture("report", true) else {
-        return;
-    };
+    let (root, cache, identity) = fixture("report", true);
     let entry = root.join("app.ds");
     let (ok, out, err) = ds(&cache, &[
         "bind",
@@ -205,9 +229,7 @@ fn a_bound_artifact_reports_its_exported_c_symbols() {
 /// with the declared spellings.
 #[test]
 fn the_artifact_flag_selects_one_bound_library() {
-    let Some((root, cache, identity)) = fixture("select", true) else {
-        return;
-    };
+    let (root, cache, identity) = fixture("select", true);
     let entry = root.join("app.ds");
     let (ok, out, err) = ds(&cache, &[
         "bind",
@@ -231,7 +253,7 @@ fn the_artifact_flag_selects_one_bound_library() {
     ]);
     assert!(!ok, "an unknown artifact name refuses");
     assert!(
-        out.contains("declares no artifact `nope`") && err.contains("declared: math"),
+        err.contains("declares no artifact `nope`") && err.contains("declared: math"),
         "the refusal names the demand and the declared spellings (stdout: {out}, stderr: {err})"
     );
 }
@@ -241,9 +263,7 @@ fn the_artifact_flag_selects_one_bound_library() {
 /// run answers before any compile.
 #[test]
 fn a_missing_artifact_refuses_the_bind() {
-    let Some((root, cache, _)) = fixture("missing", false) else {
-        return;
-    };
+    let (root, cache, _) = fixture("missing", false);
     let entry = root.join("app.ds");
     let (ok, out, err) = ds(&cache, &[
         "bind",
@@ -256,20 +276,245 @@ fn a_missing_artifact_refuses_the_bind() {
     );
 }
 
-/// The consumption seam stays honest: a source whose extern names the
-/// bound library's symbol still refuses at lowering — binding reports,
-/// and the C-ABI marshaling round owns the call.
+/// The externs' consumption seam is live (H5): a scalar-signature bound
+/// extern runs the installed artifact's C symbol through the run's bound
+/// install, the answers pinning every register-class shape the slice
+/// rules — the i64 GP pair, the f64 FP pair, the u8 GP word, and the
+/// empty call — and a warm run (the script-mode cache serving the root's
+/// dsmod) answering identically.
 #[test]
-fn an_extern_call_into_a_bound_artifact_keeps_its_lowering_refusal() {
-    let Some((root, cache, _)) = fixture("consume", true) else {
-        return;
-    };
+fn a_bound_extern_call_answers_over_the_installed_artifact() {
+    let (root, cache, _) = fixture("consume", true);
     let entry = root.join("app.ds");
     let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
-    assert!(!ok, "the extern call refuses at lowering");
+    assert!(ok, "the bound extern call runs (stderr: {err})");
+    assert_eq!(
+        out, "42\n",
+        "the answer prints one word per line (stdout: {out})"
+    );
+    // the warm run: the script-mode cache serves the root's dsmod and
+    // the same bound install answers identically
+    let (ok, warm, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    assert!(ok, "the warm run answers (stderr: {err})");
+    assert_eq!(warm, out, "the warm run answers identically");
+}
+
+/// The root's source pinning the slice's remaining register-class
+/// shapes: the FP pair, the u8 GP word, and the empty call, answered in
+/// one run through the entry's whole word span.
+const SHAPES_SOURCE: &str = concat!(
+    "extern \"math\" fn ds_scale (value: float, by: float) -> float\n",
+    "extern \"math\" fn ds_not (flag: bool) -> bool\n",
+    "extern \"math\" fn ds_answer () -> int\n",
+    "\n",
+    "fn main () -> (float, bool, int) {\n",
+    "(ds_scale(1.5, 4.0), ds_not(true), ds_answer())\n",
+    "}\n",
+);
+
+/// The run pins the slice's remaining register-class shapes over the
+/// same installed artifact: the FP pair, the u8 GP word, and the empty
+/// call — the entry's whole word span answering one word per line.
+#[test]
+fn the_register_class_shapes_answer_over_the_installed_artifact() {
+    let (root, cache, _) = fixture_source("shapes", true, SHAPES_SOURCE);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    assert!(ok, "the shapes run (stderr: {err})");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "three answers print (stdout: {out})");
+    assert_eq!(lines[0], "6.0", "the FP pair marshals");
+    assert_eq!(
+        lines[1], "false",
+        "the u8 word marshals ds_not(true) flipped"
+    );
+    assert_eq!(lines[2], "42", "the empty call marshals");
+}
+
+/// A symbol the artifact does not export refuses at lowering, the
+/// refusal naming the symbol and the artifact.
+#[test]
+fn a_missing_symbol_refuses_the_run() {
+    let (root, cache, _) = fixture_source(
+        "missing-symbol",
+        true,
+        concat!(
+            "extern \"math\" fn ds_missing () -> int\n",
+            "\n",
+            "fn main() -> int {\n",
+            "ds_missing()\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    assert!(!ok, "the missing symbol refuses");
     assert!(
-        err.contains("extern non-builtin"),
-        "the refusal names the extern seam (stdout: {out}, stderr: {err})"
+        err.contains("the bound extern `ds_missing` refuses")
+            && err.contains("exports no `ds_missing`"),
+        "the refusal names the symbol (stdout: {out}, stderr: {err})"
+    );
+}
+
+/// A signature outside the scalar first slice refuses at lowering, the
+/// refusal naming the marshaling slice: a string parameter here.
+#[test]
+fn a_wrong_signature_refuses_the_run() {
+    let (root, cache, _) = fixture_source(
+        "wrong-signature",
+        true,
+        concat!(
+            "extern \"math\" fn ds_add (left: string, right: string) -> string\n",
+            "\n",
+            "fn main() -> string {\n",
+            "ds_add(\"a\", \"b\")\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    assert!(!ok, "the out-of-slice signature refuses");
+    assert!(
+        err.contains("the bound extern `ds_add` refuses")
+            && err.contains("scalar C-ABI marshaling slice"),
+        "the refusal names the slice (stdout: {out}, stderr: {err})"
+    );
+}
+
+/// Runs the binary with the run-cache debug observable on, so the
+/// repin round can pin which path each run took.
+fn ds_traced(cache: &Path, args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ds"))
+        .env("DS_CACHE", cache)
+        .env_remove("DS_REGISTRY")
+        .env("DS_RUN_CACHE_DEBUG", "1")
+        .args(args)
+        .output()
+        .expect("the ds binary runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Fixture A's exports: ds_answer alone, so the sorted enumeration gives
+/// it index 0.
+const PIN_A_SOURCE: &str = r#"
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_answer() -> i64 {
+    42
+}
+"#;
+
+/// Fixture B's exports: ds_aaa sorts ahead of ds_answer, so the
+/// enumeration moves ds_answer to index 1 — the library a stale module
+/// compiled against A must never be served over.
+const PIN_B_SOURCE: &str = r#"
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_aaa() -> i64 {
+    999
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_answer() -> i64 {
+    42
+}
+"#;
+
+/// A repinned artifact re-keys the warm module: the same source over a
+/// moved `[artifacts]` pin takes a fresh compile that addresses the new
+/// library's own enumeration, and the run still answers 42 — a stale
+/// module compiled against fixture A would call B's index-0 export and
+/// answer 999.
+#[test]
+fn a_repinned_artifact_never_serves_the_warm_module() {
+    let work = temp_dir("repin");
+    let a = build_fixture_source(&work, PIN_A_SOURCE);
+    let b = build_fixture_source(&work, PIN_B_SOURCE);
+    let pin_a = ds_pkg::artifact_content_hash(&a);
+    let pin_b = ds_pkg::artifact_content_hash(&b);
+    let root = work.join("root");
+    fs::create_dir_all(&root).expect("the root dir creates");
+    let entry = root.join("app.ds");
+    fs::write(
+        &entry,
+        "extern \"math\" fn ds_answer () -> int\n\nfn main() -> int {\nds_answer()\n}\n",
+    )
+    .expect("the source writes");
+    fs::write(root.join("ds.pkg"), root_manifest(pin_a)).expect("the manifest writes");
+    let cache = test_cache();
+    let store = Store::open(&cache);
+    store
+        .install_artifact(pin_a, &a)
+        .expect("fixture A installs");
+    store
+        .install_artifact(pin_b, &b)
+        .expect("fixture B installs");
+    let run = || {
+        let (ok, out, err) =
+            ds_traced(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+        assert!(
+            ok,
+            "the run over the pinned artifact exits 0 (stderr: {err})"
+        );
+        assert_eq!(out, "42\n", "the answer prints (stderr: {err})");
+        err
+    };
+    // cold then warm over pin A, both answering 42
+    let cold = run();
+    assert!(
+        cold.contains("ds run cache: miss"),
+        "the first run compiles: {cold}"
+    );
+    let warm = run();
+    assert!(
+        warm.contains("ds run cache: hit"),
+        "the second run serves the cold run's artifact: {warm}"
+    );
+    // repin to B: the moved pin re-keys, the warm artifact compiled
+    // against A never serves, and the fresh module addresses B's own
+    // enumeration — still 42
+    fs::write(root.join("ds.pkg"), root_manifest(pin_b)).expect("the manifest rewrites");
+    let repinned = run();
+    assert!(
+        repinned.contains("ds run cache: miss"),
+        "the repinned run recompiles: {repinned}"
+    );
+    let warm_b = run();
+    assert!(
+        warm_b.contains("ds run cache: hit"),
+        "the repin's own artifact serves: {warm_b}"
+    );
+}
+
+/// A script with no manifest beside it keeps the graphless refusal: a
+/// bound extern addresses an artifact entry only a package graph
+/// resolves.
+#[test]
+fn a_graphless_bound_extern_refuses() {
+    let work = temp_dir("plain-bound");
+    let source = work.join("plain.ds");
+    fs::write(
+        &source,
+        concat!(
+            "extern \"math\" fn ds_add (left: int, right: int) -> int\n",
+            "\n",
+            "fn main() -> int {\n",
+            "ds_add(20, 22)\n",
+            "}\n",
+        ),
+    )
+    .expect("the source writes");
+    let cache = test_cache();
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        source.to_str().expect("the path is UTF-8"),
+    ]);
+    assert!(!ok, "a graphless bound extern refuses");
+    assert!(
+        err.contains("declares no [artifacts] entry `math`"),
+        "the refusal names the missing fold (stdout: {out}, stderr: {err})"
     );
 }
 

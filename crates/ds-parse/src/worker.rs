@@ -18,10 +18,16 @@ use ds_diag::{Diagnostic, ErrorCode, FileId};
 
 use crate::Ast;
 
-/// Stack size for the grammar thread. The scanner's nesting limit bounds the
-/// bracket depth that reaches the grammar, so this holds the deepest admitted
-/// source with room for the conversion pass.
-const PARSE_STACK: usize = 8 << 20;
+/// Stack size for the grammar thread. The scanner's nesting limits bound
+/// every recursion class that reaches the grammar, and the conversion
+/// pass that follows the parse has the largest frames: measured on a
+/// debug build (rustc 1.102-nightly, x86_64 Linux), one paren or arrow
+/// layer of conversion recursion costs ~114 KiB, and one `else if`
+/// level ~3 KiB, so the worst admitted source (39 parens + 39 arrows +
+/// 499 elses, roughly 11 MiB) fits with close to 3x headroom. Release
+/// frames are several times smaller, so the segment is sized by the
+/// debug profile, which is the profile every test run uses.
+const PARSE_STACK: usize = 32 << 20;
 
 /// One message for the worker thread.
 struct Job {

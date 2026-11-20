@@ -999,3 +999,79 @@ fn a_value_blocks_tail_read_releases_at_the_consumer_not_the_scope_end() {
         FrameAnswer::one(Value::I64(0))
     );
 }
+
+const CAPTURED_ROW_SOURCE: &str = "
+tag int
+tag string
+tag bool
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+fn make_suffix (s: string) -> fn(string) -> string {
+  (w: string) => concat(w, s)
+}
+
+fn main() -> int {
+  const f = make_suffix(\"tail\")
+  println(f(\"head\"))
+  0
+}";
+
+/// A frame reads the affine rows across function boundaries: the
+/// synthesized lambda registers its captured enclosing binding (a
+/// binder whose span lives in another function's text), so the
+/// capture's own last-use row still drives the lambda frame's
+/// placement — the parameter and the captured count both dec inside the
+/// frame at the concat use, while the enclosing frame's stream carries
+/// only its own count traffic. A per-function row slice keyed by each
+/// frame's own text would drop the capture's row and strand its count;
+/// this pin holds the shared facts table to the whole-table behavior.
+#[test]
+fn a_lambda_frame_places_its_captured_binder_row() {
+    let lowered = lower_inline(CAPTURED_ROW_SOURCE);
+    let lambda = lowered
+        .functions()
+        .iter()
+        .find(|name| name.starts_with("make_suffix$"))
+        .expect("the synthesized lambda lands in the function table");
+    let placed = lowered
+        .placed(lambda)
+        .expect("the lambda's placed stream exists");
+    let ops = rc_ops(placed);
+    assert_eq!(
+        ops.len(),
+        2,
+        "the parameter and the capture dec once each: {ops:?}"
+    );
+    assert!(
+        ops.iter().all(|op| matches!(op, RcOp::Dec { .. })),
+        "both counts die inside the frame: {ops:?}"
+    );
+    let first = placed
+        .iter()
+        .position(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
+        .expect("the first dec is placed");
+    let before = &placed[first - 1];
+    assert!(
+        matches!(before, PlacedOp::Uop(Uop::Call { .. })),
+        "both decs follow the concat use: {before:?}"
+    );
+
+    let maker = rc_ops(
+        lowered
+            .placed("make_suffix")
+            .expect("make_suffix is planned"),
+    );
+    assert_eq!(
+        maker.len(),
+        1,
+        "the enclosing frame keeps only its own dec: {maker:?}"
+    );
+    assert!(matches!(maker[0], RcOp::Dec { .. }));
+
+    assert_eq!(
+        run_main(&lowered, CAPTURED_ROW_SOURCE, "headtail\n"),
+        FrameAnswer::one(Value::I64(0)),
+        "observable behavior is unchanged and the heap drains"
+    );
+}

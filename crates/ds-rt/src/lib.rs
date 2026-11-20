@@ -5,13 +5,14 @@
 //! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry, bump alloc, restore
 //!   on every pop path; chunk-append growth keeps captured frame addresses stable; marks are
 //!   per-fiber so fiber switching needs no arena action. The arena module's docs carry the full
-//!   contract mapping from the design record ([C4], [H4] in `docs/en/design-decisions.md`).
+//!   contract mapping from the design record (`[C4]`, `[H4]` in `docs/en/design-decisions.md`).
 //! - Precise non-atomic reference counting for boxed/shared values ([`RcHeader`], [`RcRef`]):
 //!   `rc_inc` at each explicit clone, `rc_dec` at each unique death; the dying block becomes a
 //!   reuse candidate threaded to the next compatible allocation (the `alloc_at` pattern), with the
 //!   system allocator as fallback; `deinit` runs exactly once at the unique death on every path -
-//!   normal, early return, panic unwind ([C5]). The counts are non-atomic and sound because values
-//!   are thread-confined; E3's fork-join transfers ownership of whole heaps, never shares them.
+//!   normal, early return, panic unwind (`[C5]`). The counts are non-atomic and sound because
+//!   values are thread-confined; E3's fork-join transfers ownership of whole heaps, never shares
+//!   them.
 //!
 //! The `diag` feature (default off) adds the debugging instrument for the
 //! whole memory story: rc underflow/overflow tripwires, rc==1 assertions
@@ -33,13 +34,11 @@
 //! implementation plan); the rest of the workspace consumes it through safe
 //! APIs. Every unsafe block carries a safety comment.
 //!
-//! Miri is not available on this Windows setup; the unsafe code is nonetheless
-//! written to miri rules (in-bounds pointer arithmetic, matched alloc/dealloc
-//! layouts, provenance-free dangling pointers for zero-sized requests).
-//!
-//! [C4]: https://github.com/lxl66566/DreamScript/blob/main/docs/en/design-decisions.md
-//! [H4]: https://github.com/lxl66566/DreamScript/blob/main/docs/en/design-decisions.md
-//! [C5]: https://github.com/lxl66566/DreamScript/blob/main/docs/en/design-decisions.md
+//! Miri gates the unsafe core (CI runs `cargo miri test -p ds-rt` under both
+//! Stacked and Tree Borrows). Arena grants are raw pointers because
+//! restore-reuse invalidates references: a restore kills every grant it freed
+//! and only the latest grant for a byte range is live, an aliasing contract
+//! the arena's misuse contract documents and every caller upholds.
 
 mod arena;
 mod guard;

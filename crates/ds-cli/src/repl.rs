@@ -16,11 +16,16 @@
 //! forces the value-position lowering that no tail call can replace.
 //!
 //! Every submission re-runs the memoized queries over the whole session
-//! text through one query database (the check is session-length;
-//! block-grain invalidation renews the untouched declaration blocks), then
-//! lowers in the resumed-frame mode — `main`'s binders pin, their words
-//! claimed to the frame's teardown, since a session-live value must
-//! never die at a text-relative last use a later submission may extend.
+//! text through one query database the session owns across submissions
+//! (the check passes are package-grain: each submission re-derives them
+//! once, the ambient prefix served from the process park, and the
+//! per-block type and linearity stories stay one-bucket slices), then
+//! lowers in the resumed-frame mode over the affine rows the gate's own
+//! walk already produced — the lowerer's facts seam, so no submission
+//! pays the lowerer's backstop re-walk of the package. `main`'s binders
+//! pin, their words claimed to the frame's teardown, since a
+//! session-live value must never die at a text-relative last use a later
+//! submission may extend.
 //!
 //! # The resumed frame
 //!
@@ -72,7 +77,8 @@ use ds_mod::Hash128;
 use ds_parse::{Ast, ItemKind, LocalDecl, Pattern, StmtKind};
 use ds_query::{
     Analyzed, BlockIndex, BlockInfo, Db, DefId, EffectsOf, LinearityCheck, PackageEffects,
-    PackageId, ParseFile, PlatformCheck, QueryError, Resolve, TypeOf,
+    PackageId, PackageLinearity, ParseFile, PlatformCheck, PooledCheck, QueryError, Resolve,
+    TypeOf,
 };
 use ds_vm::{
     FrameAnswer, LoadError, ModuleRegistry, Platform, ReplOutcome, SpliceError, Value, Vm,
@@ -311,13 +317,19 @@ impl Session {
                 .filter(|diag| touches(diag, self.file))
                 .cloned(),
         );
-        // The pooled-body refusal [E3]: combinator element bodies
-        // refuse the members a pooled drive cannot serve.
-        let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")?;
+        // The pooled-body refusal [E3] rides its query like every other
+        // pass: combinator element bodies refuse the members a pooled
+        // drive cannot serve.
+        let pooled = query(
+            self.db.get::<PooledCheck>(PackageId::new(0)),
+            "pooled_check",
+        )?;
         reports.extend(
-            ds_check::check_pooled_bodies(&analyzed.analyzed, self.db.declared_rows())
-                .into_iter()
-                .filter(|diag| touches(diag, self.file)),
+            pooled
+                .diags
+                .iter()
+                .filter(|diag| touches(diag, self.file))
+                .cloned(),
         );
         if reports.is_empty() {
             return Ok(true);
@@ -341,11 +353,24 @@ impl Session {
         let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")
             .map_err(Failure::Engine)?
             .analyzed;
+        // The gate already paid the affine walk (the check pass reads it
+        // per block), so the lowering consumes its rows instead of the
+        // backstop re-walking the whole package — the same facts seam the
+        // run path and `ds dev`'s reload drive. The read is a memo hit
+        // over the same revision; `rows()` clones the lists the lowerer
+        // plans over, still far under one extra walk of the ambient.
+        let linear = query(
+            self.db.get::<PackageLinearity>(PackageId::new(0)),
+            "package linearity",
+        )
+        .map_err(Failure::Engine)?
+        .rows();
         let lowered = lower_in_mode(
             MODULE,
             Hash128::compute(text.as_bytes()),
             &analyzed.asts,
             &analyzed,
+            Some(&linear),
             LowerMode::ResumedFrame,
         )
         .map_err(|error| Failure::lower(&error, self.db.files()))?;
@@ -1351,6 +1376,205 @@ mod rename_tests {
         assert_eq!(
             rename_binding("const m = (\n1,\n2)", "__x"),
             "const __x = (\n1,\n2)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod query_riding_tests {
+    use anyhow::Result;
+    use ds_diag::FileId;
+    use ds_lower::{LowerMode, lower_in_mode};
+    use ds_mod::Hash128;
+    use ds_query::{Analyzed, Db, PackageId, PackageLinearity, QueryKey};
+
+    use super::{LineEvent, MODULE, ReadsLines, SESSION_FILE, Session, drive};
+
+    /// The session-shaped database over the ambient, the host provision,
+    /// and one session file: the exact registration [`Session::new`]
+    /// performs, so the differential below lowers the same package the
+    /// live REPL lowers.
+    fn session_db(text: &str) -> (Db, FileId) {
+        let mut db = Db::with_declared_rows(crate::source::session_rows().clone())
+            .with_world_caps(ds_stdlib::world_caps().clone());
+        let _ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+        let _host = db.add_file(crate::source::HOST_FILE, crate::source::HOST_SOURCE);
+        let file = db.add_file(SESSION_FILE, text);
+        (db, file)
+    }
+
+    /// The query-ridden lowering answers the backstop's bytes exactly:
+    /// for every round of a growing session the module lowered over the
+    /// `package_linearity` query's rows (the served walk's) equals the
+    /// module the lowerer's own plain re-walk produces — module bytes,
+    /// per-statement value ends, and the parked binder registrations —
+    /// so riding the queries moves no observable answer.
+    #[test]
+    fn the_query_rows_lower_the_backstops_bytes_exactly() {
+        let res =
+            "struct res: ~Copyable {\n  id: int\n  deinit { println(\"dying ${self.id}\") }\n}";
+        let point = "#[derive(show)]\nstruct point {\n  x: int\n}";
+        let rounds: [(Vec<&str>, Vec<&str>); 4] = [
+            (vec![res], vec!["const r = res { id: 7 }"]),
+            (vec![res], vec![
+                "const r = res { id: 7 }",
+                "println(\"id ${r.id}\")",
+            ]),
+            (vec![res, point], vec![
+                "const r = res { id: 7 }",
+                "println(\"id ${r.id}\")",
+                "const p = point { x: 1 }",
+                "p",
+            ]),
+            (vec![res, point, "fn f(x: res) -> int { x.id * 2 }"], vec![
+                "const r = res { id: 7 }",
+                "println(\"id ${r.id}\")",
+                "const p = point { x: 1 }",
+                "p",
+                "var v = res { id: 2 }",
+                "v = res { id: 3 }",
+                "f(r)",
+            ]),
+        ];
+        let mut text = Session::text(&[], &[]);
+        let (mut db, file) = session_db(&text);
+        for (decls, stmts) in rounds {
+            text = Session::text(
+                &decls
+                    .iter()
+                    .map(|decl| (*decl).to_owned())
+                    .collect::<Vec<_>>(),
+                &stmts
+                    .iter()
+                    .map(|stmt| (*stmt).to_owned())
+                    .collect::<Vec<_>>(),
+            );
+            db.set_file_content(file, &text).unwrap();
+            let parse = db.get::<ds_query::ParseFile>(file).unwrap();
+            assert!(
+                parse.diagnostics.is_empty(),
+                "round {decls:?}/{stmts:?} must parse: {:?}",
+                parse.diagnostics
+            );
+            let analyzed = db.get::<Analyzed>(PackageId::new(0)).unwrap().analyzed;
+            assert!(
+                analyzed.checked.diags.is_empty(),
+                "round {decls:?}/{stmts:?} must check: {:?}",
+                analyzed.checked.diags
+            );
+            let rows = db
+                .get::<PackageLinearity>(PackageId::new(0))
+                .unwrap()
+                .rows();
+            let hash = Hash128::compute(text.as_bytes());
+            let backstop = lower_in_mode(
+                MODULE,
+                hash,
+                &analyzed.asts,
+                &analyzed,
+                None,
+                LowerMode::ResumedFrame,
+            )
+            .unwrap();
+            let queries = lower_in_mode(
+                MODULE,
+                hash,
+                &analyzed.asts,
+                &analyzed,
+                Some(&rows),
+                LowerMode::ResumedFrame,
+            )
+            .unwrap();
+            assert_eq!(
+                ds_mod::write(backstop.module()),
+                ds_mod::write(queries.module()),
+                "round {decls:?}/{stmts:?}: the served rows must lower the backstop's bytes"
+            );
+            assert_eq!(
+                backstop.value_ends("main"),
+                queries.value_ends("main"),
+                "the per-statement value ends must agree"
+            );
+            assert_eq!(
+                backstop.registered("main"),
+                queries.registered("main"),
+                "the parked binder registrations must agree"
+            );
+        }
+    }
+
+    /// A scripted read layer over fixed lines.
+    struct Lines(Vec<LineEvent>);
+
+    impl ReadsLines for Lines {
+        fn read_line(&mut self, _prompt: &str) -> Result<LineEvent> {
+            Ok(self.0.remove(0))
+        }
+
+        fn record(&mut self, _submission: &str) {}
+    }
+
+    /// The per-submission work the engine sees, counted: five clean
+    /// submissions re-derive each package-grain pass exactly once (the
+    /// necessary work — any edit can move any resolution, so the passes
+    /// are package-grain by design) and parse the ambient and host
+    /// exactly once for the whole session (the ambient's parse serves
+    /// from the embedded blob and no submission touches it again). The
+    /// one affine walk per submission serves both the gate's per-block
+    /// stories and the lowering's facts seam: before the seam rode here,
+    /// every submission's lowering re-walked the whole package — the
+    /// ambient included — through the lowerer's plain backstop, a second
+    /// full walk these counters could never see because it bypassed the
+    /// engine entirely.
+    #[test]
+    fn five_submissions_recheck_each_pass_once() {
+        let submissions = [
+            "struct res: ~Copyable {\n  id: int\n  deinit { println(\"dying ${self.id}\") }\n}",
+            "const r = res { id: 7 }",
+            "r.id + 1",
+            "fn f(x: int) -> int { x * 2 }",
+            "f(3)",
+        ];
+        let mut events: Vec<LineEvent> = submissions
+            .iter()
+            .map(|line| LineEvent::Line((*line).to_owned()))
+            .collect();
+        events.push(LineEvent::Eof);
+        let mut reader = Lines(events);
+        let mut session = Session::new();
+        let code = drive(&mut session, &mut reader).expect("the session ends cleanly");
+        assert_eq!(code, std::process::ExitCode::SUCCESS);
+        let db = &session.db;
+        // file ids: the ambient (0), the host provision (1), the session (2)
+        let session_file = FileId::new(2);
+        let pkg = PackageId::new(0);
+        let k = submissions.len();
+        for (name, key) in [
+            ("session parse", QueryKey::ParseFile(session_file)),
+            ("expansion", QueryKey::Expanded(pkg)),
+            ("resolve", QueryKey::Resolve(pkg)),
+            ("checked package", QueryKey::CheckedPackage(pkg)),
+            ("analyzed", QueryKey::Analyzed(pkg)),
+            ("package linearity", QueryKey::PackageLinearity(pkg)),
+            ("package effects", QueryKey::PackageEffects(pkg)),
+            ("platform check", QueryKey::PlatformCheck(pkg)),
+            ("pooled check", QueryKey::PooledCheck(pkg)),
+        ] {
+            assert_eq!(
+                db.compute_count(&key),
+                k,
+                "{name}: one re-derivation per submission, never two"
+            );
+        }
+        assert_eq!(
+            db.compute_count(&QueryKey::ParseFile(FileId::new(0))),
+            1,
+            "the ambient parses once for the whole session"
+        );
+        assert_eq!(
+            db.compute_count(&QueryKey::ParseFile(FileId::new(1))),
+            1,
+            "the host provision parses once for the whole session"
         );
     }
 }

@@ -15,6 +15,29 @@ set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 kdir="$here/kernels"
 
+# Per-invocation timeout guard: `timeout` when the platform has it
+# (GNU coreutils ships it on the Linux runners and Git-for-Windows),
+# else a passthrough — a hung interpreter then fails the invocation
+# itself instead of wedging a bench round.
+TIMEOUT_SECS=600
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT() { timeout "$TIMEOUT_SECS" "$@"; }
+else
+    TIMEOUT() { "$@"; }
+fi
+
+# `date +%s%N` prints nanoseconds on GNU date only; BSD date answers
+# seconds plus a literal `N`. These numbers gate M8/M9 perf records, so
+# a non-digit answer refuses loudly instead of timing on a broken scale
+# (the portable fallback would be `date +%s` whole seconds).
+probe=$(date +%s%N)
+case $probe in
+'' | *[!0-9]*)
+    echo "ab.sh: \`date +%s%N\` answered [$probe] — this date has no nanoseconds (BSD); the bench needs GNU date, or a rework over the \`date +%s\` fallback" >&2
+    exit 1
+    ;;
+esac
+
 binA=${1:?usage: ab.sh <binA> <binB> [rounds] [kernel...]}
 binB=${2:?usage: ab.sh <binA> <binB> [rounds] [kernel...]}
 rounds=${3:-10}
@@ -36,11 +59,22 @@ for name in $all_kernels; do
 done
 kernels=${kernels# }
 
+# The per-side sample files live for the whole kernel loop; an
+# interrupt must not leave the `ab_A.$$`/`ab_B.$$` corpses behind.
+tmpA=""
+tmpB=""
+ab_cleanup() {
+    [ -n "$tmpA" ] && rm -f "$tmpA"
+    [ -n "$tmpB" ] && rm -f "$tmpB"
+}
+trap ab_cleanup EXIT
+trap 'ab_cleanup; exit 1' INT TERM
+
 times_bin() {
     bin=$1
     file=$2
     t0=$(date +%s%N)
-    "$bin" run --no-cache "$file" >/dev/null 2>&1
+    TIMEOUT "$bin" run --no-cache "$file" >/dev/null 2>&1
     status=$?
     t1=$(date +%s%N)
     if [ "$status" -ne 0 ]; then

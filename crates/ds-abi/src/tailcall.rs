@@ -219,8 +219,21 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
     let arg_area = caller.arg_area();
     let src = arg_area.start..arg_area.start + needed;
     let dst = 0..needed;
-    // Both ranges span `needed` slots, so the direction rule is total.
-    let direction = plan_direction(&src, &dst);
+    // The direction decision compares the physical displacement, never
+    // the logical starts: the slide's ends live under different owners'
+    // mappings — the source at the caller's overlay position (fp + 2 +
+    // body_len), the destination at the callee's body position (fp + 1) —
+    // so the two differ by one call word even when the logical starts
+    // coincide (a pure-argument-area caller, body_len == 0). Deciding on
+    // the logical starts would answer None there, skip the copy, and
+    // leave the callee reading the stale call-word slot. With needed > 0
+    // the destination always sits below the source, so the plan is
+    // always an Ascending down-slide; only an empty slide is None.
+    let physical_src_start = 2 + caller.body_len();
+    let direction = plan_direction(
+        &(physical_src_start..physical_src_start + needed),
+        &(1..1 + needed),
+    );
     Ok(SlidePlan {
         src,
         dst,
@@ -259,17 +272,29 @@ mod tests {
     }
 
     #[test]
-    fn delta_zero_when_frame_is_pure_arg_area() {
-        // A trampoline whose frame is only the overlay region: the staged
-        // arguments already sit at the frame base.
+    fn pure_arg_area_callt_with_arguments_slides_across_the_call_word() {
+        // A trampoline whose frame is only the overlay region: the logical
+        // source and destination coincide, but the physical maps differ by
+        // one call word (the staged words at fp+2, the callee's params at
+        // fp+1), so every argument must slide. The logical `apply` is the
+        // identity here; the physical application is the VM's job, per the
+        // owner-relative mapping.
         let caller = layout(vec![I64, F64], 0, 2);
         let callee = layout(vec![I64, F64, Bool], 2, 1);
         let plan = slide_plan(&caller, &callee).expect("layouts agree");
-        assert_eq!(plan.direction(), SlideDirection::None);
-        assert_eq!(plan.delta(), 0);
+        assert_eq!(plan.src(), 0..2);
+        assert_eq!(plan.dst(), 0..2);
+        assert_eq!(plan.direction(), SlideDirection::Ascending);
         let mut words = [4, 5, 0];
         plan.apply(&mut words);
         assert_eq!(words, [4, 5, 0]);
+        // a one-word slide: a caller with no body slots forwarding a
+        // single i64 to a one-param callee
+        let caller = layout(vec![I64], 0, 1);
+        let callee = layout(vec![I64], 1, 0);
+        let plan = slide_plan(&caller, &callee).expect("layouts agree");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.direction(), SlideDirection::Ascending);
     }
 
     #[test]

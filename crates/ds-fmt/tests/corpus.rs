@@ -10,6 +10,30 @@ use ds_diag::Files;
 use ds_fmt::format_source;
 use ds_parse::{parse, parse_script};
 
+// The gates over one script-entry source: format, re-parse the output as
+// the entry, re-format, and compare.
+fn script_round_trip(name: &str, src: &str) -> String {
+    let mut files = Files::new();
+    let file = files.add_source(name, src);
+    let ast = parse_script(&files, file)
+        .unwrap_or_else(|d| panic!("{name} should parse as the entry: {}", d[0].message));
+    let out = format_source(&files, file, &ast);
+    let mut re_files = Files::new();
+    let re = re_files.add_source(name, &out);
+    let re_ast = parse_script(&re_files, re).unwrap_or_else(|d| {
+        panic!(
+            "{name}: formatted output does not parse as the entry: {}\n--- output:\n{out}",
+            d[0].message
+        )
+    });
+    let out2 = format_source(&re_files, re, &re_ast);
+    assert_eq!(
+        out, out2,
+        "{name} not idempotent\n--- first:\n{out}\n--- second:\n{out2}"
+    );
+    out
+}
+
 /// Runs both gates over one source, with failure messages that name the case.
 fn check(name: &str, src: &str) {
     let out = fmt_once(name, src);
@@ -129,72 +153,53 @@ fn script_entry_files_round_trip() {
 }
 
 /// `##` separators between the statements that fold into the synthesized
-/// `main` survive formatting: the fold leaves the statement-carrying blocks
-/// empty and appends `main` to the last one, so the separators sit in the
-/// inter-block gap windows like any library separator — provided the
-/// window end does not trust the synthesized span (which joins the file's
-/// first..last statements and starts before the carrying block). The
-/// comment-before-separator shape once inverted that window into a panic.
-/// Gates for every fixture: the physical separator lines survive verbatim,
-/// the output re-parses in library mode, and formatting is idempotent.
+/// `main` keep their place: the grammar admits `##` only between
+/// top-level blocks, so the one-`fn main` spelling cannot carry them —
+/// a separator-carrying entry renders back in its script shape, the
+/// statement groups at top level with every separator between (or
+/// around) them. Gates for every fixture: the expected bytes, a re-parse
+/// of the output as the entry, and idempotence. An unseparated entry
+/// still folds to the written `fn main` (the test above).
 #[test]
-fn script_entry_separators_survive_the_fold() {
+fn script_entry_separators_stay_between_the_statement_groups() {
     let fixtures: &[(&str, &str)] = &[
-        // The plain drop: one separator between the folded statements.
+        // The review's two-block repro, already canonical.
         (
+            "const a = 1\nprintln(\"hi\")\n## part two\nconst b = 2\nprintln(\"bye\")\n",
+            "const a = 1\nprintln(\"hi\")\n## part two\nconst b = 2\nprintln(\"bye\")\n",
+        ),
+        // Messy groups normalize around a separator that never moves.
+        (
+            "const   a=1\n## section\nprintln( a )\n",
             "const a = 1\n## section\nprintln(a)\n",
-            "## section\nfn main() -> () {\n  const a = 1\n\n  println(a)\n}\n",
         ),
-        // The former panic: a comment between the last folded statement of a
-        // block and the separator rides the empty block's trailing trivia.
+        // A comment between the last folded statement of a block and the
+        // separator rides the block's trailing trivia, ahead of the
+        // separator like in the source.
         (
+            "const   a=1\n// mid\n## section\nprintln(a)\n",
             "const a = 1\n// mid\n## section\nprintln(a)\n",
-            "// mid\n## section\nfn main() -> () {\n  const a = 1\n\n  println(a)\n}\n",
         ),
-        // Consecutive folded groups: both separators stack before `main`,
-        // each still on its own physical line.
+        // Consecutive folded groups: both separators keep their lines.
         (
+            "const   a=1\n## s1\nprintln(a)\n## s2\nprintln(b)\n",
             "const a = 1\n## s1\nprintln(a)\n## s2\nprintln(b)\n",
-            "## s1\n## s2\nfn main() -> () {\n  const a = 1\n\n  println(a)\n\n  println(b)\n}\n",
         ),
-        // Declarations between the statement groups stay their own items;
-        // the separators keep separating them from `main`.
+        // Declarations between the statement groups stay their own
+        // items, in source order against the folded statements.
         (
+            "const   a=1\n## helpers\nfn   helper() -> () {}\n## run\nprintln(a)\n",
             "const a = 1\n## helpers\nfn helper() -> () {}\n## run\nprintln(a)\n",
-            "## helpers\nfn helper() -> () {}\n## run\nfn main() -> () {\n  const a = 1\n\n  \
-             println(a)\n}\n",
         ),
-        // A separator behind the last statement survives ahead of `main`:
-        // the fold fills the empty block the trailing separator leaves, so
-        // the separator lands in the window before that block.
-        (
-            "println(a)\n## tail\n",
-            "## tail\nfn main() -> () { println(a) }\n",
-        ),
+        // A separator behind the last statement stays behind it.
+        ("println(a)\n## tail\n", "println(a)\n## tail\n"),
     ];
     for (i, (src, expected)) in fixtures.iter().enumerate() {
         let name = format!("script-entry-sep[{i}]");
-        let mut files = Files::new();
-        let file = files.add_source(&name, src);
-        let ast = parse_script(&files, file)
-            .unwrap_or_else(|d| panic!("{name} should parse as the entry: {}", d[0].message));
-        let out = format_source(&files, file, &ast);
+        let out = script_round_trip(&name, src);
         assert_eq!(
             out, *expected,
             "{name} separator lost or moved\n--- src:\n{src}"
-        );
-        let mut re_files = Files::new();
-        let re = re_files.add_source(&name, &out);
-        let re_ast = parse(&re_files, re).unwrap_or_else(|d| {
-            panic!(
-                "{name}: formatted output does not parse: {}\n--- output:\n{out}",
-                d[0].message
-            )
-        });
-        let out2 = format_source(&re_files, re, &re_ast);
-        assert_eq!(
-            out, out2,
-            "{name} not idempotent\n--- first:\n{out}\n--- second:\n{out2}"
         );
     }
 }

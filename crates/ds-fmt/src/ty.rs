@@ -127,7 +127,7 @@ fn write_ty_inner(ctx: &Ctx, out: &mut String, ty: &Type) {
         },
         Type::TypeKw(_) => out.push_str("type"),
         // Verbatim from the span: escape-free re-rendering of `c["sqlite3"]`.
-        Type::Foreign { span, .. } => out.push_str(ctx.text(*span)),
+        Type::Foreign { span, .. } => ctx.push_verbatim(out, *span),
     }
 }
 

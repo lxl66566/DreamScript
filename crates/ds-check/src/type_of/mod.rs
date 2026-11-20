@@ -332,6 +332,7 @@ pub fn analyze_owned(files: &Files, asts: Vec<Arc<Ast>>) -> Analyzed {
         package.into(),
         resolutions.into(),
         resolve_diags,
+        Arc::default(),
     )
 }
 
@@ -349,6 +350,7 @@ pub fn analyze_resolved(
     package: Arc<Package>,
     resolutions: Arc<[Resolutions]>,
     resolve_diags: Vec<Diagnostic>,
+    artifacts: Arc<ArtifactSymbols>,
 ) -> Analyzed {
     let (decls, checked) = check_bodies(files, &asts[..], &package, &resolutions[..], None);
     let mut diags = resolve_diags;
@@ -372,6 +374,7 @@ pub fn analyze_resolved(
         package,
         resolutions,
         decls: Rc::new(decls),
+        artifacts,
         checked: Arc::new(checked),
     }
 }
@@ -400,7 +403,16 @@ pub fn analyze_served(
     served: decls::ServedDecls,
     diags: Vec<Diagnostic>,
 ) -> Analyzed {
-    analyze_served_over(files, asts, package, resolutions, served, diags, None)
+    analyze_served_over(
+        files,
+        asts,
+        package,
+        resolutions,
+        served,
+        diags,
+        None,
+        Arc::default(),
+    )
 }
 
 /// [`analyze_served`] with import surfaces linked (G4): the link pass
@@ -424,6 +436,7 @@ pub fn analyze_served_linked(
         served,
         diags,
         Some(imports),
+        Arc::new(imports.artifacts().clone()),
     )
 }
 
@@ -435,6 +448,7 @@ fn analyze_served_over(
     served: decls::ServedDecls,
     diags: Vec<Diagnostic>,
     imports: Option<&crate::import::ImportGraph>,
+    artifacts: Arc<ArtifactSymbols>,
 ) -> Analyzed {
     let mut diags = diags;
     let mut package = package;
@@ -485,6 +499,7 @@ fn analyze_served_over(
         package: package.into(),
         resolutions: tables.into(),
         decls: Rc::new(decls),
+        artifacts,
         checked: Arc::new(checked),
     }
 }
@@ -666,6 +681,10 @@ where
     })
 }
 
+/// The resolved graph's bound artifacts (H5): artifact name to its
+/// installed library's exported C symbols, in enumeration order.
+pub type ArtifactSymbols = std::collections::BTreeMap<String, Arc<Vec<String>>>;
+
 /// The tables of one analyzed package; see [`analyze`]. Every field is a
 /// shared handle, so cloning the bundle clones pointers — the query layer
 /// hands it out of a memo without copying the namespace — and a consumer
@@ -689,6 +708,14 @@ pub struct Analyzed {
     /// `Ty`. Shared without atomics: the tables hold `Rc` sets (see
     /// `Universe`), so the bundle is not `Send` however it is shared.
     pub decls: Rc<Decls>,
+    /// The resolved graph's bound artifacts (H5): each `[artifacts]`
+    /// name the run's manifest graph resolved mapped to its installed
+    /// library's exported C symbols, in enumeration order — the fold a
+    /// bound extern's declaration resolves through and the table the
+    /// run installs as the artifact's native module. Empty on every
+    /// graphless path (a plain script, the REPL), where a bound extern
+    /// refuses at lowering naming the missing package fold.
+    pub artifacts: Arc<ArtifactSymbols>,
     /// The typed result: diagnostics (resolve classes merged ahead of the
     /// declaration and body classes, like [`analyze`]), top-level types,
     /// binder facts, per-expression types.
@@ -1726,6 +1753,22 @@ impl Bodies<'_> {
     }
 
     fn literal(&mut self, span: Span, lit: &Literal) -> Val {
+        if let Literal::Int { suffix, text } = lit
+            && suffix.is_empty()
+            && int_literal_value(text, false).is_none()
+        {
+            self.error(
+                ErrorCode::InvalidLiteral,
+                format!("integer literal `{text}` does not fit the i64 range"),
+                span,
+                "out of range",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        }
         let (name, what) = match lit {
             Literal::Int { suffix, .. } => {
                 if suffix.is_empty() {
@@ -1910,7 +1953,7 @@ impl Bodies<'_> {
         }
         match (survivors.as_slice(), runtime.as_slice()) {
             ([only], []) => {
-                self.record_solved_dispatch(*only, ty, span);
+                self.record_solved_dispatch(*only, ty, None, span);
                 self.hole_show_dispatches.insert(span, *only);
                 self.expr_types.insert(span, Val {
                     ty: string_ty,
@@ -2213,8 +2256,9 @@ impl Bodies<'_> {
 
     /// The memoized type of a top-level binding, typed lazily so
     /// order-independent uses work (G3). A linked const has no tree here:
-    /// its literal fact is the whole type story — the fact's scalar atom,
-    /// minted once and memoized like a solved initializer.
+    /// its literal fact is the whole type story — the fact's own mint in
+    /// this universe (a scalar's atom, a list's applied constructor),
+    /// memoized like a solved initializer.
     fn const_ty(&mut self, def: DefId, span: Span) -> Val {
         if let Some(&ty) = self.def_types.get(&def) {
             return Val {
@@ -2224,11 +2268,8 @@ impl Bodies<'_> {
             };
         }
         if let Some(fact) = self.decls.foreign_consts.get(&def).cloned() {
-            let ty = self
-                .decls
-                .universe
-                .atom_by_name(fact.atom_name())
-                .and_then(|atom| self.decls.universe.atom_ty(atom).ok())
+            let ty = fact
+                .ty(&mut self.decls.universe)
                 .unwrap_or_else(|| self.empty());
             self.def_types.insert(def, ty);
             return Val {
@@ -3936,7 +3977,7 @@ impl Bodies<'_> {
                     poisoned: false,
                 };
             }
-            self.record_solved_dispatch(method, recv_val.ty, span);
+            self.record_solved_dispatch(method, recv_val.ty, None, span);
         }
         self.member_call(
             method,
@@ -3946,6 +3987,7 @@ impl Bodies<'_> {
             &args[1..],
             trailing,
             span,
+            None,
         )
     }
 
@@ -4301,7 +4343,7 @@ impl Bodies<'_> {
                 self.inherent_call_bounds.insert(span, bounds);
             }
         }
-        self.member_call(method, &sig, owner_ty, None, args, trailing, span)
+        self.member_call(method, &sig, owner_ty, None, args, trailing, span, None)
     }
 
     /// Method-candidate selection (F3, B6): candidates narrow by receiver
@@ -4318,7 +4360,10 @@ impl Bodies<'_> {
         span: Span,
     ) -> Val {
         let recv_val = self.expr(recv, None);
-        let mut survivors: Vec<(MethodId, Arc<FnSig>)> = Vec::new();
+        // Each survivor carries the resolution its trait branch solved:
+        // the selected survivor hands its resolution to the dispatch
+        // record and the member call, so the pair solves once.
+        let mut survivors: Vec<(MethodId, Arc<FnSig>, Option<Resolution>)> = Vec::new();
         let mut miss = None;
         for &candidate in candidates {
             let Some(sig) = self.member_sig(candidate) else {
@@ -4330,14 +4375,14 @@ impl Bodies<'_> {
                         continue;
                     };
                     if self.assumption_covers(trait_id, recv_val.ty) {
-                        survivors.push((candidate, sig));
+                        survivors.push((candidate, sig, None));
                         continue;
                     }
                     match self.instance_resolution(trait_id, recv_val.ty) {
-                        Resolution::Unique(_)
+                        resolution @ (Resolution::Unique(_)
                         | Resolution::Covered(_)
-                        | Resolution::Ambiguous(_) => {
-                            survivors.push((candidate, sig));
+                        | Resolution::Ambiguous(_)) => {
+                            survivors.push((candidate, sig, Some(resolution)));
                         },
                         // A head that matched while its bound failed is
                         // the nearest miss: the diagnostic below names the
@@ -4357,7 +4402,7 @@ impl Bodies<'_> {
                         continue;
                     }
                     if self.inherent_accepts(target, recv_val.ty) {
-                        survivors.push((candidate, sig));
+                        survivors.push((candidate, sig, None));
                     }
                 },
             }
@@ -4454,10 +4499,19 @@ impl Bodies<'_> {
                 poisoned: false,
             };
         }
-        let (method, sig) = survivors.remove(0);
+        let (method, sig, resolution) = survivors.remove(0);
         self.method_selections.insert(name.span, method);
-        self.record_solved_dispatch(method, recv_val.ty, span);
-        self.member_call(method, &sig, recv_val.ty, Some(recv), args, trailing, span)
+        self.record_solved_dispatch(method, recv_val.ty, resolution.as_ref(), span);
+        self.member_call(
+            method,
+            &sig,
+            recv_val.ty,
+            Some(recv),
+            args,
+            trailing,
+            span,
+            resolution.as_ref(),
+        )
     }
 
     /// Whether an inherent impl's owner accepts the receiver (F3): every
@@ -4495,7 +4549,13 @@ impl Bodies<'_> {
     /// instance exists). A site satisfied only through an in-scope
     /// assumption with no resolving instance records nothing — its
     /// dispatch is the runtime-resolved evidence form.
-    fn record_solved_dispatch(&mut self, method: MethodId, recv: Ty, span: Span) {
+    fn record_solved_dispatch(
+        &mut self,
+        method: MethodId,
+        recv: Ty,
+        resolution: Option<&Resolution>,
+        span: Span,
+    ) {
         if matches!(&self.package.method(method).owner, MethodOwner::Inherent(_)) {
             self.inherent_calls.insert(span, method);
             // A generic inherent impl's body dispatches on runtime
@@ -4519,8 +4579,18 @@ impl Bodies<'_> {
         let Some(&trait_id) = self.decls.traits.get(def) else {
             return;
         };
-        match self.instance_resolution(trait_id, recv) {
+        // The dot-call's selected resolution arrives from selection; the
+        // other call spellings solve the pair here.
+        let resolved;
+        let resolution = if let Some(resolution) = resolution {
+            resolution
+        } else {
+            resolved = self.instance_resolution(trait_id, recv);
+            &resolved
+        };
+        match resolution {
             Resolution::Unique(instance) | Resolution::Covered(instance) => {
+                let instance = *instance;
                 // a generic impl's body dispatches on runtime evidence:
                 // record the per-bound instances the substitution serves,
                 // so the lowering side stages them without re-deriving types
@@ -4540,7 +4610,7 @@ impl Bodies<'_> {
                 });
             },
             Resolution::Ambiguous(candidates) => {
-                self.instance_ambiguity(trait_id, recv, &candidates, span);
+                self.instance_ambiguity(trait_id, recv, candidates, span);
             },
             Resolution::None | Resolution::BoundUnsat { .. } => {},
         }
@@ -4552,17 +4622,24 @@ impl Bodies<'_> {
     /// over the written head, so its `Self`-typed parameters accept the
     /// head's whole member set and a case-narrowed receiver no longer
     /// pins them to its own case. A generic written head keeps the
-    /// receiver, which carries the call's substitution.
-    fn self_binding(&self, method: MethodId, recv: Ty) -> Ty {
+    /// receiver, which carries the call's substitution. The dot-call's
+    /// selected resolution arrives from selection; the other call
+    /// spellings solve the pair here.
+    fn self_binding(&self, method: MethodId, recv: Ty, resolution: Option<&Resolution>) -> Ty {
         let MethodOwner::Trait(def) = &self.package.method(method).owner else {
             return recv;
         };
         let Some(&trait_id) = self.decls.traits.get(def) else {
             return recv;
         };
-        let (Resolution::Unique(id) | Resolution::Covered(id)) =
-            self.instance_resolution(trait_id, recv)
-        else {
+        let resolved;
+        let resolution = if let Some(resolution) = resolution {
+            resolution
+        } else {
+            resolved = self.instance_resolution(trait_id, recv);
+            &resolved
+        };
+        let (&Resolution::Unique(id) | &Resolution::Covered(id)) = resolution else {
             return recv;
         };
         let Ok(written) = self.decls.instances.written(id) else {
@@ -4585,7 +4662,10 @@ impl Bodies<'_> {
     /// bound itself to any argument, accepting types the substitution
     /// does not cover [record 6.1]. A value receiver passes through the
     /// same mut-window exclusivity gate as a free call's fed argument
-    /// (D2, C3).
+    /// (D2, C3). The dot-call's selected resolution arrives from
+    /// selection (the pair solved once there); the other call spellings
+    /// pass `None` and solve here.
+    #[allow(clippy::too_many_arguments)]
     fn member_call(
         &mut self,
         method: MethodId,
@@ -4595,12 +4675,16 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        resolution: Option<&Resolution>,
     ) -> Val {
-        let self_ty = self.self_binding(method, recv_ty);
+        let self_ty = self.self_binding(method, recv_ty, resolution);
         let mut vars = FxHashMap::from_iter([("Self".to_owned(), self_ty)]);
         if let MethodOwner::Trait(def) = &self.package.method(method).owner
             && let Some(&trait_id) = self.decls.traits.get(def)
-            && let Some(instance) = self.instance_resolution(trait_id, recv_ty).solved()
+            && let Some(instance) = match resolution {
+                Some(resolution) => Resolution::solved(resolution),
+                None => self.instance_resolution(trait_id, recv_ty).solved(),
+            }
             && let Some(&site) = self.decls.instance_impls.get(&instance)
             && let Some(decl_args) = self.decls.trait_impl_args.get(&site)
             && let Some(names) = self.decls.trait_generics.get(def)
@@ -5610,9 +5694,13 @@ impl Bodies<'_> {
                 let Some(bind) = self.path_local(peel_paren(expr)) else {
                     return
                 };
-                let Some(solved) = self.solve_here(ty) else {
-                    return
-                };
+                // The test type solved once at its own site; a re-solve
+                // here only feeds the narrowing, so a repeated refusal
+                // is dropped instead of reported twice.
+                let before = self.diags.len();
+                let solved = self.solve_here(ty);
+                self.diags.truncate(before);
+                let Some(solved) = solved else { return };
                 out.push(Narrow {
                     bind,
                     keep: true,
@@ -5835,7 +5923,7 @@ impl Bodies<'_> {
         generics: &[GenericParam],
     ) -> Option<Ty> {
         match ty {
-            Type::Path { path, args, .. } => {
+            Type::Path { span, path, args } => {
                 let [only] = path.segments.as_slice() else {
                     return None
                 };
@@ -5871,6 +5959,18 @@ impl Bodies<'_> {
                     .lookup_type(&only.name)
                     .or_else(|| self.decls.foreign_type(&only.name))?;
                 if !args.is_empty() {
+                    if let Err(mismatch) =
+                        decls::check_application(self.package, def, args.len(), self.decls)
+                    {
+                        self.error(
+                            ErrorCode::TypeApplicationMismatch,
+                            mismatch.message(&only.name),
+                            *span,
+                            "type application",
+                        );
+                        self.solve_reported = true;
+                        return None;
+                    }
                     let mut arg_tys = Vec::with_capacity(args.len());
                     for arg in args {
                         arg_tys.push(self.solve_with(arg, subst, generics)?);
@@ -6706,6 +6806,28 @@ fn name_type(name: &str) -> Type {
             }],
         },
         args: Vec::new(),
+    }
+}
+
+/// One integer literal's i64 value with its written sign folded in:
+/// the digit text (radix prefixes kept, separators already stripped by
+/// the parser) must fit the two's-complement range at that sign, so a
+/// leading `-` widens the bound to `9223372036854775808` while the bare
+/// magnitude refuses. `None` when the digits are out of range.
+fn int_literal_value(text: &str, neg: bool) -> Option<i64> {
+    let (radix, digits) = match text.as_bytes() {
+        [b'0', b'x' | b'X', ..] => (16, &text[2..]),
+        [b'0', b'b' | b'B', ..] => (2, &text[2..]),
+        [b'0', b'o' | b'O', ..] => (8, &text[2..]),
+        _ => (10, text),
+    };
+    let magnitude = u64::from_str_radix(digits, radix).ok()?;
+    if neg {
+        // The min magnitude alone wraps under negation; every smaller
+        // one negates in range.
+        if magnitude == 1u64 << 63 { Some(i64::MIN) } else { Some(-i64::try_from(magnitude).ok()?) }
+    } else {
+        i64::try_from(magnitude).ok()
     }
 }
 

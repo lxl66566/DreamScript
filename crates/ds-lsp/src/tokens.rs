@@ -569,10 +569,13 @@ impl Walker<'_> {
             },
             ItemKind::ExternFn(f) => {
                 self.keyword(f.span.start, "extern");
-                self.keyword_after(
+                // the bind target's literal (H5) sits between the
+                // keywords; `fn` highlights past it when present
+                let fn_at = f.bind.as_ref().map_or(
                     f.span.start + u32::try_from("extern".len()).expect("an offset fits u32"),
-                    "fn",
+                    |bind| bind.span.end,
                 );
+                self.keyword_after(fn_at, "fn");
                 self.push(f.name.span, Tok::Function, DECLARATION);
                 let mark = self.generics(&f.generics);
                 for param in &f.params {

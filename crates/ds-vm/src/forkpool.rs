@@ -146,7 +146,7 @@ fn run_on_worker(vm: &mut Vm, cargo: ForkCargo) -> ForkReturn {
             break;
         }
         let (active, pc) = vm.switch_in(child, Value::Tag(crate::native::PLATFORM_NONE));
-        match vm.execute_host_step(active, pc, usize::MAX) {
+        match vm.execute_host_step::<false>(active, pc, usize::MAX) {
             // a quiet end: the fiber died (the loop's head sees Dead) or
             // parked at the host (the bounce back in, exactly the
             // sequential drive's re-entry)

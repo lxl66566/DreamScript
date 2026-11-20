@@ -28,7 +28,7 @@ fn main() -> () {
 
 ## The `ds` CLI
 
-`run`, `build`, `check` (the static story alone, with `--error-format json`), `fmt` (zero style options), `save` (install a package into the content-addressed store), `info` (render a `.dsi` API surface), `dev` (hot reload), `repl`, `lsp`. Entries default to `main`.
+`run`, `build`, `check` (the static story alone, with `--error-format json`), `fmt` (zero style options), `save` (install a package into the content-addressed store), `bind` (bind an installed package artifact's native library and report its exported C symbols), `info` (render a `.dsi` API surface), `dev` (hot reload), `repl`, `lsp`. Entries default to `main`.
 
 ## What the language refuses
 

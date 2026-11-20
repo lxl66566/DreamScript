@@ -78,20 +78,52 @@ pub(crate) fn push_comment(
 ) {
     stream.begin(ctx, out, t.span.start);
     push_indent(out, indent);
-    out.push_str(ctx.comment_text(t));
+    ctx.push_verbatim(out, t.span);
     stream.end(t.span.end);
 }
 
-fn stmt_span_end(stmt: &Stmt) -> u32 {
+pub(crate) fn stmt_span_end(stmt: &Stmt) -> u32 {
     stmt.trailing_trivia
         .last()
         .map_or(stmt.span.end, |t| t.span.end.max(stmt.span.end))
 }
 
-fn stmt_span_start(stmt: &Stmt) -> u32 {
+pub(crate) fn stmt_span_start(stmt: &Stmt) -> u32 {
     stmt.leading_trivia
         .first()
         .map_or(stmt.span.start, |t| t.span.start.min(stmt.span.start))
+}
+
+/// One statement's full element rendering — leading comments as their own
+/// lines, the statement at `indent`, same-line trailing comments inline,
+/// later-line trailing comments back on their own lines — appended through
+/// the caller's element stream.
+pub(crate) fn write_stmt_elem(
+    ctx: &Ctx,
+    out: &mut String,
+    stream: &mut ElemStream,
+    indent: usize,
+    stmt: &Stmt,
+) {
+    for t in &stmt.leading_trivia {
+        push_comment(ctx, out, stream, indent, t);
+    }
+    stream.begin(ctx, out, stmt_span_start(stmt));
+    push_indent(out, indent);
+    write_stmt(ctx, out, indent, stmt);
+    let end_line = ctx.line(stmt.span.end);
+    for t in &stmt.trailing_trivia {
+        if ctx.line(t.span.start) == end_line {
+            out.push(' ');
+            ctx.push_verbatim(out, t.span);
+        }
+    }
+    stream.end(stmt_span_end(stmt));
+    for t in &stmt.trailing_trivia {
+        if ctx.line(t.span.start) != end_line {
+            push_comment(ctx, out, stream, indent, t);
+        }
+    }
 }
 
 /// Writes a block body: statements (with their leading comments as separate
@@ -109,25 +141,7 @@ fn write_block_elems(
 ) -> bool {
     let mut stream = ElemStream::new(true);
     for stmt in stmts {
-        for t in &stmt.leading_trivia {
-            push_comment(ctx, out, &mut stream, indent, t);
-        }
-        stream.begin(ctx, out, stmt_span_start(stmt));
-        push_indent(out, indent);
-        write_stmt(ctx, out, indent, stmt);
-        let end_line = ctx.line(stmt.span.end);
-        for t in &stmt.trailing_trivia {
-            if ctx.line(t.span.start) == end_line {
-                out.push(' ');
-                out.push_str(ctx.comment_text(t));
-            }
-        }
-        stream.end(stmt_span_end(stmt));
-        for t in &stmt.trailing_trivia {
-            if ctx.line(t.span.start) != end_line {
-                push_comment(ctx, out, &mut stream, indent, t);
-            }
-        }
+        write_stmt_elem(ctx, out, &mut stream, indent, stmt);
     }
     for t in trailing {
         push_comment(ctx, out, &mut stream, indent, t);
@@ -182,7 +196,7 @@ fn write_block_inline(ctx: &Ctx, out: &mut String, b: &BlockExpr) {
     }
     for t in &b.trailing_trivia {
         out.push(' ');
-        out.push_str(ctx.comment_text(t));
+        ctx.push_verbatim(out, t.span);
     }
     out.push_str(" }");
 }
@@ -335,7 +349,7 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
         Expr::Literal { lit, .. } => write_literal(out, lit),
         // String literals re-render verbatim from their source spans; the
         // formatter never re-escapes or re-flows them.
-        Expr::Str { span, .. } | Expr::RawStr { span, .. } => out.push_str(ctx.text(*span)),
+        Expr::Str { span, .. } | Expr::RawStr { span, .. } => ctx.push_verbatim(out, *span),
         Expr::Lambda {
             generics,
             params,
@@ -730,7 +744,7 @@ pub(crate) fn write_pattern(ctx: &Ctx, out: &mut String, p: &Pattern) {
         Pattern::Binding { name, .. } => out.push_str(&name.name),
         Pattern::Literal { lit, .. } => write_literal(out, lit),
         Pattern::Str { span, .. } | Pattern::RawStr { span, .. } => {
-            out.push_str(ctx.text(*span));
+            ctx.push_verbatim(out, *span);
         },
         Pattern::Path { path, .. } => write_path(out, path),
         Pattern::Call { path, args, .. } => {

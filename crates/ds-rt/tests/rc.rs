@@ -170,7 +170,8 @@ fn arena_frames_and_boxed_blocks_coexist_per_fiber() {
     {
         let _frame = heap.frame();
         let tmp = heap.arena().alloc(99u64);
-        assert_eq!(*tmp, 99);
+        // SAFETY: the grant is live: the frame restore has not run yet.
+        assert_eq!(unsafe { *tmp.as_ptr() }, 99);
     }
     // The frame restore reclaimed the temporary; the counted block is intact
     // at the same address - boxed blocks are never arena-backed.

@@ -1,9 +1,10 @@
 //! The bind round-trip over a real C-ABI shared object: the host's own
 //! rustc compiles the fixture source as a cdylib (no C toolchain), the
 //! loading layer binds it, and the export reader enumerates its symbols
-//! — every enumerated name resolving through the bound handle. The leg
-//! is gated behind the fixture build: a host without a runnable rustc
-//! passes with a note, while the loading-layer units stay unconditional.
+//! — every enumerated name resolving through the bound handle. Cargo
+//! sets `RUSTC` for the test binary, so a fixture build failure is a
+//! test failure, never a silent pass; the loading-layer units stay
+//! unconditional.
 
 use std::{
     env,
@@ -11,7 +12,7 @@ use std::{
     process::Command,
 };
 
-use ds_ffi::Library;
+use ds_ffi::{Library, Scalar, ScalarKind, ScalarSig};
 
 /// The fixture library's file name per platform: the loader-recognized
 /// spelling rustc emits for a cdylib.
@@ -25,9 +26,10 @@ fn library_name() -> &'static str {
     }
 }
 
-/// Compiles the fixture cdylib with the host's rustc into `dir`, `None`
-/// when the toolchain cannot run (the gated leg's skip).
-fn build_fixture(dir: &Path) -> Option<PathBuf> {
+/// Compiles the fixture cdylib with the host's rustc into `dir`. Cargo
+/// sets `RUSTC` for the test binary, so a build failure is a test
+/// failure carrying rustc's own stderr — never a silent pass.
+fn build_fixture(dir: &Path) -> PathBuf {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scalar_cdylib.rs");
     let out = dir.join(library_name());
@@ -39,11 +41,13 @@ fn build_fixture(dir: &Path) -> Option<PathBuf> {
         .arg("-o")
         .arg(&out)
         .output()
-        .ok()?;
-    if !built.status.success() {
-        return None;
-    }
-    Some(out)
+        .unwrap_or_else(|error| panic!("the fixture's rustc runs: {error}"));
+    assert!(
+        built.status.success(),
+        "the fixture cdylib builds (rustc stderr: {})",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    out
 }
 
 /// One unique temp dir per leg, removed first.
@@ -60,10 +64,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 #[test]
 fn a_compiled_cdylib_binds_and_enumerates() {
     let dir = temp_dir("fixture");
-    let Some(dylib) = build_fixture(&dir) else {
-        eprintln!("skipping: the host's rustc cannot build the fixture cdylib");
-        return;
-    };
+    let dylib = build_fixture(&dir);
     let library = Library::open(&dylib).unwrap_or_else(|error| panic!("{error}"));
     for name in ["ds_add", "ds_scale", "ds_answer"] {
         assert!(
@@ -96,5 +97,63 @@ fn a_compiled_cdylib_binds_and_enumerates() {
     assert_eq!(
         symbols, sorted,
         "the enumeration is sorted and deduplicated"
+    );
+}
+
+/// The scalar marshaling answers real calls: every register-class shape
+/// the slice rules — the i64 GP pair, the f64 FP pair, the empty call,
+/// the u8 GP word, and the mixed GP+FP sequence — calls the bound
+/// symbol and marshals the answer back.
+#[test]
+fn scalar_calls_answer_over_every_register_class() {
+    let dir = temp_dir("scalar");
+    let dylib = build_fixture(&dir);
+    let library = Library::open(&dylib).unwrap_or_else(|error| panic!("{error}"));
+    let sig = |params: &[ScalarKind], ret: ScalarKind| ScalarSig {
+        params: params.to_vec(),
+        ret,
+    };
+    let call = |name: &str, sig: &ScalarSig, args: &[Scalar]| {
+        let symbol = library.symbol(name).expect("the fixture exports the name");
+        symbol
+            .call_scalar(sig, args)
+            .unwrap_or_else(|error| panic!("the scalar call answers: {error}"))
+    };
+    let int = ScalarKind::Int;
+    let boolean = ScalarKind::Bool;
+    let float = ScalarKind::Float;
+    assert_eq!(
+        call("ds_add", &sig(&[int, int], int), &[
+            Scalar::Int(20),
+            Scalar::Int(22)
+        ]),
+        Scalar::Int(42),
+        "the GP pair marshals"
+    );
+    assert_eq!(
+        call("ds_scale", &sig(&[float, float], float), &[
+            Scalar::Float(1.5),
+            Scalar::Float(4.0)
+        ]),
+        Scalar::Float(6.0),
+        "the FP pair marshals"
+    );
+    assert_eq!(
+        call("ds_answer", &sig(&[], int), &[]),
+        Scalar::Int(42),
+        "the empty call marshals"
+    );
+    assert_eq!(
+        call("ds_not", &sig(&[boolean], boolean), &[Scalar::Bool(false)]),
+        Scalar::Bool(true),
+        "the u8 word marshals"
+    );
+    assert_eq!(
+        call("ds_gated", &sig(&[boolean, float], float), &[
+            Scalar::Bool(true),
+            Scalar::Float(3.5)
+        ]),
+        Scalar::Float(3.5),
+        "the mixed GP+FP sequence marshals"
     );
 }

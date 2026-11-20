@@ -1,0 +1,26 @@
+// The migrated @std package members (the library-boundary un-merge's
+// first slice): declarations that left the compiler-required ambient and
+// now live in the reserved package's own ds source. A graph that declares
+// the @std dep binds these through the linked surface (an import
+// selection validating against the package's exported entries); every
+// other registration composes this file back into the merged ambient it
+// always served, so the two readings stay namespace-identical while the
+// migration runs. The members here are the ambient's demo residue,
+// first out of the ambient.
+
+// A text row: keyed lookup over strings.
+pub type row = map[string, string]
+
+// The config record (an optional port field beside plain ones). The
+// reader/fallback externs that answered it are gone — no native
+// answered them — so a package wanting them declares its own externs
+// over this shape.
+pub struct config { host: string, port: int?, retries: int }
+
+// An opaque response value. The fetch/consume externs that answered it
+// are gone — no native answered them — so a package wanting them
+// declares its own externs over this shape.
+pub struct response
+
+// The nursery demo's fixed page list.
+pub const urls = ["https://ds.dev", "https://example.org"]

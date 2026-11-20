@@ -1,4 +1,4 @@
-//! Byte-stable write-then-read round trips [G3.5 acceptance].
+//! Byte-stable write-then-read round trips `[G3.5 acceptance]`.
 
 use ds_abi::{
     FrameLayout, Inst, SlotType,
@@ -253,7 +253,9 @@ fn mmap_loader_round_trips_from_disk() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("pipeline.dsmod");
     std::fs::write(&path, write(&sample_module())).expect("write artifact");
-    let mapped = read_mmap(&path).expect("mmap valid module");
+    // SAFETY: the test wrote the file above and nothing rewrites or
+    // truncates it while the mapping lives.
+    let mapped = unsafe { read_mmap(&path) }.expect("mmap valid module");
     assert_eq!(mapped.module().name(), "pipeline");
     assert_eq!(mapped.bytes(), &write(&sample_module())[..]);
 }

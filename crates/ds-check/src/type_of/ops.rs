@@ -9,6 +9,37 @@ use super::*;
 
 impl Bodies<'_> {
     pub(crate) fn unary(&mut self, op: UnaryOp, operand: &Expr, span: Span) -> Val {
+        // `-` directly over one integer literal folds the sign into the
+        // literal's i64 range check, so `-9223372036854775808` writes
+        // i64::MIN; a parenthesized or wider magnitude keeps the operand
+        // walk and its own refusal.
+        if op == UnaryOp::Neg
+            && let Expr::Literal {
+                span: lit_span,
+                lit: Literal::Int { suffix, text },
+            } = operand
+            && suffix.is_empty()
+        {
+            if int_literal_value(text, true).is_some() {
+                let val = self.named_ty(*lit_span, "int", "integer literal");
+                // The operand walk never runs, so its solved type is
+                // recorded here for the span-keyed readers
+                // (the lowerer's span lookup).
+                self.expr_types.insert(*lit_span, val);
+                return val;
+            }
+            self.error(
+                ErrorCode::InvalidLiteral,
+                format!("integer literal `{text}` negated does not fit the i64 range"),
+                span,
+                "out of range",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        }
         let val = self.expr(operand, None);
         // A poisoned operand already reported its root cause; the
         // operator's own shape complaint would be a cascade.

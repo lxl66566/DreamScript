@@ -8,11 +8,11 @@ Every doc lives under `docs/en/` (working docs, English) or `docs/zh/` (read-onl
 |---|---|---|
 | `design-decisions.md` | The authoritative record of every language decision (44 points, A1-H6, plus dated author rulings and author supplements). | You implement or design any part of the language, or need to know *why* a rule exists. |
 | `tutorial.md` | The entire v1 surface in one short tutorial, the explainability-budget proof. | You need the ruled surface syntax and semantics in reading order. |
-| `implementation-plan.md` | Milestones M0-M9 with scope, work items, and acceptance criteria; workspace and crate layout; dependency policy; test and performance methodology; Rust-specific notes; risks and recorded fallbacks; scope guards. | You plan a round or judge whether something is in scope. |
+| `implementation-plan.md` | Milestones M0-M9 with scope and acceptance criteria; workspace and crate layout; dependency policy; test and performance methodology; risks and recorded fallbacks; scope guards. | You plan a round or judge whether something is in scope. |
 | `status.md` | What runs today: per-milestone state and the exact lowered subset the tier-1 pipeline executes. | You need the current boundary before promising or probing behavior. |
 | `todo.md` | The ranked open-work queue, with milestone, effort tag, author rulings, and questions awaiting the author. | You pick the next round's work. |
 | `pitfalls.md` | Index over `pitfalls/`: invariants and lessons that prevent breakage, one board per area (coordination and gates, front end, language surface, lowering, runtime and memory, testing and perf). | You touch any of those areas, or a gate fails in a way that smells familiar. |
-| `memory-arc.md` | The memory endgame execution contract: stage order, rulings, gates, silent-breakage register, STOP conditions, measured baselines. | You work on `ds-rt`, ownership lowering, or multi-word values. |
+| `memory-arc.md` | The memory endgame execution contract: binding rulings, gates that stay green, silent-breakage register, STOP conditions, measured baselines. | You work on `ds-rt`, ownership lowering, or multi-word values. |
 
 ## Archive — `docs/zh/`
 

@@ -20,6 +20,8 @@ diag = ["ds-rt/diag"]
 
 [dependencies]
 ds-abi = { path = "../ds-abi" }
+# the bound externs' scalar C-ABI marshaling seam (H5)
+ds-ffi = { path = "../ds-ffi" }
 ds-mod = { path = "../ds-mod" }
 ds-rt = { path = "../ds-rt" }
 # the fork-join worker pool's scoped scheduler (E3's measured candidate)

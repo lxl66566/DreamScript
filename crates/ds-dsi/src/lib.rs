@@ -13,9 +13,8 @@
 //! payload carries, for the package's members alone:
 //!
 //! * the resolve half — the package namespace parts and the per-file resolution tables — so a
-//!   served run collects and resolves only the fresh files, continuing the package's
-//!   [`DefId`](ds_check::DefId) and [`MethodId`](ds_check::MethodId) spaces exactly as a fresh run
-//!   mints them (the mint-determinism pin);
+//!   served run collects and resolves only the fresh files, continuing the package's [`DefId`] and
+//!   [`MethodId`] spaces exactly as a fresh run mints them (the mint-determinism pin);
 //! * the declaration half's plain tables — the universe's atom and trait mint logs (replayed
 //!   through the declare APIs) plus the atoms/structs/enums/cases tables and the trait memberships
 //!   — so the reserve and shape passes skip the served defs; the shape-phase mint log carries each
@@ -98,7 +97,7 @@ impl std::error::Error for PrefixDsiError {}
 
 /// The decoded artifact's native serve, ready for the analyze entries:
 /// the namespace parts and per-file resolution tables
-/// ([`analyze_served`](ds_meta::analyze_served)'s inputs), the
+/// (`ds_meta::analyze_served`'s inputs), the
 /// declaration-side prefix
 /// ([`ServedDecls`]' replay input), and the solved effect rows
 /// ([`effects_of_resolved_served`](ds_check::effects::effects_of_resolved_served)'s
@@ -304,6 +303,11 @@ pub enum MintData {
         /// (identities) and its own minted applications by generation id.
         fields: Vec<FieldData>,
     },
+    /// A minted linked opaque struct (G4): a bodiless import-bound
+    /// type's reserved atom — identity alone, its shape never set, so
+    /// the replay reserves the name and every value use keeps the
+    /// local spelling's own refusals.
+    Reserved(String),
 }
 
 /// One minted atom and its final shape.
@@ -410,6 +414,9 @@ pub struct FnSigData {
     pub params: Vec<ParamSigData>,
     /// The written return type; absent means inferred or unit.
     pub ret: Option<ds_parse::Type>,
+    /// The extern's bind target (H5), when the signature is a bound
+    /// extern's.
+    pub bind: Option<String>,
 }
 
 /// One parameter of a stored signature, as written.
@@ -816,7 +823,10 @@ fn universe_log(decls: &ds_check::Decls, foreign: &HashSet<DefId>) -> UniverseLo
                     },
                     // a linked enum's unit case rides its bare name
                     AtomKind::Unit => MintData::Var(decl.name.clone()),
-                    _ => panic!("a linked type's atom is a struct or a unit case"),
+                    // a linked opaque struct rides its bare reserved
+                    // identity
+                    AtomKind::Reserved => MintData::Reserved(decl.name.clone()),
+                    _ => panic!("a linked type's atom is a struct, a unit case, or reserved"),
                 };
                 return Some((id.index(), linked));
             }
@@ -1012,6 +1022,7 @@ fn fn_sig_data(sig: &FnSig) -> FnSigData {
             })
             .collect(),
         ret: sig.ret.clone(),
+        bind: sig.bind.clone(),
     }
 }
 
@@ -1030,6 +1041,7 @@ fn fn_sig(data: &FnSigData) -> FnSig {
             })
             .collect(),
         ret: data.ret.clone(),
+        bind: data.bind.clone(),
     }
 }
 
@@ -1709,6 +1721,7 @@ fn serve_tables(
                         })
                         .collect(),
                 ),
+                MintData::Reserved(name) => ReplayMint::Reserved(name.clone()),
             };
             Ok((TypeId::from_raw(*gen_id), mint))
         })
@@ -1741,6 +1754,10 @@ fn type_expr(data: &TypeExprData) -> TypeExpr {
 /// depending on identity between universes (the raw solved-handle
 /// comparisons are exact where the two runs mint identical sequences —
 /// the pin the gates enforce).
+/// The package-surface conversion: one served prefix's own members as
+/// the `.dsi` document `ds info` prints and the LSP hover spells.
+pub mod surface;
+
 pub mod gates {
     use ds_check::Analyzed;
     use ds_diag::Span;

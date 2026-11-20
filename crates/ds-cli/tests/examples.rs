@@ -200,7 +200,7 @@ fn files_round_trip_runs_through_the_success_typed_read() {
     // the round trip's read leg rides the ambient's string | io_err
     // signature: the `.err` handler extracts at run level, and the
     // written file landing before the read proves the legs ordered
-    let dir = env::temp_dir().join("ds_cli_files_example");
+    let dir = env::temp_dir().join(format!("ds_cli_files_example-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("the temp dir creates");
     let mut command = ds();
@@ -288,6 +288,105 @@ fn script_entry_runs_top_level_statements() {
         run_ok(ds().arg("run").arg(example("script_entry.ds"))),
         "total: 3\nsize: small\nbumped: 41\n0\n"
     );
+}
+
+/// The install identity a `ds save` report pins: the report's
+/// `blake3:` row is the content hash the next manifest embeds.
+fn saved_hash(output: &str) -> String {
+    output
+        .rsplit("blake3:")
+        .next()
+        .expect("the save report names the identity it pinned")
+        .trim()
+        .to_owned()
+}
+
+/// The re-export chain over three staged packages: the middle package's
+/// `pub import` row joins the origin's callable, const, and struct onto
+/// its export surface (the aliased spelling included), and the committed
+/// example — copied in as the root package's entry — selects them beside
+/// the middle's own member through one import row. A plain `ds run` of
+/// the example declares no deps, so the gate stages the chain: both
+/// packages saved into the private store, the root's manifest pinning the
+/// middle package alone.
+#[test]
+fn pub_import_selects_the_reexported_surface_through_the_middle_package() {
+    let work = env::temp_dir().join(format!("ds_cli_pub_import_example-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+
+    // the origin package: a callable, a literal const, and a flat struct
+    let deep = work.join("deep");
+    fs::create_dir_all(&deep).expect("the origin dir creates");
+    fs::write(
+        deep.join("ds.pkg"),
+        "name = \"@deep\"\nversion = \"1.0.0\"\n",
+    )
+    .expect("the origin manifest writes");
+    fs::write(
+        deep.join("deep.ds"),
+        concat!(
+            "pub fn base() -> int {\n",
+            "  21\n",
+            "}\n",
+            "\n",
+            "pub const step = 2\n",
+            "\n",
+            "pub struct unit {\n",
+            "  n: int,\n",
+            "}\n",
+        ),
+    )
+    .expect("the origin source writes");
+    let deep_hash = saved_hash(&run_ok(ds().arg("save").arg(&deep)));
+
+    // the middle package: one pub row re-exports the origin's members
+    // (the alias binding `origin` included), its own fn beside them
+    let lib = work.join("lib");
+    fs::create_dir_all(&lib).expect("the middle dir creates");
+    fs::write(
+        lib.join("ds.pkg"),
+        format!(
+            "name = \"@lib\"\nversion = \"1.2.0\"\n\n[deps]\n@deep = {{ ver = \"1.0.0\", hash = \
+             \"blake3:{deep_hash}\" }}\n"
+        ),
+    )
+    .expect("the middle manifest writes");
+    fs::write(
+        lib.join("helper.ds"),
+        concat!(
+            "pub import @deep (base, base as origin, step, unit)\n",
+            "\n",
+            "pub fn twice(n: int) -> int {\n",
+            "  base() + n\n",
+            "}\n",
+        ),
+    )
+    .expect("the middle source writes");
+    let lib_hash = saved_hash(&run_ok(ds().arg("save").arg(&lib)));
+
+    // the root: the committed example as the entry, pinning the middle
+    // package alone — the re-exported names bind through it
+    let root = work.join("root");
+    fs::create_dir_all(&root).expect("the root dir creates");
+    fs::write(
+        root.join("ds.pkg"),
+        format!(
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@lib = {{ ver = \"1.2.0\", hash = \
+             \"blake3:{lib_hash}\" }}\n"
+        ),
+    )
+    .expect("the root manifest writes");
+    fs::copy(example("pub_import.ds"), root.join("app.ds"))
+        .expect("the example copies in as the entry");
+
+    let entry = root.join("app.ds");
+    assert_eq!(
+        run_ok(ds().arg("run").arg(&entry)),
+        "hi\n87\n",
+        "the re-exported callable, const, and struct answer beside the middle package's own member"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
 #[test]
@@ -445,7 +544,7 @@ fn every_example_has_a_gate() {
 
 #[test]
 fn build_then_run_the_module_reproduces_the_source_output() {
-    let dir = env::temp_dir().join("ds_cli_build_example");
+    let dir = env::temp_dir().join(format!("ds_cli_build_example-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("the temp dir creates");
     let module = dir.join("hello.dsmod");

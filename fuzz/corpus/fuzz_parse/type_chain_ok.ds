@@ -1,0 +1,14 @@
+// Type chains just under the parser's 128-term fold budget: deep
+// postfix runs, union/intersect chains over drawn atoms, and negation
+// runs, at the positions types are written. These must parse to
+// completion.
+
+fn deep(x: int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int) -> int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int & int { x }
+
+fn marks() -> int {
+  const a: int??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????? = 1
+  const b: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~int = 2
+  0
+}
+
+type wide = int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int | int

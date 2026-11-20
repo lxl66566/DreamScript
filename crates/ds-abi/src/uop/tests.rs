@@ -130,7 +130,7 @@ fn samples() -> Vec<Uop> {
 }
 
 /// The jump samples: absolute targets spanning both bias edges relative
-/// to pc = 100 (window [0, 32868]); other pcs in the round-trip test
+/// to pc = 100 (window `[0, 32868]`); other pcs in the round-trip test
 /// cover the rest.
 fn jump_samples() -> Vec<Uop> {
     let mut s = Vec::new();

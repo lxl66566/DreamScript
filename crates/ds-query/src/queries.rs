@@ -275,15 +275,16 @@ pub(crate) fn analyzed(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
     };
     let expanded = ctx.get::<crate::query::Expanded>(package)?;
     let resolved = ctx.get::<crate::query::Resolve>(package)?;
-    Ok(QueryValue::Analyzed(AnalyzedOutput {
-        analyzed: ds_check::analyze_resolved(
+    Ok(QueryValue::Analyzed(AnalyzedOutput::new(
+        ds_check::analyze_resolved(
             ctx.files(),
             expanded.asts,
             resolved.package,
             resolved.resolutions,
             resolved.diags.to_vec(),
+            Arc::default(),
         ),
-    }))
+    )))
 }
 
 /// The type story of one definition (B2): a slice of the checked package
@@ -672,7 +673,7 @@ enum ScanFrame {
     Open,
     /// An interpolation hole `${` inside a string.
     Hole,
-    /// An ordinary string; single-line [6.1], so a newline closes it.
+    /// An ordinary string; single-line `[6.1]`, so a newline closes it.
     Str,
     /// A char or byte literal; single-line.
     Char,

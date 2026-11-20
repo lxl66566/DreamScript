@@ -18,10 +18,20 @@
 //! own refusals until it lands.
 
 mod exports;
+mod scalar;
 mod sys;
 
 pub use exports::{ExportError, enumerate};
+pub use scalar::{MAX_PARAMS, Scalar, ScalarError, ScalarKind, ScalarSig};
 pub use sys::LoadError;
+
+/// A symbol over a raw address, the unit tests' construction seam (a
+/// live symbol always arrives through [`Library::symbol`], whose handle
+/// keeps the address valid).
+#[cfg(test)]
+pub(crate) fn test_symbol(address: usize) -> Symbol {
+    Symbol { address }
+}
 
 /// One loaded native library: a load reference over the platform loader
 /// (an owned reference for [`Library::open`], a borrowed one for the
@@ -56,7 +66,9 @@ impl Library {
 
     /// One named symbol's address, `None` when the library does not
     /// export the name. A name with an interior NUL or a non-ASCII byte
-    /// cannot spell a C symbol and names nothing.
+    /// cannot spell a C symbol and names nothing. The address stays valid
+    /// only while this library stays loaded — see [`Symbol`]'s contract
+    /// before holding one past a drop.
     #[must_use]
     pub fn symbol(&self, name: &str) -> Option<Symbol> {
         self.handle.symbol(name).map(|address| Symbol { address })
@@ -72,7 +84,14 @@ impl Drop for Library {
 }
 
 /// One bound symbol: its address alone, the shape a marshaling round
-/// transmutes into a typed call.
+/// transmutes into a typed call. The address points into the loaded
+/// image of the [`Library`] that resolved it, so it stays valid only
+/// while that library stays loaded — dropping the library releases the
+/// load reference (dlclose / FreeLibrary) and can unload the image.
+/// The lookup cannot tie the word to the library's borrow: the one
+/// in-tree holder, ds-vm's `BoundModule`, owns the library and its
+/// symbol table in one value and reads addresses only while it lives,
+/// the discipline every later holder must keep.
 #[derive(Clone, Copy, Debug)]
 pub struct Symbol {
     address: usize,

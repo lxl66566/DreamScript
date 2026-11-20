@@ -14,7 +14,7 @@
 //! last-freed-first-reused.
 //!
 //! A list is one object with its element words inline — the ruled shape;
-//! see [`Object::List`]. The element words are plain [`Value`]s, so one
+//! see `[Object::List]`. The element words are plain [`Value`]s, so one
 //! kind serves every element type. Ownership of `Ref` elements is exact:
 //! storing one into a list (the `list_push` construction append, the
 //! `list_concat` shared-element copies, the `list_get` checked read-out)
@@ -377,20 +377,30 @@ fn ref_hash(word: RefId) -> u32 {
     fnv_step(SEED_REF, &bytes)
 }
 
-/// The hash of a scalar key: bits that respect word equality — `+0.0`
-/// and `-0.0` compare equal as words, so both fold to one bits form and
-/// the filter never rejects an equal pair (every other scalar kind is
-/// bits-equal exactly when word-equal; a NaN probe never matches, so its
-/// hash is free).
+/// The one word-equality judge the structural `==` family rides [B9]:
+/// floats compare bit-structurally (reflexive, total, `+0.0` and `-0.0`
+/// distinct), every other word by its derived equality. Collection
+/// content equality and map key matching answer through this judge, the
+/// same one the scalar `==`/`in` chain serves.
+fn word_eq(a: Value, b: Value) -> bool {
+    match (a, b) {
+        (Value::F64(x), Value::F64(y)) => x.to_bits() == y.to_bits(),
+        _ => a == b,
+    }
+}
+
+/// The hash of a scalar key: bits that respect word equality — the float
+/// word hashes its own bits, so word-equal (bit-structural) floats hash
+/// equal and the filter never rejects an equal pair, while `+0.0` and
+/// `-0.0` hash apart as the distinct keys they are (every other scalar
+/// kind is bits-equal exactly when word-equal; a NaN key matches itself
+/// alone, so its payload hashing with the bits is free).
 fn scalar_hash(word: Value) -> u32 {
     // every scalar word is one 8-byte payload, so the class seed alone
     // carries the kind distinction
     let (payload, seed) = match word {
         Value::I64(n) => (n.to_le_bytes(), SEED_SCALAR),
-        Value::F64(x) => (
-            (if x == 0.0 { 0.0 } else { x }).to_bits().to_le_bytes(),
-            SEED_SCALAR_F64,
-        ),
+        Value::F64(x) => (x.to_bits().to_le_bytes(), SEED_SCALAR_F64),
         Value::Bool(b) => (i64::from(b).to_le_bytes(), SEED_SCALAR),
         Value::Tag(t) => (u64::from(t).to_le_bytes(), SEED_SCALAR),
         Value::Arena(h) => (h.raw().to_le_bytes(), SEED_SCALAR),
@@ -997,8 +1007,10 @@ impl Objects {
             (s, t) => {
                 return Err(Trap::ElementStride {
                     obj: rhs,
-                    stride: s,
-                    given: t,
+                    // the named operand's own stride, the other side's
+                    // width staged against it
+                    stride: t,
+                    given: s,
                 })
             },
         };
@@ -1041,7 +1053,7 @@ impl Objects {
     }
 
     /// The char count of string object `obj`, building its char-boundary
-    /// map on the first char-indexed query (see [`Str`]).
+    /// map on the first char-indexed query (see `[Str]`).
     ///
     /// # Errors
     ///
@@ -1333,7 +1345,7 @@ impl Objects {
                 Value::Ref(a) => a == *word,
                 _ => false,
             },
-            ProbeKey::Scalar { word, .. } => stored == *word,
+            ProbeKey::Scalar { word, .. } => word_eq(stored, *word),
         }
     }
 
@@ -1584,6 +1596,20 @@ impl<'a> Heaps<'a> {
         }
     }
 
+    /// The store owning `word`, shared: the routed reads' face. A read
+    /// mutates no count and queues no cross-heap operation, so it owes no
+    /// drain — the pool stays quiet between mutations exactly as before.
+    fn store_shared(&self, word: RefId) -> Result<&Objects, Trap> {
+        if self.live && word.fiber() == self.owner {
+            Ok(&*self.current)
+        } else {
+            self.pool
+                .get(word.fiber().index())
+                .map(|fiber| &fiber.objects)
+                .ok_or(Trap::UnknownObject { obj: word.id() })
+        }
+    }
+
     /// How many cross-heap operations wait on the store owning `fiber`.
     fn queued(&self, fiber: FiberId) -> usize {
         if self.live && fiber == self.owner {
@@ -1705,8 +1731,7 @@ impl<'a> Heaps<'a> {
     /// The byte payload of bytes object `word`, routed: a borrowed slice
     /// of the owning store — copy a byte out before another routed call.
     pub(crate) fn bytes_at(&mut self, word: RefId) -> Result<&[u8], Trap> {
-        let store = self.store(word)?;
-        store.bytes_at(word.id())
+        self.bytes_ref(word)
     }
 
     /// The interned word of `text` on the running fiber's store,
@@ -1788,11 +1813,22 @@ impl<'a> Heaps<'a> {
         self.settle(word.fiber())
     }
 
+    /// The string content of `word`, routed as a shared borrow: the read
+    /// allocates nothing, so the compare and hash natives read both
+    /// operands without copying either out.
+    pub(crate) fn str_ref(&self, word: RefId) -> Result<&str, Trap> {
+        self.store_shared(word)?.str_at(word.id())
+    }
+
+    /// The byte payload of bytes object `word`, routed as a shared borrow,
+    /// allocating nothing.
+    pub(crate) fn bytes_ref(&self, word: RefId) -> Result<&[u8], Trap> {
+        self.store_shared(word)?.bytes_at(word.id())
+    }
+
     /// The string content of `word`, routed.
     pub(crate) fn str_at(&mut self, word: RefId) -> Result<&str, Trap> {
-        let store = self.store(word)?;
-        let text = store.str_at(word.id())?;
-        Ok(text)
+        self.str_ref(word)
     }
 
     /// Concatenates two strings into a fresh object on the running
@@ -1888,8 +1924,10 @@ impl<'a> Heaps<'a> {
             (s, t) => {
                 return Err(Trap::ElementStride {
                     obj: y.id(),
-                    stride: s,
-                    given: t,
+                    // the named operand's own stride, the other side's
+                    // width staged against it
+                    stride: t,
+                    given: s,
                 })
             },
         };
@@ -1942,6 +1980,28 @@ impl<'a> Heaps<'a> {
         match self.store(map)?.map_at(map.id(), key, &res)? {
             Some(span) => Ok(Some(span.to_vec())),
             None => Ok(None),
+        }
+    }
+
+    /// The value span stored under `key` in map object `map`, routed into
+    /// `scratch`: the row read for walks that pair one map's rows with
+    /// another's. The span leaves the owning store as plain copied words
+    /// (the map keeps every count it owns) in the caller's buffer, so a
+    /// reused scratch holds a many-row walk at O(1) allocations.
+    pub(crate) fn map_row_scratch(
+        &mut self,
+        map: RefId,
+        key: Value,
+        scratch: &mut Vec<Value>,
+    ) -> Result<bool, Trap> {
+        let res = self.resolve_key(map.fiber(), key)?;
+        match self.store(map)?.map_at(map.id(), key, &res)? {
+            Some(span) => {
+                scratch.clear();
+                scratch.extend_from_slice(span);
+                Ok(true)
+            },
+            None => Ok(false),
         }
     }
 
@@ -2000,7 +2060,9 @@ impl<'a> Heaps<'a> {
     /// lookup face `map_get` serves (string keys by content, every other
     /// word by identity), and every nested reference pair compares the
     /// same way — the walk covers a list of lists and a map over string
-    /// values without a static plan. Scalar words compare by value; mixed
+    /// values without a static plan. Scalar words compare through the
+    /// one bit-structural judge the scalar `==` chain serves (`word_eq`:
+    /// floats by bits, a NaN reflexive, the two zeros distinct); mixed
     /// object kinds, and the faceless kinds against anything, never
     /// compare equal. Both operands stay borrowed: the walk only reads,
     /// so it owns no count and queues nothing. Iterative over a pending
@@ -2012,10 +2074,15 @@ impl<'a> Heaps<'a> {
     pub(crate) fn content_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
         let mut pending = vec![(Value::Ref(x), Value::Ref(y))];
         let mut assumed: Vec<(RefId, RefId)> = Vec::new();
+        // the two row buffers, reused across the walk so a many-row
+        // compare allocates no per-row vector (the death scratch's spill
+        // shape, walk-local: no store borrow survives a routed call)
+        let (mut left, mut right) = (Vec::new(), Vec::new());
         while let Some((l, r)) = pending.pop() {
-            // an equal word pair — one scalar, one shared object — needs
-            // no walk; unequal non-reference words answer at once
-            if l == r {
+            // an equal word pair — one scalar (bit-structural, a float's
+            // own judge), one shared object — needs no walk; unequal
+            // non-reference words answer at once
+            if word_eq(l, r) {
                 continue;
             }
             let (Value::Ref(a), Value::Ref(b)) = (l, r) else {
@@ -2023,16 +2090,14 @@ impl<'a> Heaps<'a> {
             };
             match (self.content_face(a)?, self.content_face(b)?) {
                 (Some(ContentFace::Str), Some(ContentFace::Str)) => {
-                    // the routed read borrows the store, so one side copies out
-                    let text = self.str_at(a)?.to_owned();
-                    if text.as_str() != self.str_at(b)? {
+                    // both operands borrow shared, so the pair compares
+                    // without a copy
+                    if self.str_ref(a)? != self.str_ref(b)? {
                         return Ok(false);
                     }
                 },
                 (Some(ContentFace::Bytes), Some(ContentFace::Bytes)) => {
-                    // the routed read borrows the store, so one side copies out
-                    let payload = self.bytes_at(a)?.to_vec();
-                    if payload.as_slice() != self.bytes_at(b)? {
+                    if self.bytes_ref(a)? != self.bytes_ref(b)? {
                         return Ok(false);
                     }
                 },
@@ -2042,13 +2107,13 @@ impl<'a> Heaps<'a> {
                     }
                     assumed.push((a, b));
                     let (front, _) = self.list_at(a)?;
-                    let front = front.to_vec();
+                    left.clear();
+                    left.extend_from_slice(front);
                     let (back, _) = self.list_at(b)?;
-                    let back = back.to_vec();
-                    if front.len() != back.len() {
+                    if left.len() != back.len() {
                         return Ok(false);
                     }
-                    pending.extend(front.into_iter().zip(back));
+                    pending.extend(left.iter().copied().zip(back.iter().copied()));
                 },
                 (Some(ContentFace::Map), Some(ContentFace::Map)) => {
                     if assumed.contains(&(a, b)) {
@@ -2059,18 +2124,20 @@ impl<'a> Heaps<'a> {
                         return Ok(false);
                     }
                     for key in self.map_keys(a)? {
-                        // the left span is the key's own row, so only the
-                        // right side can miss — a missing key answers
-                        // unequal at once
-                        let (Some(front), Some(back)) =
-                            (self.map_at(a, key)?, self.map_at(b, key)?)
-                        else {
-                            return Ok(false);
-                        };
-                        if front.len() != back.len() {
+                        // each row lands in a reused buffer, so the walk pays
+                        // no per-row vector; the key is its own map's row,
+                        // so only the right side can miss — a missing row
+                        // answers unequal at once
+                        if !self.map_row_scratch(a, key, &mut left)? {
                             return Ok(false);
                         }
-                        pending.extend(front.into_iter().zip(back));
+                        if !self.map_row_scratch(b, key, &mut right)? {
+                            return Ok(false);
+                        }
+                        if left.len() != right.len() {
+                            return Ok(false);
+                        }
+                        pending.extend(left.iter().copied().zip(right.iter().copied()));
                     }
                 },
                 // mixed kinds, or a faceless kind against anything: no
@@ -2227,6 +2294,152 @@ mod tests {
             m(&mut heaps, cyc1, w(inner1)),
             Ok(false),
             "a list and a one-word list of distinct content"
+        );
+    }
+
+    /// Float words ride the scalar `==` chain's bit-structural judge
+    /// through the content walk too: a NaN element equals its copy behind
+    /// distinct objects (the judge is reflexive over floats), a distinct
+    /// NaN payload never equals the canonical one, and the two zeros
+    /// compare unequal — the same answers the scalar `==` prints.
+    #[test]
+    fn float_elements_compare_bit_structurally_through_the_content_walk() {
+        let mut current = Objects::new(FIBER_ROOT);
+        let nan = current.alloc_list(vec![Value::F64(f64::NAN)]);
+        let nan_copy = current.alloc_list(vec![Value::F64(f64::NAN)]);
+        let payloaded = current.alloc_list(vec![Value::F64(f64::from_bits(0x7ff8_0000_0000_0001))]);
+        let zero = current.alloc_list(vec![Value::F64(0.0)]);
+        let zero_copy = current.alloc_list(vec![Value::F64(0.0)]);
+        let neg_zero = current.alloc_list(vec![Value::F64(-0.0)]);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT)];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        let w = |id: u32| RefId::new(FIBER_ROOT, id);
+        assert_eq!(
+            heaps.content_eq(w(nan), w(nan_copy)),
+            Ok(true),
+            "a NaN element equals its copy"
+        );
+        assert_eq!(
+            heaps.content_eq(w(nan), w(payloaded)),
+            Ok(false),
+            "a distinct NaN payload is a distinct word"
+        );
+        assert_eq!(
+            heaps.content_eq(w(zero), w(zero_copy)),
+            Ok(true),
+            "equal zero spellings compare equal"
+        );
+        assert_eq!(
+            heaps.content_eq(w(zero), w(neg_zero)),
+            Ok(false),
+            "the two zeros are distinct words"
+        );
+    }
+
+    /// The shared-borrow reads route cross-heap: a string borrowed from
+    /// one heap compares by content against another heap's through the
+    /// live door, the parked door serves a pool-resident word, and the
+    /// compare queues no cross-heap operation (every store ends the walk
+    /// with a quiet pending queue).
+    #[test]
+    fn shared_string_reads_compare_cross_heap() {
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let local = current.alloc_str("cross heap text".to_owned());
+        let foreign = pool[other.index()]
+            .objects
+            .alloc_str("cross heap text".to_owned());
+        let wrong = pool[other.index()]
+            .objects
+            .alloc_str("different".to_owned());
+        let (lw, fw, ww) = (
+            RefId::new(FIBER_ROOT, local),
+            RefId::new(other, foreign),
+            RefId::new(other, wrong),
+        );
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        assert_eq!(heaps.str_ref(lw), Ok("cross heap text"));
+        assert_eq!(heaps.str_ref(fw), Ok("cross heap text"));
+        assert_eq!(heaps.str_ref(ww), Ok("different"));
+        assert_eq!(heaps.content_eq(lw, fw), Ok(true));
+        assert_eq!(heaps.content_eq(lw, ww), Ok(false));
+        assert_eq!(heaps.content_eq(fw, ww), Ok(false));
+        assert_eq!(
+            current.queued() + pool[other.index()].objects.queued(),
+            0,
+            "the reads and the compare queue no cross-heap operation"
+        );
+        // the parked door: the context store is the scratch, so every
+        // word routes through the pool, the local fiber's own slot
+        // included
+        let pooled = pool[FIBER_ROOT.index()]
+            .objects
+            .alloc_str("pooled text".to_owned());
+        let mut scratch = Objects::new(FIBER_ROOT);
+        let heaps = Heaps::new(FIBER_ROOT, &mut scratch, &mut pool, &mut claims, false);
+        assert_eq!(
+            heaps.str_ref(RefId::new(FIBER_ROOT, pooled)),
+            Ok("pooled text")
+        );
+        assert_eq!(heaps.str_ref(fw), Ok("cross heap text"));
+    }
+
+    /// The map rows' scratch reuse: two content-equal maps over many
+    /// rows — fresh string-key and list-value objects each, so no pair
+    /// shares identity — compare true, and a value swapped in one row,
+    /// a row missing on the right, and a longer value span each answer
+    /// false.
+    #[test]
+    fn the_map_compare_walks_many_rows_through_the_scratch() {
+        const ROWS: i64 = 100;
+        let mut current = Objects::new(FIBER_ROOT);
+        let fill = |objects: &mut Objects, rows: i64, swap_last: bool| -> u32 {
+            let map = objects.alloc_map();
+            for i in 0..rows {
+                let key = objects.alloc_str(format!("key {i}"));
+                let text = objects.alloc_str(format!("value {i}"));
+                let word = RefId::new(FIBER_ROOT, text);
+                let list = objects.alloc_list(vec![Value::I64(i), Value::Ref(word)]);
+                let value = if swap_last && i + 1 == rows {
+                    objects.alloc_list(vec![Value::I64(i), Value::Ref(word), Value::I64(9)])
+                } else {
+                    list
+                };
+                objects
+                    .set_map(
+                        map,
+                        Value::Ref(RefId::new(FIBER_ROOT, key)),
+                        &ResolvedKey::Word,
+                        &[Value::Ref(RefId::new(FIBER_ROOT, value))],
+                    )
+                    .expect("the row stores");
+            }
+            map
+        };
+        let (map_a, map_b) = (
+            fill(&mut current, ROWS, false),
+            fill(&mut current, ROWS, false),
+        );
+        let short = fill(&mut current, ROWS - 1, false);
+        let swapped = fill(&mut current, ROWS, true);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT)];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        let w = |id: u32| RefId::new(FIBER_ROOT, id);
+        assert_eq!(heaps.content_eq(w(map_a), w(map_b)), Ok(true));
+        assert_eq!(heaps.content_eq(w(map_a), w(map_a)), Ok(true));
+        assert_eq!(
+            heaps.content_eq(w(map_a), w(short)),
+            Ok(false),
+            "a missing row"
+        );
+        assert_eq!(
+            heaps.content_eq(w(map_a), w(swapped)),
+            Ok(false),
+            "one swapped value"
         );
     }
 
@@ -2697,12 +2910,12 @@ mod tests {
         );
     }
 
-    /// Word equality is the scalar key rule, so the hash filter folds
-    /// `+0.0` and `-0.0` to one form: either spelling finds the other's
-    /// entry, while an int and a float over equal-looking bytes stay
-    /// distinct keys.
+    /// Word equality is the bit-structural scalar key rule, so `+0.0`
+    /// and `-0.0` are two distinct keys: each spelling stores its own
+    /// row, finds itself, and never finds the other, while an int and a
+    /// float over equal-looking bytes stay distinct keys.
     #[test]
-    fn signed_zero_scalar_keys_match_through_the_filter() {
+    fn signed_zero_scalar_keys_are_two_distinct_rows() {
         let mut objects = Objects::new(FIBER_ROOT);
         let map = objects.alloc_map();
         objects
@@ -2710,15 +2923,65 @@ mod tests {
                 true,
             )])
             .expect("the positive zero stores");
+        objects
+            .set_map(map, Value::F64(-0.0), &ResolvedKey::Word, &[Value::Bool(
+                false,
+            )])
+            .expect("the negative zero stores its own row");
+        assert_eq!(objects.map_len(map), Ok(2), "the two zeros are two rows");
+        assert_eq!(
+            objects.map_at(map, Value::F64(0.0), &ResolvedKey::Word),
+            Ok(Some(&[Value::Bool(true)][..])),
+            "the positive zero finds its own row"
+        );
         assert_eq!(
             objects.map_at(map, Value::F64(-0.0), &ResolvedKey::Word),
-            Ok(Some(&[Value::Bool(true)][..])),
-            "the two zero spellings are one scalar key"
+            Ok(Some(&[Value::Bool(false)][..])),
+            "the negative zero finds its own row"
         );
         assert_eq!(
             objects.map_at(map, Value::I64(0), &ResolvedKey::Word),
             Ok(None),
             "an int key never matches a float key"
+        );
+    }
+
+    /// A NaN scalar key is reflexive: one NaN payload stores one row, a
+    /// second store over the same payload overwrites that row (the count
+    /// stays one), the row reads back, and a distinct NaN payload is a
+    /// different key with its own row.
+    #[test]
+    fn a_nan_scalar_key_round_trips_through_its_own_row() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let nan = f64::NAN;
+        let payloaded = f64::from_bits(0x7ff8_0000_0000_0001);
+        let map = objects.alloc_map();
+        objects
+            .set_map(map, Value::F64(nan), &ResolvedKey::Word, &[Value::I64(1)])
+            .expect("the NaN key stores");
+        objects
+            .set_map(map, Value::F64(nan), &ResolvedKey::Word, &[Value::I64(2)])
+            .expect("the same NaN payload overwrites its row");
+        assert_eq!(objects.map_len(map), Ok(1), "the overwrite kept one row");
+        assert_eq!(
+            objects.map_at(map, Value::F64(nan), &ResolvedKey::Word),
+            Ok(Some(&[Value::I64(2)][..])),
+            "the NaN key finds its overwritten row"
+        );
+        objects
+            .set_map(map, Value::F64(payloaded), &ResolvedKey::Word, &[
+                Value::I64(3),
+            ])
+            .expect("the payloaded NaN stores its own row");
+        assert_eq!(
+            objects.map_len(map),
+            Ok(2),
+            "a distinct NaN payload is a distinct key"
+        );
+        assert_eq!(
+            objects.map_at(map, Value::F64(payloaded), &ResolvedKey::Word),
+            Ok(Some(&[Value::I64(3)][..])),
+            "the payloaded NaN finds its own row"
         );
     }
 
@@ -3045,5 +3308,44 @@ mod tests {
             .dec(other)
             .expect("the caller drops the second value");
         assert!(objects.is_empty(), "the pair words died with the map");
+    }
+
+    /// A concat over disagreeing non-empty strides names the right operand
+    /// with its own stride and the width the left side staged -- lowered
+    /// code cannot build the shape (the checker holds one element type
+    /// per list value), so the trap is the hand-assembled frame's
+    /// diagnostic and this pins what it says. The in-place pair runs
+    /// first; the routed cross-store pair answers the same attribution.
+    #[test]
+    fn a_concat_of_disagreeing_strides_names_the_right_operand() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let one = objects.alloc_list(vec![Value::I64(1)]);
+        let pair = objects.alloc_list_strided(vec![Value::I64(2), Value::I64(3)], 2);
+        assert_eq!(
+            objects.concat_lists(one, pair),
+            Err(Trap::ElementStride {
+                obj: pair,
+                stride: 2,
+                given: 1,
+            })
+        );
+
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let front = current.alloc_list(vec![Value::I64(1)]);
+        let back = pool[other.index()]
+            .objects
+            .alloc_list_strided(vec![Value::I64(2), Value::I64(3)], 2);
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        assert_eq!(
+            heaps.concat_lists(RefId::new(FIBER_ROOT, front), RefId::new(other, back)),
+            Err(Trap::ElementStride {
+                obj: back,
+                stride: 2,
+                given: 1,
+            })
+        );
     }
 }

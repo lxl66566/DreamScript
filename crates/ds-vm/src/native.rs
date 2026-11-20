@@ -49,18 +49,18 @@
 //! | 8     | reserved |
 //! | 9     | reserved |
 //! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) |
-//! | 11    | `substring (s, start, end: int) -> string | none` (the checked slice) |
+//! | 11    | `substring (s, start, end: int) -> string \| none` (the checked slice) |
 //! | 12    | `concat (a, b: string) -> string` |
 //! | 13    | `to_upper (s: string) -> string` |
 //! | 14    | `to_lower (s: string) -> string` |
 //! | 15    | `trim (s: string) -> string` |
-//! | 16    | `parse_int (s: string) -> int | parse_err` |
+//! | 16    | `parse_int (s: string) -> int \| parse_err` |
 //! | 17    | `split (s, sep: string) -> list[string]` |
-//! | 18    | `char_at (s: string, i: int) -> char | none` (the checked char read) |
+//! | 18    | `char_at (s: string, i: int) -> char \| none` (the checked char read) |
 //! | 19    | reserved (the string block's spare slot) |
 //! | 20    | `list_new () -> list` |
 //! | 21    | `list_len[t] (list) -> int` (generic; CALLG) |
-//! | 22    | `list_get[t] (list, i: int) -> t | none` (generic; CALLG) |
+//! | 22    | `list_get[t] (list, i: int) -> t \| none` (generic; CALLG) |
 //! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) |
 //! | 24    | reserved (the retired `fiber_yield` debug yield's slot; the dev host injects suspension through its own face) |
 //! | 25    | `fiber_resume (fiber, value: int) -> int` |
@@ -68,13 +68,13 @@
 //! | 27    | `list_push (xs: list, x: value) -> unit` |
 //! | 28    | `map_new () -> map` |
 //! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) |
-//! | 30    | `map_get[k, v] (map, key: value) -> v | none` (generic; CALLG) |
+//! | 30    | `map_get[k, v] (map, key: value) -> v \| none` (generic; CALLG) |
 //! | 31    | `map_set (map, key, value words, variadic) -> unit` — the value's whole inline word span |
 //! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) |
 //! | 33    | reserved (was `head`, retired 2026-11-17; `first` is the one list-front spelling) |
 //! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) |
 //! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) |
-//! | 36    | `first[t] (xs: list) -> t | none` (generic; CALLG) |
+//! | 36    | `first[t] (xs: list) -> t \| none` (generic; CALLG) |
 //! | 37    | `max[t] (a, b: value) -> value` (generic; CALLG) |
 //! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) |
 //! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) |
@@ -96,17 +96,17 @@
 //! | 55    | `char_hash (c: char) -> int` |
 //! | 56    | `repl_park (answer words, variadic)` (control seam; the REPL's spliced park) |
 //! | 57    | reserved (was parse_json; the reader lives in @std ds source now) |
-//! | 58    | `char_of (code: int) -> char | none` — the codepoint→char reader |
+//! | 58    | `char_of (code: int) -> char \| none` — the codepoint→char reader |
 //! | 59    | `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the entry-order key list |
 //! | 60    | `code_of (c: char) -> int` — the char→codepoint reader |
 //! | 61    | `bytes_of (xs: list[byte]) -> bytes` — the byte string's construction seam |
 //! | 62    | `byte_list (b: bytes) -> list[byte]` — the bridge back out |
-//! | 63    | `byte_at (b: bytes, i: int) -> byte | none` — the checked indexed read |
+//! | 63    | `byte_at (b: bytes, i: int) -> byte \| none` — the checked indexed read |
 //! | 64    | `bytes_eq (a, b: bytes) -> bool` — the structural content compare the `==`/`!=` chain dispatches over bytes operands |
 //! | 65    | `bytes_compare (a, b: bytes) -> int` — the bytes sort key the `ord` derive orders bytes parts through |
 //! | 66    | `bytes_hash (b: bytes) -> int` — the content hash the `hash` derive folds bytes parts through |
 //! | 67    | `utf8_encode (s: string) -> bytes` — the string→bytes bridge, the string's own bytes |
-//! | 68    | `utf8_decode (b: bytes) -> string | utf8_err` — the bytes→string bridge, UTF-8 validated on the way back |
+//! | 68    | `utf8_decode (b: bytes) -> string \| utf8_err` — the bytes→string bridge, UTF-8 validated on the way back |
 //! | 69    | `trap (msg: string) -> unit` — the bare trap primitive; never returns, never prints (the die split) |
 //! | 70    | `list_eq (a, b: list) -> bool` — the list collection's structural content compare the `==`/`!=` chain dispatches over list operands |
 //! | 71    | `map_eq (a, b: map) -> bool` — the map collection's structural content compare the `==`/`!=` chain dispatches over map operands |
@@ -972,9 +972,9 @@ fn str_compare_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so one operand copies out
-    let a = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    let b = heaps.str_at(ref_arg(args, 1)?)?;
+    // both operands borrow shared, so neither side copies out
+    let a = heaps.str_ref(ref_arg(args, 0)?)?;
+    let b = heaps.str_ref(ref_arg(args, 1)?)?;
     Ok(NativeResult::Word(Value::I64(
         match a.as_bytes().cmp(b.as_bytes()) {
             std::cmp::Ordering::Less => -1,
@@ -989,9 +989,9 @@ fn char_compare_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so one operand copies out
-    let a = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    let b = heaps.str_at(ref_arg(args, 1)?)?;
+    // both operands borrow shared, so neither side copies out
+    let a = heaps.str_ref(ref_arg(args, 0)?)?;
+    let b = heaps.str_ref(ref_arg(args, 1)?)?;
     Ok(NativeResult::Word(Value::I64(
         match a.chars().cmp(b.chars()) {
             std::cmp::Ordering::Less => -1,
@@ -1036,8 +1036,8 @@ fn str_hash_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so the operand copies out
-    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    // the operand borrows shared, so the hash reads without a copy
+    let text = heaps.str_ref(ref_arg(args, 0)?)?;
     Ok(NativeResult::Word(Value::I64(fnv1a(text.as_bytes()))))
 }
 
@@ -1482,7 +1482,11 @@ fn map_eq_fn(
 /// How `split` cuts the subject. The surface separator is a `char` (one
 /// scalar value), and an empty one splits per character rather than trap.
 enum SplitSep {
-    /// An empty separator: one part per character.
+    /// An empty separator: one part per character. The lowerer types the
+    /// separator `char` and every char word is a one-char string by
+    /// construction, so lowered code never stages the empty spelling: the
+    /// arm answers hand-assembled frames riding an empty string over the
+    /// operand (the lenient seam `code_of` takes).
     PerChar,
     /// One ASCII character: the split scans the subject's bytes once.
     Byte(char),
@@ -2017,8 +2021,8 @@ pub struct GenericFunction {
 /// The body shape of a generic builtin: the whole VM, the evidence
 /// words, then the real arguments. The whole-VM signature is the
 /// reentrancy seam — the lambda-taking combinators call user code back
-/// through [`Vm::call_hosted`] mid-body — while the pure bodies split
-/// the heap and sink off themselves ([`Vm::split`]) and never touch the
+/// through `[Vm::call_hosted]` mid-body — while the pure bodies split
+/// the heap and sink off themselves (`[Vm::split]`) and never touch the
 /// rest.
 pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Trap>;
 
@@ -3421,7 +3425,7 @@ impl OutputSink {
         self.net.set_timeout(timeout);
     }
 
-    /// Pins the TLS client of the net face's tls tier ([`crate::tls`]):
+    /// Pins the TLS client of the net face's tls tier (`[crate::tls]`):
     /// custom trust roots for an embedding host or a test, the default
     /// being the webpki root set.
     pub fn set_tls_config(&mut self, config: std::sync::Arc<rustls::ClientConfig>) {
@@ -4247,6 +4251,40 @@ mod tests {
             let want: Vec<String> = want.iter().map(|part| (*part).to_owned()).collect();
             assert_eq!(parts, want, "{text:?} split on {sep:?}");
         }
+    }
+
+    /// The empty separator's per-character split: the parts fall on char
+    /// boundaries, so a multi-byte scalar stays whole. Lowered code never
+    /// stages the empty spelling over the `char` separator (every char
+    /// word is one-char by construction); the arm answers hand-assembled
+    /// frames, and this pins the answer it gives them.
+    #[test]
+    fn an_empty_separator_splits_per_character() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let text_id = heaps.current().intern("a—b");
+        let sep_id = heaps.current().intern("");
+        let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
+            Value::Ref(RefId::new(FIBER_ROOT, text_id)),
+            Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
+        ])
+        .expect("split runs")
+        .word()
+        .expect("a single word") else {
+            panic!("a list ref")
+        };
+        let words = heaps.list_at(list).expect("the list is live").0.to_vec();
+        let parts: Vec<String> = words
+            .iter()
+            .map(|elem| match elem {
+                Value::Ref(word) => heaps.str_at(*word).expect("a string part").to_owned(),
+                other => panic!("a string part, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(parts, ["a", "—", "b"]);
     }
 
     /// `join` pastes the elements at their exact byte lengths: the buffer

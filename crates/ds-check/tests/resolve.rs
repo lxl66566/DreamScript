@@ -1069,6 +1069,7 @@ fn a_linked_const_binds_through_its_literal_fact() {
             value,
             ty: None,
             link: 0,
+            origin: None,
             func: Some(0),
             std: false,
         }
@@ -1215,12 +1216,14 @@ fn a_linked_type_registers_before_selections_validate() {
                 default: None,
             }],
             ret: Some(name_type(ret)),
+            bind: None,
         })),
         row: ds_check::EffectRow::default(),
         caps: 0,
         value: None,
         ty: None,
         link: 0,
+        origin: None,
         func: Some(0),
         std: false,
     };
@@ -1237,6 +1240,7 @@ fn a_linked_type_registers_before_selections_validate() {
         value: None,
         ty: fact.map(std::sync::Arc::new),
         link: 0,
+        origin: None,
         func: Some(0),
         std: false,
     };
@@ -1305,6 +1309,241 @@ fn a_linked_type_registers_before_selections_validate() {
     );
 }
 
+/// A linked zero-field struct binds through its empty word layout (G4):
+/// an `pub struct x { }` fact carries no fields yet mints the def an
+/// annotation, a return position, and an empty construction answer
+/// exactly like a local declaration. The un-merge's first migrants' own
+/// wider shapes — the alias, the optional-field struct, the opaque
+/// bodiless struct, the list-initialized const — bind through the
+/// artifact round's widened vocabulary, the next test's rows; the e2e
+/// pins them end to end over the real surface.
+#[test]
+fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
+    let mut files = Files::new();
+    let source = concat!(
+        "import @std (response)\n",
+        "\n",
+        "pub fn make() -> response {\n",
+        "  response { }\n",
+        "}\n",
+        "\n",
+        "pub fn take(r: response) -> response {\n",
+        "  r\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![ds_check::ForeignEntry {
+            name: "response".to_owned(),
+            origin: None,
+            vis: ds_check::Vis::Pub,
+            kind: ds_check::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct(Vec::new()))),
+            link: 0,
+            func: None,
+            std: true,
+        }],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    let span = ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .find_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+        .expect("the source carries one import");
+    imports.add(span, ds_check::ImportSurface::Linked(surface));
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    assert!(diags.is_empty(), "the zero-field shape binds: {diags:?}");
+    let (&def, _) = package
+        .foreign()
+        .iter()
+        .find(|(_, entry)| entry.name == "response")
+        .unwrap_or_else(|| panic!("the zero-field struct registers"));
+    assert_eq!(package.def(def).kind, DefKind::Struct);
+    let index = UseIndex::build(&resolutions);
+    let ret = span_in(source, file, "pub fn make() -> response {", 0, "response");
+    let brace_head = span_in(source, file, "  response { }", 0, "response");
+    let take_line = "pub fn take(r: response) -> response {";
+    let annotation = span_in(source, file, take_line, 0, "response");
+    // the return spelling is the line's second occurrence: derive its span
+    // from the line's own bounds
+    let ctx = span_of(source, file, take_line, 0);
+    let text = &source[ctx.start as usize..ctx.end as usize];
+    let at = text
+        .rfind("response")
+        .expect("the line carries two spellings");
+    let take_ret = Span::new(
+        file,
+        ctx.start + u32::try_from(at).unwrap(),
+        ctx.start + u32::try_from(at + "response".len()).unwrap(),
+    );
+    assert_eq!(
+        index.def_uses(def),
+        [ret, brace_head, annotation, take_ret],
+        "the return, the construction head, and both of take's spellings resolve onto the def"
+    );
+}
+
+/// The artifact round's first widened shapes bind at the same walk (G4):
+/// an alias registers as the alias def its use sites expand, an
+/// optional-field struct registers like any flat struct, the bodiless
+/// struct registers its opaque identity, and a list-literal const
+/// registers as the const def its uses embed — each selection binding
+/// where the pre-widening vocabulary refused it (DS4021).
+#[test]
+fn the_widened_link_shapes_bind_at_the_walk() {
+    let mut files = Files::new();
+    let source = concat!(
+        "pub tag int\n",
+        "pub tag string\n",
+        "pub struct map[k, v]\n",
+        "import @std (row, config, response, urls)\n",
+        "\n",
+        "fn take(c: config, r: response) -> int {\n",
+        "  1\n",
+        "}\n",
+        "\n",
+        "fn keys() -> row {\n",
+        "  map[string, string]()\n",
+        "}\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  take(config { host: \"h\", port: 8080, retries: 1 }, response { })\n",
+        "}\n",
+        "\n",
+        "const seen = urls\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let entry = |name: &str, ty: Option<ds_check::TypeFact>, value: Option<ds_check::ConstFact>| {
+        ds_check::ForeignEntry {
+            name: name.to_owned(),
+            origin: None,
+            vis: ds_check::Vis::Pub,
+            kind: if value.is_some() {
+                ds_check::ForeignKind::Binding
+            } else {
+                ds_check::ForeignKind::Type
+            },
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value,
+            ty: ty.map(std::sync::Arc::new),
+            link: 0,
+            func: None,
+            std: true,
+        }
+    };
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            entry(
+                "row",
+                Some(ds_check::TypeFact::Alias(Box::new(
+                    ds_check::import::TypeWord::Map(
+                        ds_check::import::ScalarWord::Str,
+                        ds_check::import::ScalarWord::Str,
+                    ),
+                ))),
+                None,
+            ),
+            entry(
+                "config",
+                Some(ds_check::TypeFact::Struct(vec![
+                    ds_check::import::TypeField {
+                        name: "host".to_owned(),
+                        word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Str),
+                    },
+                    ds_check::import::TypeField {
+                        name: "port".to_owned(),
+                        word: ds_check::import::TypeWord::Optional(
+                            ds_check::import::ScalarWord::Int,
+                        ),
+                    },
+                    ds_check::import::TypeField {
+                        name: "retries".to_owned(),
+                        word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
+                    },
+                ])),
+                None,
+            ),
+            entry("response", Some(ds_check::TypeFact::Opaque), None),
+            entry(
+                "urls",
+                None,
+                Some(ds_check::ConstFact::List(vec![
+                    ds_check::ConstFact::Str("https://ds.dev".to_owned()),
+                    ds_check::ConstFact::Str("https://example.org".to_owned()),
+                ])),
+            ),
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    let span = ast
+        .blocks
+        .iter()
+        .flat_map(|block| block.items.iter())
+        .find_map(|item| match &item.kind {
+            ds_parse::ItemKind::Import(import) => Some(import.span),
+            _ => None,
+        })
+        .expect("the source carries one import");
+    imports.add(span, ds_check::ImportSurface::Linked(surface));
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    assert!(diags.is_empty(), "the widened shapes bind: {diags:?}");
+    let kind_of = |name: &str| {
+        let (&def, _) = package
+            .foreign()
+            .iter()
+            .find(|(_, entry)| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} registers"));
+        package.def(def).kind
+    };
+    assert_eq!(kind_of("row"), DefKind::TypeAlias);
+    assert_eq!(kind_of("config"), DefKind::Struct);
+    assert_eq!(kind_of("response"), DefKind::Struct);
+    assert_eq!(kind_of("urls"), DefKind::Const);
+    let index = UseIndex::build(&resolutions);
+    let (&row_def, _) = package
+        .foreign()
+        .iter()
+        .find(|(_, entry)| entry.name == "row")
+        .expect("row registers");
+    assert_eq!(
+        index.def_uses(row_def),
+        [span_in(source, file, "fn keys() -> row {", 0, "row")],
+        "the alias's annotation resolves onto the alias def"
+    );
+    let (&urls_def, _) = package
+        .foreign()
+        .iter()
+        .find(|(_, entry)| entry.name == "urls")
+        .expect("urls registers");
+    assert_eq!(
+        index.def_uses(urls_def),
+        [span_in(source, file, "const seen = urls", 0, "urls")],
+        "the list const's use resolves onto the const def"
+    );
+}
+
 /// Resolves one source over a linked member surface whose only entry is
 /// the fact-carrying struct `cell` (G4): the fixture the linked tier's
 /// receiver and impl seams share.
@@ -1333,6 +1572,7 @@ fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
                 },
             ]))),
             link: 0,
+            origin: None,
             func: None,
             std: false,
         }],
@@ -1458,12 +1698,14 @@ fn a_linked_enum_registers_its_cases_beside_it() {
                 default: None,
             }],
             ret: Some(name_type(ret)),
+            bind: None,
         })),
         row: ds_check::EffectRow::default(),
         caps: 0,
         value: None,
         ty: None,
         link: 0,
+        origin: None,
         func: Some(0),
         std: false,
     };
@@ -1480,6 +1722,7 @@ fn a_linked_enum_registers_its_cases_beside_it() {
         value: None,
         ty: fact.map(std::sync::Arc::new),
         link: 0,
+        origin: None,
         func: None,
         std: false,
     };
@@ -1635,5 +1878,144 @@ fn a_linked_enum_registers_its_cases_beside_it() {
     assert!(
         format!("{refusal:?}").contains("its enum `tone` did not bind"),
         "the refusal names the enum: {refusal:?}"
+    );
+}
+
+/// One source over a linked surface carrying a callable, a literal
+/// const, and a second callable, resolving with the package returned:
+/// the fixture the `pub import` re-export rows share.
+fn resolve_pub_import(source: &str) -> (Package, Vec<Diagnostic>) {
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let entry =
+        |name: &str, kind: ds_check::ForeignKind, func: Option<u32>| ds_check::ForeignEntry {
+            name: name.to_owned(),
+            vis: ds_check::Vis::Pub,
+            kind,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: ds_check::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: None,
+            link: 0,
+            origin: None,
+            func,
+            std: false,
+        };
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            entry("helper", ds_check::ForeignKind::Fn, Some(3)),
+            entry("limit", ds_check::ForeignKind::Fn, Some(4)),
+            entry("other", ds_check::ForeignKind::Fn, Some(5)),
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            // an @std path stays surfaceless like the merged reading's
+            // no-graph spelling, so its rows refuse through the
+            // resolving pass alone
+            if import.path.at_sign
+                && import
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|s| s.name == "std")
+            {
+                continue;
+            }
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    let (package, _, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    (package, diags)
+}
+
+/// A `pub import` row's bound selections record as re-exports (G4's
+/// transitive surface closure): each binding carries the foreign def,
+/// the bound name (an alias's spelling included), and the row's own
+/// span, while a private row's binding of the same surface records
+/// nothing — only `pub` rows feed the export surface.
+#[test]
+fn a_pub_import_records_its_bindings_as_reexports() {
+    let source = concat!(
+        "pub tag int\n",
+        "\n",
+        "pub import @lib (helper as help, limit)\n",
+        "import @lib (other)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  help()\n",
+        "}\n",
+    );
+    let (package, diags) = resolve_pub_import(source);
+    assert!(diags.is_empty(), "the rows bind clean: {diags:?}");
+    let foreign: std::collections::HashMap<ds_check::DefId, &str> = package
+        .foreign()
+        .iter()
+        .map(|(def, entry)| (*def, entry.name.as_str()))
+        .collect();
+    let reexports: Vec<(String, String)> = package
+        .reexports()
+        .iter()
+        .map(|(def, name, _)| {
+            let origin = foreign.get(def).expect("a re-export binds a foreign def");
+            (name.clone(), origin.to_string())
+        })
+        .collect();
+    assert_eq!(
+        reexports,
+        vec![
+            ("help".to_owned(), "helper".to_owned()),
+            ("limit".to_owned(), "limit".to_owned()),
+        ],
+        "the pub row's two bindings re-export under their bound names, the private row's never"
+    );
+}
+
+/// The `pub import` rows that bind nothing refuse at their own seams
+/// (G4): a selectionless row re-exports nothing, `pub(pkg)` on an
+/// import names nothing (imports are already package-wide), and a `pub
+/// import` of `@std` re-exports nothing under the merged-ambient
+/// reading — each a VisNoTarget naming the empty target.
+#[test]
+fn the_pub_import_rows_that_bind_nothing_refuse() {
+    let source = concat!(
+        "pub tag int\n",
+        "\n",
+        "pub import @lib\n",
+        "pub(pkg) import @lib (helper)\n",
+        "pub import @std/csv (reader)\n",
+    );
+    let (_, diags) = resolve_pub_import(source);
+    let refusals: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|diag| diag.code == ErrorCode::VisNoTarget)
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        3,
+        "each empty target refuses once: {diags:?}"
+    );
+    assert!(
+        refusals
+            .iter()
+            .any(|diag| format!("{diag:?}").contains("no selection list")),
+        "the selectionless row names its emptiness: {refusals:?}"
+    );
+    assert!(
+        refusals
+            .iter()
+            .any(|diag| format!("{diag:?}").contains("merged-ambient reading")),
+        "the @std row names the merged reading: {refusals:?}"
     );
 }

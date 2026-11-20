@@ -46,7 +46,7 @@ pub(crate) const HOST_FILE: &str = "$host.ds";
 
 /// The host provision's text: the `die` spelling's declaration, the
 /// signature the old ambient extern carried, `pub` like every ambient
-/// face [G4] because the member's name is the host's surface to the
+/// face `[G4]` because the member's name is the host's surface to the
 /// entry files, not a private one. The lowerer's compiler-wired
 /// recognition routes the call to the builtin core's bare trap
 /// primitive; what the trap prints and which exit code follows is this
@@ -82,21 +82,28 @@ pub(crate) fn package_ambient_files(no_ambient: bool, link_name: &str) -> usize 
 
 /// Extracts every member file's exported top-level definitions (G4):
 /// one [`Export`] per package def whose defining span names a member
-/// source — the module's own ambient and the import-bound foreign defs
-/// excluded — carrying the facts an import surface serves (the written
-/// signature of a callable, the solved row, the function-table index a
-/// cross-module call addresses, the literal value a plain `const`
-/// binding carries as its own link fact, and the word layout a struct,
-/// enum, or enum-case declaration carries as its own). A `const` binding whose value
+/// source — the module's own ambient excluded — carrying the facts an
+/// import surface serves (the written signature of a callable, the
+/// solved row, the function-table index a cross-module call addresses,
+/// the literal value a plain `const` binding carries as its own link
+/// fact, and the word layout a struct, enum, or enum-case declaration
+/// carries as its own). A `const` binding whose value
 /// is a function (F2) exports as callable when its signature registered;
 /// a data const exports as a binding, its fact the literal when the
-/// initializer is one.
+/// initializer is one. A `pub import` row's bound selections export too
+/// — the transitive surface closure — under the names the rows bound,
+/// each carrying its origin package's link name (the position fact the
+/// entry rides translates through this module's own dep list) so a
+/// dependent's FuncRef addresses the origin, never this package's
+/// table; a private import's bound defs stay excluded exactly as
+/// before.
 #[must_use]
 fn exports_of(
     analyzed: &Analyzed,
     ambient_files: usize,
     effects: &ds_check::Effects,
     functions: &[String],
+    deps: &[ds_mod::Dep],
 ) -> Vec<Export> {
     let caps_of = |def: ds_check::DefId| {
         effects
@@ -106,16 +113,55 @@ fn exports_of(
             .map_or(0, |entry| entry.caps)
     };
     let mut exports = Vec::new();
+    // The `pub import` rows' bindings, keyed by def: the bound names and
+    // row spans the transitive exports below carry (a def two rows alias
+    // rides twice, one export per name).
+    let mut reexports: HashMap<ds_check::DefId, Vec<(&str, ds_diag::Span)>> = HashMap::new();
+    for (def, name, span) in analyzed.package.reexports() {
+        reexports
+            .entry(*def)
+            .or_default()
+            .push((name.as_str(), *span));
+    }
     for (index, def) in analyzed.package.defs().enumerate() {
         if (def.span.file.as_u32() as usize) < ambient_files {
             continue; // the ambient's own definitions never export
         }
         let id = ds_check::DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
-        if analyzed.package.foreign().contains_key(&id) {
-            // an import-bound definition is not this package's own: the
-            // export surface carries the package's declarations alone, so
-            // a linked name never re-exports transitively (G4's
-            // transitive closure stays the artifact round's)
+        if let Some(entry) = analyzed.package.foreign().get(&id) {
+            // an import-bound definition is not this package's own: only
+            // a `pub import` row's binding re-exports (G4's transitive
+            // closure), the row's own span the definition site a
+            // dependent's diagnostics name — the origin's declaring span
+            // lives in the origin package's file space and never rebases
+            // into a dependent's registry. The origin's link name rides
+            // from the entry's position fact through this module's own
+            // dep list, so a dependent's FuncRef addresses the package
+            // whose table holds the body.
+            for (name, span) in reexports.get(&id).into_iter().flatten() {
+                let origin = deps
+                    .get(usize::try_from(entry.link).expect("link position fits usize"))
+                    .map(|dep| dep.name.clone());
+                exports.push(Export {
+                    name: (*name).to_owned(),
+                    vis: entry.vis,
+                    kind: match entry.kind {
+                        ds_check::ForeignKind::Fn => ExportKind::Fn,
+                        ds_check::ForeignKind::Binding => ExportKind::Binding,
+                        ds_check::ForeignKind::Type => ExportKind::Type,
+                    },
+                    generic: entry.generic,
+                    defaulted: entry.defaulted,
+                    decl_span: *span,
+                    sig: entry.sig.clone(),
+                    value: entry.value.clone(),
+                    ty: entry.ty.clone(),
+                    func: entry.func,
+                    origin,
+                    row: entry.row,
+                    caps: entry.caps,
+                });
+            }
             continue;
         }
         let sig = analyzed.decls.fns.get(&id).cloned();
@@ -151,8 +197,10 @@ fn exports_of(
         };
         // A type declaration's per-target link fact is its word layout
         // over the surface's vocabulary: a flat non-generic struct, a
-        // non-generic enum's tag rows, and each minted case's own row —
-        // every other type-namespace shape stays refused downstream.
+        // non-generic enum's tag rows, each minted case's own row, a
+        // non-generic alias's resolved word, and a bodiless struct's
+        // opaque identity — every other type-namespace shape stays
+        // refused downstream.
         let ty = match def.kind {
             ds_check::DefKind::Struct => {
                 ds_check::TypeFact::of_struct(&analyzed.decls, id).map(std::sync::Arc::new)
@@ -172,6 +220,9 @@ fn exports_of(
                         .map(std::sync::Arc::new)
                 })
             },
+            ds_check::DefKind::TypeAlias => {
+                ds_check::TypeFact::of_alias(&analyzed.decls, id).map(std::sync::Arc::new)
+            },
             _ => None,
         };
         exports.push(Export {
@@ -185,6 +236,7 @@ fn exports_of(
             value,
             ty,
             func: func.map(|func| u32::try_from(func).expect("function index fits u32")),
+            origin: None,
             row: effects.of(id).unwrap_or_default(),
             caps: caps_of(id),
         });
@@ -205,6 +257,7 @@ pub(crate) fn rebase_sig(
         generics: sig.generics.clone(),
         params: sig.params.clone(),
         ret: sig.ret.clone(),
+        bind: sig.bind.clone(),
     };
     for generic in &mut sig.generics {
         generic.span = rebase_span(generic.span, map);
@@ -336,8 +389,14 @@ pub struct Export {
     /// type-namespace shape carries none.
     pub ty: Option<std::sync::Arc<ds_check::TypeFact>>,
     /// The function's index in this module's table, callable definitions
-    /// only.
+    /// only. A re-exported entry's index names the ORIGIN module's table.
     pub func: Option<u32>,
+    /// The origin package's link name when this export re-exports
+    /// transitively (a `pub import` row's binding): a dependent's dep
+    /// list records the name and the entry's FuncRef addresses the
+    /// origin's position, so the body's own module serves the call.
+    /// `None` for the package's own declarations.
+    pub origin: Option<String>,
     /// The definition's solved effect row.
     pub row: EffectRow,
     /// The definition's world-capability bits.
@@ -409,6 +468,7 @@ pub fn compile(
         true,
         prefix_cache,
         None,
+        None,
         after,
     )
 }
@@ -430,48 +490,10 @@ struct Inputs<'a> {
     main_required: bool,
     /// The module's content identity (G3.5): a script's or single-member
     /// package's source hash, a multi-member package's composed fold.
+    /// Every cache tier keys on it — the dsmod artifact's header, the
+    /// persisted `.dsi` prefix — so a member edit re-keys each one.
     identity: Hash128,
     dep_content: &'a BTreeMap<String, Hash128>,
-}
-
-/// Compiles one package-shaped root over source text. `name` is the
-/// module's name (the script rule, its file stem), `display` the path
-/// diagnostics render, and `dep_content` the resolved graph's
-/// identities, which the writer records for names the source text alone
-/// cannot determine. The run contract's `main` entry is required, the
-/// script rule. `graph` links the imports when the root runs over a
-/// resolved package graph; `None` keeps every import declarative.
-/// `prefix_cache` is the caller's prefix tier, keyed on the same dep
-/// identities; `None` runs uncached.
-///
-/// # Errors
-///
-/// A reserved or empty module name, and every pipeline failure
-/// [`compile`] reports.
-#[allow(clippy::too_many_arguments)]
-pub fn compile_package(
-    name: &str,
-    display: &str,
-    source: &str,
-    entry: &str,
-    no_ambient: bool,
-    dep_content: &BTreeMap<String, Hash128>,
-    graph: Option<&crate::package::Graph>,
-    prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
-    after: BundleAfter,
-) -> Result<CompiledSource> {
-    compile_linked(
-        name,
-        &[(display.to_owned(), source.to_owned())],
-        Hash128::compute(source.as_bytes()),
-        entry,
-        true,
-        no_ambient,
-        dep_content,
-        graph,
-        prefix_cache,
-        after,
-    )
 }
 
 /// Compiles one package module over its member sources (G3's one
@@ -480,25 +502,33 @@ pub fn compile_package(
 /// `identity` (a single member's source hash, a composed fold over
 /// every member otherwise), and its own recorded imports validate
 /// against the same graph through the caller's `dep_content` and bind
-/// through `graph`. The run contract's `main` entry check is waived
+/// through `graph`. `script` parses the first member as a script — its
+/// top-level statements fold into the synthesized `main`, the manifest-
+/// free run path's rule over the implicit `@std` graph — while `false`
+/// keeps the member grammar a package root or linked member parses
+/// under. The run contract's `main` entry check is waived
 /// when `main_required` is false — an installed member serves its
-/// members and never runs as an entry.
+/// members and never runs as an entry. `dep_dsi` is the linked-member
+/// `.dsi` tier: a compile the script-mode run path serves as a dep
+/// caches persists its own checked prefix beside its dsmod.
 ///
 /// # Errors
 ///
 /// A reserved or empty module name, and every pipeline failure
 /// [`compile`] reports.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub fn compile_linked(
     name: &str,
     members: &[(String, String)],
     identity: Hash128,
     entry: &str,
+    script: bool,
     main_required: bool,
     no_ambient: bool,
     dep_content: &BTreeMap<String, Hash128>,
     graph: Option<&crate::package::Graph>,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    dep_dsi: Option<&crate::run_cache::RunCache>,
     after: BundleAfter,
 ) -> Result<CompiledSource> {
     if name.is_empty() {
@@ -522,11 +552,12 @@ pub fn compile_linked(
     compile_text(
         &inputs,
         members,
-        false,
+        script,
         entry,
         no_ambient,
         true,
         prefix_cache,
+        dep_dsi,
         graph,
         after,
     )
@@ -544,6 +575,7 @@ fn compile_text(
     no_ambient: bool,
     allow_serve: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    dep_dsi: Option<&crate::run_cache::RunCache>,
     graph: Option<&crate::package::Graph>,
     after: BundleAfter,
 ) -> Result<CompiledSource> {
@@ -555,10 +587,18 @@ fn compile_text(
     let mut preexpanded = Vec::new();
     // The registration the prefix pins: the ambient first, the sources
     // after it, in order. The reserved `@std` package's own member
-    // compile registers none — the member IS the ambient source seeded
-    // verbatim, so the ambient beside it would duplicate every face.
+    // compile registers none — the package carries the ambient core as
+    // its first member, so the ambient beside it would duplicate every
+    // face. The ambient's shape follows the graph: a compile whose graph
+    // resolved `@std` registers the shrunk core (the migrated members
+    // bind through the linked surface, so a selection's name stays free),
+    // every other registration the merged source — the un-merge's
+    // per-graph reading switch, the undeclaring side byte-stable.
     let mut ids = Vec::new();
     let std_pkg = inputs.name == ds_stdlib::STD_PACKAGE_NAME;
+    let std_declared = graph.is_some_and(crate::package::Graph::declares_std);
+    let ambient_source =
+        if std_declared { ds_stdlib::AMBIENT_CORE_SOURCE } else { ds_stdlib::AMBIENT_SOURCE };
     let ambient_files = usize::from(!no_ambient && !std_pkg);
     // The die provision (the 2026-11-17 split): an entry session carries
     // the host member as its last registered source — a plain member, so
@@ -571,8 +611,8 @@ fn compile_text(
     // ambient verbatim).
     let host_member = usize::from(inputs.main_required && !no_ambient && !std_pkg);
     if ambient_files > 0 {
-        let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
-        let (ast, expanded) = ambient_tree(&files, id);
+        let id = files.add_source(ds_stdlib::AMBIENT_FILE, ambient_source);
+        let (ast, expanded) = ambient_tree(&files, id, !std_declared);
         asts.push(ast);
         preexpanded.push(expanded);
         ids.push(id);
@@ -608,7 +648,7 @@ fn compile_text(
     // linked members' texts after the sources, so the surfaces' spans
     // name this compile's own registry.
     let imports = graph
-        .map(|graph| graph.surfaces(&mut files, &asts, ambient_files))
+        .map(|graph| graph.surfaces(&mut files, &asts, ambient_files, dep_dsi))
         .transpose()?;
     // Two serve tiers, each a pure cache with the fresh compute as the
     // canonical fallback: the user cache's composed prefix first — the
@@ -621,7 +661,9 @@ fn compile_text(
     let mut served = None;
     let mut served_rows = None;
     if let Some(cache) = prefix_cache {
-        served = cache.lookup(&name, &sources[0].1, &ids);
+        // the identity — a single source's hash, a multi-member package's
+        // composed fold — keys the tier, so a sibling edit re-keys it
+        served = cache.lookup(&name, inputs.identity, &ids);
     }
     // The ambient tier alone parks its affine walk: the prefix is one
     // file shared by every compile of the process, so the first walk
@@ -629,9 +671,12 @@ fn compile_text(
     // composed user prefix serves a different (per-source) file set and
     // keeps the plain full walk. The `@std` package's own member compile
     // takes the fresh analyze — its member parsed and expanded here, not
-    // the blob-served ambient tree the prefix assumes.
+    // the blob-served ambient tree the prefix assumes — and a core-shaped
+    // registration (a graph that resolved `@std`) takes it too: the
+    // checked-in `.dsi` carries the merged ambient's tables, a pure cache
+    // whose miss falls to this fresh analyze.
     let mut ambient_served = false;
-    if served.is_none() && ambient_files > 0 {
+    if served.is_none() && ambient_files > 0 && !std_declared {
         served = ds_stdlib::ambient_dsi(ids[0]).ok();
         ambient_served = served.is_some();
     }
@@ -784,9 +829,15 @@ fn compile_text(
     // name, source hash, splice boundary, plan disagreement) falls back
     // to lowering them here, whose answer is the canonical one. The
     // `@std` package's own member compile never splices: its items ARE
-    // the ambient's, planned in this module's own table.
-    let served =
-        if !no_ambient && !std_pkg && allow_serve { crate::ambient_dsmod::serve() } else { None };
+    // the ambient's, planned in this module's own table. A core-shaped
+    // registration never splices either — the artifact is keyed on the
+    // merged source, and the fresh lowering is the canonical fallback a
+    // core-keyed splice artifact would later serve.
+    let served = if !no_ambient && !std_pkg && allow_serve && !std_declared {
+        crate::ambient_dsmod::serve()
+    } else {
+        None
+    };
     let lowered = lower_via_serve(
         inputs.main_required,
         &name,
@@ -808,14 +859,36 @@ fn compile_text(
         .iter()
         .find(|plan| plan.name == entry)
         .map(|plan| plan.args.clone());
-    let deps = dep_list(&asts[ambient_files..], inputs.dep_content);
+    let deps = dep_list(&asts[ambient_files..], imports.as_ref(), inputs.dep_content);
     // A clean, fully lowered compile persists its own prefix for the
     // next run of the same source; every failure inside is silent (the
     // compile already succeeded, the next run falls back).
     if let Some(cache) = prefix_cache {
-        cache.store(&name, &sources[0].1, &ids, &analyzed, &effects, rows, caps);
+        cache.store(
+            &name,
+            inputs.identity,
+            &ids,
+            &analyzed,
+            &effects,
+            rows,
+            caps,
+        );
     }
-    let exports = exports_of(&analyzed, ambient_files, &effects, lowered.functions());
+    // A linked dep member's compile (the entry contract waived, so
+    // never the root itself) persists its own checked prefix beside the
+    // dsmod the walk's caller caches — the surface `ds info` and the LSP
+    // hover serve — over the same graph fold the dsmod key applies;
+    // every failure inside is silent the same way.
+    if let (Some(cache), false) = (dep_dsi, inputs.main_required) {
+        cache.store_dep_dsi(&name, source_hash, &analyzed, &effects, rows, caps);
+    }
+    let exports = exports_of(
+        &analyzed,
+        ambient_files,
+        &effects,
+        lowered.functions(),
+        &deps,
+    );
     match after {
         BundleAfter::Keep => {
             // The bundle's teardown is pure overhead on the one-shot
@@ -838,10 +911,20 @@ fn compile_text(
 /// embedded blob when it verifies against this registration (its trees
 /// carry the derive expansion from artifact build time), a fresh parse
 /// otherwise — the blob is a pure cache, never correctness-load-bearing.
-fn ambient_tree(files: &Files, id: ds_diag::FileId) -> (std::sync::Arc<ds_parse::Ast>, bool) {
-    match ds_stdlib::ambient_ast(id) {
-        Ok(ast) => (ast, true),
-        Err(_) => (
+/// The blob serves the merged ambient alone: a core-shaped registration
+/// (a graph that resolved `@std`) parses fresh, since the artifact's tree
+/// carries the migrated members' declarations back.
+fn ambient_tree(
+    files: &Files,
+    id: ds_diag::FileId,
+    merged: bool,
+) -> (std::sync::Arc<ds_parse::Ast>, bool) {
+    let served = merged
+        .then(|| ds_stdlib::ambient_ast(id))
+        .and_then(Result::ok);
+    match served {
+        Some(ast) => (ast, true),
+        None => (
             std::sync::Arc::new(parse(files, id).expect("the ambient parses")),
             false,
         ),
@@ -1059,7 +1142,10 @@ where
 /// into the header's link table (G3.5): one entry per linked name in
 /// declaration order — the plain list the load walk consumes, so a built
 /// artifact names its deps and a walk over it never re-derives them from
-/// source.
+/// source. A compile with import surfaces records the surfaces' own
+/// link-name walk instead — the source's names in first-occurrence order
+/// plus the re-export origins the surfaces introduce (`pub import`), so a
+/// transitive entry's FuncRef position names a dep this list carries.
 ///
 /// An `@`-sigil path links its package stem with the sigil kept
 /// (`@std/csv` links `@std`): the sigil space is the registry's package
@@ -1094,34 +1180,59 @@ pub(crate) fn import_link_name(import: &ds_parse::ImportDecl) -> String {
     name
 }
 
-fn dep_list<T>(asts: &[T], dep_content: &BTreeMap<String, Hash128>) -> Vec<ds_mod::Dep>
+fn dep_list<T>(
+    asts: &[T],
+    imports: Option<&ds_check::ImportGraph>,
+    dep_content: &BTreeMap<String, Hash128>,
+) -> Vec<ds_mod::Dep>
 where
     T: std::borrow::Borrow<ds_parse::Ast>,
 {
-    let mut deps: Vec<ds_mod::Dep> = Vec::new();
-    for ast in asts
-        .iter()
-        .map(std::borrow::Borrow::<ds_parse::Ast>::borrow)
-    {
-        for block in &ast.blocks {
-            for item in &block.items {
-                let ItemKind::Import(import) = &item.kind else {
-                    continue;
-                };
-                let name = import_link_name(import);
-                if deps.iter().any(|dep| dep.name == name) {
-                    continue;
+    // the surfaces' walk: the source's own link names plus the re-export
+    // origins the surface builder assigned positions for, exactly the
+    // order the entries' link facts address; a graph-absent compile
+    // (the script path) walks its own imports in first-occurrence order
+    let names: Vec<String> = if let Some(imports) = imports {
+        imports.link_order().to_vec()
+    } else {
+        let mut names: Vec<String> = Vec::new();
+        for ast in asts
+            .iter()
+            .map(std::borrow::Borrow::<ds_parse::Ast>::borrow)
+        {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ItemKind::Import(import) = &item.kind else {
+                        continue;
+                    };
+                    let name = import_link_name(import);
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
                 }
-                let content_hash = if name == "@std" {
-                    Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())
-                } else {
-                    dep_content.get(&name).copied().unwrap_or(Hash128::ZERO)
-                };
-                deps.push(ds_mod::Dep { name, content_hash });
             }
         }
-    }
-    deps
+        names
+    };
+    names
+        .into_iter()
+        .map(|name| {
+            // The reserved `@std` links at the identity the walk serves for
+            // it: the graph's own bundle identity when the manifest declared
+            // the dep, the ambient source hash otherwise (the merged-ambient
+            // reading, whose walk serves the checked-in ambient dsmod under
+            // exactly that hash).
+            let content_hash = if name == "@std" {
+                dep_content
+                    .get(&name)
+                    .copied()
+                    .unwrap_or_else(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes()))
+            } else {
+                dep_content.get(&name).copied().unwrap_or(Hash128::ZERO)
+            };
+            ds_mod::Dep { name, content_hash }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1130,7 +1241,7 @@ mod tests {
 
     use ds_vm::abi::{ConstIdx, FrameLayout, SlotType, SlotType::I64, uop::Uop};
 
-    use super::{BundleAfter, CompiledSource, Inputs, NO_DEPS, compile_package, compile_text};
+    use super::{BundleAfter, CompiledSource, Inputs, NO_DEPS, compile_linked, compile_text};
 
     /// The script-shaped test compile: one source, script parsing, no
     /// resolved graph.
@@ -1148,6 +1259,7 @@ mod tests {
             entry,
             no_ambient,
             allow_serve,
+            None,
             None,
             None,
             BundleAfter::Drop,
@@ -1524,13 +1636,16 @@ mod tests {
         const APP: &str = "import @lib/helper (twice)\nimport @other\n\nfn main() -> int {\n7\n}\n";
         let identity = ds_mod::Hash128::compute(b"the lib member's text");
         let dep_content = BTreeMap::from([("@lib".to_owned(), identity)]);
-        let compiled = compile_package(
+        let compiled = compile_linked(
             "@app",
-            "@app/main.ds",
-            APP,
+            &[("@app/main.ds".to_owned(), APP.to_owned())],
+            ds_mod::Hash128::compute(APP.as_bytes()),
             "main",
             false,
+            true,
+            false,
             &dep_content,
+            None,
             None,
             None,
             BundleAfter::Drop,

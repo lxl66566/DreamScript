@@ -45,8 +45,16 @@
 //! and enums), and the import-row vocabulary names const- and type-shaped
 //! members — the linked facts' import-surface spelling, parsed and
 //! checked here; the link walk itself needs a package store this
-//! single-file harness does not carry. Included by the cargo-fuzz
-//! target `fuzz_check_gen` and the nextest mirror in
+//! single-file harness does not carry. The parser-budget shapes are
+//! drawn vocabulary the same way: long type chains (a `?` postfix
+//! run, an `|`/`&`/`-` chain over a drawn atom, a `~` negation run,
+//! a long-chain alias) written into parameter, return, and binding
+//! annotations, and near-budget typed lambda arrow chains and paren
+//! nesting, each drawn at both sides of the parser's budgets — the
+//! admissible shapes parse and check, the past-budget shapes answer
+//! the budget diagnostics instead of aborting — each counted in the
+//! census. Included by the cargo-fuzz target `fuzz_check_gen` and the
+//! nextest mirror in
 //! crates/ds-check/tests/fuzz_check_gen.rs.
 //!
 //! Termination and size: a shared node budget (a few hundred) plus
@@ -55,7 +63,7 @@
 //! the fuzz input, so any input (including empty) yields a full program
 //! and any mutation shifts the program deterministically.
 
-use std::hint::black_box;
+use std::{fmt::Write as _, hint::black_box};
 
 use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, check, effects_of};
 use ds_diag::{Files, render};
@@ -160,6 +168,22 @@ pub struct Drawn {
     /// facts' import-surface spelling; the link walk itself needs a
     /// package store this single-file harness does not carry).
     pub import_members: u32,
+    /// Type chains at or under the parser's 128-term chain budget,
+    /// drawn at the positions types are written (parameter, return,
+    /// and binding annotations, a type alias): a `?` postfix run, an
+    /// `|`/`&`/`-` chain over a drawn atom, and a `~` negation run.
+    pub type_chain_oks: u32,
+    /// Past-budget type chains drawn: the parse answers the
+    /// NestingTooDeep diagnostic instead of building the tree.
+    pub type_chain_over: u32,
+    /// Near-budget depth shapes drawn just under the scanner's arrow
+    /// and bracket budgets: typed lambda arrow chains and paren
+    /// nesting, which parse to completion.
+    pub depth_oks: u32,
+    /// Past-budget depth shapes drawn: an over-long arrow run or
+    /// bracket nesting the pre-scan answers with the budget
+    /// diagnostics instead of walking the worker's stack.
+    pub depth_over: u32,
 }
 
 /// One generated program plus the effect rows declared around it.
@@ -350,6 +374,28 @@ struct Gen<'a> {
     ret: Option<Ty>,
     rows: Vec<(String, EffectRow)>,
     drawn: Drawn,
+}
+
+/// `members` copies of `atom` folded with `op` (`|`, `&`, or `-`):
+/// one unbracketed chain term per copy past the first.
+fn op_chain(atom: &str, op: &str, members: usize) -> String {
+    let mut out = String::from(atom);
+    for _ in 1..members {
+        let _ = write!(out, " {op} {atom}");
+    }
+    out
+}
+
+/// A typed lambda arrow chain `depth` deep: one arrow and one bracket
+/// per level, at both scanner budgets' edge when drawn just under
+/// them.
+fn typed_arrows(depth: usize) -> String {
+    let mut out = String::new();
+    for i in 0..depth {
+        let _ = write!(out, "(x{i}: int) => ");
+    }
+    out.push('1');
+    out
 }
 
 pub fn generate(data: &[u8]) -> Generated {
@@ -641,6 +687,7 @@ impl Gen<'_> {
             self.line("## generated section");
         }
         self.gen_fns();
+        self.gen_budget_episode();
         self.pick_rows();
     }
 
@@ -1033,6 +1080,111 @@ impl Gen<'_> {
                 self.line(&format!("const {name}: {} = {value}", self.render_ty(&ty)));
                 self.consts.push((name, ty));
             }
+        }
+    }
+
+    /// The parser-budget episode: type-chain and unbracketed-depth
+    /// shapes drawn at both sides of the parser's budgets. The
+    /// admissible arm writes long type chains into the positions real
+    /// programs write them (a parameter chain, a return chain, a `?`
+    /// postfix run and a `~` negation run as binding annotations, a
+    /// long-chain type alias) plus near-budget typed lambda arrow
+    /// chains and paren nesting — every count under the budgets, so
+    /// the program still parses and checks. The over arms draw rarely
+    /// (a program carrying one answers its budget diagnostic at parse
+    /// and never checks): a past-budget chain must answer the
+    /// NestingTooDeep diagnostic, an over-long arrow run or bracket
+    /// nesting the pre-scan's budget diagnostics — never an abort.
+    fn gen_budget_episode(&mut self) {
+        // the chain fold's term cap and the scanner's arrow/bracket
+        // budgets, spelled as the parser's current limits
+        const CHAIN_TERMS: usize = 128;
+        const DEPTH: usize = 40;
+        if !self.s.roll(3) {
+            let atom = match self.s.below(4) {
+                0 => "int",
+                1 => "float",
+                2 => "bool",
+                _ => "string",
+            };
+            let lit = match atom {
+                "int" => "1",
+                "float" => "1.5",
+                "bool" => "true",
+                _ => "\"s\"",
+            };
+            let op = match self.s.below(3) {
+                0 => "|",
+                1 => "&",
+                _ => "-",
+            };
+            let name = self.fresh("g");
+            let chain_param = self.fresh("p");
+            let param = op_chain(atom, op, 32 + self.s.below(CHAIN_TERMS - 32));
+            let ret = op_chain(atom, "&", 32 + self.s.below(CHAIN_TERMS - 32));
+            let alias = self.fresh("a");
+            let alias_chain = op_chain(atom, "|", 32 + self.s.below(CHAIN_TERMS - 32));
+            self.line(&format!("type {alias} = {alias_chain}"));
+            let opt_bind = self.fresh("x");
+            let marks = 16 + self.s.below(CHAIN_TERMS - 16);
+            let neg_bind = self.fresh("x");
+            let negs = 16 + self.s.below(CHAIN_TERMS - 16);
+            let arrow_bind = self.fresh("x");
+            let depth = 16 + self.s.below(DEPTH - 16);
+            let paren_bind = self.fresh("x");
+            let nest = 16 + self.s.below(DEPTH - 16);
+            self.line(&format!("fn {name}({chain_param}: {param}) -> {ret} {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "const {opt_bind}: {atom}{} = {lit}",
+                "?".repeat(marks)
+            ));
+            self.line(&format!(
+                "const {neg_bind}: {}{atom} = {lit}",
+                "~".repeat(negs)
+            ));
+            let arrows = typed_arrows(depth);
+            self.line(&format!("const {arrow_bind} = {arrows}"));
+            self.line(&format!(
+                "const {paren_bind} = {}1{}",
+                "(".repeat(nest),
+                ")".repeat(nest)
+            ));
+            self.line(&chain_param);
+            self.indent -= 1;
+            self.line("}");
+            self.drawn.type_chain_oks += 1;
+            self.drawn.depth_oks += 1;
+        }
+        // past-budget type chain: drawn rarely, because the whole
+        // program answers its diagnostic at parse and never checks
+        if self.s.roll(25) {
+            let name = self.fresh("g");
+            let p = self.fresh("p");
+            let over = match self.s.below(4) {
+                0 => op_chain("int", "|", CHAIN_TERMS + 1 + self.s.below(200)),
+                1 => op_chain("int", "&", CHAIN_TERMS + 1 + self.s.below(200)),
+                2 => format!("int{}", "?".repeat(CHAIN_TERMS)),
+                _ => format!("{}int", "~".repeat(CHAIN_TERMS)),
+            };
+            self.line(&format!("fn {name}({p}: {over}) -> int {{ 0 }}"));
+            self.drawn.type_chain_over += 1;
+        }
+        // past-budget depth shape: an over-long arrow run or bracket
+        // nesting, answered by the pre-scan's budget diagnostics
+        if self.s.roll(25) {
+            let name = self.fresh("g");
+            let body = if self.s.roll(2) {
+                format!(
+                    "const k = {}1",
+                    "x => ".repeat(DEPTH + 1 + self.s.below(20))
+                )
+            } else {
+                let nest = DEPTH + 1 + self.s.below(20);
+                format!("const k = {}1{}", "(".repeat(nest), ")".repeat(nest))
+            };
+            self.line(&format!("fn {name}() -> int {{\n  {body}\n  0\n}}"));
+            self.drawn.depth_over += 1;
         }
     }
 

@@ -80,11 +80,16 @@ impl Mark {
 /// `Sync` (allocation mutates through `&self`).
 ///
 /// # Misuse contract
-/// Allocations reachable after the restore point they postdate are dead by
-/// contract; the arena cannot prove that (linearity does, at the language
-/// level). Using a reference after the restore that freed it, or across an
-/// intervening allocation, is the caller's bug - the same contract every bump
-/// allocator (e.g. bumpalo's `reset`) ships with.
+/// Grants are raw pointers because a restore hands the reclaimed bytes to the
+/// next allocation: no borrow-checkable lifetime can span the mark discipline,
+/// so the aliasing contract sits on the caller. A pointer is live until the
+/// first restore past its mark; a restore invalidates every grant the arena
+/// handed out after the restored mark, and only the latest grant for a byte
+/// range is live. Dereferencing a dead grant (or holding a reference to its
+/// bytes across the later grant that reuses them) is undefined behavior - the
+/// same contract every bump allocator (e.g. bumpalo's `reset`) ships with;
+/// linearity upholds it at the language level, the VM's claim ledger at the
+/// runtime level.
 pub struct Arena {
     inner: UnsafeCell<Inner>,
 }
@@ -117,13 +122,6 @@ struct Chunk {
 }
 
 impl Chunk {
-    /// This chunk's live bytes: `[ptr, ptr + len)`.
-    fn as_bytes(&self) -> &[u8] {
-        // SAFETY: the chunk owns `[ptr, ptr + cap)` valid for reads and
-        // `len <= cap` holds by construction.
-        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-
     fn release(self) {
         // SAFETY: the chunk was created in `acquire_chunk` from exactly this
         // `(cap, align)` layout, is uniquely owned, and is released exactly once.
@@ -280,57 +278,66 @@ impl Arena {
         (at, ptr)
     }
 
-    /// Places `value` in the arena and returns an exclusive reference to it.
+    /// Places `value` in the arena and returns the raw pointer to it.
+    ///
+    /// # Arena aliasing contract
+    /// The pointer stays valid until the first [`Arena::restore`] past this
+    /// allocation's mark; a restore invalidates every grant made after the
+    /// restored mark, and only the latest grant for a byte range is live
+    /// (see the type-level misuse contract). Callers hold the contract the
+    /// way the VM does: its claim ledger never reaches a word across the
+    /// frame-pop restore that freed it.
     ///
     /// # Panics
     /// See [`Arena::alloc_layout`].
-    // Sound against `&self`: the reference targets memory this call just carved
-    // out of the arena, no alias of it exists, and `Arena` is !Sync so handout
-    // is thread-confined.
-    #[allow(clippy::mut_from_ref)]
-    pub fn alloc<T>(&self, value: T) -> &mut T {
+    pub fn alloc<T>(&self, value: T) -> NonNull<T> {
         let ptr = self.alloc_layout(Layout::new::<T>()).cast::<T>();
         // SAFETY: `alloc_layout` returned memory valid and aligned for a `T`
-        // that this arena exclusively owns; the reference is unique.
-        unsafe {
-            ptr.as_ptr().write(value);
-            &mut *ptr.as_ptr()
-        }
+        // that this arena exclusively owns; the raw write initializes it
+        // without pushing a reference tag onto the arena's memory (a reference
+        // would be invalidated by the next grant to the same bytes after a
+        // restore, which is why the handout is raw).
+        unsafe { ptr.as_ptr().write(value) };
+        ptr
     }
 
-    /// Copies `source` into the arena and returns the copy as an exclusive slice.
+    /// Copies `source` into the arena and returns the raw pointer to the copy's
+    /// first element; the slice runs `source.len()` elements.
+    ///
+    /// # Arena aliasing contract
+    /// As [`Arena::alloc`].
     ///
     /// # Panics
     /// See [`Arena::alloc_layout`].
-    // Sound for the same reason as [`Arena::alloc`]: freshly carved, unaliased,
-    // thread-confined memory.
-    #[allow(clippy::mut_from_ref)]
-    pub fn alloc_slice_copy<T: Copy>(&self, source: &[T]) -> &mut [T] {
+    pub fn alloc_slice_copy<T: Copy>(&self, source: &[T]) -> NonNull<T> {
         let ptr = self.alloc_layout(Layout::for_value(source)).cast::<T>();
         // SAFETY: the destination was just allocated with `source`'s layout and
         // cannot overlap it (the arena owns the destination exclusively).
         unsafe { ptr::copy_nonoverlapping(source.as_ptr(), ptr.as_ptr(), source.len()) };
-        // SAFETY: `ptr` is valid for `source.len()` elements of properly aligned
-        // `T`, uniquely owned by the arena.
-        unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), source.len()) }
+        ptr
     }
 
-    /// Allocates `len` copies of `value`.
+    /// Allocates `len` copies of `value` and returns the raw pointer to the
+    /// first element.
+    ///
+    /// # Arena aliasing contract
+    /// As [`Arena::alloc`].
     ///
     /// # Panics
     /// See [`Arena::alloc_layout`].
-    // Sound for the same reason as [`Arena::alloc`]: freshly carved, unaliased,
-    // thread-confined memory.
-    #[allow(clippy::mut_from_ref)]
-    pub fn alloc_slice_fill<T: Copy>(&self, len: usize, value: T) -> &mut [T] {
+    pub fn alloc_slice_fill<T: Copy>(&self, len: usize, value: T) -> NonNull<T> {
         let ptr = self
             .alloc_layout(Layout::array::<T>(len).expect("arena: slice layout overflow"))
             .cast::<T>();
-        // SAFETY: `ptr` is valid for `len` elements of properly aligned `T`;
-        // filling happens before the exclusive slice escapes.
-        let slice = unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) };
-        slice.fill(value);
-        slice
+        // SAFETY: `ptr` is valid for `len` elements of properly aligned `T`; the
+        // raw writes initialize the range before the pointer escapes, and stay
+        // raw for the same reason as [`Arena::alloc`]'s write.
+        unsafe {
+            for i in 0..len {
+                ptr.as_ptr().add(i).write(value);
+            }
+        }
+        ptr
     }
 
     /// The checked face of [`Arena::restore`]: the same LIFO discipline
@@ -423,22 +430,31 @@ impl Arena {
         at
     }
 
-    /// The `len` bytes at `at`: the reader side of the packed handle. The
-    /// range must be live - allocated after the last restore past it -
-    /// which the placement proof guarantees for every handle lowered code
+    /// The `len` bytes at `at` as a raw slice: the reader side of the packed
+    /// handle. The range must be live - allocated after the last restore past
+    /// it - which the placement proof guarantees for every handle lowered code
     /// serves; a hand-packed handle that fails the bounds names its class
     /// instead of reading.
-    pub fn bytes_at(&self, at: Mark, len: usize) -> Result<&[u8], ArenaMisuse> {
+    ///
+    /// # Arena aliasing contract
+    /// As [`Arena::alloc`]: the raw slice is live until a restore reclaims its
+    /// range, and materializing a `&[u8]` from it is sound only while the
+    /// grant is live (the caller owns that discipline, as the VM's claim
+    /// ledger does for arena words).
+    pub fn bytes_at(&self, at: Mark, len: usize) -> Result<*const [u8], ArenaMisuse> {
         let end = at.offset.checked_add(len).ok_or(ArenaMisuse::Range)?;
         let chunk = self
             .inner()
             .chunks
             .get(at.chunk)
             .ok_or(ArenaMisuse::Chunk)?;
-        chunk
-            .as_bytes()
-            .get(at.offset..end)
-            .ok_or(ArenaMisuse::Range)
+        if end > chunk.len {
+            return Err(ArenaMisuse::Range);
+        }
+        // SAFETY: `end <= chunk.len <= chunk.cap` keeps the range inside this
+        // chunk's allocation, and the raw slice never pushes a reference tag
+        // onto memory a later grant may reuse.
+        Ok(unsafe { ptr::slice_from_raw_parts(chunk.ptr.as_ptr().add(at.offset), len) })
     }
 
     /// Pushes the current position as one arena-allocating frame's entry

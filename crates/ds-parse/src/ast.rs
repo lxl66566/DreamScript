@@ -224,12 +224,29 @@ pub struct FnDecl {
     pub ret: Option<Type>,
     /// Body block; absent for signatures (traits, externs).
     pub body: Option<BlockExpr>,
+    /// The extern's bind target (H5): the optional plain string literal
+    /// between `extern` and `fn`, naming the `[artifacts]` entry whose
+    /// installed library owns the C symbol the declaration binds. `None`
+    /// on every bodied `fn` and on the compiler-wired natives' own
+    /// bodiless declarations.
+    pub bind: Option<BindName>,
     /// The `///` run attached to this member declaration (G3): filled for
     /// trait/impl member `fn`s, where the run immediately precedes the `fn`.
     /// Top-level declarations carry their doc in [`Item::doc`], so this slot
     /// stays empty there. The same trivia also stay in the enclosing item's
     /// deep trivia — pure attachment data, not a move.
     pub doc: Vec<Trivia>,
+}
+
+/// The extern's bind target (H5): one plain string literal's text, the
+/// `[artifacts]` name the declaration resolves through the package graph.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BindName {
+    /// Span of the string literal.
+    pub span: Span,
+    /// The name's text.
+    pub name: String,
 }
 
 /// One declared generic parameter.

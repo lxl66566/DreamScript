@@ -4199,6 +4199,7 @@ fn impl_item(
             stmts: body,
             trailing_trivia: Vec::new(),
         }),
+        bind: None,
         doc: Vec::new(),
     };
     Item {
@@ -4314,7 +4315,15 @@ impl Mint {
     }
 
     fn span(&mut self) -> Span {
-        loop {
+        // Every candidate is a subspan of `[start, end)` (one pass per
+        // length), so the space holds at most `range*(range+1)/2` spans; a
+        // search that exhausts it means `forbidden` covers the whole item
+        // (a length-1 declaration, unreachable from real derives). The
+        // fallback spends the item's first byte, colliding with a written
+        // span -- the degradation the header names -- rather than looping.
+        let span_budget = u64::from(self.end.saturating_sub(self.start));
+        let candidates = span_budget * (span_budget + 1) / 2 + 1;
+        for _ in 0..candidates {
             let range = self.end.saturating_sub(self.start);
             if self.len > range || self.next + self.len > self.end {
                 self.next = self.start;
@@ -4322,11 +4331,11 @@ impl Mint {
             }
             let span = Span::new(self.file, self.next, self.next + self.len);
             self.next += 1;
-            if self.forbidden.contains(&span) {
-                continue;
+            if !self.forbidden.contains(&span) {
+                return span;
             }
-            return span;
         }
+        Span::new(self.file, self.start, self.start + 1)
     }
 }
 
@@ -4429,5 +4438,55 @@ fn type_spans(ty: &Type, out: &mut std::collections::HashSet<Span>) {
             type_spans(right, out);
         },
         Type::Unit(_) | Type::TypeKw(_) | Type::Foreign { .. } => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_diag::FileId;
+
+    use super::{Mint, Span};
+
+    /// A length-1 item span is fully forbidden (the whole-span row
+    /// `Mint::new` inserts), so the candidate space holds nothing: the
+    /// search must degrade to the item's first byte rather than cycle
+    /// its one rejected candidate forever. Real derives never mint over
+    /// a declaration shorter than the derive's own spelling, so only
+    /// this hand-built mint reaches the bound.
+    #[test]
+    fn a_fully_covered_item_span_degrades_instead_of_looping() {
+        let mut mint = Mint {
+            file: FileId::new(0),
+            start: 7,
+            next: 7,
+            end: 7,
+            len: 1,
+            forbidden: [Span::new(FileId::new(0), 7, 8)].into_iter().collect(),
+        };
+        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
+        // a follow-up mint answers the same fallback, never a later byte
+        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
+    }
+
+    /// The ordinary mint walks the item's bytes in order, skipping the
+    /// forbidden rows: the first free subspan answers and the next call
+    /// continues from where the last one spent.
+    #[test]
+    fn the_mint_spends_free_spans_in_order() {
+        let file = FileId::new(0);
+        let mut mint = Mint {
+            file,
+            start: 3,
+            next: 3,
+            end: 9,
+            len: 1,
+            forbidden: [Span::new(file, 5, 6), Span::new(file, 7, 8)]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(mint.span(), Span::new(file, 3, 4));
+        assert_eq!(mint.span(), Span::new(file, 4, 5));
+        assert_eq!(mint.span(), Span::new(file, 6, 7));
+        assert_eq!(mint.span(), Span::new(file, 8, 9));
     }
 }

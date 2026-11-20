@@ -91,6 +91,7 @@ pub fn generate() -> PrefixDsi {
         package.into(),
         tables.into(),
         resolve_diags,
+        Arc::default(),
     );
     assert!(
         analyzed.checked.diags.is_empty(),

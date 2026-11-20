@@ -10,7 +10,7 @@ use ds_diag::{Diagnostic, Files};
 use ds_meta::evaluate;
 use ds_mod::Hash128;
 use ds_parse::parse;
-use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Vm, loader};
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader};
 
 const AMBIENT: &str = concat!(
     "tag int\n",
@@ -261,6 +261,45 @@ fn a_string_list_answer_embeds_as_the_literal() {
         "}\n",
     )));
     assert_eq!(out, "title.views\n");
+}
+
+/// A comptime call in tail position embeds its answer through the
+/// value walk and the frame returns it like a written literal: the
+/// tail-callee test excludes comptime defs, since treating the embed
+/// as a control transfer would stage the constant with no return
+/// emitted and control would run off the frame's code stream.
+#[test]
+fn a_tail_position_comptime_call_returns_through_the_value_walk() {
+    let out = output_of(&source(concat!(
+        "fn twice(comptime n: int) -> int {\n",
+        "  n + n\n",
+        "}\n",
+        "fn call_it() -> int {\n",
+        "  twice(21)\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(\"${call_it()} ${twice(5)}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "42 10\n");
+}
+
+/// The entry frame's own tail comptime call: the embedded answer
+/// returns through the frame exit like the named callee's.
+#[test]
+fn an_entry_tail_comptime_call_answers_the_frame() {
+    let (_, result) = run_source(
+        "witness",
+        &source(concat!(
+            "fn twice(comptime n: int) -> int {\n",
+            "  n + n\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "  twice(21)\n",
+            "}\n",
+        )),
+    );
+    assert_eq!(result, Ok(FrameAnswer::one(Value::I64(42))));
 }
 
 #[test]
@@ -896,4 +935,52 @@ fn a_tuple_answer_over_a_string_embeds_at_the_call() {
         "}\n",
     )));
     assert_eq!(out, "page 1\n");
+}
+
+/// A pure fn whose loop never terminates answers the fence's step
+/// budget instead of hanging the compile: the refusal is the evaluator's
+/// own diagnostic at the call site, in bounded wall time.
+#[test]
+fn a_non_terminating_comptime_loop_refuses_at_the_step_budget() {
+    let rendered = evaluate_refused(
+        "spin_budget",
+        &source(concat!(
+            "fn spin(comptime n: int) -> int {\n",
+            "  var i = n\n",
+            "  while i > 0 {\n",
+            "    i = i + 1\n",
+            "  }\n",
+            "  i\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${spin(1)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("DS2034") && rendered.contains("step budget"),
+        "the runaway loop answers the step-budget refusal: {rendered}"
+    );
+}
+
+/// A large-but-terminating comptime computation stays inside the budget:
+/// a ~10^7-step build loop embeds its answer, so the cap bites only the
+/// runaway shape.
+#[test]
+fn a_large_terminating_computation_passes_the_budget() {
+    let out = output_of(&source(concat!(
+        "fn sum(comptime n: int) -> int {\n",
+        "  var acc = 0\n",
+        "  var i = 0\n",
+        "  while i < n {\n",
+        "    acc = acc + i\n",
+        "    i = i + 1\n",
+        "  }\n",
+        "  acc\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(\"${sum(2000000)}\")\n",
+        "}\n",
+    )));
+    assert_eq!(out, "1999999000000\n");
 }

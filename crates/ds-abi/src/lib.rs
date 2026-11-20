@@ -1,4 +1,4 @@
-//! # The DreamScript call ABI: the locked slot-overlay contract [BL-6, H2]
+//! # The DreamScript call ABI: the locked slot-overlay contract `[BL-6, H2]`
 //!
 //! This crate is spec-as-code: the portable contract that `ds-vm` (tier 1),
 //! `ds-lower` (frame layout assignment), and `ds-jit` (tiers 2-3) implement.

@@ -30,7 +30,7 @@ use crate::effects::{Effect, Effects};
 /// The world capability vocabulary (H5's provides list), in bit order.
 pub const CAPABILITIES: [&str; 4] = ["console", "fsys", "net", "time"];
 
-/// One capability's bit in a [`Caps`] set.
+/// One capability's bit in a `[Caps]` set.
 #[must_use]
 pub fn capability_bit(name: &str) -> Option<u8> {
     CAPABILITIES

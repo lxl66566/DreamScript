@@ -30,7 +30,7 @@ benchmarks/run.sh bench                  # wall-clock table, one run per kernel 
 
 `check` compares each interpreter's final `result:` line against `<name>.golden` and exits nonzero on any mismatch; a missing interpreter prints a `SKIP` line and is not a failure. The ds binary is found at `../target/release/ds` relative to `benchmarks/` (`.exe` on Windows); set `DS_BIN` to point elsewhere, e.g. at a shared `CARGO_TARGET_DIR` worktree build. Optional arguments filter kernels: `run.sh check fib strings`. Every ds invocation forces the cold path (`--no-cache`): the suite measured the full pipeline before the script-mode dsmod cache existed, the timings stay comparable, and no run inherits or writes a user cache directory.
 
-The runner is POSIX sh and runs under git bash on Windows and on Linux. Timing uses `date +%s%N` wall clock, so platforms without GNU date cannot time. Interpreter versions matter: record the versions you benched with (python/python3, lua or lua5.4/5.3, node) alongside any results you keep — the runner does not pin them.
+The runner is POSIX sh and runs under git bash on Windows and on Linux. Every interpreter invocation runs under a per-invocation `timeout` (600 s, a passthrough where `timeout` is absent), so a hung interpreter fails its invocation instead of wedging the round. Timing uses `date +%s%N` wall clock; a one-time probe refuses the bench loudly when `date` answers without nanoseconds (BSD prints a literal `N`; the portable fallback would be `date +%s` whole seconds). Interpreter versions matter: record the versions you benched with (python/python3, lua or lua5.4/5.3, node) alongside any results you keep — the runner does not pin them.
 
 ## Startup
 

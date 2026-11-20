@@ -67,7 +67,7 @@
 //! spans into the source and the only strippable section: a module built
 //! with [`Flags::STRIP`] set carries no debug-spans section.
 //!
-//! # Blocks payload, version 3 [BL-5, BL-6, BL-7]
+//! # Blocks payload, version 3 `[BL-5, BL-6, BL-7]`
 //!
 //! ```text
 //! u8    payload version = 3

@@ -19,9 +19,13 @@ use crate::{ctx::Ctx, expr};
 /// pattern and initializer render through the expression renderer, which
 /// reads string literals verbatim.
 pub fn member(out: &mut String, src: &str, ast: &Ast) {
+    // One Ctx over the whole member: its line table is a scan of the
+    // full source, so per-item construction made a binding-dense member
+    // pay declarations x file length.
+    let ctx = Ctx::new(src);
     for entry in ast.blocks.iter().flat_map(|block| block.items.iter()) {
         if matches!(entry.vis, Some(ds_parse::Vis::Pub(_))) {
-            item(out, src, entry);
+            render_item(out, &ctx, entry);
         }
     }
 }
@@ -32,9 +36,26 @@ pub fn member(out: &mut String, src: &str, ast: &Ast) {
 /// consumer showing one declaration it already resolved filters by its
 /// own rule.
 pub fn item(out: &mut String, src: &str, item: &Item) {
+    // The one-item entry builds its own context; a caller rendering many
+    // items over one source builds one and shares it through
+    // `render_item` instead.
+    let ctx = Ctx::new(src);
+    render_item(out, &ctx, item);
+}
+
+/// [`item`]'s rendering body over a shared [`Ctx`].
+fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
     match &item.kind {
         ItemKind::Fn(f) => fn_signature(out, f, "pub fn"),
-        ItemKind::ExternFn(f) => fn_signature(out, f, "pub extern fn"),
+        // the bind target rides between `extern` and `fn` (H5), the
+        // declaration's own re-quote discipline
+        ItemKind::ExternFn(f) => {
+            let prefix = match &f.bind {
+                Some(bind) => format!("pub extern \"{}\" fn", bind.name),
+                None => "pub extern fn".to_owned(),
+            };
+            fn_signature(out, f, &prefix);
+        },
         ItemKind::Local(local) => {
             // A bodied top-level fn is the converted const-arrow binding
             // of one lambda (F2), so the .dsi renders its fn signature;
@@ -55,14 +76,13 @@ pub fn item(out: &mut String, src: &str, item: &Item) {
             // re-parse (the surface's every-line contract), so the
             // initializer renders through the expression renderer like
             // ds fmt spells it.
-            let ctx = Ctx::new(src);
             let mut line = format!("pub {} ", if local.mutable { "var" } else { "const" });
-            expr::write_pattern(&ctx, &mut line, &local.pat);
+            expr::write_pattern(ctx, &mut line, &local.pat);
             if let Some(ty) = &local.ty {
                 let _ = write!(line, ": {}", render_type(ty));
             }
             line.push_str(" = ");
-            expr::write_expr(&ctx, &mut line, 0, &local.init);
+            expr::write_expr(ctx, &mut line, 0, &local.init);
             let _ = writeln!(out, "{line}");
         },
         ItemKind::Struct(s) => {

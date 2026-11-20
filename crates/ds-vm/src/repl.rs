@@ -592,7 +592,7 @@ impl Vm {
         loop {
             // one host step drains every interlock inside itself and
             // answers a final outcome
-            match self.execute_host_step(active, pc, usize::MAX) {
+            match self.execute_host_step::<false>(active, pc, usize::MAX) {
                 Ok(DriveOutcome::Yielded(_)) => {
                     if let Some(answer) = self.repl_park.take() {
                         self.host_release();

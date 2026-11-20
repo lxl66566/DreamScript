@@ -224,10 +224,12 @@ fn collection_equality_compares_nested_content_and_membership() {
     // nested collections compose (a list of lists, a map over list
     // values, a struct field of list and map type), and in membership
     // compares the element by its type (a list element over a list of
-    // lists, a struct element whose fields are collections)
+    // lists, a struct element whose fields are collections); the float
+    // judge rides the one bit-structural word equality everywhere — a
+    // NaN reflexive, the two zeros distinct keys and unequal elements
     run_golden(
         "collection_equality.ds",
-        "nested true\nmatrix true\nfields true\nmember true\n0\n",
+        "nested true\nmatrix true\nfields true\nmember true\nfloat true\n0\n",
     );
 }
 

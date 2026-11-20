@@ -18,7 +18,7 @@
 //! - Trait/impl members always render as `fn name(params) -> ret { ... }`; the AST erases the
 //!   const-arrow member spelling, so one form is chosen.
 //! - Multiline struct/enum/trait/impl bodies and match arms are newline-separated without commas
-//!   [6.1]; commas survive only inside a one-line inline container. Named arguments render `name:
+//!   `[6.1]`; commas survive only inside a one-line inline container. Named arguments render `name:
 //!   value` and literal signature defaults render `= lit` (F7).
 //! - `.`-chains keep the author's line breaks (continuations at base indent + 2); everything else
 //!   that fits its container's layout renders flat.
@@ -27,6 +27,9 @@
 //!   its own (`with_file(p, f) { ... }`); `else if` chains keep the `if`.
 //! - There is NO wrapping: long lines stay long. A braced container renders inline iff its span
 //!   lies on one source line; otherwise it opens up.
+//! - Layout line breaks are bare LF; string and raw-string literals, comments, and foreign types
+//!   re-emit their source spans byte for byte, line endings included — [`format_source_tracked`]
+//!   names those ranges so an EOL fold can leave them alone.
 //!
 //! # Trivia placement
 //!
@@ -40,7 +43,10 @@
 //! runs between
 //! elements collapse to at most one blank line. `##` separators are
 //! recovered verbatim from the source (text and column preserved) and a
-//! blank line around a separator is preserved. Comments interior to a
+//! blank line around a separator is preserved; in a script entry they
+//! keep their place too — a `##`-carrying entry renders in its script
+//! shape with the separators between its statement groups, and only an
+//! unseparated entry folds to the written `fn main`. Comments interior to a
 //! declaration that no member or field doc slot owns (deep trivia) migrate
 //! to the item's trailing position — a v1 limit: position moves, content
 //! never disappears.
@@ -70,8 +76,8 @@ mod ty;
 
 use ctx::Ctx;
 use ds_diag::{FileId, Files};
-use ds_parse::{Ast, Block, Item};
-use expr::{ElemStream, push_comment};
+use ds_parse::{Ast, Block, Expr, Item, ItemKind, LocalDecl, Pattern, Stmt};
+use expr::{ElemStream, push_comment, stmt_span_end, stmt_span_start, write_stmt_elem};
 
 /// Formats one parsed file. Zero options: layout follows the canonical form
 /// and the source's own line structure (inline vs multiline containers,
@@ -81,9 +87,239 @@ use expr::{ElemStream, push_comment};
 /// source for verbatim strings, comments, and separator lines).
 #[must_use]
 pub fn format_source(files: &Files, file: FileId, ast: &Ast) -> String {
+    format_source_tracked(files, file, ast).text
+}
+
+/// A whole-file format result: the canonical text plus the output byte
+/// ranges that hold source text verbatim (string and raw-string literals,
+/// comments, foreign types). Line-ending normalization may fold only the
+/// bytes outside the verbatim ranges — a literal's or comment's own line
+/// endings are program data and survive byte for byte.
+#[must_use]
+pub struct FormattedSource {
+    /// The formatted text (layout line breaks are bare LF).
+    pub text: String,
+    /// Output byte ranges of verbatim source text, sorted and
+    /// non-overlapping.
+    pub verbatim: Vec<(usize, usize)>,
+}
+
+/// [`format_source`] plus the verbatim ranges of its output, for callers
+/// that re-spell line endings: folding must skip the verbatim ranges.
+pub fn format_source_tracked(files: &Files, file: FileId, ast: &Ast) -> FormattedSource {
     let ctx = Ctx::new(files.source(file));
-    let rendered: Vec<String> = ast.blocks.iter().map(|b| render_block(&ctx, b)).collect();
-    assemble(&ctx, &ast.blocks, &rendered)
+    let parts = match synthesized_main(&ast.blocks) {
+        // A `##`-carrying script entry keeps its script shape (the
+        // separator between statement groups cannot live inside the
+        // fold's one `fn main`); an unseparated one folds to the written
+        // `fn main` like before.
+        Some((_, stmts)) => {
+            script_parts(&ctx, &ast.blocks, stmts).unwrap_or_else(|| block_parts(&ctx, &ast.blocks))
+        },
+        None => block_parts(&ctx, &ast.blocks),
+    };
+    let (text, verbatim) = assemble(&ctx, &parts);
+    FormattedSource { text, verbatim }
+}
+
+/// One part per block: the rendered text, the content bounds its separator
+/// gap windows live between, and the text-local verbatim ranges.
+fn block_parts(ctx: &Ctx, blocks: &[Block]) -> Vec<Part> {
+    blocks
+        .iter()
+        .map(|b| Part {
+            text: render_block(ctx, b),
+            start: content_start(b),
+            end: content_end(b),
+            verbatim: ctx.take_verbatim(),
+        })
+        .collect()
+}
+
+/// The script entry's synthesized `main` (the parse-side fold): an
+/// immutable `main` binding of one lambda whose pattern and lambda spans
+/// are empty — no real node owns an empty span — carrying the folded
+/// top-level statements in its block body.
+fn synthesized_main(blocks: &[Block]) -> Option<(&Item, &[Stmt])> {
+    let item = blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .find(|i| is_folded_main_item(i))?;
+    let ItemKind::Local(l) = &item.kind else {
+        return None;
+    };
+    let Expr::Lambda { body, .. } = &l.init else {
+        return None;
+    };
+    let Expr::Block(b) = &**body else {
+        return None;
+    };
+    Some((item, &b.stmts))
+}
+
+/// Whether the item is the script entry's synthesized `main`.
+fn is_folded_main_item(item: &Item) -> bool {
+    matches!(&item.kind, ItemKind::Local(l) if is_folded_main(l))
+}
+
+/// The synthesized-`main` shape: a `main` binding whose pattern and
+/// lambda spans are empty. Real `fn main` spellings carry real token
+/// spans, so the empty spans identify the fold beyond the name.
+fn is_folded_main(l: &LocalDecl) -> bool {
+    let Pattern::Binding { span, name, .. } = &l.pat else {
+        return false;
+    };
+    name.name == "main"
+        && span.is_empty()
+        && matches!(&l.init, Expr::Lambda { span, .. } if span.is_empty())
+}
+
+/// The unfolded parts of a `##`-carrying script entry, or `None` when no
+/// `##` shares the file with the folded statements: each block renders
+/// its own items plus the statements the fold pulled out of it, so every
+/// separator stays between the statement groups it separates (the
+/// grammar admits `##` only between top-level blocks, so the one-`fn
+/// main` spelling cannot carry them and stays for unseparated entries).
+fn script_parts(ctx: &Ctx, blocks: &[Block], stmts: &[Stmt]) -> Option<Vec<Part>> {
+    let groups = script_groups(blocks, stmts);
+    let bounds: Vec<(u32, u32)> = blocks
+        .iter()
+        .zip(&groups)
+        .map(|(b, g)| script_bounds(b, g))
+        .collect();
+    if !script_has_separator(ctx, &bounds) {
+        return None;
+    }
+    Some(
+        blocks
+            .iter()
+            .zip(&groups)
+            .zip(bounds)
+            .map(|((b, g), (start, end))| Part {
+                text: render_script_block(ctx, b, g),
+                start,
+                end,
+                verbatim: ctx.take_verbatim(),
+            })
+            .collect(),
+    )
+}
+
+/// The folded statements grouped by their source block: each one
+/// converted inside exactly one file_block pair, so the unique block
+/// whose span contains it is its own.
+fn script_groups<'a>(blocks: &[Block], stmts: &'a [Stmt]) -> Vec<Vec<&'a Stmt>> {
+    let mut groups = vec![Vec::new(); blocks.len()];
+    for s in stmts {
+        let bi = blocks
+            .iter()
+            .position(|b| b.span.start <= s.span.start && s.span.end <= b.span.end)
+            .expect("every folded statement lies inside its block");
+        groups[bi].push(s);
+    }
+    groups
+}
+
+/// Whether a `##` separator lives in any gap between (or behind) the
+/// blocks' content: the fold would have to displace it, because the one
+/// `fn main` it synthesizes hangs on the last block.
+fn script_has_separator(ctx: &Ctx, bounds: &[(u32, u32)]) -> bool {
+    // Offsets are u32 by the Files contract.
+    #[allow(clippy::cast_possible_truncation)]
+    let src_len = ctx.src().len() as u32;
+    bounds
+        .windows(2)
+        .any(|w| find_separator(ctx, w[0].1, w[1].0).is_some())
+        || bounds
+            .last()
+            .is_some_and(|&(.., end)| find_separator(ctx, end, src_len).is_some())
+}
+
+/// Honest content bounds of one unfolded script block: the declaration
+/// items (minus the synthesized `main`) plus the folded statements that
+/// render back into it. Every element really lives in the block, so the
+/// separator gap windows need no clamps (the fold's lying span never
+/// enters here).
+fn script_bounds(block: &Block, stmts: &[&Stmt]) -> (u32, u32) {
+    let mut start = u32::MAX;
+    let mut end = 0;
+    for item in &block.items {
+        if is_folded_main_item(item) {
+            continue;
+        }
+        start = start.min(item_start(item));
+        end = end.max(item.span.end);
+        if let Some(t) = item.trailing_trivia.last() {
+            end = end.max(t.span.end);
+        }
+    }
+    for stmt in stmts {
+        start = start.min(stmt_span_start(stmt));
+        end = end.max(stmt_span_end(stmt));
+    }
+    if let Some(t) = block.trailing_trivia.first() {
+        start = start.min(t.span.start);
+    }
+    if let Some(t) = block.trailing_trivia.last() {
+        end = end.max(t.span.end);
+    }
+    if start == u32::MAX {
+        start = block.span.start;
+    }
+    if end == 0 {
+        end = block.span.end;
+    }
+    (start, end)
+}
+
+/// Renders one unfolded script block: its declaration items and the folded
+/// statements that came from it, merged back in source order, each at
+/// indent 0 — the file's own script shape, which keeps every `##`
+/// separator between the statement groups it separates.
+fn render_script_block(ctx: &Ctx, block: &Block, stmts: &[&Stmt]) -> String {
+    let mut out = String::new();
+    let mut stream = ElemStream::new(false);
+    let mut items = block
+        .items
+        .iter()
+        .filter(|i| !is_folded_main_item(i))
+        .peekable();
+    let mut stmts = stmts.iter().peekable();
+    loop {
+        match (items.peek().copied(), stmts.peek().copied()) {
+            (None, None) => break,
+            (Some(item), None) => {
+                items.next();
+                render_item(ctx, &mut out, &mut stream, item);
+            },
+            (None, Some(stmt)) => {
+                stmts.next();
+                write_stmt_elem(ctx, &mut out, &mut stream, 0, stmt);
+            },
+            (Some(item), Some(stmt)) => {
+                if item_start(item) <= stmt_span_start(stmt) {
+                    items.next();
+                    render_item(ctx, &mut out, &mut stream, item);
+                } else {
+                    stmts.next();
+                    write_stmt_elem(ctx, &mut out, &mut stream, 0, stmt);
+                }
+            },
+        }
+    }
+    for t in &block.trailing_trivia {
+        push_comment(ctx, &mut out, &mut stream, 0, t);
+    }
+    out
+}
+
+/// First content offset of one item: its leading comments or its own
+/// span, whichever starts first — the merge key against the folded
+/// statements' own starts.
+fn item_start(item: &Item) -> u32 {
+    item.leading_trivia
+        .first()
+        .map_or(item.span.start, |t| t.span.start.min(item.span.start))
 }
 
 /// Renders one block from its own items and trivia only. This is the
@@ -125,7 +361,7 @@ fn render_item(ctx: &Ctx, out: &mut String, stream: &mut ElemStream, item: &Item
             continue;
         }
         out.push(' ');
-        out.push_str(ctx.comment_text(t));
+        ctx.push_verbatim(out, t.span);
     }
     let (.., end) = item_region(item);
     stream.end(end);
@@ -235,6 +471,20 @@ fn content_end(block: &Block) -> u32 {
     end
 }
 
+/// One block's contribution to the assembled file: its rendered text, the
+/// source content bounds the separator gap windows live between, and the
+/// text-local verbatim output ranges the EOL fold must skip.
+struct Part {
+    /// The block's canonical rendering (empty when it holds no content).
+    text: String,
+    /// First real content offset (see [`content_start`]).
+    start: u32,
+    /// Last real content offset (see [`content_end`]).
+    end: u32,
+    /// Verbatim ranges local to `text`.
+    verbatim: Vec<(usize, usize)>,
+}
+
 /// A recovered `##` separator line, verbatim from the source (the marker
 /// is line-initial, so the line starts at it; its text is preserved).
 struct Separator {
@@ -267,6 +517,17 @@ fn find_separator(ctx: &Ctx, from: u32, to: u32) -> Option<Separator> {
         .map_or(from as usize, |i| from as usize + i + 1);
     let line_end = memchr::memchr(b'\n', &bytes[tok..]).map_or(src.len(), |i| tok + i);
     let text_end = line_start + src[line_start..line_end].trim_end().len();
+    // Pin the invariant the first-match search rides on: outside the
+    // separator's own line the window holds whitespace only, so the
+    // first `##` is the separator and nothing before it can be one.
+    debug_assert!(
+        tok == line_start
+            && bytes[from as usize..tok]
+                .iter()
+                .chain(&bytes[line_end.min(to as usize)..to as usize])
+                .all(u8::is_ascii_whitespace),
+        "the gap window holds content besides the separator line"
+    );
     Some(Separator {
         line_start: line_start as u32,
         text_end: text_end as u32,
@@ -274,43 +535,49 @@ fn find_separator(ctx: &Ctx, from: u32, to: u32) -> Option<Separator> {
     })
 }
 
-/// Concatenates rendered blocks with their separators. A blank line before a
-/// separator (or after one) is preserved as a single blank line; empty
-/// blocks (from consecutive separators) contribute nothing.
-fn assemble(ctx: &Ctx, blocks: &[Block], rendered: &[String]) -> String {
+/// Concatenates the rendered blocks with their separators. A blank line
+/// before a separator (or after one) is preserved as a single blank line;
+/// empty blocks (from consecutive separators) contribute nothing. Answers
+/// the assembled text plus its whole-file verbatim ranges (each part's
+/// text-local ranges shifted by where the part landed).
+fn assemble(ctx: &Ctx, parts: &[Part]) -> (String, Vec<(usize, usize)>) {
     // Offsets are u32 by the Files contract.
     #[allow(clippy::cast_possible_truncation)]
     let src_len = ctx.src().len() as u32;
     let src = ctx.src();
     let mut out = String::new();
-    for (i, text) in rendered.iter().enumerate() {
-        let last = i + 1 == blocks.len();
-        // Both content offsets are read more than once below, and each read
-        // walks the block's items.
-        let end = content_end(&blocks[i]);
-        let next_start = if last { src_len } else { content_start(&blocks[i + 1]) };
+    let mut verbatim = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        let end = part.end;
+        let next_start = if last { src_len } else { parts[i + 1].start };
         let sep = find_separator(ctx, end, next_start);
-        if !text.is_empty() {
-            push_part(&mut out, text);
+        if !part.text.is_empty() {
+            // push_part prepends the newline when out already holds text.
+            let base = out.len() + usize::from(!out.is_empty());
+            push_part(&mut out, &part.text);
+            for &(s, e) in &part.verbatim {
+                verbatim.push((base + s, base + e));
+            }
         }
         let Some(sep) = sep else {
             continue;
         };
-        if !text.is_empty() && ctx.blank_between(end, sep.line_start) {
+        if !part.text.is_empty() && ctx.blank_between(end, sep.line_start) {
             push_part(&mut out, "");
         }
         push_part(
             &mut out,
             &src[sep.line_start as usize..sep.text_end as usize],
         );
-        if !last && !rendered[i + 1].is_empty() && ctx.blank_between(sep.line_end, next_start) {
+        if !last && !parts[i + 1].text.is_empty() && ctx.blank_between(sep.line_end, next_start) {
             push_part(&mut out, "");
         }
     }
     if !out.is_empty() {
         out.push('\n');
     }
-    out
+    (out, verbatim)
 }
 
 /// Appends one output part on its own line.
@@ -347,12 +614,21 @@ mod tests {
         assert!(ast.blocks.len() >= 3, "three blocks expected");
         let whole = format_source(&files, file, &ast);
         let ctx = Ctx::new(files.source(file));
-        let rendered: Vec<String> = ast.blocks.iter().map(|b| render_block(&ctx, b)).collect();
-        assert_eq!(assemble(&ctx, &ast.blocks, &rendered), whole);
+        let parts = block_parts(&ctx, &ast.blocks);
+        let (reassembled, verbatim) = assemble(&ctx, &parts);
+        assert_eq!(reassembled, whole);
+        // Each verbatim range names source text present in the output.
+        for &(s, e) in &verbatim {
+            assert!(src.contains(&whole[s..e]), "verbatim range not in output");
+        }
         // Each isolated block text appears verbatim in the whole-file output.
-        for text in &rendered {
-            if !text.is_empty() {
-                assert!(whole.contains(text), "missing block:\n{text}\nin:\n{whole}");
+        for part in &parts {
+            if !part.text.is_empty() {
+                assert!(
+                    whole.contains(&part.text),
+                    "missing block:\n{}\nin:\n{whole}",
+                    part.text
+                );
             }
         }
     }

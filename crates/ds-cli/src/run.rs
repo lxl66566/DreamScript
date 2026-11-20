@@ -1,5 +1,5 @@
-//! The `ds run` subcommand: execute one module — a validated mmap-read
-//! dsmod file, or a .ds source compiled in-process through the source
+//! The `ds run` subcommand: execute one module — a validated dsmod file
+//! read from bytes, or a .ds source compiled in-process through the source
 //! pipeline (parse, check, lower, install), with the script-mode dsmod
 //! cache consulted before that pipeline — resolving one entry function
 //! and reporting its result. A .ds source with a `ds.pkg` beside it runs
@@ -8,17 +8,17 @@
 //! script-mode caches — the dsmod artifact, the checked-prefix `.dsi`,
 //! and the dep-member dsmod artifacts, each linked package's own
 //! compiled module keyed on its content identity — serve the root and
-//! the walk's dep demands across runs under keys that fold the graph's
-//! dep identities.
+//! the walk's dep demands across runs under keys that fold the root's
+//! own member identity and the graph's dep identities.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
-use ds_mod::{EntryArg, LoadError as ModLoadError, Module, ReadError, read_mmap};
+use ds_mod::{EntryArg, Module, ReadError, read};
 use ds_vm::{
-    ArenaMisuse, ArenaPackError, FramePc, LoadError as VmLoadError, ModuleBuildError,
+    ArenaMisuse, ArenaPackError, FIBER_ROOT, FramePc, LoadError as VmLoadError, ModuleBuildError,
     ModuleRegistry, StagedSite, Trap, Value, Vm,
     native::{
         PLATFORM_IO_ERR, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT, PLATFORM_NONE,
@@ -114,10 +114,17 @@ struct PreparedRun {
     functions: Vec<String>,
 }
 
-/// The existing dsmod path: validated mmap read and install.
+/// The existing dsmod path: validated read and install. The file is the
+/// user's own, outside the cache artifacts' write-once discipline, so the
+/// run reads its bytes and validates from those instead of mapping (a
+/// mapping's stability contract cannot name a file another process may
+/// rewrite under the run).
 fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
-    let module = read_mmap(&args.file).map_err(|error| open_error(&args.file, &error))?;
-    install_module(module.into_module(), args)
+    let bytes = std::fs::read(&args.file)
+        .map_err(|error| anyhow!("cannot open module `{}`: {error}", args.file.display()))?;
+    let module =
+        read(&bytes).map_err(|error| anyhow!("{}", render_read_error(&args.file, &error)))?;
+    install_module(module, args)
 }
 
 /// Installs one finished module into a fresh VM with the default std
@@ -145,13 +152,20 @@ fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
 }
 
 /// The source path: a package-shaped root (a `ds.pkg` beside the source)
-/// takes the package path first; everything else is the script-mode
-/// dsmod cache first — a servable cached artifact installs without the
-/// front end — then the in-process compile exactly as before, caching
-/// what a later run of the same inputs can serve.
+/// takes the package path first; a manifest-free source with the ambient
+/// on takes the same path over the implicit `@std` graph (the
+/// bare-specifier switch: the default bundle resolves ahead of the
+/// compile, so the script compiles over the shrunk core and its `@std`
+/// imports bind through the linked surface); everything else is the
+/// script-mode dsmod cache first — a servable cached artifact installs
+/// without the front end — then the in-process compile exactly as
+/// before, caching what a later run of the same inputs can serve.
 fn run_source(args: &RunArgs) -> Result<PreparedRun> {
     if let Some(graph) = package::open(&args.file, args.no_ambient)? {
-        return run_package(args, &graph);
+        return run_package(args, &graph, false);
+    }
+    if !args.no_ambient {
+        return run_package(args, &package::implicit_std_graph(), true);
     }
     let cache = RunCache::discover(!args.no_cache, args.no_ambient);
     let prefix = crate::dsi_cache::PrefixCache::discover(!args.no_cache, args.no_ambient);
@@ -169,29 +183,50 @@ fn run_source(args: &RunArgs) -> Result<PreparedRun> {
     compile_source(args, compiled)
 }
 
-/// The package path: the script-mode dsmod cache first, keyed on the
-/// resolved graph's dep identities — a servable cached artifact
-/// installs without the front end — then the compile against the graph
-/// and the install through the deps-first walk, caching what a later
-/// run of the same source over the same resolution can serve: the dsmod
-/// artifact and the checked prefix alike, both keyed on the graph's
-/// dep identities. The artifact's link table records the graph's
-/// identities and both keys fold exactly those, so a dep whose resolved
-/// content changed is another key: an artifact or prefix linked against
-/// old content never serves a new resolution.
-fn run_package(args: &RunArgs, graph: &package::Graph) -> Result<PreparedRun> {
-    let cache = RunCache::discover_linked(!args.no_cache, args.no_ambient, graph.identities());
-    if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
+/// The package path — a manifest-resolved graph or the bare script's
+/// implicit `@std` graph — with `script` parsing the root's first member
+/// as a script (top-level statements folding into the synthesized
+/// `main`): the script-mode dsmod cache first, keyed on the root's
+/// composed member identity beside the resolved graph's dep identities
+/// and native-artifact pins — a servable cached artifact installs
+/// without the front end — then the compile against the graph and the
+/// install through the deps-first walk, caching what a later run of
+/// the same member set over the same resolution can serve: the dsmod
+/// artifact and the checked prefix alike, both keyed on the root's
+/// member fold, the graph's dep identities, and the artifact pins. The
+/// artifact's link table records the graph's identities and both keys
+/// fold exactly those plus the root's members, so a dep whose resolved
+/// content changed, a repinned library, or a sibling member's edit is
+/// another key: an artifact or prefix linked against old content never
+/// serves a new resolution.
+fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<PreparedRun> {
+    let pins = graph.artifact_pins();
+    let cache =
+        RunCache::discover_linked(!args.no_cache, args.no_ambient, graph.identities(), &pins);
+    // the root's members enter the cache key the way the graph's dep
+    // identities do: a manifest root composes every member of its
+    // namespace (G3), and the composed fold re-keys on a sibling edit
+    let members = package::root_members(&args.file)?;
+    if let Some((module, plan)) = cache.lookup_root(&args.file, &members, &args.entry) {
         return run_cached_package(module, &plan, graph, &cache, args);
     }
-    // the same dep identities key the prefix tier: a prefix linked
-    // against a dep's old content never serves a new resolution
+    // the same dep identities and artifact pins key the prefix tier: a
+    // prefix linked against a dep's old content never serves a new
+    // resolution
     let prefix = crate::dsi_cache::PrefixCache::discover_linked(
         !args.no_cache,
         args.no_ambient,
         graph.identities(),
+        &pins,
     );
-    let compiled = package::compile_root(&args.file, &args.entry, graph, Some(&prefix))?;
+    let compiled = package::compile_root(
+        &args.file,
+        &args.entry,
+        graph,
+        script,
+        Some(&prefix),
+        Some(&cache),
+    )?;
     let name = compiled.name.clone();
     let functions = compiled.lowered.functions().to_vec();
     let int_member = compiled.lowered.tag("int");
@@ -235,6 +270,12 @@ fn install_package_root(
 ) -> Result<Vm> {
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
+    // the graph's bindable artifacts install before the modules (H5): the
+    // deps-first walk's pool validation resolves a bound extern's
+    // constant against the bound tables, exactly like a platform's
+    // served ops — a load that refused leaves the artifact uninstalled
+    // and a module binding it answers the recorded reason below
+    let refused_binds = graph.install_bound(&mut registry);
     let mut vm = Vm::new(registry);
     // a member that fails to compile refuses through the walk's provider
     // miss, so its failure rides the stash out of the provider closure
@@ -243,7 +284,7 @@ fn install_package_root(
         if let Some(served) = cache.lookup_dep(dep, linked) {
             return Some(served);
         }
-        match graph.serve(dep) {
+        match graph.serve(dep, Some(cache)) {
             Ok(Some(served)) => {
                 cache.store_dep(dep, linked, &served);
                 Some(served)
@@ -258,8 +299,31 @@ fn install_package_root(
     if let Some(error) = failed.into_inner() {
         return Err(error);
     }
-    walk.map_err(|error| install_error(name, function_count, &error))?;
+    walk.map_err(|error| install_error_bound(name, function_count, &error, &refused_binds))?;
     Ok(vm)
+}
+
+/// The walk's install refusal with the refused binds beside it: an
+/// unresolved callee naming an artifact whose load refused answers the
+/// recorded bind reason (the artifact installed nothing, so its bound
+/// extern's pool validation is the first refusal to name it); every
+/// other error renders as ever.
+fn install_error_bound(
+    name: &str,
+    function_count: usize,
+    error: &VmLoadError,
+    refused_binds: &[(String, String)],
+) -> Error {
+    if let VmLoadError::UnresolvedCallee { module, .. } = error
+        && let Some((_, reason)) = refused_binds
+            .iter()
+            .find(|(artifact, _)| artifact == module)
+    {
+        return anyhow!(
+            "the artifact `{module}` does not bind, so its bound externs refuse the run: {reason}"
+        );
+    }
+    install_error(name, function_count, error)
 }
 
 /// The package hit path: install the served artifact through the same
@@ -352,7 +416,10 @@ fn compile_source(args: &RunArgs, compiled: source::CompiledSource) -> Result<Pr
 /// member of a checked read prints by name, and everything else prints
 /// like the dsmod path always did. The run answers the entry's whole
 /// word span, so a multi-word answer (a tuple, a widened span) prints
-/// one word per line instead of a truncated head.
+/// one word per line instead of a truncated head. A trapped run reports
+/// first — the backtrace reads the kept frames — and then releases the
+/// interrupted root, so the kept frames' deinit hooks fire exactly once
+/// and their claims drain before the run exits nonzero.
 fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
     if prepared
         .vm
@@ -399,7 +466,14 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
                 Ok(())
             },
         },
-        Err(trap) => Err(trap_error(&prepared.vm, &trap)),
+        Err(trap) => {
+            let report = trap_error(&prepared.vm, &trap);
+            // the trapped root keeps its frames for the report; the
+            // release fires their deinit hooks once and drains their
+            // claims before the run exits nonzero
+            prepared.vm.release_interrupted(FIBER_ROOT);
+            Err(report)
+        },
     }
 }
 
@@ -474,15 +548,6 @@ pub(crate) fn stage_source_args(
         }
     }
     Ok(staged)
-}
-
-/// Missing files get one line; format failures get the structured ds-diag
-/// rendering over the offending bytes.
-fn open_error(path: &Path, error: &ModLoadError) -> Error {
-    match error {
-        ModLoadError::Io(err) => anyhow!("cannot open module `{}`: {err}", path.display()),
-        ModLoadError::Format(err) => anyhow!("{}", render_read_error(path, err)),
-    }
 }
 
 /// Renders a [`ReadError`] as a human diagnostic against the file's bytes.
@@ -722,6 +787,9 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::UnservedWorldOp { op } => {
             format!("world op {op} is not served by the installed platform")
         },
+        Trap::BoundMarshaling { symbol, reason } => {
+            format!("the bound extern `{symbol}` refuses at the C-ABI marshaling seam: {reason}")
+        },
         Trap::UnknownModule { module } => {
             format!("callable word names module id {module}, which is not installed")
         },
@@ -810,6 +878,9 @@ fn describe_trap(trap: &Trap) -> String {
         },
         Trap::TailForkJoin => "a fork-join combinator (par_map, par_reduce) at a tail dispatch \
                                site; the join parks through the drive, which needs the CALLG site"
+            .to_owned(),
+        Trap::OutOfFuel => "a budgeted drive ran past its step limit (the comptime fence's cap; a \
+                            run drive carries none)"
             .to_owned(),
     }
 }

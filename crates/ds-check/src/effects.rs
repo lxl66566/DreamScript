@@ -454,7 +454,7 @@ const fn traps_assign(op: AssignOp) -> bool {
 /// check ran, so no implicit hole dispatch record exists: a hole over a
 /// `show`-carrying operand contributes only its operand's own row here;
 /// callers that checked pass their records through
-/// [`effects_of_resolved`](self::effects_of_resolved).
+/// [`effects_of_resolved`].
 #[must_use]
 pub fn effects_of<T>(asts: &[T], declared: &DeclaredRows, world: &WorldCaps) -> Effects
 where
@@ -527,7 +527,7 @@ pub struct ServedMethodRow {
 /// registered methods' solved rows, in registration order, over its own
 /// closed package — the rows a served run seeds so user edges into
 /// ambient method nodes read without walking the ambient's trees. Runs
-/// the same walk and fixpoint [`effects_of_resolved`](self::effects_of_resolved)
+/// the same walk and fixpoint [`effects_of_resolved`]
 /// runs.
 #[must_use]
 pub fn solved_method_rows<T>(
@@ -567,7 +567,7 @@ where
         .collect()
 }
 
-/// [`effects_of_resolved`](self::effects_of_resolved) behind a
+/// [`effects_of_resolved`] behind a
 /// checked-ambient artifact: only the user trees walk; the ambient's
 /// solved rows — its definitions' (from the artifact's
 /// [`Effects::defs`]) and its registered methods' — seed the graph as

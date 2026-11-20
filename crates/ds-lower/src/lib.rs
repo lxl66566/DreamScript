@@ -1,4 +1,4 @@
-//! # ds-lower: checked programs to executable dsmod modules [M3]
+//! # ds-lower: checked programs to executable dsmod modules `[M3]`
 //!
 //! The lowering pass: one checked package (parse -> `ds_check::analyze`)
 //! becomes one ds-mod module — frame layouts per the locked BL-6 rules,
@@ -11,14 +11,14 @@
 //!
 //! 1. **Planning** collects the lowerable top-level functions: const-arrow lambdas — monomorphic or
 //!    free-generic (plus the synthesized functions lambda values register mid-lowering, F2). A free
-//!    generic fn lowers its ONE body once [H3]: call sites stage the instantiated evidence words
+//!    generic fn lowers its ONE body once `[H3]`: call sites stage the instantiated evidence words
 //!    its body's runtime demands read, in the outgoing-argument area after the true arguments.
 //!    Comptime items stay exempt, and generic lambdas as values and comptime parameters refuse at
 //!    their own doors. A `main` entry must exist.
 //! 2. **Shapes** map every solved type onto its slot representation ([`shape` module docs]):
 //!    scalars are one word, bare structs are field spans, unions are tag+payload spans with
 //!    per-member payload offsets. Tag ids are module-wide, assigned in first-use order.
-//! 3. **Per-function lowering** ([`func`]) walks each body once, reading the checker's recorded
+//! 3. **Per-function lowering** (`[func]`) walks each body once, reading the checker's recorded
 //!    tables: per-expression solved types (`expr_types`, flow-refined), per-binder declared types
 //!    (`binders`), and per-use name resolutions. Slots bump-allocate (params first, then
 //!    locals/temps); the outgoing-argument area sizes itself as the max over call sites of staged
@@ -30,12 +30,12 @@
 //! alternative or re-span the propagated member into the enclosing return
 //! union with RETSPAN. Interpolation lowers to `str_*` builtin calls
 //! chained with STRCAT. Tail positions lower to CALLT (the stack never
-//! grows [H2]) and final expressions to RET/RETSPAN.
+//! grows `[H2]`) and final expressions to RET/RETSPAN.
 //!
 //! # The Perceus placement pass (C4, rides the walk)
 //!
-//! The walk in [`func`] is also the forward pass of the dup/drop placement
-//! ([`place`]): every Ref-typed word owns a reference count, and both the
+//! The walk in `[func]` is also the forward pass of the dup/drop placement
+//! (`[place]`): every Ref-typed word owns a reference count, and both the
 //! placed sequence returned per function ([`Lowered::placed`]) and the
 //! module's executable code interleave `RcOp::Inc`/`Dec` with the runnable
 //! uops — the 0xE words ride beside the uops, and the tier-1 VM executes
@@ -467,11 +467,21 @@ pub fn lower<T>(
 where
     T: std::borrow::Borrow<Ast>,
 {
-    lower_in_mode(module_name, source_hash, asts, analyzed, LowerMode::Program)
+    lower_in_mode(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        None,
+        LowerMode::Program,
+    )
 }
 
-/// [`lower`] under an explicit [`LowerMode`] — the REPL's resumed-frame
-/// session is the second caller.
+/// [`lower`] under an explicit [`LowerMode`] and a caller's already-run
+/// affine walk — the REPL's resumed-frame session is the caller, handing
+/// the rows its check gate paid for so a submission never pays the
+/// lowerer's backstop re-walk (the same facts seam `lower_with_comptime`
+/// gives the run and reload paths).
 ///
 /// # Errors
 ///
@@ -481,6 +491,7 @@ pub fn lower_in_mode<T>(
     source_hash: Hash128,
     asts: &[T],
     analyzed: &Analyzed,
+    facts: Option<&ds_check::Linearity>,
     mode: LowerMode,
 ) -> Result<Lowered, LowerError>
 where
@@ -495,7 +506,7 @@ where
         true,
         None,
         &[],
-        None,
+        facts,
         func::ComptimeRun::Runtime(&empty),
         mode,
     )
@@ -1311,6 +1322,10 @@ fn lower_all<'b>(
         spliced = placed.len();
     }
     shapes.seed_linked(analyzed.package.linked_tag_rows())?;
+    // the placement pass reads the checker's affine rows through one
+    // shared sorted table: every function's walk queries it, so the
+    // lowering never copies the package's rows per function
+    let affine = Rc::new(place::AffineFacts::from_linearity(lin));
     let mut index = functions.len();
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
@@ -1323,7 +1338,7 @@ fn lower_all<'b>(
             res,
             plan,
             &mut shapes,
-            lin,
+            &affine,
             &planned,
             u32::try_from(index).expect("function index fits u32"),
             func::RunContext {

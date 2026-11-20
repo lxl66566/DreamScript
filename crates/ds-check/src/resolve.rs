@@ -593,6 +593,14 @@ pub struct Package {
     /// refuses it), keeping the shadowing discipline the value namespace
     /// already follows.
     foreign_type_defs: FxHashMap<String, DefId>,
+    /// The selections a `pub import` row bound (G4's re-export): the
+    /// import-bound defs that join this package's export surface, with
+    /// the bound name (an alias's spelling included) and the row's own
+    /// span — the definition site a dependent's diagnostics name, since
+    /// the origin's declaring span lives in the origin package's file
+    /// space. A def two pub rows alias twice rides twice, one export per
+    /// bound name.
+    reexports: Vec<(DefId, String, Span)>,
     /// The linked modules' tag-table rows the link pass collected (the
     /// shared tag mapping): a union-typed word crossing a module
     /// boundary carries the producing module's tag ids as immediates,
@@ -751,13 +759,17 @@ impl Package {
 }
 
 /// One file's import bindings (G4): the names its import declarations
-/// selected (under their own or their per-symbol alias spelling) and the
-/// module aliases its `as` clauses bound. Imported names enter the
+/// selected (under their own or their per-symbol alias spelling), the
+/// module aliases its `as` clauses bound, and the import declarations a
+/// resolved graph served through a linked surface — the spans whose
+/// selections the member surface validated, so the resolver's
+/// merged-namespace check does not retry them. Imported names enter the
 /// file's namespace alone — other files of the package see nothing.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct FileImports {
     names: FxHashMap<String, (DefId, Span)>,
     modules: FxHashMap<String, (ModuleId, Span)>,
+    linked: Vec<Span>,
 }
 
 /// One module reference an import's `as` clause bound: the alias's name
@@ -977,6 +989,15 @@ impl Package {
                         },
                         ImportSurface::Linked(member_surface) => {
                             self.register_member(ast.file, imp, member_surface, &mut diags);
+                            // the span the linked surface served: the
+                            // resolver's merged-namespace check skips it (a
+                            // linked selection validates against the member
+                            // surface alone — the link pass above)
+                            self.imports
+                                .entry(ast.file)
+                                .or_default()
+                                .linked
+                                .push(imp.span);
                             // the shared tag mapping's rows collect here:
                             // the lowering seeds its table with them, so
                             // duplicate rows (two imports of one package)
@@ -993,8 +1014,27 @@ impl Package {
                     let ItemKind::Import(imp) = &item.kind else {
                         continue;
                     };
+                    // A `pub import` row re-exports: its bound selections
+                    // join the export surface (validate_member records
+                    // them), while a selectionless row binds nothing to
+                    // re-export and the modifier names nothing. An `@std`
+                    // path skips the selectionless check — the resolving
+                    // pass's own `pub import` refusal owns the word there.
+                    let reexport = matches!(item.vis, Some(ds_parse::Vis::Pub(_)));
+                    let std_path = imp.path.at_sign
+                        && imp.path.segments.first().is_some_and(|s| s.name == "std");
                     if let Some(ImportSurface::Linked(member_surface)) = imports.get(imp.span) {
-                        self.validate_member(ast.file, imp, member_surface, &mut diags);
+                        self.validate_member(ast.file, imp, member_surface, reexport, &mut diags);
+                        if reexport && imp.select.is_empty() && !std_path {
+                            diags.push(
+                                Diagnostic::error(
+                                    ErrorCode::VisNoTarget,
+                                    "a `pub import` with no selection list re-exports nothing [G4]"
+                                        .to_owned(),
+                                )
+                                .with_primary(imp.span, "the import binds no name to re-export"),
+                            );
+                        }
                     }
                 }
             }
@@ -1072,12 +1112,15 @@ impl Package {
                 // the enum's def.
                 ForeignKind::Type if entry.ty.is_some() => {
                     let kind = match entry.ty.as_deref() {
-                        Some(crate::import::TypeFact::Struct(..)) => Some(DefKind::Struct),
+                        Some(
+                            crate::import::TypeFact::Struct(..) | crate::import::TypeFact::Opaque,
+                        ) => Some(DefKind::Struct),
                         Some(crate::import::TypeFact::Enum(..)) => Some(DefKind::Enum),
                         Some(crate::import::TypeFact::Case(fact)) => self
                             .foreign_type_defs
                             .contains_key(&fact.enum_name)
                             .then_some(DefKind::Case),
+                        Some(crate::import::TypeFact::Alias(..)) => Some(DefKind::TypeAlias),
                         None => None,
                     };
                     let free = entry.name != "none"
@@ -1119,12 +1162,17 @@ impl Package {
 
     /// Validates one linked member's selections: each names an exported
     /// definition whose shape binds this round, and what passes binds
-    /// into the importing file's namespace (G4).
+    /// into the importing file's namespace (G4). A `pub import` row's
+    /// bindings record as re-exports — the export surface's transitive
+    /// closure — under the name the row bound (an alias's spelling
+    /// included), the row's own span the definition site a dependent's
+    /// diagnostics name.
     fn validate_member(
         &mut self,
         file: ds_diag::FileId,
         imp: &ds_parse::ImportDecl,
         member_surface: &MemberSurface,
+        reexport: bool,
         diags: &mut Vec<Diagnostic>,
     ) {
         for sel in &imp.select {
@@ -1323,6 +1371,9 @@ impl Package {
             file_imports
                 .names
                 .insert(name.name.clone(), (def, imp.span));
+            if reexport {
+                self.reexports.push((def, name.name.clone(), imp.span));
+            }
         }
     }
 
@@ -1377,16 +1428,19 @@ impl Package {
                         let registered = entry.kind != ForeignKind::Type
                             || self.foreign_type_defs.contains_key(head);
                         // The @std equivalence: the reserved package's
-                        // member is the ambient source verbatim this
-                        // round, so a word-shaped atom head the consuming
-                        // ambient also declares is the same declaration —
-                        // the spelling resolves through the consumer's own
-                        // atom, the same base-aware lookup the registered
-                        // foreign types read. Union positions keep the
-                        // tag-seam refusal (the two modules' private tag
-                        // tables), and every tag- or struct-bearing head
-                        // keeps its Unbound refusal; the arm retires with
-                        // the un-merge.
+                        // first member is the ambient core itself (a
+                        // declaring compile registers that same core as
+                        // its ambient, the migrated members riding beside
+                        // the core inside the package), so a word-shaped
+                        // atom head the consuming ambient also declares is
+                        // the same declaration — the spelling resolves
+                        // through the consumer's own atom, the same
+                        // base-aware lookup the registered foreign types
+                        // read. Union positions keep the tag-seam refusal
+                        // (the two modules' private tag tables), and every
+                        // tag- or struct-bearing head keeps its Unbound
+                        // refusal; the arm retires when the core's atoms
+                        // stop crossing as plain words.
                         let std_equivalent = entry.std
                             && !in_union
                             && args.is_empty()
@@ -1502,6 +1556,14 @@ impl Package {
     #[must_use]
     pub fn foreign(&self) -> &FxHashMap<DefId, ForeignEntry> {
         &self.foreign
+    }
+
+    /// The selections a `pub import` row bound (G4's re-export): the
+    /// def, the bound name it exports under, and the row's span — in
+    /// binding order, a def bound by two pub rows riding twice.
+    #[must_use]
+    pub fn reexports(&self) -> &[(DefId, String, Span)] {
+        &self.reexports
     }
 
     /// The module reference an id names.
@@ -1642,15 +1704,16 @@ impl Package {
     fn collect_item(&mut self, item: &Item, diags: &mut Vec<Diagnostic>) {
         let vis = Vis::of(item.vis);
         if let Some(modifier) = item.vis.filter(|_| {
-            matches!(
-                item.kind,
-                ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Platform(_)
-            )
+            matches!(item.kind, ItemKind::Impl(_) | ItemKind::Platform(_))
+                || matches!(&item.kind, ItemKind::Import(_))
+                    && matches!(item.vis, Some(ds_parse::Vis::PubPkg(_)))
         }) {
-            // An import re-exports (`pub import`) and an impl or platform
-            // declaration names no package-level name, so a modifier there
-            // names nothing this round: re-export lands with cross-package
-            // linking, and impl members carry no namespace slot.
+            // An impl or platform declaration names no package-level
+            // name, and `pub(pkg)` on an import names nothing — imports
+            // are already package-wide (one namespace per package, G3).
+            // A `pub import`'s meaning is the link pass's: its bound
+            // selections join the export surface there, so collection
+            // alone cannot judge the modifier.
             let pkg = matches!(modifier, ds_parse::Vis::PubPkg(_))
                 .then(|| "(pkg)")
                 .unwrap_or("");
@@ -1857,7 +1920,7 @@ enum ArmTag {
 impl FileResolver<'_> {
     fn item(&mut self, item: &Item) {
         match &item.kind {
-            ItemKind::Import(imp) => self.import(imp),
+            ItemKind::Import(imp) => self.import(imp, item.vis),
             ItemKind::Tag(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
                 // A top-level binding declares a PACKAGE def [G3], not a
@@ -2265,13 +2328,35 @@ impl FileResolver<'_> {
 
     /// One import declaration (G4): an `@std` import's selections validate
     /// against the exported surface — the compile unit's merged namespace
-    /// serves the `@std` member this round — while every other path
-    /// (bare or sigiled) stays declarative for the link walk (the
-    /// dep-list records it and the graph validates the link). A
-    /// condition is a source-internal spelling the target model will
-    /// evaluate; until then the import records and links as written.
-    fn import(&mut self, imp: &ds_parse::ImportDecl) {
+    /// serving the undeclared reading — while a graph that resolved the
+    /// reserved package serves the same span through its linked surface
+    /// (the member surface's own validation, recorded by the link pass)
+    /// and every other path (bare or sigiled) stays declarative for the
+    /// link walk (the dep-list records it and the graph validates the
+    /// link). A condition is a source-internal spelling the target model
+    /// will evaluate; until then the import records and links as written.
+    /// A `pub import` of `@std` refuses here: the merged-ambient reading
+    /// binds the compile's own names, never import-bound defs, so no
+    /// selection re-exports until the un-merge (item 53).
+    fn import(&mut self, imp: &ds_parse::ImportDecl, vis: Option<ds_parse::Vis>) {
         if !imp.path.at_sign || imp.path.segments.first().is_none_or(|s| s.name != "std") {
+            return;
+        }
+        if let Some(ds_parse::Vis::Pub(span)) = vis {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::VisNoTarget,
+                    "`pub import` of `@std` re-exports nothing: the merged-ambient reading binds \
+                     this compile's own names [G4]"
+                        .to_owned(),
+                )
+                .with_primary(span, "the visibility modifier"),
+            );
+        }
+        if self
+            .imports
+            .is_some_and(|imports| imports.linked.contains(&imp.span))
+        {
             return;
         }
         for sel in &imp.select {

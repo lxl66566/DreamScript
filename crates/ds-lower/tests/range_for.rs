@@ -1,9 +1,11 @@
 //! The ranges + for end-to-end probe: `for x in a..b` / `a..=b` lowers
 //! as a counted loop with one induction slot (the endpoints evaluate
-//! once, the binder names the induction word), and `x in a..b` lowers as
+//! once, the binder names the induction word; an inclusive back edge
+//! parked at i64::MAX exits without the step), and `x in a..b` lowers as
 //! two once-evaluated comparisons joined by jumps. The run proves empty
 //! ranges, single-step inclusive ranges, the exclusive/inclusive bound
-//! difference, non-constant ends, wildcard patterns, and membership at
+//! difference, non-constant ends, wildcard patterns, the inclusive
+//! ceiling bound, and membership at
 //! and past both edges; a non-`int` width range stays an honest lowering
 //! boundary (the checker accepts it, the uop contract does not).
 
@@ -136,4 +138,49 @@ fn a_non_int_width_range_stays_a_named_lowering_boundary() {
         "an unsupported boundary, not a miscompile"
     );
     assert!(err.to_string().contains("non-`int` widths"));
+}
+
+/// An inclusive range ending at i64::MAX runs its final iteration and
+/// exits without the step: the back edge detects the count parked at
+/// the ceiling and jumps to the exit, so the loop answers its full
+/// visit count instead of trapping on the overflow add — and the open
+/// range at the ceiling keeps its zero-iteration answer (the count
+/// fails `LtI64` at the head, no step ever runs).
+#[test]
+fn an_inclusive_ceiling_bound_exits_without_the_overflow_step() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "\n",
+        "extern fn println (msg: string) -> ()\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  var n: int = 0\n",
+        "  for i in 9223372036854775806..=9223372036854775807 {\n",
+        "    n += 1\n",
+        "  }\n",
+        "  println(\"done n=${n}\")\n",
+        "  var solo: int = 0\n",
+        "  for i in 9223372036854775807..=9223372036854775807 {\n",
+        "    solo += 1\n",
+        "  }\n",
+        "  var open: int = 0\n",
+        "  for i in 9223372036854775807..9223372036854775807 {\n",
+        "    open += 100\n",
+        "  }\n",
+        "  n + solo + open\n",
+        "}\n",
+    );
+    let mut vm = build(source, "ceiling_range");
+    vm.capture_output();
+    assert_eq!(
+        vm.run("ceiling_range", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(3))),
+        "two ceiling steps plus one single-step loop"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        "done n=2\n",
+        "the final inclusive iteration exits before the step"
+    );
 }

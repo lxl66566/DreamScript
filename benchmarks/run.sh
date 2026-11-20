@@ -20,6 +20,17 @@ set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 kdir="$here/kernels"
 
+# Per-invocation timeout guard: `timeout` when the platform has it
+# (GNU coreutils ships it on the Linux runners and Git-for-Windows),
+# else a passthrough — a hung interpreter then fails the invocation
+# itself instead of wedging a check or bench round.
+TIMEOUT_SECS=600
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT() { timeout "$TIMEOUT_SECS" "$@"; }
+else
+    TIMEOUT() { "$@"; }
+fi
+
 # ---- interpreters ------------------------------------------------------------
 
 # The release ds binary: DS_BIN wins, else the repo's shared target dir
@@ -60,10 +71,10 @@ run_kernel() {
     interp=$1
     file=$2
     case $interp in
-    ds) "$ds_bin" run --no-cache "$file" ;;
-    python) "$python_bin" "$file" ;;
-    lua) "$lua_bin" "$file" ;;
-    node) "$node_bin" "$file" ;;
+    ds) TIMEOUT "$ds_bin" run --no-cache "$file" ;;
+    python) TIMEOUT "$python_bin" "$file" ;;
+    lua) TIMEOUT "$lua_bin" "$file" ;;
+    node) TIMEOUT "$node_bin" "$file" ;;
     esac
 }
 
@@ -175,6 +186,18 @@ fi
 # ---- bench -------------------------------------------------------------------
 # Wall-clock one run per kernel and interpreter (stdout discarded). Repeat the
 # invocation under an exclusive flock for stable numbers.
+
+# `date +%s%N` prints nanoseconds on GNU date only; BSD date answers
+# seconds plus a literal `N`. These numbers gate M8/M9 perf records, so
+# a non-digit answer refuses loudly instead of timing on a broken scale
+# (the portable fallback would be `date +%s` whole seconds).
+probe=$(date +%s%N)
+case $probe in
+'' | *[!0-9]*)
+    echo "run.sh: \`date +%s%N\` answered [$probe] — this date has no nanoseconds (BSD); the bench needs GNU date, or a rework over the \`date +%s\` fallback" >&2
+    exit 1
+    ;;
+esac
 
 printf '%-12s %-8s %10s\n' KERNEL INTERP MS
 for name in $kernels; do

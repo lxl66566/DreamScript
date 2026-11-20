@@ -28,23 +28,27 @@ use ds_diag::{Diagnostic, ErrorCode, FileId, Span};
 
 /// Live-arrow refusal point, kept independent of the other limits. Worst
 /// admitted source: 39 open brackets (`MAX_NEST` in [`crate::lexscan`])
-/// plus a 39-arrow run is ~78 chain traversals; at the 12-30 KiB measured
-/// per traversal (worker.rs) that stays under 2.4 MiB against the parse
-/// worker's 8 MiB stack, while the conversion pass (~3 frames per arrow)
-/// and the caller-side Box-drop recursion (~1 frame per node) are orders
-/// below it. The same arithmetic bounds the near-legal prefixes pest
-/// backtracks through, so an illegal tail cannot smuggle depth past the
-/// budget either.
+/// plus a 39-arrow run. The binding cost is the conversion pass that
+/// follows the parse: measured on a debug build (rustc 1.102-nightly,
+/// x86_64 Linux), one arrow layer of conversion recursion costs ~114 KiB
+/// (~6 frames through the precedence ladder per layer, many times the
+/// ~12-30 KiB a bracket costs inside pest itself), and a paren layer
+/// costs about the same — an 8 MiB stack aborts at 39 parens + 36 arrows.
+/// The 32 MiB worker segment (`worker.rs`) therefore carries the worst
+/// admitted combination (39 + 39 arrow/paren layers, plus `else if`
+/// levels, ~10-11 MiB) with close to 3x headroom, and the same
+/// arithmetic bounds the near-legal prefixes pest backtracks through, so
+/// an illegal tail cannot smuggle depth past the budget either.
 pub(crate) const MAX_ARROWS: u32 = 40;
 
-/// Live-`else` refusal point. Measured on the 8 MiB parse stack, pest's
+/// Live-`else` refusal point. Measured on the parse worker's stack, pest's
 /// own stack guard refuses an `else if` chain at ~3648 branches, so one
-/// level costs ~2 KiB; 499 live elses then cost ~1 MiB. Combined with
-/// the other worst cases (39 brackets + 39 arrows, ~2.4 MiB) the whole
-/// admitted worst case stays under half the segment, and the caller-side
-/// Box-drop recursion (~1 frame per if node) is trivial at this depth.
-/// Real generated decoders carry 100+ branches, so 500 sits far above
-/// legal use and ~7x under the measured guard point.
+/// level costs ~2 KiB; 499 live elses then cost ~1-2 MiB even counting
+/// the conversion pass's ~3 KiB per level. Combined with the other worst
+/// case (39 brackets + 39 arrows, ~9 MiB) the whole admitted worst case
+/// stays well inside the 32 MiB worker segment. Real generated decoders
+/// carry 100+ branches, so 500 sits far above legal use and ~7x under the
+/// measured guard point.
 pub(crate) const MAX_ELSES: u32 = 500;
 
 /// Spacing classification of the last meaningful byte. A newline ends a

@@ -131,7 +131,7 @@ impl Store {
 
     /// The validated bundle for a demanded identity, the identity
     /// recomputed from the installed file's own bytes:
-    /// [`None`](Option::None) names an identity nothing is installed
+    /// [`None`] names an identity nothing is installed
     /// under, and a file whose bytes hash to another identity is a
     /// disagreement that names the file — corrupt or drifted content
     /// never answers a demand.
@@ -168,9 +168,11 @@ impl Store {
     /// file beside the target and rename over it, so a reader never
     /// sees a partial install and an interrupted install leaves no file
     /// under the identity. A file that already validates as this
-    /// identity is the install — a valid bundle is never rewritten —
-    /// while disagreeing bytes under the identity are the repair this
-    /// write lands. Answers the installed content identity.
+    /// identity is the install — the existence gate is cheap and the
+    /// validation needs the installed bytes' own hash alone, never the
+    /// load's decode — while disagreeing bytes under the identity are
+    /// the repair this write lands. Answers the installed content
+    /// identity.
     ///
     /// # Errors
     ///
@@ -179,7 +181,7 @@ impl Store {
         let bytes = package.to_bytes();
         let identity = bundle_content_hash(&bytes);
         // a file that validates by its own bytes already is this content
-        if matches!(self.load(identity), Ok(Some(_))) {
+        if Self::file_validates(&self.path_of(identity), identity, bundle_content_hash) {
             return Ok(identity);
         }
         Self::write_atomic(&self.dir, &self.path_of(identity), &bytes)?;
@@ -203,8 +205,10 @@ impl Store {
     /// the bytes against the pin before anything lands — the winning
     /// declarer's pin validates fetched content, the dep install's own
     /// rule. A file that already validates as this identity is the
-    /// install; disagreeing bytes under the identity are the repair this
-    /// write lands.
+    /// install (the existence gate first, then the installed bytes' own
+    /// hash against the same identity — the digest that just validated
+    /// the bytes in hand is the only hash needed); disagreeing bytes
+    /// under the identity are the repair this write lands.
     ///
     /// # Errors
     ///
@@ -219,7 +223,12 @@ impl Store {
                 found,
             });
         }
-        if matches!(self.load_artifact(identity), Ok(Some(_))) {
+        // a file that validates by its own bytes already is this content
+        if Self::file_validates(
+            &self.artifact_path(identity),
+            identity,
+            artifact_content_hash,
+        ) {
             return Ok(());
         }
         let dir = self.artifact_dir();
@@ -228,7 +237,7 @@ impl Store {
 
     /// The validated library bytes for a demanded identity, the identity
     /// recomputed from the installed file's own bytes:
-    /// [`None`](Option::None) names an identity nothing is installed
+    /// [`None`] names an identity nothing is installed
     /// under, and a file whose bytes hash to another identity is a
     /// disagreement that names the file — corrupt or drifted content
     /// never answers a demand.
@@ -287,6 +296,16 @@ impl Store {
                 .map_err(|persist| io(path.to_owned(), persist.error))?;
         }
         Ok(())
+    }
+
+    /// Whether the file under `path` holds exactly `identity`: a cheap
+    /// existence gate, then the installed bytes hashing to it (the
+    /// load-side decode serves readers; the install decision needs the
+    /// hash alone). A disagreement answers false and the caller's write
+    /// is the repair.
+    fn file_validates(path: &Path, identity: Hash128, hash: impl FnOnce(&[u8]) -> Hash128) -> bool {
+        std::fs::metadata(path).is_ok()
+            && std::fs::read(path).is_ok_and(|bytes| hash(bytes.as_slice()) == identity)
     }
 
     /// Every installed row the store self-describes: each `*.pkg` file

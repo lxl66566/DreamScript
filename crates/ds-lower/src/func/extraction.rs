@@ -438,7 +438,9 @@ impl FnLower<'_, '_, '_> {
     /// contained in the return union, so every member returns through
     /// the return itself — one member is a plain return, several
     /// dispatch by tag and each re-spans into the return union, leaving
-    /// no live fall-through.
+    /// no live fall-through. Each member's exit drops from its own fork
+    /// of the post-operand ownership state, so every exit releases the
+    /// frame's owned words, not just the first.
     pub(super) fn try_tail(&mut self, operand: &Expr) -> Result<(), LowerError> {
         let src = self.value(operand)?;
         let src_ty = self.val(operand.span())?.ty;
@@ -464,9 +466,16 @@ impl FnLower<'_, '_, '_> {
                     });
                     exits.push(exit);
                 }
-                for (member, exit) in members.iter().zip(exits) {
+                let base = self.rc.save();
+                for (index, (member, exit)) in members.iter().zip(exits).enumerate() {
                     self.bind_label(exit);
                     self.respan_exit(&src.place, *member)?;
+                    // every member's exit drops from the same fork of the
+                    // ownership map; the divergence marker stays set, so
+                    // the frame reads exited on every member's path
+                    if index + 1 < members.len() {
+                        self.rc.rewind(base.clone());
+                    }
                 }
                 Ok(())
             },

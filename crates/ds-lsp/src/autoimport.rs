@@ -2,14 +2,19 @@
 //! the file's `@std` import surface, attached to the scope answer's items
 //! when the typed prefix names no visible name.
 //!
-//! The candidate set is the ambient's exported members — @std's member is
-//! the ambient source verbatim under the merged reading, so one set
-//! serves both — and the visibility gate is the checker's own export
+//! The candidate set composes the registered ambient's exported members
+//! with the `@std` package's own members: under the merged registration
+//! the members' file rides inside the ambient, so the ambient's defs
+//! already carry them and the members' table enriches the same items,
+//! while a registration over the shrunk core (a declaring graph's
+//! ambient) carries none of them and the table serves the offers alone,
+//! each member joining the answer as its own item. The table is the
+//! tree's own sources resolved beside the core — the reserved package's
+//! members are a toolchain constant like the ambient itself, never a
+//! served dep artifact. The visibility gate is the checker's own export
 //! predicate ([`ds_check::Vis::exported`], the same one an `@std` import
-//! selection validates against): a private or `pub(pkg)` name is never a
-//! candidate, so no offer ever imports one. The un-merge round widens the
-//! candidate set to the linked packages' members; this edit machinery
-//! serves that round verbatim.
+//! selection validates against): a private or `pub(pkg)` name is never
+//! a candidate, so no offer ever imports one.
 //!
 //! The edit merges into a plain `@std` row when the file carries one — a
 //! selection appended after the last entry, or a selection list added to
@@ -17,6 +22,8 @@
 //! prevailing style: grouped after the last import row, or ahead of the
 //! first item past its doc comment. A row that already selects the name
 //! answers no edit at all.
+
+use std::sync::LazyLock;
 
 use ds_check::{DefKind, Package};
 use ds_diag::{FileId, Files};
@@ -63,13 +70,15 @@ pub(crate) struct Inputs<'a> {
 }
 
 /// Attaches the import edit to every item naming an exported ambient
-/// member whose spelling prefix-matches the typed prefix: accepting the
-/// offer inserts the name and applies the edit alongside. The tier only
-/// enriches items the scope answer already lists — a name a local
-/// shadows needs no import — and never touches a private or `pub(pkg)`
-/// name.
+/// member whose spelling prefix-matches the typed prefix, then to the
+/// `@std` package's own members over the same gate: a merged registration
+/// already lists them (the table enriches the same items), a core-shaped
+/// one joins each as its own item. Accepting an offer inserts the name
+/// and applies the edit alongside; a row that already selects the name
+/// answers no edit, and a private or `pub(pkg)` name is never a
+/// candidate.
 pub(crate) fn attach(
-    items: &mut [lsp::CompletionItem],
+    items: &mut Vec<lsp::CompletionItem>,
     inputs: &Inputs<'_>,
     prefix: &str,
     namespace: Namespace,
@@ -111,6 +120,85 @@ pub(crate) fn attach(
             }
         }
     }
+    for member in std_members() {
+        if !namespace.serves(member.kind) || !member.name.starts_with(prefix) {
+            continue;
+        }
+        let Some((start, end, text)) = row_edit(source, ast, &member.name) else {
+            continue;
+        };
+        let edit = lsp::TextEdit {
+            range: lsp::Range::new(
+                convert::position(files, file, start),
+                convert::position(files, file, end),
+            ),
+            new_text: text,
+        };
+        match items.iter_mut().find(|item| item.label == member.name) {
+            // The merged registration already lists the member: the same
+            // enrichment the ambient's own defs gave it.
+            Some(item) => item.additional_text_edits = Some(vec![edit]),
+            // A core-shaped registration lists none of them: the member
+            // joins the answer as its own item, the offer the import row
+            // binds the name through.
+            None => items.push(lsp::CompletionItem {
+                label: member.name.clone(),
+                kind: Some(convert::completion_kind(member.kind.into())),
+                additional_text_edits: Some(vec![edit]),
+                ..lsp::CompletionItem::default()
+            }),
+        }
+    }
+}
+
+/// The `@std` package's exported members, the composed candidate set's
+/// other half: each member's spelling and the definition kind its
+/// declaration mints.
+struct StdMember {
+    /// The declared name.
+    name: String,
+    /// What the declaration defines: the namespace gate and the item kind
+    /// read it.
+    kind: DefKind,
+}
+
+/// The `@std` package's own members from the tree's sources, built once
+/// per process: the members' file resolved beside the shrunk core — the
+/// reserved package's own compile shape — keeping its exported defs
+/// alone. The session's in-process knowledge of the reserved package,
+/// mirroring the ambient's own-parse precedent: a served dep artifact
+/// never feeds the tier.
+fn std_members() -> &'static [StdMember] {
+    static MEMBERS: LazyLock<Vec<StdMember>> = LazyLock::new(|| {
+        exported_std_members(
+            ds_stdlib::AMBIENT_CORE_SOURCE,
+            ds_stdlib::STD_MEMBERS_SOURCE,
+        )
+    });
+    &MEMBERS
+}
+
+/// One members-source pair's exported members: the core resolved ahead
+/// of the members' file, the exported defs of the members' file alone —
+/// the checker's own rows, so the export gate is the one an `@std`
+/// selection validates against. A source pair that does not resolve is
+/// a broken tree, a generation-side failure.
+fn exported_std_members(core: &str, members: &str) -> Vec<StdMember> {
+    let mut files = Files::new();
+    let core_file = files.add_source(ds_stdlib::AMBIENT_FILE, core);
+    let members_file = files.add_source(ds_stdlib::STD_MEMBERS_FILE, members);
+    let core_ast = ds_parse::parse(&files, core_file).expect("the ambient core parses");
+    let members_ast = ds_parse::parse(&files, members_file).expect("the members parse");
+    let (package, _, diags) = ds_check::resolve_package(&[core_ast, members_ast]);
+    assert!(diags.is_empty(), "the members' source resolves: {diags:?}");
+    package
+        .defs()
+        .filter(|def| def.span.file == members_file && def.vis.exported())
+        .map(|def| StdMember {
+            name: def.name.clone(),
+            kind: def.kind,
+        })
+        .collect()
 }
 
 /// The file's import rows in source order, with their whole items.
@@ -300,5 +388,38 @@ mod tests {
         assert!(Vis::Pub.exported());
         assert!(!Vis::Pkg.exported());
         assert!(!Vis::Private.exported());
+    }
+
+    #[test]
+    fn the_std_members_table_carries_the_exported_members() {
+        // The tree's own members: the demo residue's four names, kinds
+        // and all — the table the composed candidate set reads.
+        let members = exported_std_members(
+            ds_stdlib::AMBIENT_CORE_SOURCE,
+            ds_stdlib::STD_MEMBERS_SOURCE,
+        );
+        let rows: Vec<(&str, DefKind)> = members
+            .iter()
+            .map(|member| (member.name.as_str(), member.kind))
+            .collect();
+        assert_eq!(rows, [
+            ("row", DefKind::TypeAlias),
+            ("config", DefKind::Struct),
+            ("response", DefKind::Struct),
+            ("urls", DefKind::Const),
+        ]);
+    }
+
+    #[test]
+    fn the_members_table_never_carries_an_unexported_name() {
+        // The export gate holds at the table: a private or `pub(pkg)`
+        // member of the members' file is no candidate, so no offer ever
+        // imports one — the same gate the ambient's own defs pass.
+        let members = exported_std_members(
+            "pub tag int\nfn core_helper() -> int {\n  1\n}\n",
+            "const hidden = 1\npub(pkg) fn pkg_only() -> int {\n  1\n}\npub const shown = 2\n",
+        );
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["shown"]);
     }
 }

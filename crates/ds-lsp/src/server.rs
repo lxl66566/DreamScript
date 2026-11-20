@@ -70,11 +70,12 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    /// Builds the handler behind a freshly spawned engine worker.
-    pub(crate) fn spawn(client: Client) -> Self {
+    /// Builds the handler behind a freshly spawned engine worker, the
+    /// embedder's linked-surface provider riding the worker's session.
+    pub(crate) fn spawn(client: Client, linked: crate::SurfaceProvider) -> Self {
         Self {
             client,
-            tx: spawn_worker(),
+            tx: spawn_worker(linked),
             docs: Mutex::new(FxHashMap::default()),
         }
     }

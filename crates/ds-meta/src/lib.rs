@@ -1,4 +1,4 @@
-//! # ds-meta: the meta layer [M6, G1, G2]
+//! # ds-meta: the meta layer `[M6, G1, G2]`
 //!
 //! The derive engine, the comptime evaluator, and the analyze entries
 //! that apply the expansion live here: a derive attribute expands into
@@ -59,6 +59,12 @@ pub mod derive;
 
 pub use derive::{expand as expand_derives, expand_owned};
 
+/// The fenced run's total step budget, one step per decoded instruction:
+/// 2^28. Measured on the debug CLI, a 10^7-iteration comptime build loop
+/// (~7e7 steps) evaluates in ~3 s, so the budget holds ~3.8x that step
+/// count while a runaway fenced run answers in ~14 s instead of hanging.
+const COMPTIME_FUEL: u64 = 1 << 28;
+
 /// The full bidirectional check over raw trees with the derive
 /// expansion applied first: the checker's
 /// [`analyze`](ds_check::type_of::analyze) over the expanded trees, the
@@ -104,6 +110,7 @@ pub fn analyze_owned(
         package.into(),
         resolutions.into(),
         diags,
+        std::sync::Arc::default(),
     )
 }
 
@@ -128,6 +135,10 @@ pub fn analyze_owned_linked(
         package.into(),
         resolutions.into(),
         diags,
+        // the graph's artifact tables ride the bundle (H5): a bound
+        // extern's lowering resolves its declaration against exactly
+        // this fold
+        std::sync::Arc::new(imports.artifacts().clone()),
     )
 }
 
@@ -295,7 +306,7 @@ where
         let Some(function) = fns.iter().find(|f| f.def == site.def) else {
             continue;
         };
-        match vm.run(module_name, &function.name, &staged) {
+        match vm.run_with_budget(module_name, &function.name, &staged, COMPTIME_FUEL) {
             Ok(answer) => {
                 // the call's own checked type gates the embed (the runtime
                 // lowering stages each element literal from it); the host
@@ -309,13 +320,31 @@ where
                     ),
                 }
             },
-            Err(trap) => diags.push(
-                Diagnostic::error(
-                    ErrorCode::ComptimeEvalRefusal,
-                    format!("the comptime evaluation trapped: {trap:?}"),
-                )
-                .with_primary(site.span, "the comptime call"),
-            ),
+            Err(trap) => {
+                // the budget's refusal names the runaway shape, so the
+                // message reads the same on every host
+                if matches!(trap, ds_vm::Trap::OutOfFuel) {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ComptimeEvalRefusal,
+                            format!(
+                                "the comptime evaluation ran past its {COMPTIME_FUEL}-step \
+                                 budget: a pure fn's non-terminating loop or recursion never \
+                                 answers on its own"
+                            ),
+                        )
+                        .with_primary(site.span, "the comptime call"),
+                    );
+                } else {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::ComptimeEvalRefusal,
+                            format!("the comptime evaluation trapped: {trap:?}"),
+                        )
+                        .with_primary(site.span, "the comptime call"),
+                    );
+                }
+            },
         }
     }
     drop(guard);
@@ -1176,7 +1205,7 @@ fn stage_literal(vm: &mut Vm, kind: ScalarKind, arg: &Expr) -> Result<Value, Str
 }
 
 /// One integer literal's raw digit text (radix prefix kept, separators
-/// already stripped by the parser) to its word [B7].
+/// already stripped by the parser) to its word `[B7]`.
 fn parse_int_word(text: &str) -> Option<i64> {
     let (radix, digits) = match text.as_bytes() {
         [b'0', b'x', ..] => (16, &text[2..]),

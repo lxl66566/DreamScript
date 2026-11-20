@@ -145,6 +145,17 @@ pub enum Trap {
         /// The unserved op's index in the platform's fixed table.
         op: u32,
     },
+    /// A bound extern's C-ABI call refused at the marshaling backstop
+    /// (H5): a staged word outside the scalar slice, or a signature
+    /// wider than the enumerated transmute serves — shapes the lowering
+    /// refuses for source programs ahead of the run, so this names
+    /// hand-assembled code or a corrupted pool, never a source program.
+    BoundMarshaling {
+        /// The refused export's name.
+        symbol: String,
+        /// Why the marshaling refused.
+        reason: &'static str,
+    },
     /// A call or run passed the wrong argument count.
     ArityMismatch {
         /// Parameter count the callee's layout declares.
@@ -346,6 +357,11 @@ pub enum Trap {
     /// onto a parked site — the fork combinators need the CALLG site,
     /// and hand-assembled code traps here instead.
     TailForkJoin,
+    /// A budgeted drive ([`Vm::run_with_budget`]) consumed its whole
+    /// step budget: a compile-time evaluation whose body never
+    /// terminates while its stack stays flat (a loop forgetting its
+    /// decrement). The unbounded drives never raise it.
+    OutOfFuel,
 }
 
 /// One entry of the call-info stack: the frame base plus the module
@@ -475,6 +491,17 @@ enum Resolved {
         /// The callee's index in the table.
         index: u32,
     },
+    /// Invoke the bound artifact's C symbol in the caller's frame (H5,
+    /// no frame push): the loaded module's shared symbol table, the
+    /// export's enumeration index, and the return word's scalar kind.
+    Bound {
+        /// The bound module's shared symbol table.
+        module: Arc<crate::bound::BoundModule>,
+        /// The symbol's index in the export enumeration.
+        index: u32,
+        /// The return word's scalar kind.
+        ret: SlotType,
+    },
 }
 
 /// The ownable form of a call-site resolution the inline cache stores: the
@@ -491,6 +518,15 @@ enum CachedCallee {
     Native {
         table: Arc<Vec<NativeFunction>>,
         index: u32,
+    },
+    /// The bound-artifact shape (H5): the loaded module's shared symbol
+    /// table, the export's index, and the return word's kind (a bound
+    /// symbol is not a value — the table is the stable handle, the index
+    /// the callee).
+    Bound {
+        module: Arc<crate::bound::BoundModule>,
+        index: u32,
+        ret: SlotType,
     },
 }
 
@@ -1407,8 +1443,8 @@ fn evidence_chain_dispatch(
     // the exact sentinel-arity contract: the chain's tail list was built
     // one entry per the serving body's own evidence demands, so the
     // parameter count must be the staged real-argument count plus it — a
-    // gap names a corrupted table (the P0 shape: a one-word receiver
-    // staged against a multi-word `self`), never a silent slide of a
+    // gap names a corrupted table (a one-word receiver staged against a
+    // multi-word `self`), never a silent slide of a
     // rider into the parameter span
     if usize::from(nargs) + riders != params_len {
         return Err((
@@ -1625,10 +1661,14 @@ fn str_content<'a>(
         },
         Value::Arena(handle) => {
             let (chunk, offset, len) = handle.unpack();
-            pool[current.index()]
+            let bytes = pool[current.index()]
                 .arena
                 .bytes_at(ds_rt::Mark::at(chunk, offset), len)
-                .map_err(|class| Trap::ArenaHandle { class })
+                .map_err(|class| Trap::ArenaHandle { class })?;
+            // SAFETY: the claim ledger is the aliasing discipline for arena
+            // words: the running frame granted these bytes and no restore
+            // reclaims them before the instruction reading them completes.
+            Ok(unsafe { &*bytes })
         },
         _ => unreachable!("slot kind agrees with the variant"),
     }
@@ -2176,9 +2216,100 @@ fn check_native_call_site(caller: &FrameLayout, nf: &NativeFunction) -> Result<(
     check_native_overlay(area, nf)
 }
 
+/// The pre-invocation width check for a bound extern's CALL (H5): the
+/// staged words and the one overlay word the scalar answer takes must
+/// fit the caller's staging area — the same discipline
+/// [`check_native_call_site`] applies, checked before the foreign call
+/// runs so a world-effect side effect never happens only for the trap.
+fn check_bound_call_site(caller: &FrameLayout, staged: usize) -> Result<(), Trap> {
+    let area = caller.arg_area_len();
+    if staged.max(1) > area {
+        return Err(Trap::CallLayout(SlideError::StagingTooSmall {
+            available: area,
+            needed: staged.max(1),
+        }));
+    }
+    Ok(())
+}
+
+/// The pre-invocation width check for a bound extern's CALLT: the one
+/// overlay word lands on the ORIGINAL caller's area (the tail frame's
+/// slot 0 aliases it), so the frame below supplies the area — the same
+/// rule [`check_native_overlay`] applies to a native's `result_words`.
+fn check_bound_overlay(area: usize) -> Result<(), Trap> {
+    if area < 1 {
+        return Err(Trap::RetSpanTooWide {
+            span: 1,
+            caller_area: u16::try_from(area).expect("argument areas fit u16"),
+        });
+    }
+    Ok(())
+}
+
+/// Runs one bound extern's C-ABI call (H5) in the caller's frame: the
+/// staged words read exactly like a native's, each marshaling per its own
+/// kind (the lowering proved the written signature scalar ahead of the
+/// run), and the foreign answer boxes by the pool constant's return
+/// kind. A blocking call pins the calling fiber for its whole duration —
+/// no preemption point exists inside the C call — and a foreign abort
+/// kills the process (panic=abort, the VM never unwinding through a
+/// foreign frame).
+fn invoke_bound(
+    module: &crate::bound::BoundModule,
+    index: u32,
+    ret: SlotType,
+    staged: usize,
+    stack: &mut Segment,
+    caller: &FrameLayout,
+    fp: usize,
+) -> Result<Value, Trap> {
+    let body_len = caller.body_len();
+    check_bound_call_site(caller, staged)?;
+    let start = caller.arg_area().start;
+    let mut inline = [Value::I64(0); INLINE_WORDS];
+    let mut heap = Vec::new();
+    let args: &[Value] = if staged <= INLINE_WORDS {
+        for (i, word) in inline.iter_mut().enumerate().take(staged) {
+            let slot = u8::try_from(start + i).expect("slot index fits u8");
+            *word = read_value(stack, fp, slot, caller.slots(), body_len)?;
+        }
+        &inline[..staged]
+    } else {
+        heap.reserve(staged);
+        for i in 0..staged {
+            let slot = u8::try_from(start + i).expect("slot index fits u8");
+            heap.push(read_value(stack, fp, slot, caller.slots(), body_len)?);
+        }
+        &heap
+    };
+    let mut scalars = Vec::with_capacity(args.len());
+    for (at, &value) in args.iter().enumerate() {
+        scalars.push(crate::bound::scalar_of(value, at).map_err(|_| {
+            Trap::BoundMarshaling {
+                symbol: module
+                    .name(u32::try_from(at).unwrap_or(u32::MAX))
+                    .to_owned(),
+                reason: "a staged word outside the scalar int/bool/float slice",
+            }
+        })?);
+    }
+    let symbol = module.symbol(index).ok_or_else(|| Trap::BoundMarshaling {
+        symbol: module.name(index).to_owned(),
+        reason: "an export index past the artifact's enumeration",
+    })?;
+    let sig = crate::bound::staged_sig(&scalars, ret);
+    let answer = symbol
+        .call_scalar(&sig, &scalars)
+        .map_err(|_| Trap::BoundMarshaling {
+            symbol: module.name(index).to_owned(),
+            reason: "the enumerated transmute serves at most the scalar arity cap",
+        })?;
+    Ok(crate::bound::scalar_value(answer, ret))
+}
+
 /// Where a backtrace frame stands: a bytecode position, or parked inside
 /// a hosted native's reentrant call — the synthetic reentry frame
-/// [`Vm::call_hosted`] pushed carries the entry-frame sentinel return pc,
+/// `[Vm::call_hosted]` pushed carries the entry-frame sentinel return pc,
 /// which names no real position, so the frame's caller renders the seam
 /// instead of a bogus integer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2301,6 +2432,11 @@ pub struct Vm {
     /// parks — the frame has advanced a full iteration). Set by the
     /// switch into a Preempted fiber; every switch resets it.
     suspend_skip: Option<(FiberId, CodePc)>,
+    /// The budgeted drive's remaining steps ([`Vm::run_with_budget`]):
+    /// charged one per decoded instruction by the fueled instantiation
+    /// of the dispatch loop alone, so every unbounded drive ignores it
+    /// and its dispatch cost is unchanged.
+    fuel: u64,
     /// The fork-join worker pool opt-in (E3's 2026-11-15 sendability
     /// ruling, crates/ds-vm/src/forkpool.rs): off by default — the
     /// sequential interlock drive is M5's backend — and when on, a
@@ -2445,6 +2581,7 @@ impl Vm {
             repl_park: None,
             suspend_request: None,
             suspend_skip: None,
+            fuel: 0,
             fork_pool: false,
             fork_pool_drives: 0,
         }
@@ -3059,6 +3196,14 @@ impl Vm {
         &self.registry
     }
 
+    /// Installs a bound-artifact module under its manifest name (H5):
+    /// the same replacement discipline a native table takes, so a host
+    /// or a dev session installs ahead of the module installs whose
+    /// pool validation resolves bound constants against the table.
+    pub fn install_bound(&mut self, name: &str, module: crate::bound::BoundModule) {
+        self.registry.install_bound(name, module);
+    }
+
     /// Current value-stack word count: the current fiber's segment length.
     #[must_use]
     pub fn stack_len(&self) -> usize {
@@ -3381,7 +3526,7 @@ impl Vm {
         }
         self.pool[fiber.index()].resumer = None; // the host resumes
         let (active, pc) = self.switch_in(fiber, payload);
-        let outcome = self.execute_host_step(active, pc, usize::MAX);
+        let outcome = self.execute_host_step::<false>(active, pc, usize::MAX);
         self.host_release();
         match outcome {
             Ok(DriveOutcome::Died(answer)) => {
@@ -3835,7 +3980,7 @@ impl Vm {
     /// interrupted (already ledgered, the guard breaks); parked → bounced
     /// back in, or cut at that resume when the flag is up.
     fn drive_step(&mut self, active: Active, pc: CodePc) -> StepFlow {
-        match self.execute(active, pc, usize::MAX) {
+        match self.execute::<false>(active, pc, usize::MAX) {
             Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => StepFlow::Quiet,
             Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
             Ok(DriveOutcome::Interlock(req)) => StepFlow::Interlock(req),
@@ -4512,7 +4657,7 @@ impl Vm {
     /// and the joiner re-entered — program nesting depth costs heap, not
     /// Rust stack. A gone joiner's answer surfaces to the host drive as
     /// its death value; a boundary raise propagates at the join call's pc.
-    fn drive_interlock(
+    fn drive_interlock<const FUELED: bool>(
         &mut self,
         req: InterlockRequest,
         boundary: usize,
@@ -4525,7 +4670,7 @@ impl Vm {
             NurseryDriveEnd::Entered(a, at) => (a, at),
         };
         loop {
-            match self.execute(active, pc, boundary) {
+            match self.execute::<FUELED>(active, pc, boundary) {
                 Ok(DriveOutcome::Interlock(req)) => {
                     let frame = self.push_drive_frame(
                         req.nursery,
@@ -4552,14 +4697,14 @@ impl Vm {
     /// Runs one host-drive step, draining any interlock the step raises
     /// before the interrupted fiber continues (its join answer delivered
     /// onto the parked call site).
-    pub(crate) fn execute_host_step(
+    pub(crate) fn execute_host_step<const FUELED: bool>(
         &mut self,
         active: Active,
         pc: CodePc,
         boundary: usize,
     ) -> Result<DriveOutcome, (Trap, CodePc)> {
-        match self.execute(active, pc, boundary) {
-            Ok(DriveOutcome::Interlock(req)) => self.drive_interlock(req, boundary),
+        match self.execute::<FUELED>(active, pc, boundary) {
+            Ok(DriveOutcome::Interlock(req)) => self.drive_interlock::<FUELED>(req, boundary),
             outcome => outcome,
         }
     }
@@ -5189,6 +5334,37 @@ impl Vm {
     /// drives to completion; interactive stepping is
     /// [`Vm::resume_fiber`].
     pub fn run(&mut self, module: &str, func: &str, args: &[Value]) -> Result<FrameAnswer, Trap> {
+        self.run_budgeted(module, func, args, None)
+    }
+
+    /// [`Vm::run`] under a total step budget (the comptime fence's
+    /// runaway bound): the fueled instantiation of the dispatch loop
+    /// charges one step per decoded instruction, and a drive past the
+    /// budget answers [`Trap::OutOfFuel`] instead of hanging — a pure
+    /// fn whose loop never terminates while its stack stays flat has
+    /// no other termination witness. The budget is the calling host's
+    /// policy, never a property of the code; every unbounded drive
+    /// keeps [`Vm::run`].
+    pub fn run_with_budget(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+        fuel: u64,
+    ) -> Result<FrameAnswer, Trap> {
+        self.run_budgeted(module, func, args, Some(fuel))
+    }
+
+    /// The two run entries' shared setup and drive: `fuel` selects the
+    /// dispatch loop's instantiation, so the unbounded run's dispatch
+    /// cost stays untouched (the pin table's contract).
+    fn run_budgeted(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+        fuel: Option<u64>,
+    ) -> Result<FrameAnswer, Trap> {
         self.trap_pc = None;
         let (version, func_id) = self.resolve_entry(module, func, args)?;
         let frame_size = self.registry.pinned(version).functions()[func_id as usize]
@@ -5217,13 +5393,31 @@ impl Vm {
         std::mem::swap(&mut self.objects, &mut root_slot.objects);
         self.current = FIBER_ROOT;
         self.ctx_live = true;
-        let mut active = Active {
+        let active = Active {
             version,
             func: func_id,
         };
+        let answer = match fuel {
+            Some(fuel) => {
+                self.fuel = fuel;
+                self.root_drive::<true>(active)
+            },
+            None => self.root_drive::<false>(active),
+        };
+        self.fuel = 0;
+        answer
+    }
+
+    /// A root drive's completion loop, shared by the two run entries:
+    /// the constant parameter selects the dispatch loop's instantiation,
+    /// so the unbounded drive compiles exactly the dispatch it always
+    /// had and the budgeted drive adds its per-instruction step charge
+    /// inside the fueled instantiation alone.
+    fn root_drive<const FUELED: bool>(&mut self, active: Active) -> Result<FrameAnswer, Trap> {
+        let mut active = active;
         let mut pc = CodePc(0);
         loop {
-            match self.execute_host_step(active, pc, usize::MAX) {
+            match self.execute_host_step::<FUELED>(active, pc, usize::MAX) {
                 Ok(DriveOutcome::Died(answer)) => {
                     self.host_release();
                     // the completed root's whole answer span crosses to
@@ -5447,7 +5641,7 @@ impl Vm {
             version,
             func: func_id,
         };
-        let driven = match self.execute_host_step(active, CodePc(0), boundary) {
+        let driven = match self.execute_host_step::<false>(active, CodePc(0), boundary) {
             Ok(DriveOutcome::Frame(value)) => Ok(value),
             Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => Err(Trap::ReentrancyRefused),
             Ok(DriveOutcome::Interlock(_)) => {
@@ -6049,6 +6243,11 @@ impl Vm {
                     table: Arc::clone(table),
                     index: *index,
                 },
+                CachedCallee::Bound { module, index, ret } => Resolved::Bound {
+                    module: Arc::clone(module),
+                    index: *index,
+                    ret: *ret,
+                },
             },
         )
     }
@@ -6082,6 +6281,29 @@ impl Vm {
                 found: found.kind(),
             });
         };
+        // a bound callee resolves through the registry's bound tier alone
+        // (H5): never a uop module, never the native tables — the
+        // artifact's symbol table under its manifest name
+        if let ConstFuncRef::Bound { module, index, ret } = entry {
+            let bound = self
+                .registry
+                .bound_table(module)
+                .filter(|table| usize::try_from(*index).is_ok_and(|at| at < table.len()))
+                .ok_or(Trap::UnknownCallee {
+                    module: module.clone(),
+                    func: *index,
+                })?;
+            return Ok(CallSite {
+                caller: caller.func,
+                pc,
+                stamp,
+                callee: CachedCallee::Bound {
+                    module: Arc::clone(bound),
+                    index: *index,
+                    ret: *ret,
+                },
+            });
+        }
         // uop first: an install-resolved id addresses the dep's module
         // directly (its name sits in the registry's id vector), a name
         // through the module table — so a uop module installed under a
@@ -6110,6 +6332,8 @@ impl Vm {
                         })?;
                     self.registry.resolve_indexed(module, func)
                 },
+                // the bound tier answered ahead of this match (H5)
+                ConstFuncRef::Bound { .. } => None,
             };
         if let Some((version, func_id)) = uop_target {
             let target = &self.registry.pinned(version).functions()[func_id as usize];
@@ -6147,6 +6371,10 @@ impl Vm {
                 });
             },
             ConstFuncRef::Named { module, func } => (module.as_str(), *func),
+            // the bound tier answered ahead of this match (H5)
+            ConstFuncRef::Bound { .. } => {
+                unreachable!("the bound tier resolved ahead of the native fallback")
+            },
         };
         let table = self
             .registry
@@ -6246,6 +6474,16 @@ impl Vm {
                         })?;
                     self.registry.resolve_indexed(module, func)
                 },
+                // a bound C symbol never rides the generic dispatch (the
+                // lowering refuses generic bound externs), so the honest
+                // refusal names the callee rather than routing a foreign
+                // address into the uop tables (H5)
+                ConstFuncRef::Bound { module, index, .. } => {
+                    return Err(Trap::UnknownCallee {
+                        module: module.clone(),
+                        func: *index,
+                    });
+                },
             };
             let Some((version, func_id)) = target else {
                 return Ok(DispatchResolved::NotUop);
@@ -6291,7 +6529,9 @@ impl Vm {
             }),
             // unreachable by the hit predicate; answered defensively so a
             // corrupted bank degrades to the generic path's honest trap
-            CachedCallee::Native { .. } => Ok(DispatchResolved::NotUop),
+            CachedCallee::Native { .. } | CachedCallee::Bound { .. } => {
+                Ok(DispatchResolved::NotUop)
+            },
         }
     }
 
@@ -6367,6 +6607,11 @@ impl Vm {
     /// synthetic reentry frame ([`Vm::call_hosted`]): a host-level drive
     /// passes `usize::MAX` and never sees [`DriveOutcome::Frame`], and a
     /// nested drive answers it when its reentry frame returns.
+    /// `FUELED` selects the budgeted instantiation ([`Vm::run_with_budget`]
+    /// alone drives it): `true` charges `fuel` one step per decoded
+    /// instruction and answers [`Trap::OutOfFuel`] at zero; `false` compiles
+    /// the charge away entirely, keeping the unbounded drives' dispatch
+    /// cost (the pin table's contract) untouched.
     // One flat match over the whole uop set is the point of a dispatch loop
     // [BL-3]; splitting arms into helpers would fragment it and add a call
     // per op in debug builds. The bias word re-reads u16 as i16 (the
@@ -6375,7 +6620,7 @@ impl Vm {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::cast_possible_wrap)]
     #[allow(clippy::similar_names)]
-    fn execute(
+    fn execute<const FUELED: bool>(
         &mut self,
         mut active: Active,
         mut pc: CodePc,
@@ -6405,6 +6650,15 @@ impl Vm {
             // reclaim drops or shifts revalidates against its own key.
             let mut kstr_slot: Option<KstrRowSlot> = None;
             loop {
+                // the budgeted drive's step charge: the constant folds
+                // the whole block away on the unbounded instantiation,
+                // so only `run_with_budget`'s drive pays it
+                if FUELED {
+                    match self.fuel {
+                        0 => return Err((Trap::OutOfFuel, pc)),
+                        _ => self.fuel -= 1,
+                    }
+                }
                 let idx = pc.0 as usize;
                 if idx >= code.len() {
                     let e = Trap::InvalidPc {
@@ -6720,6 +6974,21 @@ impl Vm {
                                         FuncRef::new(module_id, *func),
                                     )
                                     .map_err(|e| (e, pc))?
+                                },
+                                // a bound C symbol is not a callable word
+                                // (H5): the lowering routes every bound
+                                // extern through its call sites, so a
+                                // value-site use never lowers to this pool
+                                // kind — the honest refusal, the same
+                                // discipline a native surface takes
+                                ConstFuncRef::Bound { module, index, .. } => {
+                                    return Err((
+                                        Trap::UnknownCallee {
+                                            module: module.clone(),
+                                            func: *index,
+                                        },
+                                        pc,
+                                    ));
                                 },
                             },
                             found => {
@@ -7663,6 +7932,34 @@ impl Vm {
                                     pc.0 += 1;
                                 }
                             },
+                            // A bound artifact's C symbol runs in the
+                            // caller's frame like a native (H5): the staged
+                            // words marshal per their own kinds and the
+                            // scalar answer overlays argument slot 0. The
+                            // call is blocking and synchronous — it pins the
+                            // fiber for its whole duration, and a foreign
+                            // abort kills the process (panic=abort, the VM
+                            // never unwinding through a foreign frame).
+                            Resolved::Bound { module, index, ret } => {
+                                let value = invoke_bound(
+                                    &module,
+                                    index,
+                                    ret,
+                                    usize::from(nargs),
+                                    &mut self.stack,
+                                    &f.layout,
+                                    fp,
+                                )
+                                .map_err(|e| (e, pc))?;
+                                overlay_native(
+                                    NativeResult::Word(value),
+                                    &mut self.stack,
+                                    &f.layout,
+                                    fp,
+                                )
+                                .map_err(|e| (e, pc))?;
+                                pc.0 += 1;
+                            },
                         }
                     },
                     OP_CALLT => {
@@ -7675,7 +7972,7 @@ impl Vm {
                         let resolved = self
                             .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
                             .map_err(|e| (e, pc))?;
-                        match resolved {
+                        let result = match resolved {
                             Resolved::Uop {
                                 version,
                                 func,
@@ -7715,7 +8012,7 @@ impl Vm {
                                     &mut self.claims,
                                     self.ctx_live,
                                 );
-                                let result = invoke_native(
+                                invoke_native(
                                     nf,
                                     usize::from(nargs),
                                     &mut self.stack,
@@ -7724,122 +8021,142 @@ impl Vm {
                                     &f.layout,
                                     fp,
                                 )
-                                .map_err(|e| (e, pc))?;
-                                // the answer's whole word span rides a
-                                // boundary return (the hosted seam's result
-                                // channel); every other outcome keeps its
-                                // prior words
-                                let (value, answer) = match result {
-                                    NativeResult::Word(value) => (value, FrameAnswer::one(value)),
-                                    // a plain table native never parks (the
-                                    // generic fork bodies live behind the
-                                    // CALLG dispatch, and this arm never
-                                    // reaches them)
-                                    NativeResult::Fork { .. } => {
-                                        unreachable!("a plain native never parks")
-                                    },
-                                    NativeResult::Tag { tag, payload } => {
-                                        if self.callinfo.len() > 1 {
-                                            self.stack[fp + 2] = Word::Slot(payload);
-                                        }
-                                        (Value::Tag(tag), FrameAnswer::tagged(tag, &[payload]))
-                                    },
-                                    // a span channel's tail ride: the payload
-                                    // words land on the original caller's
-                                    // overlay past the head (physical words
-                                    // fp+2..), bounds-checked against that
-                                    // caller's area; at the root only the
-                                    // head word survives, the root rule
-                                    // RETSPAN returns by
-                                    NativeResult::Span { tag, payload } => {
-                                        if self.callinfo.len() > 1 {
-                                            let caller = &self.callinfo[self.callinfo.len() - 2];
-                                            let caller_fn =
-                                                &self.registry.pinned(caller.module).functions()
-                                                    [caller.func as usize];
-                                            let area = caller_fn.layout.arg_area_len();
-                                            if 1 + payload.len() > area {
-                                                return Err((
-                                                    Trap::RetSpanTooWide {
-                                                        span: u16::try_from(1 + payload.len())
-                                                            .expect("span widths fit u16"),
-                                                        caller_area: u16::try_from(area)
-                                                            .expect("argument areas fit u16"),
-                                                    },
-                                                    pc,
-                                                ));
-                                            }
-                                            for (index, word) in payload.iter().enumerate() {
-                                                self.stack[fp + 2 + index] = Word::Slot(*word);
-                                            }
-                                        }
-                                        (Value::Tag(tag), FrameAnswer::tagged(tag, &payload))
-                                    },
-                                    // the tag-less total's tail ride: no
-                                    // discriminant, so word 0 rides the RET
-                                    // and the rest land on the original
-                                    // caller's overlay words 1.. (physical
-                                    // words fp+2..), bounds-checked against
-                                    // that caller's area; at the root only
-                                    // word 0 survives
-                                    NativeResult::Total { words } => {
-                                        if self.callinfo.len() > 1 {
-                                            let caller = &self.callinfo[self.callinfo.len() - 2];
-                                            let caller_fn =
-                                                &self.registry.pinned(caller.module).functions()
-                                                    [caller.func as usize];
-                                            let area = caller_fn.layout.arg_area_len();
-                                            if words.len() > area {
-                                                return Err((
-                                                    Trap::RetSpanTooWide {
-                                                        span: u16::try_from(words.len())
-                                                            .expect("span widths fit u16"),
-                                                        caller_area: u16::try_from(area)
-                                                            .expect("argument areas fit u16"),
-                                                    },
-                                                    pc,
-                                                ));
-                                            }
-                                            for (index, word) in words.iter().enumerate().skip(1) {
-                                                self.stack[fp + 1 + index] = Word::Slot(*word);
-                                            }
-                                        }
-                                        let lead = words
-                                            .first()
-                                            .copied()
-                                            .expect("a tag-less total carries a word");
-                                        (lead, FrameAnswer::many(words))
-                                    },
-                                };
-                                self.arena_frame_close(fp);
-                                let mut st = stack_state!();
-                                match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
-                                    RetOutcome::Root(_) => {
-                                        // the native's whole span answer rides the
-                                        // completion channel to a live resumer and
-                                        // the drive's death value whole
-                                        match self.complete_current_span(&answer) {
-                                            Some((a, at)) => {
-                                                active = a;
-                                                pc = at;
-                                                continue 'transfer;
+                                .map_err(|e| (e, pc))?
+                            },
+                            // A bound artifact's C symbol tail-calls in
+                            // place (H5): the blocking call pins the fiber
+                            // for its whole duration, and the one scalar
+                            // word answers exactly a native word result's
+                            // tail ride
+                            Resolved::Bound { module, index, ret } => {
+                                if let Some(caller_area) = self.caller_arg_area() {
+                                    check_bound_overlay(caller_area).map_err(|e| (e, pc))?;
+                                }
+                                NativeResult::Word(
+                                    invoke_bound(
+                                        &module,
+                                        index,
+                                        ret,
+                                        usize::from(nargs),
+                                        &mut self.stack,
+                                        &f.layout,
+                                        fp,
+                                    )
+                                    .map_err(|e| (e, pc))?,
+                                )
+                            },
+                        };
+                        // the answer's whole word span rides a
+                        // boundary return (the hosted seam's result
+                        // channel); every other outcome keeps its
+                        // prior words
+                        let (value, answer) = match result {
+                            NativeResult::Word(value) => (value, FrameAnswer::one(value)),
+                            // a plain table native never parks (the
+                            // generic fork bodies live behind the
+                            // CALLG dispatch, and this arm never
+                            // reaches them)
+                            NativeResult::Fork { .. } => {
+                                unreachable!("a plain native never parks")
+                            },
+                            NativeResult::Tag { tag, payload } => {
+                                if self.callinfo.len() > 1 {
+                                    self.stack[fp + 2] = Word::Slot(payload);
+                                }
+                                (Value::Tag(tag), FrameAnswer::tagged(tag, &[payload]))
+                            },
+                            // a span channel's tail ride: the payload
+                            // words land on the original caller's
+                            // overlay past the head (physical words
+                            // fp+2..), bounds-checked against that
+                            // caller's area; at the root only the
+                            // head word survives, the root rule
+                            // RETSPAN returns by
+                            NativeResult::Span { tag, payload } => {
+                                if self.callinfo.len() > 1 {
+                                    let caller = &self.callinfo[self.callinfo.len() - 2];
+                                    let caller_fn =
+                                        &self.registry.pinned(caller.module).functions()
+                                            [caller.func as usize];
+                                    let area = caller_fn.layout.arg_area_len();
+                                    if 1 + payload.len() > area {
+                                        return Err((
+                                            Trap::RetSpanTooWide {
+                                                span: u16::try_from(1 + payload.len())
+                                                    .expect("span widths fit u16"),
+                                                caller_area: u16::try_from(area)
+                                                    .expect("argument areas fit u16"),
                                             },
-                                            None => return Ok(DriveOutcome::Died(answer)),
-                                        }
-                                    },
-                                    RetOutcome::Boundary(_) => {
-                                        return Ok(DriveOutcome::Frame(answer))
-                                    },
-                                    RetOutcome::Resume {
-                                        version,
-                                        func,
-                                        pc: at,
-                                    } => {
-                                        active = Active { version, func };
+                                            pc,
+                                        ));
+                                    }
+                                    for (index, word) in payload.iter().enumerate() {
+                                        self.stack[fp + 2 + index] = Word::Slot(*word);
+                                    }
+                                }
+                                (Value::Tag(tag), FrameAnswer::tagged(tag, &payload))
+                            },
+                            // the tag-less total's tail ride: no
+                            // discriminant, so word 0 rides the RET
+                            // and the rest land on the original
+                            // caller's overlay words 1.. (physical
+                            // words fp+2..), bounds-checked against
+                            // that caller's area; at the root only
+                            // word 0 survives
+                            NativeResult::Total { words } => {
+                                if self.callinfo.len() > 1 {
+                                    let caller = &self.callinfo[self.callinfo.len() - 2];
+                                    let caller_fn =
+                                        &self.registry.pinned(caller.module).functions()
+                                            [caller.func as usize];
+                                    let area = caller_fn.layout.arg_area_len();
+                                    if words.len() > area {
+                                        return Err((
+                                            Trap::RetSpanTooWide {
+                                                span: u16::try_from(words.len())
+                                                    .expect("span widths fit u16"),
+                                                caller_area: u16::try_from(area)
+                                                    .expect("argument areas fit u16"),
+                                            },
+                                            pc,
+                                        ));
+                                    }
+                                    for (index, word) in words.iter().enumerate().skip(1) {
+                                        self.stack[fp + 1 + index] = Word::Slot(*word);
+                                    }
+                                }
+                                let lead = words
+                                    .first()
+                                    .copied()
+                                    .expect("a tag-less total carries a word");
+                                (lead, FrameAnswer::many(words))
+                            },
+                        };
+                        self.arena_frame_close(fp);
+                        let mut st = stack_state!();
+                        match st.ret(value, fp, boundary).map_err(|e| (e, pc))? {
+                            RetOutcome::Root(_) => {
+                                // the native's whole span answer rides the
+                                // completion channel to a live resumer and
+                                // the drive's death value whole
+                                match self.complete_current_span(&answer) {
+                                    Some((a, at)) => {
+                                        active = a;
                                         pc = at;
                                         continue 'transfer;
                                     },
+                                    None => return Ok(DriveOutcome::Died(answer)),
                                 }
+                            },
+                            RetOutcome::Boundary(_) => return Ok(DriveOutcome::Frame(answer)),
+                            RetOutcome::Resume {
+                                version,
+                                func,
+                                pc: at,
+                            } => {
+                                active = Active { version, func };
+                                pc = at;
+                                continue 'transfer;
                             },
                         }
                     },
@@ -8148,6 +8465,17 @@ impl Vm {
                                     pc,
                                 ));
                             },
+                            // a bound C symbol never rides the generic
+                            // dispatch (H5)
+                            ConstFuncRef::Bound { module, index, .. } => {
+                                return Err((
+                                    Trap::UnknownCallee {
+                                        module: module.clone(),
+                                        func: *index,
+                                    },
+                                    pc,
+                                ));
+                            },
                         };
                         let g = crate::native::resolve_generic(module, func).ok_or((
                             Trap::UnknownCallee {
@@ -8411,6 +8739,17 @@ impl Vm {
                                     Trap::UnknownCallee {
                                         module: name.to_owned(),
                                         func: *func,
+                                    },
+                                    pc,
+                                ));
+                            },
+                            // a bound C symbol never rides the generic
+                            // dispatch (H5)
+                            ConstFuncRef::Bound { module, index, .. } => {
+                                return Err((
+                                    Trap::UnknownCallee {
+                                        module: module.clone(),
+                                        func: *index,
                                     },
                                     pc,
                                 ));

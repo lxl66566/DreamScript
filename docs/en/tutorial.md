@@ -1,12 +1,12 @@
 # DreamScript in one short tutorial
 
-DreamScript is a general-purpose interpreted language with static set-theoretic types, affine-by-default values, guaranteed tail calls, reference-counted memory with no GC, and optional JIT tiers. This file is the entire v1 surface, the artifact of the explainability budget: the whole language fits one short tutorial.
+DreamScript is a general-purpose interpreted language with static set-theoretic types, affine-by-default values, guaranteed tail calls, reference-counted memory with no GC, and optional JIT tiers. This file is the whole v1 surface, the explainability budget in one tutorial.
 
-Run examples as scripts with `ds run file.ds`. Snippets below are fragments; top-level statements are legal only in a script's entry file (see Modules and script mode).
+Run examples with `ds run file.ds`; top-level statements are legal only in a script's entry file (see Modules and script mode).
 
 ## Values and bindings
 
-A binding is `const` (the default, immutable) or `var` (a rebindable local); rebinding a `var` changes which value the name holds, while changing a value in place is a separate, always-visible mechanism (see Linearity).
+A binding is `const` (the default, immutable) or `var` (a rebindable local); rebinding swaps the value the name holds, and in-place change is the separate mutation channel (see Linearity).
 
 ```ts
 const name = "dreamscript"   // immutable, type inferred as string
@@ -17,9 +17,9 @@ fn count_up() -> int {
 }
 ```
 
-Numbers: `int` is 64-bit signed, `float` is 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`); a width suffix (`42u32`) names a declared type, so undeclared widths refuse, and a suffixed literal itself still refuses at lowering today — the width word is built by the conversions named below. Arithmetic traps on overflow and division by zero (`1 / 0` panics; floats follow IEEE and never trap, so `1.0 / 0.0` is `+inf`); wrapping is explicit (`a +% b`, `a *% b`, `-%a`), and narrowing is an explicit call that waits on the width types (`i32(u)`, `i64(f)`), while `u32.of(x)` answers today — the ambient's trapping conversion on the width's own static tier, in range the width's word and out of range a trap naming the value and the range (the checked `u32_of` answers `u32 | none` instead; the bare `u32(x)` spelling refuses as a type called as a function under F9's namespace priority, awaiting the author's word); the shift and bitwise operators (`<<`, `>>` arithmetic, `&`, `^`, `|`) lower over ints, a shift amount at or past 64 (or below zero) trapping like overflow and division by zero, with the bitwise trio total.
+`int` is 64-bit signed and `float` 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`), and a width suffix (`42u32`) names a declared type, so an undeclared width refuses and a suffixed literal itself refuses at lowering. Overflow and division by zero trap (`1 / 0` panics), while floats never trap (`1.0 / 0.0` is `+inf`). Wrapping is explicit (`+%`, `*%`, `-%a`); narrowing is a width-type call (`i32(u)`, `i64(f)`) with `u32.of(x)` the trapping conversion and `u32_of` the checked `u32 | none` (bare `u32(x)` refuses under the F9 namespace priority). `<<`, `>>` shift arithmetically, `&`, `^`, `|` are total, and a shift amount at or past 64 or below zero traps.
 
-Strings are immutable UTF-8 with escapes `\n \t \r \\ \" \' \0 \u{...}`; raw strings `r"..."` and nestable `r#"..."#` carry no escapes and cover multiline needs; `'x'` is a Unicode scalar char, `b'x'` a single byte (its `\u{..}` escape spelling the full 0-255 range, `b'\u{ff}'` naming any value while a raw non-ASCII char refuses), `code_of(c)` reads the char's scalar back, and the checked `char_of(code)` answers `string | none`, `none` naming a code that is no Unicode scalar. Interpolation is a string-only context: `"$x"` and `"${e}"` desugar to `str(e)` and compile when the operand is a printable primitive (`int`, `float`, `bool`, `char`, `byte`, `string`) or carries `show`, the hole staging the solved `show` dispatch at its own span (a union receiver through its covering impls); a union or optional operand with no covering `show` is an error — extract first or implement `show` over the whole union.
+Strings are immutable UTF-8 with escapes `\n \t \r \\ \" \' \0 \u{...}`; raw `r"..."` and nestable `r#"..."#` take no escapes and cover multiline needs. `'x'` is a Unicode scalar char and `b'x'` a byte (`\u{..}` spelling 0-255, while a raw non-ASCII byte char refuses); `code_of(c)` reads the char's scalar, and checked `char_of(code)` answers `string | none` (one scalar, a codepoint's UTF-8 bytes not being expressible in ds source). Interpolation is string-only: `"$x"` and `"${e}"` desugar to `str(e)` for a printable primitive (`int`, `float`, `bool`, `char`, `byte`, `string`) or a `show` carrier staged at its own span, a union receiver through its covering impls; a union or optional operand without covering `show` is an error.
 
 ```ts
 const who = "ada"
@@ -33,7 +33,7 @@ Equality is one structural `==` over all data, never overloadable; no `===` exis
 
 ## Types are sets
 
-Declarations are nominal — every `tag`, `struct`, and `enum` has identity — and the type language above them is set algebra: unions `a | b`, intersections `a & b`, and differences `a - b` over nominal atoms. Intersections keep the most precise member's layout; difference types erase entirely. Type aliases never declare cases; payload cases live only in enum blocks.
+Declarations are nominal: every `tag`, `struct`, and `enum` has identity. Types are sets — unions `a | b`, intersections `a & b`, differences `a - b` over nominal atoms — where an intersection keeps the most precise member's layout and a difference erases entirely. Aliases never declare cases; payload cases live only in enum blocks.
 
 ```ts
 struct bad_port { got: int }
@@ -43,9 +43,9 @@ enum parse_error { bad_number(string), missing_field(string) }
 type entry = map[string, string]
 ```
 
-The ambient predeclares the failure taxonomy of the fallible reads — `io_err`, `parse_err`, the net error `net_err` (`timeout | refused`), and the bytes-decode error `utf8_err` — as it predeclares `none`, the `json` value family (one enum case per grammar shape, the number split kept faithful), and the `config` record the extraction example below uses, so a script's errors and parsed documents share one vocabulary; redeclaring any of them is a duplicate-definition error.
+The ambient predeclares the fallible-read taxonomy (`io_err`, `parse_err`, `net_err` as `timeout | refused`, `utf8_err`) beside `none`, the `json` family, and the `config` record the extraction example uses; redeclaring one is a duplicate-definition error.
 
-Construction is fixed per declaration: structs use brace form only, enum cases call form only, unit tags are bare, and cross-spellings are checker errors; struct braces support punning.
+Construction is fixed per declaration: structs brace form only, enum cases call form only, unit tags bare, cross-spellings checker errors, and struct braces support punning.
 
 ```ts
 timeout                                    // unit tag: bare
@@ -55,9 +55,9 @@ const url = "https://ds.dev"
 const home = page { url, body: "" }        // punning: the field fills from the local
 ```
 
-`T?` is exactly `T | none` and is legal in every annotation position; `none` is an ordinary unit tag, so optionals, error unions, and enums share one mechanism — narrowing, matching, one extraction family — with no `?.` operator.
+`T?` is exactly `T | none`, legal in every annotation position; `none` is an ordinary unit tag, so optionals, error unions, and enums share one mechanism (narrowing, matching, one extraction family), and no `?.` exists.
 
-Narrowing is `is`: Kotlin-shaped type narrowing (never identity comparison) whose right side is a type expression, so `|` and `&` are legal there. Refinement narrows monotonically through `is` tests, none tests, and match arms, resetting only at assignment.
+Narrowing is `is`, Kotlin-shaped and never identity comparison, its right side a type expression, so `|` and `&` are legal there; refinement narrows monotonically through `is` tests, none tests, and match arms, resetting at assignment.
 
 ```ts
 tag doc_null
@@ -78,17 +78,17 @@ fn port_of(j: doc) -> int | none | bad_port {
 }
 ```
 
-Types and values resolve in two namespaces: constructors (brace forms, bare tags, generic applications like `list[page]()`) in the type namespace, functions in the value namespace. A struct `map` and a function `map` coexist; a call-form name in both is an ambiguity error, never a priority search.
+Constructors (brace forms, bare tags, generic applications like `list[page]()`) live in the type namespace, functions in the value namespace: a struct `map` and a function `map` coexist, and a call-form name in both is an ambiguity error.
 
-Lists and tuples: `[1, 2, 3]` is a `list[int]` literal, the empty mutable collection is `list[page]()`, and map literals are deferred (maps are built by calls for now; union values ride the map value channel, so a `map[string, json]` read runs — the ambient's `json_object` case is exactly that map). Ad-hoc aggregates are anonymous tuples — `("host", 8080)` — with destructuring in bindings and patterns.
+Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `map_get` read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
 
 ## Functions
 
-`fn` is the only named-function declaration — at top level and as trait/impl members — and the defined name is in scope inside its own body, so recursion is direct. Parameters are `name: t`, returns are `-> t`, union returns parse as `-> a | b`, and `T?` is legal in any annotation.
+`fn` is the only named-function declaration, at top level and as trait/impl members, and the name is in scope inside its own body, so recursion is direct. Parameters are `name: t`, returns are `-> t`, and union returns parse as `-> a | b`.
 
-The body's final expression is the return value; `return e` exits early; `break`/`continue` serve loops; `()` is the unit type; a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions and anchor the set algebra; locals, lambdas, and match arms are inferred.
+The body's final expression is the return value; `return e` exits early; `()` is the unit type, and a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions, while locals, lambdas, and match arms are inferred.
 
-Anonymous functions are const-arrow lambdas, the only other function spelling: a binding inside any block names one, while top level names functions with `fn` only.
+Anonymous functions are const-arrow lambdas, the only other function spelling: a binding inside any block names one; top level names functions with `fn` only.
 
 ```ts
 fn doubled(xs: list[int]) -> list[int] {
@@ -100,7 +100,7 @@ fn doubled(xs: list[int]) -> list[int] {
 println("${doubled([1, 2, 3]).reduce(0, (a, b) => a + b)}")
 ```
 
-Functions are values end to end: a named fn binds and passes like any value, a `fn(t) -> r` parameter or return names a fn type, and any callable (named fn, lambda, capturing closure) inhabits the slot with one call spelling. A fn-typed return builds factories: `(k: int) => (x: int) => x + k` makes add-k functions.
+Functions are values end to end: a named fn binds and passes like any value, `fn(t) -> r` names a fn type in either position, and any callable (named fn, lambda, capturing closure) inhabits the slot with one call spelling. A fn-typed return builds factories: `(k: int) => (x: int) => x + k`.
 
 ```ts
 fn apply(f: fn(int) -> int, v: int) -> int { f(v) }
@@ -113,13 +113,13 @@ const b = apply((x: int) => x * k, 4)   // so does a capturing closure
 const raised = [1, 2].map(inc)          // one combinator parameter, every callable
 ```
 
-UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first (a same-named free function owns the dot position even when its parameter types do not fit, so the member needs the hatch), then trait methods, `trait::f(x)` as the escape hatch, and true ambiguity a compile error. Capability parameters are named and excluded from the dot position: `println(io, msg)` can never be written `msg.println()` with `io` hidden.
+UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first (a same-named free function owns the dot position even when its parameter types do not fit, so the member needs `trait::f(x)`), then trait methods, and true ambiguity a compile error. Capability parameters are named and excluded from the dot position, so `println(io, msg)` is never `msg.println()`.
 
 ```ts
 const n = "hello".len()        // desugars to len("hello")
 ```
 
-Signatures may default parameters — literals only, the omitted argument staged at the call site whatever the callee class (free fn, inherent member, or trait dispatch). Call sites may name arguments after positional ones: an enum case constructor fills its payload fields by name, while the function-call spellings parse the form and refuse at lowering. A last-argument lambda may be written after the call as a brace block — `twice { k + 11 }` stages exactly like `twice(() => k + 11)` over every callee class that takes one (named fn, dot-call, indirect call).
+Signatures may default parameters, literals only, the omitted argument staged at the call site whatever the callee class. Call sites may name arguments after positional ones: an enum case constructor fills its payload fields by name, while the function-call spellings parse the form and refuse at lowering. A last-argument lambda may be written after the call as a brace block, so `twice { k + 11 }` stages like `twice(() => k + 11)`.
 
 ```ts
 fn connect(host: string, port: int = 8080) -> string { "${host}:${port}" }
@@ -139,7 +139,7 @@ Every block opens with a visible token; statements are newline-terminated with n
 const m = if a >= b { a } else { b }
 ```
 
-`match` is Rust-shaped: arms `pat => expr` separated by commas or newlines, guards `pat if cond`, or-patterns `a | b`, destructuring bindings, and the `_` wildcard; a struct pattern tests its literal fields in place and binds the rest (`point { x: 1, y }`), an enum case arm tests and binds its payload the same way (`scored(1)`, `scored(n)`), and a failed payload test or guard slides to the next arm, so every can-fail member arm needs a later settling arm or a catchall; nested struct patterns test and bind fields the same way. Exhaustiveness is checked by tag identity over the set algebra, and the diagnostic names the missing members as a set computation ("missing: timeout | refused"). A tuple scrutinee carrying a union element refuses at lowering today — narrow the element into a local first.
+`match` is Rust-shaped: arms `pat => expr` separated by commas or newlines, guards `pat if cond`, or-patterns `a | b`, destructuring bindings, and `_`. A struct pattern tests its literal fields in place and binds the rest (`point { x: 1, y }`), an enum case arm tests and binds its payload the same way, and a failed test or guard slides to the next arm, so a can-fail arm needs a settling arm or a catchall. Exhaustiveness is checked by tag identity over the set algebra ("missing: timeout | refused"); a tuple scrutinee carrying a union element refuses at lowering.
 
 ```ts
 fn parse_age(s: string) -> int | parse_error {
@@ -166,7 +166,7 @@ fn report(total: int, failed: int) -> string {
 }
 ```
 
-Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive) — the `in` operator takes a bare range as its right side, and collection membership has no operator form (`xs.contains(x)`) — plus `while cond`, with `break` and `continue`. Boolean contexts (conditions, `&&`/`||`/`!` operands) are bool-typed.
+Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `map_get`). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
 
 ```ts
 fn drill() {
@@ -178,13 +178,13 @@ fn drill() {
 drill()
 ```
 
-The explicit early-exit spelling is `if x is none { return missing }`, with refinement applying to everything after it. `return` is a statement, never an arm's answer: a value-consumed position — an arm inside an `if`/`match` used as an expression, a bare block initializer, an argument slot — refuses it (DS2039), because the diverged path has no answer for the consuming slot; spell the exit as its own statement line (an arm of a statement `if`/`match` may exit beside its value-bearing sibling) and let the code below it read refined.
+The early-exit spelling is `if x is none { return missing }`, with refinement applying after it. `return` is a statement, never an arm's answer: a value-consumed position (an `if`/`match` arm used as an expression, a bare block initializer, an argument slot) refuses it (DS2039).
 
-Operator precedence is one frozen C-family table, published here once and never extended, with no user-defined operators: postfix calls and subscripts, unary `!` `-`, `*` `/` `%`, `+` `-`, shifts, `&` `^` `|`, comparisons and `in` (`x in a..b && flag` reads `(x in a..b) && flag`), `&&`, `||`, tightest first; the word-form operators are exactly `in` and `is`.
+Precedence is one frozen C-family table, never extended, with no user-defined operators: postfix calls and subscripts, unary `!` `-`, `*` `/` `%`, `+` `-`, shifts, `&` `^` `|`, comparisons and `in`, `&&`, `||`, tightest first, so `x in a..b && flag` reads `(x in a..b) && flag`. The word-form operators are exactly `in` and `is`.
 
 ## Errors and extraction
 
-Expected failures are union members of return types — storable data, one predicted branch in the VM, no exception machinery. `?` propagates: members outside the ok-type return early, with checked containment — the enclosing return union must contain the propagated member, and no implicit conversions exist.
+Expected failures are union members of return types: storable data, one predicted branch in the VM, no exception machinery. `?` propagates, returning early on members outside the ok-type with checked containment (the enclosing return union must contain the propagated member).
 
 ```ts
 fn parse_config(text: string) -> config | parse_error { config { host: text, port: none, retries: 3 } }
@@ -209,15 +209,15 @@ fn require_name(m: map[string, string]) -> string | parse_error {
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).ok((n: string) => n).err((e) => "?")}")
 ```
 
-The @std extraction family — `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err` — plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary; let-it-crash supervision is a library pattern. Deliberate abort is `die(msg)`, a host provision rather than a language primitive: the `ds` CLI installs the spelling for its entry sessions (`run`, `dev`, `repl`) and prints `die: <msg>` exiting failed, while a compile without the provision (tests, embedders, `--no-ambient`) keeps the name unknown; a block-tail `die` against an annotated return refuses (the never-type machinery is unset), so spell it as its own statement.
+The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses.
 
 ## Linearity
 
-Every value is affine: moving it into a new binding, a consume-mode call, or a return kills the old binding, and use-after-move is a compile error rendered as a two-span linear diagnostic ("value `h` was consumed here / used again here"). Checking is one intraprocedural forward pass over last uses — no lifetime annotations, no mode syntax at call sites. Copyable values satisfy the rule by copying invisibly, so everyday code never notices it.
+Every value is affine: moving it into a new binding, a consume-mode call, or a return kills the old binding, and use-after-move is a compile error rendered as a two-span linear diagnostic. Checking is one intraprocedural forward pass over last uses, with no lifetime annotations and no mode syntax at call sites.
 
-`~Copyable` is a negated set constraint — it subtracts the default copyability constraint and composes with unions — marking real resources such as file descriptors, locks, and foreign memory. Such values cannot be copied and cannot be lost: `deinit` runs exactly once at the unique instance's death, on every path including early return, panic, and cancellation teardown. The ambient's own resources carry the pattern: `open_file` answers the deinit-carrying `file_handle` whose fallible reads (`read_raw`, `read_exact`) answer `bytes | io_err`, and `net_connect` answers the same-shaped `net_handle` served by `send`/`recv`/`close_conn`, the fallible reads answering the net error union (`string | net_err` for `recv`, `() | net_err` for `send`) over the taxonomy's two cases; the open and the connect keep the total spelling because a deinit-carrying value refuses as a union member, and each deinit closes what an explicit close already closed, idempotently. Phantom-state unions (`file[open] | file[closed]` style) typestate protocols on the same marker; explicit `drop` is a debug and FFI tool only, since users never write routine drops.
+`~Copyable` is a negated set constraint marking real resources (file descriptors, locks, foreign memory): such values cannot be copied or lost, `deinit` running exactly once at the unique instance's death, on every path including early return, panic, and cancellation teardown. The ambient's resources carry the pattern: `open_file` answers the deinit-carrying `file_handle` (fallible reads `read_raw`/`read_exact` answering `bytes | io_err`) and `net_connect` a `net_handle` served by `send`/`recv`/`close_conn` (fallible reads answering `() | net_err` and `string | net_err`). Both keep the total spelling, since a deinit-carrying value refuses as a union member, and a deinit closes what an explicit close already closed. Phantom-state unions (`file[open] | file[closed]`) typestate on the same marker; explicit `drop` is a debug and FFI tool.
 
-Mutation has one channel — a named call on an owned receiver with a `mut` mode — always lexically visible at the call. The three parameter modes are fixed at the definition site: default borrow (immutable), `mut` (an exclusive, re-storable window: the callee may re-seat its parameter and the caller's binding never observes the re-seat), and `move` (a consuming hand-off: the deinit claim rides the move, so the callee's scope end fires the hook once). Call sites carry zero mode syntax: `xs.list_push(1)` reads identically whatever the mode. Inside a window are zero runtime checks, alias-freeness being proven; outside it everything is shared-immutable, so shared mutation is unrepresentable by construction.
+Mutation has one channel, a named call on an owned receiver with a `mut` mode, lexically visible at the call. Parameter modes are fixed at the definition site: default borrow (immutable), `mut` (an exclusive re-storable window, where the callee may re-seat its parameter and the caller never observes it), and `move` (a consuming hand-off, the deinit claim riding the move). Call sites carry zero mode syntax; inside a window are zero runtime checks, alias-freeness being proven, and outside it everything is shared-immutable.
 
 ```ts
 type raw_fd = int
@@ -235,9 +235,7 @@ println("${size("x")} ${close(file { fd: 3 })}")
 
 ## Collections and iteration
 
-Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned, so in-place reuse is guaranteed and observable. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, a `const` receiver is a compile error, and no hidden copy hides behind an aliasing call. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note, never an error. Persistent structures are ordinary library types on the same runtime; `bytes` and `vec` are the unboxed unique members of the same model (FFI-grade).
-
-A record element is one unit on the same surface: the checked `list_get` read answers `t | none` whole, fields project out of the extraction, and the copy closes move whole spans.
+Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `list_get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
 
 ```ts
 var club = list[user]()
@@ -250,7 +248,7 @@ const roster = collect(grown)                                   // the whole-lis
 for u in roster { println("user ${u.name}") }
 ```
 
-Iteration is combinators — `map`, `filter`, `reduce`, and friends — plus `for`, all over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops, and non-fusable shapes fall back to the same cursor semantics. Subscripts are single-element (`xs[0]`) with no slicing sugar; index typing waits on the stdlib collection types, and string slices are library calls — the checked `substring(s, 0, 2)` answers `string | none` on char boundaries today, an out-of-range slice answering none, and the indexed read `char_at(s, i)` answers `char | none` under the same convention; `split(s, c)`/`join(xs, c)` take exactly one `char` separator, answering a `list[string]` and a `string`.
+Iteration is combinators (`map`, `filter`, `reduce`, and friends) plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar, and index typing waits on the stdlib types. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
 
 ```ts
 // rows: list[entry]
@@ -265,11 +263,11 @@ const total = users
   .reduce(0, (a, b) => a + b)
 ```
 
-Stage note: `list[record]` runs end to end — `list_push` stages each element's whole word span, the checked `list_get`/`first` read answers whole, for-in and `in` bind whole elements per step, the closes (`cons`, `tail`, `collect`, `list_concat`) move whole spans, and `map`/`filter`/`partition`/`reduce` run over struct elements and answers (`partition` through the native channel's tag-less multi-word total, a struct-folding `reduce` staging the init's span between the list and the callable). The `rows.map(parse_user)` half waits: union elements refuse at every read. A `list[(int, string)]` element stages its positional words per element, so the checked reads, for-in, `in`, the closes, and the combinators (a tuple-accumulator `reduce` included) run over tuple elements, and a tuple member of a union destructures positionally inside a member arm's body (a tuple arm resolves no member). Maps have no iteration — build a list, or use the checked `map_get` read; `m.len()` counts the pairs through the free generic's Map instance. `bytes` runs end to end — one immutable byte string per value behind one reference word: `bytes_of` constructs from `list[byte]` and `byte_list` bridges back, `len` counts the payload, `==`/`!=` answers payload content equality over bytes operands, the checked `byte_at` answers `byte | none`, and the file face's `read_exact` answers `bytes | io_err`. The representation carries the derived faces too: `show` renders the payload as a byte list (`bytes[1, 2, 255]`, empty printing `bytes[]`), `ord` orders and `hash` hashes over the payload lexicographically (a shorter prefix first), so `derive(show/ord/hash)` composes over a bytes part, and the bridges cross to text — `utf8_encode` takes the string's own bytes, `utf8_decode` validates on the way back answering `string | utf8_err`.
+`list[record]` and `list[(int, string)]` run end to end, whole word spans crossing each read, close (`cons`, `tail`, `collect`, `list_concat`), and combinator; union elements refuse at every read, so `rows.map(parse_user)` waits, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
 
 ## Traits and generics
 
-A trait is a set-theoretic interface; an instance is declared for a type head; receivers are spelled `self` (borrow) or `mut self` (exclusive window), typed `Self` and exempt from annotation.
+A trait is a set-theoretic interface; an instance is declared for a type head; receivers are `self` (borrow) or `mut self` (exclusive window), typed `Self`.
 
 ```ts
 trait renderable {
@@ -285,7 +283,7 @@ impl[t: renderable] renderable for list[t] {
 println([1, 2, 3].render())
 ```
 
-A member default lives in the declaration that owns the body: the trait declaration is the single authority for a trait member's default — every impl omits it, and both call spellings stage the declared literal when the argument is absent — while an inherent impl member keeps its default in its own body.
+A trait member's default lives in the trait declaration: impls omit it and both call spellings stage the declared literal, while an inherent impl member keeps its own.
 
 ```ts
 trait sized {
@@ -303,20 +301,22 @@ const b = sized::pad(3, 10)            // 13: a written argument, either spellin
 const c = counter { ticks: 1 }.bump()  // 4
 ```
 
-An impl member may also omit the receiver: `impl gauge { fn make(level: int) -> gauge }` is called through its type name (`gauge.make(4)`) or an instantiated application (`list[int].make()`, the applied type solving as the call's `Self` and binding a generic impl's head variables so the member's signature reads through them; a bare type name spells no type arguments, so it cannot reach a generic impl's members), type-keyed and static — no instance word, a bounded impl's evidence staging at the call like the value-receiver spelling — and the `default` derive answers through the same surface (`fn default() -> Self`, so `point.default()` and the primitive spelling `int.default()` run); trait members keep the receiver, dispatch being receiver-carried.
+An impl member may omit the receiver: `impl gauge { fn make(level: int) -> gauge }` is called through its type name (`gauge.make(4)`) or an instantiated application (`list[int].make()`, the applied type solving as the call's `Self` and binding a generic impl's head variables, while a bare type name cannot reach a generic impl's members). Such a member is type-keyed and static, and the `default` derive answers through the same surface (`point.default()`); trait members keep the receiver.
 
-The only coherence rule is pairwise disjointness of one trait's instance heads — for every pair, prove `H1 & H2 = empty` — checked at each declaration, again over the package's closed instance set, and again at link time, so an impl landing after the generics it intersects cannot hide an overlap; generic heads count through their instantiations, so `impl shows for list[int]` and `impl [t: shows] shows for list[t]` overlap at `list[int]`. Any module may implement for any type, foreign included: no orphan rule, no newtype wrappers, no priority machinery; an overlap error names both heads and a witness value type, union heads decompose into per-branch instances, and a `& ~trait` bound in a generic clause carves exclusivity when overlap is intended. Heads never overlap, so a tag-keyed inline cache never needs tie-breaking.
+Coherence is pairwise disjointness of one trait's instance heads — every pair proves `H1 & H2 = empty` — checked at each declaration, over the package's closed instance set, and at link time; generic heads count through their instantiations, so `impl shows for list[int]` and `impl [t: shows] shows for list[t]` overlap at `list[int]`. Any module may implement for any type, foreign included: no orphan rule, no newtype, no priority machinery. An overlap error names both heads and a witness value type, union heads decompose per branch, and a `& ~trait` bound carves exclusivity where overlap is intended.
 
-Generics carry one clause — `[t: c]` on functions, `[t]` on types — and every generic function exists exactly once in bytecode: call sites pass evidence words (statically resolved instances, or runtime slots behind one-to-two-entry inline caches with no correctness role), and the JIT may specialize per type lazily. Dispatch is determined by types and the set algebra, never by declaration order or priority; no HKT and no GATs in 1.0.
+Generics carry one clause — `[t: c]` on functions, `[t]` on types — and every generic function exists once in bytecode: call sites pass evidence words (statically resolved instances or runtime slots behind inline caches), and the JIT may specialize lazily. Dispatch comes from types and the set algebra, never declaration order or priority; no HKT, no GATs.
 
 ```ts
 struct stack[t] { items: list[t] }
 fn push[t: ~Copyable](s: stack[t], x: t) -> stack[t] { stack { items: cons(x, s.items) } }
 ```
 
-Stage note: the traits above run — trait sites dispatch over impl member bodies, a generic impl lowers once with the entering call site staging the evidence words, nested trait calls inside a generic body ride that evidence, and a nested generic dispatch transfers transitively through the module's evidence-chain table, one table read per hop (no frame bound on chain depth — the checker's instance solving is the practical limit). The runtime-evidence seam stays one-word: a substituted type spanning more than one word refuses at the entering site, since the one body carries the variable as a single Raw word end to end and per-instantiation frames are the JIT specialization tier's, never the interpreter's. Free generic fn calls run the same way: one body per fn, the call site staging the bound's serving words after the arguments (a generic fn used as a value and a generic lambda value still refuse their callable words — the word carries no instantiation), the running bodies keeping to trait dispatch on the variable and the builtin `list`/`map` applications — a user-declared generic application's values refuse at lowering, and a builtin generic native (`cons`, `first`) refuses a bare-variable argument, no instance covering it.
+Trait dispatch, generic impls, and transitively chained nested dispatch run, while a substituted type spanning more than one word refuses at the entering site, the runtime-evidence seam being one word; a generic fn used as a value, a generic lambda value, a user-declared generic application's values, and a builtin generic native (`cons`, `first`) over a bare variable refuse at lowering.
 
-Operators are fixed traits — `+` dispatches to `add`, indexing to `index`, over a closed token set under the frozen precedence table above; `==` is never overloadable — but the operator traits are surface only (user `+` refuses at the checker today), and ordering runs through the landed `ord` derive. Derives are attributes covering the mechanical cases: `hash`, `show`, `ord` (field-order lexicographic), `clone`, `default`, `from_json`, and `to_json` run today — `==` never derives; an enum's own `default()` answers its first case (a unit case, or the one `#[default]` annotates: the annotation on one enum case names the member the family synthesizes the union's default over, so the union's `default()` answers the annotated case's construction and a defaulting struct field typing the union answers the same construction, while an un-annotated union-typed field refuses as ambiguous); and the json families ride the ambient's json face (the paragraph below). Comptime is the language itself: a free fn whose parameters are all `comptime` — `comptime t: type` over the builtin `type` atom, or a scalar annotation taking a plain literal — has its calls evaluated at compile time on the same VM in a world-fenced context (a world-touching call refuses), and it may call an ordinary helper whose solved effect row is pure or trap alone — the helper's body joins the fenced evaluation, any other row refusing at the fence naming the call — the answer, a scalar or a list of them, embedding at the call site as the literal a user would have written; no macros of any level exist, so hygiene is deleted structurally. Reflection is comptime-only: `fields(t)` walks a struct's declared fields or an enum's declared cases as (name, type, tag) records — a case's `type` is its payload atom, `none` when it constructs bare, its `tag` its constructor name — and `type_name` spells a type as a string; runtime type questions are answered by the tags data already carries (`is`, match).
+Operators are fixed traits — `+` to `add`, indexing to `index` — over a closed token set under the frozen precedence table, `==` never overloadable, and the operator traits are surface only (user `+` refuses at the checker). Derives cover the mechanical cases (`hash`, `show`, `ord` as field-order lexicographic, `clone`, `default`, `from_json`, `to_json`), and `==` never derives. An enum's `default()` answers its first case, or the one `#[default]` annotates, which also settles a defaulting struct field typing the union; an un-annotated union-typed field refuses as ambiguous.
+
+Comptime is the language itself: a free fn whose parameters are all `comptime` (`comptime t: type` over the builtin `type` atom, or a scalar annotation taking a plain literal) evaluates its calls at compile time on the same VM in a world-fenced context, and may call an ordinary helper whose solved effect row is pure or trap alone. The answer, a scalar or a list, embeds at the call site as the literal a user would have written. No macros of any level exist, so hygiene is deleted structurally. Reflection is comptime-only: `fields(t)` walks a struct's fields or an enum's cases as (name, type, tag) records (a case's `type` its payload atom, `none` when it constructs bare, its `tag` its constructor name), `type_name` spells a type, and runtime type questions use the tags the data carries.
 
 ```ts
 #[derive(hash, show, ord)]
@@ -345,7 +345,7 @@ println(schema(page))  // {title: string, views: int, }: a constant before anyth
 println(cases(tone))   // {quiet: none/quiet, loud: loud/loud, }: payload atom or none, tag the constructor
 ```
 
-JSON is the ambient's `json` face: the predeclared enum's cases cover the grammar's shapes (`json_string { string }`, `json_object { map[string, json] }` among them), `parse_json: (string) -> json | parse_err` reads one document, the plain `to_json: (json) -> string` writes the minified form back, and the typed readers walk a document whose shape is still open — `json_member(v, "port")` answers `json | none`, and each `json_as_*` reader (`json_as_int`, `json_as_string`, ...) answers its scalar or `parse_err` on a wrong shape. The scalar widths ride their ruled representations: `byte` (0-255) and `u32` as json numbers, `char` as a one-character json string, `bytes` as a json array of numbers — one element per payload byte — so an out-of-range number or wrong-shaped value answers `parse_err` like any other. When the shape is a declared type, the derive families close it: `#[derive(from_json)]` synthesizes the receiverless member `from_json(v: json) -> Self | parse_err` — the struct walk reads one member per field, a required member's absence answering `parse_err`, an optional field reading absence as `none`, a list field walking the array, a field whose own type derives `from_json` composing, the width fields reading through their readers above — and `#[derive(to_json)]` is the mirror, synthesizing `to_json(v: Self) -> json` that builds the value through the enum's own cases, an optional field's presence setting its member and its absence leaving the member out; `t.to_json(v).to_json()` answers the string. An enum target reads its unit cases from their own names and its one struct-payload case from its members. Beside the shared refusal classes (a tag, a tuple field, generic declarations, `~Copyable` parts), the encode side refuses an optional nested inside a part.
+JSON is the ambient's `json` face: the predeclared enum's cases cover the grammar's shapes (`json_string { string }`, `json_object { map[string, json] }` among them), `parse_json: (string) -> json | parse_err` reads one document, `to_json: (json) -> string` writes the minified form back, and the typed readers walk a still-open shape (`json_member` answers `json | none`, each `json_as_*` reader its scalar or `parse_err`). `byte` (0-255) and `u32` ride json numbers, `char` a one-character string, `bytes` an array of one element per payload byte, so an out-of-range or wrong-shaped value answers `parse_err`. Derive closes a declared shape: `from_json(v: json) -> Self | parse_err` reads one member per field (a missing required member answering `parse_err`, an optional field reading absence as `none`, a list field walking the array, a deriving field composing), and `to_json(v: Self) -> json` mirrors it, an absent optional leaving its member out. An enum target reads its unit cases from their names and its one struct-payload case from its members. Beside the shared refusal classes (a tag, a tuple field, generic declarations, `~Copyable` parts), the encode side refuses an optional nested inside a part.
 
 ```ts
 #[derive(from_json, to_json)]
@@ -367,11 +367,11 @@ println(roundtrip("{\"name\": \"ada\", \"age\": 45}"))
 
 ## Modules and script mode
 
-Four layers: definitions (the identity and visibility unit) live in files (a namespace spelling); files in one package share one namespace — zero intra-package imports, and intra-package cycles are legal — and the package is the compilation unit; the module is the `ds.pkg` manifest, the dependency and distribution unit whose hash cascade makes the manifest the lock (no lockfile exists). Cross-package cycles are a link error.
+Definitions (the identity and visibility unit) live in files (a namespace spelling); files in one package share one namespace — no intra-package imports, intra-package cycles legal — and the package is the compilation unit; the module is the `ds.pkg` manifest, whose hash cascade makes it the lock. Cross-package cycles are a link error.
 
-Module bodies are pure compile-time declarations — no import-time execution, period — which buys intra-package cycle tolerance, safe hot reload, and lazy loading. Script exception: in script mode only, the entry file's top-level statements are legal and compile into a synthesized `main`; imported files and package members stay pure.
+Module bodies are pure compile-time declarations; in script mode only, the entry file's top-level statements compile into a synthesized `main`, and imported files stay pure.
 
-A line-initial `##` at top level separates blocks (the rest of the line is free separator text); definitions are order-independent with or without separators, and a file without separators is one block. A `///` line is a doc comment attaching to the next definition — a member or field included, printed exactly where it stood — while `//` is the ordinary comment.
+A line-initial `##` at top level separates blocks (the rest of the line is free text); definitions are order-independent, and a file without separators is one block. `///` is a doc comment attaching to the next definition, member or field included; `//` is the ordinary comment.
 
 ```ts
 ## state
@@ -386,18 +386,21 @@ fn read_all(f: string) -> string { f.to_upper() }
 println(read_all("ready"))
 ```
 
-Visibility is private by default; `pub(pkg)` opens package-wide (tests included) and never enters the interface; `pub` opens to dependents and enters the generated `.dsi` — `ds info` writes it, it is the reviewable API surface, and if nothing in `.dsi` changes it is typically a safe refactoring.
+Visibility is private by default; `pub(pkg)` opens package-wide (tests included) and never enters the interface; `pub` opens to dependents and enters the generated `.dsi`, the reviewable API surface `ds info` writes.
 
-Imports are symbol-selective, aliasable, and conditional per target, unified on the sigil form (a `pub import` re-export refuses today, waiting on the transitive surface closure):
+Imports are symbol-selective, aliasable, and conditional per target, unified on the sigil form, and a `pub import` row is a re-export:
 
 ```ts
 import @std/csv (reader)
 import acme/pipeline/schema (entry, parse_row)
 import acme/pipeline/io as pio
 import acme/pipeline/fs if os == "windows"
+pub import @deep (base, base as origin, step, unit)
 ```
 
-Script mode is zero-config: `ds run script.ds` compiles and runs the entry file, and a `ds.pkg` beside the entry file turns the run into a package run — the manifest resolves over the content-addressed store (`$DS_CACHE/pkg`), `$DS_REGISTRY` names a registry — a local index root or a git remote URL (`https://...`, `file://...` for local testing) — whose verified content-addressed fetch fills the store's misses, and `ds save <pkg-root>` installs a working-tree package (the `ds.pkg` plus every `.ds` below the root) into the store.
+A pub row's bound selections join the package's export surface under the names the row bound (an alias included), so a dependent binds them exactly like the middle package's own callables, consts, and structs, while a private row's binding stays internal. Refusals: a selectionless `pub import` re-exports nothing, `pub(pkg)` names nothing on an import, and `pub import @std` refuses, the merged-ambient reading binding the compile's own names and never import-bound ones.
+
+Script mode is zero-config: `ds run script.ds` compiles and runs the entry file, and a `ds.pkg` beside it makes the run a package run over the content-addressed store (`$DS_CACHE/pkg`). `$DS_REGISTRY` names a registry, a local index root or a git remote URL (`https://...`, `file://...`), whose verified fetch fills the store's misses; `ds save <pkg-root>` installs a working-tree package into the store.
 
 ```ts
 import @std/csv
@@ -415,17 +418,21 @@ for row in rows {
 }
 ```
 
-Stage note: script mode's run half is live — `ds run script.ds` folds an entry file's top-level statements into a synthesized `main`, `ds build` records the declared imports into the artifact's link table (an `@std/...` path linking its package stem, so the deps-first load walk resolves them), and an `@std` import's selections validate against the exported surface (a `pub(pkg)`, private, or missing selection refusing) — while a linked import binds callables, plain-literal consts (the value crossing as its own fact), flat struct types (scalar and list-of-scalar fields), and non-generic enums (case names plus payload shape over the same word vocabulary) over which the consumer constructs, reads fields, matches, `is`-narrows, and binds signatures — a linked enum's tag rows seeding the consumer's table, so union-typed values cross both directions over agreed ids and a linked signature unioning over its own type runs — a computed or mutable const, a deeper foreign type, a trait member, an impl body, or a generic or defaulted function refusing as the unbindable shape (DS4021) — and `@std` is itself a package in the store: a manifest declaring the dep binds its imports through this same linked surface, while a graph that does not keeps the merged-ambient reading — so the csv script above parses with its `reader` use unresolved, the merged `@std` ambient exporting no csv; `ds info` renders a file's or package's `.dsi`, and `ds bind` waits with the loading round.
+The run half is live: `ds run` folds an entry file's top-level statements into a synthesized `main`, `ds build` records the declared imports into the link table, and an `@std` import's selections validate against the exported surface. A linked import binds callables, plain-literal consts, flat struct types (scalar, `bytes`, list-of-one-scalar, map-of-two-scalars, optional-scalar fields), non-generic enums and aliases, and bodiless structs, seeding the consumer's tag table; a computed or mutable const, a deeper foreign type, a trait member, an impl body, and a generic or defaulted function refuse as the unbindable shape (DS4021). `@std` is itself a package split between the shrunk core and the members moved into its own ds source: a graph declaring the dep compiles over the core and binds the linked extern face (`to_upper`, `concat`), while a graph without the dep keeps the merged-ambient reading that the non-run sessions ride (`ds check`, the REPL, `ds dev`, the LSP). A manifest-free script takes the declaring-graph discipline implicitly over the run path: `ds run`/`ds build` resolve the default bundle ahead of the compile, so a bare `config` — the extraction example above included — refuses as unknown over the core and the bare stem form `import @std (...)` is the spelling that runs; the csv row above parses under the merged sessions with its `reader` use unresolved, while a run of it refuses at the import itself, naming the member the bundle does not carry.
 
-`ds repl` is the interactive half of script mode: one persistent session where declarations append as their own blocks and statements fold into a REPL-owned `main`, each submission printing the value, its inferred type, and its effect row; the frame parks between submissions and resumes at the new statement, so prior statements run once and a trapping line rolls back without committing — its own deinit-carrying bindings firing their hooks once on the drain and the line's abandoned nursery torn down the same way, never-entered children released cold and the slot recycled; `:drop <name>` fires one live binding's deinit exactly once, `:reset` clears the session, `:quit` leaves.
+`ds repl` is the interactive half: declarations append as their own blocks and statements fold into a REPL-owned `main`, each submission printing the value, its inferred type, and its effect row. The frame parks between submissions and resumes at the new statement, so prior statements run once. A trapping line rolls back without committing, its deinit-carrying bindings firing once on the drain. `:drop <name>` fires one live binding's deinit, `:reset` clears the session, `:quit` leaves.
 
-`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself — a loop-driving entry parks at its back edge every watch round, so no language spelling exists — and every saved edit recompiles, swaps the module in place, and the parked frame's next call runs the new code; a broken edit keeps the old version running until you fix it. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` stages the entry's parameters the way `ds run` does, re-derived on every reload.
+`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself, a loop-driving entry parking at its back edge every watch round, so no language spelling exists; every saved edit recompiles and swaps the module in place, the parked frame's next call running the new code. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` stages the entry's parameters as `ds run` does.
 
-World-touching APIs — console, files, net, time — follow the capability idiom: the `ds` CLI installs an ambient platform handler for scripts behind the source's declaration (`std` the full face; `embed` console-only, its print face running while every world op beyond it refuses at install as an unprovided op), so `println` above just runs, while tests and embedders pass the capability explicitly (`println(io, msg)`) and swap schedulers with no code change; v1 has no effect syntax. Foreign code enters as opaque linear C handles behind `extern fn` (double-free is a compile error), with `ds bind header.h` generating typed externs.
+`ds lsp` answers, over stdio, the hovering position's checked type with its effect row, preceded by the declaration's `.dsi` signature line when the position names an exported one; a word an import selection names but the open documents alone leave unknown answers its line from the linked dependency's cached `.dsi` artifact.
+
+World-touching APIs (console, files, net, time) follow the capability idiom: the `ds` CLI installs an ambient platform handler for scripts behind the source's declaration (`std` the full face, `embed` console-only with every other world op refusing at install), so `println` above just runs, while tests and embedders pass the capability explicitly (`println(io, msg)`); v1 has no effect syntax. Foreign code enters as opaque linear C handles behind `extern fn` (double-free is a compile error); native libraries are package artifacts, the manifest pinning each under `[artifacts]` as `name = { ver, target, hash }`, and `ds bind <entry-or-root>` resolves the graph as a run does and reports each installed artifact's identity and exported C symbols.
+
+A bound extern calls the installed library: `extern "math" fn ds_add(left: int, right: int) -> int` names the `[artifacts]` entry between `extern` and `fn`, binding the declaration to the library owning the `ds_add` C symbol, so `ds_add(20, 22)` answers `42`. The serving slice is scalar: `int`, `bool`, and `float` parameters and returns, at most four parameters. Outside the slice the refusal names the boundary: `string` and `bytes` words, linear handles, a unit return, a generic, a fifth parameter, a bound extern used as a callable value, and a symbol the artifact does not export all refuse at lowering. A declared artifact no source binds never loads, while a binding run loads it at start; a bound extern outside a package run refuses. The binding is panic=abort, and a blocking foreign call pins its fiber, so preemption and cancellation observe only after it returns.
 
 ## Concurrency
 
-Concurrency is stackful VM fibers in mandatory nurseries: a fiber stack is interpreter data, spawn is one allocation, a switch is a pointer swap, and `spawn` exists only inside a `nursery` block. Scope exit joins children, first failure cancels siblings, and child errors union out at the boundary — a payloaded member rides its whole value out (struct fields, a captured list) and extracts like any union value; code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
+Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
 
 ```ts
 fn fetch_all(urls: list[string]) -> list[page] | net_err {
@@ -445,34 +452,23 @@ fn fetch_all(urls: list[string]) -> list[page] | net_err {
 }
 ```
 
-Parallelism is fork-join over the sendability substrate: a linear value is sendable by construction and an immutable value shareable, so race-freedom is static and the missing piece was only a scheduler — `par_map` and `par_reduce` over immutable or linear-partitioned inputs are deterministic, replayable, and lock-free by theorem.
+Parallelism is fork-join over the sendability substrate: a linear value is sendable by construction and an immutable value shareable, so race-freedom is static; `par_map` and `par_reduce` over immutable or linear-partitioned inputs are deterministic, replayable, and lock-free by theorem, running today as deterministic single-thread slices.
 
 ```ts
 const total = pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b)
 ```
 
-Stage note: `par_map` and `par_reduce` run today as the deterministic single-thread slices — `par_map` one spawned child per element with the answers assembling in input order (the callable's answer riding the child's completion whole, one word or a whole span alike, the callable a plain fn or a capturing lambda) and the first failure canceling the siblings, `par_reduce` the fold chaining one spawned child per element (the running accumulator's whole word span and the element, each joined before the next spawns, so any fold width chains through the seam) so the reduction applies strictly in input order and the first failure re-raises at the call — while actual parallel scheduling and nesting wait on the scheduler round.
-
-Cancellation is nursery-scoped and cooperative — an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight; teardown walks the kept frames and each deinit fires exactly once at the drain, with `defer` (scope-exit sugar, non-normative; it parses with no lowering yet) in teardown. Timeouts, `firstof`, and interleave are library combinators over the timer capability; supervision is a library pattern — a nursery with a restart policy.
+Cancellation is nursery-scoped and cooperative: an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight, and teardown walks the kept frames with each deinit firing exactly once, `defer` (scope-exit sugar, non-normative; it parses with no lowering yet) in teardown. Timeouts, `firstof`, and interleave are library combinators over the timer capability; supervision is a library pattern.
 
 ## The runtime
 
-Execution is three tiers over one shared lowering — a typed register VM with unboxed slots (integers and floats raw in frame slots; boxing is the scalar overhead static typing exists to delete), a copy-and-patch JIT whose stencils compile in microseconds, and Cranelift/wasm on demand — and short scripts never pay for tiering; the register VM is the running tier today, the JIT tiers designed but not started. Tail calls are a spec-level guarantee, self and mutual, in every tier, deterministically: the stack never grows at any call depth. Memory is precise reference counting with block reuse plus per-frame bump arenas — zero pauses, zero write barriers, no GC — and static typing deletes hidden classes, inline-cache guards, and deoptimization frames from the data path; JIT exits are breakpoints, the stack-limit check, effect-handler entry, and the cold overflow edge.
+Execution is three tiers over one shared lowering: a typed register VM with unboxed slots, a copy-and-patch JIT, and Cranelift/wasm on demand, the register VM being the running tier today. Tail calls are a spec-level guarantee, self and mutual, in every tier: the stack never grows at any call depth. Memory is precise reference counting with block reuse plus per-frame bump arenas — zero pauses, zero write barriers, no GC — and static typing deletes hidden classes, inline-cache guards, and deoptimization frames from the data path.
 
 ## What is deliberately absent
 
-Every item below is a refusal with a recorded reason.
+Deliberately absent, each a recorded refusal: truthiness (boolean contexts are bool-typed, nothing is coerced), the `or` operator (one word overloaded across fallback, early exit, loop control, and union coalescing; the extraction family replaces it), chained comparisons (`a < b < c` is not an expression), comprehensions (the combinator surface covers them), inheritance (structs compose and traits carry behavior), expression-evaluating defaults (defaults are literal-only), `any` (inference failure is a compile error), and macros (comptime plus static reflection, so hygiene is structural).
 
-- **Truthiness** — boolean contexts are bool-typed; unions, options, numbers, and strings are never coerced.
-- **The `or` operator** — retired: it overloaded one word across fallback, early exit, loop control, and union coalescing, typed by contextual inference, colliding with `||`; the extraction family replaces its behaviors on existing tokens.
-- **Chained comparisons** — `a < b < c` is not an expression.
-- **Comprehensions** — the combinator surface over one hidden cursor covers them.
-- **Inheritance** — structs compose and traits carry behavior, so data, behavior, and identity never entangle.
-- **Default parameters that evaluate expressions** — defaults are literal-only, so a default can never capture mutable state or run hidden code at a call site.
-- **`any`** — inference failure is a compile error, never dynamic typing.
-- **Macros** — comptime evaluation plus static reflection is the language itself; no substitution exists, so hygiene is deleted structurally.
-
-Also permanently excluded by the same audits: user-defined operators, `Deref`-style coercions, subscript slicing sugar, vararg/spread packing, and word-form operators beyond `in` and `is`.
+Also permanently excluded: user-defined operators, `Deref`-style coercions, subscript slicing sugar, vararg/spread packing, and word-form operators beyond `in` and `is`.
 
 Deferred, recorded, not promised — additive valves that enter only after the core is stable and must re-fit this file: `|>`, anonymous record literals (the map literal rides this reservation; builder calls interim), `@` binders, `??` on `t | none`, `?.` desugar, `throws(...)` sugar, user-defined handlers, scoped named instances, labeled break/continue, and `it` shorthand.
 

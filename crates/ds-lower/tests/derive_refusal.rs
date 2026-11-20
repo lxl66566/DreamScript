@@ -802,6 +802,107 @@ fn the_from_json_family_refuses_its_carve_outs() {
     );
 }
 
+/// The decode walk's own frame ceiling: a wide target (a nested-derive
+/// member, a string, an optional member, two lists, two nested lists,
+/// and an optional list) synthesizes a `from_json` body whose frame
+/// needs 258 slots — two past the uop format's 256-slot cap — so
+/// lowering refuses with the standard frame-cap diagnostic while the
+/// checker stays clean (the width is a lowering fact, never a check
+/// error). The json face rides the episode-local vocabulary (bodied
+/// readers over builtin externs), so the probe measures the walk's
+/// width hermetically.
+#[test]
+fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "tag parse_err\n",
+        "struct list[t]\n",
+        "struct map[k, v]\n",
+        "enum json {\n",
+        "  json_null\n",
+        "  json_int { value: int }\n",
+        "  json_string { value: string }\n",
+        "  json_array { items: list[json] }\n",
+        "  json_object { fields: map[string, json] }\n",
+        "}\n",
+        "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+        "extern fn list_len[t] (xs: list[t]) -> int\n",
+        "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+        "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+        "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
+        "fn json_member (v: json, key: string) -> json | none {\n",
+        "  match v {\n",
+        "    json_object { fields } => {\n",
+        "      const m = map_get(fields, key)\n",
+        "      m\n",
+        "    },\n",
+        "    _ => none,\n",
+        "  }\n",
+        "}\n",
+        "fn json_as_int (v: json) -> int | parse_err {\n",
+        "  match v {\n",
+        "    json_int { value } => value,\n",
+        "    _ => parse_err,\n",
+        "  }\n",
+        "}\n",
+        "fn json_as_string (v: json) -> string | parse_err {\n",
+        "  match v {\n",
+        "    json_string { value } => value,\n",
+        "    _ => parse_err,\n",
+        "  }\n",
+        "}\n",
+        "fn json_as_array (v: json) -> list[json] | parse_err {\n",
+        "  match v {\n",
+        "    json_array { items } => items,\n",
+        "    _ => parse_err,\n",
+        "  }\n",
+        "}\n",
+        "fn json_as_object (v: json) -> map[string, json] | parse_err {\n",
+        "  match v {\n",
+        "    json_object { fields } => fields,\n",
+        "    _ => parse_err,\n",
+        "  }\n",
+        "}\n",
+        "#[derive(from_json)]\n",
+        "struct inner { a: int }\n",
+        "#[derive(from_json)]\n",
+        "struct outer { i: inner, kind: string, port: int?, xs: list[int], grid: list[list[int]], \
+         cols: list[list[int]], rows: list[int]? }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("wide_decode.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the wide walk checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let Err(err) = lower(
+        "wide_decode",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    ) else {
+        panic!("the decode walk past the frame cap must refuse at lowering")
+    };
+    let LowerError::FrameTooWide { name, need } = err else {
+        panic!("the standard frame-cap diagnostic owns the refusal: {err}")
+    };
+    assert!(
+        name.contains("from_json"),
+        "the refusing frame is the synthesized decode member: {name}"
+    );
+    assert_eq!(need, 258, "the measured walk's slot count");
+}
+
 /// The to_json family refuses from_json's mirror classes at the
 /// attribute, each naming the family and the refusing shape: a
 /// function-typed or `~Copyable` part (the shared part refusal), a

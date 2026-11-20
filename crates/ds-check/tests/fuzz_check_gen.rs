@@ -13,7 +13,10 @@
 //! vocabulary: free generic call sites over declared bounds, serving
 //! impl bodies, nested runtime forms, the honest doors, inert
 //! uncalled declarations, the impl-completeness shapes, and
-//! two-level instantiations. Coverage is asserted,
+//! two-level instantiations, plus the parser-budget shapes: type
+//! chains at both sides of the chain-fold budget and lambda/paren
+//! depth at both sides of the scanner's budgets. Coverage is
+//! asserted,
 //! not assumed: both parse outcomes occur across the sweep, most
 //! generated programs parse (a generator drift fails loudly), and the
 //! coverage is asserted, not assumed: both parse outcomes occur across
@@ -86,6 +89,10 @@ fn generated_programs_never_panic() {
     let mut two_level_calls = 0u32;
     let mut derive_attrs = 0u32;
     let mut import_members = 0u32;
+    let mut type_chain_oks = 0u32;
+    let mut type_chain_over = 0u32;
+    let mut depth_oks = 0u32;
+    let mut depth_over = 0u32;
     for seed in 0..240u64 {
         let len = 16 + usize::try_from(seed % 24).expect("len fits") * 11;
         let outcome = check_gen::exercise(&rng_bytes(seed, len));
@@ -113,6 +120,10 @@ fn generated_programs_never_panic() {
         two_level_calls += outcome.drawn.two_level_calls;
         derive_attrs += outcome.drawn.derive_attrs;
         import_members += outcome.drawn.import_members;
+        type_chain_oks += outcome.drawn.type_chain_oks;
+        type_chain_over += outcome.drawn.type_chain_over;
+        depth_oks += outcome.drawn.depth_oks;
+        depth_over += outcome.drawn.depth_over;
     }
     // structural generation: the near-totality of programs must parse
     assert!(
@@ -214,6 +225,24 @@ fn generated_programs_never_panic() {
     assert!(
         import_members > 0,
         "import rows naming const/type members are drawn somewhere in the sweep"
+    );
+    // the parser-budget shapes stay in the draw set at both sides of
+    // each budget (a weighting regression fails loudly)
+    assert!(
+        type_chain_oks > 0,
+        "type chains at or under the chain budget are drawn somewhere in the sweep"
+    );
+    assert!(
+        type_chain_over > 0,
+        "past-budget type chains answering NestingTooDeep are drawn somewhere in the sweep"
+    );
+    assert!(
+        depth_oks > 0,
+        "near-budget lambda arrow chains and paren nesting are drawn somewhere in the sweep"
+    );
+    assert!(
+        depth_over > 0,
+        "past-budget arrow runs and bracket nesting are drawn somewhere in the sweep"
     );
     // the degenerate inputs: empty and single-byte streams cycle into a
     // full deterministic program too

@@ -59,7 +59,7 @@ impl Rng {
 /// Per-seed iteration count; a CI fuzz job can crank it with
 /// `FUZZ_RUNS=<n> cargo nextest run` (same knob as ds-mod's mirror). The
 /// default keeps the four seeds under ~2 s: every real edit runs the real
-/// parse, whose dedicated 8 MiB stack thread dominates the cost.
+/// parse, whose dedicated 32 MiB stack thread dominates the cost.
 fn fuzz_runs() -> usize {
     std::env::var("FUZZ_RUNS")
         .ok()

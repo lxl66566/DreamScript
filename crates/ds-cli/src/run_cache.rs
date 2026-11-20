@@ -1,14 +1,17 @@
 //! The script-mode dsmod caches behind `ds run <file.ds>`: the CLI-owned
 //! key folds, the mmap hit paths, and the temp-plus-rename writes, over
 //! the `$DS_CACHE` root ds-pkg resolves (the one authority the package
-//! store shares). Two artifact families share the root: the package
-//! root's own module, and each linked dep member's compiled module —
-//! keyed on the member's own link name and content identity over the
-//! same graph fold, so a warm package run serves the walk's dep
-//! demands from disk and compiles nothing in-process. Neither cache
-//! ever fails a run: a root that cannot resolve, an artifact that
-//! cannot be read or validated, and a write that cannot land are all
-//! silent falls back to the in-process source pipeline.
+//! store shares). Three artifact families share the root: the package
+//! root's own module, each linked dep member's compiled module, and the
+//! same member's checked prefix — its `.dsi`, written beside the dsmod
+//! under the same key so `ds info` and the LSP hover serve the surface a
+//! run of the same graph cached — the dep families keyed on the member's
+//! own link name and content identity over the same graph fold, so a
+//! warm package run serves the walk's dep demands from disk and compiles
+//! nothing in-process. None of the caches ever fails a run: a root that
+//! cannot resolve, an artifact that cannot be read or validated, and a
+//! write that cannot land all silently fall back to the in-process
+//! source pipeline.
 
 use std::{
     collections::BTreeMap,
@@ -16,7 +19,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ds_mod::{EntryArg, FORMAT_VERSION, Hash128, Module, cache_path, read_mmap};
+use ds_mod::{
+    EntryArg, FORMAT_VERSION, Hash128, LoadError, MappedModule, Module, cache_path, read_mmap,
+};
 
 /// The segment below `$DS_CACHE/ir` holding script artifacts. The source
 /// pipeline emits portable bytecode-class modules, so the segment names
@@ -24,13 +29,24 @@ use ds_mod::{EntryArg, FORMAT_VERSION, Hash128, Module, cache_path, read_mmap};
 /// triple segment without disturbing this one.
 const TARGET_SEGMENT: &str = "bytecode";
 
+/// Maps one cache artifact read-only, the `read_mmap` contract's only
+/// caller-side guarantee held here once: an artifact lands by
+/// temp-plus-rename under its content-addressed name and nothing rewrites
+/// it after, so the mapping stays valid for the parse and the module's
+/// serve.
+fn read_artifact(path: &Path) -> Result<MappedModule, LoadError> {
+    // SAFETY: the artifact is content-addressed and written by
+    // temp-plus-rename; no writer truncates or rewrites it in place.
+    unsafe { read_mmap(path) }
+}
+
 /// Set to any non-empty value for one lookup-decision line per run on
 /// stderr: `hit`, `miss`, `bypassed`, or `off`.
 const DEBUG_ENV: &str = "DS_RUN_CACHE_DEBUG";
 
 /// The fold's domain tag, bumped when the folded component set changes:
 /// old artifacts must never answer a new fold.
-const KEY_DOMAIN: &[u8] = b"ds-run-cache-v1";
+const KEY_DOMAIN: &[u8] = b"ds-run-cache-v2";
 
 /// The dep-member fold's domain tag: a linked package's compiled module
 /// is its own artifact family, never the root's — the root compile and
@@ -38,7 +54,12 @@ const KEY_DOMAIN: &[u8] = b"ds-run-cache-v1";
 /// (the entry session's host member and the root's entry folding ride
 /// the root compile alone), so the two folds share components but never
 /// a domain.
-const DEP_KEY_DOMAIN: &[u8] = b"ds-dep-cache-v1";
+const DEP_KEY_DOMAIN: &[u8] = b"ds-dep-cache-v2";
+
+/// The artifact-pin list's marker inside a fold: the dep list and the
+/// artifact list share the name-then-hash pair framing, so the marker
+/// keeps one list's tail from splicing into the other's head.
+pub(crate) const ARTIFACT_LIST_TAG: &[u8] = b"ds-artifact-pins-v1";
 
 /// The build identity folded into the key: build.rs digests the source
 /// trees of every workspace crate the source pipeline runs through plus
@@ -50,13 +71,31 @@ const DEP_KEY_DOMAIN: &[u8] = b"ds-dep-cache-v1";
 pub(crate) const BUILD_ID: &str =
     if env!("DS_BUILD_ID").is_empty() { env!("CARGO_PKG_VERSION") } else { env!("DS_BUILD_ID") };
 
+/// The ambient identity a cache key folds over one graph's identities:
+/// the shrunk core's hash when the graph resolved the reserved `@std`
+/// package (the un-merge's per-graph ambient shape — those compiles
+/// register the core), the merged source's hash otherwise. The deps map
+/// alone decides, so every discover path derives the same identity.
+pub(crate) fn ambient_identity(identities: &BTreeMap<String, Hash128>) -> Hash128 {
+    Hash128::compute(
+        if identities.contains_key(ds_stdlib::STD_PACKAGE_NAME) {
+            ds_stdlib::AMBIENT_CORE_SOURCE
+        } else {
+            ds_stdlib::AMBIENT_SOURCE
+        }
+        .as_bytes(),
+    )
+}
+
 /// One run's cache handle: the resolved root (absent when the run is
-/// uncached), the ambient identity the key folds, and the resolved
-/// graph's dep identities (the empty list for a plain script).
+/// uncached), the ambient identity the key folds, the resolved graph's
+/// dep identities (the empty list for a plain script), and its native
+/// artifact pins (the empty list for a plain script).
 pub(crate) struct RunCache {
     root: Option<PathBuf>,
     ambient: Option<Hash128>,
     deps: BTreeMap<String, Hash128>,
+    artifacts: BTreeMap<String, Hash128>,
     debug: bool,
 }
 
@@ -65,26 +104,37 @@ impl RunCache {
     /// beyond the folded components — every name but the ambient
     /// records the zero marker — so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
-        Self::discover_linked(enabled, no_ambient, &BTreeMap::new())
+        Self::discover_linked(enabled, no_ambient, &BTreeMap::new(), &BTreeMap::new())
     }
 
     /// Resolves the cache for one package run. `enabled` is the
     /// `--no-cache` off switch; `no_ambient` picks the ambient identity
     /// the key folds (the ambient's impl bodies lower into the script
-    /// module, so the ambient text is a bytecode input); `identities`
-    /// are the resolved graph's dep content identities, which the
-    /// source text alone does not determine, so the key folds them and
-    /// a dep whose resolved content changed is another key.
+    /// module, so the ambient text is a bytecode input — a graph that
+    /// resolved `@std` compiles over the shrunk core, so the identity
+    /// follows the shape the graph picks); `identities` are the resolved
+    /// graph's dep content identities, which the source text alone does
+    /// not determine, so the key folds them and a dep whose resolved
+    /// content changed is another key; `artifacts` are the resolved
+    /// graph's native-artifact pins, each artifact's name over the
+    /// content hash of the library the resolution installed — a bound
+    /// constant addresses an export by the installed library's
+    /// enumeration index, so a repinned library is another key and a
+    /// warm module never serves bytecode that addresses the old
+    /// library's exports.
     pub(crate) fn discover_linked(
         enabled: bool,
         no_ambient: bool,
         identities: &BTreeMap<String, Hash128>,
+        artifacts: &BTreeMap<String, Hash128>,
     ) -> Self {
+        let ambient = (!no_ambient).then(|| ambient_identity(identities));
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then(ds_pkg::store::cache_root).flatten(),
-            ambient: (!no_ambient).then(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
+            ambient,
             deps: identities.clone(),
+            artifacts: artifacts.clone(),
             debug,
         };
         if cache.debug && cache.root.is_none() {
@@ -103,19 +153,46 @@ impl RunCache {
         // a source that cannot be read is a miss; the compile path reports it
         let source = std::fs::read_to_string(file).ok()?;
         let name = module_stem(file)?;
-        let artifact = cache_path(
-            root,
-            TARGET_SEGMENT,
-            self.key(&name, Hash128::compute(source.as_bytes())),
-        );
-        let Ok(mapped) = read_mmap(&artifact) else {
-            return self.miss(&artifact);
+        self.lookup_at(root, &name, Hash128::compute(source.as_bytes()), entry)
+    }
+
+    /// The cached artifact for one package root's composed member set
+    /// (G3): the key folds the root's member identity — the same
+    /// ascending-path fold a dep-side identity records — so a sibling
+    /// member's edit is another key and a warm artifact never serves the
+    /// old member set. A one-member root folds its lone member's text
+    /// hash, the key the plain-script lookup always answered, so the fix
+    /// lands no cache churn there. `None` is the miss every caller falls
+    /// back from, exactly `lookup`'s refusals.
+    pub(crate) fn lookup_root(
+        &self,
+        file: &Path,
+        members: &[crate::package::Member],
+        entry: &str,
+    ) -> Option<(Module, ServedPlan)> {
+        let root = self.root.as_ref()?;
+        let name = module_stem(file)?;
+        let identity = crate::package::member_identity(members);
+        self.lookup_at(root, &name, identity, entry)
+    }
+
+    /// One cached artifact's keyed read for `(name, identity)`: the fold
+    /// already keys on both, so the header check pins the artifact
+    /// honestly against the demand.
+    fn lookup_at(
+        &self,
+        root: &Path,
+        name: &str,
+        identity: Hash128,
+        entry: &str,
+    ) -> Option<(Module, ServedPlan)> {
+        let artifact = cache_path(root, TARGET_SEGMENT, self.key(name, identity));
+        let Ok(mapped) = read_artifact(&artifact) else {
+            return self.miss(Family::Run, &artifact);
         };
-        // the fold already keys on the source text and the stem; the
-        // header check pins the artifact honestly against both
         let module = mapped.module();
-        if module.source_hash() != Hash128::compute(source.as_bytes()) || module.name() != name {
-            return self.miss(&artifact);
+        if module.source_hash() != identity || module.name() != name {
+            return self.miss(Family::Run, &artifact);
         }
         let plan = match entry_staging(module, entry) {
             EntryStaging::Raw => ServedPlan::Raw,
@@ -126,11 +203,11 @@ impl RunCache {
                 none: module.tag_id("none"),
             },
             EntryStaging::FrontEndOnly => {
-                self.report("bypassed", &artifact);
+                self.report(Family::Run, "bypassed", &artifact);
                 return None;
             },
         };
-        self.report("hit", &artifact);
+        self.report(Family::Run, "hit", &artifact);
         Some((mapped.into_module(), plan))
     }
 
@@ -149,12 +226,7 @@ impl RunCache {
         let name = module.name();
         let hash = module.source_hash();
         let artifact = cache_path(root, TARGET_SEGMENT, self.key(name, hash));
-        // content addressing makes an artifact that already validates
-        // against this key the exact bytes this write would produce, so
-        // an existing one is the write
-        if read_mmap(&artifact).is_ok_and(|mapped| {
-            mapped.module().source_hash() == hash && mapped.module().name() == name
-        }) {
+        if artifact_validates(&artifact, name, hash) {
             return;
         }
         write_atomic(&artifact, &ds_mod::write(module));
@@ -174,14 +246,14 @@ impl RunCache {
             return None;
         }
         let artifact = cache_path(root, TARGET_SEGMENT, self.dep_key(name, linked));
-        let Ok(mapped) = read_mmap(&artifact) else {
-            return self.dep_miss(&artifact);
+        let Ok(mapped) = read_artifact(&artifact) else {
+            return self.miss(Family::Dep, &artifact);
         };
         let module = mapped.module();
         if module.name() != name || module.source_hash() != linked {
-            return self.dep_miss(&artifact);
+            return self.miss(Family::Dep, &artifact);
         }
-        self.dep_report("hit", &artifact);
+        self.report(Family::Dep, "hit", &artifact);
         Some(mapped.into_module())
     }
 
@@ -200,15 +272,73 @@ impl RunCache {
             return;
         }
         let artifact = cache_path(root, TARGET_SEGMENT, self.dep_key(name, linked));
-        // content addressing makes an artifact that already validates
-        // against this key the exact bytes this write would produce, so
-        // an existing one is the write
-        if read_mmap(&artifact).is_ok_and(|mapped| {
-            mapped.module().name() == name && mapped.module().source_hash() == linked
-        }) {
+        if artifact_validates(&artifact, name, linked) {
             return;
         }
         write_atomic(&artifact, &ds_mod::write(module));
+    }
+
+    /// The cached `.dsi` beside one linked dep member's dsmod: the same
+    /// dep fold key with the artifact extension, so the member's checked
+    /// prefix — the surface `ds info` and the LSP hover serve — lands
+    /// beside its module. `None` when the cache is off.
+    pub(crate) fn dep_dsi_path(&self, name: &str, linked: Hash128) -> Option<PathBuf> {
+        let root = self.root.as_ref()?;
+        Some(cache_path(root, TARGET_SEGMENT, self.dep_key(name, linked)).with_extension("dsi"))
+    }
+
+    /// Persists one linked dep member's checked prefix beside its cached
+    /// dsmod, under the same key: the fresh declaration-phase snapshot
+    /// (a second declare pass, the same shape the prefix tier's own
+    /// store pays once per changed source), the solved method rows, and
+    /// the compile's own effect rows, headed by the member's identity —
+    /// the same hash the dsmod beside it validates against. A
+    /// `--no-ambient` compile writes nothing (the composed prefix
+    /// composes only over the ambient). Every failure is silent — the
+    /// run already succeeded.
+    pub(crate) fn store_dep_dsi(
+        &self,
+        name: &str,
+        identity: Hash128,
+        analyzed: &ds_check::Analyzed,
+        effects: &ds_check::Effects,
+        declared: &ds_check::DeclaredRows,
+        world: &ds_check::WorldCaps,
+    ) {
+        if self.root.is_none() || self.ambient.is_none() {
+            return;
+        }
+        if self.deps.get(name) != Some(&identity) {
+            return;
+        }
+        let Some(artifact) = self.dep_dsi_path(name, identity) else {
+            return;
+        };
+        // content addressing makes an artifact that already decodes
+        // against this identity the exact bytes this write would
+        // produce, so an existing one skips the extraction entirely
+        if std::fs::read(&artifact)
+            .is_ok_and(|bytes| ds_dsi::decode_prefix(&bytes, identity).is_ok())
+        {
+            return;
+        }
+        let (snapshot, snapshot_diags) = ds_check::decls::build(
+            &analyzed.package,
+            &analyzed.asts[..],
+            &analyzed.resolutions[..],
+        );
+        if !snapshot_diags.is_empty() {
+            return;
+        }
+        let method_rows = ds_check::effects::solved_method_rows(
+            &analyzed.asts[..],
+            &analyzed.package,
+            &analyzed.resolutions[..],
+            declared,
+            world,
+        );
+        let payload = ds_dsi::extract(&snapshot, analyzed, effects, &method_rows);
+        write_atomic(&artifact, &ds_dsi::artifact_bytes(identity, &payload));
     }
 
     /// The blake3-128 fold over every input that changes the produced
@@ -216,7 +346,8 @@ impl RunCache {
     /// prefix another:
     /// - the domain tag above;
     /// - the module name: the file stem lands in the artifact header;
-    /// - the entry source hash;
+    /// - the compile's content identity (G3.5): a plain script's or one-member root's source hash,
+    ///   a multi-member root's composed member fold, so a sibling edit is another key;
     /// - the ambient identity: the stdlib ambient's text hash when its impl bodies lower into the
     ///   module, a marker byte when `--no-ambient` compiles without it;
     /// - each resolved dep's link name and content hash in ascending name order: the identities
@@ -224,6 +355,11 @@ impl RunCache {
     ///   resolved content changed is another key and never serves an artifact linked against the
     ///   old content. A plain script folds the empty list — its recorded dep hashes are pure
     ///   functions of the components above (the ambient's for `@std`, the zero marker otherwise);
+    /// - each resolved native artifact's name and content hash in ascending name order, over the
+    ///   list's own marker: a bound constant addresses an export by the installed library's
+    ///   enumeration index, so a repinned library (a moved `[artifacts]` hash under one name) is
+    ///   another key and a warm module never serves bytecode that addresses the old library's
+    ///   exports;
     /// - the dsmod format version: the reader refuses foreign versions anyway, and folding it
     ///   re-keys instead of paying the refused read;
     /// - the build identity: a build-time digest of the compiler crates' source trees (the package
@@ -235,9 +371,10 @@ impl RunCache {
 
     /// The dep-member fold: the same component set over its own domain
     /// tag, keyed on the member's link name and content identity. The
-    /// graph identities ride the fold like the root's: a dep module's
-    /// own dep list pins the content its imports linked at, so any
-    /// dep's moved identity is another key for every member — an
+    /// graph identities and artifact pins ride the fold like the root's:
+    /// a dep module's own dep list pins the content its imports linked
+    /// at, so any dep's moved identity is another key for every member,
+    /// and a moved artifact pin re-keys the member the same way — an
     /// artifact linked against a transitive dep's old content never
     /// serves a new resolution.
     fn dep_key(&self, name: &str, identity: Hash128) -> Hash128 {
@@ -268,6 +405,15 @@ impl RunCache {
             fold_str(&mut hasher, name);
             hasher.update(content.as_bytes());
         }
+        // the resolved graph's artifact pins, each name framed around
+        // its hash over the list's own marker (a plain script folds the
+        // empty list; see `key`'s doc)
+        hasher.update(ARTIFACT_LIST_TAG);
+        hasher.update(&(self.artifacts.len() as u64).to_le_bytes());
+        for (name, hash) in &self.artifacts {
+            fold_str(&mut hasher, name);
+            hasher.update(hash.as_bytes());
+        }
         hasher.update(&[FORMAT_VERSION]);
         fold_str(&mut hasher, BUILD_ID);
         let digest = hasher.finalize();
@@ -278,31 +424,38 @@ impl RunCache {
 
     /// Reports one lookup decision on stderr when the debug switch is
     /// set: the observable that proves which path a run took without
-    /// timing it.
-    fn report(&self, state: &str, artifact: &Path) {
+    /// timing it. The family names the artifact tier the decision is
+    /// about — a dep tier's `hit` is the proof a warm run served the
+    /// dep members from disk instead of compiling them, since the
+    /// module bytes cannot prove it (a fresh compile answers the same
+    /// bytes).
+    fn report(&self, family: Family, state: &str, artifact: &Path) {
         if self.debug {
-            eprintln!("ds run cache: {state} {}", artifact.display());
+            eprintln!("{}: {state} {}", family.prefix(), artifact.display());
         }
     }
 
-    /// Reports one dep-member lookup decision on the same debug switch:
-    /// the observable that proves a warm run served the dep members
-    /// from disk instead of compiling them — the module bytes cannot
-    /// prove it, a fresh compile answers the same bytes.
-    fn dep_report(&self, state: &str, artifact: &Path) {
-        if self.debug {
-            eprintln!("ds dep cache: {state} {}", artifact.display());
+    fn miss<T>(&self, family: Family, artifact: &Path) -> Option<T> {
+        self.report(family, "miss", artifact);
+        None
+    }
+}
+
+/// Which cache family one debug line names: the root fold's module
+/// tier or a linked dep member's — the two artifact families share the
+/// root, and the line tells them apart.
+enum Family {
+    Run,
+    Dep,
+}
+
+impl Family {
+    /// The debug line's family prefix.
+    fn prefix(self) -> &'static str {
+        match self {
+            Family::Run => "ds run cache",
+            Family::Dep => "ds dep cache",
         }
-    }
-
-    fn miss<T>(&self, artifact: &Path) -> Option<T> {
-        self.report("miss", artifact);
-        None
-    }
-
-    fn dep_miss<T>(&self, artifact: &Path) -> Option<T> {
-        self.dep_report("miss", artifact);
-        None
     }
 }
 
@@ -391,14 +544,26 @@ pub(crate) fn fold_str(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(text.as_bytes());
 }
 
+/// Whether the artifact already under `path` validates as the module
+/// `(name, hash)` names: content addressing makes an artifact that
+/// passes this check the exact bytes the write would produce, so an
+/// existing one is the write and the store skips it.
+fn artifact_validates(path: &Path, name: &str, hash: Hash128) -> bool {
+    read_artifact(path).is_ok_and(|mapped| {
+        let module = mapped.module();
+        module.name() == name && module.source_hash() == hash
+    })
+}
+
 /// Lands one artifact's bytes under its content-addressed path with
-/// the temp-plus-rename discipline every `$DS_CACHE` writer shares:
+/// the temp-plus-rename discipline every `$DS_CACHE` writer shares
+/// (this helper and the prefix cache's `.dsi` store both ride it):
 /// concurrent writers race to byte-identical content and a reader
 /// never sees a partial file. Windows rename refuses to replace, so a
 /// lost race (or a repair over a corrupt artifact) removes and retries
 /// once; a mapped file that cannot be removed waits for a later run.
 /// Every failure is silent — the caller's run already succeeded.
-fn write_atomic(artifact: &Path, bytes: &[u8]) {
+pub(crate) fn write_atomic(artifact: &Path, bytes: &[u8]) {
     let Some(dir) = artifact.parent() else {
         return;
     };
@@ -455,6 +620,7 @@ mod tests {
                 false,
                 false,
                 &BTreeMap::from([("@lib".to_owned(), Hash128::compute(identity))]),
+                &BTreeMap::new(),
             )
         };
         assert_ne!(
@@ -474,6 +640,7 @@ mod tests {
                 ("@a".to_owned(), Hash128::compute(b"one")),
                 ("@b".to_owned(), Hash128::compute(b"two")),
             ]),
+            &BTreeMap::new(),
         );
         let swapped = RunCache::discover_linked(
             false,
@@ -482,6 +649,7 @@ mod tests {
                 ("@a".to_owned(), Hash128::compute(b"two")),
                 ("@b".to_owned(), Hash128::compute(b"one")),
             ]),
+            &BTreeMap::new(),
         );
         assert_ne!(
             named.key("app", source),
@@ -504,6 +672,7 @@ mod tests {
                 false,
                 false,
                 &BTreeMap::from([("@deep".to_owned(), Hash128::compute(identity))]),
+                &BTreeMap::new(),
             )
         };
         assert_ne!(
@@ -521,6 +690,63 @@ mod tests {
             at(b"one").dep_key("@lib", member),
             at(b"one").key("@lib", member),
             "the dep fold never answers the root fold's domain"
+        );
+    }
+
+    /// The artifact-pin fold re-keys: a moved pin moves the key (a bound
+    /// constant addresses an export by the installed library's
+    /// enumeration index, so a repinned library must never serve the
+    /// module compiled against the old one), the pin's name frames its
+    /// hash, and the dep-member fold re-keys alike.
+    #[test]
+    fn the_artifact_pin_fold_rekeys() {
+        let source = Hash128::compute(b"fn main() -> () { }");
+        let plain = RunCache::discover(false, false);
+        let pinned = |hash: &[u8]| {
+            RunCache::discover_linked(
+                false,
+                false,
+                &BTreeMap::new(),
+                &BTreeMap::from([("math".to_owned(), Hash128::compute(hash))]),
+            )
+        };
+        assert_ne!(
+            pinned(b"one").key("app", source),
+            pinned(b"two").key("app", source),
+            "a moved pin is another key"
+        );
+        assert_ne!(
+            plain.key("app", source),
+            pinned(b"one").key("app", source),
+            "a pinned graph never serves a plain script's key"
+        );
+        assert_ne!(
+            pinned(b"one").dep_key("@lib", source),
+            pinned(b"two").dep_key("@lib", source),
+            "a moved pin re-keys the dep-member fold"
+        );
+        let both = RunCache::discover_linked(
+            false,
+            false,
+            &BTreeMap::new(),
+            &BTreeMap::from([
+                ("aa".to_owned(), Hash128::compute(b"one")),
+                ("bb".to_owned(), Hash128::compute(b"two")),
+            ]),
+        );
+        let swapped = RunCache::discover_linked(
+            false,
+            false,
+            &BTreeMap::new(),
+            &BTreeMap::from([
+                ("aa".to_owned(), Hash128::compute(b"two")),
+                ("bb".to_owned(), Hash128::compute(b"one")),
+            ]),
+        );
+        assert_ne!(
+            both.key("app", source),
+            swapped.key("app", source),
+            "the pin's name frames its hash"
         );
     }
 }

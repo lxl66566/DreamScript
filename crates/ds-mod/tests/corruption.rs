@@ -1,5 +1,5 @@
 //! Reader rejection: every corruption class fails with the right
-//! diagnostic [G3.5 acceptance].
+//! diagnostic `[G3.5 acceptance]`.
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{

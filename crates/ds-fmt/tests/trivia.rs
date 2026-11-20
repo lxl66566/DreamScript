@@ -1,9 +1,13 @@
 //! Trivia edge suite: comment attachment, blank-line collapsing, doc-comment
-//! travel, `##` separator recovery, and the nothing-is-dropped guarantee.
+//! travel, `##` separator recovery, the nothing-is-dropped guarantee, and
+//! the verbatim ranges an EOL fold must skip.
 
 mod common;
 
 use common::fmt_once;
+use ds_diag::Files;
+use ds_fmt::{format_source, format_source_tracked};
+use ds_parse::parse;
 
 #[test]
 fn line_comment_attaches_to_following_item() {
@@ -267,6 +271,34 @@ fn crlf_input_formats_to_lf() {
         fmt_once("t.ds", "const a = 1\r\nconst b = 2\r\n"),
         "const a = 1\nconst b = 2\n"
     );
+}
+
+/// Verbatim line endings are program data: a raw string's bare-LF line
+/// survives inside a CRLF-dominant source, and the tracked ranges cover
+/// exactly the literals and comments, so an EOL fold can leave them
+/// byte-identical.
+#[test]
+fn verbatim_line_endings_and_ranges_survive_formatting() {
+    let mut files = Files::new();
+    let src = "const a = 1\r\n// note\r\nconst s = r\"one\ntwo\"\r\n";
+    let file = files.add_source("t.ds", src);
+    let ast = parse(&files, file).expect("parses");
+    let formatted = format_source_tracked(&files, file, &ast);
+    assert_eq!(
+        formatted.text,
+        "const a = 1\n// note\nconst s = r\"one\ntwo\"\n"
+    );
+    let verbatim: Vec<&str> = formatted
+        .verbatim
+        .iter()
+        .map(|&(s, e)| &formatted.text[s..e])
+        .collect();
+    assert_eq!(verbatim, vec!["// note", "r\"one\ntwo\""]);
+    // The mixed output is a fixed point of the formatter itself.
+    let mut re_files = Files::new();
+    let re = re_files.add_source("t.ds", &formatted.text);
+    let re_ast = parse(&re_files, re).expect("the output parses");
+    assert_eq!(format_source(&re_files, re, &re_ast), formatted.text);
 }
 
 #[test]

@@ -1,0 +1,23 @@
+// The re-export chain's consumer: the middle package of the chain (its
+// own ds source is not part of this example) holds one row —
+//
+//   pub import @deep (base, base as origin, step, unit)
+//
+// so the origin package's callable, const, and struct join the middle
+// package's export surface under the names the row bound, and this
+// entry selects them beside the middle package's own `twice` through
+// one import row. A chain needs declared deps: the origin and middle
+// packages install with `ds save`, the entry's ds.pkg declares the
+// middle package, and `ds run` over the package root serves the chain
+// — a plain script run of this file declares no deps, so the names
+// stay unbound. The CLI example gate stages exactly that tree and runs
+// this file as the root package's entry.
+
+import @std/io
+import @lib (twice, base, origin, step, unit)
+
+fn main() -> int {
+  println("hi")
+  const one = unit { n: 1 }
+  base() + twice(21) + step + one.n + origin()
+}

@@ -109,6 +109,7 @@ use crate::{
     atom::{AtomKind, TraitId, TypeId},
     error::Error,
     expr::{TypeExpr, remap_type_expr},
+    id_table::IdTable,
     universe::{Ty, Universe, narrow},
 };
 
@@ -335,6 +336,12 @@ pub struct InstanceEnv {
     /// open and pairs no declaration ever put together (link merges) stay
     /// absent and probe there.
     probed_disjoint: FxHashSet<(u32, u32)>,
+    /// Per-trait row index: every stored instance of one trait in id
+    /// order, maintained at each registration seam ([`InstanceEnv::declare`]
+    /// appends, [`InstanceEnv::serve`] appends, [`InstanceEnv::merge`]
+    /// rebuilds). The solve-side scans walk only their own trait's rows
+    /// through [`InstanceEnv::of_trait`].
+    by_trait: IdTable<TraitId, Vec<InstanceId>>,
 }
 
 impl InstanceEnv {
@@ -362,6 +369,22 @@ impl InstanceEnv {
             .get(id.index() as usize)
             .map(|inst| inst.trait_id)
             .ok_or(Error::UnknownInstance(id))
+    }
+
+    /// Every stored instance of `trait_id`, in id order: the solve-side
+    /// scan's index, so a resolve touches only its own trait's rows. A
+    /// trait no instance implements reads as no rows.
+    #[must_use]
+    pub fn of_trait(&self, trait_id: TraitId) -> &[InstanceId] {
+        self.by_trait.get(&trait_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Appends ids to the trait's index list. The ids come from one
+    /// registration seam in id order, so the list stays ascending.
+    fn index_rows(&mut self, trait_id: TraitId, ids: impl Iterator<Item = InstanceId>) {
+        let mut rows = self.by_trait.get(&trait_id).cloned().unwrap_or_default();
+        rows.extend(ids);
+        self.by_trait.insert(trait_id, rows);
     }
 
     /// The solved head of an instance.
@@ -534,6 +557,10 @@ impl InstanceEnv {
             }
         }
 
+        // The index joins only committed rows: a rolled-back declaration
+        // truncated `instances` above, so the index stays in lockstep.
+        self.index_rows(decl.trait_id, ids.iter().copied());
+
         if conditions.is_empty() {
             for &id in &ids {
                 let head = self.instances[id.index() as usize].head;
@@ -563,14 +590,23 @@ impl InstanceEnv {
     /// against declared ones ([`InstanceEnv::declare`]'s rule).
     pub fn serve(&mut self, rows: Vec<ServedInstance>) {
         self.served = self.instances.len() + rows.len();
-        self.instances.extend(rows.into_iter().map(|row| Instance {
-            trait_id: row.trait_id,
-            head_expr: row.head_expr,
-            head: row.head,
-            written: row.written,
-            condition_exprs: row.condition_exprs,
-            conditions: row.conditions,
-        }));
+        let base = self.instances.len();
+        let mut fresh: FxHashMap<TraitId, Vec<InstanceId>> = FxHashMap::default();
+        for (index, row) in rows.into_iter().enumerate() {
+            let id = InstanceId::from_raw(narrow(base + index));
+            fresh.entry(row.trait_id).or_default().push(id);
+            self.instances.push(Instance {
+                trait_id: row.trait_id,
+                head_expr: row.head_expr,
+                head: row.head,
+                written: row.written,
+                condition_exprs: row.condition_exprs,
+                conditions: row.conditions,
+            });
+        }
+        for (trait_id, ids) in fresh {
+            self.index_rows(trait_id, ids.into_iter());
+        }
     }
 
     /// One stored row in full, by id (the artifact generator's extraction
@@ -714,6 +750,20 @@ impl InstanceEnv {
                 )
             }));
         self.instances.extend(other.instances);
+        // The merged rows renumber, so the index rebuilds from the merged
+        // id space (one list per trait, ascending in id order).
+        let mut fresh: FxHashMap<TraitId, Vec<InstanceId>> = FxHashMap::default();
+        for (index, inst) in self.instances.iter().enumerate() {
+            fresh
+                .entry(inst.trait_id)
+                .or_default()
+                .push(InstanceId::from_raw(narrow(index)));
+        }
+        let mut by_trait = IdTable::default();
+        for (trait_id, ids) in fresh {
+            by_trait.insert(trait_id, ids);
+        }
+        self.by_trait = by_trait;
     }
 
     /// Lookup: every instance of `trait_id` whose head contains the queried

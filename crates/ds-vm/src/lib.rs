@@ -114,6 +114,7 @@
 /// user package can collide.
 pub const EVIDENCE_MODULE: &str = "$evidence";
 
+pub mod bound;
 mod claims;
 pub mod comptime;
 pub mod fiber;
@@ -133,6 +134,7 @@ mod tls;
 pub mod value;
 pub mod vm;
 
+pub use bound::{BindError, BoundModule};
 /// The locked contracts this VM implements, re-exported for callers.
 pub use ds_abi as abi;
 pub use ds_rt::{ArenaMisuse, ArenaStats};

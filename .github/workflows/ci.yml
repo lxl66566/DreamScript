@@ -4,9 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
   # The registry client shells out to system git for `https://` remotes;
   # a credential prompt must fail fast instead of hanging the job.
   GIT_TERMINAL_PROMPT: "0"
@@ -16,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -30,34 +37,80 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@v0.0.11
       # All-features everywhere: ds-rt/ds-vm carry a diag feature, and the
       # workspace gate is `cargo nextest run --workspace --all-features`.
       # `--all-targets` is deliberately absent from nextest here: it pulls
       # the harness=false benches (ds-check check_perf, ds-parse parse,
-      # ds-mod read, ds-vm vm, ds-pins' four gungraun kernels) into the test
+      # ds-mod read, ds-pins' four gungraun kernels) into the test
       # listing, which nextest cannot list (exit 104).
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo nextest run --workspace --all-features
       - run: cargo nextest run -p ds-rt
 
+  doc-test:
+    name: cargo test --doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - run: cargo test --all-features --locked --doc
+
+  miri:
+    name: cargo miri test -p ds-rt
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      # cargo-miri builds its own sysroot through rustc; the sccache
+      # wrapper has no cache to serve there and can break the build.
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # The unsafe core's aliasing gate: arena grants are raw pointers that
+      # restores invalidate, so the suite must stay clean under both borrow
+      # models (miri is ~100x, the two arena stress tests dominate the wall
+      # clock; the ds-rt graph is dependency-free, so no sccache is no loss).
+      - run: cargo miri test -p ds-rt
+      - run: cargo miri test -p ds-rt --test arena
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows"
+
+  ds-fmt:
+    name: ds fmt --check examples, kernels, and conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # Every .ds source in the repo (examples, benchmark kernels, and
+      # the conformance corpus) must sit at `ds fmt`'s canonical form.
+      - run: cargo build --locked -p ds-cli
+      - run: target/debug/ds fmt --check examples/*.ds benchmarks/kernels/*.ds conformance/*.ds
+
   pin-bake:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@v0.0.11
       # The committed instruction-count pins are asserted under an optimized
       # profile with Callgrind; debug-profile runs and valgrind-less hosts
       # skip with a note instead of failing.
@@ -68,21 +121,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Warnings surfaced, not denied: the doc tree still carries ~250 broken
-      # intra-doc link warnings (single-token bracket refs like [C4] in doc
-      # comments). Flip to RUSTDOCFLAGS: "-D warnings" once those are swept.
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # Broken intra-doc links are denied: the workspace's doc
+      # comments carry zero link warnings (the wave-1 and wave-2
+      # sweeps landed), so any regression fails here.
       - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   bench-goldens:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@v0.0.11
       # Release CLI only (timings never run here); the check compares each
       # kernel's final `result:` line across ds, python, and node (lua SKIPs
       # when absent) and exits nonzero on any golden mismatch.

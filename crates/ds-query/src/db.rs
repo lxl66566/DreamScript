@@ -29,7 +29,7 @@ impl Revision {
 /// Compute function of one query kind: a pure function of the context (which
 /// exposes inputs and other queries) and its key. Computes run synchronously
 /// on the caller's thread; queries that need a bigger stack (the parse
-/// grammar runs its recursive descent on a dedicated 8 MiB stack thread
+/// grammar runs its recursive descent on a dedicated 32 MiB stack thread
 /// internally) arrange it themselves.
 pub type ComputeFn = fn(&mut Ctx<'_>, QueryKey) -> Result<QueryValue, QueryError>;
 

@@ -38,6 +38,10 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 - `par_map.ds` — the fork-join slice: one spawned child per element, the answers assembling in input order.
 - `par_reduce.ds` — the fork-join fold: one child per element joined in input order, the non-commutative witness and the struct-typed fold.
 
+## Packages
+
+- `pub_import.ds` — the re-export chain's consumer: the middle package's pub import row joins the origin's callable, const, and struct onto its export surface (the aliased spelling included), the entry selecting them beside the middle's own member through one import row; a chain needs declared deps, so the run is a package entry over the staged tree (a plain script run declares no deps and binds nothing).
+
 ## Files and net
 
 - `files.ds` — a write/read round trip through the file-IO natives, the read's failure handled through `.err`.

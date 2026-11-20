@@ -4,7 +4,11 @@
 //! without a binary-format crate. The reader is total: a file that is
 //! not a recognized shared object refuses naming why, and a malformed
 //! table refuses naming the offset that ran past the image — a report
-//! over untrusted library bytes never panics.
+//! over untrusted library bytes never panics. The never-panic contract
+//! assumes a 64-bit `usize`: the `usize::try_from` narrowing and the
+//! unchecked `usize` arithmetic over untrusted u32/u64 fields hold on
+//! the supported matrix alone (windows-msvc, linux x86_64/aarch64), so
+//! a 32-bit port needs every expect and addition audited.
 
 /// Why a library's exported symbols cannot enumerate.
 #[derive(Debug, thiserror::Error)]
@@ -204,18 +208,23 @@ fn elf(bytes: &[u8]) -> Result<Vec<String>, ExportError> {
             "the header is shorter than its class and data bytes".to_owned(),
         ));
     }
+    // the class/data pair: ELF64 little-endian reads, any 32-bit class
+    // refuses its round, a big-endian ELF64 names its endianness, and
+    // every other pair names itself
     match (bytes[4], bytes[5]) {
         (2, 1) => {},
         (1, _) => return Err(ExportError::Elf32),
-        (_, 1) => {
+        (2, 2) => {
             return Err(malformed(
-                "a big-endian ELF library refuses: this round reads little-endian alone".to_owned(),
+                "a big-endian ELF64 library refuses: this round reads little-endian alone"
+                    .to_owned(),
             ))
         },
-        _ => {
-            return Err(malformed(
-                "the ELF data byte names no endianness".to_owned(),
-            ))
+        (class, data) => {
+            return Err(malformed(format!(
+                "the ELF class byte {class} and data byte {data} name no little-endian ELF64 \
+                 library"
+            )))
         },
     }
     let phoff = usize::try_from(read.u64_at(0x20).map_err(malformed)?).expect("u64 fits usize");

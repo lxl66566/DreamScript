@@ -9,6 +9,19 @@ use super::*;
 impl FnLower<'_, '_, '_> {
     // ---- tail position and returns ---------------------------------------------
 
+    /// Whether a def declares a comptime parameter: the runtime module
+    /// embeds or refuses every call to it in place, while the comptime
+    /// slice lowers such functions as ordinary locals, so only the
+    /// runtime run never transfers control to one.
+    pub(super) fn comptime_def(&self, def: DefId) -> bool {
+        matches!(self.comptime, ComptimeRun::Runtime(_))
+            && self.analyzed.decls.fns.get(&def).is_some_and(|sig| {
+                sig.params
+                    .iter()
+                    .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)))
+            })
+    }
+
     /// Whether a call can transfer control in tail position [H2]: a
     /// name call, a UFCS dot-call onto a resolved free function [F3],
     /// or a member dot-call the checker solved to a monomorphic
@@ -32,7 +45,11 @@ impl FnLower<'_, '_, '_> {
             // never transfers control, so tail position lowers it as a
             // plain value [B3]. The extraction family inlines too, so a
             // tail-position family call lowers through the value walk's
-            // return, not a control transfer [E4].
+            // return, not a control transfer [E4]. A comptime call in
+            // the runtime module embeds or refuses in place, so its tail
+            // position takes the same value walk: treating it as a
+            // transfer stages the embedded answer and emits no return,
+            // leaving the frame's code stream without an exit.
             Expr::Path { span, .. } => {
                 // A call through a local binding reaches the maybe-Ref
                 // callee tracking: the tail transfers through CALLT when
@@ -44,6 +61,7 @@ impl FnLower<'_, '_, '_> {
                     Some(Res::Def(def))
                         if self.extraction_def(*def).is_some()
                             || self.ambient_extern(*def, AmbientExtern::Str)
+                            || self.comptime_def(*def)
                             || self
                                 .analyzed
                                 .decls
@@ -53,7 +71,9 @@ impl FnLower<'_, '_, '_> {
                 )
             },
             Expr::Field { recv, name, .. } => match self.res.get(name.span) {
-                Some(Res::Dot(DotRes::Free { func, .. })) => self.extraction_def(*func).is_none(),
+                Some(Res::Dot(DotRes::Free { func, .. })) => {
+                    self.extraction_def(*func).is_none() && !self.comptime_def(*func)
+                },
                 Some(Res::Dot(DotRes::Methods { candidates })) => matches!(
                     self.resolve_method_dispatch(*call_span, name.span, Some(recv), candidates),
                     Ok(TraitDispatch::Inherent { .. }
@@ -368,9 +388,11 @@ impl FnLower<'_, '_, '_> {
                 // A multi-member operand (a narrower union than the
                 // declared return — the checker proved containment) is
                 // tag-dispatched per member into the return union's
-                // region, mirroring the tail-`?` shape: an operand's raw
+                // region, mirroring the tail-`?` shape — an operand's raw
                 // span never returns directly, union regions are
-                // per-union-type.
+                // per-union-type — and each member's exit drops from its
+                // own fork of the ownership state, so every exit releases
+                // the frame's owned words, not just the first.
                 let src_members = self.members(src_ty);
                 if src_members.len() > 1 {
                     let src_word = self.tag_addr(place)?;
@@ -390,9 +412,16 @@ impl FnLower<'_, '_, '_> {
                         });
                         exits.push(exit);
                     }
-                    for (member, exit) in src_members.iter().zip(exits) {
+                    let base = self.rc.save();
+                    for (index, (member, exit)) in src_members.iter().zip(exits).enumerate() {
                         self.bind_label(exit);
                         self.respan_exit(place, *member)?;
+                        // every member's exit drops from the same fork of
+                        // the ownership map; the divergence marker stays
+                        // set, so the frame reads exited on every path
+                        if index + 1 < src_members.len() {
+                            self.rc.rewind(base.clone());
+                        }
                     }
                     return Ok(());
                 }

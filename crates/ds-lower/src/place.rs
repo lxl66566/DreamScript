@@ -92,7 +92,10 @@
 //!   balanced: a dying staged word drops its count right after the call, and the retained copy
 //!   holds the native's acquired one.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    rc::Rc,
+};
 
 use ds_diag::Span;
 
@@ -109,7 +112,7 @@ pub(crate) struct Hook {
     /// How many words the dying value spans; the hook stages them all.
     pub(crate) width: u8,
     /// Offsets of the span's `Ref` words from the claim's base word.
-    pub(crate) refs: std::rc::Rc<[u8]>,
+    pub(crate) refs: Rc<[u8]>,
 }
 
 /// One outstanding reference count this frame must account for.
@@ -163,15 +166,80 @@ struct Window {
     seen: HashSet<u8>,
 }
 
+/// The checker's affine facts one package's lowerings share: the
+/// last-use and move rows sorted by binder span, binary-searched per
+/// lookup. One table serves every function's placement, so a package
+/// of F functions over U tracked bindings pays F lookups instead of
+/// building F copies of the rows — and a frame registering a binder
+/// outside its own body (a synthesized lambda's captured enclosing
+/// binding) still finds its row, exactly as a whole-table copy did.
+pub(crate) struct AffineFacts {
+    /// (binder, (final use, borrowed)) rows, ordered by binder span.
+    last_uses: Vec<(Span, (Span, bool))>,
+    /// (binder, consuming use) rows, ordered by (binder, use) span.
+    moves: Vec<(Span, Span)>,
+}
+
+impl AffineFacts {
+    /// The checker's affine rows, sorted for lookup.
+    pub(crate) fn from_linearity(lin: &ds_check::Linearity) -> Self {
+        Self::from_rows(
+            lin.last_uses
+                .iter()
+                .map(|u| (u.binder, (u.at, u.borrowed)))
+                .collect(),
+            lin.moves.iter().map(|m| (m.binder, m.at)).collect(),
+        )
+    }
+
+    /// Sorts row lists into the lookup order.
+    pub(crate) fn from_rows(
+        mut last_uses: Vec<(Span, (Span, bool))>,
+        mut moves: Vec<(Span, Span)>,
+    ) -> Self {
+        last_uses.sort_unstable_by(|a, b| span_order(&a.0, &b.0));
+        moves.sort_unstable_by(|a, b| span_order(&a.0, &b.0).then_with(|| span_order(&a.1, &b.1)));
+        Self { last_uses, moves }
+    }
+
+    /// The final use recorded for `binder`, if any.
+    fn last_use(&self, binder: Span) -> Option<(Span, bool)> {
+        let at = self
+            .last_uses
+            .partition_point(|(b, _)| span_order(b, &binder).is_lt());
+        self.last_uses
+            .get(at)
+            .filter(|(b, _)| *b == binder)
+            .map(|(_, u)| *u)
+    }
+
+    /// Whether `at` is one of `binder`'s consuming uses.
+    fn is_move(&self, binder: Span, at: Span) -> bool {
+        let mut i = self
+            .moves
+            .partition_point(|(b, _)| span_order(b, &binder).is_lt());
+        while let Some(&(b, a)) = self.moves.get(i) {
+            if b != binder {
+                return false;
+            }
+            if a == at {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
 /// The placement state machine over one function's walk.
 pub(crate) struct Placement {
-    /// The checker's final use per binder span: (use span, borrowed).
-    last_use: HashMap<Span, (Span, bool)>,
-    /// The checker's consuming uses (binder, at): a move forces the death
-    /// test true at exactly that use — a rebinding in value position, or a
-    /// `move`-mode parameter's argument (C2). Consumed so a linear surface
-    /// slots in without re-deriving affine facts.
-    moves: HashSet<(Span, Span)>,
+    /// The checker's affine facts, shared by every function's walk:
+    /// the final use per binder span and the consuming uses (a move
+    /// forces the death test true at exactly that use — a rebinding in
+    /// value position, or a `move`-mode parameter's argument [C2]).
+    /// Consumed as a shared table so a linear surface slots in without
+    /// re-deriving affine facts.
+    facts: Rc<AffineFacts>,
     /// Owned words, ascending slot order (every emission iterates it, so
     /// output is deterministic).
     owned: State,
@@ -241,21 +309,11 @@ pub(crate) struct Placement {
 
 impl Placement {
     /// Builds the pass from the checker's affine facts (the lowerer never
-    /// re-derives last-use or move information).
-    pub(crate) fn from_linearity(lin: &ds_check::Linearity) -> Self {
-        Self::new(
-            lin.last_uses
-                .iter()
-                .map(|u| (u.binder, (u.at, u.borrowed)))
-                .collect(),
-            lin.moves.iter().map(|m| (m.binder, m.at)).collect(),
-        )
-    }
-
-    pub(crate) fn new(last_use: HashMap<Span, (Span, bool)>, moves: HashSet<(Span, Span)>) -> Self {
+    /// re-derives last-use or move information): every function's walk
+    /// shares the one sorted table the package's lowering built.
+    pub(crate) fn new(facts: Rc<AffineFacts>) -> Self {
         Self {
-            last_use,
-            moves,
+            facts,
             owned: BTreeMap::new(),
             binders: HashMap::new(),
             binder_words: HashMap::new(),
@@ -618,7 +676,7 @@ impl Placement {
             .get(&word)
             .into_iter()
             .flatten()
-            .filter_map(|b| self.last_use.get(b).map(|(at, _)| *at))
+            .filter_map(|b| self.facts.last_use(*b).map(|(at, _)| at))
             .max_by(span_order);
         match death {
             Some(at) => {
@@ -638,7 +696,7 @@ impl Placement {
         let Some(words) = self.binder_words.get(&binder) else {
             return;
         };
-        let forced = self.moves.contains(&(binder, at));
+        let forced = self.facts.is_move(binder, at);
         for &word in words {
             // a fresh use context clears the forward marker of the prior one
             if self.seen.get(&word).is_none_or(|seen| *seen != at) {
@@ -1293,14 +1351,19 @@ mod tests {
     }
 
     fn placement() -> Placement {
-        Placement::new(HashMap::new(), HashSet::new())
+        Placement::new(Rc::new(AffineFacts::from_rows(Vec::new(), Vec::new())))
+    }
+
+    /// A placement whose shared facts carry the given last-use rows.
+    fn placement_with_last_uses(rows: &[(Span, (Span, bool))]) -> Placement {
+        Placement::new(Rc::new(AffineFacts::from_rows(rows.to_vec(), Vec::new())))
     }
 
     fn hook(pool: u16, width: u8, refs: &[u8]) -> Hook {
         Hook {
             pool,
             width,
-            refs: std::rc::Rc::from(refs),
+            refs: Rc::from(refs),
         }
     }
 
@@ -1575,10 +1638,9 @@ mod tests {
     /// to the scope end, where the last alias leaving kills it once.
     #[test]
     fn a_pinned_claim_survives_its_uses() {
-        let mut rc = placement();
         let b = binder_span(10);
         let use_at = binder_span(60);
-        rc.last_use.insert(b, (use_at, true));
+        let mut rc = placement_with_last_uses(&[(b, (use_at, true))]);
         let mut establishment = Vec::new();
         rc.claimed(&mut establishment, 7, hook(9, 1, &[]), 10, &[7]);
         rc.bound(b, &[7]);
@@ -1625,7 +1687,9 @@ mod tests {
     /// A copy off the death use transfers; a copy before it dups.
     #[test]
     fn copies_transfer_at_the_death_and_dup_before_it() {
-        let mut rc = placement();
+        let b = binder_span(50);
+        let use_at = binder_span(90);
+        let mut rc = placement_with_last_uses(&[(b, (use_at, true))]);
         let mut code = Vec::new();
         rc.produced(1);
         // no binders: the temp dies at first consumption
@@ -1635,9 +1699,6 @@ mod tests {
         assert!(rc.owned.contains_key(&2));
 
         // a bound word with a later death dups at the copy
-        let b = binder_span(50);
-        let use_at = binder_span(90);
-        rc.last_use.insert(b, (use_at, true));
         rc.bound(b, &[2]);
         rc.use_of(b, binder_span(60));
         let mut code = Vec::new();
@@ -1663,13 +1724,11 @@ mod tests {
     /// Alias sets: the death widens to the latest alias's last use.
     #[test]
     fn an_alias_widens_the_death_span() {
-        let mut rc = placement();
         let s = binder_span(10);
         let t = binder_span(30);
         let s_use = binder_span(20);
         let t_use = binder_span(40);
-        rc.last_use.insert(s, (s_use, true));
-        rc.last_use.insert(t, (t_use, true));
+        let mut rc = placement_with_last_uses(&[(s, (s_use, true)), (t, (t_use, true))]);
         rc.produced(7);
         rc.bound(s, &[7]);
         rc.bound(t, &[7]);
@@ -1685,10 +1744,9 @@ mod tests {
     /// Loop rule: a use one loop deeper than the production never drops.
     #[test]
     fn a_loop_use_of_an_outer_production_never_drops() {
-        let mut rc = placement();
         let b = binder_span(10);
         let in_loop = binder_span(60);
-        rc.last_use.insert(b, (in_loop, true));
+        let mut rc = placement_with_last_uses(&[(b, (in_loop, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.loop_enter();
@@ -1712,10 +1770,9 @@ mod tests {
     /// and the exit decs the final content exactly once.
     #[test]
     fn a_loop_carried_word_rolls_over_without_dying_in_the_body() {
-        let mut rc = placement();
         let b = binder_span(10);
         let use_at = binder_span(50);
-        rc.last_use.insert(b, (use_at, true));
+        let mut rc = placement_with_last_uses(&[(b, (use_at, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.loop_enter();
@@ -1756,10 +1813,9 @@ mod tests {
     /// same count, deduped), and the flush decs exactly once.
     #[test]
     fn an_open_window_defers_a_staged_word_death_to_its_flush() {
-        let mut rc = placement();
         let b = binder_span(10);
         let death = binder_span(60);
-        rc.last_use.insert(b, (death, true));
+        let mut rc = placement_with_last_uses(&[(b, (death, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
@@ -1787,10 +1843,9 @@ mod tests {
     /// object.
     #[test]
     fn nested_windows_flush_the_outermost_reader_last() {
-        let mut rc = placement();
         let b = binder_span(10);
         let death = binder_span(60);
-        rc.last_use.insert(b, (death, true));
+        let mut rc = placement_with_last_uses(&[(b, (death, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
@@ -1822,10 +1877,9 @@ mod tests {
     /// still forwards untouched.
     #[test]
     fn a_local_staging_dups_under_an_enclosing_window() {
-        let mut rc = placement();
         let b = binder_span(10);
         let death = binder_span(60);
-        rc.last_use.insert(b, (death, true));
+        let mut rc = placement_with_last_uses(&[(b, (death, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();
@@ -1853,8 +1907,7 @@ mod tests {
             "the flush decs the frame's count after both CALLs"
         );
         // outside every window the same staging forwards as always
-        let mut rc = placement();
-        rc.last_use.insert(b, (death, true));
+        let mut rc = placement_with_last_uses(&[(b, (death, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.use_of(b, death);
@@ -1868,10 +1921,9 @@ mod tests {
     /// staged words ride the CALLT with their counts, so no dec exists.
     #[test]
     fn a_tail_transfer_rides_the_callt_with_deferred_counts() {
-        let mut rc = placement();
         let b = binder_span(10);
         let death = binder_span(60);
-        rc.last_use.insert(b, (death, true));
+        let mut rc = placement_with_last_uses(&[(b, (death, true))]);
         rc.produced(4);
         rc.bound(b, &[4]);
         rc.native_open();

@@ -22,7 +22,7 @@ const SOURCE: &[u8] = b"module reader round trip\n";
 const FUNCTIONS: usize = 256;
 
 /// One `sum_to`-shaped arithmetic loop: pool k0 = 0, k1 = 1, slots
-/// [n, acc, t, z, one].
+/// `[n, acc, t, z, one]`.
 fn function(index: usize) -> Function {
     Function::new(
         format!("fn_{index}"),

@@ -2033,3 +2033,57 @@ fn value_position_returns_refuse_with_the_statement_ruling() {
         "fn pick(n: int) -> int | io_err { n }\nfn f(n: int) -> int | io_err {\n  const o = if n > 0 {\n    1\n  } else {\n    const r = pick(n)\n    if r is io_err { return io_err }\n    r\n  }\n  o\n}\n",
     );
 }
+
+#[test]
+fn integer_literals_fold_the_leading_sign_into_the_i64_range() {
+    // i64::MIN is writable: `-` directly over the exact min magnitude
+    // folds the sign into the literal's range check, in decimal and
+    // prefixed radices alike.
+    clean("fn f() -> int { -9223372036854775808 }\n");
+    clean("fn f() -> int { -0x8000000000000000 }\n");
+    clean("fn f() -> int { -9223372036854775807 }\n");
+    // The bare magnitude and anything wider refuse at the source level,
+    // not at lowering.
+    assert_eq!(check("fn f() -> int { 9223372036854775808 }\n"), [
+        "DS1003 integer literal `9223372036854775808` does not fit the i64 range"
+    ]);
+    assert_eq!(check("fn f() -> int { -99999999999999999999 }\n"), [
+        "DS1003 integer literal `99999999999999999999` negated does not fit the i64 range"
+    ]);
+    // A parenthesized magnitude keeps the bare-literal refusal: only the
+    // direct negation folds.
+    assert_eq!(check("fn f() -> int { -(9223372036854775808) }\n"), [
+        "DS1003 integer literal `9223372036854775808` does not fit the i64 range"
+    ]);
+}
+
+#[test]
+fn written_type_applications_validate_arity_and_constructor_kind() {
+    // A generic head applied with the wrong count names the declaration
+    // and both counts, at a parameter annotation, a struct field, and an
+    // `is` test alike (the prelude's `list` declares one parameter).
+    assert_eq!(
+        check("struct pair[t] { a: t, b: t }\nfn f(x: pair[int, string]) -> int { 0 }\n"),
+        ["DS2040 `pair` declares 1 type parameter(s); the application spells 2"]
+    );
+    assert_eq!(check("struct s { f: list[int, string] }\n"), [
+        "DS2040 `list` declares 1 type parameter(s); the application spells 2"
+    ]);
+    assert_eq!(
+        check("fn f(x: int) -> int { if x is list[int, string] { 0 } else { 1 } }\n"),
+        ["DS2040 `list` declares 1 type parameter(s); the application spells 2"]
+    );
+    // A non-generic head declares zero parameters; a tag never takes
+    // type arguments at all.
+    assert_eq!(check("fn f(x: config[int]) -> int { 0 }\n"), [
+        "DS2040 `config` declares 0 type parameter(s); the application spells 1"
+    ]);
+    assert_eq!(check("fn f(x: int[string]) -> int { 0 }\n"), [
+        "DS2040 `int` is a tag and takes no type arguments"
+    ]);
+    // The positive spellings stay clean: the matching counts, the map's
+    // two, and a generic alias expanded at its use.
+    clean("fn f(x: list[int]) -> int { 0 }\n");
+    clean("struct map[k, v]\nfn f(m: map[string, int]) -> int { 0 }\n");
+    clean("type rw[t] = list[t]\nfn f() -> rw[int] { list[int]() }\n");
+}

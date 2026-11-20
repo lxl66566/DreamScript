@@ -26,6 +26,12 @@
 // Every extern here names a callee the lowering answers (a native, a
 // generic native, or a rule-routed family); a declaration whose callee
 // no table answers was the dead-name footgun this surface shed.
+// The library-boundary un-merge's first slice: this file is the shrunk
+// core — the members that migrated to the reserved @std package's own
+// source (std_members.ds, the demo residue) left it, and the merged
+// ambient every undeclaring registration serves composes that member
+// file back after this one, so the two readings stay namespace-identical
+// while the migration runs.
 
 // The default platform (H5, E1): the `ds` CLI is this platform's
 // provider, and the checker verifies the package's world usage stays
@@ -258,20 +264,6 @@ pub enum net_err {
   refused
 }
 
-// A text row: keyed lookup over strings.
-pub type row = map[string, string]
-
-// The config record (the optional port is the tutorial's b14 extraction
-// shape; an int constructs in). The reader/fallback externs that answered
-// it are gone from the ambient — no native answered them — so a package
-// wanting them declares its own externs over this shape.
-pub struct config { host: string, port: int?, retries: int }
-
-// An opaque response value. The fetch/consume externs that answered it
-// are gone from the ambient — no native answered them — so a package
-// wanting them declares its own externs over this shape.
-pub struct response
-
 // The file face: the package-owned linear handle over the fsys
 // capability. `open_file` answers this type directly (its one inline word is
 // the handle), while `read_exact` and `close_file` are ds-source
@@ -319,9 +311,6 @@ pub struct net_handle: ~Copyable {
 pub struct field { name: string, type: type, tag: string }
 pub extern fn fields (t: type) -> list[field]
 pub extern fn type_name (t: type) -> string
-
-// The nursery demo's fixed page list.
-pub const urls = ["https://ds.dev", "https://example.org"]
 
 pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]

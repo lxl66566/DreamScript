@@ -1,4 +1,4 @@
-//! The BL-5 uop set: the one instruction contract for every tier [BL-1, BL-5].
+//! The BL-5 uop set: the one instruction contract for every tier `[BL-1, BL-5]`.
 //!
 //! This module defines the micro-operation set once, as a Rust enum. Every
 //! tier consumes exactly this set: the tier-1 dispatch loop (`ds-vm`), the
@@ -358,7 +358,7 @@ pub enum Uop {
     ArenaRestore { src: u8 },
     /// `0xA.0` — call pool FuncRef `callee` with `nargs` arguments staged in
     /// the caller's outgoing-argument area; the callee frame overlays that
-    /// area [BL-6, H2]. The VM re-checks `nargs` against the callee's
+    /// area `[BL-6, H2]`. The VM re-checks `nargs` against the callee's
     /// layout.
     Call { callee: ConstIdx, nargs: u8 },
     /// `0xA.1` — tail call (H2): slide the staged arguments into slots

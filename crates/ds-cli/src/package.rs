@@ -10,7 +10,11 @@
 //! `@std` from the checked-in ambient artifact, every other linked name
 //! from its package's single source member compiled in-process under the
 //! package's link name, the graph's identities feeding the dep-list
-//! writer so the artifacts pin the content they link.
+//! writer so the artifacts pin the content they link. The light key
+//! entry [`resolve_identities`] serves the cache probes — `ds info`'s
+//! prefix tier, the LSP's linked surfaces — the resolved graph's key
+//! inputs alone, stopping ahead of the artifact installs and the graph
+//! assembly the run paths pay.
 
 use std::{
     cell::RefCell,
@@ -35,11 +39,11 @@ use crate::source::{self, CompiledSource, Export, ExportKind, rebase_sig, rebase
 /// The manifest's file name inside a package root.
 pub(crate) const MANIFEST_FILE: &str = "ds.pkg";
 
-/// One resolved package's member file: the member's path inside the
-/// package (the display path diagnostics render) and its text, in
-/// ascending path order.
+/// One package member file: the member's path inside the package — the
+/// display path the compile registers and the identity fold records —
+/// and its text.
 #[derive(Clone)]
-struct Member {
+pub(crate) struct Member {
     path: String,
     text: String,
 }
@@ -48,8 +52,10 @@ struct Member {
 /// validates (G3.5): a single member's source hash, or the composed fold
 /// over every member in ascending path order — one length-prefixed path
 /// and text pair per member, so the composition is byte-stable and a
-/// member rename or text edit changes it.
-fn member_identity(members: &[Member]) -> Hash128 {
+/// member rename or text edit changes it. The package-root caches fold
+/// the same identity over the root's own members, so a sibling edit
+/// re-keys them exactly as a dep's moved content re-keys the dep folds.
+pub(crate) fn member_identity(members: &[Member]) -> Hash128 {
     let [one] = members else {
         let mut ordered: Vec<&Member> = members.iter().collect();
         ordered.sort_by(|left, right| left.path.cmp(&right.path));
@@ -70,20 +76,29 @@ fn member_identity(members: &[Member]) -> Hash128 {
 /// validate against, in the package compile's own file space.
 struct LinkedPackage {
     module: Module,
-    members: Vec<Member>,
+    members: Rc<[Member]>,
     exports: Vec<Export>,
 }
 
 /// The graph one package run serves from: each resolved dependency's
-/// member files, keyed by link name, the member identities the dep-list
-/// writer records, the graph's native artifacts (installed
-/// content-addressed ahead of the walk), and the compiled packages those
-/// identities pin, memoized by link name so a package the walk and the
-/// surface builder both demand compiles once.
+/// member files, keyed by link name and held as one shared slice
+/// (the memoized compile reads the same members, no second copy), the
+/// member identities the dep-list writer records, the graph's native
+/// artifacts (installed content-addressed ahead of the walk), and the
+/// compiled packages those identities pin, memoized by link name so a
+/// package the walk and the surface builder both demand compiles once.
+/// The graph's bindable artifact loads (H5): the modules whose bytes load
+/// and enumerate, beside each load that refused with its rendered reason.
+type BoundLoads = (Vec<(String, ds_vm::BoundModule)>, Vec<(String, String)>);
+
 pub(crate) struct Graph {
-    members: BTreeMap<String, Vec<Member>>,
+    members: BTreeMap<String, Rc<[Member]>>,
     identities: BTreeMap<String, Hash128>,
     artifacts: BTreeMap<String, ds_pkg::ArtifactBound>,
+    /// The store the resolution served and the artifact installs landed
+    /// in: the run path reopens it per demand (the bound libraries and
+    /// their export enumerations read from here).
+    store: Store,
     no_ambient: bool,
     linked: RefCell<BTreeMap<String, Rc<LinkedPackage>>>,
     /// The link names currently compiling: a source-import cycle (a
@@ -94,14 +109,45 @@ pub(crate) struct Graph {
     in_progress: RefCell<BTreeSet<String>>,
 }
 
-/// The package run `entry` shapes, when a manifest sits beside it:
-/// `None` is the plain script the existing paths serve unchanged.
+/// The resolved graph's cache-key inputs: each resolved dep's link name
+/// over the member identity the load walk records, and each declared
+/// native artifact's name over its content pin — the maps the script
+/// and prefix cache keys fold. [`resolve_identities`] answers these
+/// alone, so a cache probe pays no artifact install and no graph
+/// assembly.
+#[derive(Clone)]
+pub(crate) struct GraphKeys {
+    /// Each resolved dep's identity.
+    pub(crate) identities: BTreeMap<String, Hash128>,
+    /// Each declared native artifact's content pin, name-keyed.
+    pub(crate) artifact_pins: BTreeMap<String, Hash128>,
+}
+
+/// The resolution front `open` and [`resolve_identities`] share: the
+/// manifest read, the store and registry wiring, and the MVS graph
+/// resolution — everything the two entries answer before they part,
+/// the run paths continuing into the artifact installs, the member
+/// retention, and the graph's compile machinery.
+struct Front {
+    /// The store the resolution served and the artifact installs land
+    /// in.
+    store: Store,
+    /// The registry behind `$DS_REGISTRY`, filling the store's misses;
+    /// `None` resolves the installed rows alone.
+    registry: Option<ds_pkg::RegistryClient>,
+    /// The resolved graph.
+    resolved: ds_pkg::Resolved,
+}
+
+/// The shared resolution front over the manifest beside `entry`:
+/// `None` names a manifest-free entry, which stays the plain script the
+/// existing paths serve.
 ///
 /// # Errors
 ///
 /// An unreadable or drifting manifest, an unresolvable cache root, and
 /// every resolution refusal the store's own knowledge reports.
-pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
+fn resolve_front(entry: &Path) -> Result<Option<Front>> {
     let Some(manifest_path) = manifest_beside(entry) else {
         return Ok(None);
     };
@@ -142,14 +188,29 @@ pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
         })
         .map_err(|error| refuse(&error, false))?
     };
-    // the graph's native artifacts install before the walk serves: each
-    // declared library validated against its content pin and landing in
-    // the store's artifact segment, a registry's storage filling misses
-    // — the `[artifacts]` entries are dependencies like `[deps]`, an
-    // unserved one an unsatisfied demand
-    for (name, artifact) in resolved.artifacts() {
-        ensure_artifact(&store, registry.as_ref(), name, artifact)?;
-    }
+    Ok(Some(Front {
+        store,
+        registry,
+        resolved,
+    }))
+}
+
+/// The per-dep member sets the run's graph retains, link-name keyed.
+type Members = BTreeMap<String, Rc<[Member]>>;
+/// The per-dep identities the dep-list writer records, link-name keyed.
+type Identities = BTreeMap<String, Hash128>;
+
+/// Each resolved dep's member set and identity, the shared fold both
+/// graph entries run: one store bundle load and validation per dep,
+/// the members the run's graph retains beside the member identity the
+/// cache keys and the dep-list writer record — so the light key entry
+/// answers the same values the heavy graph's own identities hold.
+///
+/// # Errors
+///
+/// A dep whose installed bundle will not validate, and one framing no
+/// source member.
+fn dep_members(store: &Store, resolved: &ds_pkg::Resolved) -> Result<(Members, Identities)> {
     let mut members = BTreeMap::new();
     let mut identities = BTreeMap::new();
     for (name, package) in resolved.deps() {
@@ -164,16 +225,78 @@ pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
             })?;
         let package_members = members_of(name, &bundle)?;
         identities.insert(name.clone(), member_identity(&package_members));
-        members.insert(name.clone(), package_members);
+        members.insert(name.clone(), package_members.into());
     }
+    Ok((members, identities))
+}
+
+/// The resolved graph's cache-key inputs, the light entry: the same
+/// manifest read, resolution, and per-dep identity fold `open` runs,
+/// stopping ahead of the native-artifact installs (each `[artifacts]`
+/// entry's `ensure_artifact`, a cold artifact store behind a git
+/// registry paying a snapshot clone) and the graph assembly the run
+/// paths add — a cache probe (`ds info`'s prefix tier, the LSP's linked
+/// surfaces) reads its key inputs without touching the artifacts.
+/// `None` names a manifest-free entry.
+///
+/// # Errors
+///
+/// Every refusal `open` reports ahead of its artifact installs: an
+/// unreadable or drifting manifest, an unresolvable cache root, a
+/// resolution refusal, and a dep whose installed bundle will not
+/// validate.
+pub(crate) fn resolve_identities(entry: &Path) -> Result<Option<GraphKeys>> {
+    let Some(front) = resolve_front(entry)? else {
+        return Ok(None);
+    };
+    let (_, identities) = dep_members(&front.store, &front.resolved)?;
+    Ok(Some(GraphKeys {
+        identities,
+        artifact_pins: artifact_pins_of(front.resolved.artifacts()),
+    }))
+}
+
+/// The package run `entry` shapes, when a manifest sits beside it:
+/// `None` is the plain script the existing paths serve unchanged.
+///
+/// # Errors
+///
+/// An unreadable or drifting manifest, an unresolvable cache root, and
+/// every resolution refusal the store's own knowledge reports.
+pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
+    let Some(front) = resolve_front(entry)? else {
+        return Ok(None);
+    };
+    // the graph's native artifacts install before the walk serves: each
+    // declared library validated against its content pin and landing in
+    // the store's artifact segment, a registry's storage filling misses
+    // — the `[artifacts]` entries are dependencies like `[deps]`, an
+    // unserved one an unsatisfied demand
+    for (name, artifact) in front.resolved.artifacts() {
+        ensure_artifact(&front.store, front.registry.as_ref(), name, artifact)?;
+    }
+    let (members, identities) = dep_members(&front.store, &front.resolved)?;
+    let artifacts = front.resolved.artifacts().clone();
     Ok(Some(Graph {
         members,
         identities,
-        artifacts: resolved.artifacts().clone(),
+        artifacts,
+        store: front.store,
         no_ambient,
         linked: RefCell::new(BTreeMap::new()),
         in_progress: RefCell::new(BTreeSet::new()),
     }))
+}
+
+/// The folded native-artifact pins over one artifact map: each declared
+/// library's name over its content pin, the pairs the cache keys fold.
+fn artifact_pins_of(
+    artifacts: &BTreeMap<String, ds_pkg::ArtifactBound>,
+) -> BTreeMap<String, Hash128> {
+    artifacts
+        .iter()
+        .map(|(name, bound)| (name.clone(), bound.hash))
+        .collect()
 }
 
 /// The manifest beside one entry file — the entry's directory is the
@@ -185,6 +308,59 @@ pub(crate) fn manifest_beside(entry: &Path) -> Option<PathBuf> {
         None => PathBuf::from(MANIFEST_FILE),
     };
     manifest.is_file().then_some(manifest)
+}
+
+/// The default `@std` bundle's source members, in-process: the tree's
+/// own package bytes — the same members the default install serves
+/// into the content-addressed store when package resolution demands
+/// the name — so a manifest-free resolution needs no store row to
+/// serve the same content.
+fn default_std_members() -> Vec<Member> {
+    members_of(ds_stdlib::STD_PACKAGE_NAME, &ds_stdlib::std_package())
+        .expect("the default @std bundle frames its source members")
+}
+
+/// The manifest-free run's implicit `@std` identity (the bare-specifier
+/// switch): one row, the bundle's composed member identity — the same
+/// ascending-path fold a store-resolved declaration records — so the
+/// cache keys and the dep-list writer fold what a declaring graph's
+/// `[deps]` row folds and an artifact the merged reading wrote never
+/// serves.
+pub(crate) fn implicit_std_identities() -> BTreeMap<String, Hash128> {
+    BTreeMap::from([(
+        ds_stdlib::STD_PACKAGE_NAME.to_owned(),
+        member_identity(&default_std_members()),
+    )])
+}
+
+/// The bare script's implicit graph (the bare-specifier switch): a
+/// manifest-free run resolves the reserved `@std` package ahead of its
+/// own compile — the dep implicit, the same discipline a manifest's
+/// `[deps]` row buys — so the script compiles over the shrunk core
+/// ambient, its `@std` imports bind members through the linked
+/// surface, and a bare use of a migrated name stays unknown over the
+/// core. The bundle's members ride in-process at the composed member
+/// identity; a store root never enters (a script runs with no cache at
+/// all).
+pub(crate) fn implicit_std_graph() -> Graph {
+    let members = default_std_members();
+    let identity = member_identity(&members);
+    Graph {
+        members: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), members.into())]),
+        identities: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), identity)]),
+        artifacts: BTreeMap::new(),
+        // The implicit graph never lands an artifact install (its
+        // artifact table is empty, so the bound-module walk reads no
+        // store path), and Store::open touches nothing: the row rides
+        // for the field the resolution path fills, rooted at the
+        // process's cache root when one exists and never consulted
+        // otherwise.
+        store: ds_pkg::store::cache_root()
+            .map_or_else(|| Store::open(Path::new("")), |root| Store::open(&root)),
+        no_ambient: false,
+        linked: RefCell::new(BTreeMap::new()),
+        in_progress: RefCell::new(BTreeSet::new()),
+    }
 }
 
 /// The bundle's source members (the reserved manifest member aside), in
@@ -265,6 +441,57 @@ pub(crate) fn walk_sources(root: &Path) -> Result<Vec<PathBuf>> {
 fn link_resolves_inside(link: &Path, inside: &Path) -> bool {
     link.canonicalize()
         .is_ok_and(|target| target.is_file() && target.strip_prefix(inside).is_ok())
+}
+
+/// The members one package-root entry carries (G3: one package, one
+/// namespace): a manifest-free entry stays the single member the
+/// script rule always compiled — the manifest-free run path over the
+/// implicit `@std` graph never sees a sibling — while a manifest beside
+/// the entry composes the entry member and every sibling `walk_sources`
+/// admits below the entry's directory, the same member set `ds save`
+/// bundles and a dep-side compile serves. The entry member rides first
+/// (its display path keeps the invoked spelling); the siblings follow in
+/// ascending bundle-relative path order, each member's path the
+/// bundle-relative spelling so the identity fold records the same
+/// member set whatever path spelling invoked the entry.
+///
+/// # Errors
+///
+/// An unreadable entry, an unreadable root or sibling member, and a
+/// sibling that is not UTF-8 text.
+pub(crate) fn root_members(entry: &Path) -> Result<Vec<Member>> {
+    let text = fs::read_to_string(entry).with_context(|| format!("reading {}", entry.display()))?;
+    let path = entry
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let mut members = vec![Member { path, text }];
+    if manifest_beside(entry).is_none() {
+        return Ok(members);
+    }
+    let root = entry
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut siblings = Vec::new();
+    for walked in walk_sources(root)? {
+        let relative = walked
+            .strip_prefix(root)
+            .expect("the walk started at the root");
+        let path = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        if path == members[0].path {
+            continue;
+        }
+        let text =
+            fs::read_to_string(&walked).with_context(|| format!("reading {}", walked.display()))?;
+        siblings.push(Member { path, text });
+    }
+    siblings.sort_by(|left, right| left.path.cmp(&right.path));
+    members.append(&mut siblings);
+    Ok(members)
 }
 
 /// Reads and parses one manifest, rendering its DS4014 drift diagnostics
@@ -421,18 +648,94 @@ impl Graph {
         &self.artifacts
     }
 
+    /// The graph's native-artifact pins the cache keys fold: each
+    /// declared library's name over the content identity the run
+    /// installed — the artifact map reduced to the pairs the keys fold.
+    pub(crate) fn artifact_pins(&self) -> BTreeMap<String, Hash128> {
+        artifact_pins_of(&self.artifacts)
+    }
+
+    /// The graph's bindable artifacts (H5): each resolved `[artifacts]`
+    /// library whose bytes load and enumerate installs under its manifest
+    /// name — the native module a bound extern's pool constant addresses
+    /// — beside the loads that refused, each with its reason. A library
+    /// nothing binds never installs and the run proceeds; a module whose
+    /// pool addresses a refused load gets the honest unresolved-callee
+    /// refusal, the recorded reason naming the cause.
+    pub(crate) fn bound_modules(&self) -> BoundLoads {
+        let mut modules = Vec::new();
+        let mut refused = Vec::new();
+        for (name, artifact) in &self.artifacts {
+            let path = self.store.artifact_path(artifact.hash);
+            let bound = (|| {
+                let library = ds_ffi::Library::open(&path).map_err(|error| {
+                    anyhow!(
+                        "{error}; the artifact declares the target `{}`, and a library built for \
+                         another triple is among the refusals",
+                        artifact.target
+                    )
+                })?;
+                let bytes = self
+                    .store
+                    .load_artifact(artifact.hash)
+                    .map_err(|error| anyhow!("{error}"))?
+                    .with_context(|| {
+                        format!("artifact `{name}` {} is not installed", artifact.ver)
+                    })?;
+                ds_vm::BoundModule::bind(library, &bytes)
+                    .with_context(|| format!("artifact `{name}` does not bind"))
+            })();
+            match bound {
+                Ok(module) => modules.push((name.clone(), module)),
+                Err(error) => refused.push((name.clone(), format!("{error:#}"))),
+            }
+        }
+        (modules, refused)
+    }
+
+    /// Installs the graph's bindable artifacts into a VM registry (H5) —
+    /// the run path's own step, ahead of the module installs whose pool
+    /// validation resolves a bound extern's constant against the bound
+    /// tables exactly like a platform's served ops. Answers the loads
+    /// that refused, each artifact with its reason.
+    pub(crate) fn install_bound(
+        &self,
+        registry: &mut ds_vm::ModuleRegistry,
+    ) -> Vec<(String, String)> {
+        let (modules, refused) = self.bound_modules();
+        for (name, module) in modules {
+            registry.install_bound(&name, module);
+        }
+        refused
+    }
+
+    /// Whether the graph resolved the reserved `@std` package: the
+    /// library-boundary un-merge's per-graph ambient shape — a declaring
+    /// graph compiles over the shrunk ambient core (the migrated members
+    /// bind through the linked surface), every other registration the
+    /// merged ambient.
+    pub(crate) fn declares_std(&self) -> bool {
+        self.members.contains_key(ds_stdlib::STD_PACKAGE_NAME)
+    }
+
     /// One linked package's compiled module and exports (G4), memoized by
     /// link name: the package's members compose one module under the link
     /// name at the recorded identity, its own imports validating and
     /// binding against this same graph, dependencies first. A name the
-    /// graph never resolved answers `None`.
+    /// graph never resolved answers `None`. `dep_dsi` is the
+    /// linked-member `.dsi` tier the compile persists beside its dsmod
+    /// when the script-mode run path asked for it.
     ///
     /// # Errors
     ///
     /// Every pipeline failure the package's compile reports, the
     /// validation refusal of its recorded imports, and the cycle refusal
     /// of a source import that re-links a package already compiling.
-    fn linked(&self, name: &str) -> Result<Option<Rc<LinkedPackage>>> {
+    fn linked(
+        &self,
+        name: &str,
+        dep_dsi: Option<&crate::run_cache::RunCache>,
+    ) -> Result<Option<Rc<LinkedPackage>>> {
         if let Some(package) = self.linked.borrow().get(name) {
             return Ok(Some(Rc::clone(package)));
         }
@@ -449,12 +752,12 @@ impl Graph {
                  other linked packages"
             );
         }
-        let outcome = self.compile(name, members);
+        let outcome = self.compile(name, members, dep_dsi);
         self.in_progress.borrow_mut().remove(name);
         let compiled = outcome?;
         let package = Rc::new(LinkedPackage {
             module: compiled.lowered.into_module(),
-            members: members.clone(),
+            members: Rc::clone(members),
             exports: compiled.exports,
         });
         self.linked
@@ -471,7 +774,12 @@ impl Graph {
     ///
     /// Every pipeline failure the package's compile reports, and the
     /// validation refusal of its recorded imports.
-    fn compile(&self, name: &str, members: &[Member]) -> Result<CompiledSource> {
+    fn compile(
+        &self,
+        name: &str,
+        members: &[Member],
+        dep_dsi: Option<&crate::run_cache::RunCache>,
+    ) -> Result<CompiledSource> {
         let identity = self.identities[name];
         let sources: Vec<(String, String)> = members
             .iter()
@@ -483,10 +791,12 @@ impl Graph {
             identity,
             "main",
             false,
+            false,
             self.no_ambient,
             &self.identities,
             Some(self),
             None,
+            dep_dsi,
             source::BundleAfter::Drop,
         )?;
         validate_links(name, compiled.lowered.module().deps(), &self.identities)?;
@@ -500,19 +810,27 @@ impl Graph {
     /// for the ambient. Any other name serves its linked package's
     /// module, compiled in process under the link name, its own recorded
     /// imports validated against the same graph. A demand nothing
-    /// resolves answers `None`, the walk's provider miss.
+    /// resolves answers `None`, the walk's provider miss. `dep_dsi` is
+    /// the linked-member `.dsi` tier the compile persists beside its
+    /// dsmod; `None` (the dev watch round) writes the module alone.
     ///
     /// # Errors
     ///
     /// Every pipeline failure the package's compile reports, and the
     /// validation refusal of its recorded imports.
-    pub(crate) fn serve(&self, name: &str) -> Result<Option<Module>> {
+    pub(crate) fn serve(
+        &self,
+        name: &str,
+        dep_dsi: Option<&crate::run_cache::RunCache>,
+    ) -> Result<Option<Module>> {
         if name == crate::ambient_dsmod::AMBIENT_MODULE_NAME && !self.members.contains_key(name) {
             let module = ds_mod::read(&ds_stdlib::AMBIENT_DSMOD[crate::ambient_dsmod::HEADER..])
                 .context("the checked-in ambient artifact does not read")?;
             return Ok(Some(module));
         }
-        Ok(self.linked(name)?.map(|package| package.module.clone()))
+        Ok(self
+            .linked(name, dep_dsi)?
+            .map(|package| package.module.clone()))
     }
 
     /// The import surfaces one compile's trees bind through (G4): one
@@ -523,19 +841,25 @@ impl Graph {
     /// package's import serves the named members' exported entries with
     /// the link position a call lowering addresses — the positions the
     /// dep-list writer records, so both derive from the same
-    /// first-occurrence walk. An import nothing links gains no entry
-    /// and stays declarative.
+    /// first-occurrence walk. A `pub import` re-export's origin package
+    /// joins the same walk after the source's own names, so a transitive
+    /// entry's FuncRef addresses the origin's dep slot; the recorded
+    /// order rides the graph for the dep-list writer to reuse. An import
+    /// nothing links gains no entry and stays declarative.
     pub(crate) fn surfaces(
         &self,
         files: &mut Files,
         asts: &[std::sync::Arc<ds_parse::Ast>],
         ambient_files: usize,
+        dep_dsi: Option<&crate::run_cache::RunCache>,
     ) -> Result<ImportGraph> {
         let mut imports = ImportGraph::new();
         // The first-occurrence link positions: exactly the dep-list
         // writer's walk, so a linked entry's position names the dep slot
-        // its FuncRef addresses.
+        // its FuncRef addresses. The order vector mirrors the map's
+        // insertion sequence — the walk the graph records below.
         let mut positions: HashMap<String, u32> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
         for ast in &asts[ambient_files..] {
             for block in &ast.blocks {
                 for item in &block.items {
@@ -543,9 +867,12 @@ impl Graph {
                         continue;
                     };
                     let name = source::import_link_name(import);
-                    let next =
-                        u32::try_from(positions.len()).expect("link position count fits u32");
-                    positions.entry(name).or_insert(next);
+                    if !positions.contains_key(&name) {
+                        let next =
+                            u32::try_from(positions.len()).expect("link position count fits u32");
+                        positions.insert(name.clone(), next);
+                        order.push(name);
+                    }
                 }
             }
         }
@@ -555,28 +882,75 @@ impl Graph {
                     let ItemKind::Import(import) = &item.kind else {
                         continue;
                     };
-                    let surface = self.surface_of(files, import, &positions, ambient_files)?;
+                    let surface = self.surface_of(
+                        files,
+                        import,
+                        &mut positions,
+                        &mut order,
+                        ambient_files,
+                        dep_dsi,
+                    )?;
                     imports.add(import.span, surface);
                 }
             }
         }
+        // the run's bound artifacts join the graph (H5): each resolved
+        // `[artifacts]` library a walked source's extern binds enumerates
+        // into the fold in export order — the table a bound extern's
+        // declaration validates against and the VM install binds below.
+        // An artifact nothing binds enumerates nothing: a library the
+        // host never loads costs the compile its export read never
+        let mut binds = BTreeSet::new();
+        for ast in &asts[ambient_files..] {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    if let ItemKind::ExternFn(f) = &item.kind
+                        && let Some(bind) = &f.bind
+                    {
+                        binds.insert(bind.name.clone());
+                    }
+                }
+            }
+        }
+        for name in binds {
+            let Some(artifact) = self.artifacts.get(&name) else {
+                continue;
+            };
+            let bytes = self
+                .store
+                .load_artifact(artifact.hash)
+                .map_err(|error| anyhow!("{error}"))?
+                .with_context(|| format!("artifact `{name}` {} is not installed", artifact.ver))?;
+            let symbols = ds_ffi::enumerate(&bytes)
+                .with_context(|| format!("artifact `{name}`'s export tables refuse to read"))?;
+            imports.add_artifact(&name, symbols);
+        }
+        imports.set_link_order(order);
         Ok(imports)
     }
 
     /// One import declaration's surface: a graph that resolved the `@std`
-    /// package serves its linked members, otherwise `@std` keeps the
-    /// merged-ambient reading (the compile unit's ambient namespace
-    /// serves, no graph link), and every other name serves its linked
-    /// package's selected members — no entry-shaped [`ImportSurface`]
-    /// for an import nothing serves, the `NoSuchMember` variant the
-    /// linked package that lacks the named member, so the refusal names
-    /// the selector.
+    /// package serves its linked members (the ambient core member plus
+    /// the migrated members' own source — the declarations a declaring
+    /// graph's shrunk ambient lacks, binding through the linked surface),
+    /// otherwise `@std` keeps the merged-ambient reading (the compile
+    /// unit's ambient namespace serves, no graph link), and every other
+    /// name serves its linked package's selected members — no
+    /// entry-shaped [`ImportSurface`] for an import nothing serves, the
+    /// `NoSuchMember` variant the linked package that lacks the named
+    /// member, so the refusal names the selector. A re-exported entry
+    /// (`pub import` upstream) binds its ORIGIN package's position —
+    /// assigned here in first-occurrence order after the source's own
+    /// names — so the call lowering addresses the module whose table
+    /// holds the body.
     fn surface_of(
         &self,
         files: &mut Files,
         import: &ds_parse::ImportDecl,
-        positions: &HashMap<String, u32>,
+        positions: &mut HashMap<String, u32>,
+        order: &mut Vec<String>,
         ambient_files: usize,
+        dep_dsi: Option<&crate::run_cache::RunCache>,
     ) -> Result<ImportSurface> {
         let name = source::import_link_name(import);
         if name == ds_stdlib::STD_PACKAGE_NAME && !self.members.contains_key(&name) {
@@ -599,7 +973,7 @@ impl Graph {
         } else {
             None
         };
-        let Some(package) = self.linked(&name)? else {
+        let Some(package) = self.linked(&name, dep_dsi)? else {
             return Ok(ImportSurface::NoSuchMember { member: name });
         };
         let mut rebase: HashMap<FileId, FileId> = HashMap::new();
@@ -635,15 +1009,31 @@ impl Graph {
         }
         // The registered members' exports compose the surface: an export
         // whose defining span names a member the selector skipped never
-        // enters (a selector's grain). The linked module's tag-table
-        // rows ride beside them — the shared tag mapping's identity,
-        // seeded into the consuming compile's own table at lowering.
+        // enters (a selector's grain; a re-export's defining span IS the
+        // `pub import` row's, so it names the member the same way). A
+        // re-exported export links its origin package's position — one
+        // this walk assigns in first-occurrence order, the position the
+        // entry's FuncRef addresses — while a direct member links the
+        // imported package itself. The linked module's tag-table rows
+        // ride beside them — the shared tag mapping's identity, seeded
+        // into the consuming compile's own table at lowering.
         let mut entries = Vec::new();
         for export in &package.exports {
             let old = export.decl_span.file;
             if !rebase.contains_key(&old) {
                 continue;
             }
+            let origin = export.origin.clone();
+            let link = if let Some(link) = origin.as_deref().and_then(|name| positions.get(name)) {
+                *link
+            } else if let Some(name) = origin.as_deref() {
+                let link = u32::try_from(positions.len()).expect("link position count fits u32");
+                positions.insert(name.to_owned(), link);
+                order.push(name.to_owned());
+                link
+            } else {
+                position
+            };
             entries.push(ForeignEntry {
                 name: export.name.clone(),
                 vis: export.vis,
@@ -660,7 +1050,8 @@ impl Graph {
                 caps: export.caps,
                 value: export.value.clone(),
                 ty: export.ty.clone(),
-                link: position,
+                link,
+                origin,
                 func: export.func,
                 std: std_pkg,
             });
@@ -675,11 +1066,21 @@ impl Graph {
     }
 }
 
-/// Reads and compiles one package-shaped root: the module name keeps the
-/// script rule (the file stem), the writer records the graph's
-/// identities for the source's imports, and the recorded list validates
-/// against the graph. `prefix_cache` is the caller's prefix tier, keyed
-/// on the same dep identities; `None` runs uncached.
+/// Reads and compiles one package-shaped root over its member set (G3:
+/// one package, one namespace): a manifest-free root stays the single
+/// member the script rule always compiled, while a manifest beside the
+/// entry composes the entry member and every sibling into one compile
+/// unit — the same member walk a dep-side compile rides — under the
+/// composed member identity the caches key on. The module name keeps
+/// the script rule (the file stem), the first member's display path
+/// keeps the invoked entry spelling, and the writer records the graph's
+/// identities for the imports the whole member set declares, the
+/// recorded list validating against the graph. `script` parses the
+/// root's first member as a script — top-level statements folding into
+/// the synthesized `main`, the manifest-free run path's rule over the
+/// implicit `@std` graph — while a manifest-declared root keeps the
+/// member grammar. `prefix_cache` is the caller's prefix tier, keyed on
+/// the same dep identities; `None` runs uncached.
 ///
 /// # Errors
 ///
@@ -689,19 +1090,38 @@ pub(crate) fn compile_root(
     file: &Path,
     entry: &str,
     graph: &Graph,
+    script: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
+    dep_dsi: Option<&crate::run_cache::RunCache>,
 ) -> Result<CompiledSource> {
-    let source = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let members = root_members(file)?;
     let name = source::script_module_name(file)?;
-    let compiled = source::compile_package(
+    let identity = member_identity(&members);
+    // the entry member keeps the invoked path as its display; every
+    // sibling registers under its bundle-relative path, the spelling a
+    // dep-side compile renders the same member under
+    let sources: Vec<(String, String)> = members
+        .iter()
+        .enumerate()
+        .map(|(at, member)| {
+            (
+                if at == 0 { file.display().to_string() } else { member.path.clone() },
+                member.text.clone(),
+            )
+        })
+        .collect();
+    let compiled = source::compile_linked(
         &name,
-        &file.display().to_string(),
-        &source,
+        &sources,
+        identity,
         entry,
+        script,
+        true,
         graph.no_ambient,
         graph.identities(),
         Some(graph),
         prefix_cache,
+        dep_dsi,
         source::BundleAfter::Keep,
     )?;
     validate_links(&name, compiled.lowered.module().deps(), graph.identities())?;
@@ -777,5 +1197,80 @@ mod tests {
             member_identity(&[member("only.ds", "text")]),
             Hash128::compute(b"text")
         );
+    }
+
+    /// The light key entry answers the heavy graph's own folds over a
+    /// two-package tree — the dep installed in the store, the root
+    /// manifest pinning it — so the identities and pins the cache keys
+    /// fold are the same values either entry computes, and the dep's
+    /// single member lands its text hash.
+    #[test]
+    fn the_light_key_entry_answers_the_heavy_graph_folds() {
+        let work =
+            std::env::temp_dir().join(format!("ds-cli-package-light-{}", std::process::id()));
+        let cache = work.join("cache");
+        let root = work.join("root");
+        std::fs::create_dir_all(&cache).expect("the private cache root creates");
+        std::fs::create_dir_all(&root).expect("the package root creates");
+        // The cache-root environment is test-local: the runner gives
+        // each test its own process, and no other unit test reads it.
+        let prior_cache = std::env::var_os("DS_CACHE");
+        unsafe {
+            std::env::set_var("DS_CACHE", &cache);
+            std::env::remove_var("DS_REGISTRY");
+        }
+        let dep_manifest_text = "name = \"@dep\"\nversion = \"1.0.0\"\n";
+        let manifest = ds_pkg::Manifest::parse(dep_manifest_text, ds_diag::FileId::new(0))
+            .expect("the fixture manifest parses");
+        let member = "pub fn base() -> int {\n21\n}\n";
+        let bundle = ds_pkg::Package::new(&manifest, [(
+            "dep.ds".to_owned(),
+            member.as_bytes().to_vec(),
+        )])
+        .expect("the fixture bundle builds");
+        let hash = ds_pkg::Store::open(&cache)
+            .install(&bundle)
+            .expect("the dep installs");
+        std::fs::write(
+            root.join(super::MANIFEST_FILE),
+            format!(
+                "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@dep = {{ ver = \"1.0.0\", hash = \
+                 \"blake3:{hash}\" }}\n"
+            ),
+        )
+        .expect("the root manifest writes");
+        std::fs::write(
+            root.join("main.ds"),
+            "import @dep (base)\n\nfn main() -> int {\n21\n}\n",
+        )
+        .expect("the entry writes");
+        let entry = root.join("main.ds");
+        let heavy = super::open(&entry, false)
+            .expect("the heavy entry resolves")
+            .expect("the root carries a manifest");
+        let light = super::resolve_identities(&entry)
+            .expect("the light entry resolves")
+            .expect("the root carries a manifest");
+        // restore the environment ahead of the assertions, so a failure
+        // leaves it untouched
+        unsafe {
+            match prior_cache {
+                Some(value) => std::env::set_var("DS_CACHE", value),
+                None => std::env::remove_var("DS_CACHE"),
+            }
+        }
+        std::fs::remove_dir_all(&work).expect("the work dir removes");
+        assert_eq!(
+            light.identities,
+            *heavy.identities(),
+            "one fold, two entries"
+        );
+        assert_eq!(
+            light.artifact_pins,
+            heavy.artifact_pins(),
+            "one pin fold, two entries"
+        );
+        let dep = light.identities.get("@dep").expect("the dep resolved");
+        assert_eq!(*dep, Hash128::compute(member.as_bytes()));
     }
 }

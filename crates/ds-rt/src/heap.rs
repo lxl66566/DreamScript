@@ -181,7 +181,12 @@ impl Heap {
     /// The temporaries side of the heap.
     #[must_use]
     pub fn arena(&self) -> &Arena {
-        &self.inner().arena
+        // SAFETY: the heap owns `inner.arena` for its whole life. The
+        // reference is materialized straight from the cell's contents, not
+        // through an `&mut Inner` re-tag, so it keeps the cell's shared tag:
+        // a [`crate::RestoreOnDrop`] guard holds it across later heap calls,
+        // each of which takes its own transient unique borrow of the cell.
+        unsafe { &*ptr::addr_of!((*self.inner.get()).arena) }
     }
 
     /// Per-entry mark over the arena half; restores on every pop path.

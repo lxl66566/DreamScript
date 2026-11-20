@@ -35,6 +35,22 @@ pub enum Constant {
         /// blocks payload.
         func: u32,
     },
+    /// A bound extern's C-ABI callee (H5): the `[artifacts]` name whose
+    /// installed library owns the symbol, the symbol's position in that
+    /// library's export enumeration, and the return word's scalar kind.
+    /// The parameters marshal per the staged words' own kinds — the
+    /// lowering proved the written signature scalar ahead of the run —
+    /// so only the return word needs a payload of its own.
+    Bound {
+        /// The artifact's manifest name: the bound module the run
+        /// installs the library's symbol table under.
+        module: String,
+        /// The symbol's index in the artifact's export enumeration.
+        index: u32,
+        /// The return word's scalar kind (`int`/`bool`/`float` only;
+        /// the loader refuses anything richer at install).
+        ret: SlotType,
+    },
 }
 
 /// A FuncRef's module key (the format-v4 selector-led spelling): a uop
@@ -86,11 +102,17 @@ impl core::hash::Hash for Constant {
                 key.hash(state);
                 func.hash(state);
             },
+            Self::Bound { module, index, ret } => {
+                5u8.hash(state);
+                module.hash(state);
+                index.hash(state);
+                ret.hash(state);
+            },
         }
     }
 }
 
-/// One evidence-chain object of the runtime-evidence seam [H3]: the
+/// One evidence-chain object of the runtime-evidence seam `[H3]`: the
 /// serving body a staged evidence word names, plus one tail chain index
 /// per that body's own evidence demands (in the body's pair order). The
 /// staged words carry indices into the module's chain table; a nested
@@ -387,7 +409,7 @@ pub struct Module {
     pub(crate) ir_checksum: u32,
     pub(crate) constants: Vec<Constant>,
     pub(crate) functions: Vec<Function>,
-    /// The evidence-chain table [H3]: the staged evidence words index it,
+    /// The evidence-chain table `[H3]`: the staged evidence words index it,
     /// the nested runtime dispatches walk it one hop per call.
     pub(crate) chains: Vec<EvidenceChain>,
     /// The tag table (member atom name to tag id), in first-use order.
@@ -551,7 +573,7 @@ impl Module {
         }
     }
 
-    /// The evidence-chain table, in stored order [H3].
+    /// The evidence-chain table, in stored order `[H3]`.
     #[must_use]
     pub fn chains(&self) -> &[EvidenceChain] {
         &self.chains

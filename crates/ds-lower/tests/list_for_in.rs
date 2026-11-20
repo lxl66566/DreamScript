@@ -1,15 +1,18 @@
 //! The collection for-in and membership end-to-end probe: `for x in xs`
 //! over one list lowers as an index-counted fetch loop (one hidden
 //! induction word, `list_get` per iteration over its ok/none span, the
-//! none span exits) and `x in xs` lowers as a scan of the same fetch
+//! none span exits) bounded by the frozen entry count (one `list_len`
+//! read), so a body appending to the iterable visits exactly the entry
+//! count and terminates, and `x in xs` lowers as a scan of the same fetch
 //! shape with one comparison per element — both operands evaluate once,
 //! the element binding's handed-out count dies at each rollover, and
 //! the iterable's count survives the loop as a carried borrow. The run
 //! proves int and string elements, empty lists, wildcard and unused
-//! binders, early return, nested membership inside the loop, and both
-//! membership answers at the edges; the heap drains at the end, so
-//! every per-iteration count balanced. Map iteration and map membership
-//! stay named honest boundaries.
+//! binders, early return, nested membership inside the loop, the
+//! append-during-iteration termination, and both membership answers at
+//! the edges; the heap drains at the end, so every per-iteration count
+//! balanced. Map iteration and map membership stay named honest
+//! boundaries.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -263,6 +266,58 @@ fn a_generic_tuple_element_iteration_drains_the_handed_counts() {
         String::from_utf8_lossy(vm.captured_output()),
         "sum 3\n",
         "the values read through the Raw element word"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// A body appending to the iterable terminates: the loop's element
+/// count freezes at entry (one `list_len` read before the head), so the
+/// index walk visits exactly the entry count and the appended elements
+/// stay unvisited this loop — the live-length read looped forever with
+/// no diagnostic.
+#[test]
+fn appending_during_iteration_terminates_at_the_entry_count() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "\n",
+        "struct list[t]\n",
+        "\n",
+        "extern fn println (msg: string) -> ()\n",
+        "extern fn len[t] (xs: t) -> int\n",
+        "extern fn list_new[t] () -> list[t]\n",
+        "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  var xs = list[int]()\n",
+        "  xs.list_push(1)\n",
+        "  xs.list_push(2)\n",
+        "  var visits: int = 0\n",
+        "  for x in xs {\n",
+        "    visits += 1\n",
+        "    xs.list_push(x + 10)\n",
+        "  }\n",
+        "  println(\"visits ${visits} len ${len(xs)}\")\n",
+        "  visits\n",
+        "}\n",
+    );
+    let mut vm = build(source, "frozen_for_in");
+    vm.capture_output();
+    assert_eq!(
+        vm.run("frozen_for_in", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(2))),
+        "the two entry elements are the whole visit count"
+    );
+    // the two appended elements extend the live list to four but never
+    // this loop
+    assert_eq!(
+        String::from_utf8_lossy(vm.captured_output()),
+        "visits 2 len 4\n",
+        "the frozen count bounds the walk"
     );
     assert!(
         vm.objects().is_empty(),

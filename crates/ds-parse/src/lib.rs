@@ -73,11 +73,11 @@ mod pest_gen {
     pub(super) struct DsParser;
 }
 pub use ast::{
-    AssignOp, Ast, Attribute, BinaryOp, Block, BlockExpr, CallArg, EnumCase, EnumDecl, EnumPayload,
-    Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath, ImportSel, Item, ItemKind,
-    Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, PlatformDecl, PlatformName,
-    Stmt, StmtKind, StrPart, StructDecl, StructMember, TagDecl, TraitDecl, TraitMember, Trivia,
-    TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
+    AssignOp, Ast, Attribute, BinaryOp, BindName, Block, BlockExpr, CallArg, EnumCase, EnumDecl,
+    EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath, ImportSel, Item,
+    ItemKind, Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, PlatformDecl,
+    PlatformName, Stmt, StmtKind, StrPart, StructDecl, StructMember, TagDecl, TraitDecl,
+    TraitMember, Trivia, TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
 };
 pub(crate) use pest_gen::{DsParser, Rule};
 
@@ -86,12 +86,13 @@ pub(crate) use pest_gen::{DsParser, Rule};
 /// (unclosed interpolation holes, mismatched delimiters); raw-string hash
 /// counting is exact via PUSH/POP, so it never mis-lexes.
 ///
-/// The grammar and its conversion run on a worker thread that owns an 8 MiB
+/// The grammar and its conversion run on a worker thread that owns a 32 MiB
 /// stack and is cached per caller thread, so the segment is paid once per
 /// caller: pest's recursive descent costs roughly 12-30 KiB per bracket-nesting
-/// level (the precedence chain is ~19 rules deep per level), which a default
-/// 1 MiB main-thread stack cannot host even for modestly nested sources. The
-/// scanner's depth guard stays as a second line of defense.
+/// level (the precedence chain is ~19 rules deep per level), and the
+/// conversion pass that follows costs several times that per level, which a
+/// default 1 MiB main-thread stack cannot host even for modestly nested
+/// sources. The scanner's depth guard stays as a second line of defense.
 ///
 /// # Panics
 ///
@@ -151,10 +152,15 @@ fn pest_error(file: FileId, src: &str, err: pest::error::Error<Rule>) -> Diagnos
     let code = if at_eof { ErrorCode::UnexpectedEof } else { ErrorCode::UnexpectedToken };
     let message = match err.variant {
         ErrorVariant::ParsingError { positives, .. } => {
-            let expected: Vec<String> = positives
-                .iter()
-                .map(|r| format!("{}", format_rule(*r)))
-                .collect();
+            // Positives repeat the same rule across the precedence chain's
+            // attempts, so each phrase is kept once, in report order.
+            let mut expected: Vec<String> = Vec::new();
+            for rule in positives {
+                let phrase = format_rule(rule);
+                if !expected.iter().any(|seen| seen.as_str() == phrase) {
+                    expected.push(phrase.to_owned());
+                }
+            }
             if expected.is_empty() {
                 "invalid syntax".to_owned()
             } else if at_eof {
@@ -175,41 +181,42 @@ fn pest_error(file: FileId, src: &str, err: pest::error::Error<Rule>) -> Diagnos
     Diagnostic::error(code, message).with_primary(span, label)
 }
 
-/// Human phrasing of one grammar rule for parse-error messages: the
-/// user-reachable vocabulary is named, grammar-internal helpers keep their
-/// variant name as the fallback.
-fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
-    let named = match rule {
+/// Human phrasing of one grammar rule for parse-error messages: every
+/// rule a failure can report maps to a user-facing phrase, and anything
+/// unmapped falls back to "more syntax" instead of leaking the internal
+/// variant name.
+fn format_rule(rule: Rule) -> &'static str {
+    match rule {
         // Trivia and sentinels.
         Rule::line_comment | Rule::block_comment => "a comment",
         Rule::EOI => "end of input",
-        // Keywords: their own spelling.
+        // Keywords and their control forms: their own spelling.
         Rule::kw_const => "`const`",
         Rule::kw_var => "`var`",
         Rule::kw_fn => "`fn`",
-        Rule::kw_if => "`if`",
+        Rule::kw_if | Rule::if_expr => "`if`",
         Rule::kw_else => "`else`",
-        Rule::kw_match => "`match`",
-        Rule::kw_while => "`while`",
-        Rule::kw_for => "`for`",
+        Rule::kw_match | Rule::match_expr => "`match`",
+        Rule::kw_while | Rule::while_expr => "`while`",
+        Rule::kw_for | Rule::for_expr | Rule::for_plain | Rule::for_paren => "`for`",
         Rule::kw_in => "`in`",
-        Rule::kw_break => "`break`",
-        Rule::kw_continue => "`continue`",
-        Rule::kw_return => "`return`",
+        Rule::kw_break | Rule::break_expr => "`break`",
+        Rule::kw_continue | Rule::continue_expr => "`continue`",
+        Rule::kw_return | Rule::return_expr => "`return`",
         Rule::kw_is => "`is`",
         Rule::kw_struct => "`struct`",
         Rule::kw_enum => "`enum`",
         Rule::kw_tag => "`tag`",
-        Rule::kw_type => "`type`",
+        Rule::kw_type | Rule::type_kw => "`type`",
         Rule::kw_trait => "`trait`",
         Rule::kw_impl => "`impl`",
         Rule::kw_import => "`import`",
-        Rule::kw_pub => "`pub`",
+        Rule::kw_pub | Rule::vis => "`pub`",
         Rule::kw_extern => "`extern`",
         Rule::kw_mut => "`mut`",
-        Rule::kw_nursery => "`nursery`",
-        Rule::kw_spawn => "`spawn`",
-        Rule::kw_defer => "`defer`",
+        Rule::kw_nursery | Rule::nursery_expr => "`nursery`",
+        Rule::kw_spawn | Rule::spawn_expr => "`spawn`",
+        Rule::kw_defer | Rule::defer_expr => "`defer`",
         Rule::kw_true => "`true`",
         Rule::kw_false => "`false`",
         Rule::kw_platform => "`platform`",
@@ -255,7 +262,9 @@ fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
         | Rule::postfix_lvl
         | Rule::nos_postfix
         | Rule::primary
-        | Rule::primary_nos => "an expression",
+        | Rule::primary_nos
+        | Rule::in_rhs
+        | Rule::pt_item => "an expression",
         // Types, patterns, and the declaration vocabulary.
         Rule::type_expr
         | Rule::type_union
@@ -263,9 +272,28 @@ fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
         | Rule::type_diff
         | Rule::type_postfix
         | Rule::type_unary
-        | Rule::type_atom => "a type",
-        Rule::pattern | Rule::pat_or => "a pattern",
-        Rule::ident => "an identifier",
+        | Rule::type_atom
+        | Rule::path_type
+        | Rule::case_type => "a type",
+        Rule::fn_type => "a function type",
+        Rule::ptr_type => "a pointer type",
+        Rule::tuple_type => "a tuple type",
+        Rule::type_args_bracket | Rule::type_args_angle => "type arguments",
+        Rule::ret_ann => "a return type",
+        Rule::neg_prefix => "`~`",
+        Rule::pattern
+        | Rule::pat_or
+        | Rule::pat_wild
+        | Rule::pat_ident
+        | Rule::pat_neg
+        | Rule::pat_literal
+        | Rule::pat_head
+        | Rule::pat_call
+        | Rule::pat_struct
+        | Rule::pat_field
+        | Rule::tuple_pattern
+        | Rule::local_pat => "a pattern",
+        Rule::ident | Rule::ident_start | Rule::ident_cont => "an identifier",
         Rule::path | Rule::path_atom | Rule::type_path | Rule::field_name => "a name",
         Rule::generics => "generic parameters",
         Rule::gparam => "a generic parameter",
@@ -285,19 +313,77 @@ fn format_rule(rule: Rule) -> std::borrow::Cow<'static, str> {
         Rule::import_item => "an import",
         Rule::import_path => "an import path",
         Rule::import_select => "an import selection",
+        Rule::sel_item => "a selection item",
         Rule::import_alias => "an import alias",
-        Rule::lambda => "a lambda",
+        Rule::import_cond => "an import condition",
+        Rule::lambda | Rule::lambda_paren | Rule::lambda_bare => "a lambda",
+        Rule::lambda_rhs => "a lambda body",
         Rule::case_tuple | Rule::case_struct => "an enum case payload",
         Rule::impl_body => "an impl body",
         Rule::literal => "a literal",
         Rule::int_lit => "an integer literal",
         Rule::float_lit => "a float literal",
         Rule::string_lit => "a string literal",
-        Rule::raw_string => "a raw string literal",
         Rule::char_lit => "a character literal",
         Rule::byte_lit => "a byte literal",
-        // Grammar-internal helpers keep their variant name as the fallback.
-        _ => return std::borrow::Cow::Owned(format!("{rule:?}")),
-    };
-    std::borrow::Cow::Borrowed(named)
+        // Postfix and literal internals.
+        Rule::postfix_op | Rule::nos_postfix_op => "a call, index, field access, or `?`",
+        Rule::postfix_index => "an index",
+        Rule::struct_lit => "a struct literal",
+        Rule::list_lit => "a list literal",
+        Rule::paren_tuple => "a parenthesized expression",
+        Rule::pt_trail => "a trailing comma",
+        Rule::arg_named => "a named argument",
+        Rule::field_init => "a field initializer",
+        Rule::map_apply | Rule::map_head => "a map type application",
+        // Bindings.
+        Rule::local => "a `const` or `var` binding",
+        Rule::param_default => "a default value",
+        Rule::for_body => "a loop body",
+        Rule::guard => "a match guard",
+        // Declarations and file structure.
+        Rule::fn_item => "a `fn` declaration",
+        Rule::extern_fn_item => "an extern declaration",
+        Rule::struct_item => "a struct declaration",
+        Rule::enum_item => "an enum declaration",
+        Rule::tag_item => "a tag declaration",
+        Rule::type_item => "a type alias declaration",
+        Rule::trait_item => "a trait declaration",
+        Rule::impl_item => "an impl declaration",
+        Rule::platform_item => "a platform declaration",
+        Rule::super_list => "a list of types",
+        Rule::struct_body => "a struct body",
+        Rule::field_member => "a field",
+        Rule::deinit_member => "a `deinit` member",
+        Rule::enum_case => "an enum case",
+        Rule::case_default => "a `#[default]` annotation",
+        Rule::member_list => "a member list",
+        Rule::member_const => "a const member",
+        Rule::member_sig => "a member signature",
+        Rule::assoc_type => "an associated type",
+        Rule::impl_trait => "a trait path",
+        Rule::attr_args => "attribute arguments",
+        Rule::attr_arg => "an attribute argument",
+        Rule::provides_list => "a provides list",
+        Rule::provides_cap => "a capability",
+        Rule::file | Rule::file_blocks | Rule::file_block => "a top-level declaration",
+        Rule::block_sep => "a `##` block separator",
+        // Identifier and literal internals.
+        Rule::keyword => "a keyword",
+        Rule::digit => "a digit",
+        Rule::int_suffix => "an integer suffix",
+        Rule::fsuffix => "a float suffix",
+        Rule::exp_part => "an exponent",
+        Rule::radix_int | Rule::dec_int | Rule::float_rest => "a number",
+        Rule::esc => "an escape sequence",
+        Rule::str_text => "string text",
+        Rule::interp_simple | Rule::interp_brace => "an interpolation",
+        Rule::raw_string | Rule::raw_hashed | Rule::raw_hash_body | Rule::raw_zero => {
+            "a raw string literal"
+        },
+        Rule::char_single => "a character",
+        // Any rule this table never names: no internal name reaches the
+        // user.
+        _ => "more syntax",
+    }
 }

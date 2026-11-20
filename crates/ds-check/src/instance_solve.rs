@@ -143,11 +143,7 @@ fn resolve_members(
     }
     let mut serving = Vec::new();
     let mut miss = None;
-    for index in 0..env.len() {
-        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
-        if env.trait_of(id) != Ok(trait_id) {
-            continue;
-        }
+    for &id in env.of_trait(trait_id) {
         if serves(universe, env, assumptions, id, members, MAX_DEPTH) {
             serving.push(id);
         } else if miss.is_none()
@@ -196,11 +192,7 @@ fn covered_branches(
     // carries its per-member coverage.
     let mut heads: Vec<Ty> = Vec::new();
     let mut groups: Vec<Vec<(InstanceId, Vec<bool>)>> = Vec::new();
-    for index in 0..env.len() {
-        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
-        if env.trait_of(id) != Ok(trait_id) {
-            continue;
-        }
+    for &id in env.of_trait(trait_id) {
         let Ok(written) = env.written(id) else {
             continue;
         };
@@ -748,11 +740,8 @@ fn trait_holds(
     {
         return true;
     }
-    for index in 0..env.len() {
-        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
-        if env.trait_of(id) == Ok(trait_id)
-            && serves(universe, env, assumptions, id, target, depth - 1)
-        {
+    for &id in env.of_trait(trait_id) {
+        if serves(universe, env, assumptions, id, target, depth - 1) {
             return true;
         }
     }
@@ -1034,9 +1023,8 @@ fn trait_holds_ground(
     if depth == 0 || target.is_empty() {
         return false;
     }
-    for index in 0..env.len() {
-        let id = InstanceId::from_raw(u32::try_from(index).expect("index fits u32"));
-        if env.trait_of(id) == Ok(trait_id) && serves_ground(universe, env, id, target, depth - 1) {
+    for &id in env.of_trait(trait_id) {
+        if serves_ground(universe, env, id, target, depth - 1) {
             return true;
         }
     }

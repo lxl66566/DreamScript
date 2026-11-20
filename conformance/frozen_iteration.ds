@@ -1,0 +1,21 @@
+// source: the review fix round 2026-11-20 (bug B6, the frozen-iteration ruling)
+// purpose: a for-in over a list freezes the element count at loop entry, so a body appending to the iterable terminates after the entry count's visits
+// items:
+// grow_while_iterating: stage: run
+// main: stage: run
+
+fn grow_while_iterating() -> int {
+  var xs = list[int]()
+  xs.list_push(1)
+  xs.list_push(2)
+  var visits: int = 0
+  for x in xs {
+    visits += 1
+    xs.list_push(x + 10)
+  }
+  visits * 10 + len(xs)
+}
+
+fn main() -> () {
+  println("frozen ${grow_while_iterating()}")
+}

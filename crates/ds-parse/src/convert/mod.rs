@@ -26,7 +26,7 @@ use crate::{Rule, ast::*};
 /// Cap on the terms one unbracketed operator chain may fold. Each folded
 /// term adds one nested `Expr` level, and dropping a `Box` chain recurses at
 /// roughly 100-250 bytes of stack per level on the caller's thread (not the
-/// 8 MiB parse thread) — a ~10^4-term chain aborts there. 128 terms is far
+/// 32 MiB parse thread) — a ~10^4-term chain aborts there. 128 terms is far
 /// past any written chain and keeps worst-case stacked folds (every
 /// precedence level at the cap is ~14 × 128 levels) well inside a 1 MiB
 /// stack.
@@ -914,6 +914,7 @@ impl Ctx {
         let mut params = Vec::new();
         let mut ret = None;
         let mut body = None;
+        let mut bind = None;
         for c in inner(&p) {
             match c.as_rule() {
                 Rule::ident => name = Some(self.ident(c)),
@@ -925,6 +926,32 @@ impl Ctx {
                     }
                 },
                 Rule::block_expr => body = Some(self.block(c)),
+                // the extern's bind target (H5): one plain string literal,
+                // the platform declaration's own discipline — an
+                // interpolation hole or an empty literal cannot name an
+                // artifact
+                Rule::string_lit if extern_ => {
+                    let nspan = self.span(&c);
+                    let mut text = String::new();
+                    let mut plain = true;
+                    for chunk in c.clone().into_inner() {
+                        match chunk.as_rule() {
+                            Rule::str_text => text.push_str(chunk.as_str()),
+                            _ => plain = false,
+                        }
+                    }
+                    if !plain || text.is_empty() {
+                        self.err(
+                            nspan,
+                            ErrorCode::InvalidLiteral,
+                            "an extern's bind target is one plain string literal",
+                        );
+                    }
+                    bind = Some(BindName {
+                        span: nspan,
+                        name: text,
+                    });
+                },
                 _ => {},
             }
         }
@@ -938,6 +965,7 @@ impl Ctx {
             params,
             ret,
             body,
+            bind,
             doc: Vec::new(),
         }
     }
@@ -1283,6 +1311,7 @@ impl Ctx {
             params: Vec::new(),
             ret: None,
             body: None,
+            bind: None,
             doc: Vec::new(),
         };
         for c in inner(&p) {

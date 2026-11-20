@@ -1593,6 +1593,7 @@ mod tests {
             value: None,
             ty: fact.map(std::sync::Arc::new),
             link: 0,
+            origin: None,
             func: None,
             std: false,
         };
@@ -1645,6 +1646,7 @@ mod tests {
             package.into(),
             resolutions.into(),
             Vec::new(),
+            std::sync::Arc::default(),
         );
         assert!(
             analyzed.checked.diags.is_empty(),

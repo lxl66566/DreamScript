@@ -175,6 +175,7 @@ where
         package,
         resolutions,
         decls,
+        artifacts: _,
         checked,
     } = crate::type_of::analyze(files, asts);
     let lin = linearity_check(&expanded, &package, &resolutions, &decls, &checked);

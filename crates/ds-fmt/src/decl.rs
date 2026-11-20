@@ -46,6 +46,13 @@ pub(crate) fn write_item(ctx: &Ctx, out: &mut String, base: usize, item: &Item) 
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
             if matches!(item.kind, ItemKind::ExternFn(_)) {
                 out.push_str("extern ");
+                // the bind target's literal is re-quoted (H5), the
+                // platform declaration's own re-quote discipline
+                if let Some(bind) = &f.bind {
+                    out.push('"');
+                    out.push_str(&bind.name);
+                    out.push_str("\" ");
+                }
             }
             write_fn(ctx, out, base, f);
         },
@@ -229,7 +236,7 @@ fn write_struct(ctx: &Ctx, out: &mut String, base: usize, s: &StructDecl) {
 fn push_doc(ctx: &Ctx, out: &mut String, indent: usize, doc: &[Trivia]) {
     for t in doc {
         push_indent(out, indent);
-        out.push_str(ctx.comment_text(t));
+        ctx.push_verbatim(out, t.span);
         out.push('\n');
     }
 }

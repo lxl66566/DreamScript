@@ -2,8 +2,11 @@
 //! a user package's own `.dsi`-shaped prefix persisted into `$DS_CACHE`
 //! (the one cache-root authority the script-mode dsmod cache and the
 //! package store share), keyed like that cache — the module name, the
-//! source hash, the ambient identity, the resolved graph's dep
-//! identities, and the build identity, each component framed — so two
+//! compile's content identity (a single source's hash, a multi-member
+//! package's composed member fold), the ambient identity, the resolved
+//! graph's dep
+//! identities and native-artifact pins, and the build identity, each
+//! component framed — so two
 //! builds whose front-end output can differ
 //! never share an artifact. The artifact carries the whole program's
 //! front-end half (the ambient member's and the user member's resolve,
@@ -14,7 +17,7 @@
 //! that cannot be read or validated, and a write that cannot land are
 //! all silent falls back.
 
-use std::{collections::BTreeMap, io::Write, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use ds_check::{Analyzed, DeclaredRows, Effects, WorldCaps};
 use ds_diag::FileId;
@@ -27,16 +30,18 @@ const DEBUG_ENV: &str = "DS_PREFIX_CACHE_DEBUG";
 
 /// The key fold's domain tag, bumped when the folded component set
 /// changes: old artifacts must never answer a new fold.
-const KEY_DOMAIN: &[u8] = b"ds-prefix-dsi-v2";
+const KEY_DOMAIN: &[u8] = b"ds-prefix-dsi-v3";
 
 /// One compile's prefix-cache handle: the resolved root (absent when
 /// the compile is uncached), the ambient identity the key folds, and
 /// the resolved graph's dep identities (the empty list for a plain
+/// script) and native-artifact pins (the empty list for a plain
 /// script).
 pub(crate) struct PrefixCache {
     root: Option<PathBuf>,
     ambient: Option<Hash128>,
     deps: BTreeMap<String, Hash128>,
+    artifacts: BTreeMap<String, Hash128>,
     debug: bool,
 }
 
@@ -44,7 +49,7 @@ impl PrefixCache {
     /// Resolves the cache for one plain-script compile: no dep identity
     /// beyond the ambient, so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
-        Self::discover_linked(enabled, no_ambient, &BTreeMap::new())
+        Self::discover_linked(enabled, no_ambient, &BTreeMap::new(), &BTreeMap::new())
     }
 
     /// Resolves the cache for one package-root compile. `enabled` is
@@ -54,17 +59,21 @@ impl PrefixCache {
     /// `identities` are the resolved graph's dep content identities,
     /// which the source text alone does not determine — a linked
     /// package's surface feeds the front end, so the key folds them and
-    /// a dep whose resolved content changed is another key.
+    /// a dep whose resolved content changed is another key; `artifacts`
+    /// are the resolved graph's native-artifact pins, which move the key
+    /// the same way a moved dep identity does.
     pub(crate) fn discover_linked(
         enabled: bool,
         no_ambient: bool,
         identities: &BTreeMap<String, Hash128>,
+        artifacts: &BTreeMap<String, Hash128>,
     ) -> Self {
         Self::discover_at_linked(
             enabled,
             no_ambient,
             enabled.then(ds_pkg::store::cache_root).flatten(),
             identities,
+            artifacts,
         )
     }
 
@@ -74,23 +83,31 @@ impl PrefixCache {
     /// [`Self::discover_linked`](Self::discover_linked).
     #[cfg(test)]
     pub(crate) fn discover_at(enabled: bool, no_ambient: bool, root: Option<PathBuf>) -> Self {
-        Self::discover_at_linked(enabled, no_ambient, root, &BTreeMap::new())
+        Self::discover_at_linked(
+            enabled,
+            no_ambient,
+            root,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
     }
 
     /// [`Self::discover_linked`](Self::discover_linked) over a
-    /// caller-named root and dep identities: the in-process gates'
-    /// private temp directories.
+    /// caller-named root, dep identities, and artifact pins: the
+    /// in-process gates' private temp directories.
     pub(crate) fn discover_at_linked(
         enabled: bool,
         no_ambient: bool,
         root: Option<PathBuf>,
         identities: &BTreeMap<String, Hash128>,
+        artifacts: &BTreeMap<String, Hash128>,
     ) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then_some(root).flatten().filter(|_| !no_ambient),
-            ambient: (!no_ambient).then(|| Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
+            ambient: (!no_ambient).then(|| crate::run_cache::ambient_identity(identities)),
             deps: identities.clone(),
+            artifacts: artifacts.clone(),
             debug,
         };
         if cache.debug && cache.root.is_none() {
@@ -99,22 +116,25 @@ impl PrefixCache {
         cache
     }
 
-    /// The persisted prefix for this source together with the
+    /// The persisted prefix for one compile's identity together with the
     /// registration the caller collected its files under; `None` is the
-    /// miss every caller falls back from. An unreadable, stale, or
-    /// corrupt artifact is a miss — never an error.
+    /// miss every caller falls back from. `source_hash` is the compile's
+    /// content identity (G3.5) — a single source's text hash, a
+    /// multi-member package's composed fold — so a member edit is
+    /// another key. An unreadable, stale, or corrupt artifact is a miss
+    /// — never an error.
     pub(crate) fn lookup(
         &self,
         module_name: &str,
-        source: &str,
+        source_hash: Hash128,
         files: &[FileId],
     ) -> Option<ServedPrefix> {
         self.root.as_ref()?;
-        let artifact = self.path(module_name, Hash128::compute(source.as_bytes()));
+        let artifact = self.path(module_name, source_hash);
         let Ok(bytes) = std::fs::read(&artifact) else {
             return self.miss(&artifact);
         };
-        match decode_dsi(&bytes, Hash128::compute(source.as_bytes()), files) {
+        match decode_dsi(&bytes, source_hash, files) {
             Ok(served) => {
                 self.report("hit", &artifact);
                 Some(served)
@@ -127,12 +147,13 @@ impl PrefixCache {
     /// fresh declaration-phase snapshot (the artifact extracts the phase
     /// boundary, so a second declare pass runs here — the write happens
     /// once per changed source), the solved method rows, and the compile's
-    /// own effect rows, keyed under this source. Every failure is silent
-    /// — the compile already succeeded.
+    /// own effect rows, keyed under the compile's content identity — the
+    /// same hash `lookup` keys on. Every failure is silent — the compile
+    /// already succeeded.
     pub(crate) fn store(
         &self,
         module_name: &str,
-        source: &str,
+        source_hash: Hash128,
         files: &[FileId],
         analyzed: &Analyzed,
         effects: &Effects,
@@ -142,7 +163,6 @@ impl PrefixCache {
         if self.root.is_none() {
             return;
         }
-        let source_hash = Hash128::compute(source.as_bytes());
         let artifact = self.path(module_name, source_hash);
         // content addressing makes an artifact that already validates
         // against this key the exact bytes this write would produce, so
@@ -152,9 +172,6 @@ impl PrefixCache {
         {
             return;
         }
-        let Some(dir) = artifact.parent() else {
-            return;
-        };
         let (snapshot, snapshot_diags) = ds_check::decls::build(
             &analyzed.package,
             &analyzed.asts[..],
@@ -172,26 +189,7 @@ impl PrefixCache {
         );
         let payload = ds_dsi::extract(&snapshot, analyzed, effects, &method_rows);
         let bytes = artifact_bytes(source_hash, &payload);
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
-        let Ok(mut temp) = tempfile::NamedTempFile::new_in(dir) else {
-            return;
-        };
-        if temp.write_all(&bytes).is_err() {
-            return;
-        }
-        // temp-plus-rename in the artifact's own directory: concurrent
-        // writers race to byte-identical content and a reader never sees
-        // a partial file. Windows rename refuses to replace, so a lost
-        // race removes and retries once.
-        if let Err(persist) = temp.persist(&artifact)
-            && persist.error.kind() == std::io::ErrorKind::AlreadyExists
-        {
-            let _ = std::fs::remove_file(&artifact);
-            let temp = persist.file;
-            let _ = temp.persist(&artifact);
-        }
+        crate::run_cache::write_atomic(&artifact, &bytes);
     }
 
     /// The artifact's path below the cache root: one flat file per key
@@ -218,6 +216,10 @@ impl PrefixCache {
     ///   package's surface feeds the front end, so a dep whose resolved content changed is another
     ///   key and never serves a prefix linked against the old content. A plain script folds the
     ///   empty list;
+    /// - each resolved native artifact's name and content hash in ascending name order, over the
+    ///   list's own marker: the graph's bound libraries answer the program's bound externs, so a
+    ///   repinned library is another key and a prefix folded over the old graph never serves the
+    ///   new resolution;
     /// - the build identity: the same build digest the script-mode dsmod cache keys fold, so two
     ///   builds whose front-end output can differ never share an artifact.
     fn key(&self, module_name: &str, source_hash: Hash128) -> Hash128 {
@@ -241,6 +243,14 @@ impl PrefixCache {
         for (name, content) in &self.deps {
             crate::run_cache::fold_str(&mut hasher, name);
             hasher.update(content.as_bytes());
+        }
+        // the resolved graph's artifact pins over the list's own
+        // marker, the same fold the script-mode dsmod cache key applies
+        hasher.update(crate::run_cache::ARTIFACT_LIST_TAG);
+        hasher.update(&(self.artifacts.len() as u64).to_le_bytes());
+        for (name, hash) in &self.artifacts {
+            crate::run_cache::fold_str(&mut hasher, name);
+            hasher.update(hash.as_bytes());
         }
         crate::run_cache::fold_str(&mut hasher, crate::run_cache::BUILD_ID);
         let digest = hasher.finalize();
@@ -267,6 +277,8 @@ impl PrefixCache {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    use ds_mod::Hash128;
 
     use super::PrefixCache;
 
@@ -421,7 +433,7 @@ mod tests {
             caps,
         );
         let payload = ds_dsi::extract(&snapshot, &fresh_run, &effects, &method_rows);
-        let generated = ds_dsi::artifact_bytes(ds_mod::Hash128::compute(GATE.as_bytes()), &payload);
+        let generated = ds_dsi::artifact_bytes(Hash128::compute(GATE.as_bytes()), &payload);
         assert_eq!(
             persisted, generated,
             "the persisted prefix must be the fresh generation's bytes"
@@ -449,7 +461,9 @@ mod tests {
 
         let [ambient, user, host] = registered_ids();
         let served = cache
-            .lookup("gate", GATE, &[ambient, user, host])
+            .lookup("gate", Hash128::compute(GATE.as_bytes()), &[
+                ambient, user, host,
+            ])
             .expect("the persisted prefix serves");
         let mut files = ds_diag::Files::new();
         let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
@@ -641,7 +655,9 @@ mod tests {
         // an edited source is another key
         assert!(
             cache
-                .lookup("gate", "fn main() -> () { }\n", &[ambient, user, host])
+                .lookup("gate", Hash128::compute(b"fn main() -> () { }\n"), &[
+                    ambient, user, host
+                ])
                 .is_none(),
             "an edited source misses"
         );
@@ -652,7 +668,9 @@ mod tests {
         let _ = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
         let _ = files.add_source("gate.ds", GATE);
         assert!(
-            cache.lookup("gate", GATE, &[foreign]).is_none(),
+            cache
+                .lookup("gate", Hash128::compute(GATE.as_bytes()), &[foreign])
+                .is_none(),
             "a foreign registration misses"
         );
         // corrupt bytes are a miss
@@ -661,7 +679,11 @@ mod tests {
         corrupt[last] = corrupt[last].wrapping_add(1);
         std::fs::write(&artifact, &corrupt).expect("the corrupt bytes write");
         assert!(
-            cache.lookup("gate", GATE, &[ambient, user, host]).is_none(),
+            cache
+                .lookup("gate", Hash128::compute(GATE.as_bytes()), &[
+                    ambient, user, host
+                ])
+                .is_none(),
             "corrupt bytes miss"
         );
     }
@@ -685,6 +707,7 @@ mod tests {
                 false,
                 None,
                 &BTreeMap::from([("@lib".to_owned(), H::compute(identity))]),
+                &BTreeMap::new(),
             )
         };
         assert_ne!(
@@ -705,6 +728,7 @@ mod tests {
                 ("@a".to_owned(), H::compute(b"one")),
                 ("@b".to_owned(), H::compute(b"two")),
             ]),
+            &BTreeMap::new(),
         );
         let swapped = PrefixCache::discover_at_linked(
             false,
@@ -714,11 +738,45 @@ mod tests {
                 ("@a".to_owned(), H::compute(b"two")),
                 ("@b".to_owned(), H::compute(b"one")),
             ]),
+            &BTreeMap::new(),
         );
         assert_ne!(
             named.key("app", source),
             swapped.key("app", source),
             "the link name frames its hash"
+        );
+    }
+
+    /// The artifact-pin fold re-keys: a moved pin moves the key, and a
+    /// plain script's empty-list fold differs from every pinned graph's
+    /// — a prefix folded over the old graph never serves a repinned
+    /// resolution.
+    #[test]
+    fn the_artifact_pin_fold_rekeys() {
+        use std::collections::BTreeMap;
+
+        use ds_mod::Hash128 as H;
+
+        let source = H::compute(b"fn main() -> () { }");
+        let plain = PrefixCache::discover(false, false);
+        let pinned = |hash: &[u8]| {
+            PrefixCache::discover_at_linked(
+                false,
+                false,
+                None,
+                &BTreeMap::new(),
+                &BTreeMap::from([("math".to_owned(), H::compute(hash))]),
+            )
+        };
+        assert_ne!(
+            pinned(b"one").key("app", source),
+            pinned(b"two").key("app", source),
+            "a moved pin is another key"
+        );
+        assert_ne!(
+            plain.key("app", source),
+            pinned(b"one").key("app", source),
+            "a pinned graph never serves a plain script's key"
         );
     }
 }

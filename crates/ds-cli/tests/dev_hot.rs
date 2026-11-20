@@ -758,6 +758,74 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     dev.kill();
 }
 
+/// The package-root watch sees a sibling member's edit: the watched
+/// bytes compose every member below the root, so an edit to a helper
+/// member (a `pub` member the entry calls across files) reloads
+/// exactly like the entry's own and the parked frame's next
+/// cross-member call answers the new body through the swapped slot. A
+/// broken sibling refuses the round under the sibling's own member
+/// path, the installed version keeping running.
+#[test]
+fn a_package_root_sibling_edit_hot_reloads() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).expect("the root dir creates");
+    std::fs::write(root.join("ds.pkg"), "name = \"app\"\nversion = \"0.1.0\"\n")
+        .expect("the manifest writes");
+    let work_member = |body: &str| format!("pub fn work(n: int) -> int {{\n  return {body}\n}}\n");
+    std::fs::write(root.join("work.ds"), work_member("n * 2")).expect("the sibling member writes");
+    let entry = root.join("app.ds");
+    std::fs::write(
+        &entry,
+        "fn main(n: int) -> int {\n  var i = 0\n  while i < 10 {\n    println(\"${work(n)}\")\n    \
+         i = i + 1\n  }\n  return 0\n}\n",
+    )
+    .expect("the source writes");
+
+    let mut command = ds();
+    command
+        .env("DS_CACHE", dir.path().join("cache"))
+        .env_remove("DS_REGISTRY")
+        .arg("dev")
+        .arg(&entry)
+        .arg("--args")
+        .arg("21");
+    let mut dev = Dev::launch(command, 500);
+    assert_eq!(
+        dev.line(),
+        "42",
+        "the first round composes the sibling and runs work(21)"
+    );
+    // the sibling edit swaps: the parked frame's next `work` call runs
+    // the new body out of the sibling member
+    std::fs::write(root.join("work.ds"), work_member("n * 3")).expect("the sibling edit writes");
+    assert_eq!(
+        dev.line(),
+        "63",
+        "the parked frame's next call runs the sibling's new body"
+    );
+    // a broken sibling refuses the round naming the sibling member;
+    // the installed version keeps running
+    std::fs::write(root.join("work.ds"), "fn broken {\n").expect("the broken sibling writes");
+    assert_eq!(
+        dev.line(),
+        "63",
+        "the refused round resumes the entry on the installed version"
+    );
+    let mut found = String::new();
+    for _ in 0..4 {
+        found = dev.err();
+        if found.contains("--> work.ds") {
+            break;
+        }
+    }
+    assert!(
+        found.contains("--> work.ds"),
+        "the refused round names the sibling member: {found}"
+    );
+    dev.kill();
+}
+
 /// One dep member body at a parameterized edit: the multi-package watch
 /// repins `twice`'s body while keeping the name and table position, so
 /// the moved dep's swap keeps every live cross-module site (the swap

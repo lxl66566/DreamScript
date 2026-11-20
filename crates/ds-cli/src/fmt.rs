@@ -1,8 +1,10 @@
 //! The `ds fmt` subcommand: rewrite .ds sources in place through the
 //! zero-option formatter. Each file parses exactly as `ds check` parses it
 //! (library mode); a file library mode rejects as top-level statements
-//! parses as the script entry — the fold whose output spells a written
-//! `fn main() -> () { ... }`, so both shapes format with no flag. Syntax
+//! parses as the script entry — an unseparated one formats as the fold's
+//! written `fn main() -> () { ... }`, while a `##`-carrying one keeps its
+//! script shape (the separator between statement groups cannot live
+//! inside the fold), so every shape formats with no flag. Syntax
 //! failures render through the ds-diag human renderer and the file is left
 //! untouched; the exit code is 1 when any file failed or, under `--check`,
 //! when any file would change.
@@ -15,7 +17,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use ds_diag::{Diagnostic, Files, render};
-use ds_fmt::format_source;
+use ds_fmt::{FormattedSource, format_source_tracked};
 use ds_parse::{parse, parse_script};
 
 /// The `ds fmt` surface: the files and the CI gate. No style options — the
@@ -98,7 +100,7 @@ fn format_file(path: &Path, check_only: bool) -> Result<Action> {
         Ok(ast) => ast,
         Err(_) => parse_script(&files, id).map_err(|diags| reject(&files, &diags, path))?,
     };
-    let formatted = format_source(&files, id, &ast);
+    let formatted = format_source_tracked(&files, id, &ast);
     // The comparison and the write-back both speak the source's dominant
     // line ending: the canonical form is about layout, not EOL style, and
     // a CRLF workspace file is byte-stable under fmt instead of being
@@ -114,12 +116,13 @@ fn format_file(path: &Path, check_only: bool) -> Result<Action> {
     Ok(Action::Formatted)
 }
 
-/// Re-spells `text` with the source's dominant line ending: the count of
-/// CRLF breaks vs bare-LF ones picks the winner (ties and an all-LF file
-/// stay LF, the formatter's native spelling). Verbatim string literals
-/// can carry either spelling, so the text folds to LF before re-emitting
-/// the winner — CRLF content round-trips byte for byte.
-fn with_source_newlines(source: &str, text: String) -> String {
+/// Re-spells the formatted text with the source's dominant line ending:
+/// the count of CRLF breaks vs bare-LF ones picks the winner (ties and
+/// an all-LF file stay LF, the formatter's native spelling). Only layout
+/// folds: the formatted text's verbatim ranges (string literals and
+/// comments) keep their own bytes, so a literal's line endings survive a
+/// mixed-EOL file byte for byte.
+fn with_source_newlines(source: &str, formatted: FormattedSource) -> String {
     let bytes = source.as_bytes();
     let (mut crlf, mut lf) = (0usize, 0usize);
     let mut i = 0;
@@ -136,7 +139,31 @@ fn with_source_newlines(source: &str, text: String) -> String {
             _ => i += 1,
         }
     }
-    if crlf > lf { text.replace("\r\n", "\n").replace('\n', "\r\n") } else { text }
+    if crlf <= lf {
+        return formatted.text;
+    }
+    let text = &formatted.text;
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    for &(start, end) in &formatted.verbatim {
+        fold_bare_lf(&mut out, &text[pos..start]);
+        out.push_str(&text[start..end]);
+        pos = end;
+    }
+    fold_bare_lf(&mut out, &text[pos..]);
+    out
+}
+
+/// Folds every bare-LF break to CRLF. Layout text never carries `\r`, so
+/// each `\n` is a line break of its own.
+fn fold_bare_lf(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if c == '\n' {
+            out.push_str("\r\n");
+        } else {
+            out.push(c);
+        }
+    }
 }
 
 /// Renders every syntax diagnostic to stderr and summarizes the report as
