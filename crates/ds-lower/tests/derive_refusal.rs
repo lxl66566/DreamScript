@@ -670,13 +670,14 @@ fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
 /// `~Copyable` part (the shared part refusal), a generic declaration
 /// (the runtime seam's one-member-body boundary), a tag (no members to
 /// walk), a tuple field (a shape spelling no read over the typed
-/// readers), and the enum shapes the walk cannot name (a tuple payload,
-/// two payloaded cases sharing the object shape, an empty enum). The
-/// attribute-level refusals need no json face: the family refuses
-/// before any name resolves. The optional list field — once the
+/// readers), and the one enum shape the walk cannot name (an empty
+/// enum). The attribute-level refusals need no json face: the family
+/// refuses before any name resolves. The optional list field — once the
 /// family's own refusal — now expands clean: the decode walk mirrors
 /// to_json's statement-position member row, the presence narrow's
-/// catchall arm carrying the array walk.
+/// catchall arm carrying the array walk. So do the tuple payload and
+/// several payloaded cases (the 2026-11-21 discriminator ruling), so
+/// their rows live in the json-faced e2e suites alone.
 #[test]
 fn the_from_json_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -696,14 +697,10 @@ fn the_from_json_family_refuses_its_carve_outs() {
         "#[derive(from_json)]\n",
         "struct pair { both: (int, int) }\n",
         "#[derive(from_json)]\n",
-        "enum pay { unit, boxed(int) }\n",
-        "#[derive(from_json)]\n",
-        "enum two { go { w: int }, stop { h: int } }\n",
-        "#[derive(from_json)]\n",
         "enum never { }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 8, "the eight refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 6, "the six refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `from_json` refuses the field `cb`: a function-typed part")),
@@ -729,16 +726,6 @@ fn the_from_json_family_refuses_its_carve_outs() {
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("refuses the field `both`: this shape spells no json read")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum case `boxed`: a tuple payload spells no member names")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum `two`: two payloaded cases share the json object")),
         "{rendered:?}"
     );
     assert!(
@@ -908,14 +895,17 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
 /// function-typed or `~Copyable` part (the shared part refusal), a
 /// generic declaration (the runtime seam's one-member-body boundary),
 /// a tag (no members to walk), a tuple field (a shape spelling no json
-/// write), and the enum shapes the object walk cannot name (a tuple
-/// payload, two payloaded cases, an empty enum). The attribute-level
-/// refusals need no json face: the family refuses before any name
-/// resolves. The optional list field — the decode mirror's refusal —
-/// expands clean: the encode walk's member rows are statement-position,
-/// so the presence narrow carries the array walk the value-position
-/// else could not (the checked pin rides the conformance gate's
-/// json-faced ambient).
+/// write), the enum shapes the walk cannot name (an empty enum, and a
+/// lone tuple case whose single-arm member test rides the
+/// single-member scrutinee seam). The attribute-level refusals need no
+/// json face: the family refuses before any name resolves. The
+/// optional list field — the decode mirror's refusal — expands clean:
+/// the encode walk's member rows are statement-position, so the
+/// presence narrow carries the array walk the value-position else
+/// could not (the checked pin rides the conformance gate's json-faced
+/// ambient). A tuple case beside siblings and several payloaded cases
+/// encode under the 2026-11-21 discriminator ruling, so their rows
+/// live in the json-faced e2e suites alone.
 #[test]
 fn the_to_json_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -935,14 +925,12 @@ fn the_to_json_family_refuses_its_carve_outs() {
         "#[derive(to_json)]\n",
         "struct pair { both: (int, int) }\n",
         "#[derive(to_json)]\n",
-        "enum pay { unit, boxed(int) }\n",
-        "#[derive(to_json)]\n",
-        "enum two { go { w: int }, stop { h: int } }\n",
+        "enum solo { just(int) }\n",
         "#[derive(to_json)]\n",
         "enum never { }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 8, "the eight refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 7, "the seven refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `to_json` refuses the field `cb`: a function-typed part")),
@@ -971,12 +959,10 @@ fn the_to_json_family_refuses_its_carve_outs() {
     );
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum case `boxed`: a tuple payload spells no member names")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum `two`: two payloaded cases share the json object")),
+            && r.contains(
+                "refuses the enum case `just`: a lone tuple case's single-arm member test has no \
+                 M3 lowering"
+            )),
         "{rendered:?}"
     );
     assert!(

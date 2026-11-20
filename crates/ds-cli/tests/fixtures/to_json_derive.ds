@@ -9,7 +9,9 @@
 // through that type's own to_json member, an optional field's presence
 // setting its member and its absence leaving the member out — and the
 // enum walk matches the receiver, the unit cases answering their
-// json_string names and the one struct-payload case its object. The
+// json_string names, the sole payloaded case its bare shape, and
+// several payloaded cases one-member objects keyed by their own names
+// (the 2026-11-21 discriminator ruling). The
 // optional list field (the decode mirror's refusal) runs: the encode
 // walk's member rows are statement-position. The roundtrip rows pin
 // the from_json composition both ways over one declaration deriving
@@ -29,6 +31,19 @@ struct soft { rows: list[int]? }
 
 #[derive(to_json)]
 enum turn { left, right, spin { times: int } }
+
+// The discriminator ruling's encode targets (2026-11-21): several
+// payloaded cases answer one-member objects keyed by their own names,
+// the sole payloaded case its bare shape — an object for a struct
+// payload, an array for a tuple payload.
+#[derive(to_json)]
+enum figure { dot { x: int, y: int }, ring { r: int } }
+
+#[derive(to_json)]
+enum step { stay, walk(int, string) }
+
+#[derive(to_json)]
+enum bearing { plain, paired(int, int), named { label: string } }
 
 #[derive(from_json, to_json)]
 struct rt { a: int, tag: string, xs: list[int], port: int? }
@@ -74,6 +89,18 @@ fn main() -> () {
   println(turn.to_json(right).to_json())
   const sp = spin(times: 3)
   println(turn.to_json(sp).to_json())
+  const f1 = dot(x: 2, y: 5)
+  println(figure.to_json(f1).to_json())
+  const f2 = ring(r: 7)
+  println(figure.to_json(f2).to_json())
+  println(step.to_json(stay).to_json())
+  const wk = walk(3, "hi")
+  println(step.to_json(wk).to_json())
+  println(bearing.to_json(plain).to_json())
+  const pr = paired(1, 2)
+  println(bearing.to_json(pr).to_json())
+  const nm = named(label: "q")
+  println(bearing.to_json(nm).to_json())
   rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": [1, 2], \"port\": 3}")
   rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": []}")
   rt_round("{\"tag\": \"t\", \"xs\": []}")

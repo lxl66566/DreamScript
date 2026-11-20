@@ -49,7 +49,11 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// scalars target's width readers (byte/u32 as numbers with their
 /// range edges, char as a one-character string, bytes as a number
 /// array, every wrong shape or out-of-range value answering
-/// parse_err), and the enum target's shapes.
+/// parse_err), and the enum target's shapes — the ruled string/object
+/// walk plus the discriminator ruling's rows (2026-11-21): two
+/// payloaded cases decoding from their own member keys, the sole tuple
+/// payload from its bare array, and a mixed enum's wrapped payloaded
+/// cases, each wrong key or wrong shape answering parse_err.
 const GOLDEN: &str = concat!(
     "cell 12 2.5 true arch\n",
     "parse_err\n",
@@ -94,6 +98,23 @@ const GOLDEN: &str = concat!(
     "left\n",
     "right\n",
     "spin 3\n",
+    "parse_err\n",
+    "parse_err\n",
+    "{\"dot\":{\"x\":2,\"y\":5}}\n",
+    "{\"ring\":{\"r\":7}}\n",
+    "parse_err\n",
+    "parse_err\n",
+    "parse_err\n",
+    "parse_err\n",
+    "parse_err\n",
+    "\"stay\"\n",
+    "[3,\"hi\"]\n",
+    "parse_err\n",
+    "parse_err\n",
+    "parse_err\n",
+    "\"plain\"\n",
+    "{\"paired\":[1,2]}\n",
+    "{\"named\":{\"label\":\"q\"}}\n",
     "parse_err\n",
     "parse_err\n",
     "0\n",

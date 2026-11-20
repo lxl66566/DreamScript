@@ -47,7 +47,10 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// target's full and absent-optional rows (the nested derive, the list
 /// and nested-list walks, the absent member left out), the optional
 /// list field absent and present, the enum's two unit shapes and its
-/// payload object, the roundtrip rows (present optional kept, absent
+/// payload object, the discriminator ruling's encode rows (2026-11-21:
+/// two payloaded cases answering their own member keys, the sole tuple
+/// payload its bare array, a mixed enum's wrapped cases), the roundtrip
+/// rows (present optional kept, absent
 /// optional still absent, a missing required member refused), and the
 /// width fields' rows (byte/u32 as numbers with their edges, char as
 /// its one-character string, bytes as a number array, and the
@@ -61,6 +64,13 @@ const GOLDEN: &str = concat!(
     "\"left\"\n",
     "\"right\"\n",
     "{\"times\":3}\n",
+    "{\"dot\":{\"x\":2,\"y\":5}}\n",
+    "{\"ring\":{\"r\":7}}\n",
+    "\"stay\"\n",
+    "[3,\"hi\"]\n",
+    "\"plain\"\n",
+    "{\"paired\":[1,2]}\n",
+    "{\"named\":{\"label\":\"q\"}}\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[1,2],\"port\":3}\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[]}\n",
     "parse_err\n",
