@@ -20,6 +20,10 @@ jobs:
       - name: release rust project
         uses: lxl66566/rust-simple-release@main
         with:
+          # unset, the action builds the first workspace package, which is
+          # ds-abi (a lib) under the crates/* glob, not the ds binary
+          package: ds-cli
+          files_to_pack: README.md,LICENSE-MIT,LICENSE-APACHE
           targets: |
             aarch64-unknown-linux-gnu
             aarch64-unknown-linux-musl

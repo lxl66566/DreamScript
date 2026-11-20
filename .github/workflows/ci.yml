@@ -12,8 +12,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
   # The registry client shells out to system git for `https://` remotes;
   # a credential prompt must fail fast instead of hanging the job.
   GIT_TERMINAL_PROMPT: "0"
@@ -44,7 +42,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # All-features everywhere: ds-rt/ds-vm carry a diag feature, and the
       # workspace gate is `cargo nextest run --workspace --all-features`.
       # `--all-targets` is deliberately absent from nextest here: it pulls
@@ -62,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       - run: cargo test --all-features --locked --doc
 
   miri:
@@ -70,19 +68,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      # cargo-miri builds its own sysroot through rustc; the sccache
-      # wrapper has no cache to serve there and can break the build.
+      # cargo-miri builds its own sysroot through rustc
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # The unsafe core's aliasing gate: arena grants are raw pointers that
       # restores invalidate, so the suite must stay clean under both borrow
       # models (miri is ~100x, the two arena stress tests dominate the wall
-      # clock; the ds-rt graph is dependency-free, so no sccache is no loss).
+      # clock; the ds-rt graph is dependency-free, so no kache is no loss).
       - run: cargo miri test -p ds-rt
       - run: cargo miri test -p ds-rt --test arena
         env:
@@ -95,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # Every .ds source in the repo (examples, benchmark kernels, and
       # the conformance corpus) must sit at `ds fmt`'s canonical form.
       - run: cargo build --locked -p ds-cli
@@ -110,7 +107,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # The committed instruction-count pins are asserted under an optimized
       # profile with Callgrind; debug-profile runs and valgrind-less hosts
       # skip with a note instead of failing.
@@ -123,7 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # Broken intra-doc links are denied: the workspace's doc
       # comments carry zero link warnings (the wave-1 and wave-2
       # sweeps landed), so any regression fails here.
@@ -137,7 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: kunobi-ninja/kache-action@v1
       # Release CLI only (timings never run here); the check compares each
       # kernel's final `result:` line across ds, python, and node (lua SKIPs
       # when absent) and exits nonzero on any golden mismatch.

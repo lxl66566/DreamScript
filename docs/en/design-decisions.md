@@ -1,7 +1,7 @@
 # DreamScript working design decisions
 
-Status: the authoritative working record of every language decision (44 points: A1-A3, B1-B9, C1-C5, D1-D3, E1-E5, F1-F9, G1-G4, H1-H6), authored 2026-11-08 from the frozen `design/` archive and amended through 2026-11-20. `design/` is read-only; lowering mechanics and measured constants live in `docs/en/pitfalls/` and the code.
-Source map under `design/en/design/`: `08-decisions.md`, `01-types.md`, `02-linearity-ownership.md`, `03-effects-errors-async.md`, `04-syntax.md`, `05-generics-metaprogramming.md`, `06-modules-tooling.md`, `07-runtime.md`, `09-decision-rationale.md`, `00-decision-map.md`.
+Status: the authoritative working record of every language decision (44 points: A1-A3, B1-B9, C1-C5, D1-D3, E1-E5, F1-F9, G1-G4, H1-H6), authored 2026-11-08 from the frozen archive and amended through 2026-11-20. `archive/` is read-only; lowering mechanics and measured constants live in `docs/en/pitfalls/` and the code.
+Source map under `archive/design/`: `08-decisions.md`, `01-types.md`, `02-linearity-ownership.md`, `03-effects-errors-async.md`, `04-syntax.md`, `05-generics-metaprogramming.md`, `06-modules-tooling.md`, `07-runtime.md`, `09-decision-rationale.md`, `00-decision-map.md`.
 
 ## 0. Author supplements — binding
 

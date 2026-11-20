@@ -1,49 +1,49 @@
 [package]
-name         = "ds-vm"
-description  = "Tier-1 VM for DreamScript: executes the ds-abi uop contract from its canonical 32-bit encoding with pooled immediates and the slot-overlay call ABI"
+name                   = "ds-vm"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Tier-1 VM for DreamScript: executes the ds-abi uop contract from its canonical 32-bit encoding with pooled immediates and the slot-overlay call ABI"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
-[lints]
-workspace = true
+[[bench]]
+harness = false
+name    = "vm"
+
+[[bench]]
+harness = false
+name    = "fork_join"
+
+[[bench]]
+harness = false
+name    = "ledger"
+
+[dependencies]
+ds-abi                 = { path = "../ds-abi" }
+# the bound externs' scalar C-ABI marshaling seam (H5)
+ds-ffi                 = { path = "../ds-ffi" }
+ds-mod                 = { path = "../ds-mod" }
+ds-rt                  = { path = "../ds-rt" }
+# the platform net face's TLS tier (the host-selected tls capability)
+rustls.workspace       = true
+webpki-roots.workspace = true
+# the fork-join worker pool's scoped scheduler (E3's measured candidate)
+youpipe.workspace      = true
+
+[dev-dependencies]
+criterion.workspace = true
+# the local TLS test servers' self-signed certificates
+rcgen.workspace     = true
+tempfile.workspace  = true
 
 [features]
 # The RC balance tripwires: ds-rt's hard asserts on rc underflow/overflow
 # (the ds-rt diag layer) arm through this feature.
 diag = ["ds-rt/diag"]
 
-[dependencies]
-ds-abi = { path = "../ds-abi" }
-# the bound externs' scalar C-ABI marshaling seam (H5)
-ds-ffi = { path = "../ds-ffi" }
-ds-mod = { path = "../ds-mod" }
-ds-rt = { path = "../ds-rt" }
-# the fork-join worker pool's scoped scheduler (E3's measured candidate)
-youpipe.workspace = true
-# the platform net face's TLS tier (the host-selected tls capability)
-rustls.workspace       = true
-webpki-roots.workspace = true
-
-[dev-dependencies]
-criterion.workspace = true
-tempfile.workspace = true
-# the local TLS test servers' self-signed certificates
-rcgen.workspace = true
-
-[[bench]]
-name    = "vm"
-harness = false
-
-[[bench]]
-name    = "fork_join"
-harness = false
-
-[[bench]]
-name    = "ledger"
-harness = false
+[lints]
+workspace = true

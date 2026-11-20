@@ -10,11 +10,11 @@
 slow-timeout = { timeout = "60s", terminate-after = 2 }
 
 [[profile.default.overrides]]
-filter = "test(mutual_even_odd_at_ten_million_runs_at_constant_stack) or test(mutual_even_odd_across_two_modules_at_ten_million_runs_at_constant_stack) or test(dispatch_tails_slide_through_the_frame_reuse_transfer) or test(a_cross_module_tail_transfer_runs_a_ten_million_hop_loop_over_a_linked_package) or test(a_runaway_comptime_loop_answers_the_step_budget_at_the_run) or binary(fuzz_exec_gen)"
+filter       = "test(mutual_even_odd_at_ten_million_runs_at_constant_stack) or test(mutual_even_odd_across_two_modules_at_ten_million_runs_at_constant_stack) or test(dispatch_tails_slide_through_the_frame_reuse_transfer) or test(a_cross_module_tail_transfer_runs_a_ten_million_hop_loop_over_a_linked_package) or test(a_runaway_comptime_loop_answers_the_step_budget_at_the_run) or binary(fuzz_exec_gen)"
 slow-timeout = { period = "120s", terminate-after = 2 }
 
 # the bind e2e legs shell out to the host rustc for their fixture cdylib:
 # a compile under parallel-lane load is a bounded wait, not a hang
 [[profile.default.overrides]]
-filter = "binary(fixture_dylib) or test(a_bound_artifact_reports_its_exported_c_symbols) or test(the_artifact_flag_selects_one_bound_library) or test(a_missing_artifact_refuses_the_bind) or test(an_extern_call_into_a_bound_artifact_keeps_its_lowering_refusal)"
+filter       = "binary(fixture_dylib) or test(a_bound_artifact_reports_its_exported_c_symbols) or test(the_artifact_flag_selects_one_bound_library) or test(a_missing_artifact_refuses_the_bind) or test(an_extern_call_into_a_bound_artifact_keeps_its_lowering_refusal)"
 slow-timeout = { period = "120s", terminate-after = 2 }

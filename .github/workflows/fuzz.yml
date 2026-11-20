@@ -1,8 +1,9 @@
 name: fuzz
 
 on:
-  schedule:
-    - cron: "0 3 * * 1" # Mondays 03:00 UTC; no push trigger by design
+  # schedule:
+  #   - cron: "0 3 * * 1"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +23,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
       - run: cargo nextest run -p ds-mod --test fuzz_read
 
   ds-check-pipeline:
@@ -34,7 +35,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
       - run: cargo nextest run -p ds-check --test fuzz_check
 
   ds-check-generator:
@@ -46,5 +47,5 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: kunobi-ninja/kache-action@v1
       - run: cargo nextest run -p ds-check --test fuzz_check_gen

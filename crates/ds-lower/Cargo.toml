@@ -1,35 +1,35 @@
 [package]
-name         = "ds-lower"
-description  = "M3 lowering: checked programs to frame layouts, uop bodies, and dsmod modules for the tier-1 VM"
+name                   = "ds-lower"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace       = true
-repository.workspace   = true
-keywords.workspace      = true
-categories.workspace   = true
+description            = "M3 lowering: checked programs to frame layouts, uop bodies, and dsmod modules for the tier-1 VM"
 readme.workspace       = true
+repository.workspace   = true
+license.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
 
-[lints]
-workspace = true
+[[bench]]
+harness = false
+name    = "lower"
 
 [dependencies]
-thiserror.workspace = true
-ds-abi   = { path = "../ds-abi" }
-ds-check = { path = "../ds-check" }
+ds-abi              = { path = "../ds-abi" }
+ds-check            = { path = "../ds-check" }
+ds-diag             = { path = "../ds-diag" }
 # the scalar marshaling slice's arity cap (H5), single-sourced beside
 # the transmute that serves it
-ds-ffi   = { path = "../ds-ffi" }
-ds-diag  = { path = "../ds-diag" }
-ds-mod   = { path = "../ds-mod" }
-ds-parse = { path = "../ds-parse" }
+ds-ffi              = { path = "../ds-ffi" }
+ds-mod              = { path = "../ds-mod" }
+ds-parse            = { path = "../ds-parse" }
+thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-ds-vm     = { path = "../ds-vm" }
 # the derive-expanding analyze entries the e2e tests run raw sources through
-ds-meta   = { path = "../ds-meta" }
+ds-meta             = { path = "../ds-meta" }
+ds-vm               = { path = "../ds-vm" }
 
-[[bench]]
-name    = "lower"
-harness = false
+[lints]
+workspace = true

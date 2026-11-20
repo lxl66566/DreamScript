@@ -1,6 +1,6 @@
 # Documentation index
 
-Every doc lives under `docs/en/` (working docs, English) or `docs/zh/` (read-only Chinese mirror). The repository's front door is `README.md`; the binding project rules are `AGENTS.md`.
+Every working doc lives under `docs/en/`. The repository's front door is `README.md`; the binding project rules are `AGENTS.md`.
 
 ## Working docs — `docs/en/`
 
@@ -14,13 +14,9 @@ Every doc lives under `docs/en/` (working docs, English) or `docs/zh/` (read-onl
 | `pitfalls.md` | Index over `pitfalls/`: invariants and lessons that prevent breakage, one board per area (coordination and gates, front end, language surface, lowering, runtime and memory, testing and perf). | You touch any of those areas, or a gate fails in a way that smells familiar. |
 | `memory-arc.md` | The memory endgame execution contract: binding rulings, gates that stay green, silent-breakage register, STOP conditions, measured baselines. | You work on `ds-rt`, ownership lowering, or multi-word values. |
 
-## Archive — `docs/zh/`
+## Frozen archive — `archive/`
 
-Read-only Chinese documents, not updated with the working docs: `ARCHITECTURE.md` (early architecture overview), `design-decisions.md` (translation of an earlier record state), `syntax-review.md` (surface syntax review). When the two languages disagree, the English archive under `design/` and the working record `docs/en/design-decisions.md` win.
-
-## Frozen archive — `design/`
-
-Stage 1-3 research notes, decision catalogs, decision records, and the author's supplements. Never edit it; read it only when the working record is genuinely thin on a point, and treat it as background.
+Stage 1-3 research notes (`archive/research/`), decision catalogs and records (`archive/design/`), and the author's supplements (`archive/author_say.md`). Never edit it; read it only when the working record is genuinely thin on a point, and treat it as background.
 
 ## Related indexes
 

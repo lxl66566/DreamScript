@@ -1,26 +1,32 @@
 [package]
-name         = "ds-pins"
-description  = "Instruction-count pin host: the gungraun kernels over ds-vm plus the nextest-runnable bake that asserts their committed counts"
+name                   = "ds-pins"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Instruction-count pin host: the gungraun kernels over ds-vm plus the nextest-runnable bake that asserts their committed counts"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
-[lints]
-workspace = true
+[[bench]]
+harness = false
+name    = "loop_claims"
 
-# The crate's payload is `benches/` (the gungraun kernels) and
-# `tests/pin_bake.rs` (their committed-count bake); the lib target is empty.
-# Keeping both outside ds-vm keeps the harness's dependency graph out of
-# ds-vm's test binaries.
+[[bench]]
+harness = false
+name    = "scalar_loop"
+
+[[bench]]
+harness = false
+name    = "strcat_temp"
+
+[[bench]]
+harness = false
+name    = "string_temp"
 
 [dev-dependencies]
-gungraun.workspace  = true
-ds-vm               = { path = "../ds-vm" }
 # the examples/opcode_census tool lowers the benchmark kernels through the compiler chain
 ds-abi              = { path = "../ds-abi" }
 ds-check            = { path = "../ds-check" }
@@ -29,19 +35,13 @@ ds-lower            = { path = "../ds-lower" }
 ds-mod.workspace    = true
 ds-parse            = { path = "../ds-parse" }
 ds-stdlib.workspace = true
+ds-vm               = { path = "../ds-vm" }
+gungraun.workspace  = true
 
-[[bench]]
-name    = "loop_claims"
-harness = false
+[lints]
+workspace = true
 
-[[bench]]
-name    = "scalar_loop"
-harness = false
-
-[[bench]]
-name    = "strcat_temp"
-harness = false
-
-[[bench]]
-name    = "string_temp"
-harness = false
+# The crate's payload is `benches/` (the gungraun kernels) and
+# `tests/pin_bake.rs` (their committed-count bake); the lib target is empty.
+# Keeping both outside ds-vm keeps the harness's dependency graph out of
+# ds-vm's test binaries.

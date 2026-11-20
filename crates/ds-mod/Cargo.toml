@@ -1,30 +1,30 @@
 [package]
-name         = "ds-mod"
-description  = "dsmod module format: writer, validating reader, mmap loader, and cache path layout for DreamScript"
+name                   = "ds-mod"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "dsmod module format: writer, validating reader, mmap loader, and cache path layout for DreamScript"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
-[lints]
-workspace = true
+[[bench]]
+harness = false
+name    = "read"
 
 [dependencies]
 blake3.workspace    = true
+ds-abi              = { path = "../ds-abi" }
+ds-diag             = { path = "../ds-diag" }
 memmap2.workspace   = true
 thiserror.workspace = true
-ds-abi  = { path = "../ds-abi" }
-ds-diag = { path = "../ds-diag" }
 
 [dev-dependencies]
 arbitrary.workspace = true
 criterion.workspace = true
-tempfile.workspace   = true
+tempfile.workspace  = true
 
-[[bench]]
-name    = "read"
-harness = false
+[lints]
+workspace = true

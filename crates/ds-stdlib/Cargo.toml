@@ -1,35 +1,26 @@
 [package]
-name         = "ds-stdlib"
-description  = "The DreamScript stdlib ambient: the checked-declaration layer a ds check package registers before user sources"
+name                   = "ds-stdlib"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "The DreamScript stdlib ambient: the checked-declaration layer a ds check package registers before user sources"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
-
-[lints]
-workspace = true
-
-[features]
-# The precompiled ambient AST blob's decode path: postcard over ds-parse's
-# serde surface, the source hash through ds-mod. Off by default so
-# consumers that never load the blob carry no serializer.
-ast-serde = ["dep:postcard", "dep:serde", "dep:ds-mod", "dep:ds-dsi", "ds-parse/ast-serde"]
 
 [dependencies]
 ds-check = { path = "../ds-check" }
+ds-diag  = { path = "../ds-diag" }
+# the checked-prefix artifact format the ambient's `.dsi` rides
+ds-dsi   = { workspace = true, optional = true }
 # the derive expansion behind the baked artifacts
 ds-meta  = { path = "../ds-meta" }
-ds-diag  = { path = "../ds-diag" }
+ds-mod   = { workspace = true, optional = true }
 ds-parse = { path = "../ds-parse" }
 # the default @std package's bundle framing
 ds-pkg   = { path = "../ds-pkg" }
-ds-mod   = { workspace = true, optional = true }
-# the checked-prefix artifact format the ambient's `.dsi` rides
-ds-dsi    = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
 serde    = { workspace = true, optional = true }
 
@@ -38,3 +29,12 @@ serde    = { workspace = true, optional = true }
 # with its own feature on: the self-dependency unions the feature into
 # every test and example target.
 ds-stdlib = { path = ".", features = ["ast-serde"] }
+
+[features]
+# The precompiled ambient AST blob's decode path: postcard over ds-parse's
+# serde surface, the source hash through ds-mod. Off by default so
+# consumers that never load the blob carry no serializer.
+ast-serde = ["dep:ds-dsi", "dep:ds-mod", "dep:postcard", "dep:serde", "ds-parse/ast-serde"]
+
+[lints]
+workspace = true

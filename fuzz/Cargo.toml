@@ -1,71 +1,71 @@
 [package]
-name = "dreamscript-fuzz"
+name    = "dreamscript-fuzz"
 version = "0.0.0"
-publish = false
 edition = "2024"
+publish = false
 
 [package.metadata]
 cargo-fuzz = true
 
-[dependencies]
-libfuzzer-sys = "0.4"
-ds-abi = { path = "../crates/ds-abi" }
-ds-check = { path = "../crates/ds-check" }
-ds-lower = { path = "../crates/ds-lower" }
-ds-meta = { path = "../crates/ds-meta" }
-ds-diag = { path = "../crates/ds-diag", features = ["json"] }
-ds-mod = { path = "../crates/ds-mod" }
-ds-parse = { path = "../crates/ds-parse" }
-ds-query = { path = "../crates/ds-query" }
-ds-vm = { path = "../crates/ds-vm" }
-
 [[bin]]
-name = "fuzz_parse"
-path = "fuzz_targets/fuzz_parse.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_parse"
+path  = "fuzz_targets/fuzz_parse.rs"
+test  = false
 
 # Not a fuzz target: regenerates valid .dsmod corpus seeds (see the
 # file's header comment).
 [[bin]]
-name = "gen_dsmod_seeds"
-path = "tools/gen_dsmod_seeds.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "gen_dsmod_seeds"
+path  = "tools/gen_dsmod_seeds.rs"
+test  = false
 
 [[bin]]
-name = "fuzz_check"
-path = "fuzz_targets/fuzz_check.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_check"
+path  = "fuzz_targets/fuzz_check.rs"
+test  = false
 
 [[bin]]
-name = "fuzz_read_dsmod"
-path = "fuzz_targets/fuzz_read_dsmod.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_read_dsmod"
+path  = "fuzz_targets/fuzz_read_dsmod.rs"
+test  = false
 
 [[bin]]
-name = "fuzz_query_engine"
-path = "fuzz_targets/fuzz_query_engine.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_query_engine"
+path  = "fuzz_targets/fuzz_query_engine.rs"
+test  = false
 
 [[bin]]
-name = "fuzz_vm"
-path = "fuzz_targets/fuzz_vm.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_vm"
+path  = "fuzz_targets/fuzz_vm.rs"
+test  = false
 
 [[bin]]
-name = "fuzz_check_gen"
-path = "fuzz_targets/fuzz_check_gen.rs"
-test = false
-doc = false
 bench = false
+doc   = false
+name  = "fuzz_check_gen"
+path  = "fuzz_targets/fuzz_check_gen.rs"
+test  = false
+
+[dependencies]
+ds-abi        = { path = "../crates/ds-abi" }
+ds-check      = { path = "../crates/ds-check" }
+ds-diag       = { path = "../crates/ds-diag", features = ["json"] }
+ds-lower      = { path = "../crates/ds-lower" }
+ds-meta       = { path = "../crates/ds-meta" }
+ds-mod        = { path = "../crates/ds-mod" }
+ds-parse      = { path = "../crates/ds-parse" }
+ds-query      = { path = "../crates/ds-query" }
+ds-vm         = { path = "../crates/ds-vm" }
+libfuzzer-sys = "0.4"

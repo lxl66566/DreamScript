@@ -1,17 +1,29 @@
 [package]
-name         = "ds-parse"
-description  = "Lexer, pest grammar, and spanned AST for the DreamScript decided surface"
+name                   = "ds-parse"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Lexer, pest grammar, and spanned AST for the DreamScript decided surface"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
-[lints]
-workspace = true
+[[bench]]
+harness = false
+name    = "parse"
+
+[dependencies]
+ds-diag               = { path = "../ds-diag" }
+memchr.workspace      = true
+pest.workspace        = true
+pest_derive.workspace = true
+serde                 = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace      = true
+ds-corpus-path.workspace = true
 
 [features]
 # Serialize/Deserialize over the AST type family (plus ds-diag's
@@ -19,17 +31,5 @@ workspace = true
 # blob. Off by default so the parser path carries no serializer.
 ast-serde = ["dep:serde", "ds-diag/ast-serde"]
 
-[dependencies]
-pest.workspace        = true
-pest_derive.workspace = true
-ds-diag = { path = "../ds-diag" }
-memchr.workspace = true
-serde = { workspace = true, optional = true }
-
-[dev-dependencies]
-criterion.workspace = true
-ds-corpus-path.workspace = true
-
-[[bench]]
-name    = "parse"
-harness = false
+[lints]
+workspace = true

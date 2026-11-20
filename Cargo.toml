@@ -1,69 +1,51 @@
 [workspace]
-resolver   = "3"
-members    = ["crates/*"]
-exclude    = ["fuzz"]
+resolver = "3"
+members  = ["crates/*"]
+exclude  = ["fuzz"]
 
 [workspace.package]
-version     = "0.1.0"
-edition     = "2024"
+version      = "0.1.0"
+edition      = "2024"
 rust-version = "1.95"
-license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/lxl66566/DreamScript"
-keywords    = ["dreamscript", "language", "compiler"]
-categories  = ["compilers"]
-readme      = "../../README.md"
+readme       = "../../README.md"
+repository   = "https://github.com/lxl66566/DreamScript"
+license      = "MIT OR Apache-2.0"
+keywords     = ["compiler", "dreamscript", "language"]
+categories   = ["compilers"]
 
 [workspace.dependencies]
-thiserror  = "2"
-rustc-hash = "2"
-blake3     = "1"
-memmap2    = "0.9"
-memchr     = "2"
-arbitrary  = "1"
-pest       = "2"
-pest_derive = "2"
-serde      = { version = "1", features = ["derive"] }
-# fast JSON serialization; ds-diag's `json` feature is its only consumer
-sonic-rs   = "0.5"
-# compact self-describing-free codec: the precompiled ambient AST blob's
-# format (ds-stdlib's `ast-serde` feature); `alloc` serves to_allocvec, the
-# default heapless/cobs surfaces are not used
-postcard   = { version = "1", default-features = false, features = ["alloc"] }
-# default-features off: rayon/plotters only serve report generation
-criterion  = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-# deterministic Valgrind instruction-count pinning (the arc's stage-three gate)
-gungraun   = "0.20"
-anyhow     = "1"
-# the fork-join scheduler backend measurement's candidate (M5's decided-by-measurement seam);
-# the tokio runtime serves async stages only, the bench uses `youpipe::scope`
-youpipe    = { version = "0.10", default-features = false }
-tempfile   = "3"
-clap       = { version = "4", features = ["derive"] }
-# in-workspace crates, so consumers write `name.workspace = true`
-ds-diag    = { path = "crates/ds-diag" }
-ds-parse   = { path = "crates/ds-parse" }
-ds-check   = { path = "crates/ds-check" }
-ds-lower   = { path = "crates/ds-lower" }
-ds-query   = { path = "crates/ds-query" }
-ds-mod     = { path = "crates/ds-mod" }
-ds-pkg     = { path = "crates/ds-pkg" }
-ds-vm      = { path = "crates/ds-vm" }
-ds-stdlib  = { path = "crates/ds-stdlib" }
-ds-dsi     = { path = "crates/ds-dsi" }
-# the H5 FFI substrate: dependency-free library loading and symbol
-# enumeration (no libloading — the dependency policy queues it)
-ds-ffi     = { path = "crates/ds-ffi" }
-# the platform net face's TLS tier: default-features off so the
-# aws-lc-rs provider never enters the tree (ring needs no native
-# tooling on Windows, keeping the build portable)
-rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# the TLS client's static Mozilla root set (no system store, no client
-# certs this round)
-webpki-roots = "1"
-# dev-only: self-signed certificates for the local TLS test servers
-rcgen        = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
-# dev-only: run-time corpus resolution for the conformance gates
+anyhow         = "1"
+arbitrary      = "1"
+blake3         = "1"
+clap           = { version = "4", features = ["derive"] }
+criterion      = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+ds-check       = { path = "crates/ds-check" }
 ds-corpus-path = { path = "crates/ds-corpus-path" }
+ds-diag        = { path = "crates/ds-diag" }
+ds-dsi         = { path = "crates/ds-dsi" }
+ds-ffi         = { path = "crates/ds-ffi" }
+ds-lower       = { path = "crates/ds-lower" }
+ds-mod         = { path = "crates/ds-mod" }
+ds-parse       = { path = "crates/ds-parse" }
+ds-pkg         = { path = "crates/ds-pkg" }
+ds-query       = { path = "crates/ds-query" }
+ds-stdlib      = { path = "crates/ds-stdlib" }
+ds-vm          = { path = "crates/ds-vm" }
+gungraun       = "0.20"
+memchr         = "2"
+memmap2        = "0.9"
+pest           = "2"
+pest_derive    = "2"
+postcard       = { version = "1", default-features = false, features = ["alloc"] }
+rcgen          = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+rustc-hash     = "2"
+rustls         = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde          = { version = "1", features = ["derive"] }
+sonic-rs       = "0.5"
+tempfile       = "3"
+thiserror      = "2"
+webpki-roots   = "1"
+youpipe        = { version = "0.10", default-features = false }
 
 [workspace.lints.clippy]
 all                     = { level = "warn", priority = -1 }
@@ -79,11 +61,11 @@ wildcard_imports        = "allow"
 unsafe_code           = "allow"
 unused_qualifications = "warn"
 
-[profile.release]
-codegen-units = 1
-# hot paths cross ds-vm -> ds-abi/ds-rt, so cross-crate inlining needs LTO
-lto           = "thin"
-
 [profile.bench]
 # gungraun's Callgrind pass needs symbols to attribute counts
 debug = true
+
+[profile.release]
+# hot paths cross ds-vm -> ds-abi/ds-rt, so cross-crate inlining needs LTO
+lto           = "thin"
+codegen-units = 1

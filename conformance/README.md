@@ -1,6 +1,6 @@
 # Conformance corpus
 
-The DreamScript conformance corpus: the frozen archive's seed programs (`design/en/design/` catalogs) ported to the decided surface syntax per the M1 work items of `docs/en/implementation-plan.md`. The runtime encodings (catalog 07-runtime) are covered by the ds-abi/ds-vm hand-assembled fixtures instead. Every future bug regression lands in this directory as a new item or a new file; a regression never lives only in a unit test. Every `.ds` file sits at `ds fmt`'s canonical form (the CI ds-fmt job gates the corpus alongside examples/ and the benchmark kernels), so run the formatter after editing one; the header blocks and separator lines are preserved verbatim.
+The DreamScript conformance corpus: the frozen archive's seed programs (`archive/design/` catalogs) ported to the decided surface syntax per the M1 work items of `docs/en/implementation-plan.md`. The runtime encodings (catalog 07-runtime) are covered by the ds-abi/ds-vm hand-assembled fixtures instead. Every future bug regression lands in this directory as a new item or a new file; a regression never lives only in a unit test. Every `.ds` file sits at `ds fmt`'s canonical form (the CI ds-fmt job gates the corpus alongside examples/ and the benchmark kernels), so run the formatter after editing one; the header blocks and separator lines are preserved verbatim.
 
 ## File list
 

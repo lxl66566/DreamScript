@@ -1,22 +1,22 @@
 [package]
-name         = "ds-fmt"
-description  = "Block-aware zero-option formatter over the parse: the ds fmt and LSP on-type-formatting component"
+name                   = "ds-fmt"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Block-aware zero-option formatter over the parse: the ds fmt and LSP on-type-formatting component"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
-
-[lints]
-workspace = true
 
 [dependencies]
-ds-diag  = { path = "../ds-diag" }
-ds-parse = { path = "../ds-parse" }
+ds-diag          = { path = "../ds-diag" }
+ds-parse         = { path = "../ds-parse" }
 memchr.workspace = true
 
 [dev-dependencies]
 ds-corpus-path.workspace = true
+
+[lints]
+workspace = true

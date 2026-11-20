@@ -1,27 +1,27 @@
 [package]
-name         = "ds-diag"
-description  = "Span model, error-code registry, and diagnostic rendering for DreamScript"
+name                   = "ds-diag"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Span model, error-code registry, and diagnostic rendering for DreamScript"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
-
-[lints]
-workspace = true
-
-[features]
-# the `--error-format=json` renderer; off by default so the checker path
-# carries no serializer
-json = ["dep:serde", "dep:sonic-rs"]
-# Serialize/Deserialize over Span and FileId: the codec surface of the
-# precompiled ambient AST blob (ds-parse's `ast-serde` feature turns it on);
-# off by default so the diagnostic path carries no serializer
-ast-serde = ["dep:serde"]
 
 [dependencies]
 serde    = { workspace = true, optional = true }
 sonic-rs = { workspace = true, optional = true }
+
+[features]
+# Serialize/Deserialize over Span and FileId: the codec surface of the
+# precompiled ambient AST blob (ds-parse's `ast-serde` feature turns it on);
+# off by default so the diagnostic path carries no serializer
+ast-serde = ["dep:serde"]
+# the `--error-format=json` renderer; off by default so the checker path
+# carries no serializer
+json      = ["dep:serde", "dep:sonic-rs"]
+
+[lints]
+workspace = true

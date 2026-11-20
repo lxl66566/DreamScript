@@ -1,17 +1,14 @@
 [package]
-name         = "ds-dsi"
-description = "DreamScript's checked-prefix artifact: the pre-resolved, pre-declared front-end half a cold compile serves"
+name                   = "ds-dsi"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "DreamScript's checked-prefix artifact: the pre-resolved, pre-declared front-end half a cold compile serves"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
-categories.workspace  = true
-readme.workspace      = true
-
-[lints]
-workspace = true
+categories.workspace   = true
 
 [dependencies]
 ds-check = { workspace = true }
@@ -19,9 +16,12 @@ ds-diag  = { workspace = true, features = ["ast-serde"] }
 # the surface conversion renders through the one signature renderer the
 # source path serves (no second rendering forked)
 ds-fmt   = { path = "../ds-fmt" }
-ds-parse = { workspace = true, features = ["ast-serde"] }
 # the artifact header's hash and the payload's embedded written types
 # (ds-parse's serde surface, on like the AST blob's)
 ds-mod   = { workspace = true }
-serde    = { workspace = true }
+ds-parse = { workspace = true, features = ["ast-serde"] }
 postcard = { workspace = true }
+serde    = { workspace = true }
+
+[lints]
+workspace = true

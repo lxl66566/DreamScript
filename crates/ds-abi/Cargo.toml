@@ -1,14 +1,14 @@
 [package]
-name         = "ds-abi"
-description  = "Locked slot-overlay call ABI for DreamScript: typed frame layouts, CALLT argument slide, two-word entry descriptors, tail-chain metadata"
+name                   = "ds-abi"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "Locked slot-overlay call ABI for DreamScript: typed frame layouts, CALLT argument slide, two-word entry descriptors, tail-chain metadata"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
 [lints]
 workspace = true

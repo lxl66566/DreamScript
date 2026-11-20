@@ -1,60 +1,60 @@
 [package]
-name         = "ds-cli"
-description  = "The ds binary: DreamScript's command-line interface (check, run, build, fmt)"
+name                   = "ds-cli"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-license.workspace      = true
+description            = "The ds binary: DreamScript's command-line interface (check, run, build, fmt)"
+readme.workspace       = true
 repository.workspace   = true
+license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
-readme.workspace       = true
 
 [[bin]]
 name = "ds"
 path = "src/main.rs"
 
-[lints]
-workspace = true
-
 [dependencies]
-anyhow.workspace    = true
-clap.workspace      = true
-ds-check.workspace  = true
-ds-dsi.workspace    = true
-ds-diag             = { workspace = true, features = ["json"] }
-ds-query.workspace  = true
-ds-stdlib = { workspace = true, features = ["ast-serde"] }
-ds-mod.workspace    = true
-ds-vm.workspace     = true
-# the `$DS_CACHE` root's one authority (the script-mode cache and the
-# package store share it)
-ds-pkg.workspace    = true
+anyhow.workspace   = true
+# the script-mode cache key fold (CLI-owned, beside ds-mod's Hash128)
+blake3             = { workspace = true }
+clap.workspace     = true
+ds-check.workspace = true
+ds-diag            = { workspace = true, features = ["json"] }
+ds-dsi.workspace   = true
 # the H5 binding face: `ds bind` loads an installed artifact library and
 # enumerates its C symbols (no loader crate — dependency-free by design)
-ds-ffi.workspace    = true
-ds-lower = { path = "../ds-lower" }
-ds-meta  = { path = "../ds-meta" }
-ds-lsp   = { path = "../ds-lsp" }
-# the async runtime behind `ds lsp`'s protocol loop (built and dropped
-# inside the subcommand; no analysis code is async)
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "time"] }
-ds-parse = { path = "../ds-parse" }
-ds-fmt   = { path = "../ds-fmt" }
-# the script-mode cache key fold (CLI-owned, beside ds-mod's Hash128)
-blake3   = { workspace = true }
-# the script-mode cache artifact's temp-plus-rename atomic write
-tempfile = { workspace = true }
+ds-ffi.workspace   = true
+ds-fmt             = { path = "../ds-fmt" }
+ds-lower           = { path = "../ds-lower" }
+ds-lsp             = { path = "../ds-lsp" }
+ds-meta            = { path = "../ds-meta" }
+ds-mod.workspace   = true
+ds-parse           = { path = "../ds-parse" }
+# the `$DS_CACHE` root's one authority (the script-mode cache and the
+# package store share it)
+ds-pkg.workspace   = true
+ds-query.workspace = true
+ds-stdlib          = { workspace = true, features = ["ast-serde"] }
+ds-vm.workspace    = true
 # the `ds repl` prompt's line editor over an interactive terminal
 # (history recall, Ctrl-C as an event; piped stdin reads plain lines)
-rustyline = "19.0.0"
+rustyline          = "19.0.0"
+# the script-mode cache artifact's temp-plus-rename atomic write
+tempfile           = { workspace = true }
+# the async runtime behind `ds lsp`'s protocol loop (built and dropped
+# inside the subcommand; no analysis code is async)
+tokio              = { version = "1", features = ["io-std", "io-util", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 # run-time corpus resolution for the conformance-reading tests
 ds-corpus-path.workspace = true
 # the prefix-cache gates' served-vs-fresh tree comparison
-postcard = { workspace = true }
+postcard                 = { workspace = true }
 
 [build-dependencies]
 # the build identity the cache key folds (see build.rs)
 blake3 = { workspace = true }
+
+[lints]
+workspace = true
