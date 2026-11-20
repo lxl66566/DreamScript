@@ -1,0 +1,4 @@
+{"metric":"floor","runs":30,"median_ms":3.717,"min_ms":3.520,"p95_ms":4.214}
+{"metric":"trivial","runs":30,"median_ms":18.663,"min_ms":17.937,"p95_ms":19.335}
+{"metric":"small-real","runs":30,"median_ms":18.994,"min_ms":18.178,"p95_ms":19.932}
+{"metric":"warm","runs":30,"median_ms":4.105,"min_ms":3.800,"p95_ms":4.341}

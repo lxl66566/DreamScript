@@ -1,48 +1,61 @@
 # Benchmarks
 
-Cross-language kernel suite plus a ds cold-start harness: matched programs in DreamScript and peer scripting languages (python, lua, node), one runner, no committed timings. The suite records correctness goldens and the exact commands; numbers are produced by whoever runs `bench` under an exclusive lock.
+Cross-language kernel suite plus a ds cold-start harness: matched programs in ds, python, lua, and node under one POSIX-sh runner, with committed correctness goldens. Committed timing tables are dated single-sample snapshots (see Results); the raw rows live in `results/`.
 
 ## Kernels
 
-Each kernel lives in `kernels/` as `<name>.ds`, `.py`, `.lua`, `.mjs`, plus a committed `<name>.golden` holding the one expected final line. The kernels mirror each other operation for operation; every program prints exactly one `result:` line and that line is identical across all four languages — that identity is the correctness golden. The `.ds` kernels sit at `ds fmt`'s canonical form (all eleven verified unchanged; the CI ds-fmt job gates them alongside examples/), so run the formatter after editing one.
+Each kernel sits in `kernels/` as `<name>.ds`, `.py`, `.lua`, `.mjs`, plus a `<name>.golden` holding the one expected final `result:` line, identical across every language. The `.ds` files sit at `ds fmt`'s canonical form (the CI ds-fmt job gates them), so run the formatter after editing one.
 
-- `fib` — naive recursive fib(34): call overhead and integer add per call.
-- `loops-arith` — 10^7 hot var-mutation iterations of a Lehmer generator (mul, mod, parity branch, accumulator): integer arithmetic and loop dispatch.
-- `strings` — build 25k three-digit segments through interpolation and concat (grouped to bound copying), then rescan with char_at, substring, and parse_int (the substring and parse_int checked answers extracted through the .ok/.err handlers): string allocation and the string-op natives.
-- `float-loop` — 10^7 f64 iterations of mul/add/compare with a conditional rescale: float slots.
-- `lists` — split 20k three-digit pieces once, 120 checked-read passes checksummed through parse_int, and a 32-step concat ladder (~10M element-word copies) re-checksummed in full: the list object surface (checked reads, len, concat copying).
-- `closures` — 800k-iteration loops of capturing closures built and called per iteration: a named int factory (one CLOSURE_NEW per pass), a const closure threading the accumulator through every call, a value-position factory capturing through two levels, and a string factory (Ref captures). Captures stay immutable — ds copies captures by value while the peers capture by reference.
-- `combinators` — 250 rounds of map/filter/reduce over a 10k int list plus 40 rounds over a 1k string list, all lambdas non-capturing: the CALLG hosted-reentry surface (the VM reenters the interpreter once per element per combinator).
-- `containers` — a 15000-element cons ladder (~112M element-word copies), a first/tail drain with a running max (~112M more), and 150 collect copies: the container closes cons/first/tail/collect/max.
-- `maps` — one 5000-entry map over string keys: fill, 16 checked-read rounds over all keys, 2000 missing-key probes, a key-for-key overwrite pass observing the count per set, and a final re-read: the interim map builder surface (map_new/set/get/len).
-- `records` — 20001 four-field records (two ints, a float, a string Ref) staged into a `list[record]` by `list_push` at the element stride, 45 read passes walking all elements by checked `list_get` with `.ok`/`.err` extraction and field projection, a 2000 missing-index probe over the none side, and a first pin: the native result span channel for whole record word spans.
-- `nursery` — 200k nursery cycles each opening a fresh scope that spawns two children (one computing on a copied-in int capture, one touching a string Ref capture so the spawn-seam copy-in acquire rides), joined at scope exit; every 100th cycle a spawned child opens its own nursery while the enclosing drive still owns one (a cross-level join, kept at 1%), and one final walk re-reads the shared out-list by checked `list_get` with `.ok`/`.err` extraction: the spawn/join fiber path.
+| Kernel | Measures |
+|---|---|
+| `fib` | naive recursive fib(34): call overhead and integer add per call |
+| `loops-arith` | 10^7 hot iterations of a Lehmer generator: integer arithmetic and loop dispatch |
+| `float-loop` | 10^7 f64 iterations of mul/add/compare with a conditional rescale: float slots |
+| `strings` | 25k interpolated segments built, then a char_at scan, substring cuts, parse_int: string allocation and the string natives |
+| `lists` | one split, 120 checked-read passes, a 32-step concat ladder (~10M word copies): the list object surface |
+| `closures` | 800k iterations building and calling capturing closures: CLOSURE_NEW and Ref captures |
+| `combinators` | 250 rounds of map/filter/reduce over a 10k list: CALLG hosted reentry per element |
+| `containers` | a 15000-element cons ladder (~112M word copies) and a first/tail drain (~112M more): cons/first/tail/collect |
+| `maps` | one 5000-entry string-keyed map: fill, 16 read rounds, 2000 missing probes, an overwrite pass |
+| `records` | 20001 four-field records staged at the element stride, 45 checked-read passes with field projection: the record span channel |
+| `nursery` | 200k spawn/join cycles of two children each, 1% cross-level joins: the fiber path |
 
-Mirroring rules the kernels obey: every integer intermediate stays below 2^47 so ds i64, f64-only JS, and bignum Python compute identical values; division and modulo only ever see non-negative operands, where ds truncating division equals Python/Lua floored division; the float kernel prints an odd fourth (x.25 or x.75), exact in binary and short enough in decimal that Rust, Python, JS shortest-repr and Lua `%.14g` render the same digits. The ds kernels stay inside the currently lowered M3 subset (`fn` declarations, const/var bindings, arithmetic, interpolation with implicit primitive conversion, the lowered string and list natives, if/else, while, UFCS, the generic `len` dispatched on its call-site type evidence, `.ok`/`.err` handlers, capturing closures with immutable captures, the combinators map/filter/reduce, the container closes cons/first/tail/collect/max, the interim map builder calls, and struct-typed list elements staged and read back whole through the native result span channel — list_push/list_get/head over records with `.ok`/`.err` extraction and field projection, no copy closes or combinators over wider elements, the `nursery` blocks with `spawn` children (int captures copied in and string Ref captures acquired at the spawn seam), a child-owned nested nursery joining across levels, and the value match over a union refutable label (net_err timeout/refused)). One shape is excluded: a mutated captured binding (ds copies captures at CLOSURE_NEW while the peers share them — immutable captures make the two agree). The combinator lambdas stay non-capturing to keep closure build traffic out of the CALLG reentry measurement.
+The kernels mirror each other operation for operation. Every integer intermediate stays below 2^47 so ds i64, f64-only JS, and bignum Python agree; division and modulo see only non-negative operands (truncating equals floored there); the float kernel prints an odd fourth so every language's shortest representation renders the same digits; captures stay immutable (ds copies at CLOSURE_NEW while the peers share); the combinator lambdas stay non-capturing so closure traffic stays out of the CALLG measurement.
 
 ## Running
 
 ```sh
-cargo build -p ds-cli --release          # required: ds timings are release-build timings
-benchmarks/run.sh check                  # correctness: all kernels, all available interpreters
+cargo build -p ds-cli --release          # ds timings are release timings
+benchmarks/run.sh check                  # all kernels, all available interpreters, vs goldens
 benchmarks/run.sh bench                  # wall-clock table, one run per kernel per interpreter
+benchmarks/run.sh bench --json           # one JSON object per row, meta line first
+benchmarks/startup.sh bench              # cold-start medians; --json and -n runs likewise
 ```
 
-`check` compares each interpreter's final `result:` line against `<name>.golden` and exits nonzero on any mismatch; a missing interpreter prints a `SKIP` line and is not a failure. The ds binary is found at `../target/release/ds` relative to `benchmarks/` (`.exe` on Windows); set `DS_BIN` to point elsewhere, e.g. at a shared `CARGO_TARGET_DIR` worktree build. Optional arguments filter kernels: `run.sh check fib strings`. Every ds invocation forces the cold path (`--no-cache`): the suite measured the full pipeline before the script-mode dsmod cache existed, the timings stay comparable, and no run inherits or writes a user cache directory.
-
-The runner is POSIX sh and runs under git bash on Windows and on Linux. Every interpreter invocation runs under a per-invocation `timeout` (600 s, a passthrough where `timeout` is absent), so a hung interpreter fails its invocation instead of wedging the round. Timing uses `date +%s%N` wall clock; a one-time probe refuses the bench loudly when `date` answers without nanoseconds (BSD prints a literal `N`; the portable fallback would be `date +%s` whole seconds). Interpreter versions matter: record the versions you benched with (python/python3, lua or lua5.4/5.3, node) alongside any results you keep — the runner does not pin them.
+Arguments after the mode filter kernels (`run.sh bench fib strings`). The ds binary is found at `../target/release/ds` or through `DS_BIN`; a missing ds fails the run, missing peers print `SKIP`. Every interpreter invocation runs under a 600 s timeout, and the bench needs GNU `date` (`%s%N` nanoseconds). Bench numbers are meaningful only under the repo's exclusive `flock` with the machine otherwise idle; one invocation is one sample, repeat for stability. The JSON meta line carries the interpreter versions, so a saved file needs no side notes.
 
 ## Startup
 
-`startup.sh bench` times three fixed ds cold-start stages plus the script-cache hit stage as medians over N runs (default 30; `-n` to change, `--json` for one machine-readable line per metric). `floor` (`ds --version`) isolates the process + allocator floor under the harness; `trivial` (`startup/trivial.ds`, three arithmetic statements and one print) adds front-end + check + lower + VM entry; `small-real` (`startup/small-real.ds`, a list literal, a map through the interim constructor, one reduce) adds the first-allocations cost; `warm` runs the trivial fixture served from the script-mode dsmod cache (a private `DS_CACHE` root primed untimed), so `warm - floor` is the artifact load + install + execute cost. The cold stages force `--no-cache`, so they never inherit or write a user cache and stay comparable with the pre-cache suite. The adjacent deltas are the diagnostic: `trivial - floor` is compiler-pipeline entry cost, `small-real - trivial` is first-allocation cost, `trivial - warm` is what the cache deletes of the front end. On Windows git bash the floor includes the msys fork/exec overhead — compare deltas across stages, not the floor against other platforms.
+`startup.sh bench` times four stages as medians over N runs (default 30): `floor` (`ds --version`), `trivial` (arithmetic and one print), `small-real` (a list, a map, one reduce), `warm` (trivial served from the script-mode dsmod cache; the cold stages force `--no-cache`). The adjacent deltas are the diagnostic: `trivial - floor` is pipeline entry cost, `warm` vs `trivial` is what the cache deletes. On Windows git bash the floor carries msys fork/exec overhead — compare deltas, not floors.
 
-```sh
-benchmarks/startup.sh bench                 # median/min/p95 table, ms
-DS_BIN=<ds> benchmarks/startup.sh bench --json -n 50
-```
+## Results
 
-DS_BIN resolution and the `date +%s%N` wall clock follow run.sh; the fixtures sit at `ds fmt`'s canonical form. Every timed run's `result:` line is checked against the fixture's `.golden` and any mismatch or nonzero exit fails loudly — a wrong-result benchmark is worse than none. Numbers are never committed: performance rounds record the startup medians in the commit message alongside the other gate numbers.
+Committed tables are dated single-sample snapshots; refresh one with `bench --json > results/<date>-kernels.jsonl`, `startup.sh bench --json > results/<date>-startup.jsonl`, and rewrite the tables here from that run.
 
-## Rules
+2026-11-21, Linux x64 (32 cores), exclusive flock, ds 0.1.0, Python 3.14.8, node v24.21.0, lua absent. Milliseconds, one run per cell.
 
-`bench` numbers are meaningful only under the repo convention of an exclusive `flock` (benchmarks exclusive, compiles and tests shared) with the machine otherwise idle, and one invocation is one sample: repeat for stability. Timing numbers are never committed — not to this directory, not to docs; the committed artifacts are the kernels, the goldens, the runner, and this method. Differences found this way (for example, `substring` costing O(string length) per call in the tier-1 VM, which dominated the first strings sizing) are recorded as implementation findings elsewhere, not as benchmark tables.
+| Kernel | ds | python | node |
+|---|---:|---:|---:|
+| fib | 993 | 431 | 70 |
+| closures | 856 | 563 | 37 |
+| lists | 755 | 394 | 133 |
+| loops-arith | 581 | 1875 | 452 |
+| float-loop | 433 | 822 | 46 |
+| combinators | 472 | 247 | 61 |
+| nursery | 294 | 1961 | 82 |
+| records | 276 | 246 | 32 |
+| containers | 161 | 267 | 103 |
+| maps | 67 | 36 | 33 |
+| strings | 54 | 28 | 31 |
+
+Startup medians over 30 runs: floor 3.7, trivial 18.7, small-real 19.0, warm 4.1 (ms). Raw rows: `results/2026-11-21-kernels.jsonl`, `results/2026-11-21-startup.jsonl`.

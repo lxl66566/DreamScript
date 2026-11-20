@@ -6,7 +6,10 @@
 #   run.sh bench [kernel...]   wall-clock each run once and print a table.
 #                              Numbers are meaningful only under an exclusive
 #                              flock with the machine otherwise idle (see
-#                              README.md); they are never committed.
+#                              README.md).
+#   run.sh bench --json [...]  one JSON object per row instead of the table,
+#                              meta line first (date plus the interpreter
+#                              versions), so a saved file is self-describing.
 # The ds interpreter is the release CLI: build it first with
 #   CARGO_TARGET_DIR=<shared target> cargo build -p ds-cli --release
 # and point DS_BIN at the binary when it is not at <repo>/target/release/ds.
@@ -91,7 +94,18 @@ kernel_file() {
 
 mode=${1:-}
 [ $# -gt 0 ] && shift
-selected=${*:-}
+# --json is a flag, never a kernel name; it is filtered from the
+# selection and only bench answers it.
+json=0
+selected=""
+for arg in "$@"; do
+    if [ "$arg" = "--json" ]; then
+        json=1
+    else
+        selected="$selected $arg"
+    fi
+done
+selected=${selected# }
 
 all_kernels=$(ls "$kdir"/*.ds 2>/dev/null | sed 's|.*/||; s|\.ds$||' | sort)
 if [ -z "$all_kernels" ]; then
@@ -100,9 +114,14 @@ if [ -z "$all_kernels" ]; then
 fi
 
 if [ "$mode" != check ] && [ "$mode" != bench ]; then
-    echo "usage: run.sh check|bench [kernel...]" >&2
+    echo "usage: run.sh check|bench [--json] [kernel...]" >&2
     echo "  kernels:$all_kernels" | tr '\n' ' ' >&2
     echo >&2
+    exit 2
+fi
+
+if [ "$json" = 1 ] && [ "$mode" != bench ]; then
+    echo "run.sh: --json applies to bench only" >&2
     exit 2
 fi
 
@@ -185,7 +204,9 @@ fi
 
 # ---- bench -------------------------------------------------------------------
 # Wall-clock one run per kernel and interpreter (stdout discarded). Repeat the
-# invocation under an exclusive flock for stable numbers.
+# invocation under an exclusive flock for stable numbers. --json answers one
+# object per row with a meta line first, so a saved file carries its own
+# environment (date plus the interpreter versions in play).
 
 # `date +%s%N` prints nanoseconds on GNU date only; BSD date answers
 # seconds plus a literal `N`. These numbers gate M8/M9 perf records, so
@@ -199,12 +220,26 @@ case $probe in
     ;;
 esac
 
-printf '%-12s %-8s %10s\n' KERNEL INTERP MS
+if [ "$json" = 1 ]; then
+    lua_ver=""
+    [ -n "$lua_bin" ] && lua_ver=$($lua_bin -v 2>&1 | head -n 1)
+    printf '{"meta":{"date":"%s","ds":"%s","python":"%s","lua":"%s","node":"%s"}}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$($ds_bin --version 2>&1)" \
+        "$([ -n "$python_bin" ] && $python_bin --version 2>&1)" \
+        "$lua_ver" \
+        "$([ -n "$node_bin" ] && $node_bin --version 2>&1)"
+else
+    printf '%-12s %-8s %10s\n' KERNEL INTERP MS
+fi
 for name in $kernels; do
     for interp in ds python lua node; do
         eval "bin=\$${interp}_bin"
         if [ -z "$bin" ]; then
-            printf '%-12s %-8s %10s\n' "$name" "$interp" SKIP
+            if [ "$json" = 1 ]; then
+                printf '{"kernel":"%s","interp":"%s","skip":true}\n' "$name" "$interp"
+            else
+                printf '%-12s %-8s %10s\n' "$name" "$interp" SKIP
+            fi
             continue
         fi
         file=$(kernel_file "$name" "$interp")
@@ -213,7 +248,13 @@ for name in $kernels; do
         status=$?
         t1=$(date +%s%N)
         if [ "$status" -ne 0 ]; then
-            printf '%-12s %-8s %10s\n' "$name" "$interp" "FAIL($status)"
+            if [ "$json" = 1 ]; then
+                printf '{"kernel":"%s","interp":"%s","exit":%d}\n' "$name" "$interp" "$status"
+            else
+                printf '%-12s %-8s %10s\n' "$name" "$interp" "FAIL($status)"
+            fi
+        elif [ "$json" = 1 ]; then
+            printf '{"kernel":"%s","interp":"%s","ms":%d}\n' "$name" "$interp" $(((t1 - t0) / 1000000))
         else
             printf '%-12s %-8s %10d\n' "$name" "$interp" $(((t1 - t0) / 1000000))
         fi
