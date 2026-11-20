@@ -352,8 +352,12 @@ impl State {
             );
             return Err(());
         };
-        let contents = &self.line[start..start + len];
-        if let Some(bad) = contents.bytes().position(|b| !matches!(b, 0x20..=0x7e)) {
+        // The gate borrows inline and the returned slice is bound last: a
+        // borrow held across `drift`'s `&mut self` is rejected by NLL.
+        if let Some(bad) = self.line[start..start + len]
+            .bytes()
+            .position(|b| !matches!(b, 0x20..=0x7e))
+        {
             self.drift(
                 start + bad,
                 start + bad + 1,
@@ -362,6 +366,7 @@ impl State {
             return Err(());
         }
         self.at = start + len + 1;
+        let contents = &self.line[start..start + len];
         Ok((contents, (start - 1, self.at)))
     }
 
