@@ -27,7 +27,7 @@ fn main() -> () {
     gi += 1
   }
   const n: int = 20000
-  s = s.substring(0, n * 4 - 1)
+  s = s.substring(0, n * 4 - 1).ok((x: string) => x).err((_: none) => "")
   const parts = split(s, ';')
   var sum: int = 0
   var p: int = 0

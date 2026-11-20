@@ -1,8 +1,9 @@
 // Kernel: build strings then reprocess them — interpolation with two
 // holes, concat, char_at scanning, substring cuts, parse_int. Pieces
-// are always three digits plus ';', so every parse_int sees clean
-// digits and its int | parse_err answer is extracted with the .err
-// handler (the default never fires). Accumulators seed with the empty
+// are always three digits plus ';', so the substring cuts stay in
+// range and every parse_int sees clean digits; each checked answer
+// (string | none, int | parse_err) is extracted with the .ok/.err
+// handlers (the defaults never fire). Accumulators seed with the empty
 // string literal, mirrored exactly in the peer kernels. Every
 // intermediate stays a non-negative int below 2^47.
 
@@ -24,8 +25,9 @@ fn main() -> () {
   var start: int = 0
   var j: int = 0
   while j < 100000 {
-    if s.char_at(j) == ";" {
-      sum += s.substring(start, j).parse_int().err((_: parse_err) => 0)
+    const c = s.char_at(j)
+    if c is char && c == ';' {
+      sum += s.substring(start, j).ok((x: string) => x).err((_: none) => "").parse_int().err((_: parse_err) => 0)
       start = j + 1
     }
     j += 1

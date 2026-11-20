@@ -7,8 +7,8 @@
 // item | none and extracted with the .ok/.err chain, the fields
 // projected (two int adds, a float add, the tag length through len),
 // a missing-index probe pins the none side over the same span (the
-// const fallback record rides the err handler's capture), and head
-// pins the checked first read. Scores cycle 0.25/0.75/1.25 over an
+// const fallback record rides the err handler's capture), and first
+// pins the checked head read. Scores cycle 0.25/0.75/1.25 over an
 // odd pass count so the printed float total is an odd fourth; every
 // integer intermediate stays non-negative below 2^47.
 
@@ -58,7 +58,7 @@ fn main() -> () {
     miss += p.id
     q += 1
   }
-  const h = head(xs)
+  const h = first(xs)
   const hid = h.ok((e: item) => e.id).err((_: none) => -1)
   println("result: ${sum_id} ${sum_w} ${lensum} ${miss} ${hid} ${total}")
 }
