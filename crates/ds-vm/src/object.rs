@@ -1291,7 +1291,7 @@ impl Objects {
     /// the router's pre-resolution (content and hash carried off the
     /// probe's own heap), a scalar word needs no payload at all. The scan
     /// then never re-reads the probe's payload per candidate.
-    fn resolve_probe<'a>(&'a self, key: Value, res: &'a ResolvedKey) -> ProbeKey<'a> {
+    fn resolve_probe<'a>(&'a self, key: Value, res: &'a ResolvedKey<'a>) -> ProbeKey<'a> {
         match res {
             ResolvedKey::Text { text, hash } => ProbeKey::Text { hash: *hash, text },
             ResolvedKey::Opaque => match key {
@@ -1392,7 +1392,7 @@ impl Objects {
         &mut self,
         obj: u32,
         key: Value,
-        res: &ResolvedKey,
+        res: &ResolvedKey<'_>,
         value: &[Value],
     ) -> Result<(), Trap> {
         let header = match self.table.get(obj as usize) {
@@ -1480,7 +1480,7 @@ impl Objects {
         &self,
         obj: u32,
         key: Value,
-        res: &ResolvedKey,
+        res: &ResolvedKey<'_>,
     ) -> Result<Option<&[Value]>, Trap> {
         let Some(Object::Map(data)) = self.payload_of(obj) else {
             return Err(Trap::UnknownObject { obj });
@@ -1950,23 +1950,51 @@ impl<'a> Heaps<'a> {
         self.settle(list.fiber())
     }
 
-    /// Resolves a map probe word for the map's store: a local (or
-    /// scalar) word compares through the store itself; a foreign word's
-    /// string content and hash resolve here, on the probe's own heap, so
-    /// the content compare never reads the wrong store's payload and the
-    /// map's store never re-hashes the probe.
-    fn resolve_key(&mut self, map: FiberId, key: Value) -> Result<ResolvedKey, Trap> {
+    /// Resolves a map probe word for the map's store, the read funnels'
+    /// shared face: a local (or scalar) word compares through the store
+    /// itself; a foreign word's string content and hash resolve here, on
+    /// the probe's own heap, so the content compare never reads the wrong
+    /// store's payload and the map's store never re-hashes the probe. The
+    /// foreign text borrows its own heap shared — no owned copy per probe
+    /// — and the read queues no cross-heap operation, so it owes no drain.
+    fn resolve_key_shared(&self, map: FiberId, key: Value) -> Result<ResolvedKey<'_>, Trap> {
         let Value::Ref(word) = key else {
             return Ok(ResolvedKey::Word);
         };
         if word.fiber() == map {
             return Ok(ResolvedKey::Word);
         }
-        let probe = self.store(word)?.str_with_hash(word.id());
+        let probe = self.store_shared(word)?.str_with_hash(word.id());
         Ok(match probe {
-            Some((text, hash)) => ResolvedKey::Text {
-                text: text.into(),
-                hash,
+            Some((text, hash)) => ResolvedKey::Text { text, hash },
+            None => ResolvedKey::Opaque,
+        })
+    }
+
+    /// The same resolution for a mutating funnel: the foreign text lands
+    /// in `scratch` (one copy per store op, the store's exclusive borrow
+    /// window demanding a text the router does not hold), the resolution
+    /// borrowing it.
+    fn resolve_key_staged<'s>(
+        &mut self,
+        map: FiberId,
+        key: Value,
+        scratch: &'s mut String,
+    ) -> Result<ResolvedKey<'s>, Trap> {
+        let Value::Ref(word) = key else {
+            return Ok(ResolvedKey::Word);
+        };
+        if word.fiber() == map {
+            return Ok(ResolvedKey::Word);
+        }
+        Ok(match self.store(word)?.str_with_hash(word.id()) {
+            Some((text, hash)) => {
+                scratch.clear();
+                scratch.push_str(text);
+                ResolvedKey::Text {
+                    text: scratch.as_str(),
+                    hash,
+                }
             },
             None => ResolvedKey::Opaque,
         })
@@ -1976,8 +2004,8 @@ impl<'a> Heaps<'a> {
     /// copied out: the slice leaves the owning store as owned words, so
     /// the caller may route count mutations while holding it.
     pub(crate) fn map_at(&mut self, map: RefId, key: Value) -> Result<Option<Vec<Value>>, Trap> {
-        let res = self.resolve_key(map.fiber(), key)?;
-        match self.store(map)?.map_at(map.id(), key, &res)? {
+        let res = self.resolve_key_shared(map.fiber(), key)?;
+        match self.store_shared(map)?.map_at(map.id(), key, &res)? {
             Some(span) => Ok(Some(span.to_vec())),
             None => Ok(None),
         }
@@ -1987,15 +2015,17 @@ impl<'a> Heaps<'a> {
     /// `scratch`: the row read for walks that pair one map's rows with
     /// another's. The span leaves the owning store as plain copied words
     /// (the map keeps every count it owns) in the caller's buffer, so a
-    /// reused scratch holds a many-row walk at O(1) allocations.
+    /// reused scratch holds a many-row walk at O(1) allocations; a key
+    /// foreign to the map resolves by borrowing the probe's heap, so the
+    /// walk copies no key text per row.
     pub(crate) fn map_row_scratch(
         &mut self,
         map: RefId,
         key: Value,
         scratch: &mut Vec<Value>,
     ) -> Result<bool, Trap> {
-        let res = self.resolve_key(map.fiber(), key)?;
-        match self.store(map)?.map_at(map.id(), key, &res)? {
+        let res = self.resolve_key_shared(map.fiber(), key)?;
+        match self.store_shared(map)?.map_at(map.id(), key, &res)? {
             Some(span) => {
                 scratch.clear();
                 scratch.extend_from_slice(span);
@@ -2008,7 +2038,8 @@ impl<'a> Heaps<'a> {
     /// Stores one key and its value span into map object `map`, routed,
     /// with the queues drained.
     pub(crate) fn set_map(&mut self, map: RefId, key: Value, value: &[Value]) -> Result<(), Trap> {
-        let res = self.resolve_key(map.fiber(), key)?;
+        let mut probe_text = String::new();
+        let res = self.resolve_key_staged(map.fiber(), key, &mut probe_text)?;
         self.store(map)?.set_map(map.id(), key, &res, value)?;
         self.settle(map.fiber())
     }
@@ -2125,9 +2156,11 @@ impl<'a> Heaps<'a> {
                     }
                     for key in self.map_keys(a)? {
                         // each row lands in a reused buffer, so the walk pays
-                        // no per-row vector; the key is its own map's row,
-                        // so only the right side can miss — a missing row
-                        // answers unequal at once
+                        // no per-row vector, and a key foreign to either
+                        // map resolves by borrowing (no key text copy per
+                        // row); the key is its own map's row, so only the
+                        // right side can miss — a missing row answers
+                        // unequal at once
                         if !self.map_row_scratch(a, key, &mut left)? {
                             return Ok(false);
                         }
@@ -2168,15 +2201,18 @@ pub(crate) enum ContentFace {
 /// [`Objects::set_map`]: a local or scalar word resolves through the
 /// map's own store; a foreign word arrives pre-resolved — its string
 /// content, or the knowledge that it names no string (identity compare
-/// then, like every non-string reference key).
-pub enum ResolvedKey {
+/// then, like every non-string reference key). The content borrows: a
+/// read funnel resolves it straight off the probe's own heap (no owned
+/// copy per probe), while the mutating funnel stages its copy in the
+/// caller's buffer.
+pub enum ResolvedKey<'a> {
     /// The word is local to the map's store or carries no reference:
     /// the store resolves it itself.
     Word,
-    /// A foreign string probe: its content copied off the probe's heap,
-    /// plus that object's cached content hash, so the map's store compares
-    /// without re-walking the probe.
-    Text { text: Box<str>, hash: u32 },
+    /// A foreign string probe: its content, plus that object's cached
+    /// content hash, so the map's store compares without re-walking the
+    /// probe.
+    Text { text: &'a str, hash: u32 },
     /// A foreign reference probe naming no string.
     Opaque,
 }
@@ -2440,6 +2476,121 @@ mod tests {
             heaps.content_eq(w(map_a), w(swapped)),
             Ok(false),
             "one swapped value"
+        );
+    }
+
+    /// The shared-borrow bytes reads route cross-heap: a payload
+    /// borrowed from one heap compares by content against another heap's
+    /// through the live door, the parked door serves a pool-resident
+    /// word, and the reads queue no cross-heap operation.
+    #[test]
+    fn shared_bytes_reads_compare_cross_heap() {
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let local = current.alloc_bytes(b"cross heap bytes".to_vec().into_boxed_slice());
+        let foreign = pool[other.index()]
+            .objects
+            .alloc_bytes(b"cross heap bytes".to_vec().into_boxed_slice());
+        let wrong = pool[other.index()]
+            .objects
+            .alloc_bytes(b"different".to_vec().into_boxed_slice());
+        let (lw, fw, ww) = (
+            RefId::new(FIBER_ROOT, local),
+            RefId::new(other, foreign),
+            RefId::new(other, wrong),
+        );
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        assert_eq!(heaps.bytes_ref(lw), Ok(&b"cross heap bytes"[..]));
+        assert_eq!(heaps.bytes_ref(fw), Ok(&b"cross heap bytes"[..]));
+        assert_eq!(heaps.bytes_ref(ww), Ok(&b"different"[..]));
+        assert_eq!(heaps.content_eq(lw, fw), Ok(true));
+        assert_eq!(heaps.content_eq(lw, ww), Ok(false));
+        assert_eq!(heaps.content_eq(fw, ww), Ok(false));
+        assert_eq!(
+            current.queued() + pool[other.index()].objects.queued(),
+            0,
+            "the reads and the compare queue no cross-heap operation"
+        );
+        // the parked door: the context store is the scratch, so every
+        // word routes through the pool, the local fiber's own slot
+        // included
+        let pooled = pool[FIBER_ROOT.index()]
+            .objects
+            .alloc_bytes(b"pooled bytes".to_vec().into_boxed_slice());
+        let mut scratch = Objects::new(FIBER_ROOT);
+        let heaps = Heaps::new(FIBER_ROOT, &mut scratch, &mut pool, &mut claims, false);
+        assert_eq!(
+            heaps.bytes_ref(RefId::new(FIBER_ROOT, pooled)),
+            Ok(&b"pooled bytes"[..])
+        );
+        assert_eq!(heaps.bytes_ref(fw), Ok(&b"cross heap bytes"[..]));
+    }
+
+    /// The map compare's cross-heap rows: two content-equal maps on
+    /// different heaps, each keyed by its own local strings — every row
+    /// of the walk resolves the left map's key against the right map's
+    /// heap, borrowing the probe text (no owned copy per row) — answer
+    /// true in both directions, a swapped value and a missing row
+    /// answer false, the read funnel serves a foreign probe, and every
+    /// queue ends the walk quiet.
+    #[test]
+    fn the_map_compare_resolves_foreign_keys_by_borrowing() {
+        const ROWS: usize = 50;
+        let other = FiberId(1);
+        let mut current = Objects::new(FIBER_ROOT);
+        let mut pool = vec![Fiber::empty(FIBER_ROOT), Fiber::empty(other)];
+        let mut claims = vec![ClaimTable::new(FIBER_ROOT), ClaimTable::new(other)];
+        let fill = |objects: &mut Objects, rows: usize, swap_last: bool| -> u32 {
+            let map = objects.alloc_map();
+            for i in 0..rows {
+                let key = objects.alloc_str(format!("key {i}"));
+                let last = swap_last && i + 1 == rows;
+                let at = i64::try_from(i).expect("the row index fits");
+                objects
+                    .set_map(
+                        map,
+                        Value::Ref(RefId::new(objects.owner(), key)),
+                        &ResolvedKey::Word,
+                        &[Value::I64(if last { 9 } else { at })],
+                    )
+                    .expect("the row stores");
+            }
+            map
+        };
+        let (map_a, map_b) = (fill(&mut current, ROWS, false), {
+            let store = &mut pool[other.index()].objects;
+            fill(store, ROWS, false)
+        });
+        let foreign_key = pool[other.index()].objects.alloc_str("key 3".to_owned());
+        let short = fill(&mut current, ROWS - 1, false);
+        let swapped = fill(&mut current, ROWS, true);
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut current, &mut pool, &mut claims, true);
+        let (a, b) = (RefId::new(FIBER_ROOT, map_a), RefId::new(other, map_b));
+        assert_eq!(heaps.content_eq(a, b), Ok(true));
+        assert_eq!(heaps.content_eq(b, a), Ok(true));
+        assert_eq!(
+            heaps.content_eq(a, RefId::new(FIBER_ROOT, short)),
+            Ok(false),
+            "a missing row"
+        );
+        assert_eq!(
+            heaps.content_eq(a, RefId::new(FIBER_ROOT, swapped)),
+            Ok(false),
+            "one swapped value"
+        );
+        // the read funnel resolves a probe foreign to the map through
+        // the same borrowed face: the left map's key finds the right
+        // map's equal-content row
+        assert_eq!(
+            heaps.map_at(a, Value::Ref(RefId::new(other, foreign_key))),
+            Ok(Some(vec![Value::I64(3)]))
+        );
+        assert_eq!(
+            current.queued() + pool[other.index()].objects.queued(),
+            0,
+            "the walk queues no cross-heap operation"
         );
     }
 
@@ -2881,7 +3032,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Text {
-                    text: foreign_text.clone(),
+                    text: &foreign_text,
                     hash
                 }
             ),
@@ -2895,7 +3046,7 @@ mod tests {
                 map,
                 Value::Ref(RefId::new(FIBER_ROOT, key)),
                 &ResolvedKey::Text {
-                    text: other_text,
+                    text: &other_text,
                     hash: other_hash
                 }
             ),

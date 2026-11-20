@@ -1377,9 +1377,9 @@ fn bytes_eq_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so one operand copies out
-    let a = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
-    let b = heaps.bytes_at(ref_arg(args, 1)?)?;
+    // both operands borrow shared, so neither side copies out
+    let a = heaps.bytes_ref(ref_arg(args, 0)?)?;
+    let b = heaps.bytes_ref(ref_arg(args, 1)?)?;
     Ok(NativeResult::Word(Value::Bool(a == b)))
 }
 
@@ -1391,10 +1391,10 @@ fn bytes_compare_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so one operand copies out
-    let a = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
-    let b = heaps.bytes_at(ref_arg(args, 1)?)?;
-    Ok(NativeResult::Word(Value::I64(match a.as_slice().cmp(b) {
+    // both operands borrow shared, so neither side copies out
+    let a = heaps.bytes_ref(ref_arg(args, 0)?)?;
+    let b = heaps.bytes_ref(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::I64(match a.cmp(b) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
@@ -1408,9 +1408,9 @@ fn bytes_hash_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so the operand copies out
-    let payload = heaps.bytes_at(ref_arg(args, 0)?)?.to_vec();
-    Ok(NativeResult::Word(Value::I64(fnv1a(&payload))))
+    // the operand borrows shared, so the hash reads without a copy
+    let payload = heaps.bytes_ref(ref_arg(args, 0)?)?;
+    Ok(NativeResult::Word(Value::I64(fnv1a(payload))))
 }
 
 /// `utf8_encode(s: string) -> bytes` — the string→bytes bridge: the
