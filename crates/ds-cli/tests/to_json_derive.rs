@@ -50,10 +50,10 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// payload object, the discriminator ruling's encode rows (2026-11-21:
 /// two payloaded cases answering their own member keys, the sole tuple
 /// payload its bare array, a mixed enum's wrapped cases, the lone
-/// tuple-payload case its bare array and its decode peek), the
+/// tuple-payload case its bare array and its roundtrip), the
 /// roundtrip rows (present optional kept, absent optional still
 /// absent, a missing required member refused, the lone tuple case's
-/// peek and its wrong shape refused), and the
+/// re-encode through the narrowed place and its wrong shape refused), and the
 /// width fields' rows (byte/u32 as numbers with their edges, char as
 /// its one-character string, bytes as a number array, and the
 /// constructed row over field reads of every width).
@@ -74,7 +74,7 @@ const GOLDEN: &str = concat!(
     "{\"paired\":[1,2]}\n",
     "{\"named\":{\"label\":\"q\"}}\n",
     "[3,4]\n",
-    "peek 5 6\n",
+    "[5,6]\n",
     "parse_err\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[1,2],\"port\":3}\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[]}\n",

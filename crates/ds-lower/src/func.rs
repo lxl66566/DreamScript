@@ -2806,11 +2806,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .member_fields(atom)
                     .ok_or_else(|| mismatch("a union member field"))?;
                 let mut out = Vec::new();
-                for field in &s.fields {
-                    let member = fields
-                        .iter()
-                        .find(|f| f.name == field.name)
-                        .ok_or_else(|| mismatch("a union member field"))?;
+                for (index, field) in s.fields.iter().enumerate() {
+                    // a positional field (a tuple-payload case's) matches
+                    // by position — the None names all compare equal, so
+                    // the name-find would return the first field for
+                    // every element
+                    let member = if field.name.is_some() {
+                        fields
+                            .iter()
+                            .find(|f| f.name == field.name)
+                            .ok_or_else(|| mismatch("a union member field"))?
+                    } else {
+                        fields
+                            .get(index)
+                            .ok_or_else(|| mismatch("a union member field"))?
+                    };
                     out.extend(field_addrs(place.base, member));
                 }
                 Ok(out)
