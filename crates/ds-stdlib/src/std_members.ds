@@ -1,12 +1,13 @@
-// The migrated @std package members (the library-boundary un-merge's
-// first slice): declarations that left the compiler-required ambient and
-// now live in the reserved package's own ds source. A graph that declares
-// the @std dep binds these through the linked surface (an import
-// selection validating against the package's exported entries); every
-// other registration composes this file back into the merged ambient it
-// always served, so the two readings stay namespace-identical while the
-// migration runs. The members here are the ambient's demo residue,
-// first out of the ambient.
+// The migrated @std members (the library-boundary un-merge): the
+// declarations that left the compiler-required ambient and live in the
+// reserved package ds source. A graph that declares the @std dep binds
+// these through the linked surface (an import selection validating
+// against the exported entries of the package), and every undeclaring
+// registration composes this file back into the merged ambient it
+// always served — the two readings stay namespace-identical while the
+// migration runs. The bodied members (the names a session can compose
+// back and lower as ambient bodies) live in their own file beside this
+// one, the session composition's source.
 
 // A text row: keyed lookup over strings.
 pub type row = map[string, string]
@@ -22,5 +23,5 @@ pub struct config { host: string, port: int?, retries: int }
 // declares its own externs over this shape.
 pub struct response
 
-// The nursery demo's fixed page list.
+// The nursery demo fixed page list.
 pub const urls = ["https://ds.dev", "https://example.org"]

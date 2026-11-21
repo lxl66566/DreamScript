@@ -73,15 +73,21 @@ pub(crate) const BUILD_ID: &str =
 
 /// The ambient identity a cache key folds over one graph's identities:
 /// the shrunk core's hash when the graph resolved the reserved `@std`
-/// package (the un-merge's per-graph ambient shape — those compiles
-/// register the core), the merged source's hash otherwise. The deps map
-/// alone decides, so every discover path derives the same identity.
-pub(crate) fn ambient_identity(identities: &BTreeMap<String, Hash128>) -> Hash128 {
+/// package and the compile is package-shaped (the un-merge's ambient
+/// shape — those compiles register the core alone), the session
+/// composition's hash for an entry script session over a std-declaring
+/// graph (the core with the @std bodied members composed back), and the
+/// merged source's hash otherwise — `script` follows the same session
+/// rule the compile's ambient registration picks. The deps map and the
+/// session shape alone decide, so every discover path derives the same
+/// identity.
+pub(crate) fn ambient_identity(identities: &BTreeMap<String, Hash128>, script: bool) -> Hash128 {
+    let std_declared = identities.contains_key(ds_stdlib::STD_PACKAGE_NAME);
     Hash128::compute(
-        if identities.contains_key(ds_stdlib::STD_PACKAGE_NAME) {
-            ds_stdlib::AMBIENT_CORE_SOURCE
-        } else {
-            ds_stdlib::AMBIENT_SOURCE
+        match (std_declared, script) {
+            (true, false) => ds_stdlib::AMBIENT_CORE_SOURCE,
+            (true, true) => ds_stdlib::AMBIENT_SESSION_SOURCE,
+            (false, _) => ds_stdlib::AMBIENT_SOURCE,
         }
         .as_bytes(),
     )
@@ -104,31 +110,40 @@ impl RunCache {
     /// beyond the folded components — every name but the ambient
     /// records the zero marker — so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
-        Self::discover_linked(enabled, no_ambient, &BTreeMap::new(), &BTreeMap::new())
+        Self::discover_linked(
+            enabled,
+            no_ambient,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+        )
     }
 
     /// Resolves the cache for one package run. `enabled` is the
     /// `--no-cache` off switch; `no_ambient` picks the ambient identity
     /// the key folds (the ambient's impl bodies lower into the script
-    /// module, so the ambient text is a bytecode input — a graph that
-    /// resolved `@std` compiles over the shrunk core, so the identity
-    /// follows the shape the graph picks); `identities` are the resolved
-    /// graph's dep content identities, which the source text alone does
-    /// not determine, so the key folds them and a dep whose resolved
-    /// content changed is another key; `artifacts` are the resolved
-    /// graph's native-artifact pins, each artifact's name over the
-    /// content hash of the library the resolution installed — a bound
-    /// constant addresses an export by the installed library's
+    /// module, so the ambient text is a bytecode input — a package
+    /// compile over a graph that resolved `@std` lowers the shrunk
+    /// core, an entry script session the session composition, so
+    /// `script` follows the shape the session picks); `identities` are
+    /// the resolved graph's dep content identities, which the source
+    /// text alone does not determine, so the key folds them and a dep
+    /// whose resolved content changed is another key; `artifacts` are
+    /// the resolved graph's native-artifact pins, each artifact's name
+    /// over the content hash of the library the resolution installed —
+    /// a bound constant addresses an export by the installed library's
     /// enumeration index, so a repinned library is another key and a
     /// warm module never serves bytecode that addresses the old
     /// library's exports.
+    #[allow(clippy::fn_params_excessive_bools)]
     pub(crate) fn discover_linked(
         enabled: bool,
         no_ambient: bool,
         identities: &BTreeMap<String, Hash128>,
         artifacts: &BTreeMap<String, Hash128>,
+        script: bool,
     ) -> Self {
-        let ambient = (!no_ambient).then(|| ambient_identity(identities));
+        let ambient = (!no_ambient).then(|| ambient_identity(identities, script));
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then(ds_pkg::store::cache_root).flatten(),
@@ -621,6 +636,7 @@ mod tests {
                 false,
                 &BTreeMap::from([("@lib".to_owned(), Hash128::compute(identity))]),
                 &BTreeMap::new(),
+                false,
             )
         };
         assert_ne!(
@@ -641,6 +657,7 @@ mod tests {
                 ("@b".to_owned(), Hash128::compute(b"two")),
             ]),
             &BTreeMap::new(),
+            false,
         );
         let swapped = RunCache::discover_linked(
             false,
@@ -650,11 +667,31 @@ mod tests {
                 ("@b".to_owned(), Hash128::compute(b"one")),
             ]),
             &BTreeMap::new(),
+            false,
         );
         assert_ne!(
             named.key("app", source),
             swapped.key("app", source),
             "the link name frames its hash"
+        );
+    }
+
+    /// The session shape re-keys over a std-declaring graph: an entry
+    /// script session composes the @std members back (the merged
+    /// ambient's bodies lower into its module) while a package compile
+    /// lowers the shrunk core, so two compiles of the same members over
+    /// the same resolution never share a key — an artifact the merged
+    /// reading wrote never serves the core reading.
+    #[test]
+    fn the_session_shape_rekeys_over_a_std_declaring_graph() {
+        let source = Hash128::compute(b"fn main() -> () { }");
+        let identities = BTreeMap::from([("@std".to_owned(), Hash128::compute(b"bundle"))]);
+        let session = RunCache::discover_linked(false, false, &identities, &BTreeMap::new(), true);
+        let package = RunCache::discover_linked(false, false, &identities, &BTreeMap::new(), false);
+        assert_ne!(
+            session.key("app", source),
+            package.key("app", source),
+            "the session composition is a bytecode input the key folds"
         );
     }
 
@@ -673,6 +710,7 @@ mod tests {
                 false,
                 &BTreeMap::from([("@deep".to_owned(), Hash128::compute(identity))]),
                 &BTreeMap::new(),
+                false,
             )
         };
         assert_ne!(
@@ -708,6 +746,7 @@ mod tests {
                 false,
                 &BTreeMap::new(),
                 &BTreeMap::from([("math".to_owned(), Hash128::compute(hash))]),
+                false,
             )
         };
         assert_ne!(
@@ -733,6 +772,7 @@ mod tests {
                 ("aa".to_owned(), Hash128::compute(b"one")),
                 ("bb".to_owned(), Hash128::compute(b"two")),
             ]),
+            false,
         );
         let swapped = RunCache::discover_linked(
             false,
@@ -742,6 +782,7 @@ mod tests {
                 ("aa".to_owned(), Hash128::compute(b"two")),
                 ("bb".to_owned(), Hash128::compute(b"one")),
             ]),
+            false,
         );
         assert_ne!(
             both.key("app", source),

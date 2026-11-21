@@ -110,11 +110,14 @@ fn provider_over(
 /// band. Any miss is `None` — a cache miss, never an error.
 fn dep_surface(keys: &crate::package::GraphKeys, link: &str) -> Option<ds_lsp::LinkedSurface> {
     let identity = *keys.identities.get(link)?;
+    // a dep member compiles package-shaped (never a script session), so
+    // the fold keys the package reading
     let cache = crate::run_cache::RunCache::discover_linked(
         true,
         false,
         &keys.identities,
         &keys.artifact_pins,
+        false,
     );
     let artifact = cache.dep_dsi_path(link, identity)?;
     let bytes = std::fs::read(&artifact).ok()?;

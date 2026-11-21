@@ -67,9 +67,10 @@
 //!   minify). The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`, `parse_err`
 //!   — the discriminants the platform natives answer), so the fallible reads (`read_file`,
 //!   `parse_int`, the file face's reads) return real success unions.
-//! * `max` carries no bound even though the ambient now owns the `ord` trait: the native's one
-//!   generic body plans against no instance, so the bound would add nothing to route. Likewise
-//!   `u32` is a distinct atom (B7) (mixed-width arithmetic is the corpus's staged noise).
+//! * `max`/`min` migrated to the @std bodied members' file as the int pair (the library-boundary
+//!   round): the word-shaped signature a linked call binds and a session composes back, the float
+//!   and ord-generic spellings riding the later linked-surface rounds. Likewise `u32` is a distinct
+//!   atom (B7) (mixed-width arithmetic is the corpus's staged noise).
 //! * Every extern names a callee the lowering answers; the dead declarations (declared externs
 //!   whose callee no native or rule answered — `get`, `log`, `close`, `to_u32_le`, `read_config`,
 //!   `default_config`, `load_rows`, `fetch`, `consume`, `die`) are gone, so their uses are unknown
@@ -138,11 +139,12 @@ pub fn world_caps() -> &'static WorldCaps {
 pub const AMBIENT_FILE: &str = "std/ambient.ds";
 
 /// The shrunk ambient core's text: the compiler-required face plus every
-/// member the library-boundary un-merge has not migrated yet. A graph
-/// that resolved the reserved `@std` package registers this text as its
-/// ambient, so the migrated members bind through the linked surface
-/// alone; every other registration serves the merged
-/// [`AMBIENT_SOURCE`].
+/// member the library-boundary un-merge has not migrated yet. A package
+/// compile whose graph resolved the reserved `@std` package registers
+/// this text as its ambient, so the migrated members bind through the
+/// linked surface alone; an entry script session composes the
+/// [`BODIED_SOURCE`] members back ([`AMBIENT_SESSION_SOURCE`]), and
+/// every other registration serves the merged [`AMBIENT_SOURCE`].
 pub const AMBIENT_CORE_SOURCE: &str = include_str!("ambient.ds");
 
 /// The migrated `@std` members' file name inside the default package:
@@ -150,19 +152,45 @@ pub const AMBIENT_CORE_SOURCE: &str = include_str!("ambient.ds");
 /// first migrants.
 pub const STD_MEMBERS_FILE: &str = "std/std_members.ds";
 
-/// The migrated `@std` members' text: the declarations that left the
-/// ambient core and live in the reserved package's own ds source.
+/// The migrated `@std` members' text: the data-shaped declarations that
+/// left the ambient core and live in the reserved package's own ds
+/// source, bindable through the linked surface alone (no session
+/// composes them back — ambient data values do not lower).
 pub const STD_MEMBERS_SOURCE: &str = include_str!("std_members.ds");
+
+/// The `@std` bodied members' file name inside the default package: the
+/// migrated declarations whose bodies are plain ds source over
+/// word-shaped atoms — the ordering pair (`max`/`min`) the
+/// library-boundary round landed, the later bodied migrations' home.
+pub const BODIED_FILE: &str = "std/bodied.ds";
+
+/// The `@std` bodied members' text: the one shape a linked call surface
+/// binds and the one a session composes back beside the shrunk core
+/// (the bodies lower as ambient bodies, keeping the bare spellings
+/// resolving and running for every entry script session).
+pub const BODIED_SOURCE: &str = include_str!("bodied.ds");
+
+/// The entry script session's ambient text: the shrunk core with the
+/// @std bodied members composed after it — the run path's implicit
+/// resolution over the implicit `@std` graph, holding the bare
+/// load-bearing migrated names alive while the data-shaped members
+/// stay bound through the linked surface. The merged
+/// [`AMBIENT_SOURCE`] serves every undeclaring registration.
+pub const AMBIENT_SESSION_SOURCE: &str =
+    concat!(include_str!("ambient.ds"), "\n", include_str!("bodied.ds"));
 
 /// The ambient package member's text: the declarations of the M3 stdlib
 /// surface. The merged reading — the core composed with the migrated
-/// @std members after it, so the two sources are one namespace and every
-/// undeclaring registration keeps the exact pre-un-merge surface. Register
-/// it as a package member before the user's files.
+/// @std members and bodied members after it, so the sources are one
+/// namespace and every undeclaring registration keeps the exact
+/// pre-un-merge surface. Register it as a package member before the
+/// user's files.
 pub const AMBIENT_SOURCE: &str = concat!(
     include_str!("ambient.ds"),
     "\n",
-    include_str!("std_members.ds")
+    include_str!("std_members.ds"),
+    "\n",
+    include_str!("bodied.ds")
 );
 
 /// The reserved `@std` package's name in the package namespace: the
@@ -173,13 +201,13 @@ pub const AMBIENT_SOURCE: &str = concat!(
 pub const STD_PACKAGE_NAME: &str = "@std";
 
 /// The default `@std` package's bundle: the manifest (`@std` at the
-/// toolchain's own version, dependency-free) plus the ambient core member
-/// and the migrated members' own source — the core beside the members so
-/// the package's own compile (which registers no ambient ahead of it)
-/// still resolves every name, the members' file the migration home the
-/// un-merge grows. A pure function of the tree: two calls build
-/// byte-identical bundles, so the store's content addressing holds one
-/// row per toolchain.
+/// toolchain's own version, dependency-free) plus the ambient core
+/// member, the migrated members' own source, and the bodied members'
+/// file — the core beside the members so the package's own compile
+/// (which registers no ambient ahead of it) still resolves every name,
+/// the members' files the migration home the un-merge grows. A pure
+/// function of the tree: two calls build byte-identical bundles, so the
+/// store's content addressing holds one row per toolchain.
 #[must_use]
 pub fn std_package() -> ds_pkg::Package {
     let version = ds_pkg::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -195,6 +223,7 @@ pub fn std_package() -> ds_pkg::Package {
             AMBIENT_FILE.to_owned(),
             AMBIENT_CORE_SOURCE.as_bytes().to_vec(),
         ),
+        (BODIED_FILE.to_owned(), BODIED_SOURCE.as_bytes().to_vec()),
         (
             STD_MEMBERS_FILE.to_owned(),
             STD_MEMBERS_SOURCE.as_bytes().to_vec(),
@@ -459,8 +488,8 @@ mod tests {
     /// The default @std package is a pure function of the tree: the
     /// manifest names the reserved package at the toolchain's version, the
     /// members are the ambient core beside the migrated members' own
-    /// source (the demo residue's file the migration home), and two calls
-    /// build byte-identical bundles.
+    /// source and the bodied members' file (the migration homes the
+    /// un-merge grows), and two calls build byte-identical bundles.
     #[test]
     fn the_default_std_package_carries_the_core_and_the_migrated_members() {
         let package = std_package();
@@ -480,8 +509,8 @@ mod tests {
             .filter(|(path, _)| path.as_str() != ds_pkg::MANIFEST_MEMBER)
             .count();
         assert_eq!(
-            source_members, 2,
-            "the bundle carries the core and the members"
+            source_members, 3,
+            "the bundle carries the core, the members, and the bodied file"
         );
         assert!(
             package.members().iter().any(
@@ -497,6 +526,13 @@ mod tests {
                     && bytes == STD_MEMBERS_SOURCE.as_bytes()),
             "the migrated members ride under their own file name"
         );
+        assert!(
+            package
+                .members()
+                .iter()
+                .any(|(path, bytes)| path == BODIED_FILE && bytes == BODIED_SOURCE.as_bytes()),
+            "the bodied members ride under their own file name"
+        );
         assert_eq!(
             std_package().to_bytes(),
             package.to_bytes(),
@@ -506,10 +542,13 @@ mod tests {
 
     /// The un-merge's split is one namespace: the shrunk core parses and
     /// resolves clean on its own (a declaring graph's ambient and the
-    /// @std package's first member) with the demo residue gone, the
-    /// members' file beside the core composes the @std package's own
-    /// compile shape, and the merged composition — the core with the
-    /// members' file appended — keeps the exact pre-un-merge surface.
+    /// @std package's first member) with every migrated name gone, the
+    /// members' and bodied files beside the core compose the @std
+    /// package's own compile shape, the session composition — the core
+    /// with the bodied members alone — keeps the load-bearing bare
+    /// spellings resolving while the data-shaped names stay
+    /// link-bound, and the merged composition keeps the exact
+    /// pre-un-merge surface.
     #[test]
     fn the_split_composes_the_merged_namespace() {
         let mut files = ds_diag::Files::new();
@@ -528,9 +567,17 @@ mod tests {
             diags.is_empty(),
             "duplicate names across the core and the members: {diags:?}"
         );
+        let bodied = files.add_source(BODIED_FILE, BODIED_SOURCE);
+        let bodied_ast = ds_parse::parse(&files, bodied).expect("the bodied members parse");
+        let diags = collect.add_file(&bodied_ast);
+        assert!(
+            diags.is_empty(),
+            "duplicate names across the core and the bodied file: {diags:?}"
+        );
         // the @std package's own compile shape: the core member ahead of
-        // the migrated members' file, one namespace
-        let (pkg_package, _, pkg_diags) = ds_check::resolve_package(&[core_ast, members_ast]);
+        // the migrated files, one namespace
+        let (pkg_package, _, pkg_diags) =
+            ds_check::resolve_package(&[core_ast, members_ast, bodied_ast]);
         assert!(
             pkg_diags.is_empty(),
             "the package shape resolves: {pkg_diags:?}"
@@ -545,9 +592,15 @@ mod tests {
             pkg_package.lookup_value("urls").is_some(),
             "`urls` lives in the @std members' source beside the core"
         );
+        for name in ["max", "min"] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "`{name}` lives in the @std bodied file as a bodied member"
+            );
+        }
 
         // the declaring graph's ambient shape: the core alone, the demo
-        // residue's names gone
+        // residue's and the ordering pair's names gone
         let mut core_files = ds_diag::Files::new();
         let core_only = core_files.add_source(AMBIENT_FILE, AMBIENT_CORE_SOURCE);
         let core_only_ast = ds_parse::parse(&core_files, core_only)
@@ -567,9 +620,40 @@ mod tests {
             core_package.lookup_value("urls").is_none(),
             "`urls` left the shrunk core"
         );
+        for name in ["max", "min"] {
+            assert!(
+                core_package.lookup_value(name).is_none(),
+                "`{name}` left the shrunk core (the extern and the bodied pair both)"
+            );
+        }
+
+        // the entry script session's shape: the core with the bodied
+        // members composed back, the load-bearing bare spellings
+        // resolving while the data-shaped members stay link-bound
+        let mut session_files = ds_diag::Files::new();
+        let session = session_files.add_source(AMBIENT_FILE, AMBIENT_SESSION_SOURCE);
+        let session_ast =
+            ds_parse::parse(&session_files, session).expect("the session ambient parses");
+        let (session_package, _, session_diags) = ds_check::resolve_package(&[session_ast]);
+        assert!(
+            session_diags.is_empty(),
+            "the session composition resolves clean: {session_diags:?}"
+        );
+        for name in ["max", "min"] {
+            assert!(
+                session_package.lookup_value(name).is_some(),
+                "the session composition keeps the bare `{name}`"
+            );
+        }
+        for name in ["row", "config", "response"] {
+            assert!(
+                session_package.lookup_type(name).is_none(),
+                "`{name}` stays link-bound in the session shape"
+            );
+        }
 
         // the merged reading every undeclaring registration serves: the
-        // composition carries the demo residue back, namespace-identical
+        // composition carries every migrated name back, namespace-identical
         let mut merged_files = ds_diag::Files::new();
         let merged = merged_files.add_source(AMBIENT_FILE, AMBIENT_SOURCE);
         let merged_ast = ds_parse::parse(&merged_files, merged).expect("the merged ambient parses");
@@ -588,16 +672,37 @@ mod tests {
             merged_package.lookup_value("urls").is_some(),
             "the merged reading keeps `urls`"
         );
-        // the merged text is the core composed with the members' file: the
-        // composition rule the consts pin
+        for name in ["max", "min"] {
+            assert!(
+                merged_package.lookup_value(name).is_some(),
+                "the merged reading keeps the bodied `{name}` (namespace-identical)"
+            );
+        }
+        // the composition rules the consts pin: the session text is the
+        // core then the bodied file, the merged text the core, the
+        // members' file, then the bodied file
+        assert!(
+            AMBIENT_SESSION_SOURCE
+                .strip_prefix(AMBIENT_CORE_SOURCE)
+                .is_some_and(|rest| {
+                    rest.strip_prefix('\n')
+                        .is_some_and(|rest| rest == BODIED_SOURCE)
+                }),
+            "the session source is the core, a newline, then the bodied file"
+        );
         assert!(
             AMBIENT_SOURCE
                 .strip_prefix(AMBIENT_CORE_SOURCE)
                 .is_some_and(|rest| {
-                    rest.strip_prefix('\n')
-                        .is_some_and(|rest| rest == STD_MEMBERS_SOURCE)
+                    rest.strip_prefix('\n').is_some_and(|rest| {
+                        rest.strip_prefix(STD_MEMBERS_SOURCE).is_some_and(|rest| {
+                            rest.strip_prefix('\n')
+                                .is_some_and(|rest| rest == BODIED_SOURCE)
+                        })
+                    })
                 }),
-            "the merged source is the core, a newline, then the members' file"
+            "the merged source is the core, a newline, the members' file, a newline, then the \
+             bodied file"
         );
     }
 }

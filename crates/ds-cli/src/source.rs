@@ -589,16 +589,27 @@ fn compile_text(
     // after it, in order. The reserved `@std` package's own member
     // compile registers none — the package carries the ambient core as
     // its first member, so the ambient beside it would duplicate every
-    // face. The ambient's shape follows the graph: a compile whose graph
-    // resolved `@std` registers the shrunk core (the migrated members
-    // bind through the linked surface, so a selection's name stays free),
-    // every other registration the merged source — the un-merge's
-    // per-graph reading switch, the undeclaring side byte-stable.
+    // face. The ambient's shape follows the session before the graph: a
+    // package compile whose graph resolved `@std` registers the shrunk
+    // core (the migrated members bind through the linked surface, so a
+    // selection's name stays free), while an entry script session — the
+    // manifest-free run over the implicit `@std` graph — composes the
+    // @std bodied members back beside the core (the run path's implicit
+    // resolution: the bare load-bearing migrated names resolve and
+    // lower, the data-shaped members staying bound through the link),
+    // and every undeclaring registration serves the merged source as
+    // ever — the un-merge's reading switch, the undeclaring side
+    // byte-stable.
     let mut ids = Vec::new();
     let std_pkg = inputs.name == ds_stdlib::STD_PACKAGE_NAME;
     let std_declared = graph.is_some_and(crate::package::Graph::declares_std);
-    let ambient_source =
-        if std_declared { ds_stdlib::AMBIENT_CORE_SOURCE } else { ds_stdlib::AMBIENT_SOURCE };
+    let ambient_source = if !std_declared {
+        ds_stdlib::AMBIENT_SOURCE
+    } else if script {
+        ds_stdlib::AMBIENT_SESSION_SOURCE
+    } else {
+        ds_stdlib::AMBIENT_CORE_SOURCE
+    };
     let ambient_files = usize::from(!no_ambient && !std_pkg);
     // The die provision (the 2026-11-17 split): an entry session carries
     // the host member as its last registered source — a plain member, so

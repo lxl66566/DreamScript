@@ -1,0 +1,16 @@
+// The @std bodied members: the migrated declarations whose bodies are
+// plain ds source over word-shaped atoms, the one shape a linked call
+// surface binds (a @std bodied member binds only in word-shaped ambient
+// atom signatures) and the one a session composes back beside the
+// shrunk core — the bodies lower as ambient bodies, where a data member
+// (a type or a const) cannot, so the bare spellings keep resolving and
+// running for every entry script session while its data-shaped @std
+// imports stay bound through the linked surface. The ordering pair is
+// the first family (the library-boundary round): the float and
+// ord-generic spellings ride the later linked-surface rounds.
+pub fn max (a: int, b: int) -> int {
+  if a < b { b } else { a }
+}
+pub fn min (a: int, b: int) -> int {
+  if a < b { a } else { b }
+}

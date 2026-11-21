@@ -77,11 +77,11 @@ fn lists_print_the_literal_and_constructor_surface() {
 fn containers_compose_the_generic_closes() {
     // the container closes dispatch through CALLG: cons builds, tail
     // drops the first, collect copies, first answers the checked
-    // first element (the empty list the none member), and max orders
-    // both numeric instances
+    // first element (the empty list the none member), and the @std
+    // ordering pair answers over its int members
     assert_eq!(
         run_ok(ds().arg("run").arg(example("containers.ds"))),
-        "cons 2 1 1 2\nempty -1 -1\nmax 9 2.5\n0\n"
+        "cons 2 1 1 2\nempty -1 -1\nmax 9 3\n0\n"
     );
 }
 

@@ -493,11 +493,12 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
 /// The default @std bundle's member identity — the ascending-path fold
 /// over path-and-text pairs the implicit resolution records for the
 /// manifest-free run's `@std` dep entry, computed over the tree's own
-/// member texts (the ambient core member beside the migrated members'
-/// source).
+/// member texts (the ambient core member beside the bodied and migrated
+/// members' sources).
 fn std_member_identity() -> Hash128 {
     let members = [
         (ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE),
+        (ds_stdlib::BODIED_FILE, ds_stdlib::BODIED_SOURCE),
         (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
     ];
     let mut ordered: Vec<&(&str, &str)> = members.iter().collect();

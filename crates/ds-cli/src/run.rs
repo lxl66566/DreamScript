@@ -155,11 +155,13 @@ fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
 /// takes the package path first; a manifest-free source with the ambient
 /// on takes the same path over the implicit `@std` graph (the
 /// bare-specifier switch: the default bundle resolves ahead of the
-/// compile, so the script compiles over the shrunk core and its `@std`
-/// imports bind through the linked surface); everything else is the
-/// script-mode dsmod cache first — a servable cached artifact installs
-/// without the front end — then the in-process compile exactly as
-/// before, caching what a later run of the same inputs can serve.
+/// compile, so the script session composes the @std bodied members
+/// back beside the core — the bare load-bearing migrated names keep
+/// resolving — while its `@std` imports bind through the linked
+/// surface); everything else
+/// is the script-mode dsmod cache first — a servable cached artifact
+/// installs without the front end — then the in-process compile exactly
+/// as before, caching what a later run of the same inputs can serve.
 fn run_source(args: &RunArgs) -> Result<PreparedRun> {
     if let Some(graph) = package::open(&args.file, args.no_ambient)? {
         return run_package(args, &graph, false);
@@ -201,8 +203,13 @@ fn run_source(args: &RunArgs) -> Result<PreparedRun> {
 /// serves a new resolution.
 fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<PreparedRun> {
     let pins = graph.artifact_pins();
-    let cache =
-        RunCache::discover_linked(!args.no_cache, args.no_ambient, graph.identities(), &pins);
+    let cache = RunCache::discover_linked(
+        !args.no_cache,
+        args.no_ambient,
+        graph.identities(),
+        &pins,
+        script,
+    );
     // the root's members enter the cache key the way the graph's dep
     // identities do: a manifest root composes every member of its
     // namespace (G3), and the composed fold re-keys on a sibling edit
@@ -210,14 +217,15 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
     if let Some((module, plan)) = cache.lookup_root(&args.file, &members, &args.entry) {
         return run_cached_package(module, &plan, graph, &cache, args);
     }
-    // the same dep identities and artifact pins key the prefix tier: a
-    // prefix linked against a dep's old content never serves a new
-    // resolution
+    // the same dep identities, artifact pins, and session shape key the
+    // prefix tier: a prefix linked against a dep's old content never
+    // serves a new resolution
     let prefix = crate::dsi_cache::PrefixCache::discover_linked(
         !args.no_cache,
         args.no_ambient,
         graph.identities(),
         &pins,
+        script,
     );
     let compiled = package::compile_root(
         &args.file,

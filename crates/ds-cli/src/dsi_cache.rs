@@ -49,24 +49,35 @@ impl PrefixCache {
     /// Resolves the cache for one plain-script compile: no dep identity
     /// beyond the ambient, so the key folds the empty dep list.
     pub(crate) fn discover(enabled: bool, no_ambient: bool) -> Self {
-        Self::discover_linked(enabled, no_ambient, &BTreeMap::new(), &BTreeMap::new())
+        Self::discover_linked(
+            enabled,
+            no_ambient,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+        )
     }
 
     /// Resolves the cache for one package-root compile. `enabled` is
     /// the shared `--no-cache` off switch; `no_ambient` picks the
     /// ambient identity the key folds — a compile without the ambient
     /// has no composed prefix to serve this round, so it runs uncached;
-    /// `identities` are the resolved graph's dep content identities,
-    /// which the source text alone does not determine — a linked
-    /// package's surface feeds the front end, so the key folds them and
-    /// a dep whose resolved content changed is another key; `artifacts`
-    /// are the resolved graph's native-artifact pins, which move the key
-    /// the same way a moved dep identity does.
+    /// `script` follows the session rule the compile's ambient
+    /// registration picks (an entry script session composes the @std
+    /// bodied members back even over a std-declaring graph); `identities` are
+    /// the resolved graph's dep content identities, which the source
+    /// text alone does not determine — a linked package's surface feeds
+    /// the front end, so the key folds them and a dep whose resolved
+    /// content changed is another key; `artifacts` are the resolved
+    /// graph's native-artifact pins, which move the key the same way a
+    /// moved dep identity does.
+    #[allow(clippy::fn_params_excessive_bools)]
     pub(crate) fn discover_linked(
         enabled: bool,
         no_ambient: bool,
         identities: &BTreeMap<String, Hash128>,
         artifacts: &BTreeMap<String, Hash128>,
+        script: bool,
     ) -> Self {
         Self::discover_at_linked(
             enabled,
@@ -74,6 +85,7 @@ impl PrefixCache {
             enabled.then(ds_pkg::store::cache_root).flatten(),
             identities,
             artifacts,
+            script,
         )
     }
 
@@ -89,23 +101,26 @@ impl PrefixCache {
             root,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            true,
         )
     }
 
     /// [`Self::discover_linked`](Self::discover_linked) over a
     /// caller-named root, dep identities, and artifact pins: the
     /// in-process gates' private temp directories.
+    #[allow(clippy::fn_params_excessive_bools)]
     pub(crate) fn discover_at_linked(
         enabled: bool,
         no_ambient: bool,
         root: Option<PathBuf>,
         identities: &BTreeMap<String, Hash128>,
         artifacts: &BTreeMap<String, Hash128>,
+        script: bool,
     ) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
             root: enabled.then_some(root).flatten().filter(|_| !no_ambient),
-            ambient: (!no_ambient).then(|| crate::run_cache::ambient_identity(identities)),
+            ambient: (!no_ambient).then(|| crate::run_cache::ambient_identity(identities, script)),
             deps: identities.clone(),
             artifacts: artifacts.clone(),
             debug,
@@ -708,6 +723,7 @@ mod tests {
                 None,
                 &BTreeMap::from([("@lib".to_owned(), H::compute(identity))]),
                 &BTreeMap::new(),
+                false,
             )
         };
         assert_ne!(
@@ -729,6 +745,7 @@ mod tests {
                 ("@b".to_owned(), H::compute(b"two")),
             ]),
             &BTreeMap::new(),
+            false,
         );
         let swapped = PrefixCache::discover_at_linked(
             false,
@@ -739,6 +756,7 @@ mod tests {
                 ("@b".to_owned(), H::compute(b"one")),
             ]),
             &BTreeMap::new(),
+            false,
         );
         assert_ne!(
             named.key("app", source),
@@ -766,6 +784,7 @@ mod tests {
                 None,
                 &BTreeMap::new(),
                 &BTreeMap::from([("math".to_owned(), H::compute(hash))]),
+                false,
             )
         };
         assert_ne!(

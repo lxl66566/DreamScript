@@ -452,7 +452,6 @@ pub extern fn unwrap_or[t] (x: t?, y: t) -> t
 pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t
 pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e
 pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2
-pub extern fn max[t] (a: t, b: t) -> t
 
 // The file face's ds-source handlers over the raw externs: the
 // package-owned `file_handle` type never reaches a native call directly —

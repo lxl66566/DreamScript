@@ -345,12 +345,14 @@ pub(crate) fn implicit_std_identities() -> BTreeMap<String, Hash128> {
 /// The bare script's implicit graph (the bare-specifier switch): a
 /// manifest-free run resolves the reserved `@std` package ahead of its
 /// own compile — the dep implicit, the same discipline a manifest's
-/// `[deps]` row buys — so the script compiles over the shrunk core
-/// ambient, its `@std` imports bind members through the linked
-/// surface, and a bare use of a migrated name stays unknown over the
-/// core. The bundle's members ride in-process at the composed member
-/// identity; a store root never enters (a script runs with no cache at
-/// all).
+/// `[deps]` row buys — so the script session composes the @std bodied
+/// members back beside the shrunk core (the bare load-bearing migrated
+/// names keep resolving and lowering) while its `@std` imports bind
+/// members through the linked surface; a package compile over the same
+/// graph registers the shrunk core, where a bare use of a migrated name
+/// stays unknown. The bundle's members ride in-process at the composed
+/// member identity; a store root never enters (a script runs with no
+/// cache at all).
 pub(crate) fn implicit_std_graph() -> Graph {
     let members = default_std_members();
     let identity = member_identity(&members);

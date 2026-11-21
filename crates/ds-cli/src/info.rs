@@ -80,23 +80,36 @@ pub fn info(args: &InfoArgs) -> Result<()> {
 /// `None`, the source rendering's cue.
 fn cached_surface(target: &Path) -> Option<String> {
     let source = fs::read_to_string(target).ok()?;
-    let (identities, artifacts) = match crate::package::resolve_identities(target) {
-        Ok(Some(keys)) => (keys.identities, keys.artifact_pins),
+    let (identities, artifacts, script) = match crate::package::resolve_identities(target) {
+        Ok(Some(keys)) => (keys.identities, keys.artifact_pins, false),
         // a manifest-free target keys the implicit @std identity the
         // run path's script resolution folds (the bare-specifier
         // switch), so the artifact the same source's run wrote serves
-        _ => (crate::package::implicit_std_identities(), BTreeMap::new()),
+        _ => (
+            crate::package::implicit_std_identities(),
+            BTreeMap::new(),
+            true,
+        ),
     };
-    let cache =
-        crate::dsi_cache::PrefixCache::discover_linked(true, false, &identities, &artifacts);
+    let cache = crate::dsi_cache::PrefixCache::discover_linked(
+        true,
+        false,
+        &identities,
+        &artifacts,
+        script,
+    );
     let mut files = Files::new();
-    // the registration mirrors the run's: a graph that resolved `@std`
-    // (declared or implicit) registers the shrunk core, every other
-    // registration the merged source
-    let ambient_source = if identities.contains_key(ds_stdlib::STD_PACKAGE_NAME) {
-        ds_stdlib::AMBIENT_CORE_SOURCE
-    } else {
+    // the registration mirrors the run's session rule: a package
+    // compile over a graph that resolved `@std` registers the shrunk
+    // core, an entry script session (the manifest-free target) the
+    // session composition, and every undeclaring registration the
+    // merged source
+    let ambient_source = if !identities.contains_key(ds_stdlib::STD_PACKAGE_NAME) {
         ds_stdlib::AMBIENT_SOURCE
+    } else if script {
+        ds_stdlib::AMBIENT_SESSION_SOURCE
+    } else {
+        ds_stdlib::AMBIENT_CORE_SOURCE
     };
     let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ambient_source);
     let member = files.add_source(target.display().to_string(), &source);

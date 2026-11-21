@@ -151,9 +151,10 @@ mod tests {
         );
         assert_eq!(
             served.functions.last().map(ds_mod::Function::name),
-            Some("json_of_bytes"),
+            Some("min"),
             "each struct's deinit plans right after its own item, so a growing module's\ntable \
-             ends on its last item's entries and stays append-stable under live-frame swaps",
+             ends on its last item's entries and stays append-stable under live-frame swaps (the \
+             merged composition's tail is the @std members' ordering pair)",
         );
         assert!(
             served

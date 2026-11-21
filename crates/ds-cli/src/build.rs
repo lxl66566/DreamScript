@@ -63,10 +63,10 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// One root compile over a resolved graph: the same dep identities and
-/// artifact pins key the prefix tier, and `script` picks the root's
-/// parse (the manifest-free source folds its top-level statements, a
-/// manifest root keeps the member grammar).
+/// One root compile over a resolved graph: the same dep identities,
+/// artifact pins, and session shape key the prefix tier, and `script`
+/// picks the root's parse (the manifest-free source folds its top-level
+/// statements, a manifest root keeps the member grammar).
 fn build_root(
     file: &std::path::Path,
     graph: &package::Graph,
@@ -74,8 +74,13 @@ fn build_root(
     script: bool,
 ) -> Result<source::CompiledSource> {
     let pins = graph.artifact_pins();
-    let linked =
-        crate::dsi_cache::PrefixCache::discover_linked(true, no_ambient, graph.identities(), &pins);
+    let linked = crate::dsi_cache::PrefixCache::discover_linked(
+        true,
+        no_ambient,
+        graph.identities(),
+        &pins,
+        script,
+    );
     package::compile_root(file, "main", graph, script, Some(&linked), None)
 }
 
