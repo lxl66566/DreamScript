@@ -124,6 +124,22 @@ pub enum SlotType {
     Raw,
 }
 
+/// One bound extern's return word (H5): the marshaling slice's scalar
+/// words, or the absent word a unit return rides — the pool
+/// `Constant::Bound` return payload, decoded and re-encoded by the
+/// format's compact byte beside the symbol index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BoundRet {
+    /// No return word — the C void, the `unit` return's own encoding.
+    Unit,
+    /// The i64 general-purpose word, `int`'s.
+    Int,
+    /// The u8 general-purpose word, `bool`'s.
+    Bool,
+    /// The f64 floating word, `float`'s.
+    Float,
+}
+
 /// How a generic dispatch's staged real words map onto the table entry's
 /// named parameter words: one word per named parameter; one element span
 /// leading the named words (a `cons` head's whole inline span rides the

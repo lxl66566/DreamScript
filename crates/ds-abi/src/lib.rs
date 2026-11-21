@@ -60,7 +60,7 @@ mod tailcall;
 pub mod uop;
 
 pub use descriptor::{EntryDescriptor, Tier, TierFlipError};
-pub use layout::{FrameLayout, LayoutError, SlotType, Staging};
+pub use layout::{BoundRet, FrameLayout, LayoutError, SlotType, Staging};
 pub use meta::{CodePc, ElisionRecord, FrameMetadata, FuncId, TailChain};
 pub use tailcall::{SlideDirection, SlideError, SlidePlan, slide_plan};
 pub use uop::{

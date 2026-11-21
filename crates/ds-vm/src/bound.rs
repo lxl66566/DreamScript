@@ -3,9 +3,11 @@
 //! name — the loaded library's own symbols, in export enumeration order,
 //! so a pool `Constant::Bound` callee addresses one symbol by its
 //! position in the same table the lowerer validated against. The C-ABI
-//! marshaling itself lives in the ds-ffi crate's scalar slice; this
-//! module owns the registry face alone (the table's lifetime, pinned by
-//! the load reference, and the word conversions around the call).
+//! marshaling itself lives in the ds-ffi crate's marshaling face (the
+//! scalar words and the string/bytes pair encodings over one enumerated
+//! transmute); this module owns the registry face alone (the table's
+//! lifetime, pinned by the load reference, and the return-word
+//! conversions around the call).
 //!
 //! The H5 contract clauses hold here: a bound extern means panic=abort (a
 //! foreign abort kills the process, the VM never unwinding through a
@@ -18,8 +20,8 @@
 
 use std::fmt;
 
-use ds_abi::SlotType;
-use ds_ffi::{Library, Scalar, ScalarKind, ScalarSig, Symbol};
+use ds_abi::BoundRet;
+use ds_ffi::{Answer, Library, Ret, Symbol};
 
 use crate::value::Value;
 
@@ -120,50 +122,33 @@ impl BoundModule {
     }
 }
 
-/// One staged word's scalar marshaling form: `int` the i64 word, `bool`
-/// the u8 word, `float` the f64 word — the staged value's own kind
-/// deciding, since the lowering proved the written signature scalar and
-/// the call site staged exactly its words. The index names the word that
-/// refused.
-pub fn scalar_of(value: Value, index: usize) -> Result<Scalar, usize> {
-    match value {
-        Value::I64(word) => Ok(Scalar::Int(word)),
-        Value::Bool(word) => Ok(Scalar::Bool(word)),
-        Value::F64(word) => Ok(Scalar::Float(word)),
-        _ => Err(index),
-    }
-}
-
-/// The scalar signature one call stages: the parameters read off the
-/// staged words' own kinds (the call site's static fact, checked at
-/// lowering), the return the pool constant's kind.
+/// The marshaling return word a pool constant's return spells: the
+/// absent word or one of the scalar words, the same vocabulary the
+/// marshaling face dispatches under.
 #[must_use]
-pub fn staged_sig(args: &[Scalar], ret: SlotType) -> ScalarSig {
-    ScalarSig {
-        params: args.iter().map(|arg| arg.kind()).collect(),
-        ret: scalar_kind(ret),
-    }
-}
-
-/// The return word a scalar kind spells, for boxing the foreign answer.
-#[must_use]
-pub fn scalar_value(scalar: Scalar, ret: SlotType) -> Value {
-    match (scalar, ret) {
-        (Scalar::Int(word), SlotType::I64) => Value::I64(word),
-        (Scalar::Bool(word), SlotType::Bool) => Value::Bool(word),
-        (Scalar::Float(word), SlotType::F64) => Value::F64(word),
-        // the loader validated the written return against the same slice,
-        // so the pairing is the pool's own contract
-        _ => Value::I64(0),
-    }
-}
-
-/// The marshaling kind a return word spells, `Int` for anything outside
-/// the scalar slice (the loader refused those at install).
-fn scalar_kind(ret: SlotType) -> ScalarKind {
+pub fn marshal_ret(ret: BoundRet) -> Ret {
     match ret {
-        SlotType::Bool => ScalarKind::Bool,
-        SlotType::F64 => ScalarKind::Float,
-        _ => ScalarKind::Int,
+        BoundRet::Unit => Ret::Unit,
+        BoundRet::Int => Ret::Int,
+        BoundRet::Bool => Ret::Bool,
+        BoundRet::Float => Ret::Float,
+    }
+}
+
+/// The frame word a foreign answer boxes into: a scalar word its own
+/// kind, the unit answer the canonical unit word (one I64 word, the
+/// `()` value's own spelling — the call site's unit-typed answer span
+/// reads exactly it).
+#[must_use]
+pub fn answer_value(answer: Answer, ret: BoundRet) -> Value {
+    match (answer, ret) {
+        (Answer::Int(word), BoundRet::Int) => Value::I64(word),
+        (Answer::Bool(word), BoundRet::Bool) => Value::Bool(word),
+        (Answer::Float(word), BoundRet::Float) => Value::F64(word),
+        // every other pairing — the unit answer included — answers the
+        // canonical unit word: the staged words and the dispatch agreed
+        // on the return's word, so a mismatch names hand-assembled code
+        // the boxing declines to mis-read
+        _ => Value::I64(0),
     }
 }

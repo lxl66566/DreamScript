@@ -3,7 +3,10 @@
 //! `ds save` installs the bundle, and the store's artifact segment holds
 //! the library bytes — `ds bind` then binds the installed library and
 //! reports its exported C symbols, while the extern consumption seam
-//! keeps its honest lowering refusal (the marshaling round's own).
+//! serves the marshaling slice's shapes end to end — the scalar words,
+//! a string/bytes parameter's call-scoped pair, a unit return's absent
+//! word — its out-of-slice shapes keeping the honest lowering
+//! refusals.
 //! The host's rustc (cargo sets `RUSTC` for the test binary) builds the
 //! fixtures, so a build failure is a test failure, never a silent pass.
 
@@ -69,6 +72,65 @@ pub extern "C" fn ds_scale(value: f64, by: f64) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_not(flag: u8) -> u8 {
     u8::from(flag == 0)
+}
+"#;
+
+/// The marshaling-round fixture source: the tally family — the
+/// borrowed (pointer, length) pair's pointer dereferenced and summed
+/// (a mis-staged word answers garbage, never a pass), the pair followed
+/// by an FP word (the mixed placement), two pairs (the four-GP-word
+/// envelope), and the unit-returning records whose effect the scalar
+/// face reads back.
+const MARSHAL_FIXTURE_SOURCE: &str = r#"
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static RECORDED: AtomicUsize = AtomicUsize::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_tally(data: *const u8, len: usize) -> i64 {
+    unsafe { read_buffer(data, len) }.iter().map(|&byte| i64::from(byte)).sum()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_weighed(data: *const u8, len: usize, scale: f64) -> f64 {
+    let tally: f64 = unsafe { read_buffer(data, len) }
+        .iter()
+        .map(|&byte| f64::from(byte))
+        .sum();
+    tally * scale
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_total(
+    first: *const u8,
+    first_len: usize,
+    second: *const u8,
+    second_len: usize,
+) -> i64 {
+    ds_tally(first, first_len).wrapping_add(ds_tally(second, second_len))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_record(data: *const u8, len: usize) {
+    let _ = data;
+    RECORDED.store(len, Ordering::SeqCst);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_recorded() -> i64 {
+    RECORDED.load(Ordering::SeqCst) as i64
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_clear() {
+    RECORDED.store(0, Ordering::SeqCst);
+}
+
+unsafe fn read_buffer<'a>(data: *const u8, len: usize) -> &'a [u8] {
+    if data.is_null() {
+        return &[];
+    }
+    unsafe { std::slice::from_raw_parts(data, len) }
 }
 "#;
 
@@ -186,6 +248,36 @@ fn fixture_source(tag: &str, install_artifact: bool, source: &str) -> (PathBuf, 
     if install_artifact {
         Store::open(&cache)
             .install_artifact(identity, &dylib)
+            .expect("the fixture library installs into the store");
+    }
+    (root, cache, identity)
+}
+
+/// The fixture package over both custom sides: the dylib source and the
+/// root source, saved and its library installed under its own identity.
+fn fixture_both(
+    tag: &str,
+    install_artifact: bool,
+    dylib: &str,
+    source: &str,
+) -> (PathBuf, PathBuf, Hash128) {
+    let work = temp_dir(tag);
+    let dylib_bytes = build_fixture_source(&work, dylib);
+    let identity = ds_pkg::artifact_content_hash(&dylib_bytes);
+    let root = work.join("root");
+    fs::create_dir_all(&root).expect("the root dir creates");
+    fs::write(root.join("ds.pkg"), root_manifest(identity)).expect("the manifest writes");
+    fs::write(root.join("app.ds"), source).expect("the source writes");
+    let cache = test_cache();
+    let (ok, out, err) = ds(&cache, &["save", root.to_str().expect("the path is UTF-8")]);
+    assert!(ok, "ds save exits 0 (stderr: {err})");
+    assert!(
+        out.starts_with("saved "),
+        "the install reports (stdout: {out})"
+    );
+    if install_artifact {
+        Store::open(&cache)
+            .install_artifact(identity, &dylib_bytes)
             .expect("the fixture library installs into the store");
     }
     (root, cache, identity)
@@ -331,6 +423,59 @@ fn the_register_class_shapes_answer_over_the_installed_artifact() {
     assert_eq!(lines[2], "42", "the empty call marshals");
 }
 
+/// The marshaling round's language-side consumption (H5): a `string`
+/// or `bytes` parameter rides its call-scoped (pointer, length) pair
+/// and a unit return rides the absent word, both live through `ds run`
+/// over the installed artifact — the pair legs' values answered
+/// directly (the fixture dereferences the pointer, so a mis-staged word
+/// answers garbage, never a pass) and the unit calls' effects read back
+/// through the scalar face.
+#[test]
+fn the_marshaled_pair_and_unit_shapes_answer_over_the_installed_artifact() {
+    let source = concat!(
+        "extern \"math\" fn ds_tally (data: string) -> int\n",
+        "extern \"math\" fn ds_weighed (data: bytes, scale: float) -> float\n",
+        "extern \"math\" fn ds_total (first: string, second: bytes) -> int\n",
+        "extern \"math\" fn ds_record (data: string)\n",
+        "extern \"math\" fn ds_recorded () -> int\n",
+        "extern \"math\" fn ds_clear ()\n",
+        "\n",
+        "fn main () -> (int, float, int, int) {\n",
+        "const text = \"abc\"\n",
+        "const buf = utf8_encode(\"ab\")\n",
+        "const a = ds_tally(text)\n",
+        "const w = ds_weighed(buf, 10.0)\n",
+        "const t = ds_total(text, buf)\n",
+        "ds_record(\"xyz\")\n",
+        "const recorded = ds_recorded()\n",
+        "ds_clear()\n",
+        "(a, w, t, recorded * 100 + ds_recorded())\n",
+        "}\n",
+    );
+    let (root, cache, _) = fixture_both("marshal", true, MARSHAL_FIXTURE_SOURCE, source);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    assert!(ok, "the marshaled shapes run (stderr: {err})");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "four answers print (stdout: {out})");
+    assert_eq!(
+        lines[0], "294",
+        "the string pair's borrowed bytes tally (97+98+99) (stdout: {out})"
+    );
+    assert_eq!(
+        lines[1], "1950.0",
+        "the bytes pair followed by the FP word, the mixed placement (stdout: {out})"
+    );
+    assert_eq!(
+        lines[2], "489",
+        "two pairs fill the four-C-word envelope (294+195) (stdout: {out})"
+    );
+    assert_eq!(
+        lines[3], "300",
+        "the unit calls' effects read back: 3 recorded, then cleared to 0 (stdout: {out})"
+    );
+}
+
 /// A symbol the artifact does not export refuses at lowering, the
 /// refusal naming the symbol and the artifact.
 #[test]
@@ -356,8 +501,9 @@ fn a_missing_symbol_refuses_the_run() {
     );
 }
 
-/// A signature outside the scalar first slice refuses at lowering, the
-/// refusal naming the marshaling slice: a string parameter here.
+/// A signature outside the marshaling slice refuses at lowering, the
+/// refusal naming the slice: a string return here (the returning
+/// direction is the ownership round's own).
 #[test]
 fn a_wrong_signature_refuses_the_run() {
     let (root, cache, _) = fixture_source(
@@ -375,8 +521,7 @@ fn a_wrong_signature_refuses_the_run() {
     let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
     assert!(!ok, "the out-of-slice signature refuses");
     assert!(
-        err.contains("the bound extern `ds_add` refuses")
-            && err.contains("scalar C-ABI marshaling slice"),
+        err.contains("the bound extern `ds_add` refuses") && err.contains("C-ABI marshaling slice"),
         "the refusal names the slice (stdout: {out}, stderr: {err})"
     );
 }

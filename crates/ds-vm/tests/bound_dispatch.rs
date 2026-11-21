@@ -3,7 +3,7 @@
 //! module installs under its manifest artifact name, a pool
 //! `Constant::Bound` callee addresses one export by its enumeration
 //! index, and the CALL and CALLT arms marshal the staged words per their
-//! own kinds and box the foreign answer per the constant's return kind —
+//! own kinds and box the foreign answer per the constant's return word —
 //! the loader's install validation and the honest refusals pinned beside
 //! the answers.
 
@@ -13,6 +13,7 @@ use std::{
     process::Command,
 };
 
+use ds_abi::BoundRet;
 use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{
     BoundModule, FrameAnswer, LoadError, ModuleRegistry, Value, Vm,
@@ -174,7 +175,7 @@ fn a_bound_call_answers_over_call_and_tail() {
             vec![Constant::I64(20), Constant::I64(22), Constant::Bound {
                 module: "math".to_owned(),
                 index: u32::try_from(index).expect("the export index fits u32"),
-                ret: I64,
+                ret: BoundRet::Int,
             }],
             tail,
         );
@@ -203,7 +204,7 @@ fn the_fp_pair_answers() {
         vec![Constant::F64(1.5), Constant::F64(4.0), Constant::Bound {
             module: "math".to_owned(),
             index: u32::try_from(index).expect("the export index fits u32"),
-            ret: F64,
+            ret: BoundRet::Float,
         }],
         false,
     );
@@ -230,7 +231,7 @@ fn the_mixed_gp_fp_sequence_answers() {
         vec![Constant::Bool(true), Constant::F64(3.5), Constant::Bound {
             module: "math".to_owned(),
             index: u32::try_from(index).expect("the export index fits u32"),
-            ret: F64,
+            ret: BoundRet::Float,
         }],
         false,
     );
@@ -254,7 +255,7 @@ fn an_out_of_range_export_index_refuses_the_install() {
         vec![Constant::I64(20), Constant::I64(22), Constant::Bound {
             module: "math".to_owned(),
             index: past,
-            ret: I64,
+            ret: BoundRet::Int,
         }],
         false,
     );
@@ -290,7 +291,7 @@ fn an_uninstalled_artifact_name_refuses_the_install() {
         vec![Constant::I64(20), Constant::I64(22), Constant::Bound {
             module: "math".to_owned(),
             index: u32::try_from(index).expect("the export index fits u32"),
-            ret: I64,
+            ret: BoundRet::Int,
         }],
         false,
     );
@@ -312,34 +313,55 @@ fn an_uninstalled_artifact_name_refuses_the_install() {
     );
 }
 
-/// A return word outside the scalar slice refuses at install: the
-/// marshaling slice rules int, bool, and float alone.
+/// A unit-returning bound call answers the canonical unit word over
+/// both call arms: the absent return word boxes as the `()` value's
+/// single I64 word, the empty staging leaving the overlay word to the
+/// answer alone.
 #[test]
-fn a_non_scalar_return_refuses_the_install() {
-    let (bytes, path) = fixture("ret");
-    let (bound, names) = bound_of(&bytes, &path);
+fn a_unit_return_answers_the_unit_word() {
+    let (bytes, path) = fixture("unit");
+    let (_, names) = bound_of(&bytes, &path);
     let index = names
         .iter()
-        .position(|name| name == "ds_add")
-        .expect("the fixture exports ds_add");
-    let module = call_module(
-        &[I64, I64],
-        vec![Constant::I64(20), Constant::I64(22), Constant::Bound {
-            module: "math".to_owned(),
-            index: u32::try_from(index).expect("the export index fits u32"),
-            ret: SlotType::Ref,
-        }],
-        false,
-    );
-    let mut registry = ModuleRegistry::new();
-    registry.install_bound("math", bound);
-    let error = ds_vm::loader::install(
-        &mut registry,
-        read(&write(&module)).expect("the module round-trips"),
-    )
-    .expect_err("the install refuses the non-scalar return");
-    assert!(
-        matches!(&error, LoadError::UnresolvedCallee { module, .. } if module == "math"),
-        "the refusal names the callee ({error:?})"
-    );
+        .position(|name| name == "ds_silent")
+        .expect("the fixture exports ds_silent");
+    for tail in [false, true] {
+        let mut body = vec![Uop::Funcf { frame_slots: 1 }];
+        if tail {
+            body.push(Uop::Callt {
+                callee: k(0),
+                nargs: 0,
+            });
+        } else {
+            body.push(Uop::Call {
+                callee: k(0),
+                nargs: 0,
+            });
+            body.push(Uop::Ret { src: 0 });
+        }
+        let main = Function::new(
+            "main",
+            layout(&[I64], 0, 1),
+            vec![Constant::Bound {
+                module: "math".to_owned(),
+                index: u32::try_from(index).expect("the export index fits u32"),
+                ret: BoundRet::Unit,
+            }],
+            body,
+        )
+        .expect("valid function");
+        let module = Module::new(
+            "app",
+            TargetClass::Bytecode,
+            Hash128::compute(b"bound unit source"),
+        )
+        .with_function(main);
+        let mut vm = vm_over(bound_again(&bytes, &path), &module);
+        assert_eq!(
+            vm.run("app", "main", &[]),
+            Ok(FrameAnswer::one(Value::I64(0))),
+            "the unit {} answers the canonical unit word",
+            if tail { "tail call" } else { "call" }
+        );
+    }
 }

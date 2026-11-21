@@ -12,7 +12,7 @@ use std::{
     process::Command,
 };
 
-use ds_ffi::{Library, Scalar, ScalarKind, ScalarSig};
+use ds_ffi::{Answer, Arg, Library, Param, Ret, Scalar, ScalarKind, ScalarSig, Sig};
 
 /// The fixture library's file name per platform: the loader-recognized
 /// spelling rustc emits for a cdylib.
@@ -31,7 +31,7 @@ fn library_name() -> &'static str {
 /// failure carrying rustc's own stderr — never a silent pass.
 fn build_fixture(dir: &Path) -> PathBuf {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scalar_cdylib.rs");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture_cdylib.rs");
     let out = dir.join(library_name());
     let built = Command::new(rustc)
         .arg("--edition=2024")
@@ -155,5 +155,93 @@ fn scalar_calls_answer_over_every_register_class() {
         ]),
         Scalar::Float(3.5),
         "the mixed GP+FP sequence marshals"
+    );
+}
+
+/// The marshaling face answers real calls over its widened encodings:
+/// the call-scoped string/bytes pair (alone, mixed with an FP word, and
+/// two pairs filling the word envelope) and the unit return (over a
+/// pair and over no words), the unit call's effect read back through
+/// the scalar face.
+#[test]
+fn marshaled_calls_carry_pairs_and_unit_returns() {
+    let dir = temp_dir("marshal");
+    let dylib = build_fixture(&dir);
+    let library = Library::open(&dylib).unwrap_or_else(|error| panic!("{error}"));
+    let symbol = |name: &str| library.symbol(name).expect("the fixture exports the name");
+    let sig = |params: &[Param], ret: Ret| Sig {
+        params: params.to_vec(),
+        ret,
+    };
+    // the pair alone: the pointer is dereferenced, so the tally proves
+    // the staged borrow reached the callee
+    assert_eq!(
+        symbol("ds_tally").call(&sig(&[Param::Str], Ret::Int), &[Arg::Str("abc")]),
+        Ok(Answer::Int(294)),
+        "the string pair marshals its bytes"
+    );
+    assert_eq!(
+        symbol("ds_tally").call(&sig(&[Param::Bytes], Ret::Int), &[Arg::Bytes(&[
+            0, 1, 0xff
+        ])]),
+        Ok(Answer::Int(256)),
+        "the bytes pair marshals its buffer, zero and 0xFF included"
+    );
+    // the pair followed by an FP word: the mixed placement
+    assert_eq!(
+        symbol("ds_weighed").call(&sig(&[Param::Str, Param::Float], Ret::Float), &[
+            Arg::Str("abc"),
+            Arg::Float(0.5)
+        ],),
+        Ok(Answer::Float(147.0)),
+        "the pair plus float word marshals"
+    );
+    // two pairs: the four-GP-word envelope
+    assert_eq!(
+        symbol("ds_total").call(&sig(&[Param::Str, Param::Bytes], Ret::Int), &[
+            Arg::Str("ab"),
+            Arg::Bytes(&[1, 2])
+        ],),
+        Ok(Answer::Int(198)),
+        "two pairs fill the word envelope"
+    );
+    // the unit return over a pair, its effect read back through the
+    // scalar face
+    assert_eq!(
+        symbol("ds_record").call(&sig(&[Param::Str], Ret::Unit), &[Arg::Str("hello")]),
+        Ok(Answer::Unit),
+        "the unit return answers the absent word"
+    );
+    assert_eq!(
+        symbol("ds_recorded")
+            .call_scalar(
+                &ScalarSig {
+                    params: Vec::new(),
+                    ret: ScalarKind::Int,
+                },
+                &[],
+            )
+            .ok(),
+        Some(Scalar::Int(5)),
+        "the unit call ran: the recorded length answers through the scalar face"
+    );
+    // the unit return over no words at all
+    assert_eq!(
+        symbol("ds_clear").call(&sig(&[], Ret::Unit), &[]),
+        Ok(Answer::Unit),
+        "the empty unit call marshals"
+    );
+    assert_eq!(
+        symbol("ds_recorded")
+            .call_scalar(
+                &ScalarSig {
+                    params: Vec::new(),
+                    ret: ScalarKind::Int,
+                },
+                &[],
+            )
+            .ok(),
+        Some(Scalar::Int(0)),
+        "the empty unit call ran: the record cleared"
     );
 }

@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
-use ds_abi::{EntryDescriptor, Inst, InstDecodeError, SlotType, Uop};
+use ds_abi::{BoundRet, EntryDescriptor, Inst, InstDecodeError, Uop};
 
 use crate::{
     bound::BoundModule,
@@ -176,14 +176,10 @@ fn content_hash(def: &FunctionDef) -> u64 {
                 module.hash(&mut hasher);
                 hasher.write_u32(*index);
                 hasher.write_u8(match ret {
-                    SlotType::I32 => 0,
-                    SlotType::I64 => 1,
-                    SlotType::F64 => 2,
-                    SlotType::Bool => 3,
-                    SlotType::Ref => 4,
-                    SlotType::Tag => 5,
-                    SlotType::Fn => 6,
-                    SlotType::Raw => 7,
+                    BoundRet::Unit => 0,
+                    BoundRet::Int => 1,
+                    BoundRet::Float => 2,
+                    BoundRet::Bool => 3,
                 });
             },
         }
@@ -949,7 +945,10 @@ impl CodeSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use ds_abi::uop::{DecodeError, Uop};
+    use ds_abi::{
+        SlotType,
+        uop::{DecodeError, Uop},
+    };
 
     use super::*;
     use crate::program::assemble;

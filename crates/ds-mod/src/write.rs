@@ -6,7 +6,7 @@ use crate::{
     header::{SectionKind, TargetClass},
     module::{
         Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
-        entry_arg_tag, slot_tag,
+        bound_ret_tag, entry_arg_tag, slot_tag,
     },
     varint::{put_uleb, uleb_len},
 };
@@ -326,7 +326,7 @@ fn put_constant<S: Sink>(out: &mut S, constant: &Constant) {
             out.push(5);
             put_str(out, module);
             out.uleb(u64::from(*index));
-            out.push(slot_tag(*ret));
+            out.push(bound_ret_tag(*ret));
         },
     }
 }

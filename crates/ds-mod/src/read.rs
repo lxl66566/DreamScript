@@ -10,7 +10,7 @@ use crate::{
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
     module::{
         Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
-        entry_arg_from_tag, jump_target_of, slot_from_tag,
+        bound_ret_from_tag, entry_arg_from_tag, jump_target_of, slot_from_tag,
     },
     write::BLOCKS_PAYLOAD_VERSION,
 };
@@ -409,8 +409,8 @@ fn parse_constant(p: &mut Cursor<'_>, dep_count: usize) -> Result<Constant, Read
             let index = u32::try_from(index)
                 .map_err(|_| malformed(at, "bound symbol index exceeds u32"))?;
             let ret_at = p.abs();
-            let ret = slot_from_tag(p.u8()?)
-                .ok_or_else(|| malformed(ret_at, "unknown bound return slot type"))?;
+            let ret = bound_ret_from_tag(p.u8()?)
+                .ok_or_else(|| malformed(ret_at, "unknown bound return marshaling word"))?;
             Ok(Constant::Bound { module, index, ret })
         },
         _ => Err(malformed(at, "unknown constant tag")),

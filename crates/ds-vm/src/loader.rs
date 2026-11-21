@@ -276,24 +276,21 @@ fn key_name(key: &ds_mod::FuncRefKey, own_module: &str, deps: &[ds_mod::Dep]) ->
 }
 
 /// Resolves one bound extern's pool constant (H5): the artifact's bound
-/// module must be installed under its manifest name, the symbol's index
-/// inside the export enumeration, and the return word inside the scalar
-/// marshaling slice — the same refusals the lowerer answers for source
-/// programs, replayed here against foreign or hand-assembled modules.
+/// module must be installed under its manifest name and the symbol's
+/// index inside the export enumeration — the return's marshaling word
+/// is the format's own closed vocabulary (the absent word or a scalar
+/// word), so nothing validates it further here; the refusals the
+/// lowerer answers for source programs replay against foreign or
+/// hand-assembled modules.
 fn resolve_bound(
     registry: &ModuleRegistry,
     module: &str,
     index: u32,
-    ret: ds_abi::SlotType,
+    ret: ds_abi::BoundRet,
 ) -> Result<ConstFuncRef, ()> {
     let bound = registry.bound_table(module).ok_or(())?;
     let in_range = usize::try_from(index).is_ok_and(|at| at < bound.len());
-    if !in_range
-        || !matches!(
-            ret,
-            ds_abi::SlotType::I64 | ds_abi::SlotType::Bool | ds_abi::SlotType::F64
-        )
-    {
+    if !in_range {
         return Err(());
     }
     Ok(ConstFuncRef::Bound {

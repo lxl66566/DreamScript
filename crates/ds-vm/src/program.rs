@@ -1,6 +1,6 @@
 //! Encoded programs: the constant pool [BL-1, BL-7] and assembled bodies.
 
-use ds_abi::{EncodeError, Inst, SlotType};
+use ds_abi::{BoundRet, EncodeError, Inst};
 
 /// What kind of entry a pool index holds; [`Const::kind`] is its witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,17 +70,19 @@ pub enum ConstFuncRef {
     },
     /// A bound artifact's C symbol (H5): the `[artifacts]` name whose
     /// installed module holds the symbol's address, the symbol's index
-    /// in the export enumeration, and the return word's scalar kind —
-    /// the parameters marshal per the staged words' own kinds. The
-    /// registry's bound tier resolves it at issue time; a bound symbol
-    /// is not a callable word, so no value path mints it.
+    /// in the export enumeration, and the return's marshaling word —
+    /// the absent word or a scalar word, the parameters marshaling per
+    /// the staged words' own kinds. The registry's bound tier resolves
+    /// it at issue time; a bound symbol is not a callable word, so no
+    /// value path mints it.
     Bound {
         /// The artifact's manifest name.
         module: String,
-        /// The symbol's index in the artifact's export enumeration.
+        /// The symbol's index in the export enumeration.
         index: u32,
-        /// The return word's scalar kind.
-        ret: SlotType,
+        /// The return's marshaling word: the absent word or a scalar
+        /// word.
+        ret: BoundRet,
     },
 }
 

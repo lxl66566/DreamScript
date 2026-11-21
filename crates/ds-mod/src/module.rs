@@ -1,7 +1,7 @@
 //! The in-memory module value: header data, functions, constants, and
 //! debug spans.
 
-use ds_abi::{EncodeError, FrameLayout, Inst, SlotType, Uop};
+use ds_abi::{BoundRet, EncodeError, FrameLayout, Inst, SlotType, Uop};
 
 use crate::{
     hash::Hash128,
@@ -37,19 +37,20 @@ pub enum Constant {
     },
     /// A bound extern's C-ABI callee (H5): the `[artifacts]` name whose
     /// installed library owns the symbol, the symbol's position in that
-    /// library's export enumeration, and the return word's scalar kind.
-    /// The parameters marshal per the staged words' own kinds — the
-    /// lowering proved the written signature scalar ahead of the run —
-    /// so only the return word needs a payload of its own.
+    /// library's export enumeration, and the return's marshaling word —
+    /// a scalar word or the absent word a unit return rides. The
+    /// parameters marshal per the staged words' own kinds (the lowering
+    /// proved the written signature inside the marshaling slice ahead
+    /// of the run), so only the return needs a payload of its own.
     Bound {
         /// The artifact's manifest name: the bound module the run
         /// installs the library's symbol table under.
         module: String,
         /// The symbol's index in the artifact's export enumeration.
         index: u32,
-        /// The return word's scalar kind (`int`/`bool`/`float` only;
-        /// the loader refuses anything richer at install).
-        ret: SlotType,
+        /// The return's marshaling word: the absent word (`unit`), or
+        /// the scalar `int`/`bool`/`float` word.
+        ret: BoundRet,
     },
 }
 
@@ -367,6 +368,31 @@ pub(crate) const fn slot_tag(slot: SlotType) -> u8 {
         SlotType::Tag => 5,
         SlotType::Raw => 6,
         SlotType::Fn => 7,
+    }
+}
+
+/// One bound extern's return word as a compact byte (H5): `Unit` rides
+/// the tag no [`SlotType`] spells (`slot_tag`'s I32 byte, a kind the
+/// bound return never legally held), the scalar words their own
+/// [`slot_tag`] bytes — so an artifact the scalar round wrote decodes
+/// unchanged over the richer vocabulary.
+pub(crate) const fn bound_ret_tag(ret: BoundRet) -> u8 {
+    match ret {
+        BoundRet::Unit => 0,
+        BoundRet::Int => slot_tag(SlotType::I64),
+        BoundRet::Bool => slot_tag(SlotType::Bool),
+        BoundRet::Float => slot_tag(SlotType::F64),
+    }
+}
+
+/// Parses a bound return's compact byte; `None` for unknown tags.
+pub(crate) const fn bound_ret_from_tag(tag: u8) -> Option<BoundRet> {
+    match tag {
+        0 => Some(BoundRet::Unit),
+        1 => Some(BoundRet::Int),
+        2 => Some(BoundRet::Float),
+        3 => Some(BoundRet::Bool),
+        _ => None,
     }
 }
 

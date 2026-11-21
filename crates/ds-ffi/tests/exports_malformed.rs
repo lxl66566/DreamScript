@@ -244,7 +244,7 @@ fn library_name() -> &'static str {
 /// failure carrying rustc's own stderr — never a silent pass.
 fn build_fixture(dir: &Path) -> PathBuf {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scalar_cdylib.rs");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture_cdylib.rs");
     let out = dir.join(library_name());
     let built = Command::new(rustc)
         .arg("--edition=2024")

@@ -3084,9 +3084,11 @@ impl<'a> FnLower<'a, '_, '_> {
     /// names an artifact the graph resolved, the extern's name a symbol
     /// its installed library exports — the FuncRef addressing the
     /// artifact's native module at the symbol's enumeration index. The
-    /// signature must be the marshaling slice's own shape (scalar words,
-    /// at most [`ds_ffi::MAX_PARAMS`] of them); anything richer refuses
-    /// here naming the seam, before any run starts.
+    /// signature must be the marshaling slice's own shape (the scalar
+    /// words, a `string`/`bytes` parameter's call-scoped pair, and the
+    /// absent word a unit return rides, at most [`ds_ffi::MAX_PARAMS`]
+    /// C words with a pair counting two); anything richer refuses here
+    /// naming the seam, before any run starts.
     fn bound_callee(&self, def: DefId, bind: &str, span: Span) -> Result<Callee, LowerError> {
         let sig = self
             .analyzed
@@ -3114,41 +3116,50 @@ impl<'a> FnLower<'a, '_, '_> {
         };
         if !sig.generics.is_empty() {
             return Err(refuse(
-                "a C symbol has no generic body; the signature must be scalar and monomorphic"
-                    .to_owned(),
+                "a C symbol has no generic body; the signature must be monomorphic".to_owned(),
             ));
         }
-        if sig.params.len() > ds_ffi::MAX_PARAMS {
-            return Err(refuse(format!(
-                "the scalar C-ABI marshaling slice serves at most {} parameters",
-                ds_ffi::MAX_PARAMS
-            )));
-        }
-        let scalar_slice = "the scalar C-ABI marshaling slice rules int, bool, and float words; \
-                            string, bytes, handle, and aggregate marshaling is the marshaling \
-                            round's next slice";
+        // the cap counts C words, not parameters: a string/bytes
+        // parameter's (pointer, length) pair occupies two, so two pairs
+        // fill the enumerated transmute's envelope exactly
+        let mut words = 0usize;
         for param in &sig.params {
             let Some(ty) = &param.ty else {
                 return Err(refuse(
-                    "an inferred parameter has no written scalar word; write the int, bool, or \
-                     float annotation"
+                    "an inferred parameter has no written marshaling word; write the int, bool, \
+                     float, string, or bytes annotation"
                         .to_owned(),
                 ));
             };
-            if scalar_word(ty).is_none() {
-                return Err(refuse(scalar_slice.to_owned()));
+            match marshal_word(ty) {
+                Some(word) => words += word,
+                None => {
+                    return Err(refuse(
+                        "the C-ABI marshaling slice rules int, bool, float, string, and bytes \
+                         parameters; handle and aggregate marshaling is the ownership round's own"
+                            .to_owned(),
+                    ));
+                },
             }
         }
-        match &sig.ret {
-            Some(ret) if scalar_word(ret).is_some() => {},
-            Some(_) => return Err(refuse(scalar_slice.to_owned())),
-            None => {
-                return Err(refuse(
-                    "the slice answers one scalar word; a unit return needs the marshaling \
-                     round's next slice"
-                        .to_owned(),
-                ));
-            },
+        if words > ds_ffi::MAX_PARAMS {
+            return Err(refuse(format!(
+                "the C-ABI marshaling slice serves at most {} C words, a string or bytes \
+                 parameter's pair occupying two",
+                ds_ffi::MAX_PARAMS
+            )));
+        }
+        // a unit return rides the absent word; the returning direction of
+        // string/bytes marshaling needs an ownership story the round
+        // keeps queued
+        if let Some(ret) = &sig.ret
+            && scalar_word(ret).is_none()
+        {
+            return Err(refuse(
+                "the C-ABI marshaling slice answers one scalar word or none (a unit return rides \
+                 the absent word); a string or bytes return is the ownership round's own"
+                    .to_owned(),
+            ));
         }
         Ok(Callee::Bound {
             def,
@@ -4592,6 +4603,43 @@ fn embedded_const_expr(constant: &crate::ComptimeConst, span: Span) -> Result<Ex
             ));
         },
     })
+}
+
+/// The C words a written parameter type marshals (H5): the scalar words
+/// one, a `string` or `bytes` parameter its call-scoped (pointer,
+/// length) pair — two. `None` for every type outside the marshaling
+/// slice (handles, aggregates, type variables), the same slice the
+/// callee resolution validated.
+pub(super) fn marshal_word(ty: &Type) -> Option<usize> {
+    if scalar_word(ty).is_some() {
+        return Some(1);
+    }
+    let Type::Path { path, args, .. } = ty else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let [one] = &path.segments[..] else {
+        return None;
+    };
+    match one.name.as_str() {
+        "string" | "bytes" => Some(2),
+        _ => None,
+    }
+}
+
+/// The return's marshaling word a written return type names (H5): the
+/// scalar words their own, anything else none — the unit return rides
+/// the absent word the caller spells. Shared with the pool constant's
+/// return payload, the same slice the callee resolution validated.
+pub(super) fn bound_ret_word(ty: &Type) -> Option<BoundRet> {
+    match scalar_word(ty)? {
+        SlotType::I64 => Some(BoundRet::Int),
+        SlotType::Bool => Some(BoundRet::Bool),
+        SlotType::F64 => Some(BoundRet::Float),
+        _ => None,
+    }
 }
 
 /// The scalar word a written type names, when it is one of the

@@ -26,3 +26,8 @@ pub extern "C" fn ds_gated(flag: u8, scale: f64) -> f64 {
         0.0
     }
 }
+
+/// Answers nothing at all — the unit return's own shape, the absent
+/// word.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_silent() {}

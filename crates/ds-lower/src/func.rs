@@ -14,7 +14,7 @@ use std::{
     rc::Rc,
 };
 
-use ds_abi::{BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
+use ds_abi::{BoundRet, BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
 use ds_check::{
     Analyzed, AtomKind, BinderFact, ConstFact, DefId, DotRes, Extraction, GenericCallBounds,
     InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
@@ -7830,10 +7830,11 @@ impl FnLower<'_, '_, '_> {
                 func: native.index,
             },
             Callee::Bound { def, index } => {
-                // the pool constant carries the return word's scalar kind
+                // the pool constant carries the return's marshaling word
                 // (H5): the parameters marshal per the staged words' own
-                // kinds, so the return alone needs a payload — read off
-                // the signature the resolution already validated
+                // kinds, so the return alone needs a payload — the scalar
+                // word read off the signature the resolution already
+                // validated, an absent return the unit word
                 let sig = self
                     .analyzed
                     .decls
@@ -7849,8 +7850,8 @@ impl FnLower<'_, '_, '_> {
                     ret: sig
                         .ret
                         .as_ref()
-                        .and_then(calls::scalar_word)
-                        .expect("the resolution validated the scalar return"),
+                        .and_then(calls::bound_ret_word)
+                        .unwrap_or(BoundRet::Unit),
                 }
             },
             Callee::Generic(generic) => Constant::FuncRef {

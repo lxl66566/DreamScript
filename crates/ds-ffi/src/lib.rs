@@ -7,21 +7,26 @@
 //! the libraries: one content-addressed file per installed artifact, and
 //! the caller hands that path to the loader.
 //!
-//! The round this crate opens: externs name compiler-wired natives the
-//! lowering answers today, and a call into an installed artifact refuses
-//! at lowering; the consumption seam rides the C-ABI marshaling round.
-//! Its H5 contract clauses, holding from the first bound library: a
-//! bound extern means panic=abort (a foreign panic cannot unwind through
-//! the interpreter), and a blocking foreign call pins its fiber
-//! (cancellation is observed only at VM re-entry). String and bytes
-//! marshaling and deinit-carrying linear handles are the same round's
-//! own refusals until it lands.
+//! The marshaling faces: the scalar slice the VM stage calls today, and
+//! the widened encoding face beside it — a `string`/`bytes` parameter
+//! as its call-scoped (pointer, length) word pair, a unit return as the
+//! absent word — carried, validated, and called here while the language
+//! side still refuses those shapes at the lowering seam. Its H5
+//! contract clauses, holding from the first bound library: a bound
+//! extern means panic=abort (a foreign panic cannot unwind through the
+//! interpreter), and a blocking foreign call pins its fiber
+//! (cancellation is observed only at VM re-entry). Deinit-carrying
+//! handles and the returning direction of string/bytes marshaling are
+//! the ownership round's own refusals until it lands.
 
 mod exports;
+mod marshal;
 mod scalar;
 mod sys;
+mod word;
 
 pub use exports::{ExportError, enumerate};
+pub use marshal::{Answer, Arg, MarshalError, Param, Ret, Sig};
 pub use scalar::{MAX_PARAMS, Scalar, ScalarError, ScalarKind, ScalarSig};
 pub use sys::LoadError;
 

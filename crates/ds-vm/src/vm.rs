@@ -66,7 +66,7 @@ use std::{
 };
 
 use ds_abi::{
-    BIAS_J, CodePc, ConstIdx, FrameLayout, FrameMetadata, RC_MAJOR, RcDecodeError, RcOp,
+    BIAS_J, BoundRet, CodePc, ConstIdx, FrameLayout, FrameMetadata, RC_MAJOR, RcDecodeError, RcOp,
     SlideDirection, SlideError, SlidePlan, SlotType, Staging, TailChain,
     uop::{DecodeError, MAX_FRAME_SLOTS},
 };
@@ -493,14 +493,16 @@ enum Resolved {
     },
     /// Invoke the bound artifact's C symbol in the caller's frame (H5,
     /// no frame push): the loaded module's shared symbol table, the
-    /// export's enumeration index, and the return word's scalar kind.
+    /// export's enumeration index, and the return's marshaling word —
+    /// the absent word or a scalar word.
     Bound {
         /// The bound module's shared symbol table.
         module: Arc<crate::bound::BoundModule>,
         /// The symbol's index in the export enumeration.
         index: u32,
-        /// The return word's scalar kind.
-        ret: SlotType,
+        /// The return's marshaling word: the absent word or a scalar
+        /// word.
+        ret: BoundRet,
     },
 }
 
@@ -520,13 +522,13 @@ enum CachedCallee {
         index: u32,
     },
     /// The bound-artifact shape (H5): the loaded module's shared symbol
-    /// table, the export's index, and the return word's kind (a bound
-    /// symbol is not a value — the table is the stable handle, the index
-    /// the callee).
+    /// table, the export's index, and the return's marshaling word (a
+    /// bound symbol is not a value — the table is the stable handle, the
+    /// index the callee).
     Bound {
         module: Arc<crate::bound::BoundModule>,
         index: u32,
-        ret: SlotType,
+        ret: BoundRet,
     },
 }
 
@@ -2247,17 +2249,26 @@ fn check_bound_overlay(area: usize) -> Result<(), Trap> {
 }
 
 /// Runs one bound extern's C-ABI call (H5) in the caller's frame: the
-/// staged words read exactly like a native's, each marshaling per its own
-/// kind (the lowering proved the written signature scalar ahead of the
-/// run), and the foreign answer boxes by the pool constant's return
-/// kind. A blocking call pins the calling fiber for its whole duration —
-/// no preemption point exists inside the C call — and a foreign abort
-/// kills the process (panic=abort, the VM never unwinding through a
-/// foreign frame).
+/// staged words read exactly like a native's, each marshaling per its
+/// own kind — a scalar word singly, a string or bytes word as its
+/// call-scoped (pointer, length) pair over the borrowed content, a heap
+/// word routed to its owning store and an arena handle read from the
+/// running fiber's arena (the lowering proved the written signature
+/// inside the marshaling slice ahead of the run) — and the foreign
+/// answer boxes by the pool constant's return word, a unit return
+/// answering the canonical unit word. A blocking call pins the calling
+/// fiber for its whole duration — no preemption point exists inside the
+/// C call — and a foreign abort kills the process (panic=abort, the VM
+/// never unwinding through a foreign frame).
+#[allow(clippy::too_many_arguments)]
 fn invoke_bound(
+    pool: &[Fiber],
+    objects: &Objects,
+    ctx_live: bool,
+    current: FiberId,
     module: &crate::bound::BoundModule,
     index: u32,
-    ret: SlotType,
+    ret: BoundRet,
     staged: usize,
     stack: &mut Segment,
     caller: &FrameLayout,
@@ -2282,29 +2293,79 @@ fn invoke_bound(
         }
         &heap
     };
-    let mut scalars = Vec::with_capacity(args.len());
-    for (at, &value) in args.iter().enumerate() {
-        scalars.push(crate::bound::scalar_of(value, at).map_err(|_| {
-            Trap::BoundMarshaling {
-                symbol: module
-                    .name(u32::try_from(at).unwrap_or(u32::MAX))
-                    .to_owned(),
-                reason: "a staged word outside the scalar int/bool/float slice",
-            }
-        })?);
+    let outside = |word: &'static str| Trap::BoundMarshaling {
+        symbol: module.name(index).to_owned(),
+        reason: word,
+    };
+    let mut params = Vec::with_capacity(args.len());
+    let mut marshaled = Vec::with_capacity(args.len());
+    for &value in args {
+        match value {
+            Value::I64(word) => {
+                params.push(ds_ffi::Param::Int);
+                marshaled.push(ds_ffi::Arg::Int(word));
+            },
+            Value::Bool(flag) => {
+                params.push(ds_ffi::Param::Bool);
+                marshaled.push(ds_ffi::Arg::Bool(flag));
+            },
+            Value::F64(number) => {
+                params.push(ds_ffi::Param::Float);
+                marshaled.push(ds_ffi::Arg::Float(number));
+            },
+            // a string or bytes word marshals as its call-scoped
+            // (pointer, length) pair: a heap word's own payload decides
+            // the encoding (the store holds exactly one of the two
+            // kinds), an arena handle is a concat temporary over the
+            // running fiber's arena
+            Value::Ref(id) => {
+                let store = if ctx_live && id.fiber() == current {
+                    objects
+                } else {
+                    &pool[id.fiber().index()].objects
+                };
+                if let Ok(text) = store.str_at(id.id()) {
+                    params.push(ds_ffi::Param::Str);
+                    marshaled.push(ds_ffi::Arg::Str(text));
+                } else if let Ok(data) = store.bytes_at(id.id()) {
+                    params.push(ds_ffi::Param::Bytes);
+                    marshaled.push(ds_ffi::Arg::Bytes(data));
+                } else {
+                    return Err(outside(
+                        "a staged word outside the int, bool, float, string, and bytes slice",
+                    ));
+                }
+            },
+            Value::Arena(_) => {
+                let bytes = str_content(pool, objects, ctx_live, current, value)
+                    .map_err(|_| outside("a staged arena word outside the running fiber"))?;
+                let text = core::str::from_utf8(bytes)
+                    .map_err(|_| outside("a staged arena word outside UTF-8 text"))?;
+                params.push(ds_ffi::Param::Str);
+                marshaled.push(ds_ffi::Arg::Str(text));
+            },
+            _ => {
+                return Err(outside(
+                    "a staged word outside the int, bool, float, string, and bytes slice",
+                ));
+            },
+        }
     }
     let symbol = module.symbol(index).ok_or_else(|| Trap::BoundMarshaling {
         symbol: module.name(index).to_owned(),
         reason: "an export index past the artifact's enumeration",
     })?;
-    let sig = crate::bound::staged_sig(&scalars, ret);
+    let sig = ds_ffi::Sig {
+        params,
+        ret: crate::bound::marshal_ret(ret),
+    };
     let answer = symbol
-        .call_scalar(&sig, &scalars)
+        .call(&sig, &marshaled)
         .map_err(|_| Trap::BoundMarshaling {
             symbol: module.name(index).to_owned(),
-            reason: "the enumerated transmute serves at most the scalar arity cap",
+            reason: "the enumerated transmute serves at most the marshaling arity cap",
         })?;
-    Ok(crate::bound::scalar_value(answer, ret))
+    Ok(crate::bound::answer_value(answer, ret))
 }
 
 /// Where a backtrace frame stands: a bytecode position, or parked inside
@@ -7942,6 +8003,10 @@ impl Vm {
                             // never unwinding through a foreign frame).
                             Resolved::Bound { module, index, ret } => {
                                 let value = invoke_bound(
+                                    &self.pool,
+                                    &self.objects,
+                                    self.ctx_live,
+                                    self.current,
                                     &module,
                                     index,
                                     ret,
@@ -8034,6 +8099,10 @@ impl Vm {
                                 }
                                 NativeResult::Word(
                                     invoke_bound(
+                                        &self.pool,
+                                        &self.objects,
+                                        self.ctx_live,
+                                        self.current,
                                         &module,
                                         index,
                                         ret,
