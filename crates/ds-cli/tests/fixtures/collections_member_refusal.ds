@@ -1,19 +1,18 @@
-// The member shape the runtime seam refuses this round: a generic
-// inherent impl over a builtin collection whose parameter or answer
-// spans the collection's own type variable has no static word kind (the
-// free generic fn's Raw-word shape is the free tier's alone), so the
-// checked read keeps its `map_get` native seam and the member spelling
-// refuses at lowering while the check stays clean.
+// The member shape the runtime seam refuses: a ds-bodied inherent
+// member over a builtin collection whose parameter or answer spans the
+// collection's own type variable has no static word kind (the ambient's
+// own `get`/`push`/`set` members declare no body and route to the
+// collection natives directly), so the spelling checks clean and
+// refuses at lowering.
 
-impl[k, v] map[k, v] {
-  fn get (self, key: k) -> v | none {
-    const val = map_get(self, key)
-    val
+impl[t] list[t] {
+  fn append(mut self, x: t) -> list[t] {
+    self
   }
 }
 
-fn main() -> () {
-  var m = map[string, int]()
-  map_set(m, "one", 1)
-  println("${m.get("one").unwrap_or(0)}")
+fn main() -> int {
+  var xs = [1, 2]
+  xs.append(9)
+  return len(xs)
 }

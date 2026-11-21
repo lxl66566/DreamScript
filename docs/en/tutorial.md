@@ -69,7 +69,7 @@ type doc = doc_null | doc_bool | doc_num | doc_str | doc_obj
 
 fn port_of(j: doc) -> int | none | bad_port {
   if j is doc_obj {
-    const pv = j.fields.map_get("port")        // inferred: doc | none
+    const pv = j.fields.get("port")            // inferred: doc | none
     if pv is doc_num && pv.value >= 1 && pv.value <= 65535 { pv.value }
     else { bad_port { got: -1 } }
   } else {
@@ -80,7 +80,7 @@ fn port_of(j: doc) -> int | none | bad_port {
 
 Constructors (brace forms, bare tags, generic applications like `list[page]()`) live in the type namespace, functions in the value namespace: a struct `map` and a function `map` coexist, and a call-form name in both is an ambiguity error.
 
-Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `map_get` read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
+Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `get` member read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
 
 ## Functions
 
@@ -166,7 +166,7 @@ fn report(total: int, failed: int) -> string {
 }
 ```
 
-Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `map_get`). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
+Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `get` member). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
 
 ```ts
 fn drill() {
@@ -204,7 +204,7 @@ const cfg = load_config("app.cfg").err((e) => config { host: "localhost", port: 
 const port = cfg.port.unwrap_or(8080)                       // int? -> int, eager fallback
 const p2 = cfg.port.unwrap_or_else(() => 8081)              // lazy variant
 fn require_name(m: map[string, string]) -> string | parse_error {
-  map_get(m, "name").ok_or(missing_field("name"))?          // early exit with a new value
+  m.get("name").ok_or(missing_field("name"))?              // early exit with a new value
 }
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).ok((n: string) => n).err((e) => "?")}")
 ```
@@ -235,13 +235,13 @@ println("${size("x")} ${close(file { fd: 3 })}")
 
 ## Collections and iteration
 
-Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `list_get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
+Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `get` member answers `t | none` whole, fields project out, and the copy closes move whole spans.
 
 ```ts
 var club = list[user]()
-club.list_push(user { name: "ada", age: 45 })                  // the whole span lands in place
-club.list_push(user { name: "bob", age: 15 })
-const cell = list_get(club, 0)                                 // user | none, the checked read
+club.push(user { name: "ada", age: 45 })                       // the whole span lands in place
+club.push(user { name: "bob", age: 15 })
+const cell = club.get(0)                                       // user | none, the checked read
 const who = cell.ok((u: user) => u.name).err((_: none) => "?")  // fields project out
 const grown = cons(user { name: "eve", age: 30 }, tail(club))   // cons and tail move whole spans
 const roster = collect(grown)                                   // the whole-list copy
@@ -255,7 +255,7 @@ Iteration is combinators (`map`, `filter`, `reduce`, and friends) plus `for`, ov
 var users = list[user]()
 var errors = list[parse_error]()
 for r in rows.map(parse_user) {
-  if r is parse_error { errors.list_push(r) } else { users.list_push(r) }
+  if r is parse_error { errors.push(r) } else { users.push(r) }
 }
 const total = users
   .filter((u) => u.age >= 18)
@@ -443,7 +443,7 @@ fn fetch_all(urls: list[string]) -> list[page] | net_err {
         match fetch_body(url) {
           timeout => cancel(timeout),
           refused => cancel(refused),
-          p       => pages.list_push(p),
+          p       => pages.push(p),
         }
       }
     }

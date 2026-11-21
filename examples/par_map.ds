@@ -8,7 +8,7 @@
 // from.
 
 fn at(xs: list[int], i: int) -> int {
-  const cell = list_get(xs, i)
+  const cell = xs.get(i)
   cell.ok((x: int) => x).err((_: none) => -1)
 }
 

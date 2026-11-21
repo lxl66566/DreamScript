@@ -36,7 +36,7 @@ fn cases(comptime t: type) -> string {
 fn field_names(comptime t: type) -> list[string] {
   var ns = list[string]()
   for f in fields(t) {
-    ns.list_push(f.name)
+    ns.push(f.name)
   }
   ns
 }

@@ -1,0 +1,17 @@
+// The retired prefix spellings refuse at the check: the collection
+// natives are VM-internal (private to the ambient), and each refusal
+// names the member spelling that replaced it.
+
+fn main() -> int {
+  var xs = [1]
+  xs.push(2)
+  list_push(xs, 3)
+  const first = list_get(xs, 0)
+  var m = map[string, int]()
+  m.set("one", 1)
+  map_set(m, "two", 2)
+  const one = map_get(m, "one")
+  map_keys(m)
+  xs.list_push(4)
+  return len(xs) + len(m) + len(first.unwrap_or(0)) + one.unwrap_or(0)
+}

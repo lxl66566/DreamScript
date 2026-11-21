@@ -1,18 +1,21 @@
 // The taught collection face through the `ds` binary: the empty
-// constructors, the UFCS member spellings over the free generic's
-// instance table (the List and Map receivers), the inherent member over
-// the map's ordered key face, and split/join over the one char separator.
+// constructors, the inherent member spellings over the native seams
+// (the appending mutation and the checked reads), the UFCS `len` over
+// the free generic's instance table (the List and Map receivers), the
+// inherent member over the map's ordered key face, and split/join over
+// the one char separator.
 
 fn main() -> () {
   var xs = list[int]()
-  list_push(xs, 1)
-  list_push(xs, 2)
+  xs.push(1)
+  xs.push(2)
   const parts = split("alpha;beta;gamma", ';')
   var m = map[string, int]()
-  map_set(m, "one", 1)
-  map_set(m, "two", 2)
+  m.set("one", 1)
+  m.set("two", 2)
   println("len ${xs.len()} ${parts.len()} ${m.len()}")
   println("keys ${m.keys().len()}")
   println("csv ${parts.join(',')}")
   println("empty ${list[int]().len()} ${map_len(map[string, int]())}")
+  println("get ${xs.get(1).unwrap_or(0)} ${m.get("two").unwrap_or(0)}")
 }

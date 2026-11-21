@@ -20,21 +20,21 @@ fn nested_rows() -> bool {
 
 fn matrix_rows() -> bool {
   var one = map[string, list[int]]()
-  map_set(one, "k", [1, 2])
+  one.set("k", [1, 2])
   var two = map[string, list[int]]()
-  map_set(two, "k", [1, 2])
+  two.set("k", [1, 2])
   var diff = map[string, list[int]]()
-  map_set(diff, "k", [1, 3])
+  diff.set("k", [1, 3])
   one == two && one != diff
 }
 
 fn field_rows() -> bool {
   var t1 = map[string, int]()
-  map_set(t1, "k", 1)
+  t1.set("k", 1)
   var t2 = map[string, int]()
-  map_set(t2, "k", 1)
+  t2.set("k", 1)
   var t3 = map[string, int]()
-  map_set(t3, "k", 2)
+  t3.set("k", 2)
   const one = holds { tags: ["a", "b"], table: t1 }
   const two = holds { tags: ["a", "b"], table: t2 }
   const short = holds { tags: ["a"], table: t1 }
@@ -44,9 +44,9 @@ fn field_rows() -> bool {
 
 fn member_rows() -> bool {
   var t1 = map[string, int]()
-  map_set(t1, "k", 1)
+  t1.set("k", 1)
   var t2 = map[string, int]()
-  map_set(t2, "k", 1)
+  t2.set("k", 1)
   const xs = [["a"], ["b"]]
   const group = [holds { tags: ["x"], table: t1 }, holds { tags: [], table: t2 }]
   ["a"] in xs && !(["c"] in xs) && holds { tags: ["x"], table: t1 } in group && !(holds { tags: ["q"], table: t1 } in group)
@@ -64,19 +64,19 @@ fn float_rows() -> bool {
   const lists = [n] == [n] && !([z] == [nz])
   const member = n in [n] && !(nz in [z])
   var nans = map[float, int]()
-  map_set(nans, n, 1)
-  map_set(nans, n, 2)
-  const nan_rows = map_len(nans) == 1 && match map_get(nans, n) {
+  nans.set(n, 1)
+  nans.set(n, 2)
+  const nan_rows = map_len(nans) == 1 && match nans.get(n) {
     none => false
     v => v == 2
   }
   var zeros = map[float, int]()
-  map_set(zeros, z, 1)
-  map_set(zeros, nz, 2)
-  const zero_rows = map_len(zeros) == 2 && match map_get(zeros, z) {
+  zeros.set(z, 1)
+  zeros.set(nz, 2)
+  const zero_rows = map_len(zeros) == 2 && match zeros.get(z) {
     none => false
     v => v == 1
-  } && match map_get(zeros, nz) {
+  } && match zeros.get(nz) {
     none => false
     v => v == 2
   }

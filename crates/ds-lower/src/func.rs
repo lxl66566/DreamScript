@@ -334,6 +334,7 @@ struct LoopSpan {
 }
 
 /// A walked expression's result: its place plus the use's static type.
+#[derive(Clone)]
 struct TypedPlace {
     place: Place,
     ty: Ty,

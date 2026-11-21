@@ -41,7 +41,7 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
         match fetch_body(url) {
           timeout => cancel(timeout)
           refused => cancel(refused)
-          p => pages.list_push(p)
+          p => pages.push(p)
         }
       }
     }

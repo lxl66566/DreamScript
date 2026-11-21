@@ -12,7 +12,7 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 - `patterns.ds` — the match surfaces: struct, enum-case, nested struct, guard, and tuple patterns.
 - `mutation.ds` — rebindable `var` locals, UFCS method calls, the counted loop, and the fallible `parse_int` extraction through `.err`.
 - `containers.ds` — the container closes over CALLG dispatch: cons, tail, collect, the checked first, and max over both numeric instances.
-- `records_lists.ds` — a record-element list over the native result span: list_push/list_get, `.ok`/`.err` extraction, and field projection out of the element.
+- `records_lists.ds` — a record-element list over the native result span: the push/get members, `.ok`/`.err` extraction, and field projection out of the element.
 - `script_entry.ds` — top-level statements folding into a synthesized `main` beside pure declarations, an early return ending the run.
 - `schema.ds` — the comptime witness: functions running at compile time over declared fields and enum cases, their answers embedded as literals.
 

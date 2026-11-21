@@ -24,7 +24,7 @@ fn guarded(n: int) -> int | net_err {
     spawn {
       var i = 0
       while i < n {
-        xs.list_push(i)
+        xs.push(i)
         i = i + 1
       }
     }
@@ -42,7 +42,7 @@ fn guarded_cancel(n: int) -> int | net_err {
     spawn {
       var i = 0
       while i < n {
-        xs.list_push(i)
+        xs.push(i)
         i = i + 1
       }
     }
@@ -55,7 +55,7 @@ fn mixed(n: int) -> int | net_err {
   var xs = list[int]()
   nursery {
     spawn {
-      xs.list_push(7)
+      xs.push(7)
     }
     spawn {
       cancel(refused)
@@ -63,7 +63,7 @@ fn mixed(n: int) -> int | net_err {
     spawn {
       var i = 0
       while i < n {
-        xs.list_push(i)
+        xs.push(i)
         i = i + 1
       }
     }

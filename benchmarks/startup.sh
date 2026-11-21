@@ -11,7 +11,7 @@
 #               arithmetic plus one print: front-end + check + lower +
 #               VM entry on an empty program graph.
 #   small-real  `ds run startup/small-real.ds` — one list literal, a map
-#               through the interim constructor + map_set, one reduce:
+#               through the constructor + the set member, one reduce:
 #               the same pipeline plus first-allocations cost.
 #   warm        `ds run startup/trivial.ds` served from the script-mode
 #               dsmod cache (a private DS_CACHE primed untimed) — the

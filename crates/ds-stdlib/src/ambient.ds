@@ -214,6 +214,13 @@ impl bytes { fn default() -> bytes { bytes_of(list[byte]()) } }
 // generic's instance table; the ordered key face presents as a member.
 impl[k, v] map[k, v] {
   fn keys (self) -> list[k] { map_keys(self) }
+  fn get (self, key: k) -> v | none
+  fn set (mut self, key: k, value: v) -> map[k, v]
+}
+
+impl[t] list[t] {
+  fn get (self, i: int) -> t | none
+  fn push (mut self, x: t) -> list[t]
 }
 
 pub tag int
@@ -317,17 +324,17 @@ pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 pub extern fn tail[t] (xs: list[t]) -> list[t]
 pub extern fn list_new[t] () -> list[t]
 pub extern fn list_len[t] (xs: list[t]) -> int
-pub extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
 pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
-pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()
-pub extern fn map_new[k, v] () -> map[k, v]
-pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
-pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn map_new[k, v] () -> map[k, v]
+extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
 pub extern fn map_len[k, v] (m: map[k, v]) -> int
 // The ordered key face: the map's entry order, one word per key — the
 // iteration seam the checked reads compose over (the value spans read
 // back through map_get).
-pub extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
+extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
 // The bytes collection's native face: `bytes_of` is the construction
 // seam (the `list[byte]` bridge in — one payload byte per element word),
 // `byte_list` the bridge back out (one word per byte), `byte_at`

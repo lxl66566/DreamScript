@@ -103,9 +103,12 @@ const LISTS_AMBIENT: &str = concat!(
     "trait Copyable { }\n",
     "struct list[t]\n",
     "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
     "extern fn println (msg: string) -> ()\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
 );
 
 const MAPS_AMBIENT: &str = concat!(
@@ -114,11 +117,14 @@ const MAPS_AMBIENT: &str = concat!(
     "tag bool\n",
     "trait Copyable { }\n",
     "struct map[k, v]\n",
-    "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
-    "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "struct list[t]\n",
     "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
     "extern fn len[t] (xs: t) -> int\n",
-    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
+    "impl[k, v] map[k, v] {\n",
+    "  fn get (self, key: k) -> v | none\n",
+    "  fn set (mut self, key: k, value: v) -> map[k, v]\n",
+    "  fn keys (self) -> list[k]\n",
+    "}\n",
 );
 
 const EXTRACTION_AMBIENT: &str = concat!(
@@ -130,12 +136,16 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "struct list[t]\n",
     "struct map[k, v]\n",
     "extern fn println (msg: string) -> ()\n",
-    "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "extern fn get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
     "extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
     "extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "}\n",
+    "impl[k, v] map[k, v] {\n",
+    "  fn get (self, key: k) -> v | none\n",
+    "}\n",
 );
 
 /// One corpus file plus its ambient source, re-parsed every round so both

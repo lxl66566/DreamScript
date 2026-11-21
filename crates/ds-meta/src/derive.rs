@@ -1093,6 +1093,31 @@ fn pair_compare(lhs: Expr, rhs: Expr, mint: &mut Mint) -> Expr {
     }
 }
 
+/// One inherent-member call over a receiver expression:
+/// `recv.name(args)` — the collection face's member spellings.
+fn member_call(recv: Expr, name: &str, args: Vec<Expr>, mint: &mut Mint) -> Expr {
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(Expr::Field {
+            span: mint.span(),
+            recv: Box::new(recv),
+            name: Ident {
+                span: mint.span(),
+                name: name.to_owned(),
+            },
+        }),
+        args: args
+            .into_iter()
+            .map(|value| CallArg {
+                span: value.span(),
+                name: None,
+                value,
+            })
+            .collect(),
+        trailing: None,
+    }
+}
+
 /// A field read of the receiver or the other operand: `base.name`.
 fn field_read(base: &str, field: &Ident, mint: &mut Mint) -> Expr {
     let recv = path_expr(base, mint.span());
@@ -3042,7 +3067,7 @@ fn list_read(
     };
     let array_read = path_expr(&array, mint.span());
     let index_read = path_expr(&index, mint.span());
-    let get = fn_call(mint, "list_get", vec![array_read, index_read]);
+    let get = member_call(array_read, "get", vec![index_read], mint);
     let elem = Expr::Call {
         span: mint.span(),
         callee: Box::new(Expr::Field {
@@ -3064,9 +3089,7 @@ fn list_read(
     let mut loop_body = vec![local(mint, &at, elem, false)];
     loop_body.extend(read.0);
     let out_read = path_expr(&out, mint.span());
-    loop_body.push(expr_stmt(fn_call(mint, "list_push", vec![
-        out_read, read.1,
-    ])));
+    loop_body.push(expr_stmt(member_call(out_read, "push", vec![read.1], mint)));
     loop_body.push(assign_add(mint, &index));
     let index_cmp = path_expr(&index, mint.span());
     let array_len_arg = path_expr(&array, mint.span());
@@ -3242,7 +3265,7 @@ fn case_decode_arm(
                 let at = fresh_binder(fresh, "e");
                 let array_read = path_expr(&array, mint.span());
                 let index_arg = int_answer(mint, &index.to_string());
-                let get = fn_call(mint, "list_get", vec![array_read, index_arg]);
+                let get = member_call(array_read, "get", vec![index_arg], mint);
                 let elem = Expr::Call {
                     span: mint.span(),
                     callee: Box::new(Expr::Field {
@@ -3661,10 +3684,10 @@ fn member_rows(
     Some(stmts)
 }
 
-/// One member's `map_set` statement at minted spans.
+/// One member's `set`-member statement at minted spans.
 fn member_set(mint: &mut Mint, map: &str, key: Expr, value: Expr) -> Stmt {
     let map_read = path_expr(map, mint.span());
-    expr_stmt(fn_call(mint, "map_set", vec![map_read, key, value]))
+    expr_stmt(member_call(map_read, "set", vec![key, value], mint))
 }
 
 /// The value write keyed by one written type over the value expression
@@ -3860,7 +3883,7 @@ fn list_write(
     )?;
     let mut body = rows;
     let out_read = path_expr(&out, mint.span());
-    body.push(expr_stmt(fn_call(mint, "list_push", vec![out_read, value])));
+    body.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
     let pat_span = mint.span();
     let walk = Expr::For {
         span: mint.span(),
@@ -4051,7 +4074,7 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                         )?;
                         stmts.extend(rows);
                         let out_read = path_expr(&out, mint.span());
-                        stmts.push(expr_stmt(fn_call(mint, "list_push", vec![out_read, value])));
+                        stmts.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
                     }
                     let out_read = path_expr(&out, mint.span());
                     let value = case_value(mint, "json_array", "items", out_read);

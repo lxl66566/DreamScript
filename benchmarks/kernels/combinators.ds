@@ -3,7 +3,7 @@
 // reentry surface: the VM reenters the interpreter once per element per
 // combinator). The int pipeline runs 250 rounds of map (x*2), filter
 // (x % 3 == 0), reduce (sum) over a 10000-element list built with
-// list_push; the string pipeline runs 40 rounds of map (suffix concat),
+// the push member; the string pipeline runs 40 rounds of map (suffix concat),
 // filter (len < 5), reduce (concat join) over a 1000-element list,
 // checksummed by length so the golden stays short. Every lambda is
 // non-capturing by construction, so the reentry measures CALLG
@@ -14,7 +14,7 @@ fn main() -> () {
   var xs: list[int] = list[int]()
   var i: int = 0
   while i < 10000 {
-    list_push(xs, (i * 37) % 900 + 100)
+    xs.push((i * 37) % 900 + 100)
     i += 1
   }
   var sum: int = 0
@@ -28,7 +28,7 @@ fn main() -> () {
   var ys: list[string] = list[string]()
   var j: int = 0
   while j < 1000 {
-    list_push(ys, "w${j % 40}")
+    ys.push("w${j % 40}")
     j += 1
   }
   var lensum: int = 0

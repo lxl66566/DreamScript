@@ -7,7 +7,7 @@
 // own nursery while the enclosing drive owns it — the interlock's
 // two-level join-across-levels shape, kept at 1% so the cycle cost
 // dominates. One final walk re-reads the shared out-list through
-// checked list_get with .ok/.err extraction to checksum the children's
+// checked get member with .ok/.err extraction to checksum the children's
 // answers; the walk runs once, not per cycle. Every integer
 // intermediate stays non-negative below 2^47.
 
@@ -17,12 +17,12 @@ fn deep(i: int, label: string) -> int | net_err {
     spawn {
       nursery {
         spawn {
-          list_push(sub, len(label) + i % 7)
+          sub.push(len(label) + i % 7)
         }
       }
     }
   }
-  const cell = list_get(sub, 0)
+  const cell = sub.get(0)
   cell.ok((e: int) => e).err((_: none) => 0)
 }
 
@@ -35,10 +35,10 @@ fn main() -> () {
   while i < n {
     nursery {
       spawn {
-        list_push(out, (i % 97) + (i % 13))
+        out.push((i % 97) + (i % 13))
       }
       spawn {
-        list_push(out, len(label) + i % 11)
+        out.push(len(label) + i % 11)
       }
     }
     if i % 100 == 99 {
@@ -54,7 +54,7 @@ fn main() -> () {
   var j: int = 0
   const m: int = len(out)
   while j < m {
-    const cell = list_get(out, j)
+    const cell = out.get(j)
     sum += cell.ok((e: int) => e).err((_: none) => 0)
     j += 1
   }

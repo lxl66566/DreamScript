@@ -3,8 +3,10 @@
 
 tag int
 struct list[t]
-extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+impl[t] list[t] {
+  fn push(mut self, x: t) -> list[t]
+}
 fn grow() -> () {
   const xs = [1]
-  xs.list_push(2)
+  xs.push(2)
 }

@@ -1,5 +1,5 @@
 // source: the native result span channel round 2026-11-12 (list[record] elements)
-// purpose: a list[record] built with list_push over whole element spans, read through the checked list_get with .ok/.err extraction (a missing index answered on the none side), the field projections summed over the explicit-index walk
+// purpose: a list[record] built with the push member over whole element spans, read through the checked get member with .ok/.err extraction (a missing index answered on the none side), the field projections summed over the explicit-index walk
 // items:
 // part: stage: typecheck
 // cost: stage: run
@@ -13,16 +13,16 @@ fn cost(p: part) -> int {
 }
 
 fn part_at(xs: list[part], i: int) -> part {
-  const cell = list_get(xs, i)
+  const cell = xs.get(i)
   cell.ok((p: part) => p).err((_: none) => part { label: "none", qty: 0, cents: 0 })
 }
 
 fn main() -> () {
   var xs = list[part]()
-  xs.list_push(part { label: "nut", qty: 4, cents: 9 })
-  xs.list_push(part { label: "bolt", qty: 2, cents: 25 })
-  xs.list_push(part { label: "washer", qty: 8, cents: 3 })
-  const miss = list_get(xs, 7)
+  xs.push(part { label: "nut", qty: 4, cents: 9 })
+  xs.push(part { label: "bolt", qty: 2, cents: 25 })
+  xs.push(part { label: "washer", qty: 8, cents: 3 })
+  const miss = xs.get(7)
   const missing = miss.ok((p: part) => p.label).err((_: none) => "absent")
   var total = 0
   var i = 0

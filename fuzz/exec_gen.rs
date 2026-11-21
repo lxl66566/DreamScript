@@ -1494,6 +1494,14 @@ impl Gen<'_> {
         self.decl("extern fn list_len[t] (xs: list[t]) -> int");
         self.decl("extern fn list_push[t] (xs: mut list[t], x: t) -> ()");
         self.decl("extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none");
+        self.decl(
+            "impl[t] list[t] {\n  fn get (self, i: int) -> t | none\n  fn push (mut self, x: t) \
+             -> list[t]\n}",
+        );
+        self.decl(
+            "impl[k, v] map[k, v] {\n  fn get (self, key: k) -> v | none\n  fn set (mut self, \
+             key: k, value: v) -> map[k, v]\n}",
+        );
         self.decl("#[derive(from_json, to_json)]\nstruct slack { xs: list[int]? }");
         let (sp, sa) = (self.name("sp"), self.name("sa"));
         self.line(&format!("const {sp} = slack {{ xs: [{a}, {b}] }}"));

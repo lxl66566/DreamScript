@@ -1,7 +1,7 @@
 // Kernel: the list surface — build one delimited string (N = 20000
 // three-digit pieces joined by ';', grouped like strings.ds to bound
 // copying, the trailing separator chopped by a known-length substring),
-// split it once into N parts, then 120 rounds of checked list_get reads
+// split it once into N parts, then 120 rounds of checked get-member reads
 // checksummed with parse_int, and a bounded list_concat ladder: each
 // concat copies both operands into a fresh list, so C = 32 concats of
 // the N-part list cost ~N*C^2/2 = 10M element words — C stays small so
@@ -34,7 +34,7 @@ fn main() -> () {
   while p < 120 {
     var i: int = 0
     while i < n {
-      const cell = list_get(parts, i)
+      const cell = parts.get(i)
       const w = cell.ok((x: string) => x).err((_: none) => "0")
       sum += w.parse_int().err((_: parse_err) => 0)
       i += 1
@@ -51,7 +51,7 @@ fn main() -> () {
   var j: int = 0
   const m: int = n * 33
   while j < m {
-    const cell = list_get(acc, j)
+    const cell = acc.get(j)
     const w = cell.ok((x: string) => x).err((_: none) => "0")
     total += w.parse_int().err((_: parse_err) => 0)
     j += 1

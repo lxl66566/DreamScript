@@ -21,8 +21,8 @@ enum parse_fail { bad_number(string) }
 
 fn parse_row(line: string) -> row | parse_fail {
   const parts = line.split(',')
-  const name = list_get(parts, 0).unwrap_or("?")          // checked read: t | none
-  const parsed = list_get(parts, 1).unwrap_or("x").parse_int()
+  const name = parts.get(0).unwrap_or("?")              // checked read: t | none
+  const parsed = parts.get(1).unwrap_or("x").parse_int()
   if parsed is int {                                      // is narrows the union
     row { name, hits: parsed }                            // if is an expression; { name } puns
   } else {
@@ -35,7 +35,7 @@ fn load(text: string) -> list[row] {
   for line in text.split('\n') {
     const r = parse_row(line)
     if r is row {                                         // keep the good members only
-      rows.list_push(r)
+      rows.push(r)
     }
   }
   rows
@@ -72,7 +72,7 @@ fn main() -> () {
   nursery {
     for p in paths {
       spawn {                                // children run as fibers
-        list_push(sizes, weight(p))
+        sizes.push(weight(p))
       }
     }
   }                                          // scope exit joins every child

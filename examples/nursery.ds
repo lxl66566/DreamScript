@@ -26,7 +26,7 @@ fn fetch_all(urls: list[string]) -> int | net_err {
         match fetch_body(u) {
           timeout => cancel(timeout)
           refused => cancel(refused)
-          body => bodies.list_push(body)
+          body => bodies.push(body)
         }
       }
     }

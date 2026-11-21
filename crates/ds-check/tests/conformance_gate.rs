@@ -92,6 +92,15 @@ const SWEEP_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub struct map[k, v]\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
+    "impl[k, v] map[k, v] {\n",
+    "  fn get (self, key: k) -> v | none\n",
+    "  fn set (mut self, key: k, value: v) -> map[k, v]\n",
+    "  fn keys (self) -> list[k]\n",
+    "}\n",
 );
 
 /// Ambient stdlib stubs per the generics_coherent_traits list.
@@ -164,11 +173,13 @@ const NURSERY_AMBIENT: &str = concat!(
     "  refused\n",
     "}\n",
     "pub extern fn list_len[t] (xs: list[t]) -> int\n",
-    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn str[t] (v: t) -> string\n",
     "pub extern fn println (msg: string) -> ()\n",
     "pub extern fn cancel[t] (e: t) -> ()\n",
+    "impl[t] list[t] {\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
 );
 
 /// Ambient stdlib stubs for closures_surface: the primitives alone; the
@@ -205,20 +216,23 @@ const LISTS_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub extern fn list_len[t] (xs: list[t]) -> int\n",
-    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
     "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
     "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
     "pub extern fn collect[t] (xs: list[t]) -> list[t]\n",
     "pub extern fn join (parts: list[string], sep: char) -> string\n",
     "pub extern fn println (msg: string) -> ()\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
 );
 
-/// Ambient stdlib stubs per the maps_surface list: the checked map reads
-/// the constructor and builder calls build against, the ordered key face
-/// the entry-order item walks, the free `len` the member-count item
-/// spells, and the list the key face answers (the `get` spelling is the
-/// corpus file's own extern — the ambient shed its dead declarations).
+/// Ambient stdlib stubs per the maps_surface list: the constructor, the
+/// inherent member spellings the builder calls and checked reads run
+/// through (the native seams' `set`/`get`/`keys` members), the entry
+/// count, the free `len` the member-count item spells, and the list the
+/// key face answers.
 const MAPS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
@@ -226,16 +240,17 @@ const MAPS_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct map[k, v]\n",
     "pub struct list[t]\n",
-    "pub extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
-    "pub extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
     "pub extern fn map_len[k, v] (m: map[k, v]) -> int\n",
-    "pub extern fn map_keys[k, v] (m: map[k, v]) -> list[k]\n",
     "pub extern fn len[t] (xs: t) -> int\n",
+    "impl[k, v] map[k, v] {\n",
+    "  fn get (self, key: k) -> v | none\n",
+    "  fn set (mut self, key: k, value: v) -> map[k, v]\n",
+    "  fn keys (self) -> list[k]\n",
+    "}\n",
 );
-/// Ambient for extraction_family: the primitives, the collection reads,
-/// the family's own extern spellings, and the ambient-owned config the
-/// b14 spellings extract over (the `get` extern is the corpus file's
-/// own).
+/// Ambient for extraction_family: the primitives, the collection member
+/// reads, the family's own extern spellings, and the ambient-owned
+/// config the b14 spellings extract over.
 const EXTRACTION_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
@@ -246,11 +261,16 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "pub struct map[k, v]\n",
     "pub struct config { host: string, port: int?, retries: int }\n",
     "pub extern fn println (msg: string) -> ()\n",
-    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",
     "pub extern fn ok_or[t, e] (x: t?, err: e) -> t | e\n",
     "pub extern fn map_err[t, e, e2] (x: t | e, f: fn(e) -> e2) -> t | e2\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "}\n",
+    "impl[k, v] map[k, v] {\n",
+    "  fn get (self, key: k) -> v | none\n",
+    "}\n",
 );
 
 /// Ambient stdlib stubs for trait_defaults: the primitives, `len` (the
@@ -272,22 +292,26 @@ const RECORDS_LISTS_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub extern fn list_len[t] (xs: list[t]) -> int\n",
-    "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
-    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "pub extern fn println (msg: string) -> ()\n",
+    "impl[t] list[t] {\n",
+    "  fn get (self, i: int) -> t | none\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
 );
 
-/// Ambient stdlib stubs for frozen_iteration: the ambient list surface
-/// the builder calls and the mutation ride, the free `len`, and
+/// Ambient stdlib stubs for frozen_iteration: the list surface's push
+/// member the builder calls and the mutation ride, the free `len`, and
 /// `println`; the file owns nothing.
 const FROZEN_ITER_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
-    "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn println (msg: string) -> ()\n",
+    "impl[t] list[t] {\n",
+    "  fn push (mut self, x: t) -> list[t]\n",
+    "}\n",
 );
 
 /// Ambient stdlib stubs for transitive_dispatch: the primitives, the

@@ -8,8 +8,8 @@ enum grade { plain, scored(int) }
 
 fn main() -> () {
   var one = list[grade]()
-  list_push(one, plain)
+  one.push(plain)
   var two = list[grade]()
-  list_push(two, plain)
+  two.push(plain)
   println("${one == two}")
 }

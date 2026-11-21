@@ -1,8 +1,8 @@
-// Kernel: the interim maps surface — map_new/set/get/len builder-call
+// Kernel: the maps surface — the constructor and set/get/len member
 // sequences over string keys by content (builtin 28-31, the B3
 // builder-call interim; no iteration promise, so every read walks a key
 // rebuilt by interpolation). One map of 5000 distinct keys is filled
-// (one map_set per key), read for 16 rounds of checked map_get over all
+// (one set per key), read for 16 rounds of checked get over all
 // keys with the .ok/.err extraction, probed by 2000 missing keys, then
 // overwritten key-for-key (values replaced, map_len observed per set),
 // and re-read once so the final checksum pins the overwritten values.
@@ -12,7 +12,7 @@ fn main() -> () {
   var m = map[string, int]()
   var i: int = 0
   while i < 5000 {
-    map_set(m, "key-${i % 7}-${i}", (i * 37) % 900 + 100)
+    m.set("key-${i % 7}-${i}", (i * 37) % 900 + 100)
     i += 1
   }
   var sum: int = 0
@@ -20,7 +20,7 @@ fn main() -> () {
   while r < 16 {
     var j: int = 0
     while j < 5000 {
-      const cell = map_get(m, "key-${j % 7}-${j}")
+      const cell = m.get("key-${j % 7}-${j}")
       sum += cell.ok((x: int) => x).err((_: none) => -1)
       j += 1
     }
@@ -29,21 +29,21 @@ fn main() -> () {
   var miss: int = 0
   var q: int = 0
   while q < 2000 {
-    const cell = map_get(m, "missing-${q}")
+    const cell = m.get("missing-${q}")
     miss += cell.ok((x: int) => x).err((_: none) => -1)
     q += 1
   }
   var n2: int = 0
   var k: int = 0
   while k < 5000 {
-    map_set(m, "key-${k % 7}-${k}", k % 100)
+    m.set("key-${k % 7}-${k}", k % 100)
     n2 += map_len(m)
     k += 1
   }
   var sum2: int = 0
   var w: int = 0
   while w < 5000 {
-    const cell = map_get(m, "key-${w % 7}-${w}")
+    const cell = m.get("key-${w % 7}-${w}")
     sum2 += cell.ok((x: int) => x).err((_: none) => -1)
     w += 1
   }

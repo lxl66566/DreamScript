@@ -2309,10 +2309,24 @@ impl FileResolver<'_> {
     fn enforce_vis(&mut self, span: Span, def: DefId) {
         let def_decl = self.package.def(def);
         if def_decl.vis == Vis::Private && def_decl.span.file != span.file {
+            // the retired collection spellings name their member
+            // replacement in the message; every other private name keeps
+            // the plain boundary refusal
+            let hint = match def_decl.name.as_str() {
+                "list_get" => "; the member spelling is `xs.get(i)`",
+                "list_push" => "; the member spelling is `xs.push(x)`",
+                "map_get" => "; the member spelling is `m.get(k)`",
+                "map_set" => "; the member spelling is `m.set(k, v)`",
+                "map_keys" => "; the member spelling is `m.keys()`",
+                _ => "",
+            };
             self.diags.push(
                 Diagnostic::error(
                     ErrorCode::PrivateUse,
-                    format!("`{}` is private to its defining file [G4]", def_decl.name),
+                    format!(
+                        "`{}` is private to its defining file [G4]{hint}",
+                        def_decl.name
+                    ),
                 )
                 .with_primary(span, "used outside the defining file")
                 .with_secondary(def_decl.span, "defined private here"),

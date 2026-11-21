@@ -23,7 +23,7 @@ fn make_adder(k: int) -> fn(int) -> int {
 }
 
 fn at(xs: list[int], i: int) -> int {
-  const cell = list_get(xs, i)
+  const cell = xs.get(i)
   cell.ok((x: int) => x).err((_: none) => -1)
 }
 
@@ -42,9 +42,9 @@ fn main() -> () {
   const add5 = make_adder(5)
   println("factory ${add5(37)}")
   var fns = list[fn(int) -> int]()
-  fns.list_push(inc)
-  fns.list_push((x: int) => x * 3)
-  const cell = list_get(fns, 0)
+  fns.push(inc)
+  fns.push((x: int) => x * 3)
+  const cell = fns.get(0)
   const first = cell.ok((f: fn(int) -> int) => f(41)).err((_: none) => -1)
   println("fns ${len(fns)} ${first}")
   const label = double_port("34")

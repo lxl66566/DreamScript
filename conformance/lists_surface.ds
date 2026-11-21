@@ -21,7 +21,7 @@ fn sum_ints() -> int {
   var total: int = 0
   var i: int = 0
   while i < list_len(xs) {
-    const cell = list_get(xs, i)
+    const cell = xs.get(i)
     total += cell.ok((x: int) => x).err((_: none) => 0)
     i += 1
   }
@@ -31,7 +31,7 @@ fn sum_ints() -> int {
 fn words_report() -> string {
   const words = ["alpha", "beta", "gamma"]
   const joined = list_concat(words, ["delta"])
-  const first = list_get(joined, 0)
+  const first = joined.get(0)
   first.ok((w: string) => w).err((_: none) => "?")
 }
 

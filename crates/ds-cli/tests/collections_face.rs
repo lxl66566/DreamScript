@@ -1,13 +1,15 @@
 //! The collection face end to end through the `ds` binary (the H5.5
 //! member-tier ruling): the taught spellings present over the ambient —
-//! the `list[t]()`/`map[k, v]()` empty constructors, `xs.len()` through
-//! the free generic's List instance, `m.keys()` through the ambient's
-//! inherent member over the map's ordered key face, and split/join over
-//! the one char separator — while the element-carrying member spellings
-//! keep their prefixed native seams: a generic inherent member whose
-//! parameter or answer spans the collection's own type variable has no
-//! static word kind, so the shape checks clean and refuses at lowering
-//! (the seam pinned generically in `generic_impl_refusals.rs`).
+//! the `list[t]()`/`map[k, v]()` empty constructors, the inherent member
+//! spellings over the native seams (`xs.push(x)` and `m.set(k, v)`
+//! mutating in place and answering the collection, `xs.get(i)` and
+//! `m.get(k)` the checked reads), `xs.len()` through the free generic's
+//! List instance, `m.keys()` through the ambient's inherent member over
+//! the map's ordered key face, and split/join over the one char
+//! separator — while a ds-bodied member over the collection's own type
+//! variables keeps its lowering refusal: an element-carrying generic
+//! member body has no static word kind (the seam pinned generically in
+//! `generic_impl_refusals.rs`).
 
 use std::{
     env, fs,
@@ -59,6 +61,7 @@ fn the_member_spellings_run_over_the_ambient() {
             "keys 2\n",
             "csv alpha,beta,gamma\n",
             "empty 0 0\n",
+            "get 2 2\n",
             "0\n",
         )
     );
@@ -87,17 +90,44 @@ fn built_module_reproduces_the_source_run() {
             "keys 2\n",
             "csv alpha,beta,gamma\n",
             "empty 0 0\n",
+            "get 2 2\n",
             "0\n",
         )
     );
     let _ = fs::remove_file(&module);
 }
 
-/// The refused shape: the checked-read member over the collection's own
-/// type variables checks clean (exit 0, empty stderr) and refuses only
-/// at lowering, naming the member-body seam exactly.
+/// The retired spellings: every prefix form (the plain call and the
+/// UFCS dot) refuses at the check with the private-tier diagnostic
+/// naming its member replacement.
 #[test]
-fn the_checked_read_member_refuses_at_lowering() {
+fn the_retired_prefix_spellings_refuse_naming_the_member() {
+    let check = run(ds()
+        .arg("check")
+        .arg(fixture("collections_prefix_refusal.ds")));
+    assert_ne!(check.status.code(), Some(0), "the run failed: {check:?}");
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    for retired in [
+        "`list_push` is private to its defining file [G4]; the member spelling is `xs.push(x)`",
+        "`list_get` is private to its defining file [G4]; the member spelling is `xs.get(i)`",
+        "`map_set` is private to its defining file [G4]; the member spelling is `m.set(k, v)`",
+        "`map_get` is private to its defining file [G4]; the member spelling is `m.get(k)`",
+        "`map_keys` is private to its defining file [G4]; the member spelling is `m.keys()`",
+    ] {
+        assert!(stderr.contains(retired), "the refusal: {stderr}");
+    }
+    assert_eq!(
+        stderr.matches("is private to its defining file").count(),
+        6,
+        "every retired use refuses exactly once: {stderr}"
+    );
+}
+
+/// The refused shape: a ds-bodied member over the collection's own type
+/// variables checks clean (exit 0, empty stderr) and refuses only at
+/// lowering, naming the member-body seam exactly.
+#[test]
+fn the_ds_bodied_member_refuses_at_lowering() {
     let check = run(ds()
         .arg("check")
         .arg(fixture("collections_member_refusal.ds")));

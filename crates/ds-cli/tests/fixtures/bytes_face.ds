@@ -25,9 +25,9 @@ fn main() -> () {
   println(bytes_of(list[byte]()).show())
   const high = byte_at(utf8_encode("ÿ"), 0).unwrap_or(b'\0')
   var xs = list[byte]()
-  list_push(xs, b'1')
-  list_push(xs, b'2')
-  list_push(xs, high)
+  xs.push(b'1')
+  xs.push(b'2')
+  xs.push(high)
   println(bytes_of(xs).show())
   const w = wrap { b: ab }
   println(w.show())

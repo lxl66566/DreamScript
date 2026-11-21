@@ -5,6 +5,15 @@
 
 use super::*;
 
+/// A bodiless ambient collection member's native routing: the extern
+/// def the call lowers through, and whether the member re-answers the
+/// receiver after the native's in-place mutation (`push`/`set`).
+#[derive(Clone, Copy)]
+struct NativeMember {
+    def: DefId,
+    window: bool,
+}
+
 impl<'a> FnLower<'a, '_, '_> {
     // ---- calls ------------------------------------------------------------------
 
@@ -740,6 +749,13 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Expr::MapApply { .. } = &**callee {
             return self.map_ctor_call(args);
         }
+        // A bodiless ambient collection member (`xs.get(i)`, `xs.push(x)`,
+        // `m.get(k)`, `m.set(k, v)`) routes to its native seam through the
+        // free-callee path below: the receiver feeds the first argument,
+        // exactly like the retired free spelling's own call. `push`/`set`
+        // additionally re-answer the receiver after the native's unit word
+        // (the member's answer is the collection itself).
+        let native_member = self.native_member_def(call_span);
         // the callee and its argument expressions in call order: a plain
         // name call feeds the written arguments; a UFCS dot-call `x.f(a)`
         // resolves to the free function and stages the receiver as its
@@ -790,16 +806,31 @@ impl<'a> FnLower<'a, '_, '_> {
                     )
                 },
                 Some(Res::Dot(DotRes::Methods { candidates })) => {
-                    let dispatch =
-                        self.resolve_method_dispatch(call_span, name.span, Some(recv), candidates)?;
-                    (
-                        None,
-                        name.span,
-                        std::iter::once(&**recv)
-                            .chain(args.iter().map(|arg| &arg.value))
-                            .collect(),
-                        Some(dispatch),
-                    )
+                    if let Some(member) = native_member {
+                        (
+                            Some(member.def),
+                            name.span,
+                            std::iter::once(&**recv)
+                                .chain(args.iter().map(|arg| &arg.value))
+                                .collect(),
+                            None,
+                        )
+                    } else {
+                        let dispatch = self.resolve_method_dispatch(
+                            call_span,
+                            name.span,
+                            Some(recv),
+                            candidates,
+                        )?;
+                        (
+                            None,
+                            name.span,
+                            std::iter::once(&**recv)
+                                .chain(args.iter().map(|arg| &arg.value))
+                                .collect(),
+                            Some(dispatch),
+                        )
+                    }
                 },
                 // The type-keyed member call: no receiver word stages, so
                 // the written arguments alone feed the body; the dispatch
@@ -1090,6 +1121,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // the receiver's checked type mints a generic call's evidence
         // words (the builtin instance it addresses) [H3]
         let mut receiver_ty: Option<Ty> = None;
+        // a `push`/`set` member call's receiver place: the native window
+        // mutates it in place, and the member re-answers a duplicate of
+        // its word after the call
+        let window_answer = native_member.is_some_and(|member| member.window);
+        let mut window_receiver: Option<TypedPlace> = None;
         // the call's borrow window opens before operand evaluation: a
         // later operand's own use can fire an earlier word's last-use
         // dec there, and the window pins every word this CALL reads
@@ -1134,6 +1170,9 @@ impl<'a> FnLower<'a, '_, '_> {
             let direct = offered && self.scalar_dst.take().is_none();
             if index == 0 {
                 receiver_ty = Some(arg_val.ty);
+                if window_answer {
+                    window_receiver = Some(arg_val.clone());
+                }
             }
             let deinit = self.deinit_claim(arg_val.ty, arg.span())?;
             if deinit.is_some() {
@@ -1344,7 +1383,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // transfer a local's does (H2): the pool FuncRef carries the
         // module boundary, the slide a pure fact of the two layouts, so
         // the transfer crosses the dsmod seam with the stack flat
-        let in_place_tail = native_tail_return || closure_tail;
+        // a collection-mutating member (`push`/`set`) answers the receiver
+        // after the native's unit word, so it always lowers in place: the
+        // transfer would hand the caller the unit word where the member's
+        // answer is the collection
+        let in_place_tail = native_tail_return || closure_tail || (tail && window_answer);
         // the frame-ending transfer: the exit drops and every claim hook
         // stage through the overlay as their own argument windows, so the
         // call's argument span stages after them, ahead of the CALLT
@@ -1391,6 +1434,13 @@ impl<'a> FnLower<'a, '_, '_> {
             if counted[index] {
                 if defaulted.contains(&index) {
                     self.rc.staged_native(slot, false);
+                } else if window_answer && word_arg.get(index) == Some(&0) {
+                    // a collection-mutating member's receiver: the
+                    // member re-answers a duplicate of the word after
+                    // the call, so the window's flush never decs a
+                    // dying receiver — the answer's own count keeps
+                    // the object
+                    self.rc.staged_native_keep(slot);
                 } else {
                     match target {
                         Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. } => {
@@ -1463,6 +1513,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 &mut staged,
                 receiver_ty,
                 tail_transfer,
+                native_member.is_some(),
             )?);
         }
         // a trait-method dispatch site [H3]: a call into a generic impl
@@ -1760,14 +1811,38 @@ impl<'a> FnLower<'a, '_, '_> {
             });
         }
         self.rc.native_done(&mut self.code);
-        let place = self.result_place(ty, &result_words, callee_span)?;
-        // a known-function callee's fn-typed result is the scalar its own
-        // provenance proved (a factory's result classifies Ref instead),
-        // so the result word joins the provenance oracle and widens into
-        // a re-storable slot like a named fn value
-        if *result_words == [SlotType::Fn] && matches!(target, Callee::Local(_)) {
-            self.scalar_fn_words.insert(place.base);
-        }
+        let place = if let Some(recv) = window_receiver {
+            // a collection-mutating member (`xs.push(x)`, `m.set(k, v)`)
+            // answers the receiver: the native window appended in place
+            // and answered the unit word on the overlay, so the member's
+            // result is a duplicate of the receiver's own word
+            let word = single(
+                &self
+                    .word_addrs(&recv.place, recv.ty)
+                    .map_err(|err| err.respanned(callee_span))?,
+                callee_span,
+            )?;
+            let base = self.alloc(&[SlotType::Ref])?;
+            self.emit(Op::Mov {
+                dst: Slot::body(base),
+                src: Slot::body(word.slot),
+            });
+            self.rc.duped(&mut self.code, base, word.slot);
+            Place {
+                base,
+                shape: PlaceShape::Word(SlotType::Ref),
+            }
+        } else {
+            let place = self.result_place(ty, &result_words, callee_span)?;
+            // a known-function callee's fn-typed result is the scalar its own
+            // provenance proved (a factory's result classifies Ref instead),
+            // so the result word joins the provenance oracle and widens into
+            // a re-storable slot like a named fn value
+            if *result_words == [SlotType::Fn] && matches!(target, Callee::Local(_)) {
+                self.scalar_fn_words.insert(place.base);
+            }
+            place
+        };
         if in_place_tail {
             // the in-place tail call (a non-root native or generic tail,
             // or a local tail staging a closure into a callable-defaulted
@@ -2228,6 +2303,7 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &mut Vec<SlotType>,
         receiver_ty: Option<Ty>,
         defer: bool,
+        member_routed: bool,
     ) -> Result<BuiltinInstance, LowerError> {
         let sig = self
             .analyzed
@@ -2235,26 +2311,41 @@ impl<'a> FnLower<'a, '_, '_> {
             .fns
             .get(&def)
             .ok_or_else(|| mismatch("a generic callee signature"))?;
-        let instantiations = self
-            .analyzed
-            .checked
-            .generic_calls
-            .get(&call)
-            .ok_or_else(|| {
-                LowerError::unsupported(
+        // a member-routed native (`xs.get(i)`, `m.get(k)`) carries no
+        // free-call instantiation record: the member's checked resolution
+        // is the instantiation's authority, and only the declared arity
+        // matters here — the instance word derives from the receiver's
+        // own type below
+        if member_routed {
+            if sig.generics.len() != usize::from(generic.evidence) {
+                return Err(LowerError::unsupported(
                     span,
                     "a generic call",
-                    "the checker recorded no full instantiation for it",
-                )
-            })?;
-        if instantiations.len() != sig.generics.len()
-            || instantiations.len() != usize::from(generic.evidence)
-        {
-            return Err(LowerError::unsupported(
-                span,
-                "a generic call",
-                "the builtin's evidence arity disagrees with the declaration's generics",
-            ));
+                    "the builtin's evidence arity disagrees with the declaration's generics",
+                ));
+            }
+        } else {
+            let instantiations =
+                self.analyzed
+                    .checked
+                    .generic_calls
+                    .get(&call)
+                    .ok_or_else(|| {
+                        LowerError::unsupported(
+                            span,
+                            "a generic call",
+                            "the checker recorded no full instantiation for it",
+                        )
+                    })?;
+            if instantiations.len() != sig.generics.len()
+                || instantiations.len() != usize::from(generic.evidence)
+            {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a generic call",
+                    "the builtin's evidence arity disagrees with the declaration's generics",
+                ));
+            }
         }
         let receiver = receiver_ty.ok_or_else(|| mismatch("a generic call's receiver"))?;
         let instance = self.shapes.builtin_instance(receiver).ok_or_else(|| {
@@ -2398,6 +2489,35 @@ impl<'a> FnLower<'a, '_, '_> {
     /// entering site carries the checker-recorded bounds (the serving
     /// instance per declared bound under the receiver's substitution),
     /// which stage the body's evidence demands.
+    /// The native seam a bodiless ambient collection member routes to:
+    /// `list`'s `get`/`push` and `map`'s `get`/`set` declare no ds body
+    /// (an element-carrying generic member body has no static word kind),
+    /// so the call lowers exactly like the native's own retired free
+    /// spelling — the receiver feeding the first argument. `window`
+    /// marks the in-place mutations whose member answer re-answers the
+    /// receiver after the native's unit word. A member with a ds body
+    /// (the `keys` shape, or a user impl's own body) lowers that body.
+    fn native_member_def(&self, call: Span) -> Option<NativeMember> {
+        let &method = self.analyzed.checked.inherent_calls.get(&call)?;
+        let MethodOwner::Inherent(target) = &self.analyzed.package.method(method).owner else {
+            return None;
+        };
+        let member = self.analyzed.package.method(method).name.as_str();
+        let (native, window) = match (target.as_str(), member) {
+            ("list", "get") => ("list_get", false),
+            ("list", "push") => ("list_push", true),
+            ("map", "get") => ("map_get", false),
+            ("map", "set") => ("map_set", true),
+            _ => return None,
+        };
+        let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;
+        if self.plan.impl_body(impl_site, member).is_some() {
+            return None;
+        }
+        let def = self.analyzed.package.lookup_value(native)?;
+        Some(NativeMember { def, window })
+    }
+
     fn resolve_inherent_method(
         &self,
         method: MethodId,
