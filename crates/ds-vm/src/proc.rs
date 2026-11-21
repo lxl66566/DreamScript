@@ -97,18 +97,24 @@ pub(crate) fn proc_run_fn(
 
 /// The `exit(code)` host member's seam: the deliberate process status
 /// rides the trap out to the drive, the CLI host's exit-code policy
-/// above it — the engine decides none (the die split's own rule). The
-/// staged word clamps to the portable 0..=255 status range. Never
-/// answers.
+/// above it — the engine decides none (the die split's own rule). A
+/// negative status traps (ruled 2026-11-22, the trapping-arithmetic
+/// precedent: a deliberate failure never reads as clean success), the
+/// message riding the Die trap out like the u32 range failure's own
+/// note; a wider status wraps to its low byte, POSIX process
+/// semantics. Never answers.
 pub(crate) fn exit_fn(
     _heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let code = i64_arg(args, 0)?;
-    Err(Trap::Exit {
-        code: code.clamp(0, 255),
-    })
+    if code < 0 {
+        return Err(Trap::Die {
+            message: format!("exit: {code} is out of range 0..=255"),
+        });
+    }
+    Err(Trap::Exit { code: code & 0xff })
 }
 
 #[cfg(test)]
@@ -246,10 +252,11 @@ mod tests {
         );
     }
 
-    /// `exit(code)` never answers: the clamped status rides the trap
-    /// out, the host's policy above the engine.
+    /// `exit(code)` never answers: the wrapped status rides the trap
+    /// out, a negative status trapping like the u32 range failure, the
+    /// host's policy above the engine.
     #[test]
-    fn exit_traps_with_the_clamped_status() {
+    fn exit_traps_negative_and_wraps_wide_statuses() {
         let mut objects = Objects::new(FIBER_ROOT);
         let mut fibers: Vec<Fiber> = Vec::new();
         let mut claims = vec![ClaimTable::default()];
@@ -260,14 +267,25 @@ mod tests {
             Err(Trap::Exit { code: 3 })
         );
         assert_eq!(
-            exit_fn(&mut heaps, &mut out, &[Value::I64(-1)]),
+            exit_fn(&mut heaps, &mut out, &[Value::I64(255)]),
+            Err(Trap::Exit { code: 255 })
+        );
+        assert_eq!(
+            exit_fn(&mut heaps, &mut out, &[Value::I64(256)]),
             Err(Trap::Exit { code: 0 }),
-            "a negative status clamps into the portable range"
+            "a wide status wraps to its low byte"
         );
         assert_eq!(
             exit_fn(&mut heaps, &mut out, &[Value::I64(1000)]),
-            Err(Trap::Exit { code: 255 }),
-            "a wide status clamps into the portable range"
+            Err(Trap::Exit { code: 232 }),
+            "a wide status wraps to its low byte"
+        );
+        assert_eq!(
+            exit_fn(&mut heaps, &mut out, &[Value::I64(-1)]),
+            Err(Trap::Die {
+                message: "exit: -1 is out of range 0..=255".to_owned()
+            }),
+            "a negative status traps, never reading as clean success"
         );
     }
 }

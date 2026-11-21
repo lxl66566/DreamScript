@@ -335,8 +335,10 @@ pub enum Trap {
     /// The `exit(code)` host member's deliberate process status (the
     /// CLI process surface, ruled 2026-11-21): like `Die`, the engine
     /// decides nothing — the code rides the trap out and the host's
-    /// exit-code policy applies above it. The native clamps the staged
-    /// word to the portable 0..=255 range.
+    /// exit-code policy applies above it. A negative status traps at
+    /// the seam (ruled 2026-11-22) and a wider one wraps to its low
+    /// byte, so the carried word is always the portable 0..=255
+    /// status.
     Exit {
         /// The requested process status.
         code: i64,

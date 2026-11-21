@@ -4,7 +4,8 @@
 //! stderr through `eprint`/`eprintln`, reads stdin through `read_line`,
 //! spawns children through `proc_run`, and the host owns the exit code
 //! — clean completion 0, a `die` trap 1, an explicit `exit(code)` its
-//! deliberate status.
+//! deliberate status (a negative code trapping to 1 with the standard
+//! trap note, a code past 255 wrapping to its low byte).
 
 use std::{
     env, fs,
@@ -217,6 +218,34 @@ fn the_host_owns_the_exit_code() {
     );
     let out = ds_run(&zero, &[]);
     assert_eq!(out.status.code(), Some(0), "exit(0) answers 0");
+
+    // a wide status wraps to its low byte, POSIX process semantics
+    let wide = source_file(
+        "wide",
+        "fn main() -> () {\n  exit(1000)\n  println(\"unreachable\")\n}\n",
+    );
+    let out = ds_run(&wide, &[]);
+    assert_eq!(out.status.code(), Some(232), "exit(1000) wraps to 232");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "the wrapped status prints no report"
+    );
+
+    // a negative status traps: the run answers 1 with the standard
+    // trap note (the trapping-arithmetic discipline — a deliberate
+    // failure never reads as clean success)
+    let negative = source_file(
+        "negative",
+        "fn main() -> () {\n  exit(-1)\n  println(\"unreachable\")\n}\n",
+    );
+    let out = ds_run(&negative, &[]);
+    assert_eq!(out.status.code(), Some(1), "exit(-1) traps to 1");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("die: exit: -1 is out of range 0..=255"),
+        "the trap note reports: {:?}",
+        out.stderr
+    );
 
     // a trap without die still exits 1
     let traps = source_file("traps", "fn main() -> int {\n  return 1 /% 0\n}\n");
