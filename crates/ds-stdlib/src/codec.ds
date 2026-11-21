@@ -1,0 +1,38 @@
+// The @std serialization driver face (the 2026-11-21 ruling): the two
+// traits every format driver implements over its own document type,
+// the derive synthesis's closed target — one derivation serving every
+// format, the json face the first driver (its impls live in the json
+// member's own source), toml/yaml later arriving as ordinary packages
+// implementing this face. A driver's document type answers `default()`
+// with its empty document (the encode walk's seed, the receiver every
+// construction consumes), implements `decoder` for its typed reads (a
+// wrong shape answering `parse_err`, the failure taxonomy the ambient
+// owns), and implements `encoder` for its constructions (each member
+// consuming one seed document and answering the constructed one — a
+// driver may thread state through the seed; json ignores it).
+pub trait encoder {
+  fn enc_bool (self, value: bool) -> Self
+  fn enc_int (self, value: int) -> Self
+  fn enc_float (self, value: float) -> Self
+  fn enc_string (self, value: string) -> Self
+  fn enc_byte (self, value: byte) -> Self
+  fn enc_u32 (self, value: u32) -> Self
+  fn enc_char (self, value: char) -> Self
+  fn enc_bytes (self, value: bytes) -> Self
+  fn enc_array (self, items: list[Self]) -> Self
+  fn enc_object (self, fields: map[string, Self]) -> Self
+}
+
+pub trait decoder {
+  fn dec_object (self) -> map[string, Self] | parse_err
+  fn dec_array (self) -> list[Self] | parse_err
+  fn dec_member (self, key: string) -> Self | none
+  fn dec_string (self) -> string | parse_err
+  fn dec_int (self) -> int | parse_err
+  fn dec_float (self) -> float | parse_err
+  fn dec_bool (self) -> bool | parse_err
+  fn dec_byte (self) -> byte | parse_err
+  fn dec_u32 (self) -> u32 | parse_err
+  fn dec_char (self) -> char | parse_err
+  fn dec_bytes (self) -> bytes | parse_err
+}

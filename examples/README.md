@@ -25,7 +25,7 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 
 ## JSON derive families
 
-- `json.ds` — a round trip over the ambient's json face: parse_json, the from_json/to_json derives over a struct and an enum, absent optionals, and the parse_err rows.
+- `json.ds` — a round trip over the json face (the @std json member's source, composed back for every script session): parse_json, the from_json/to_json derives over a struct and an enum, absent optionals, and the parse_err rows.
 - `json_width.ds` — the width-scalar fields through both derive families: byte and u32 as json numbers, char as a one-character json string, bytes as a json array of numbers, with range-edge and failure rows.
 
 ## Bytes

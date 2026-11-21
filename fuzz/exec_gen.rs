@@ -1490,6 +1490,30 @@ impl Gen<'_> {
             "fn json_as_int (v: json) -> int | parse_err {\n  match v {\n    json_int { value } \
              => value,\n    _ => parse_err(pos: 0),\n  }\n}",
         );
+        self.decl(
+            "trait encoder {\n  fn enc_int (self, value: int) -> Self\n  fn enc_array (self, \
+             items: list[Self]) -> Self\n  fn enc_object (self, fields: map[string, Self]) -> \
+             Self\n}",
+        );
+        self.decl(
+            "trait decoder {\n  fn dec_object (self) -> map[string, Self] | parse_err\n  fn \
+             dec_array (self) -> list[Self] | parse_err\n  fn dec_member (self, key: string) -> \
+             Self | none\n  fn dec_int (self) -> int | parse_err\n}",
+        );
+        self.decl("impl json {\n  fn default() -> json { json_null }\n}");
+        self.decl(
+            "impl decoder for json {\n  fn dec_object (self) -> map[string, json] | parse_err { \
+             json_as_object(self) }\n  fn dec_array (self) -> list[json] | parse_err { \
+             json_as_array(self) }\n  fn dec_member (self, key: string) -> json | none { \
+             json_member(self, key) }\n  fn dec_int (self) -> int | parse_err { json_as_int(self) \
+             }\n}",
+        );
+        self.decl(
+            "impl encoder for json {\n  fn enc_int (self, value: int) -> json { json_int(value: \
+             value) }\n  fn enc_array (self, items: list[json]) -> json { json_array(items: \
+             items) }\n  fn enc_object (self, fields: map[string, json]) -> json { \
+             json_object(fields: fields) }\n}",
+        );
         self.decl("extern fn unwrap_or[t] (x: t?, y: t) -> t");
         self.decl("extern fn list_len[t] (xs: list[t]) -> int");
         self.decl("extern fn list_push[t] (xs: mut list[t], x: t) -> ()");

@@ -3167,7 +3167,8 @@ fn std_package_facts() -> (Package, Hash128, String) {
 /// member beside the bodied and migrated members' sources.
 fn std_member_identity() -> Hash128 {
     let members = [
-        (ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE),
+        (ds_stdlib::AMBIENT_FILE, ds_stdlib::BUNDLE_CORE_SOURCE),
+        (ds_stdlib::CODEC_FILE, ds_stdlib::CODEC_SOURCE),
         (ds_stdlib::BODIED_FILE, ds_stdlib::BODIED_SOURCE),
         (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
     ];

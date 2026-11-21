@@ -1,7 +1,8 @@
 // purpose: the from_json derive family end to end over the real
 // ambient — `#[derive(from_json)]` on a struct or an enum synthesizes
-// the receiverless decode member whose body walks the landed typed
-// readers (`json_member` plus the `json_as_*` family): the struct walk
+// the receiverless decode member whose body walks the @std driver
+// face's `decoder` trait members (the json driver the first
+// implementor): the struct walk
 // guards the object shape, reads one member per field (a required
 // member none-testing into parse_err, an optional member reading
 // absence as none — an optional list field through the

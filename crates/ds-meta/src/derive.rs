@@ -33,49 +33,51 @@
 //! construction, a union over one enum's cases member-wise; no
 //! annotation keeps the ambiguity refusal, a second annotated member
 //! refusing as a duplicate.
-//! `from_json` answers the decode walk (the 2026-11-18 ruling) — a
-//! receiverless inherent member `fn from_json(v: json) -> Self |
-//! parse_err` over the landed typed readers, never a comptime
-//! extension: the struct body guards the object shape
-//! (`json_as_object(v)?`, so a non-object answers `parse_err` whatever
-//! its fields), reads one member per field (`json_member`, a required
-//! member none-testing into `parse_err`, an optional member reading
-//! absence as `none`), and answers the construction — a scalar field
-//! through its reader inline (byte, u32, char, and bytes included per
-//! the 2026-11-19 ruling: a json number as byte or u32, a
-//! one-character json string as char, a number array as bytes), a list
+//! `from_json` answers the decode walk (the 2026-11-18 ruling,
+//! re-targeted onto the @std driver face per the 2026-11-21 ruling) —
+//! a receiverless inherent member `fn from_json(v: json) -> Self |
+//! parse_err` whose body reads through the `decoder` trait members
+//! alone, never a comptime extension and never a json face name: the
+//! struct body guards the object shape (`v.dec_object()?`, so a
+//! non-object answers `parse_err` whatever its fields), reads one
+//! member per field (`dec_member`, a required member none-testing into
+//! `parse_err`, an optional member reading absence as `none`), and
+//! answers the construction — a scalar field through its reader inline
+//! (byte, u32, char, and bytes included per the 2026-11-19 ruling: a
+//! json number as byte or u32, a one-character json string as char, a
+//! number array as bytes), a list
 //! field through the array read plus
 //! one element walk per position, a field whose type spells no reader
 //! through that type's own `from_json` member (a type carrying none
 //! fails at the synthesized call with the standard missing-member
-//! diagnostic); the enum body matches the value's shape, the unit cases
-//! reading from their own names (a json string), the sole payloaded
-//! case from its payload's bare shape (a struct payload's members as a
-//! json object, a tuple payload's positions as a json array), and
-//! several payloaded cases each from the member its own name keys (the
-//! 2026-11-21 discriminator ruling), any other shape answering
-//! `parse_err`. The walk refuses: a field whose type spells no read (a
+//! diagnostic); the enum body probes the driver reads — the unit cases
+//! matching the string read against their own names, the sole payloaded
+//! case from its payload's bare shape (the object read for a struct
+//! payload, the array read for a tuple payload), and several payloaded
+//! cases each from the member its own name keys (the 2026-11-21
+//! discriminator ruling), any other shape answering `parse_err` at the
+//! probe chain's tail. The walk refuses: a field whose type spells no read (a
 //! tuple, a union, a shape the reader vocabulary does not name) or an
 //! enum with no cases.
 //! `to_json` answers the encode walk, from_json's mirror — the
 //! receiverless inherent member `fn to_json(v: Self) -> json` building
-//! the json enum value through its own case constructions, the plain
-//! `to_json: (json) -> string` writer staying the composition point:
-//! the struct body fills one object map with one member per field — a
-//! scalar field through its case construction inline (the four widths
-//! the case vocabulary cannot spell from — byte, u32, char, bytes —
-//! through the json face's own encode helpers, the same 2026-11-19
+//! the document through the `encoder` trait members alone over one
+//! seed (`json.default()`, the driver face's empty-document
+//! convention), the plain `to_json: (json) -> string` writer staying
+//! the composition point: the struct body fills one object map with
+//! one member per field — a scalar field through its `enc_*`
+//! construction inline (the four widths per the same 2026-11-19
 //! ruling), a list field
-//! through one json element per position, a field whose type spells no
-//! case construction through that type's own `to_json` member (a type
-//! carrying none failing at the synthesized call with the standard
-//! missing-member diagnostic) — an optional field's presence setting
-//! its member and its absence leaving the member out (the decode
-//! mirror: the absent member reads back as `none`); the enum body
-//! matches the receiver, the unit cases answering their json_string
-//! names, the sole payloaded case its bare payload shape, and several
-//! payloaded cases one-member objects keyed by their own names (the
-//! 2026-11-21 discriminator ruling). The walk refuses: a field whose
+//! through one document element per position, a field whose type
+//! spells no construction through that type's own `to_json` member (a
+//! type carrying none failing at the synthesized call with the
+//! standard missing-member diagnostic) — an optional field's presence
+//! setting its member and its absence leaving the member out (the
+//! decode mirror: the absent member reads back as `none`); the enum
+//! body matches the receiver, the unit cases answering their names
+//! through `enc_string`, the sole payloaded case its bare payload
+//! shape, and several payloaded cases one-member objects keyed by
+//! their own names (the 2026-11-21 discriminator ruling). The walk refuses: a field whose
 //! type spells no write (a tuple, a union, a shape the case vocabulary
 //! does not name), an optional nested inside a part (a `t?` list
 //! element, an optional payload field — the M3 member dispatch has no
@@ -2631,9 +2633,14 @@ fn from_json_impl(
             // the shared failure value: one construction feeds every
             // none-test's early return (the per-site spelling would
             // mint a fresh payload span per field, past the frame slot
-            // cap on wide targets)
+            // cap on wide targets); the seed beside it feeds every
+            // element default the same way
             let fail = fresh_binder(&mut 0, "f");
-            let mut stmts = vec![fail_local(mint, &fail), guard_stmt(mint)];
+            let mut stmts = vec![
+                fail_local(mint, &fail),
+                doc_seed_local(mint),
+                guard_stmt(mint),
+            ];
             let (rows, literal) = field_rows(&fields, "v", mint, &mut 0, &fail, diags)?;
             stmts.extend(rows);
             stmts.push(expr_stmt(Expr::Struct {
@@ -2657,6 +2664,7 @@ fn from_json_impl(
             let fail = fresh_binder(&mut 0, "f");
             let body = vec![
                 fail_local(mint, &fail),
+                doc_seed_local(mint),
                 expr_stmt(enum_decode_body(decl, mint, &fail, diags)?),
             ];
             Some(impl_item(
@@ -2715,12 +2723,12 @@ fn from_json_member(mint: &mut Mint) -> Member {
     }
 }
 
-/// The struct walk's object guard: a bare `json_as_object(v)?`
-/// statement, so a non-object document answers `parse_err` whatever the
-/// fields read (an all-optional or empty target included).
+/// The struct walk's object guard: a bare `v.dec_object()?` statement
+/// over the driver face, so a non-object document answers `parse_err`
+/// whatever the fields read (an all-optional or empty target included).
 fn guard_stmt(mint: &mut Mint) -> Stmt {
     let doc = path_expr("v", mint.span());
-    let read = fn_call(mint, "json_as_object", vec![doc]);
+    let read = member_call(doc, "dec_object", Vec::new(), mint);
     expr_stmt(Expr::Try {
         span: mint.span(),
         expr: Box::new(read),
@@ -2751,7 +2759,7 @@ fn field_rows(
         let member = fresh_binder(fresh, "m");
         let source_read = path_expr(source, mint.span());
         let key = key_literal(mint, &field.name.name);
-        let read = fn_call(mint, "json_member", vec![source_read, key]);
+        let read = member_call(source_read, "dec_member", vec![key], mint);
         stmts.push(local(mint, &member, read, false));
         if !matches!(field.ty, Type::Optional { .. }) {
             stmts.push(none_test(mint, &member, fail));
@@ -2857,19 +2865,19 @@ fn value_read(
             };
             if args.is_empty() {
                 let reader = match only.name.as_str() {
-                    "int" => Some("json_as_int"),
-                    "float" => Some("json_as_float"),
-                    "bool" => Some("json_as_bool"),
-                    "string" => Some("json_as_string"),
-                    "byte" => Some("json_as_byte"),
-                    "u32" => Some("json_as_u32"),
-                    "char" => Some("json_as_char"),
-                    "bytes" => Some("json_as_bytes"),
+                    "int" => Some("dec_int"),
+                    "float" => Some("dec_float"),
+                    "bool" => Some("dec_bool"),
+                    "string" => Some("dec_string"),
+                    "byte" => Some("dec_byte"),
+                    "u32" => Some("dec_u32"),
+                    "char" => Some("dec_char"),
+                    "bytes" => Some("dec_bytes"),
                     _ => None,
                 };
                 if let Some(reader) = reader {
                     let source_read = path_expr(source, mint.span());
-                    let read = fn_call(mint, reader, vec![source_read]);
+                    let read = member_call(source_read, reader, Vec::new(), mint);
                     return Some((Vec::new(), Expr::Try {
                         span: mint.span(),
                         expr: Box::new(read),
@@ -2943,19 +2951,19 @@ fn optional_else(
     };
     if args.is_empty() {
         let reader = match only.name.as_str() {
-            "int" => Some("json_as_int"),
-            "float" => Some("json_as_float"),
-            "bool" => Some("json_as_bool"),
-            "string" => Some("json_as_string"),
-            "byte" => Some("json_as_byte"),
-            "u32" => Some("json_as_u32"),
-            "char" => Some("json_as_char"),
-            "bytes" => Some("json_as_bytes"),
+            "int" => Some("dec_int"),
+            "float" => Some("dec_float"),
+            "bool" => Some("dec_bool"),
+            "string" => Some("dec_string"),
+            "byte" => Some("dec_byte"),
+            "u32" => Some("dec_u32"),
+            "char" => Some("dec_char"),
+            "bytes" => Some("dec_bytes"),
             _ => None,
         };
         if let Some(reader) = reader {
             let source_read = path_expr(source, mint.span());
-            let read = fn_call(mint, reader, vec![source_read]);
+            let read = member_call(source_read, reader, Vec::new(), mint);
             return Some((
                 Expr::Try {
                     span: mint.span(),
@@ -3067,7 +3075,7 @@ fn list_read(
         return None;
     };
     let array_source = path_expr(source, mint.span());
-    let array_read = fn_call(mint, "json_as_array", vec![array_source]);
+    let array_read = member_call(array_source, "dec_array", Vec::new(), mint);
     let read_array = Expr::Try {
         span: mint.span(),
         expr: Box::new(array_read),
@@ -3098,7 +3106,7 @@ fn list_read(
         args: vec![CallArg {
             span: mint.span(),
             name: None,
-            value: path_expr("json_null", mint.span()),
+            value: path_expr(SEED, mint.span()),
         }],
         trailing: None,
     };
@@ -3166,57 +3174,81 @@ fn enum_decode_body(
     let mut fresh = 0;
     match payloaded.as_slice() {
         [] => {
-            let chain = name_chain(decl, mint, fail)
+            let binder = fresh_binder(&mut fresh, "s");
+            let chain = name_chain(decl, &binder, mint, fail)
                 .expect("a non-empty enum with no payloaded case carries one");
-            Some(shape_switch(mint, &["json_string"], vec![chain], fail))
+            let tail = fail_block(mint, fail);
+            Some(shape_probe(mint, "dec_string", binder, chain, tail))
         },
         [only] => {
             let arm = Expr::Block(case_decode_arm(only, "v", mint, &mut fresh, fail, diags)?);
-            // The sole payloaded case's bare shape names it: an object
-            // for a struct payload, an array for a tuple payload.
-            let shape = match only.payload {
-                EnumPayload::Struct(_) => "json_object",
-                EnumPayload::Tuple(_) => "json_array",
+            // The sole payloaded case's bare shape names it: the object
+            // read for a struct payload, the array read for a tuple
+            // payload — a driver probe whose wrong shape falls to the
+            // failure tail (the arm re-reads over `v`, so the probe's
+            // binder serves the narrow alone).
+            let read = match only.payload {
+                EnumPayload::Struct(_) => "dec_object",
+                EnumPayload::Tuple(_) => "dec_array",
                 EnumPayload::None => unreachable!("the filter keeps payloaded cases alone"),
             };
-            match name_chain(decl, mint, fail) {
-                Some(chain) => Some(shape_switch(
-                    mint,
-                    &["json_string", shape],
-                    vec![chain, arm],
-                    fail,
-                )),
-                None => Some(shape_switch(mint, &[shape], vec![arm], fail)),
+            let binder = fresh_binder(&mut fresh, "g");
+            let fail_tail = fail_block(mint, fail);
+            let tail = shape_probe(mint, read, binder, arm, fail_tail);
+            let string_binder = fresh_binder(&mut fresh, "s");
+            match name_chain(decl, &string_binder, mint, fail) {
+                Some(chain) => Some(shape_probe(mint, "dec_string", string_binder, chain, tail)),
+                None => Some(tail),
             }
         },
         many => {
             let probe = payload_probe(many, mint, &mut fresh, fail, diags)?;
-            // The probe chain is the string test's else, never a case
-            // arm: the members name the cases, so no json shape keys
-            // the chain and shape_switch has no spelling for an open
-            // else.
-            match name_chain(decl, mint, fail) {
-                Some(chain) => {
-                    let cond = Expr::Is {
-                        span: mint.span(),
-                        expr: Box::new(path_expr("v", mint.span())),
-                        ty: Box::new(name_type(mint, "json_string")),
-                    };
-                    Some(Expr::If {
-                        span: mint.span(),
-                        cond: Box::new(cond),
-                        then: BlockExpr {
-                            span: mint.span(),
-                            stmts: vec![expr_stmt(chain)],
-                            trailing_trivia: Vec::new(),
-                        },
-                        else_: Some(Box::new(probe)),
-                    })
-                },
+            let binder = fresh_binder(&mut fresh, "s");
+            match name_chain(decl, &binder, mint, fail) {
+                Some(chain) => Some(shape_probe(mint, "dec_string", binder, chain, probe)),
                 None => Some(probe),
             }
         },
     }
+}
+
+/// The probe chain's failure tail: a block answering the shared fail
+/// binder.
+fn fail_block(mint: &mut Mint, fail: &str) -> Expr {
+    Expr::Block(BlockExpr {
+        span: mint.span(),
+        stmts: vec![expr_stmt(path_expr(fail, mint.span()))],
+        trailing_trivia: Vec::new(),
+    })
+}
+
+/// One driver probe over the document `v`: the read bound, a
+/// `parse_err` narrow falling to `rest`, the arm over the success. The
+/// decode's shape dispatch — the driver face's own reads carry it, so
+/// no json case name appears here.
+fn shape_probe(mint: &mut Mint, read: &str, binder: String, arm: Expr, rest: Expr) -> Expr {
+    let doc = path_expr("v", mint.span());
+    let read = member_call(doc, read, Vec::new(), mint);
+    let cond = Expr::Is {
+        span: mint.span(),
+        expr: Box::new(path_expr(&binder, mint.span())),
+        ty: Box::new(name_type(mint, "parse_err")),
+    };
+    let probe = Expr::If {
+        span: mint.span(),
+        cond: Box::new(cond),
+        then: BlockExpr {
+            span: mint.span(),
+            stmts: vec![expr_stmt(rest)],
+            trailing_trivia: Vec::new(),
+        },
+        else_: Some(Box::new(arm)),
+    };
+    Expr::Block(BlockExpr {
+        span: mint.span(),
+        stmts: vec![local(mint, &binder, read, false), expr_stmt(probe)],
+        trailing_trivia: Vec::new(),
+    })
 }
 
 /// One payloaded case's decode block over the json value named
@@ -3281,7 +3313,7 @@ fn case_decode_arm(
         EnumPayload::Tuple(items) => {
             let array = fresh_binder(fresh, "a");
             let array_source = path_expr(source, mint.span());
-            let array_call = fn_call(mint, "json_as_array", vec![array_source]);
+            let array_call = member_call(array_source, "dec_array", Vec::new(), mint);
             let array_read = Expr::Try {
                 span: mint.span(),
                 expr: Box::new(array_call),
@@ -3306,7 +3338,7 @@ fn case_decode_arm(
                     args: vec![CallArg {
                         span: mint.span(),
                         name: None,
-                        value: path_expr("json_null", mint.span()),
+                        value: path_expr(SEED, mint.span()),
                     }],
                     trailing: None,
                 };
@@ -3368,7 +3400,7 @@ fn payload_probe(
         let member = fresh_binder(fresh, "k");
         let doc = path_expr("v", mint.span());
         let key = key_literal(mint, &case.name.name);
-        let read = fn_call(mint, "json_member", vec![doc, key]);
+        let read = member_call(doc, "dec_member", vec![key], mint);
         let cond = Expr::Is {
             span: mint.span(),
             expr: Box::new(path_expr(&member, mint.span())),
@@ -3390,9 +3422,10 @@ fn payload_probe(
     Some(chain)
 }
 
-/// The unit cases' name chain: `v.value == "c1" { c1 } else if ... else
-/// { parse_err }`, `None` when the enum carries no unit case.
-fn name_chain(decl: &EnumDecl, mint: &mut Mint, fail: &str) -> Option<Expr> {
+/// The unit cases' name chain over the string probe's binder:
+/// `s == "c1" { c1 } else if ... else { parse_err }`, `None` when the
+/// enum carries no unit case.
+fn name_chain(decl: &EnumDecl, binder: &str, mint: &mut Mint, fail: &str) -> Option<Expr> {
     let names: Vec<&str> = decl
         .cases
         .iter()
@@ -3407,14 +3440,7 @@ fn name_chain(decl: &EnumDecl, mint: &mut Mint, fail: &str) -> Option<Expr> {
         let cond = Expr::Binary {
             span: mint.span(),
             op: BinaryOp::Eq,
-            left: Box::new(Expr::Field {
-                span: mint.span(),
-                recv: Box::new(path_expr("v", mint.span())),
-                name: Ident {
-                    span: mint.span(),
-                    name: "value".to_owned(),
-                },
-            }),
+            left: Box::new(path_expr(binder, mint.span())),
             right: Box::new(key_literal(mint, name)),
         };
         let case = path_expr(name, mint.span());
@@ -3427,35 +3453,6 @@ fn name_chain(decl: &EnumDecl, mint: &mut Mint, fail: &str) -> Option<Expr> {
         };
     }
     Some(chain)
-}
-
-/// The value's shape match: one arm per named json case (`v is <case>`
-/// narrowing into the arm), the `parse_err` tail over every other
-/// shape.
-fn shape_switch(mint: &mut Mint, cases: &[&str], arms: Vec<Expr>, fail: &str) -> Expr {
-    let tail = path_expr(fail, mint.span());
-    let mut chain = Expr::Block(BlockExpr {
-        span: mint.span(),
-        stmts: vec![expr_stmt(tail)],
-        trailing_trivia: Vec::new(),
-    });
-    for (case, arm) in cases.iter().rev().zip(arms.into_iter().rev()) {
-        chain = Expr::If {
-            span: mint.span(),
-            cond: Box::new(Expr::Is {
-                span: mint.span(),
-                expr: Box::new(path_expr("v", mint.span())),
-                ty: Box::new(name_type(mint, case)),
-            }),
-            then: BlockExpr {
-                span: mint.span(),
-                stmts: vec![expr_stmt(arm)],
-                trailing_trivia: Vec::new(),
-            },
-            else_: Some(Box::new(chain)),
-        };
-    }
-    chain
 }
 
 /// One member's recursive decode staged as statements: the call bound,
@@ -3559,9 +3556,10 @@ fn to_json_impl(
                 )?;
             }
             let mut fresh = 0;
+            let seed = doc_seed_local(mint);
             let map = fresh_binder(&mut fresh, "m");
             let empty = map_empty(mint);
-            let mut stmts = vec![local(mint, &map, empty, true)];
+            let mut stmts = vec![seed, local(mint, &map, empty, true)];
             let rows = member_rows(
                 &fields
                     .iter()
@@ -3574,11 +3572,12 @@ fn to_json_impl(
             )?;
             stmts.extend(rows);
             let map_read = path_expr(&map, mint.span());
-            stmts.push(expr_stmt(case_value(
+            let seed_read = path_expr(SEED, mint.span());
+            stmts.push(expr_stmt(member_call(
+                seed_read,
+                "enc_object",
+                vec![map_read],
                 mint,
-                "json_object",
-                "fields",
-                map_read,
             )));
             Some(impl_item(
                 attr,
@@ -3593,7 +3592,10 @@ fn to_json_impl(
             // Every payload mix encodes under the discriminator ruling;
             // the body's own refusals own the empty enum and the lone
             // tuple case's unlowerable single-arm member test.
-            let body = vec![expr_stmt(enum_encode_body(decl, mint, diags)?)];
+            let body = vec![
+                doc_seed_local(mint),
+                expr_stmt(enum_encode_body(decl, mint, diags)?),
+            ];
             Some(impl_item(
                 attr,
                 &decl.name,
@@ -3773,29 +3775,25 @@ fn json_value(
                 return None;
             };
             if args.is_empty() {
-                // The widths the case vocabulary cannot spell from (the
-                // 2026-11-19 ruling): byte/u32 as json numbers, char as
-                // its one-character string, bytes as the number array —
-                // each through the json face's own encode helper.
-                let helper = match only.name.as_str() {
-                    "byte" => Some("json_of_byte"),
-                    "u32" => Some("json_of_u32"),
-                    "char" => Some("json_of_char"),
-                    "bytes" => Some("json_of_bytes"),
+                // The driver face's constructions: every scalar and
+                // width writes through one `enc_*` member over the walk's
+                // seed (the widths per the 2026-11-19 ruling — byte/u32
+                // as numbers, char as its one-character string, bytes as
+                // the number array), so the walk names no json case.
+                let enc = match only.name.as_str() {
+                    "int" => Some("enc_int"),
+                    "float" => Some("enc_float"),
+                    "bool" => Some("enc_bool"),
+                    "string" => Some("enc_string"),
+                    "byte" => Some("enc_byte"),
+                    "u32" => Some("enc_u32"),
+                    "char" => Some("enc_char"),
+                    "bytes" => Some("enc_bytes"),
                     _ => None,
                 };
-                if let Some(helper) = helper {
-                    return Some((Vec::new(), fn_call(mint, helper, vec![source])));
-                }
-                let case = match only.name.as_str() {
-                    "int" => Some("json_int"),
-                    "float" => Some("json_float"),
-                    "bool" => Some("json_bool"),
-                    "string" => Some("json_string"),
-                    _ => None,
-                };
-                if let Some(case) = case {
-                    return Some((Vec::new(), case_value(mint, case, "value", source)));
+                if let Some(enc) = enc {
+                    let seed = path_expr(SEED, mint.span());
+                    return Some((Vec::new(), member_call(seed, enc, vec![source], mint)));
                 }
                 // The recursive composition: the part's own type encodes
                 // through its `to_json` member.
@@ -3826,35 +3824,6 @@ fn json_value(
             ));
             None
         },
-    }
-}
-
-/// One json case construction over its single named member:
-/// `json_int(value: part)`, `json_array(items: part)`. The callee path
-/// and its identifier share one minted span (resolution records the
-/// case's name use at the identifier's span and the lowerer's case-ctor
-/// probe looks it up by the expression's, which must coincide).
-fn case_value(mint: &mut Mint, case: &str, member: &str, value: Expr) -> Expr {
-    let span = mint.span();
-    let callee = Path {
-        span,
-        segments: vec![Ident {
-            span,
-            name: case.to_owned(),
-        }],
-    };
-    Expr::Call {
-        span: mint.span(),
-        callee: Box::new(Expr::Path { span, path: callee }),
-        args: vec![CallArg {
-            span: mint.span(),
-            name: Some(Ident {
-                span: mint.span(),
-                name: member.to_owned(),
-            }),
-            value,
-        }],
-        trailing: None,
     }
 }
 
@@ -3938,7 +3907,8 @@ fn list_write(
     };
     let stmts = vec![local(mint, &out, empty, true), expr_stmt(walk)];
     let out_read = path_expr(&out, mint.span());
-    Some((stmts, case_value(mint, "json_array", "items", out_read)))
+    let seed = path_expr(SEED, mint.span());
+    Some((stmts, member_call(seed, "enc_array", vec![out_read], mint)))
 }
 
 /// The optional narrow: `match <name> { none => { } <inner> => { <rows>
@@ -4033,7 +4003,8 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
             let body = match &case.payload {
                 EnumPayload::None => {
                     let name = key_literal(mint, &case.name.name);
-                    case_value(mint, "json_string", "value", name)
+                    let seed = path_expr(SEED, mint.span());
+                    member_call(seed, "enc_string", vec![name], mint)
                 },
                 EnumPayload::Struct(fields) => {
                     // An optional payload field's nested member dispatch
@@ -4070,7 +4041,8 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                     let mut stmts = vec![local(mint, &map, empty, true)];
                     stmts.extend(rows);
                     let map_read = path_expr(&map, mint.span());
-                    let value = case_value(mint, "json_object", "fields", map_read);
+                    let seed = path_expr(SEED, mint.span());
+                    let value = member_call(seed, "enc_object", vec![map_read], mint);
                     let (mut stmts, value) = if wrap {
                         wrapped_case(mint, &mut fresh, &case.name.name, stmts, value)
                     } else {
@@ -4112,7 +4084,8 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                         stmts.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
                     }
                     let out_read = path_expr(&out, mint.span());
-                    let value = case_value(mint, "json_array", "items", out_read);
+                    let seed = path_expr(SEED, mint.span());
+                    let value = member_call(seed, "enc_array", vec![out_read], mint);
                     let (mut stmts, value) = if wrap {
                         wrapped_case(mint, &mut fresh, &case.name.name, stmts, value)
                     } else {
@@ -4160,7 +4133,8 @@ fn wrapped_case(
     stmts.extend(rows);
     stmts.push(member_set(mint, &map, key, value));
     let map_read = path_expr(&map, mint.span());
-    (stmts, case_value(mint, "json_object", "fields", map_read))
+    let seed = path_expr(SEED, mint.span());
+    (stmts, member_call(seed, "enc_object", vec![map_read], mint))
 }
 
 /// The written type beneath any paren wrappers.
@@ -4184,6 +4158,39 @@ fn fresh_binder(fresh: &mut usize, prefix: &str) -> String {
 fn fail_local(mint: &mut Mint, name: &str) -> Stmt {
     let init = parse_err_expr(mint);
     local(mint, name, init, false)
+}
+
+/// The driver's empty document, the seed every encode construction
+/// consumes as its receiver: the doc type's own `default()` through the
+/// type-keyed static tier (the driver face's convention — a driver's
+/// document type answers `default()` with its empty document).
+fn doc_seed(mint: &mut Mint) -> Expr {
+    let field_span = mint.span();
+    let recv = path_expr("json", mint.span());
+    let name_span = mint.span();
+    let callee = Expr::Field {
+        span: field_span,
+        recv: Box::new(recv),
+        name: Ident {
+            span: name_span,
+            name: "default".to_owned(),
+        },
+    };
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(callee),
+        args: Vec::new(),
+        trailing: None,
+    }
+}
+
+/// The encode walk's seed binding at the member's top: one
+/// `const d0 = json.default()` every construction site borrows.
+const SEED: &str = "d0";
+
+fn doc_seed_local(mint: &mut Mint) -> Stmt {
+    let init = doc_seed(mint);
+    local(mint, SEED, init, false)
 }
 
 /// A `parse_err` construction at its zero position: the decode walks

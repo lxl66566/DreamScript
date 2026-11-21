@@ -61,12 +61,12 @@
 //!   ownership: the `net_handle` struct with `net_connect` answering it, the ds-source
 //!   `send`/`recv`/`close_conn` handlers reading its id word out to the raw `net_send`/`net_recv`/
 //!   `net_close` externs, the deinit closing the connection, and `net_close` total and idempotent
-//!   for the deinit pairing. Still file-owned: `json` and the stack API (`push`/`pop`) — the map
-//!   value channel holds one-word values, so the object case of a `json` enum cannot construct
-//!   until the map round widens it, and `parse_json` answers the string channel (validate and
-//!   minify). The failure taxonomy, by contrast, is ambient-owned (`io_err`, `net_err`, `parse_err`
-//!   — the discriminants the platform natives answer), so the fallible reads (`read_file`,
-//!   `parse_int`, the file face's reads) return real success unions.
+//!   for the deinit pairing. The json face (`json`, `parse_json`, `to_json`, the typed readers) is
+//!   the @std package's own source (json.ds) composed back after the core for both composing
+//!   readings, and into the @std bundle's core member. The failure taxonomy, by contrast, is
+//!   ambient-owned (`io_err`, `net_err`, `parse_err` — the discriminants the platform natives
+//!   answer), so the fallible reads (`read_file`, `parse_int`, the file face's reads) return real
+//!   success unions.
 //! * `max`/`min` migrated to the @std bodied members' file as the int pair (the library-boundary
 //!   round): the word-shaped signature a linked call binds and a session composes back, the float
 //!   and ord-generic spellings riding the later linked-surface rounds. Likewise `u32` is a distinct
@@ -180,27 +180,78 @@ pub const BODIED_FILE: &str = "std/bodied.ds";
 /// resolving and running for every entry script session).
 pub const BODIED_SOURCE: &str = include_str!("bodied.ds");
 
+/// The `@std` json face's file name: the typed value family over the
+/// JSON grammar with its parser, serializer, and the typed readers and
+/// writers the json derive walks consume. The face rides composed into
+/// the @std bundle's core member (the collection seams it calls are the
+/// core's own private externs at their pinned positions, so the face's
+/// free seam calls must stay same-file with them), not as the bundle's
+/// own member file.
+pub const JSON_FILE: &str = "std/json.ds";
+
+/// The `@std` json face's text: the ds source that lived at the ambient
+/// core's tail, now the reserved package's own source. Both composing
+/// readings fold it back (the merged source and the entry script
+/// session's — the bare spellings and the derive walks stay
+/// load-bearing), so the migration is invisible to every undeclaring
+/// registration while a declaring graph binds the face through the
+/// linked surface alone.
+pub const JSON_SOURCE: &str = include_str!("json.ds");
+
+/// The @std serialization driver face's file name: the two traits every
+/// format driver implements over its document type, the derive
+/// synthesis's closed target. Rides as the bundle's own member and
+/// composes last in both ambient readings (a tail append — the mint
+/// order of existing declarations stays untouched).
+pub const CODEC_FILE: &str = "std/codec.ds";
+
+/// The @std serialization driver face's text: the `encoder`/`decoder`
+/// driver traits, json the first implementor (its impls in the json
+/// member's own source).
+pub const CODEC_SOURCE: &str = include_str!("codec.ds");
+
+/// The @std bundle's core member: the shrunk core with the json face
+/// composed after it, the bundle's own `std/ambient.ds` — the package's
+/// self-contained first member (its own compile registers no ambient,
+/// so every name the face resolves must live in the package, and the
+/// face's free collection-seam calls must stay same-file with the
+/// core's private externs).
+pub const BUNDLE_CORE_SOURCE: &str =
+    concat!(include_str!("ambient.ds"), "\n", include_str!("json.ds"));
+
 /// The entry script session's ambient text: the shrunk core with the
-/// @std bodied members composed after it — the run path's implicit
-/// resolution over the implicit `@std` graph, holding the bare
-/// load-bearing migrated names alive while the data-shaped members
-/// stay bound through the linked surface. The merged
-/// [`AMBIENT_SOURCE`] serves every undeclaring registration.
-pub const AMBIENT_SESSION_SOURCE: &str =
-    concat!(include_str!("ambient.ds"), "\n", include_str!("bodied.ds"));
+/// @std json face and bodied members composed after it — the run
+/// path's implicit resolution over the implicit `@std` graph, holding
+/// the bare load-bearing migrated names alive (the json spellings and
+/// the derive walks included) while the data-shaped members stay
+/// bound through the linked surface. The merged [`AMBIENT_SOURCE`]
+/// serves every undeclaring registration.
+pub const AMBIENT_SESSION_SOURCE: &str = concat!(
+    include_str!("ambient.ds"),
+    "\n",
+    include_str!("json.ds"),
+    "\n",
+    include_str!("bodied.ds"),
+    "\n",
+    include_str!("codec.ds")
+);
 
 /// The ambient package member's text: the declarations of the M3 stdlib
 /// surface. The merged reading — the core composed with the migrated
-/// @std members and bodied members after it, so the sources are one
-/// namespace and every undeclaring registration keeps the exact
-/// pre-un-merge surface. Register it as a package member before the
-/// user's files.
+/// @std json face, members, and bodied members after it, so the
+/// sources are one namespace and every undeclaring registration keeps
+/// the exact pre-un-merge surface. Register it as a package member
+/// before the user's files.
 pub const AMBIENT_SOURCE: &str = concat!(
     include_str!("ambient.ds"),
     "\n",
+    include_str!("json.ds"),
+    "\n",
     include_str!("std_members.ds"),
     "\n",
-    include_str!("bodied.ds")
+    include_str!("bodied.ds"),
+    "\n",
+    include_str!("codec.ds")
 );
 
 /// The reserved `@std` package's name in the package namespace: the
@@ -211,13 +262,14 @@ pub const AMBIENT_SOURCE: &str = concat!(
 pub const STD_PACKAGE_NAME: &str = "@std";
 
 /// The default `@std` package's bundle: the manifest (`@std` at the
-/// toolchain's own version, dependency-free) plus the ambient core
-/// member, the migrated members' own source, and the bodied members'
-/// file — the core beside the members so the package's own compile
-/// (which registers no ambient ahead of it) still resolves every name,
-/// the members' files the migration home the un-merge grows. A pure
-/// function of the tree: two calls build byte-identical bundles, so the
-/// store's content addressing holds one row per toolchain.
+/// toolchain's own version, dependency-free) plus the bundle's core
+/// member (the shrunk ambient with the json face composed into it), the
+/// migrated members' own source, and the bodied members' file — the
+/// core beside the members so the package's own compile (which
+/// registers no ambient ahead of it) still resolves every name, the
+/// members' files the migration home the un-merge grows. A pure function of the tree: two calls
+/// build byte-identical bundles, so the store's content addressing
+/// holds one row per toolchain.
 #[must_use]
 pub fn std_package() -> ds_pkg::Package {
     let version = ds_pkg::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -231,8 +283,9 @@ pub fn std_package() -> ds_pkg::Package {
     ds_pkg::Package::new(&manifest, [
         (
             AMBIENT_FILE.to_owned(),
-            AMBIENT_CORE_SOURCE.as_bytes().to_vec(),
+            BUNDLE_CORE_SOURCE.as_bytes().to_vec(),
         ),
+        (CODEC_FILE.to_owned(), CODEC_SOURCE.as_bytes().to_vec()),
         (BODIED_FILE.to_owned(), BODIED_SOURCE.as_bytes().to_vec()),
         (
             STD_MEMBERS_FILE.to_owned(),
@@ -531,14 +584,21 @@ mod tests {
             .filter(|(path, _)| path.as_str() != ds_pkg::MANIFEST_MEMBER)
             .count();
         assert_eq!(
-            source_members, 3,
-            "the bundle carries the core, the members, and the bodied file"
+            source_members, 4,
+            "the bundle carries the composed core, the codec face, the members, and the bodied              file"
         );
         assert!(
             package.members().iter().any(
-                |(path, bytes)| path == AMBIENT_FILE && bytes == AMBIENT_CORE_SOURCE.as_bytes()
+                |(path, bytes)| path == AMBIENT_FILE && bytes == BUNDLE_CORE_SOURCE.as_bytes()
             ),
-            "the core member is the shrunk ambient under its own file name"
+            "the bundle's core member is the shrunk ambient with the json face composed in"
+        );
+        assert!(
+            package
+                .members()
+                .iter()
+                .any(|(path, bytes)| path == CODEC_FILE && bytes == CODEC_SOURCE.as_bytes()),
+            "the driver face rides under its own file name"
         );
         assert!(
             package
@@ -594,16 +654,51 @@ mod tests {
         let diags = collect.add_file(&bodied_ast);
         assert!(
             diags.is_empty(),
-            "duplicate names across the core and the bodied file: {diags:?}"
+            "duplicate names across the bundle core and the bodied file: {diags:?}"
         );
-        // the @std package's own compile shape: the core member ahead of
-        // the migrated files, one namespace
+        // the bundle's core member (the shrunk core with the json face
+        // and the json driver's impls composed in) resolves beside the
+        // driver face's own member — the impls name the traits, so the
+        // two members pair — and the face's free collection-seam calls
+        // stay same-file with the core's private externs
+        let bundle_file = files.add_source("@bundle-core", BUNDLE_CORE_SOURCE);
+        let bundle_core_ast =
+            ds_parse::parse(&files, bundle_file).expect("the bundle's core member parses");
+        let codec_file = files.add_source(CODEC_FILE, CODEC_SOURCE);
+        let codec_ast = ds_parse::parse(&files, codec_file).expect("the driver face parses");
+        let (bundle_package, _, bundle_diags) =
+            ds_check::resolve_package(&[bundle_core_ast.clone(), codec_ast.clone()]);
+        assert!(
+            bundle_diags.is_empty(),
+            "the bundle's core member resolves beside the driver face: {bundle_diags:?}"
+        );
+        assert!(
+            bundle_package.lookup_type("json").is_some(),
+            "`json` lives in the bundle's core member (the composed face)"
+        );
+        assert!(
+            bundle_package.lookup_value("parse_json").is_some(),
+            "`parse_json` lives in the bundle's core member (the composed face)"
+        );
+        let diags = collect.add_file(&codec_ast);
+        assert!(
+            diags.is_empty(),
+            "duplicate names across the bundle core and the codec file: {diags:?}"
+        );
+        // the @std package's own compile shape: the composed core member
+        // and the driver face ahead of the migrated files, one namespace
         let (pkg_package, _, pkg_diags) =
-            ds_check::resolve_package(&[core_ast, members_ast, bodied_ast]);
+            ds_check::resolve_package(&[bundle_core_ast, codec_ast, members_ast, bodied_ast]);
         assert!(
             pkg_diags.is_empty(),
             "the package shape resolves: {pkg_diags:?}"
         );
+        for name in ["encoder", "decoder"] {
+            assert!(
+                pkg_package.lookup_type(name).is_some(),
+                "`{name}` lives in the @std driver face beside the core"
+            );
+        }
         for name in ["row", "config", "response"] {
             assert!(
                 pkg_package.lookup_type(name).is_some(),
@@ -620,9 +715,25 @@ mod tests {
                 "`{name}` lives in the @std bodied file as a bodied member"
             );
         }
+        assert!(
+            pkg_package.lookup_type("json").is_some(),
+            "`json` lives in the @std json face beside the core"
+        );
+        for name in [
+            "parse_json",
+            "to_json",
+            "json_member",
+            "json_as_int",
+            "json_of_byte",
+        ] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "`{name}` lives in the @std json face beside the core"
+            );
+        }
 
         // the declaring graph's ambient shape: the core alone, the demo
-        // residue's and the ordering pair's names gone
+        // residue's, the json face's, and the ordering pair's names gone
         let mut core_files = ds_diag::Files::new();
         let core_only = core_files.add_source(AMBIENT_FILE, AMBIENT_CORE_SOURCE);
         let core_only_ast = ds_parse::parse(&core_files, core_only)
@@ -648,6 +759,22 @@ mod tests {
                 "`{name}` left the shrunk core (the extern and the bodied pair both)"
             );
         }
+        assert!(
+            core_package.lookup_type("json").is_some(),
+            "`json` stays pinned in the core at its declaration position (its case atoms mint              there; the compile seams address ambient mint order positionally)"
+        );
+        for name in [
+            "parse_json",
+            "to_json",
+            "json_member",
+            "json_as_int",
+            "json_of_byte",
+        ] {
+            assert!(
+                core_package.lookup_value(name).is_none(),
+                "`{name}` left the shrunk core (the @std json face's own source)"
+            );
+        }
 
         // the entry script session's shape: the core with the bodied
         // members composed back, the load-bearing bare spellings
@@ -667,6 +794,14 @@ mod tests {
                 "the session composition keeps the bare `{name}`"
             );
         }
+        assert!(
+            session_package.lookup_value("parse_json").is_some(),
+            "the session composition keeps the bare `parse_json` (the face composed back)"
+        );
+        assert!(
+            session_package.lookup_value("json_as_int").is_some(),
+            "the session composition keeps the bare typed readers (the derive walks stay              load-bearing)"
+        );
         for name in ["row", "config", "response"] {
             assert!(
                 session_package.lookup_type(name).is_none(),
@@ -700,31 +835,57 @@ mod tests {
                 "the merged reading keeps the bodied `{name}` (namespace-identical)"
             );
         }
+        assert!(
+            merged_package.lookup_value("parse_json").is_some(),
+            "the merged reading keeps `parse_json` (namespace-identical)"
+        );
+        assert!(
+            merged_package.lookup_value("json_of_byte").is_some(),
+            "the merged reading keeps the typed writers (namespace-identical)"
+        );
         // the composition rules the consts pin: the session text is the
-        // core then the bodied file, the merged text the core, the
-        // members' file, then the bodied file
+        // core, the json face, the bodied file, then the codec face;
+        // the merged text the same with the members' file before the
+        // bodied one
         assert!(
             AMBIENT_SESSION_SOURCE
                 .strip_prefix(AMBIENT_CORE_SOURCE)
                 .is_some_and(|rest| {
-                    rest.strip_prefix('\n')
-                        .is_some_and(|rest| rest == BODIED_SOURCE)
+                    rest.strip_prefix('\n').is_some_and(|rest| {
+                        rest.strip_prefix(JSON_SOURCE).is_some_and(|rest| {
+                            rest.strip_prefix('\n').is_some_and(|rest| {
+                                rest.strip_prefix(BODIED_SOURCE).is_some_and(|rest| {
+                                    rest.strip_prefix('\n')
+                                        .is_some_and(|rest| rest == CODEC_SOURCE)
+                                })
+                            })
+                        })
+                    })
                 }),
-            "the session source is the core, a newline, then the bodied file"
+            "the session source is the core, the json file, the bodied file, then the codec face, \
+             one newline between neighbors"
         );
         assert!(
             AMBIENT_SOURCE
                 .strip_prefix(AMBIENT_CORE_SOURCE)
                 .is_some_and(|rest| {
                     rest.strip_prefix('\n').is_some_and(|rest| {
-                        rest.strip_prefix(STD_MEMBERS_SOURCE).is_some_and(|rest| {
-                            rest.strip_prefix('\n')
-                                .is_some_and(|rest| rest == BODIED_SOURCE)
+                        rest.strip_prefix(JSON_SOURCE).is_some_and(|rest| {
+                            rest.strip_prefix('\n').is_some_and(|rest| {
+                                rest.strip_prefix(STD_MEMBERS_SOURCE).is_some_and(|rest| {
+                                    rest.strip_prefix('\n').is_some_and(|rest| {
+                                        rest.strip_prefix(BODIED_SOURCE).is_some_and(|rest| {
+                                            rest.strip_prefix('\n')
+                                                .is_some_and(|rest| rest == CODEC_SOURCE)
+                                        })
+                                    })
+                                })
+                            })
                         })
                     })
                 }),
-            "the merged source is the core, a newline, the members' file, a newline, then the \
-             bodied file"
+            "the merged source is the core, the json file, the members' file, the bodied file, \
+             then the codec face, one newline between neighbors"
         );
     }
 }
