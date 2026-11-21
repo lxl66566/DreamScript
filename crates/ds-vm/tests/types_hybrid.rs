@@ -1108,17 +1108,22 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_BYTE).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_U32_OF).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_U32).is_some());
+    // the float math family (76-83) and the string search triple
+    // (84-86): the 2026-11-21 pure-builtin round
+    for index in 76..=86 {
+        assert!(reg.resolve_native("builtin", index).is_some());
+    }
     assert!(
-        reg.resolve_native("builtin", 76).is_none(),
-        "76 table entries: the core's, the list block, the fiber pair, the push, the map block,
+        reg.resolve_native("builtin", 87).is_none(),
+        "87 table entries: the core's, the list block, the fiber pair, the push, the map block,
          the generic container closes, the reentrant combinators, the nursery seams, the join,
          the partition, the fork-join combinator, the fork-join fold, the float sort key, the
          string, char, and byte sort keys, the string, float, and char content hashes, the
          REPL's spliced park, the float reader, the char face, the retired JSON reader's
          reserved slot, the map key face, the bytes collection's face with its content
          compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
-         bare trap primitive, the list and map collections' content compares, and the
-         byte/u32 width bridges"
+         bare trap primitive, the list and map collections' content compares, the
+         byte/u32 width bridges, the float math family, and the string search triple"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

@@ -350,6 +350,19 @@ pub extern fn len[t] (xs: t) -> int
 pub extern fn trim (s: string) -> string
 pub extern fn parse_int (s: string) -> int | parse_err
 pub extern fn parse_float (s: string) -> float | parse_err
+// The float math family (the 2026-11-21 pure-builtin round): IEEE f64
+// semantics over the float type, total by construction — no operand
+// shape traps (a negative sqrt answers NaN). `atan2` takes (y, x), the
+// quadrant read off both signs; `pow` takes (base, exp). `abs` covers
+// the float width alone; no int sibling exists.
+pub extern fn sqrt (x: float) -> float
+pub extern fn sin (x: float) -> float
+pub extern fn cos (x: float) -> float
+pub extern fn atan2 (y: float, x: float) -> float
+pub extern fn floor (x: float) -> float
+pub extern fn ceil (x: float) -> float
+pub extern fn pow (base: float, exp: float) -> float
+pub extern fn abs (x: float) -> float
 pub extern fn split (s: string, sep: char) -> list[string]
 // The checked slice (B8): the chars between the two positions, none
 // outside `0 <= start <= end` and the string's char count — never
@@ -362,6 +375,17 @@ pub extern fn to_lower (s: string) -> string
 // the string's range — the old total spelling answered the empty
 // string instead.
 pub extern fn char_at (s: string, i: int) -> char | none
+// The string search family (the 2026-11-21 pure-builtin round):
+// `contains` answers the membership read, the empty needle always
+// occurring; `index_of` answers the first occurrence's char index
+// (substring's indexing, so the answer composes with the checked
+// slice), a miss none and the empty needle index 0; `replace` swaps
+// every non-overlapping occurrence in one left-to-right pass, the
+// inserted text never re-scanned, the empty needle inserting `with` at
+// every char boundary.
+pub extern fn contains (haystack: string, needle: string) -> bool
+pub extern fn index_of (haystack: string, needle: string) -> int | none
+pub extern fn replace (haystack: string, needle: string, with: string) -> string
 // The codepoint pair, the json face's one native seam beside the width
 // bridges below: scalar-width UTF-8 encoding is not expressible in ds
 // source, so the escape decoder builds its one-scalar strings through

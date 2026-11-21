@@ -161,7 +161,11 @@ pub(crate) struct Native {
 /// taxonomy's `utf8_err` tag), the byte/u32 width bridges
 /// `byte_of`/`int_of_byte`/`u32_of`/`int_of_u32` (the json face's scalar
 /// readers over the widths ds source cannot cross, each checked in
-/// answering a `t | none` span), the list and
+/// answering a `t | none` span), the pure-builtin round's float math
+/// family and string search triple (one f64 word per float op, total by
+/// construction; `contains` the membership bit, the checked
+/// char-indexed `index_of`, `replace` the one-pass swap's fresh
+/// string), the list and
 /// map construction and mutation surfaces (one heap-object `Ref` per
 /// value, element and pair words opaque to the natives), the file-IO
 /// surface including `fs_list`, and the TCP surface. The ambient's
@@ -438,6 +442,89 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: 75,
         shape: NativeShape::Total(SlotType::I64),
+    },
+    // The pure-builtin round's families: the float math answers one
+    // f64 word each, total by construction (IEEE edge answers — a
+    // negative sqrt NaN, never a trap), and the string search triple
+    // rides the string surface's own channels — the membership bit, the
+    // checked first-occurrence char index (substring's indexing, so the
+    // answer composes with the checked slice), the one-pass swap's
+    // fresh string.
+    Native {
+        name: "sqrt",
+        module: NativeModule::Builtin,
+        index: 76,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        name: "sin",
+        module: NativeModule::Builtin,
+        index: 77,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        name: "cos",
+        module: NativeModule::Builtin,
+        index: 78,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // (y, x): the quadrant reads off both operands' signs
+        name: "atan2",
+        module: NativeModule::Builtin,
+        index: 79,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        name: "floor",
+        module: NativeModule::Builtin,
+        index: 80,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        name: "ceil",
+        module: NativeModule::Builtin,
+        index: 81,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // (base, exp): powf's IEEE edge answers
+        name: "pow",
+        module: NativeModule::Builtin,
+        index: 82,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // the float width alone; no int sibling exists
+        name: "abs",
+        module: NativeModule::Builtin,
+        index: 83,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // the membership read, the empty needle always occurring
+        name: "contains",
+        module: NativeModule::Builtin,
+        index: 84,
+        shape: NativeShape::Total(SlotType::Bool),
+    },
+    Native {
+        // the checked search: the ok/none span re-spans into the call's
+        // own `int | none` union, the payload the first occurrence's
+        // char index; a miss answers the none member, the empty needle
+        // index 0
+        name: "index_of",
+        module: NativeModule::Builtin,
+        index: 85,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        // the one-pass swap: every non-overlapping occurrence replaced
+        // left to right, the inserted text never re-scanned
+        name: "replace",
+        module: NativeModule::Builtin,
+        index: 86,
+        shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
         name: "join",

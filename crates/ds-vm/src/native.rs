@@ -110,6 +110,17 @@
 //! | 69    | `trap (msg: string) -> unit` — the bare trap primitive; never returns, never prints (the die split) |
 //! | 70    | `list_eq (a, b: list) -> bool` — the list collection's structural content compare the `==`/`!=` chain dispatches over list operands |
 //! | 71    | `map_eq (a, b: map) -> bool` — the map collection's structural content compare the `==`/`!=` chain dispatches over map operands |
+//! | 76    | `sqrt (x: float) -> float` |
+//! | 77    | `sin (x: float) -> float` |
+//! | 78    | `cos (x: float) -> float` |
+//! | 79    | `atan2 (y, x: float) -> float` |
+//! | 80    | `floor (x: float) -> float` |
+//! | 81    | `ceil (x: float) -> float` |
+//! | 82    | `pow (base, exp: float) -> float` |
+//! | 83    | `abs (x: float) -> float` |
+//! | 84    | `contains (haystack, needle: string) -> bool` |
+//! | 85    | `index_of (haystack, needle: string) -> int \| none` (the checked search, char-indexed) |
+//! | 86    | `replace (haystack, needle, with: string) -> string` |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -697,6 +708,42 @@ pub const BUILTIN_U32_OF: u32 = 74;
 /// `int_of_u32(v: u32) -> int` — the u32 width bridge read back: the
 /// word's number, for the json_int construction.
 pub const BUILTIN_INT_OF_U32: u32 = 75;
+/// `sqrt(x: float) -> float` — the float math family's square root (the
+/// 2026-11-21 pure-builtin round): IEEE over the f64 word, total by
+/// construction — a negative operand answers NaN, never a trap.
+pub const BUILTIN_SQRT: u32 = 76;
+/// `sin(x: float) -> float`.
+pub const BUILTIN_SIN: u32 = 77;
+/// `cos(x: float) -> float`.
+pub const BUILTIN_COS: u32 = 78;
+/// `atan2(y: float, x: float) -> float` — the two-argument arctangent,
+/// the quadrant read off both signs.
+pub const BUILTIN_ATAN2: u32 = 79;
+/// `floor(x: float) -> float` — the greatest integer not above `x`, as
+/// a float.
+pub const BUILTIN_FLOOR: u32 = 80;
+/// `ceil(x: float) -> float` — the least integer not below `x`, as a
+/// float.
+pub const BUILTIN_CEIL: u32 = 81;
+/// `pow(base: float, exp: float) -> float`.
+pub const BUILTIN_POW: u32 = 82;
+/// `abs(x: float) -> float` — the float width's absolute value; no int
+/// sibling exists, so the bare name carries no overload.
+pub const BUILTIN_ABS: u32 = 83;
+/// `contains(haystack, needle: string) -> bool` — the string search
+/// family's membership read (the 2026-11-21 pure-builtin round): the
+/// needle occurs in the haystack, the empty needle always occurring.
+pub const BUILTIN_CONTAINS: u32 = 84;
+/// `index_of(haystack, needle: string) -> int | none` — the checked
+/// search: the first occurrence's char index under the ok discriminant
+/// (`substring`'s indexing), a miss the `none` member with the inert
+/// unit word as payload.
+pub const BUILTIN_INDEX_OF: u32 = 85;
+/// `replace(haystack, needle, with: string) -> string` — every
+/// non-overlapping occurrence swapped for `with` in one left-to-right
+/// pass, the inserted text never re-scanned; the empty needle inserts
+/// `with` at every char boundary.
+pub const BUILTIN_REPLACE: u32 = 86;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -1366,6 +1413,110 @@ fn int_of_u32_fn(
 ) -> Result<NativeResult, Trap> {
     let v = i64_arg(args, 0)?;
     Ok(NativeResult::Word(Value::I64(v)))
+}
+
+/// The float math family's one-argument shape (the 2026-11-21
+/// pure-builtin round): IEEE over the f64 word, total by construction —
+/// no operand shape traps (a negative `sqrt` answers NaN).
+macro_rules! float_unary {
+    ($name:ident, $op:expr) => {
+        fn $name(
+            _heaps: &mut Heaps,
+            _out: &mut OutputSink,
+            args: &[Value],
+        ) -> Result<NativeResult, Trap> {
+            Ok(NativeResult::Word(Value::F64($op(f64_arg(args, 0)?))))
+        }
+    };
+}
+
+float_unary!(sqrt_fn, f64::sqrt);
+float_unary!(sin_fn, f64::sin);
+float_unary!(cos_fn, f64::cos);
+float_unary!(floor_fn, f64::floor);
+float_unary!(ceil_fn, f64::ceil);
+float_unary!(abs_fn, f64::abs);
+
+/// `atan2(y: float, x: float) -> float` — the two-argument arctangent:
+/// the quadrant reads off both operands' signs, the signed zeros
+/// included (`atan2(0, -1)` answers pi, `atan2(-0, -1)` negative pi).
+fn atan2_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let y = f64_arg(args, 0)?;
+    let x = f64_arg(args, 1)?;
+    Ok(NativeResult::Word(Value::F64(y.atan2(x))))
+}
+
+/// `pow(base: float, exp: float) -> float` — the exponentiation,
+/// `powf`'s IEEE edge answers (a negative base to a non-integer
+/// exponent answers NaN, never a trap).
+fn pow_fn(_heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
+    let base = f64_arg(args, 0)?;
+    let exp = f64_arg(args, 1)?;
+    Ok(NativeResult::Word(Value::F64(base.powf(exp))))
+}
+
+/// `contains(haystack, needle: string) -> bool` — the string search
+/// family's membership read (the 2026-11-21 pure-builtin round): the
+/// needle occurs in the haystack, the empty needle always occurring.
+/// Both operands borrow shared, so neither side copies out.
+fn contains_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let haystack = heaps.str_ref(ref_arg(args, 0)?)?;
+    let needle = heaps.str_ref(ref_arg(args, 1)?)?;
+    Ok(NativeResult::Word(Value::Bool(haystack.contains(needle))))
+}
+
+/// `index_of(haystack, needle: string) -> int | none` — the checked
+/// search: the first occurrence's char index under the ok discriminant
+/// (`substring`/`char_at`'s indexing, so the answer composes with the
+/// checked slice), a miss the `none` member with the inert unit word as
+/// payload. The empty needle sits at index 0.
+fn index_of_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let haystack = heaps.str_ref(ref_arg(args, 0)?)?;
+    let needle = heaps.str_ref(ref_arg(args, 1)?)?;
+    Ok(match haystack.find(needle) {
+        // find's byte offset sits on a char boundary
+        Some(byte) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(
+                i64::try_from(haystack[..byte].chars().count()).expect("char count fits i64"),
+            ),
+        },
+        None => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(0),
+        },
+    })
+}
+
+/// `replace(haystack, needle, with: string) -> string` — every
+/// non-overlapping occurrence swapped for `with` in one left-to-right
+/// pass, the inserted text never re-scanned; no match answers the
+/// input's own text, and the empty needle inserts `with` at every char
+/// boundary.
+fn replace_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let replaced = {
+        let haystack = heaps.str_ref(ref_arg(args, 0)?)?;
+        let needle = heaps.str_ref(ref_arg(args, 1)?)?;
+        let with = heaps.str_ref(ref_arg(args, 2)?)?;
+        haystack.replace(needle, with)
+    };
+    Ok(NativeResult::Word(heaps.new_str(replaced)))
 }
 
 /// `bytes_eq(a, b: bytes) -> bool` — the structural content compare
@@ -2912,7 +3063,9 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// [`BUILTIN_BYTE_COMPARE`]) append past it, the content-eq pair
 /// (`list_eq`, `map_eq`) past those, and the byte/u32 width bridges
 /// ([`BUILTIN_BYTE_OF`]..[`BUILTIN_INT_OF_U32`], the json face's scalar
-/// readers) past the pair.
+/// readers) past the pair, and the float math family and the string
+/// search triple ([`BUILTIN_SQRT`]..[`BUILTIN_REPLACE`], the 2026-11-21
+/// pure-builtin round) past the bridges.
 // one flat registration table whose entry order is contract (the
 // reserved head and the compare natives' tail positions); splitting it
 // would only relocate entries between functions
@@ -3347,10 +3500,98 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             control: None,
             func: int_of_u32_fn,
         },
+        NativeFunction {
+            name: "sqrt",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: sqrt_fn,
+        },
+        NativeFunction {
+            name: "sin",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: sin_fn,
+        },
+        NativeFunction {
+            name: "cos",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: cos_fn,
+        },
+        NativeFunction {
+            name: "atan2",
+            params: &[SlotType::F64, SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: atan2_fn,
+        },
+        NativeFunction {
+            name: "floor",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: floor_fn,
+        },
+        NativeFunction {
+            name: "ceil",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: ceil_fn,
+        },
+        NativeFunction {
+            name: "pow",
+            params: &[SlotType::F64, SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: pow_fn,
+        },
+        NativeFunction {
+            name: "abs",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: abs_fn,
+        },
+        NativeFunction {
+            name: "contains",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: contains_fn,
+        },
+        NativeFunction {
+            name: "index_of",
+            params: &[SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            func: index_of_fn,
+        },
+        NativeFunction {
+            name: "replace",
+            params: &[SlotType::Ref, SlotType::Ref, SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            func: replace_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_INT_OF_U32, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_INT_OF_U32 as usize + 1);
+    // BUILTIN_REPLACE, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_REPLACE as usize + 1);
     fns
 }
 
@@ -3490,6 +3731,19 @@ pub(crate) fn i64_arg(args: &[Value], index: usize) -> Result<i64, Trap> {
         _ => Err(Trap::SlotTypeMismatch {
             slot: u8::try_from(index).expect("slot index fits u8"),
             expected: SlotType::I64,
+            actual: args.get(index).map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
+/// Reads the `f64` word at `index`, refusing with the offending
+/// argument's own kind.
+pub(crate) fn f64_arg(args: &[Value], index: usize) -> Result<f64, Trap> {
+    match args.get(index) {
+        Some(Value::F64(v)) => Ok(*v),
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: u8::try_from(index).expect("slot index fits u8"),
+            expected: SlotType::F64,
             actual: args.get(index).map_or(SlotType::I64, Value::slot_type),
         }),
     }
@@ -3845,7 +4099,18 @@ mod tests {
         assert_eq!(fns[BUILTIN_INT_OF_BYTE as usize].name, "int_of_byte");
         assert_eq!(fns[BUILTIN_U32_OF as usize].name, "u32_of");
         assert_eq!(fns[BUILTIN_INT_OF_U32 as usize].name, "int_of_u32");
-        assert_eq!(fns.len(), BUILTIN_INT_OF_U32 as usize + 1);
+        assert_eq!(fns[BUILTIN_SQRT as usize].name, "sqrt");
+        assert_eq!(fns[BUILTIN_SIN as usize].name, "sin");
+        assert_eq!(fns[BUILTIN_COS as usize].name, "cos");
+        assert_eq!(fns[BUILTIN_ATAN2 as usize].name, "atan2");
+        assert_eq!(fns[BUILTIN_FLOOR as usize].name, "floor");
+        assert_eq!(fns[BUILTIN_CEIL as usize].name, "ceil");
+        assert_eq!(fns[BUILTIN_POW as usize].name, "pow");
+        assert_eq!(fns[BUILTIN_ABS as usize].name, "abs");
+        assert_eq!(fns[BUILTIN_CONTAINS as usize].name, "contains");
+        assert_eq!(fns[BUILTIN_INDEX_OF as usize].name, "index_of");
+        assert_eq!(fns[BUILTIN_REPLACE as usize].name, "replace");
+        assert_eq!(fns.len(), BUILTIN_REPLACE as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
@@ -3896,6 +4161,17 @@ mod tests {
             (BUILTIN_INT_OF_BYTE, 1),
             (BUILTIN_U32_OF, 2),
             (BUILTIN_INT_OF_U32, 1),
+            (BUILTIN_SQRT, 1),
+            (BUILTIN_SIN, 1),
+            (BUILTIN_COS, 1),
+            (BUILTIN_ATAN2, 1),
+            (BUILTIN_FLOOR, 1),
+            (BUILTIN_CEIL, 1),
+            (BUILTIN_POW, 1),
+            (BUILTIN_ABS, 1),
+            (BUILTIN_CONTAINS, 1),
+            (BUILTIN_INDEX_OF, 2),
+            (BUILTIN_REPLACE, 1),
         ] {
             assert_eq!(fns[index as usize].result_words, want);
         }
@@ -4113,6 +4389,190 @@ mod tests {
             };
             assert_eq!(heaps.str_at(part), Ok(want), "trimmed {text:?}");
             assert_ne!(part, src, "a fresh object for {text:?}");
+        }
+    }
+
+    /// The float math family answers IEEE over the f64 word and stays
+    /// total: a negative `sqrt`, a NaN propagation, and a negative base
+    /// to a non-integer exponent all answer NaN, never a trap; `floor`/
+    /// `ceil` keep the signed zero and round the negative halves away
+    /// from and toward zero; `abs` clears the sign bit.
+    #[test]
+    fn float_math_family_answers_ieee_and_stays_total() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let mut unary = |f: NativeFn, x: f64| {
+            let Value::F64(v) = f(&mut heaps, &mut out, &[Value::F64(x)])
+                .expect("the float family is total")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("an f64 word")
+            };
+            v
+        };
+        assert_eq!(unary(sqrt_fn, 4.0), 2.0);
+        assert_eq!(unary(sqrt_fn, f64::INFINITY), f64::INFINITY);
+        assert!(unary(sqrt_fn, -1.0).is_nan(), "a negative sqrt answers NaN");
+        assert!(unary(sqrt_fn, f64::NAN).is_nan(), "NaN propagates");
+        assert_eq!(unary(sin_fn, 0.0), 0.0);
+        assert_eq!(unary(cos_fn, 0.0), 1.0);
+        assert!(unary(sin_fn, f64::NAN).is_nan());
+        assert!(
+            unary(cos_fn, f64::INFINITY).is_nan(),
+            "cos of infinity is NaN"
+        );
+        assert_eq!(unary(floor_fn, 2.5), 2.0);
+        assert_eq!(unary(ceil_fn, 2.5), 3.0);
+        assert_eq!(unary(floor_fn, -2.5), -3.0, "floor rounds away from zero");
+        assert_eq!(unary(ceil_fn, -2.5), -2.0, "ceil rounds toward zero");
+        let floored_zero = unary(floor_fn, -0.5);
+        assert_eq!(floored_zero, -1.0);
+        let floored_signed = unary(floor_fn, -0.0);
+        assert_eq!(floored_signed, 0.0);
+        assert!(
+            floored_signed.is_sign_negative(),
+            "floor keeps the signed zero"
+        );
+        assert_eq!(unary(abs_fn, -2.5), 2.5);
+        let abs_zero = unary(abs_fn, -0.0);
+        assert_eq!(abs_zero, 0.0);
+        assert!(abs_zero.is_sign_positive(), "abs clears the sign bit");
+        assert_eq!(unary(abs_fn, f64::NEG_INFINITY), f64::INFINITY);
+        assert!(unary(abs_fn, f64::NAN).is_nan());
+    }
+
+    /// The two-argument float natives stage (y, x) for `atan2` and
+    /// (base, exp) for `pow`: the quadrant reads off both signs — the
+    /// signed zeros included — and `pow` answers the IEEE edges (0^0 is
+    /// 1, a negative base to a non-integer exponent is NaN).
+    #[test]
+    fn atan2_reads_the_quadrant_and_pow_answers_the_edges() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let mut binary = |f: NativeFn, a: f64, b: f64| {
+            let Value::F64(v) = f(&mut heaps, &mut out, &[Value::F64(a), Value::F64(b)])
+                .expect("the float family is total")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("an f64 word")
+            };
+            v
+        };
+        assert_eq!(binary(atan2_fn, 1.0, 1.0), std::f64::consts::FRAC_PI_4);
+        assert_eq!(
+            binary(atan2_fn, 1.0, -1.0),
+            3.0 * std::f64::consts::FRAC_PI_4
+        );
+        assert_eq!(
+            binary(atan2_fn, -1.0, -1.0),
+            -3.0 * std::f64::consts::FRAC_PI_4,
+            "the third quadrant stays negative"
+        );
+        assert_eq!(binary(atan2_fn, 0.0, -1.0), std::f64::consts::PI);
+        assert_eq!(
+            binary(atan2_fn, -0.0, -1.0),
+            -std::f64::consts::PI,
+            "the signed zero carries the quadrant"
+        );
+        assert_eq!(binary(atan2_fn, 0.0, 0.0), 0.0);
+        assert_eq!(binary(pow_fn, 2.0, 10.0), 1024.0);
+        assert_eq!(binary(pow_fn, 2.0, -1.0), 0.5);
+        assert_eq!(binary(pow_fn, 0.0, 0.0), 1.0);
+        assert!(
+            binary(pow_fn, -8.0, 1.0 / 3.0).is_nan(),
+            "a negative base to a non-integer exponent is NaN"
+        );
+    }
+
+    /// The string search family: `contains` answers the membership read
+    /// (the empty needle always occurring), `index_of` the first
+    /// occurrence's char index under the ok discriminant — `substring`'s
+    /// indexing, multi-byte text counting scalars — a miss the `none`
+    /// member, and `replace` swaps every non-overlapping occurrence in
+    /// one left-to-right pass, the inserted text never re-scanned and
+    /// the empty needle inserting `with` at every char boundary.
+    #[test]
+    fn string_search_family_covers_the_checked_edges() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        for (haystack, needle, want) in [
+            ("héllo", "llo", true),
+            ("héllo", "él", true),
+            ("héllo", "x", false),
+            ("héllo", "", true),
+            ("", "", true),
+            ("", "a", false),
+        ] {
+            let args = [heaps.new_intern(haystack), heaps.new_intern(needle)];
+            assert_eq!(
+                contains_fn(&mut heaps, &mut out, &args).expect("contains runs"),
+                NativeResult::Word(Value::Bool(want)),
+                "contains({haystack:?}, {needle:?})"
+            );
+        }
+        for (haystack, needle, want) in [
+            ("héllo", "llo", Some(2)),
+            ("héllo", "él", Some(1)),
+            ("héllo", "héllo", Some(0)),
+            ("héllo", "", Some(0)),
+            ("", "", Some(0)),
+            ("héllo", "x", None),
+            ("ab", "abcdef", None),
+        ] {
+            let args = [heaps.new_intern(haystack), heaps.new_intern(needle)];
+            let want = match want {
+                Some(index) => NativeResult::Tag {
+                    tag: PLATFORM_IO_OK,
+                    payload: Value::I64(index),
+                },
+                None => NativeResult::Tag {
+                    tag: PLATFORM_NONE,
+                    payload: Value::I64(0),
+                },
+            };
+            assert_eq!(
+                index_of_fn(&mut heaps, &mut out, &args).expect("index_of runs"),
+                want,
+                "index_of({haystack:?}, {needle:?})"
+            );
+        }
+        for (haystack, needle, with, want) in [
+            ("banana", "an", "AN", "bANANa"),
+            ("abc", "x", "y", "abc"),
+            ("ab", "", "-", "-a-b-"),
+            ("", "", "-", "-"),
+            ("aaa", "aa", "b", "ba"),
+            ("a", "a", "aa", "aa"),
+            ("héllo héllo", "héllo", "hei", "hei hei"),
+        ] {
+            let args = [
+                heaps.new_intern(haystack),
+                heaps.new_intern(needle),
+                heaps.new_intern(with),
+            ];
+            let Value::Ref(word) = replace_fn(&mut heaps, &mut out, &args)
+                .expect("replace runs")
+                .word()
+                .expect("a single word")
+            else {
+                panic!("a string ref")
+            };
+            assert_eq!(
+                heaps.str_at(word),
+                Ok(want),
+                "replace({haystack:?}, {needle:?}, {with:?})"
+            );
         }
     }
 

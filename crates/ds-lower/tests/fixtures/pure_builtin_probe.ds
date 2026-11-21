@@ -1,0 +1,64 @@
+// purpose: the pure-builtin round's source calls lower and run through
+// the native rows the mirror routes — the float math family (sqrt, sin,
+// cos, atan2, floor, ceil, pow, abs) answering one f64 word each, total
+// by construction, and the string search triple: contains' membership
+// bit, the checked char-indexed index_of riding the same ok/none span
+// channel as the other checked natives (its answer composing with the
+// checked slice), and replace's one left-to-right pass with the inserted
+// text never re-scanned. Both the bare and the UFCS call spellings route
+// the same rows; the float probes answer the exact IEEE rows the Rust
+// side recomputes.
+
+tag int
+tag float
+tag bool
+tag string
+tag char
+tag none
+
+extern fn println (s: string) -> ()
+extern fn sqrt (x: float) -> float
+extern fn sin (x: float) -> float
+extern fn cos (x: float) -> float
+extern fn atan2 (y: float, x: float) -> float
+extern fn floor (x: float) -> float
+extern fn ceil (x: float) -> float
+extern fn pow (base: float, exp: float) -> float
+extern fn abs (x: float) -> float
+extern fn contains (haystack: string, needle: string) -> bool
+extern fn index_of (haystack: string, needle: string) -> int | none
+extern fn replace (haystack: string, needle: string, with: string) -> string
+extern fn substring (s: string, start: int, end: int) -> string | none
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+
+fn main() -> bool {
+  println("sqrt ${sqrt(4.0)} floor ${floor(2.5)} ceil ${ceil(2.5)}")
+  float_rows() && search_rows() && compose_rows()
+}
+
+fn float_rows() -> bool {
+  const neg: float = 0.0 - 3.5
+  sqrt(4.0) == 2.0 && floor(2.5) == 2.0 && ceil(2.5) == 3.0 && floor(neg) == 0.0 - 4.0 && ceil(neg) == 0.0 - 3.0 && pow(2.0, 10.0) == 1024.0 && neg.pow(2.0) == 12.25 && abs(neg) == 3.5 && neg.abs() == 3.5 && sin(0.0) == 0.0 && cos(0.0) == 1.0 && atan2(0.0, 1.0) == 0.0
+}
+
+fn search_rows() -> bool {
+  contains("hello", "ell") && !(contains("hello", "z")) && contains("hello", "") && "banana".contains("na") && index_of("hello", "l").unwrap_or(-1) == 2 && index_of("hello", "z").unwrap_or(-1) == -1 && index_of("hello", "").unwrap_or(-1) == 0 && index_of("héllo", "l").unwrap_or(-1) == 2 && replace("banana", "na", "NA") == "baNANA" && replace("aaa", "aa", "b") == "ba" && replace("abc", "z", "y") == "abc" && "ab".replace("", "-") == "-a-b-"
+}
+
+fn compose_rows() -> bool {
+  const hay = "hello world"
+  const i = index_of(hay, "world").unwrap_or(-1)
+  substring(hay, i, i + 5).unwrap_or("") == "world"
+}
+
+fn neg_sqrt() -> float {
+  sqrt(0.0 - 1.0)
+}
+
+fn sin_probe() -> float {
+  sin(1.0)
+}
+
+fn atan2_probe() -> float {
+  atan2(1.0, 0.0)
+}
