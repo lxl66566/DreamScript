@@ -4928,8 +4928,24 @@ impl Bodies<'_> {
             );
         }
         let remainder = self.decls.universe.diff(total, handled_set);
+        // the result carries the handler's own answer beside the kept
+        // side (the MapErr contract `fn(e) -> e2` answers `t | e2`): a
+        // handler mapping the error onto a member the receiver never
+        // carried must widen the answer in, or the recorded type omits
+        // the only member the err arm ever writes. An answer that never
+        // solves at the site (the `die` idiom: a generic extern whose
+        // return variable no expectation feeds) names no knowable
+        // member — a minted variable's atom name is the only `$` a
+        // solved set can carry, surface names cannot spell it — and
+        // contributes nothing.
+        let answered = self.decls.universe.members(body_ty).iter().any(|m| {
+            self.decls
+                .universe
+                .atom_decl(*m)
+                .is_ok_and(|d| d.name.contains('$'))
+        });
         let result =
-            if name == "ok" { self.decls.universe.union(remainder, body_ty) } else { remainder };
+            if answered { remainder } else { self.decls.universe.union(remainder, body_ty) };
         if self.decls.universe.is_empty(result)
             && !self.decls.universe.is_empty(total)
             && !recv_val.poisoned

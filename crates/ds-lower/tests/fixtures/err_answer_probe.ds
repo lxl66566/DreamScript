@@ -1,0 +1,100 @@
+// purpose: the `.err` handler's answer widening — a handler answering a
+// member the receiver never carried must widen its answer into the call's
+// result union (the MapErr contract `fn(e) -> e2` answering `t | e2`):
+// the recorded type once named the remainder alone, so the inlined arm
+// wrote its Ref or Tag answer word into an I64-typed result slot and the
+// firing handler trapped the VM (`slot N holds Ref where I64 is
+// required`) behind a clean check, while every committed kernel's
+// handler answered inside the remainder and never tripped it. Each
+// answer shape fires beside its ok-path flow: a payloaded enum case over
+// a captured string, a captured bare string, a unit enum case, a struct
+// over a captured string, the unannotated spelling handling every
+// member the body does not keep, and the todo chain (list_get,
+// unwrap_or, parse_int) riding the platform native's failing parse.
+
+tag int
+tag string
+tag bool
+tag char
+tag my_err
+tag parse_err
+
+struct list[t]
+struct missing { name: string }
+
+enum field_err {
+  bad_number(string)
+  unit_case
+}
+
+extern fn println (s: string) -> ()
+extern fn split (s: string, sep: char) -> list[string]
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+extern fn parse_int (s: string) -> int | parse_err
+
+fn fallible(b: bool) -> int | my_err {
+  if b { 1 } else { my_err }
+}
+
+// a payloaded enum case built from a captured string
+fn cased(b: bool, line: string) -> string {
+  match fallible(b).err((_: my_err) => bad_number(line)) {
+    bad_number(word) => "case ${word}"
+    n => "int ${n}"
+  }
+}
+
+// a captured bare string
+fn worded(b: bool, line: string) -> string {
+  match fallible(b).err((_: my_err) => line) {
+    string => "word ${line}"
+    n => "int ${n}"
+  }
+}
+
+// a unit enum case
+fn united(b: bool) -> string {
+  match fallible(b).err((_: my_err) => unit_case) {
+    unit_case => "unit"
+    n => "int ${n}"
+  }
+}
+
+// a struct built over a captured string
+fn structured(b: bool, line: string) -> string {
+  match fallible(b).err((_: my_err) => missing { name: line }) {
+    missing { name } => "name ${name}"
+    n => "int ${n}"
+  }
+}
+
+// the unannotated spelling: the body keeps none of the receiver's
+// members, so the handler consumes both — the ok path included — and
+// its answer is the only member the result carries
+fn unannotated(b: bool, line: string) -> bool {
+  fallible(b).err((e) => bad_number(line)) == bad_number(line)
+}
+
+// the todo chain: the fallback string fails the parse, the handler
+// fires with the captured line riding the payloaded case
+fn chained(parts: list[string], line: string) -> string {
+  const n = list_get(parts, 1).unwrap_or("x").parse_int().err((_: parse_err) => bad_number(line))
+  match n {
+    bad_number(word) => "case ${word}"
+    v => "int ${v}"
+  }
+}
+
+fn main() -> bool {
+  const line = "boom"
+  const parts = split("7:34", ':')
+  const bad = split("a:b", ':')
+  println("cased ${cased(true, line)} ${cased(false, line)}")
+  println("worded ${worded(true, line)} ${worded(false, line)}")
+  println("united ${united(true)} ${united(false)}")
+  println("structured ${structured(true, line)} ${structured(false, line)}")
+  println("unannotated ${unannotated(true, line)} ${unannotated(false, line)}")
+  println("chained ${chained(parts, line)} ${chained(bad, line)}")
+  cased(true, line) == "int 1" && cased(false, line) == "case boom" && worded(true, line) == "int 1" && worded(false, line) == "word boom" && united(true) == "int 1" && united(false) == "unit" && structured(true, line) == "int 1" && structured(false, line) == "name boom" && unannotated(true, line) && unannotated(false, line) && chained(parts, line) == "int 34" && chained(bad, line) == "case boom"
+}

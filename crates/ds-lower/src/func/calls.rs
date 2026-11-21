@@ -4263,6 +4263,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // not need
         let base = self.rc.save();
         let kept = set_diff(self.members(src_ty), &handled);
+        // every member handled: the fall-through is dead code, so its
+        // arm never reaches the join — the handler's answer is the
+        // result's only writer and must survive the reconcile instead
+        // of dying at the join as one arm's divergent count
+        let flow_dead = kept.is_empty();
         if kept.len() == 1 && !self.is_span_ty(ty) {
             // the result is the one kept atom itself: claiming that
             // atom is honest — the word-address path extracts the
@@ -4344,7 +4349,9 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         let arm_err = self.rc.take();
         let err_div = self.rc.diverged();
-        let dying = self.rc.reconcile(&[(arm_ok, ok_div), (arm_err, err_div)]);
+        let dying = self
+            .rc
+            .reconcile(&[(arm_ok, ok_div || flow_dead), (arm_err, err_div)]);
         if let [ok, err] = &dying[..] {
             let mut epilogue = Vec::new();
             Placement::emit_drops(&mut epilogue, ok);
@@ -4408,6 +4415,10 @@ impl<'a> FnLower<'a, '_, '_> {
         let base = self.rc.save();
         let remainder = set_diff(self.members(src_ty), &handled);
         let mut flow_jmps = Vec::new();
+        // the dead fallthrough arm never reaches the join (the mirror of
+        // err_value's kept-empty arm): the handler's answer is the
+        // result's only writer and must survive the reconcile
+        let flow_dead = remainder.is_empty();
         if remainder.is_empty() {
             // every member jumps to the handler; the fallthrough is dead
             self.emit(Op::Jmp { target: join });
@@ -4480,7 +4491,9 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         let arm_ok = self.rc.take();
         let ok_div = self.rc.diverged();
-        let dying = self.rc.reconcile(&[(arm_flow, flow_div), (arm_ok, ok_div)]);
+        let dying = self
+            .rc
+            .reconcile(&[(arm_flow, flow_div || flow_dead), (arm_ok, ok_div)]);
         if let [flow, ok] = &dying[..] {
             let mut shift = 0;
             for at in &flow_jmps {
