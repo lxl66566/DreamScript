@@ -1,0 +1,111 @@
+// purpose: the lone arm naming a single-member scrutinee's sole member —
+//          the span holds the member's own words (no tag exists to test),
+//          so the arm lowers as its body with the binders bound there:
+//          the written single-member union spellings (payloaded and bare),
+//          value, tail, and statement positions, and the `.err`/`.ok`
+//          answer-widening's collapsed result (an unannotated handler
+//          consumes every receiver member, so its payloaded answer is the
+//          only member the result carries) — the still-refused shapes ride
+//          the suite file's own probes.
+
+tag int
+tag bool
+tag string
+tag my_err
+
+enum worded {
+  bad_word(string)
+}
+
+enum solo {
+  only_case
+}
+
+extern fn println (s: string) -> ()
+
+fn fallible(b: bool) -> int | my_err {
+  if b { 1 } else { my_err }
+}
+
+// written single-member union, payloaded member, binder used
+fn word_used(x: worded) -> string {
+  match x {
+    bad_word(w) => "used ${w}",
+  }
+}
+
+// the binder skipped
+fn word_skipped(x: worded) -> string {
+  match x {
+    bad_word(_) => "skipped",
+  }
+}
+
+// written single-member union, bare member, nothing binds
+fn unit_bare(x: solo) -> string {
+  match x {
+    only_case => "bare",
+  }
+}
+
+// tail position: the arm's value is the frame's answer
+fn word_tail(x: worded) -> string {
+  match x {
+    bad_word(w) => w,
+  }
+}
+
+// statement position: the value discards after the arm runs
+fn word_stmt(x: worded) -> () {
+  match x {
+    bad_word(w) => println("stmt ${w}"),
+  }
+}
+
+// the .err collapse, direct scrutinee
+fn err_direct(b: bool, line: string) -> string {
+  match fallible(b).err((e) => bad_word(line)) {
+    bad_word(w) => "direct ${w}",
+  }
+}
+
+// the .err collapse through a const alias
+fn err_aliased(b: bool, line: string) -> string {
+  const n = fallible(b).err((e) => bad_word(line))
+  match n {
+    bad_word(w) => "aliased ${w}",
+  }
+}
+
+// the .err collapse over a bare member
+fn err_unit(b: bool) -> string {
+  const n = fallible(b).err((e) => only_case)
+  match n {
+    only_case => "unit",
+  }
+}
+
+// the .ok mirror: the unannotated handler's answer is the only member
+fn ok_collapse(b: bool, line: string) -> string {
+  const n = fallible(b).ok((e) => bad_word(line))
+  match n {
+    bad_word(w) => "ok ${w}",
+  }
+}
+
+fn main() -> bool {
+  println(word_used(bad_word("hey")))
+  println(word_skipped(bad_word("hey")))
+  println(unit_bare(only_case))
+  println(word_tail(bad_word("tail")))
+  word_stmt(bad_word("arm"))
+  println(err_direct(true, "boom"))
+  println(err_direct(false, "boom"))
+  println(err_aliased(true, "boom"))
+  println(err_aliased(false, "boom"))
+  println(err_unit(true))
+  println(err_unit(false))
+  println(ok_collapse(true, "boom"))
+  println(ok_collapse(false, "boom"))
+  word_used(bad_word("hey")) == "used hey" && word_skipped(bad_word("hey")) == "skipped" && unit_bare(only_case) == "bare" && word_tail(bad_word("tail")) == "tail" && err_direct(false, "boom") == "direct boom" && err_aliased(false, "boom") == "aliased boom" && err_unit(false) == "unit" && ok_collapse(false, "boom") == "ok boom"
+}

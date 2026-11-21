@@ -352,32 +352,43 @@ impl FnLower<'_, '_, '_> {
     /// through to the next arm. A chain that can fail needs one
     /// unguarded catchall arm to close it: literal tests and guards
     /// prove no coverage, so the checker's tuple-arity coverage leaves
-    /// the fall-through open.
+    /// the fall-through open. A lone unguarded arm naming the sole
+    /// member of a single-member scrutinee is that direct shape too: the
+    /// span holds the member's own words, so the arm lowers as its body
+    /// with the binders bound there — no tag exists to test.
     fn match_single(
         &mut self,
         scrut: &TypedPlace,
         arms: &[MatchArm],
         value: Option<(&Place, Ty, usize)>,
     ) -> Result<(), LowerError> {
-        let kinds = arms
-            .iter()
-            .map(|arm| self.value_arm_kind(&arm.pat, scrut))
-            .collect::<Result<Vec<ValueArmKind>, _>>()?;
-        let catchall = arms
-            .iter()
-            .enumerate()
-            .find(|(index, arm)| kinds[*index] == ValueArmKind::Catchall && arm.guard.is_none())
-            .map(|(index, _)| index);
-        let can_fail =
-            kinds.contains(&ValueArmKind::Tested) || arms.iter().any(|arm| arm.guard.is_some());
-        if can_fail && catchall.is_none() {
-            let span = arms.first().map_or_else(no_span, |arm| arm.span);
-            return Err(LowerError::unsupported(
-                span,
-                "a value-level match without a catchall arm",
-                "literal tests and guards prove no coverage, so the checker's exhaustiveness \
-                 proof leaves the fall-through open; one unguarded catchall arm closes the chain",
-            ));
+        let sole = match arms {
+            [arm] => arm.guard.is_none() && self.names_sole_member(&arm.pat, scrut),
+            _ => false,
+        };
+        let mut catchall = None;
+        if !sole {
+            let kinds = arms
+                .iter()
+                .map(|arm| self.value_arm_kind(&arm.pat, scrut))
+                .collect::<Result<Vec<ValueArmKind>, _>>()?;
+            catchall = arms
+                .iter()
+                .enumerate()
+                .find(|(index, arm)| kinds[*index] == ValueArmKind::Catchall && arm.guard.is_none())
+                .map(|(index, _)| index);
+            let can_fail =
+                kinds.contains(&ValueArmKind::Tested) || arms.iter().any(|arm| arm.guard.is_some());
+            if can_fail && catchall.is_none() {
+                let span = arms.first().map_or_else(no_span, |arm| arm.span);
+                return Err(LowerError::unsupported(
+                    span,
+                    "a value-level match without a catchall arm",
+                    "literal tests and guards prove no coverage, so the checker's exhaustiveness \
+                     proof leaves the fall-through open; one unguarded catchall arm closes the \
+                     chain",
+                ));
+            }
         }
         if let [arm] = arms {
             if arm.ann.is_some() {
@@ -395,6 +406,10 @@ impl FnLower<'_, '_, '_> {
                 | Pattern::Binding { .. }
                 | Pattern::Wildcard(_)
                 | Pattern::Struct { .. } => {},
+                // the sole member's own spelling: the gate above proved
+                // the arm names the scrutinee's one member with untested
+                // payload binders, so it destructures directly too
+                Pattern::Path { .. } | Pattern::Call { .. } if sole => {},
                 _ => {
                     return Err(LowerError::unsupported(
                         pattern_span(&arm.pat),
@@ -803,6 +818,39 @@ impl FnLower<'_, '_, '_> {
                 Ok(())
             },
             _ => Ok(()),
+        }
+    }
+
+    /// Whether one lone arm's pattern names the scrutinee's sole member
+    /// with no payload tests: the scrutinee's checked type is that member
+    /// alone and the pattern is its bare or constructor spelling. Such a
+    /// scrutinee's span holds the member's own words, so the arm lowers
+    /// as its body with the binders bound there — no tag exists to test.
+    /// Anything else (another member, a tested payload sub-pattern, a
+    /// multi-segment path, a name resolving to no atom) answers false and
+    /// keeps the member-test refusal below.
+    fn names_sole_member(&self, pat: &Pattern, scrut: &TypedPlace) -> bool {
+        let (path, args) = match pat {
+            Pattern::Path { path, .. } => (path, None),
+            Pattern::Call { path, args, .. } => (path, Some(args)),
+            _ => return false,
+        };
+        let [only] = path.segments.as_slice() else {
+            return false;
+        };
+        let Some(atom) = self.path_atom(&only.name) else {
+            return false;
+        };
+        if self.members(scrut.ty) != [atom] {
+            return false;
+        }
+        // a tested payload sub-pattern can fail and a lone arm has no
+        // later landing, so only plain binders and skips qualify
+        match args {
+            None => true,
+            Some(args) => args
+                .iter()
+                .all(|arg| matches!(arg, Pattern::Binding { .. } | Pattern::Wildcard(_))),
         }
     }
 
@@ -1708,13 +1756,31 @@ impl FnLower<'_, '_, '_> {
                 let PlaceShape::Span(underlying) = scrut.place.shape else {
                     return Err(mismatch("a struct pattern on a scalar"));
                 };
-                if !matches!(&*self.shapes.shape(underlying)?, Shape::Union(_)) {
-                    return Err(mismatch("a case pattern's scrutinee"));
-                }
-                let layout = self.shapes.shape(scrut.ty)?;
-                let member_fields = layout
-                    .member_fields(atom)
-                    .ok_or_else(|| mismatch("a union member read"))?;
+                let span_layout = self.shapes.shape(underlying)?;
+                let scrut_layout = self.shapes.shape(scrut.ty)?;
+                let member_fields: &[MemberField] = if self.members(scrut.ty) == [atom] {
+                    // the scrutinee's own type is the named member alone,
+                    // so its span holds the member's words: the payload at
+                    // the atom's own consecutive offsets when the span is
+                    // the member's, at the union region's offsets when the
+                    // scrutinee refined out of a wider span
+                    match &*span_layout {
+                        Shape::Union(_) => span_layout
+                            .member_fields(atom)
+                            .ok_or_else(|| mismatch("a union member read"))?,
+                        Shape::Struct(s) if self.members(underlying) == [atom] => {
+                            s.fields.as_slice()
+                        },
+                        _ => return Err(mismatch("a case pattern's scrutinee")),
+                    }
+                } else {
+                    if !matches!(&*span_layout, Shape::Union(_)) {
+                        return Err(mismatch("a case pattern's scrutinee"));
+                    }
+                    scrut_layout
+                        .member_fields(atom)
+                        .ok_or_else(|| mismatch("a union member read"))?
+                };
                 if member_fields.len() != args.len() {
                     return Err(mismatch("a case pattern's arity"));
                 }
