@@ -1003,11 +1003,15 @@ impl<'a> Reflection<'a> {
             let type_index = match payload {
                 ds_parse::EnumPayload::None => self.register_atom(TypeId::NONE)?,
                 ds_parse::EnumPayload::Tuple(_) | ds_parse::EnumPayload::Struct(_) => {
+                    // a linked enum's minted cases answer through the
+                    // foreign name index the install filled — the
+                    // package namespace never carries them
                     let case_def = self
                         .analyzed
                         .package
                         .lookup_type(name)
-                        .filter(|&d| self.analyzed.package.def(d).span == *span)?;
+                        .filter(|&d| self.analyzed.package.def(d).span == *span)
+                        .or_else(|| self.analyzed.decls.foreign_type(name))?;
                     let atom = self.analyzed.decls.atoms.get(&case_def).copied()?;
                     self.register_atom(atom)?
                 },

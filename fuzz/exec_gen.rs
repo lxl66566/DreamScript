@@ -2867,13 +2867,13 @@ pub fn exercise(data: &[u8]) -> Drawn {
             std: false,
         };
         let unit = || ds_check::import::CasePayload::Unit;
-        conflict.entries.push(entry(
-            "spare",
-            TypeFact::Enum(vec![ds_check::import::TypeCase {
+        conflict.entries.push(entry("spare", TypeFact::Enum {
+            cases: vec![ds_check::import::TypeCase {
                 name: "clash".to_owned(),
                 payload: unit(),
-            }]),
-        ));
+            }],
+            linear: false,
+        }));
         conflict.entries.push(entry(
             "clash",
             TypeFact::Case(ds_check::import::CaseFact {

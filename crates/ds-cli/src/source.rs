@@ -106,6 +106,7 @@ fn exports_of(
     effects: &ds_check::Effects,
     functions: &[String],
     deps: &[ds_mod::Dep],
+    deinit_structs: &std::collections::HashSet<u32>,
 ) -> Vec<Export> {
     let caps_of = |def: ds_check::DefId| {
         effects
@@ -205,7 +206,15 @@ fn exports_of(
         // type-namespace shape stays refused downstream.
         let ty = match def.kind {
             ds_check::DefKind::Struct => {
-                ds_check::TypeFact::of_struct(&analyzed.decls, id).map(std::sync::Arc::new)
+                // a deinit-carrying declaration keeps no structural
+                // fact: the consuming compile's binding deaths would
+                // skip the linked deinit body, so the selection stays
+                // refused until the artifact round carries the member
+                if deinit_structs.contains(&id.index()) {
+                    None
+                } else {
+                    ds_check::TypeFact::of_struct(&analyzed.decls, id).map(std::sync::Arc::new)
+                }
             },
             ds_check::DefKind::Enum => {
                 ds_check::TypeFact::of_enum(&analyzed.package, &analyzed.decls, id)
@@ -342,6 +351,35 @@ pub(crate) fn rebase_span(
         Some(file) => ds_diag::Span::new(*file, span.start, span.end),
         None => span,
     }
+}
+
+/// The def indexes of the deinit-carrying struct declarations (C5): the
+/// producer-side gate that keeps their structural facts off the export
+/// surface — a linked deinit body is member machinery the artifact round
+/// owns, so a dependent binding the shape would skip the teardown at
+/// every binding death.
+fn deinit_structs(analyzed: &Analyzed) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    for ast in analyzed.asts.iter() {
+        for block in &ast.blocks {
+            for item in &block.items {
+                let ItemKind::Struct(decl) = &item.kind else {
+                    continue;
+                };
+                if !decl
+                    .members
+                    .iter()
+                    .any(|member| matches!(member, ds_parse::StructMember::Deinit { .. }))
+                {
+                    continue;
+                }
+                if let Some(def) = analyzed.package.lookup_type(&decl.name.name) {
+                    out.insert(def.index());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One compiled source: the lowered module plus what the run entry path
@@ -889,6 +927,7 @@ fn compile_text(
         &effects,
         lowered.functions(),
         &deps,
+        &deinit_structs(&analyzed),
     );
     match after {
         BundleAfter::Keep => {

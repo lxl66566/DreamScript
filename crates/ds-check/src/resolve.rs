@@ -1113,9 +1113,10 @@ impl Package {
                 ForeignKind::Type if entry.ty.is_some() => {
                     let kind = match entry.ty.as_deref() {
                         Some(
-                            crate::import::TypeFact::Struct(..) | crate::import::TypeFact::Opaque,
+                            crate::import::TypeFact::Struct { .. }
+                            | crate::import::TypeFact::Opaque,
                         ) => Some(DefKind::Struct),
-                        Some(crate::import::TypeFact::Enum(..)) => Some(DefKind::Enum),
+                        Some(crate::import::TypeFact::Enum { .. }) => Some(DefKind::Enum),
                         Some(crate::import::TypeFact::Case(fact)) => self
                             .foreign_type_defs
                             .contains_key(&fact.enum_name)
@@ -1124,8 +1125,17 @@ impl Package {
                         Some(crate::import::TypeFact::Tag) => Some(DefKind::Tag),
                         None => None,
                     };
-                    let free = entry.name != "none"
-                        && entry.name != "type"
+                    // A case may carry the reserved spellings `none`
+                    // (and, where a producer could spell it, `type`):
+                    // the mint's reserved-atom mapping owns both sides,
+                    // mapping the colliding unit case onto the
+                    // predeclared atom exactly like a local case's mint.
+                    // Every other shape keeps the reserved-name refusal —
+                    // its mint would silently skip the predeclared
+                    // collision and mis-shape every use.
+                    let reserved_ok =
+                        matches!(entry.ty.as_deref(), Some(crate::import::TypeFact::Case(_)));
+                    let free = (reserved_ok || (entry.name != "none" && entry.name != "type"))
                         && self.lookup_type(&entry.name).is_none()
                         && !self.foreign_type_defs.contains_key(&entry.name);
                     if let (Some(kind), true) = (kind, free) {
@@ -1290,8 +1300,10 @@ impl Package {
                                 fact.enum_name
                             )
                         } else if self.lookup_type(&entry.name).is_some()
-                            || entry.name == "none"
-                            || entry.name == "type"
+                            || (!matches!(
+                                entry.ty.as_deref(),
+                                Some(crate::import::TypeFact::Case(_))
+                            ) && (entry.name == "none" || entry.name == "type"))
                         {
                             format!(
                                 "this package already declares `{}`; the local declaration would \
@@ -2020,31 +2032,6 @@ impl FileResolver<'_> {
                         [head] => self.type_name_use(head),
                         _ => self.path_use(&trait_ref.path),
                     }
-                } else if let Some(head) = impl_target_head(&imp.target) {
-                    // An inherent impl over a linked type (G4): the
-                    // minted def answers the layout seams, but the
-                    // impl's members register nowhere its receiver
-                    // resolves — the declaration itself is the honest
-                    // refusal point. A trait impl keeps its own shape
-                    // pass's head refusal.
-                    if let Some(import_span) = self.linked_impl_target(head) {
-                        self.diags.push(
-                            Diagnostic::error(
-                                ErrorCode::ImportUnsupportedShape,
-                                format!(
-                                    "impl over `{}`, a type a linked package owns: its members \
-                                     would register nowhere this package's receivers resolve [G4]",
-                                    head.name
-                                ),
-                            )
-                            .with_primary(head.span, "the impl targets an import-bound type")
-                            .with_secondary(import_span, "the import binds the type here")
-                            .with_note(
-                                "cross-package impls wait on the artifact round's member link \
-                                 facts",
-                            ),
-                        );
-                    }
                 }
                 // An impl's members spell the self type `Self` [F2, record
                 // 6.1], trait and inherent alike.
@@ -2461,22 +2448,6 @@ impl FileResolver<'_> {
             .kind
             .in_type_namespace()
             .then_some(def)
-    }
-
-    /// The import site binding an impl target's head as a linked type
-    /// (G4), when the package's own namespace does not declare the name:
-    /// the answer names the import that owns the impl's target.
-    fn linked_impl_target(&self, head: &Ident) -> Option<Span> {
-        if self.package.lookup_type(&head.name).is_some() {
-            return None;
-        }
-        self.imports.and_then(|imports| {
-            imports
-                .names
-                .get(&head.name)
-                .filter(|&(def, _)| self.package.def(*def).kind.in_type_namespace())
-                .map(|&(_, span)| span)
-        })
     }
 
     /// The callee of a call form (F9): locals first (an indirect call of a
@@ -3428,17 +3399,6 @@ fn inherent_owner(target: &Type) -> String {
         Type::Paren { inner, .. } => inherent_owner(inner),
         Type::Path { path, .. } if path.segments.len() == 1 => path.segments[0].name.clone(),
         other => crate::decls::render_type(other),
-    }
-}
-
-/// The head identifier an impl's target names when it is a bare path
-/// spelling (parens peeled, application args aside): the name whose
-/// namespace priority decides whether the impl targets a linked type.
-fn impl_target_head(target: &Type) -> Option<&Ident> {
-    match target {
-        Type::Paren { inner, .. } => impl_target_head(inner),
-        Type::Path { path, .. } if path.segments.len() == 1 => Some(&path.segments[0]),
-        _ => None,
     }
 }
 

@@ -1603,16 +1603,19 @@ mod tests {
             entries: vec![
                 entry(
                     "tone",
-                    Some(ds_check::TypeFact::Enum(vec![
-                        ds_check::import::TypeCase {
-                            name: "quiet".to_owned(),
-                            payload: unit(),
-                        },
-                        ds_check::import::TypeCase {
-                            name: "loud".to_owned(),
-                            payload: unit(),
-                        },
-                    ])),
+                    Some(ds_check::TypeFact::Enum {
+                        cases: vec![
+                            ds_check::import::TypeCase {
+                                name: "quiet".to_owned(),
+                                payload: unit(),
+                            },
+                            ds_check::import::TypeCase {
+                                name: "loud".to_owned(),
+                                payload: unit(),
+                            },
+                        ],
+                        linear: false,
+                    }),
                 ),
                 entry(
                     "quiet",

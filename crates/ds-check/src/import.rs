@@ -186,25 +186,39 @@ fn parse_int(text: &str) -> Option<i64> {
 /// compile mints the same declaration products a local declaration
 /// would — one atom, one field signature, one AST-shaped row per
 /// declaration product. The vocabulary carries a flat struct's named
-/// fields, an enum's tag rows, a lone tag's unit atom, a non-generic
-/// alias's resolved word, and a bodiless struct's opaque identity; every
-/// other type-namespace shape (a trait, a generic or linear declaration)
-/// and every field outside the vocabulary carries no fact and keeps its
-/// selection refused.
+/// fields (a linear declaration's move-discipline bit riding beside
+/// them), an enum's tag rows (the same bit), a lone tag's unit atom, a
+/// non-generic alias's resolved word, and a bodiless struct's opaque
+/// identity; every other type-namespace shape (a trait, a generic
+/// declaration) and every field outside the vocabulary carries no fact
+/// and keeps its selection refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeFact {
     /// A flat, non-generic struct: named fields over the word
-    /// vocabulary. A linear declaration (`~Copyable`, so a deinit
-    /// carrier too) carries no fact — its lifetime discipline is not a
-    /// surface fact this round.
-    Struct(Vec<TypeField>),
+    /// vocabulary, with the declaration's linearity (`~Copyable`)
+    /// riding beside them — the consuming compile's mint carries the
+    /// same move discipline a local declaration would. The producer
+    /// gates deinit-carrying declarations out of the fact: a linked
+    /// deinit body is the artifact round's member machinery.
+    Struct {
+        /// Named fields over the word vocabulary.
+        fields: Vec<TypeField>,
+        /// Whether the declaration subtracts copyability.
+        linear: bool,
+    },
     /// A non-generic enum: its tag rows, one per case, in declaration
     /// order — an empty enum rides its empty rows, so the name binds
-    /// uninhabited exactly like the local spelling. A linear declaration
-    /// carries no fact (the struct clause's rule); every payload must
-    /// spell in the vocabulary — a unit case or a struct payload of
-    /// word-shaped fields, a tuple payload carrying no member names.
-    Enum(Vec<TypeCase>),
+    /// uninhabited exactly like the local spelling — with the
+    /// declaration's linearity riding beside them. Every payload must
+    /// spell in the vocabulary: a unit case, a struct payload of
+    /// word-shaped fields, or a tuple payload of word-shaped positional
+    /// members.
+    Enum {
+        /// Tag rows, one per case.
+        cases: Vec<TypeCase>,
+        /// Whether the declaration subtracts copyability.
+        linear: bool,
+    },
     /// A lone tag: the unit atom a local `tag` declaration mints, the
     /// name and identity alone — no layout, no case rows. Its values
     /// cross through the shared tag mapping exactly like a unit case's:
@@ -246,6 +260,9 @@ pub struct TypeCase {
 pub enum CasePayload {
     /// A bare case: the tag alone.
     Unit,
+    /// A tuple payload: positional members over the word vocabulary,
+    /// constructed by call form exactly like the local spelling.
+    Tuple(Vec<TypeWord>),
     /// A struct payload: named fields over the word vocabulary,
     /// positionally constructed.
     Struct(Vec<TypeField>),
@@ -353,16 +370,19 @@ impl ScalarWord {
 
 impl TypeFact {
     /// The fact one declared struct carries, when its whole shape spells
-    /// in the vocabulary: non-generic, not linear, every field a word the
-    /// vocabulary carries. A bodiless declaration (its atom still
-    /// shape-pending) carries the opaque identity alone. The caller gates
-    /// the def's kind — a struct-payload enum case mints a struct atom
-    /// but is not a type-namespace struct export. Everything else
-    /// answers `None` and keeps its selection refused.
+    /// in the vocabulary: non-generic, every field a word the vocabulary
+    /// carries, the declaration's linearity riding beside them. A
+    /// bodiless declaration (its atom still shape-pending) carries the
+    /// opaque identity alone. The caller gates the def's kind — a
+    /// struct-payload enum case mints a struct atom but is not a
+    /// type-namespace struct export — and the deinit-carrying
+    /// declarations, whose linked death semantics wait on the artifact
+    /// round's member machinery. Everything else answers `None` and
+    /// keeps its selection refused.
     #[must_use]
     pub fn of_struct(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
         let shape = decls.structs.get(&def)?;
-        if !shape.params.is_empty() || shape.linear {
+        if !shape.params.is_empty() {
             return None;
         }
         let atom = decls.atoms.get(&def)?;
@@ -380,7 +400,10 @@ impl TypeFact {
                 word: word_of_expr(decls, &field.ty)?,
             });
         }
-        Some(Self::Struct(out))
+        Some(Self::Struct {
+            fields: out,
+            linear: shape.linear,
+        })
     }
 
     /// The fact one declared alias carries, when its body spells directly
@@ -399,10 +422,11 @@ impl TypeFact {
     }
 
     /// The fact one declared enum carries, when every case spells in the
-    /// vocabulary: non-generic, not linear, every payload a unit or a
-    /// struct payload of word-shaped fields (the tuple payload carries
-    /// no member names); an empty enum rides its empty rows. Everything
-    /// else answers `None` and keeps its selection refused.
+    /// vocabulary: non-generic, every payload a unit, a struct payload
+    /// of word-shaped fields, or a tuple payload of word-shaped
+    /// positional members; an empty enum rides its empty rows; the
+    /// declaration's linearity rides beside the rows. Everything else
+    /// answers `None` and keeps its selection refused.
     #[must_use]
     pub fn of_enum(
         package: &crate::resolve::Package,
@@ -410,7 +434,7 @@ impl TypeFact {
         def: crate::DefId,
     ) -> Option<Self> {
         let shape = decls.enums.get(&def)?;
-        if !shape.params.is_empty() || shape.linear {
+        if !shape.params.is_empty() {
             return None;
         }
         let mut out = Vec::with_capacity(shape.cases.len());
@@ -421,7 +445,10 @@ impl TypeFact {
                 payload: case_payload(decls, case_def)?,
             });
         }
-        Some(Self::Enum(out))
+        Some(Self::Enum {
+            cases: out,
+            linear: shape.linear,
+        })
     }
 
     /// The fact one declared tag carries: the unit atom's identity
@@ -453,18 +480,34 @@ impl TypeFact {
     }
 }
 
+/// The solved field signature one payloaded case's atom carries (the
+/// positional members of a tuple payload, the named members of a
+/// struct payload).
+fn atom_fields(decls: &crate::Decls, def: crate::DefId) -> Option<Vec<crate::Field>> {
+    let atom = decls.atoms.get(&def)?;
+    match decls.universe.atom_decl(*atom).ok()?.kind {
+        crate::AtomKind::Struct(ref fields) => Some(fields.clone()),
+        _ => None,
+    }
+}
+
 /// One case's payload shape over the vocabulary, from its minted
 /// declaration products.
 fn case_payload(decls: &crate::Decls, def: crate::DefId) -> Option<CasePayload> {
     match &decls.cases.get(&def)?.payload {
         ds_parse::EnumPayload::None => Some(CasePayload::Unit),
-        ds_parse::EnumPayload::Tuple(_) => None,
+        // the tuple payload's members are the case atom's positional
+        // fields: each solves to one word of the vocabulary
+        ds_parse::EnumPayload::Tuple(_) => {
+            let fields = atom_fields(decls, def)?;
+            let mut out = Vec::with_capacity(fields.len());
+            for field in fields {
+                out.push(word_of_expr(decls, &field.ty)?);
+            }
+            Some(CasePayload::Tuple(out))
+        },
         ds_parse::EnumPayload::Struct(_) => {
-            let atom = decls.atoms.get(&def)?;
-            let fields = match decls.universe.atom_decl(*atom).ok()?.kind {
-                crate::AtomKind::Struct(ref fields) => fields.clone(),
-                _ => return None,
-            };
+            let fields = atom_fields(decls, def)?;
             let mut out = Vec::with_capacity(fields.len());
             for field in fields {
                 out.push(TypeField {
@@ -897,11 +940,11 @@ mod tests {
 
     /// The structural vocabulary carries: a flat struct's named fields
     /// over every scalar word, `bytes`, a list of one scalar, a map of
-    /// two scalars, an optional scalar, and the part-less struct; a
-    /// generic struct, a linear declaration, an enum, a tag, and a field
-    /// outside the vocabulary (a nested struct, a tuple, an optional over
-    /// a wider word) carry nothing — those keep their selection
-    /// refusals.
+    /// two scalars, an optional scalar, and the part-less struct — a
+    /// linear declaration carrying its move-discipline bit beside the
+    /// fields; a generic struct, an enum, a tag, and a field outside the
+    /// vocabulary (a nested struct, a tuple, an optional over a wider
+    /// word) carry nothing — those keep their selection refusals.
     #[test]
     fn the_fact_is_the_flat_struct_s_word_layout() {
         let source = concat!(
@@ -968,9 +1011,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} declares"));
             super::TypeFact::of_struct(&analyzed.decls, def)
         };
+        let fields = |fields| {
+            Some(super::TypeFact::Struct {
+                fields,
+                linear: false,
+            })
+        };
         assert_eq!(
             fact("cell"),
-            Some(super::TypeFact::Struct(vec![
+            fields(vec![
                 super::TypeField {
                     name: "n".to_owned(),
                     word: super::TypeWord::Scalar(super::ScalarWord::Int),
@@ -991,12 +1040,12 @@ mod tests {
                     name: "data".to_owned(),
                     word: super::TypeWord::Bytes,
                 },
-            ]))
+            ])
         );
-        assert_eq!(fact("bare"), Some(super::TypeFact::Struct(Vec::new())));
+        assert_eq!(fact("bare"), fields(Vec::new()));
         assert_eq!(
             fact("keyed"),
-            Some(super::TypeFact::Struct(vec![
+            fields(vec![
                 super::TypeField {
                     name: "index".to_owned(),
                     word: super::TypeWord::Map(super::ScalarWord::Str, super::ScalarWord::Int),
@@ -1005,14 +1054,25 @@ mod tests {
                     name: "seen".to_owned(),
                     word: super::TypeWord::Map(super::ScalarWord::Byte, super::ScalarWord::Byte),
                 },
-            ]))
+            ])
         );
         assert_eq!(
             fact("opt"),
-            Some(super::TypeFact::Struct(vec![super::TypeField {
+            fields(vec![super::TypeField {
                 name: "n".to_owned(),
                 word: super::TypeWord::Optional(super::ScalarWord::Int),
-            }]))
+            }])
+        );
+        assert_eq!(
+            fact("guard"),
+            Some(super::TypeFact::Struct {
+                fields: vec![super::TypeField {
+                    name: "n".to_owned(),
+                    word: super::TypeWord::Scalar(super::ScalarWord::Int),
+                }],
+                linear: true,
+            }),
+            "a linear declaration carries its move-discipline bit"
         );
         for refused in [
             "boxed",
@@ -1020,7 +1080,6 @@ mod tests {
             "holder",
             "opt_list",
             "twin",
-            "guard",
             "keyed_wide",
             "point",
             "list",
@@ -1030,12 +1089,13 @@ mod tests {
     }
 
     /// The enum vocabulary carries: a non-generic enum's tag rows — unit
-    /// cases and struct payloads of word-shaped fields (`bytes` included,
-    /// two payloaded cases too since each row names its case) — and each
-    /// minted case its own fact naming its enum; a generic enum, a linear
-    /// enum, an empty enum, a tuple payload, and a payload field outside
-    /// the word vocabulary carry nothing — those keep their selection
-    /// refusals.
+    /// cases, struct payloads of word-shaped fields (`bytes` included,
+    /// two payloaded cases too since each row names its case), and tuple
+    /// payloads of word-shaped positional members — and each minted case
+    /// its own fact naming its enum; a linear enum carries its
+    /// move-discipline bit; a generic enum, an empty enum's refusal set,
+    /// and a payload field outside the word vocabulary carry nothing —
+    /// those keep their selection refusals.
     #[test]
     fn the_fact_is_the_enum_s_tag_rows() {
         let source = concat!(
@@ -1062,9 +1122,10 @@ mod tests {
             "}\n",
             "pub enum trip {\n",
             "  one(int, int),\n",
+            "  two(string, byte),\n",
             "}\n",
             "pub enum wide {\n",
-            "  one { v: list[list[byte]] },\n",
+            "  lone { v: list[list[byte]] },\n",
             "}\n",
             "fn main() -> int {\n",
             "7\n",
@@ -1106,22 +1167,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} declares"));
             super::TypeFact::of_case(&analyzed.decls, def, enum_name)
         };
+        let rows = |cases, linear| Some(super::TypeFact::Enum { cases, linear });
         assert_eq!(
             enum_fact("shade"),
-            Some(super::TypeFact::Enum(vec![
-                super::TypeCase {
-                    name: "red".to_owned(),
-                    payload: super::CasePayload::Unit,
-                },
-                super::TypeCase {
-                    name: "green".to_owned(),
-                    payload: super::CasePayload::Struct(green.clone()),
-                },
-                super::TypeCase {
-                    name: "blue".to_owned(),
-                    payload: super::CasePayload::Struct(blue.clone()),
-                },
-            ]))
+            rows(
+                vec![
+                    super::TypeCase {
+                        name: "red".to_owned(),
+                        payload: super::CasePayload::Unit,
+                    },
+                    super::TypeCase {
+                        name: "green".to_owned(),
+                        payload: super::CasePayload::Struct(green.clone()),
+                    },
+                    super::TypeCase {
+                        name: "blue".to_owned(),
+                        payload: super::CasePayload::Struct(blue.clone()),
+                    },
+                ],
+                false
+            )
         );
         assert_eq!(
             case_fact("red", "shade"),
@@ -1144,20 +1209,58 @@ mod tests {
                 payload: super::CasePayload::Struct(blue),
             }))
         );
-        // an empty enum rides its empty rows; the refusals: generic,
-        // linear, a tuple payload, and a payload field outside the
-        // vocabulary
-        assert_eq!(enum_fact("bare"), Some(super::TypeFact::Enum(Vec::new())));
-        for refused in ["pair", "guard"] {
+        // an empty enum rides its empty rows; a tuple payload carries
+        // its positional words; a linear enum carries its bit
+        assert_eq!(enum_fact("bare"), rows(Vec::new(), false));
+        assert_eq!(
+            enum_fact("trip"),
+            rows(
+                vec![
+                    super::TypeCase {
+                        name: "one".to_owned(),
+                        payload: super::CasePayload::Tuple(vec![
+                            super::TypeWord::Scalar(super::ScalarWord::Int),
+                            super::TypeWord::Scalar(super::ScalarWord::Int),
+                        ]),
+                    },
+                    super::TypeCase {
+                        name: "two".to_owned(),
+                        payload: super::CasePayload::Tuple(vec![
+                            super::TypeWord::Scalar(super::ScalarWord::Str),
+                            super::TypeWord::Scalar(super::ScalarWord::Byte),
+                        ]),
+                    },
+                ],
+                false,
+            )
+        );
+        assert_eq!(
+            case_fact("one", "trip"),
+            Some(super::TypeFact::Case(super::CaseFact {
+                enum_name: "trip".to_owned(),
+                payload: super::CasePayload::Tuple(vec![
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                ]),
+            })),
+            "a tuple payload carries its positional words"
+        );
+        assert_eq!(
+            enum_fact("guard"),
+            rows(
+                vec![super::TypeCase {
+                    name: "red".to_owned(),
+                    payload: super::CasePayload::Unit,
+                }],
+                true,
+            ),
+            "a linear enum carries its move-discipline bit"
+        );
+        for refused in ["pair"] {
             assert_eq!(enum_fact(refused), None, "{refused} carries no fact");
         }
         assert_eq!(
-            case_fact("one", "trip"),
-            None,
-            "a tuple payload carries no fact"
-        );
-        assert_eq!(
-            case_fact("one", "wide"),
+            case_fact("lone", "wide"),
             None,
             "a payload field outside the vocabulary carries no fact"
         );
@@ -1294,7 +1397,10 @@ mod tests {
         assert_eq!(struct_fact("opaque"), Some(super::TypeFact::Opaque));
         assert_eq!(
             struct_fact("empty"),
-            Some(super::TypeFact::Struct(Vec::new()))
+            Some(super::TypeFact::Struct {
+                fields: Vec::new(),
+                linear: false,
+            })
         );
     }
 }

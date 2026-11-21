@@ -1402,6 +1402,21 @@ version = \"1.0.0\"
         "pub enum trip {\n",
         "  one(int, int),\n",
         "}\n",
+        "pub fn trip_first(t: trip) -> int {\n",
+        "  match t {\n",
+        "    one(a, _) => a,\n",
+        "  }\n",
+        "}\n",
+        "pub fn trip_make(a: int, b: int) -> trip {\n",
+        "  one(a, b)\n",
+        "}\n",
+        "pub fn drain(g: guard) -> int {\n",
+        "  g.n\n",
+        "}\n",
+        "pub struct owned: ~Copyable {\n",
+        "  n: int,\n",
+        "  deinit { }\n",
+        "}\n",
         "pub enum hollow {\n",
         "}\n",
         "pub enum mixed[t] {\n",
@@ -1814,6 +1829,73 @@ fn linked_enum_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A linked enum's tuple payload binds through its positional-word
+/// fact (G4): the consumer constructs by call form, matches
+/// positionally, and hands values to the producer's own functions over
+/// the same positional shape — the 2026-11-20 vocabulary round's
+/// refused shape, lifted with the richer fact encoding.
+#[test]
+fn linked_tuple_payloads_bind_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-trip");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (trip, one, trip_first, trip_make)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const own = trip_first(one(3, 4))\n",
+            "  const made = trip_first(trip_make(9, 1))\n",
+            "  const localmatch = match one(5, 6) {\n",
+            "    one(a, _) => a,\n",
+            "  }\n",
+            "  const total = own + made + localmatch\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the tuple-payload run exits 0 (stderr: {err})");
+    assert_eq!(out, "17\n17\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A linked linear struct binds with its move-discipline bit (G4):
+/// the consumer constructs the linked linear shape, moves it into the
+/// producer's consuming function, and the linearity discipline holds
+/// exactly like a local declaration — the fact carrying the bit that
+/// the pre-widening round refused whole.
+#[test]
+fn linked_linear_structs_bind_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-linear");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (guard, drain)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const total = drain(guard { n: 5 })\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the linear-struct run exits 0 (stderr: {err})");
+    assert_eq!(out, "5\n5\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A lone tag binds through its unit-atom fact (G4): the link walk
 /// registers the tag def exactly like a local `tag` declaration, so
 /// the consumer constructs, annotates, narrows, and matches over
@@ -1909,9 +1991,9 @@ fn the_uncarried_type_shapes_refuse() {
     let root_manifest = shapes_root_manifest(&pkg_id);
     for (tag, source, refused) in [
         (
-            "tuple-payload",
+            "deinit-struct",
             concat!(
-                "import @shapes (trip)\n",
+                "import @shapes (owned)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -1934,17 +2016,6 @@ fn the_uncarried_type_shapes_refuse() {
             "generic-struct",
             concat!(
                 "import @shapes (box)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "linear-struct",
-            concat!(
-                "import @shapes (guard)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -2057,47 +2128,110 @@ fn the_uncarried_type_shapes_refuse() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The linked type's two consumer-side seams refuse at the check (G4):
-/// an inherent impl over the import-bound type refuses at its own
-/// declaration (its members would register nowhere the receivers
-/// resolve), and a bare linked type name as a dot-call receiver enters
-/// the type-keyed tier, so a member the type does not carry answers the
-/// checker's own refusal — the same wording the local spelling meets —
-/// instead of sailing past the check into the lowering's catch-all.
+/// An inherent impl over a linked type binds and dispatches (G4): the
+/// minted def answers the layout seams, so the consumer's own impl
+/// members register under the linked name and select against the
+/// minted atom exactly like a local impl — the body compiling in this
+/// package, the declaration-site refusal the linking round retired.
 #[test]
-fn the_linked_type_impl_and_receiver_seams_refuse_at_the_check() {
+fn an_impl_over_a_linked_type_dispatches() {
+    let (work, pkg_id) = shapes_fixtures("shapes-impl");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (cell, make)\n",
+            "\n",
+            "impl cell {\n",
+            "  fn bump(self) -> int {\n",
+            "    self.n + 1\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const total = make(4).bump()\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the impl-over-linked-type run exits 0 (stderr: {err})");
+    assert_eq!(out, "5\n5\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// Comptime reflection reads a linked type (G1, G4): the mint's
+/// declaration products are the consuming compile's own, so `fields`
+/// and `type_name` answer over a linked struct and a linked enum's
+/// cases — the reflection projection consulting the foreign name
+/// index the install filled.
+#[test]
+fn comptime_reflection_reads_a_linked_type() {
+    let (work, pkg_id) = shapes_fixtures("shapes-reflect");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (cell, shade)\n",
+            "\n",
+            "fn width(comptime t: type) -> int {\n",
+            "  var n = 0\n",
+            "  for f in fields(t) {\n",
+            "    n += 1\n",
+            "  }\n",
+            "  n\n",
+            "}\n",
+            "\n",
+            "fn label(comptime t: type) -> string {\n",
+            "  type_name(t)\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const fields_of_cell = width(cell)\n",
+            "  const cases_of_shade = width(shade)\n",
+            "  const named = label(cell)\n",
+            "  println(\"${named} ${fields_of_cell} ${cases_of_shade}\")\n",
+            "  fields_of_cell + cases_of_shade\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the reflection run exits 0 (stderr: {err})");
+    // cell carries seven fields; shade's entry carries one record per
+    // case (red, green, blue)
+    assert_eq!(out, "cell 7 3\n10\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The linked type's remaining receiver seam refuses at the check (G4):
+/// a bare linked type name as a dot-call receiver enters the type-keyed
+/// tier, so a member the type does not carry answers the checker's own
+/// refusal — the same wording the local spelling meets — instead of
+/// sailing past the check into the lowering's catch-all.
+#[test]
+fn the_linked_type_receiver_seam_refuses_at_the_check() {
     let (work, pkg_id) = shapes_fixtures("shapes-seams");
     let root_manifest = shapes_root_manifest(&pkg_id);
-    for (tag, source, refused) in [
-        (
-            "impl-over-linked-type",
-            concat!(
-                "import @shapes (cell)\n",
-                "\n",
-                "impl cell {\n",
-                "  fn extra(self) -> int {\n",
-                "    1\n",
-                "  }\n",
-                "}\n",
-                "\n",
-                "fn main() -> int {\n",
-                "  0\n",
-                "}\n",
-            ),
-            "register nowhere this package's receivers resolve",
+    for (tag, source, refused) in [(
+        "linked-receiver-member",
+        concat!(
+            "import @shapes (cell)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  cell.len()\n",
+            "}\n",
         ),
-        (
-            "linked-receiver-member",
-            concat!(
-                "import @shapes (cell)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "  cell.len()\n",
-                "}\n",
-            ),
-            "type `cell` carries no member `len`",
-        ),
-    ] {
+        "type `cell` carries no member `len`",
+    )] {
         let root = write_root(&work, &root_manifest, source);
         let entry = root.join("app.ds");
         let entry = entry.to_str().expect("temp path is UTF-8");

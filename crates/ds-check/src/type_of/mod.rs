@@ -4736,7 +4736,11 @@ impl Bodies<'_> {
     /// a receiver the owner does not cover reports at the dot. An owner
     /// naming no declared atom (an alias, a union target) accepts nothing.
     fn inherent_accepts(&self, target: &str, recv: Ty) -> bool {
-        let Some(def) = self.package.lookup_type(target) else {
+        let Some(def) = self
+            .package
+            .lookup_type(target)
+            .or_else(|| self.decls.foreign_type(target))
+        else {
             return false;
         };
         let Some(&owner) = self.decls.atoms.get(&def) else {

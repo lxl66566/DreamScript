@@ -517,11 +517,11 @@ fn install_foreign_type(
     decls: &mut Decls,
 ) {
     match fact {
-        crate::import::TypeFact::Struct(fields) => {
-            install_foreign_struct(def, name, span, fields, decls);
+        crate::import::TypeFact::Struct { fields, linear } => {
+            install_foreign_struct(def, name, span, fields, *linear, decls);
         },
-        crate::import::TypeFact::Enum(cases) => {
-            install_foreign_enum(def, name, span, cases, decls);
+        crate::import::TypeFact::Enum { cases, linear } => {
+            install_foreign_enum(def, name, span, cases, *linear, decls);
         },
         crate::import::TypeFact::Case(fact) => {
             install_foreign_case(def, name, span, fact, decls);
@@ -573,6 +573,7 @@ fn install_foreign_struct(
     name: &str,
     span: Span,
     fields: &[crate::import::TypeField],
+    linear: bool,
     decls: &mut Decls,
 ) {
     let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
@@ -605,7 +606,7 @@ fn install_foreign_struct(
     decls.structs.insert(def, StructShape {
         params: Vec::new(),
         fields: ast_fields,
-        linear: false,
+        linear,
     });
     decls.foreign_type_names.insert(name.to_owned(), def);
 }
@@ -619,12 +620,23 @@ fn install_foreign_enum(
     name: &str,
     span: Span,
     cases: &[crate::import::TypeCase],
+    linear: bool,
     decls: &mut Decls,
 ) {
     let mut ast_cases = Vec::with_capacity(cases.len());
     for case in cases {
         let payload = match &case.payload {
             crate::import::CasePayload::Unit => EnumPayload::None,
+            crate::import::CasePayload::Tuple(words) => {
+                let mut ast_items = Vec::with_capacity(words.len());
+                for word in words {
+                    let Some((_, written)) = foreign_field_type(*word, span, decls) else {
+                        return;
+                    };
+                    ast_items.push(written);
+                }
+                EnumPayload::Tuple(ast_items)
+            },
             crate::import::CasePayload::Struct(fields) => {
                 let Some((_, ast_fields)) = foreign_fields(fields, span, decls) else {
                     return;
@@ -637,7 +649,7 @@ fn install_foreign_enum(
     decls.enums.insert(def, EnumShape {
         params: Vec::new(),
         cases: ast_cases,
-        linear: false,
+        linear,
     });
     decls.foreign_type_names.insert(name.to_owned(), def);
 }
@@ -660,8 +672,43 @@ fn install_foreign_case(
     let Some(&enum_def) = decls.foreign_type_names.get(&fact.enum_name) else {
         return;
     };
+    // the enum's own linearity governs its payloaded cases' struct rows,
+    // exactly the local mint's rule: the enum installed earlier in def
+    // order (the link walk registers the enum before its cases), so its
+    // installed shape answers here
+    let linear = decls.enums.get(&enum_def).is_some_and(|shape| shape.linear);
     let payload = match &fact.payload {
         crate::import::CasePayload::Unit => EnumPayload::None,
+        crate::import::CasePayload::Tuple(words) => {
+            let mut universe_fields = Vec::with_capacity(words.len());
+            let mut ast_items = Vec::with_capacity(words.len());
+            for word in words {
+                let Some((expr, written)) = foreign_field_type(*word, span, decls) else {
+                    return;
+                };
+                universe_fields.push(Field::positional(expr));
+                ast_items.push(written);
+            }
+            let atom = match decls.universe.declare_struct(name) {
+                Ok(atom) => atom,
+                // a served prefix's replay already declared it; the
+                // fresh run's mint would duplicate — take the replayed
+                // atom and still install the rows below
+                Err(_) => match decls.atoms.get(&def) {
+                    Some(&atom) => atom,
+                    None => return,
+                },
+            };
+            if !matches!(
+                decls.universe.set_struct_fields(atom, universe_fields),
+                Ok(()) | Err(crate::Error::ShapeAlreadySet(_))
+            ) {
+                return;
+            }
+            decls.atoms.insert(def, atom);
+            decls.defs_of_atoms.insert(atom, def);
+            EnumPayload::Tuple(ast_items)
+        },
         crate::import::CasePayload::Struct(fields) => {
             let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
                 return;
@@ -687,15 +734,19 @@ fn install_foreign_case(
             decls.structs.insert(def, StructShape {
                 params: Vec::new(),
                 fields: ast_fields.clone(),
-                linear: false,
+                linear,
             });
             EnumPayload::Struct(ast_fields)
         },
     };
     if matches!(payload, EnumPayload::None) {
-        let atom = match decls.universe.declare_tag(name) {
-            Ok(atom) => Some(atom),
-            Err(_) => decls.atoms.get(&def).copied(),
+        // the reserved-atom mapping owns both spellings: a case named
+        // `none` maps to the predeclared none atom exactly like a local
+        // case's mint, so the linked case's values are the consumer's
+        // own `none` words
+        let atom = match declare_unit_name(decls, name) {
+            Some(atom) => Some(atom),
+            None => decls.atoms.get(&def).copied(),
         };
         let Some(atom) = atom else {
             return;

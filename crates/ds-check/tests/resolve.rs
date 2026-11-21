@@ -1244,16 +1244,19 @@ fn a_linked_type_registers_before_selections_validate() {
         func: Some(0),
         std: false,
     };
-    let cell_fact = ds_check::TypeFact::Struct(vec![
-        ds_check::import::TypeField {
-            name: "n".to_owned(),
-            word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
-        },
-        ds_check::import::TypeField {
-            name: "data".to_owned(),
-            word: ds_check::import::TypeWord::Bytes,
-        },
-    ]);
+    let cell_fact = ds_check::TypeFact::Struct {
+        fields: vec![
+            ds_check::import::TypeField {
+                name: "n".to_owned(),
+                word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
+            },
+            ds_check::import::TypeField {
+                name: "data".to_owned(),
+                word: ds_check::import::TypeWord::Bytes,
+            },
+        ],
+        linear: false,
+    };
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         entries: vec![
@@ -1348,7 +1351,10 @@ fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
             row: ds_check::EffectRow::default(),
             caps: 0,
             value: None,
-            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct(Vec::new()))),
+            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct {
+                fields: Vec::new(),
+                linear: false,
+            })),
             link: 0,
             func: None,
             std: true,
@@ -1471,27 +1477,41 @@ fn the_widened_link_shapes_bind_at_the_walk() {
             ),
             entry(
                 "config",
-                Some(ds_check::TypeFact::Struct(vec![
-                    ds_check::import::TypeField {
-                        name: "host".to_owned(),
-                        word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Str),
-                    },
-                    ds_check::import::TypeField {
-                        name: "port".to_owned(),
-                        word: ds_check::import::TypeWord::Optional(
-                            ds_check::import::ScalarWord::Int,
-                        ),
-                    },
-                    ds_check::import::TypeField {
-                        name: "retries".to_owned(),
-                        word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
-                    },
-                ])),
+                Some(ds_check::TypeFact::Struct {
+                    fields: vec![
+                        ds_check::import::TypeField {
+                            name: "host".to_owned(),
+                            word: ds_check::import::TypeWord::Scalar(
+                                ds_check::import::ScalarWord::Str,
+                            ),
+                        },
+                        ds_check::import::TypeField {
+                            name: "port".to_owned(),
+                            word: ds_check::import::TypeWord::Optional(
+                                ds_check::import::ScalarWord::Int,
+                            ),
+                        },
+                        ds_check::import::TypeField {
+                            name: "retries".to_owned(),
+                            word: ds_check::import::TypeWord::Scalar(
+                                ds_check::import::ScalarWord::Int,
+                            ),
+                        },
+                    ],
+                    linear: false,
+                }),
                 None,
             ),
             entry("response", Some(ds_check::TypeFact::Opaque), None),
             entry("ping", Some(ds_check::TypeFact::Tag), None),
-            entry("hollow", Some(ds_check::TypeFact::Enum(Vec::new())), None),
+            entry(
+                "hollow",
+                Some(ds_check::TypeFact::Enum {
+                    cases: Vec::new(),
+                    linear: false,
+                }),
+                None,
+            ),
             entry(
                 "urls",
                 None,
@@ -1575,6 +1595,180 @@ fn the_widened_link_shapes_bind_at_the_walk() {
     );
 }
 
+/// A linked enum case named `none` registers beside its enum (G4): the
+/// reserved-atom mapping owns both sides — the mint maps the colliding
+/// unit case onto the predeclared none atom exactly like a local case's
+/// mint, so the case's values are this compile's own `none` words and a
+/// non-case shape keeps the reserved-name refusal.
+#[test]
+fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
+    let mut files = Files::new();
+    let source = concat!(
+        "pub tag int\n",
+        "import @lib (presence, none, marked, read)\n",
+        "\n",
+        "fn probe(p: presence) -> int {\n",
+        "  match p {\n",
+        "    none => 0,\n",
+        "    marked => 1,\n",
+        "  }\n",
+        "}\n",
+    );
+    let file = files.add_source("t.ds", source);
+    let ast = parse(&files, file).expect("the source parses");
+    let at = Span::new(file, 1, 1);
+    let name_type = |name: &str| ds_parse::Type::Path {
+        span: at,
+        path: ds_parse::Path {
+            span: at,
+            segments: vec![ds_parse::Ident {
+                span: at,
+                name: name.to_owned(),
+            }],
+        },
+        args: Vec::new(),
+    };
+    let ty_entry = |name: &str, fact: Option<ds_check::TypeFact>| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Type,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: None,
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: fact.map(std::sync::Arc::new),
+        link: 0,
+        origin: None,
+        func: None,
+        std: false,
+    };
+    let unit_case = || ds_check::import::CasePayload::Unit;
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![
+            ty_entry(
+                "presence",
+                Some(ds_check::TypeFact::Enum {
+                    cases: vec![
+                        ds_check::import::TypeCase {
+                            name: "none".to_owned(),
+                            payload: unit_case(),
+                        },
+                        ds_check::import::TypeCase {
+                            name: "marked".to_owned(),
+                            payload: unit_case(),
+                        },
+                    ],
+                    linear: false,
+                }),
+            ),
+            ty_entry(
+                "none",
+                Some(ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "presence".to_owned(),
+                    payload: unit_case(),
+                })),
+            ),
+            ty_entry(
+                "marked",
+                Some(ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "presence".to_owned(),
+                    payload: unit_case(),
+                })),
+            ),
+            ds_check::ForeignEntry {
+                name: "read".to_owned(),
+                vis: ds_check::Vis::Pub,
+                kind: ds_check::ForeignKind::Fn,
+                generic: false,
+                defaulted: false,
+                decl_span: at,
+                sig: Some(std::sync::Arc::new(ds_check::FnSig {
+                    generics: Vec::new(),
+                    params: vec![ds_check::decls::ParamSig {
+                        name: "n".to_owned(),
+                        span: at,
+                        mode: ds_parse::ParamMode::Borrow,
+                        ty: Some(name_type("int")),
+                        default: None,
+                    }],
+                    ret: Some(name_type("presence")),
+                    bind: None,
+                })),
+                row: ds_check::EffectRow::default(),
+                caps: 0,
+                value: None,
+                ty: None,
+                link: 0,
+                origin: None,
+                func: Some(0),
+                std: false,
+            },
+        ],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    let (package, resolutions, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    assert!(diags.is_empty(), "the none-cased enum binds: {diags:?}");
+    let defs: std::collections::HashMap<String, ds_check::DefId> = package
+        .foreign()
+        .iter()
+        .map(|(def, entry)| (entry.name.clone(), *def))
+        .collect();
+    assert_eq!(package.def(defs["none"]).kind, DefKind::Case);
+    // the mint maps the colliding case onto the predeclared none atom
+    let (decls, _) = ds_check::decls::build(&package, &[&ast], &resolutions);
+    assert!(
+        decls.atoms.get(&defs["none"]).is_some(),
+        "the none case mints onto the reserved atom"
+    );
+    // a non-case shape keeps the reserved-name refusal: a lone linked
+    // struct named none never registers
+    let struct_named_none = ty_entry(
+        "none",
+        Some(ds_check::TypeFact::Struct {
+            fields: Vec::new(),
+            linear: false,
+        }),
+    );
+    let mut files = Files::new();
+    let refusal = "import @lib (none)\n\nfn main() -> int {\n7\n}\n";
+    let file = files.add_source("r.ds", refusal);
+    let ast = parse(&files, file).expect("the source parses");
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        entries: vec![struct_named_none],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    let (_, _, diags) = ds_check::resolve_package_linked(&[&ast], &imports);
+    let refusal = diags
+        .iter()
+        .find(|diag| diag.code == ErrorCode::ImportUnsupportedShape)
+        .expect("the reserved-name refusal answers");
+    assert!(
+        format!("{refusal:?}").contains("already declares `none`"),
+        "the refusal names the reserved spelling: {refusal:?}"
+    );
+}
+
 /// Resolves one source over a linked member surface whose only entry is
 /// the fact-carrying struct `cell` (G4): the fixture the linked tier's
 /// receiver and impl seams share.
@@ -1596,12 +1790,13 @@ fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
             row: ds_check::EffectRow::default(),
             caps: 0,
             value: None,
-            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct(vec![
-                ds_check::import::TypeField {
+            ty: Some(std::sync::Arc::new(ds_check::TypeFact::Struct {
+                fields: vec![ds_check::import::TypeField {
                     name: "n".to_owned(),
                     word: ds_check::import::TypeWord::Scalar(ds_check::import::ScalarWord::Int),
-                },
-            ]))),
+                }],
+                linear: false,
+            })),
             link: 0,
             origin: None,
             func: None,
@@ -1648,13 +1843,13 @@ fn a_linked_type_receiver_refuses_its_members_at_the_check() {
     );
 }
 
-/// An inherent impl whose target head the file's imports bind refuses at
-/// the declaration (G4): the linked type's minted def answers the layout
-/// seams, but the impl's members register nowhere its receiver resolves,
-/// so the declaration itself is the honest refusal point — cross-package
-/// impls wait on the artifact round's member link facts.
+/// An inherent impl over a linked type binds at the declaration (G4):
+/// the minted def answers the layout seams, so the consumer's own impl
+/// members register under the linked name and dispatch against the
+/// minted atom exactly like a local impl — the body compiles in this
+/// package, no linked member fact involved.
 #[test]
-fn an_impl_over_a_linked_type_refuses_at_the_declaration() {
+fn an_impl_over_a_linked_type_binds_at_the_declaration() {
     let diags = resolve_over_linked_cell(concat!(
         "pub tag int\n",
         "\n",
@@ -1666,12 +1861,7 @@ fn an_impl_over_a_linked_type_refuses_at_the_declaration() {
         "  }\n",
         "}\n",
     ));
-    assert_eq!(diags.len(), 1, "the declaration is the refusal: {diags:?}");
-    assert_eq!(diags[0].code, ErrorCode::ImportUnsupportedShape);
-    assert!(
-        format!("{:?}", diags[0]).contains("impl over `cell`"),
-        "the refusal names the linked type: {diags:?}"
-    );
+    assert!(diags.is_empty(), "the impl resolves clean: {diags:?}");
 }
 
 /// A linked enum registers exactly like a local declaration (G4): the
@@ -1780,20 +1970,23 @@ fn a_linked_enum_registers_its_cases_beside_it() {
             fn_entry("make", "n", "int", "tone"),
             ty_entry(
                 "tone",
-                Some(ds_check::TypeFact::Enum(vec![
-                    ds_check::import::TypeCase {
-                        name: "quiet".to_owned(),
-                        payload: unit(),
-                    },
-                    ds_check::import::TypeCase {
-                        name: "loud".to_owned(),
-                        payload: unit(),
-                    },
-                    ds_check::import::TypeCase {
-                        name: "tagged".to_owned(),
-                        payload: tagged_payload(),
-                    },
-                ])),
+                Some(ds_check::TypeFact::Enum {
+                    cases: vec![
+                        ds_check::import::TypeCase {
+                            name: "quiet".to_owned(),
+                            payload: unit(),
+                        },
+                        ds_check::import::TypeCase {
+                            name: "loud".to_owned(),
+                            payload: unit(),
+                        },
+                        ds_check::import::TypeCase {
+                            name: "tagged".to_owned(),
+                            payload: tagged_payload(),
+                        },
+                    ],
+                    linear: false,
+                }),
             ),
             ty_entry("quiet", Some(ds_check::TypeFact::Case(case_fact()))),
             ty_entry("loud", Some(ds_check::TypeFact::Case(case_fact()))),

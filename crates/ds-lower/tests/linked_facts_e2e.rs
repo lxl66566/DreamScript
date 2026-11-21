@@ -119,17 +119,17 @@ fn build_vm() -> (Vm, Lowered) {
                     ds_check::ConstFact::Int(4),
                 ]),
             ),
-            ty_entry(
-                "keyed",
-                ds_check::TypeFact::Struct(vec![field(
+            ty_entry("keyed", ds_check::TypeFact::Struct {
+                fields: vec![field(
                     "index",
                     TypeWord::Map(ScalarWord::Str, ScalarWord::Int),
-                )]),
-            ),
-            ty_entry(
-                "opt",
-                ds_check::TypeFact::Struct(vec![field("n", TypeWord::Optional(ScalarWord::Int))]),
-            ),
+                )],
+                linear: false,
+            }),
+            ty_entry("opt", ds_check::TypeFact::Struct {
+                fields: vec![field("n", TypeWord::Optional(ScalarWord::Int))],
+                linear: false,
+            }),
             ty_entry(
                 "rrow",
                 ds_check::TypeFact::Alias(Box::new(TypeWord::Map(
