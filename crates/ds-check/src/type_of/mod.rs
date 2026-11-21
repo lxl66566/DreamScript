@@ -2226,21 +2226,37 @@ impl Bodies<'_> {
                     poisoned: false,
                 },
             },
-            DefKind::Tag => match self.decls.atoms.get(&def).copied() {
-                Some(atom) => Val {
-                    ty: self
-                        .decls
-                        .universe
-                        .atom_ty(atom)
-                        .unwrap_or_else(|_| self.empty()),
-                    diverges: false,
-                    poisoned: false,
-                },
-                None => Val {
-                    ty: self.empty(),
-                    diverges: false,
-                    poisoned: false,
-                },
+            DefKind::Tag => {
+                // A payloaded tag constructs by call form only, exactly a
+                // minted payload case; the bare name is the cross-spelling.
+                if self.decls.structs.contains_key(&def) {
+                    self.error(
+                        ErrorCode::InferenceFailed,
+                        format!(
+                            "`{}` is a tag with a payload; construct it by call form: `{}(...)`",
+                            self.package.def(def).name,
+                            self.package.def(def).name
+                        ),
+                        span,
+                        "tag with a payload used bare",
+                    );
+                }
+                match self.decls.atoms.get(&def).copied() {
+                    Some(atom) => Val {
+                        ty: self
+                            .decls
+                            .universe
+                            .atom_ty(atom)
+                            .unwrap_or_else(|_| self.empty()),
+                        diverges: false,
+                        poisoned: false,
+                    },
+                    None => Val {
+                        ty: self.empty(),
+                        diverges: false,
+                        poisoned: false,
+                    },
+                }
             },
             DefKind::Case => {
                 // A bare case is the unit form, like a tag; a payload
@@ -2640,8 +2656,11 @@ impl Bodies<'_> {
             }; // resolver reported
         };
         // An enum case constructs by call form only [B3]; the brace form
-        // is the struct construction, so this is the cross-spelling.
-        if self.decls.cases.contains_key(&def) {
+        // is the struct construction, so this is the cross-spelling. A
+        // payloaded tag keeps the same discipline.
+        if self.decls.cases.contains_key(&def)
+            || (self.package.def(def).kind == DefKind::Tag && self.decls.structs.contains_key(&def))
+        {
             self.error(
                 ErrorCode::TypeMismatch,
                 format!(
@@ -3232,6 +3251,13 @@ impl Bodies<'_> {
                         {
                             return self.case_call(def, only, args, trailing.as_deref(), *span);
                         }
+                        // A payloaded tag constructs by call form too: the
+                        // same named-field slots over its own struct shape.
+                        if self.package.def(def).kind == DefKind::Tag
+                            && self.decls.structs.contains_key(&def)
+                        {
+                            return self.case_call(def, only, args, trailing.as_deref(), *span);
+                        }
                         if self.decls.structs.contains_key(&def)
                             || self.decls.atoms.contains_key(&def)
                         {
@@ -3281,11 +3307,14 @@ impl Bodies<'_> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Val {
-        let payload = self
-            .decls
-            .cases
-            .get(&def)
-            .map_or(EnumPayload::None, |c| c.payload.clone());
+        let payload = if let Some(case) = self.decls.cases.get(&def) {
+            case.payload.clone()
+        } else if let Some(shape) = self.decls.structs.get(&def) {
+            // a payloaded tag's slots: its own struct shape
+            EnumPayload::Struct(shape.fields.clone())
+        } else {
+            EnumPayload::None
+        };
         if trailing.is_some() {
             self.error(
                 ErrorCode::ArityMismatch,

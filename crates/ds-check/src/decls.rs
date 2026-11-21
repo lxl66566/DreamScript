@@ -1164,9 +1164,30 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             if is_served(decls, def) {
                 return;
             }
-            if let Some(id) = declare_unit_name(decls, &t.name.name) {
-                decls.atoms.insert(def, id);
-                decls.defs_of_atoms.insert(id, def);
+            match &t.payload {
+                EnumPayload::None => {
+                    if let Some(id) = declare_unit_name(decls, &t.name.name) {
+                        decls.atoms.insert(def, id);
+                        decls.defs_of_atoms.insert(id, def);
+                    }
+                },
+                // A payloaded tag is the minted payload case lifted to a
+                // declaration: a struct-shaped atom carrying its payload
+                // fields, constructed by call form and matched by struct
+                // pattern. The payload spells named fields alone — a
+                // tuple payload has no field-name tier to ride.
+                EnumPayload::Struct(fields) => {
+                    if let Ok(id) = decls.universe.declare_struct(&t.name.name) {
+                        decls.atoms.insert(def, id);
+                        decls.defs_of_atoms.insert(id, def);
+                        decls.structs.insert(def, StructShape {
+                            params: Vec::new(),
+                            fields: fields.clone(),
+                            linear: false,
+                        });
+                    }
+                },
+                EnumPayload::Tuple(_) => {},
             }
         },
         ItemKind::Struct(s) => {
@@ -1508,8 +1529,42 @@ fn shape_item(
                 declare_instance(package, item, imp, decls, diags);
             }
         },
-        ItemKind::Tag(_)
-        | ItemKind::TypeAlias(_)
+        ItemKind::Tag(t) => {
+            let Some(def) = package
+                .lookup_type(&t.name.name)
+                .filter(|&d| package.def(d).span == t.name.span)
+            else {
+                return
+            };
+            if is_served(decls, def) {
+                return;
+            }
+            match &t.payload {
+                // the tuple form refused before any mint: a payloaded
+                // tag's atom is the struct shape alone
+                EnumPayload::Tuple(_) => {
+                    diags.push(
+                        Diagnostic::error(
+                            ErrorCode::TagPayloadTuple,
+                            "a tag payload spells named fields".to_owned(),
+                        )
+                        .with_primary(
+                            t.span,
+                            "a tuple payload is not a tag form; write `tag name { field: type }`",
+                        ),
+                    );
+                },
+                EnumPayload::None => {},
+                EnumPayload::Struct(fields) => {
+                    let Some(&atom) = decls.atoms.get(&def) else {
+                        return
+                    };
+                    let solved = universe_fields(package, fields, decls, diags);
+                    let _ = decls.universe.set_struct_fields(atom, solved);
+                },
+            }
+        },
+        ItemKind::TypeAlias(_)
         | ItemKind::Trait(_)
         | ItemKind::Fn(_)
         | ItemKind::ExternFn(_)

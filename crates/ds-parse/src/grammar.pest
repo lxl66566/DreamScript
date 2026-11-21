@@ -432,7 +432,11 @@ case_payload = _{ case_tuple | case_struct }
 case_tuple = { h ~ "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
 case_struct = { h ~ "{" ~ sp ~ (field_member ~ (sp ~ "," ~ sp ~ field_member)* ~ sp ~ ","?)? ~ sp ~ "}" }
 
-tag_item = { kw_tag ~ sp ~ ident }
+// A tag may carry a payload (the failure taxonomy's payloaded members,
+// 2026-11-22): the same tuple/struct payload forms an enum case takes,
+// the inhabited-by-construction spelling a minted payload case has. A
+// bare tag stays the unit form.
+tag_item = { kw_tag ~ sp ~ ident ~ case_payload? }
 type_item = { kw_type ~ sp ~ ident ~ generics? ~ h ~ "=" ~ sp ~ type_expr }
 
 trait_item = { kw_trait ~ sp ~ ident ~ generics? ~ (h ~ ":" ~ sp ~ super_list)? ~ sp ~ "{" ~ sp ~ member_list? ~ sp ~ "}" }

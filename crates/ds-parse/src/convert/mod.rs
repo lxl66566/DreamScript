@@ -639,6 +639,7 @@ impl Ctx {
                     span,
                     name: String::new(),
                 },
+                payload: EnumPayload::None,
             })),
             leading_trivia: Vec::new(),
             doc: Vec::new(),
@@ -1209,9 +1210,32 @@ impl Ctx {
         let name = inner(&p)
             .find(|c| c.as_rule() == Rule::ident)
             .map(|c| self.ident(c));
+        let mut payload = EnumPayload::None;
+        for c in inner(&p) {
+            match c.as_rule() {
+                Rule::case_tuple => {
+                    let mut types = Vec::new();
+                    for t in inner(&c) {
+                        types.push(self.type_expr(t));
+                    }
+                    payload = EnumPayload::Tuple(types);
+                },
+                Rule::case_struct => {
+                    let mut fields = Vec::new();
+                    for f in inner(&c) {
+                        if f.as_rule() == Rule::field_member {
+                            fields.push(self.field(f));
+                        }
+                    }
+                    payload = EnumPayload::Struct(fields);
+                },
+                _ => {},
+            }
+        }
         TagDecl {
             span,
             name: name.unwrap_or_else(|| self.bad_ident(span)),
+            payload,
         }
     }
 

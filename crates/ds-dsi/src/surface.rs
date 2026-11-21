@@ -19,8 +19,8 @@
 use ds_check::{DefId, DefKind, MethodId, MethodOwner, Vis};
 use ds_diag::Span;
 use ds_parse::{
-    BindName, EnumCase, EnumDecl, FnDecl, Ident, Item, ItemKind, Param, StructDecl, StructMember,
-    TagDecl, TraitDecl, TraitMember, TypeParam,
+    BindName, EnumCase, EnumDecl, EnumPayload, FnDecl, Ident, Item, ItemKind, Param, StructDecl,
+    StructMember, TagDecl, TraitDecl, TraitMember, TypeParam,
 };
 
 use crate::ServedPrefix;
@@ -136,10 +136,20 @@ fn line_of(
                     .collect(),
             })
         },
-        DefKind::Tag => ItemKind::Tag(TagDecl {
-            span: def.span,
-            name: ident(&def.name, def.span),
-        }),
+        DefKind::Tag => {
+            // a payloaded tag's shape rides the structs table (the
+            // minted payload case's own home), so the surface line
+            // spells it back
+            let payload = match decls.structs.get(&id) {
+                Some(shape) => EnumPayload::Struct(shape.fields.clone()),
+                None => EnumPayload::None,
+            };
+            ItemKind::Tag(TagDecl {
+                span: def.span,
+                name: ident(&def.name, def.span),
+                payload,
+            })
+        },
         DefKind::Trait => ItemKind::Trait(trait_decl(prefix, &def.name, def.span, id, methods)?),
         // a binding's initializer, an alias's target, and an enum case's
         // own row stay outside the artifact's tables: no line here, the

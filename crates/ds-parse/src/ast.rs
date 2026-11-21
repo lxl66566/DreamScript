@@ -412,7 +412,8 @@ pub struct PlatformName {
     pub name: String,
 }
 
-/// A unit tag declaration (B1).
+/// A tag declaration (B1): bare the unit form, payloaded the
+/// inhabited-by-construction form a minted payload case has.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TagDecl {
@@ -420,6 +421,8 @@ pub struct TagDecl {
     pub span: Span,
     /// Tag name.
     pub name: Ident,
+    /// The tag's payload, when it carries one.
+    pub payload: EnumPayload,
 }
 
 /// A type alias (F7).

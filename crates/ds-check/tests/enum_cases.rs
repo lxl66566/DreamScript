@@ -263,3 +263,35 @@ fn a_payloaded_case_construction_types_the_binding_with_the_case_atom() {
         "}\n",
     ));
 }
+
+/// A tag carrying a struct payload (the failure taxonomy's payloaded
+/// members): it mints a struct-shaped atom, constructs by call form,
+/// matches by struct pattern and by `is` narrowing, and both bare use
+/// and the brace form refuse as cross-spellings.
+#[test]
+fn a_payloaded_tag_constructs_by_call_form() {
+    clean(
+        "tag int\ntag string\ntag bad { pos: int }\nfn f() -> int { match bad(pos: 3) { bad { pos \
+         } => pos } }\nfn g(v: int | bad) -> int { if v is bad { 1 } else { 2 } }\n",
+    );
+    let found = codes("tag int\ntag bad { pos: int }\nconst v = bad\n");
+    assert!(
+        found[0].1.contains("construct it by call form"),
+        "{found:?}"
+    );
+    let found = codes("tag int\ntag bad { pos: int }\nconst v = bad { pos: 1 }\n");
+    assert!(
+        found[0].1.contains("construct it by call form"),
+        "{found:?}"
+    );
+}
+
+/// A tag's payload spells named fields: the tuple form is a structured
+/// refusal, not a silently accepted shape.
+#[test]
+fn a_tuple_payload_on_a_tag_refuses() {
+    let found = codes("tag bad(int)\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "DS2041", "{found:?}");
+    assert!(found[0].1.contains("named fields"), "{found:?}");
+}

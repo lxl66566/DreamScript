@@ -58,7 +58,7 @@ pub(crate) fn write_item(ctx: &Ctx, out: &mut String, base: usize, item: &Item) 
         },
         ItemKind::Struct(s) => write_struct(ctx, out, base, s),
         ItemKind::Enum(e) => write_enum(ctx, out, base, e),
-        ItemKind::Tag(t) => write_tag(out, t),
+        ItemKind::Tag(t) => write_tag(ctx, out, t),
         ItemKind::TypeAlias(t) => write_type_alias(ctx, out, t),
         ItemKind::Trait(t) => write_trait(ctx, out, base, t),
         ItemKind::Impl(i) => write_impl(ctx, out, base, i),
@@ -376,9 +376,32 @@ fn write_enum_case(ctx: &Ctx, out: &mut String, base: usize, c: &EnumCase) {
     }
 }
 
-fn write_tag(out: &mut String, t: &TagDecl) {
+fn write_tag(ctx: &Ctx, out: &mut String, t: &TagDecl) {
     out.push_str("tag ");
     out.push_str(&t.name.name);
+    match &t.payload {
+        EnumPayload::None => {},
+        EnumPayload::Tuple(types) => {
+            out.push('(');
+            for (i, ty) in types.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_ty(ctx, out, ty);
+            }
+            out.push(')');
+        },
+        EnumPayload::Struct(fields) => {
+            out.push_str(" { ");
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_field(ctx, out, f);
+            }
+            out.push_str(" }");
+        },
+    }
 }
 
 fn write_type_alias(ctx: &Ctx, out: &mut String, t: &TypeAliasDecl) {

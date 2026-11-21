@@ -107,8 +107,25 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
             }
             render_body(out, &e.cases.iter().map(case_line).collect::<Vec<_>>());
         },
-        ItemKind::Tag(t) => {
-            let _ = writeln!(out, "pub tag {}", t.name.name);
+        ItemKind::Tag(t) => match &t.payload {
+            EnumPayload::None => {
+                let _ = writeln!(out, "pub tag {}", t.name.name);
+            },
+            EnumPayload::Tuple(types) => {
+                let _ = writeln!(out, "pub tag {}({})", t.name.name, type_list(types));
+            },
+            EnumPayload::Struct(fields) => {
+                let _ = writeln!(
+                    out,
+                    "pub tag {} {{ {} }}",
+                    t.name.name,
+                    fields
+                        .iter()
+                        .map(|field| format!("{}: {}", field.name.name, render_type(&field.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            },
         },
         ItemKind::TypeAlias(a) => {
             let _ = writeln!(

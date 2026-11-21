@@ -201,6 +201,8 @@ error_codes! {
     ReturnInValuePosition => "DS2039", Type,
     /// A written type application disagrees with its head declaration: a generic applied with the wrong number of type arguments, or a head that takes none (a tag, a case, a value-namespace name, a non-generic declaration).
     TypeApplicationMismatch => "DS2040", Type,
+    /// A tag declared with a tuple payload; a tag's payload spells named fields (B1).
+    TagPayloadTuple => "DS2041", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -335,6 +337,7 @@ mod tests {
             ("DeriveMemberAnnotation", "DS2038", ErrorClass::Type),
             ("ReturnInValuePosition", "DS2039", ErrorClass::Type),
             ("TypeApplicationMismatch", "DS2040", ErrorClass::Type),
+            ("TagPayloadTuple", "DS2041", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
