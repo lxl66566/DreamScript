@@ -82,10 +82,7 @@ use ds_query::{
 };
 use ds_vm::{
     FiberId, FiberState, FrameAnswer, Value, Vm,
-    native::{
-        PLATFORM_IO_ERR, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT, PLATFORM_NONE,
-        PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR,
-    },
+    native::{PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, is_io_class, is_net_class},
 };
 
 use crate::{package, repl, run, source};
@@ -544,13 +541,11 @@ impl DevSession {
     /// world failure is a dev note on stderr (the loop keeps watching).
     fn report_answer(&mut self, answer: &FrameAnswer) {
         match answer.as_slice() {
-            [Value::Tag(tag), ..] if *tag == PLATFORM_IO_ERR => {
+            [Value::Tag(tag), ..] if is_io_class(*tag) => {
                 eprintln!("dev: the entry halted on an unhandled io failure");
                 self.failed = true;
             },
-            [Value::Tag(tag), ..]
-                if matches!(*tag, PLATFORM_NET_TIMEOUT | PLATFORM_NET_REFUSED) =>
-            {
+            [Value::Tag(tag), ..] if is_net_class(*tag) => {
                 eprintln!("dev: the entry halted on an unhandled net failure");
                 self.failed = true;
             },

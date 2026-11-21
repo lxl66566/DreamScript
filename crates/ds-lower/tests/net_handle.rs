@@ -200,10 +200,11 @@ fn a_refused_connect_prints_the_message_and_halts_on_the_tag() {
 }
 
 /// The fallible reads answer the taxonomy's members: a closed handle's
-/// recv answers the `refused` case, a silent socket's bounded wait the
-/// `timeout` case — never the printing halt of the total spellings.
+/// recv folds into the `net_other` floor (an unknown connection names no
+/// class portably), a silent socket's bounded wait answers the `timeout`
+/// member — never the printing halt of the total spellings.
 #[test]
-fn a_closed_handle_answers_the_refused_case() {
+fn a_closed_handle_answers_the_net_other_floor() {
     let (listener, port) = local_listener();
     thread::spawn(move || {
         let (_sock, _) = listener.accept().expect("accept");
@@ -214,7 +215,7 @@ fn a_closed_handle_answers_the_refused_case() {
     let result = vm
         .run("net_handle", "recv_after_close", &args)
         .expect("the closed-handle recv answers its union");
-    assert_eq!(payload_string(&mut vm, &result), "refused");
+    assert_eq!(payload_string(&mut vm, &result), "other");
     assert_eq!(
         vm.captured_output(),
         b"",
@@ -236,7 +237,7 @@ fn a_silent_socket_answers_the_timeout_case() {
 }
 
 #[test]
-fn a_stale_send_answers_the_refused_case() {
+fn a_stale_send_answers_the_net_other_floor() {
     let (listener, port) = local_listener();
     thread::spawn(move || {
         let (_sock, _) = listener.accept().expect("accept");
@@ -250,7 +251,7 @@ fn a_stale_send_answers_the_refused_case() {
     let result = vm
         .run("net_handle", "send_after_close", &args)
         .expect("the stale send answers its union");
-    assert_eq!(payload_string(&mut vm, &result), "refused");
+    assert_eq!(payload_string(&mut vm, &result), "other");
 }
 
 /// The payload `Ref` of a two-word union answer: the string member's
@@ -313,10 +314,13 @@ fn the_send_failure_rides_the_return_union_under_propagation() {
     let result = vm
         .run("net_handle", "pass_send", &args)
         .expect("the propagated send answers its union");
-    assert_eq!(
-        result.as_slice().len(),
-        1,
-        "the unit success is one tag word"
+    // the union's widest member (the `net_other` floor's message field)
+    // sets the span width, so the unit success answers its tag word plus
+    // the inert dead field
+    let words = result.as_slice();
+    assert!(
+        matches!(words.first(), Some(Value::Tag(_))) && words.len() == 2,
+        "the unit success is the tag word over the union's dead field: {words:?}"
     );
 
     let (listener, port) = local_listener();
@@ -373,8 +377,7 @@ fn main (conn: int) -> string | io_err {
         panic!("the mis-tagging probe refuses at lowering")
     };
     assert!(
-        err.to_string()
-            .contains("ambient case names (timeout, refused)"),
+        err.to_string().contains("by their ambient names"),
         "the refusal names the class members: {err}"
     );
 }

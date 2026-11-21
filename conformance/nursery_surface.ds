@@ -99,21 +99,33 @@ fn main() -> () {
   match guarded(3) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("guarded kept ${n}")
   }
   match guarded_cancel(500000) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("cancel kept ${n}")
   }
   match mixed(500000) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("mixed kept ${n}")
   }
   match guarded_claim() {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("claim kept ${n}")
   }
   match payloaded(3) {
@@ -123,6 +135,9 @@ fn main() -> () {
   match captured(3) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     xs => println("list ${xs.list_len()}")
   }
 }

@@ -100,7 +100,12 @@ fn store(text: string) -> () {
   var kept: config | io_err | parse_error = parse_config(text)
   kept = parse_config(text)
   match kept {
-    io_err => ()
+    not_found => ()
+    permission_denied => ()
+    already_exists => ()
+    timed_out => ()
+    unexpected_eof => ()
+    io_other { msg } => ()
     parse_error => ()
     c => ()
   }

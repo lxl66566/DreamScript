@@ -1,17 +1,24 @@
 // purpose: the success-typed fallible natives at run level — the
 // two-word platform span re-spans into the call's own union per member
-// (read_file over string | io_err, parse_int over int | parse_err), so
-// ?, .ok, .err, and match extract real values; the error members carry
-// no payload field, so the failure arm drops the io message's
-// native-born count while the parse failure's handed-back input alias
-// is never claimed (the input survives the failing parse and reads
-// again).
+// over the error-class mapping (read_file over the io class set,
+// parse_int over its one class), so ?, .ok, .err, and match extract
+// real values; the bare class members carry no payload field, so their
+// failure arms drop the native-born message count, the *_other floor's
+// member adopts its message field, and the parse failure's position
+// rides its member's field (the input survives the failing parse and
+// reads again).
 
 tag int
 tag string
 tag bool
-tag io_err
-tag parse_err
+tag not_found
+tag permission_denied
+tag already_exists
+tag timed_out
+tag unexpected_eof
+tag io_other { msg: string }
+type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+tag parse_err { pos: int }
 
 extern fn println (s: string) -> ()
 extern fn concat (a: string, b: string) -> string
@@ -38,8 +45,13 @@ fn load_count(path: string) -> int | io_err | parse_err {
 fn spell(path: string) -> string {
   const cell = load_count(path)
   match cell {
-    io_err => "io",
-    parse_err => "parse",
+    not_found => "io",
+    permission_denied => "io",
+    already_exists => "io",
+    timed_out => "io",
+    unexpected_eof => "io",
+    io_other { msg } => "io",
+    parse_err { pos } => "parse",
     n => "count ${n}"
   }
 }

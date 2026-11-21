@@ -21,11 +21,17 @@ fn main() -> () {
   match deep(3) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other => println("o")
     n => println("three ${n}")
   }
   match deep(2000) {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other => println("o")
     n => println("two-thousand ${n}")
   }
 }

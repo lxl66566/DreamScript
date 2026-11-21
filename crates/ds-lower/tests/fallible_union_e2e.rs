@@ -2,12 +2,12 @@
 //! declares the failure unions the ambient spells (`string | io_err`,
 //! `int | parse_err`), lowers, round-trips through the ds-mod writer,
 //! installs into the VM, and runs — the two-word platform span re-spans
-//! into the call's own union (ok constructs the payload member, failure
-//! the unit-tag error member), so `?`, `.ok`, `.err`, and match extract
-//! real values at run level. The failure paths' counting is pinned by
-//! the heap drain: the io message's native-born count dies in the
-//! failure arm, and the parse failure's handed-back input alias is never
-//! claimed (the input survives and reads again).
+//! into the call's own union over the error-class mapping (ok constructs
+//! the payload member, failure the class member the discriminant names,
+//! the bare classes dropping their message count and the `*_other` floor
+//! and the parse reader adopting theirs as a field), so `?`, `.ok`,
+//! `.err`, and match extract real values at run level. The failure
+//! paths' counting is pinned by the heap drain.
 
 use ds_abi::RcOp;
 use ds_check::analyze;
@@ -112,13 +112,14 @@ fn success_typed_fallible_natives_extract_through_every_spelling() {
 }
 
 /// The placed shape of one union-spelled read: the call answers the
-/// two-word span, the discriminant test forks, the failure arm
-/// constructs the error member (zero-initing its dead Ref word) and
-/// drops the native-born message count before its jump, the ok arm
-/// constructs the payload member — and no print-and-halt remains (that
-/// path belongs to the total spellings).
+/// two-word span, the discriminant test forks, every bare io class arm
+/// constructs its member (zero-initing the dead Ref word) and drops the
+/// native-born message count before its jump, the `io_other` arm adopts
+/// its message field instead, the ok arm constructs the payload member —
+/// and no print-and-halt remains (that path belongs to the total
+/// spellings).
 #[test]
-fn the_failure_arm_drops_the_message_count_in_place() {
+fn the_failure_arms_drop_or_adopt_the_message_count_in_place() {
     let lowered = lower_fixture();
     let placed = lowered
         .placed("read_or_empty")
@@ -139,49 +140,30 @@ fn the_failure_arm_drops_the_message_count_in_place() {
         !kinds.iter().any(|k| k == "Halt"),
         "the union spelling never print-halts: {kinds:?}"
     );
-    // the failure arm runs from the first TagNew to the Jmp that skips
-    // the ok arm; the message dec sits inside it
-    let fail_at = kinds
-        .iter()
-        .position(|k| k == "TagNew")
-        .expect("the failure arm constructs the error member");
-    let arm_len = kinds[fail_at..]
-        .iter()
-        .position(|k| k == "Jmp")
-        .expect("the failure arm jumps past the ok arm");
-    let arm = &kinds[fail_at..fail_at + arm_len];
+    // the class dispatch: the ok test plus one test per class but the
+    // fall-through, then one construction arm per class plus the ok arm,
+    // then the `.err` handler's own member tests over the union
+    let tagnews = kinds.iter().filter(|k| *k == "TagNew").count();
+    let tagtests = kinds.iter().filter(|k| *k == "TagTest").count();
     assert_eq!(
-        arm,
-        ["TagNew", "Kstr", "Mov", "Rc"],
-        "the error member builds, its dead Ref word zero-inits, and the message count moves off \
-         the overlay and drops: {kinds:?}"
+        tagtests, 12,
+        "the ok test, five dispatched classes, and the handler's six error members: {kinds:?}"
     );
-    // the decs: the staged path's post-call flush sits between the call
-    // and the fork, the message dec inside the failure arm, and the
-    // `.err` handler arm's zero-init claim at its own epilogue — nothing
-    // else touches the span's counts
-    let call_at = kinds
+    assert_eq!(
+        tagnews, 7,
+        "six class members plus the payload member: {kinds:?}"
+    );
+    // the counting discipline: the staged borrow flush after the call,
+    // every bare class arm's message dec before its jump (five decs),
+    // the `io_other` arm adopting its field (no dec), and the handler
+    // epilogue's own dec
+    let decs = placed
         .iter()
-        .position(|k| k == "Call")
-        .expect("the read call lowers");
-    let rc_at: Vec<usize> = kinds
-        .iter()
-        .enumerate()
-        .filter(|(_, k)| k.as_str() == "Rc")
-        .map(|(at, _)| at)
-        .collect();
-    assert_eq!(rc_at.len(), 3, "three decs: {kinds:?}");
-    assert!(
-        rc_at[0] > call_at && rc_at[0] < fail_at,
-        "the staged borrow flushes right after the call: {kinds:?}"
-    );
-    assert!(
-        rc_at[1] > fail_at && rc_at[1] < fail_at + arm_len,
-        "the message dec lives inside the failure arm: {kinds:?}"
-    );
-    assert!(
-        rc_at[2] > fail_at + arm_len,
-        "the handler arm's claim decs after the fork: {kinds:?}"
+        .filter(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
+        .count();
+    assert_eq!(
+        decs, 7,
+        "the staged flush, the five bare arms' message decs, and the handler epilogue: {kinds:?}"
     );
     let incs = placed
         .iter()
@@ -195,31 +177,42 @@ fn the_failure_arm_drops_the_message_count_in_place() {
 
 /// The union re-span's honest boundaries: a success member wider than
 /// the native's one payload word (the multi-word `config` read a future
-/// read_config native would answer) and a union carrying two error
-/// members beside the success (the native answers one failure
-/// discriminant) both refuse at the call's span.
+/// read_config native would answer) refuses naming the success member, a
+/// union missing one of the class members refuses naming the whole-set
+/// rule, and a host row naming none of the class members (its own single
+/// error tag) has no class mapping at all.
 #[test]
 fn malformed_failure_unions_refuse_at_the_call_span() {
-    let decls = "
-tag int
+    let classes = "
+tag not_found
+tag permission_denied
+tag already_exists
+tag timed_out
+tag unexpected_eof
+tag io_other { msg: string }
+type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | \
+                   io_other
+";
+    let base = format!(
+        "{classes}tag int
 tag string
 tag bool
-tag io_err
-tag parse_err
-struct config { host: string, port: int }
-extern fn read_file (path: string) -> ";
+tag my_err
+struct config {{ host: string, port: int }}
+extern fn read_file (path: string) -> "
+    );
     for (result, reason) in [
         (
             "config | io_err",
             "the union's success member must be exactly the native's one payload",
         ),
         (
-            "string | io_err | parse_err",
-            "exactly one payload-less error member",
+            "string | not_found | permission_denied | already_exists | timed_out | unexpected_eof",
+            "every class member the native answers must be a member",
         ),
     ] {
         let source = format!(
-            "{decls}{result}
+            "{base}{result}
 
 fn read(path: string) -> {result} {{
   const cell = read_file(path)
@@ -262,33 +255,83 @@ fn main() -> bool {{
             "the refusal names the call: {rendered}"
         );
     }
-}
 
-/// The failure-member pairing rides the checked call-site signature, not
-/// a native-owned name: a platform host whose extern row re-spells
-/// read_file's failure member (`string | my_err`) gets exactly that
-/// member constructed on the failure bit — the same shape routing the
-/// ambient spelling uses, with the signature, not the table, owning the
-/// member mapping.
-#[test]
-fn the_failure_member_pairs_by_the_checked_signature() {
+    // a row naming none of the class members (the host's own single
+    // error tag, no class declarations in scope) has no class mapping
     let source = "
 tag int
 tag string
 tag bool
 tag my_err
-extern fn println (s: string) -> ()
 extern fn read_file (path: string) -> string | my_err
+
+fn read(path: string) -> string | my_err {
+  const cell = read_file(path)
+  cell
+}
+
+fn main() -> bool {
+  false
+}";
+    let mut files = Files::new();
+    let id = files.add_source("fallible_union_refusal.ds", source);
+    let asts = [parse(&files, id).expect("the source parses")];
+    let analyzed = analyze(&files, &asts);
+    assert_eq!(analyzed.checked.diags, []);
+    let Err(err) = lower(
+        "fallible_union_refusal",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    ) else {
+        panic!("the classless row refuses");
+    };
+    assert!(
+        format!("{err}").contains("by their ambient names"),
+        "the refusal names the class mapping: {err}"
+    );
+}
+
+/// The class mapping rides the ambient member names the checked
+/// call-site union carries: a hermetic host spelling its own extern row
+/// over the class set (its own declarations of the ruled names) gets
+/// each discriminant's member constructed — while a row naming none of
+/// them has no mapping (the malformed-union test's third case). The
+/// run pins the hermetic class set end to end.
+#[test]
+fn a_hermetic_class_set_row_pairs_per_member() {
+    let source = "
+tag int
+tag string
+tag bool
+tag not_found
+tag permission_denied
+tag already_exists
+tag timed_out
+tag unexpected_eof
+tag io_other { msg: string }
+type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | \
+                  io_other
+extern fn println (s: string) -> ()
+extern fn read_file (path: string) -> string | io_err
 extern fn write_file (path: string, contents: string) -> ()
 
 fn spell(path: string) -> string {
   const cell = read_file(path)
-  match cell { my_err => \"failed\", s => s }
+  match cell {
+    not_found => \"io\",
+    permission_denied => \"io\",
+    already_exists => \"io\",
+    timed_out => \"io\",
+    unexpected_eof => \"io\",
+    io_other { msg } => \"other\",
+    s => s,
+  }
 }
 
 fn main(path: string, missing: string) -> bool {
   write_file(path, \"kept\")
-  spell(path) == \"kept\" && spell(missing) == \"failed\"
+  spell(path) == \"kept\" && spell(missing) == \"io\"
 }";
     let mut files = Files::new();
     let id = files.add_source("fallible_respelled.ds", source);
@@ -296,7 +339,7 @@ fn main(path: string, missing: string) -> bool {
     let analyzed = analyze(&files, &asts);
     assert!(
         analyzed.checked.diags.is_empty(),
-        "the re-spelled signature checks clean: {}",
+        "the hermetic class row checks clean: {}",
         analyzed
             .checked
             .diags
@@ -310,7 +353,7 @@ fn main(path: string, missing: string) -> bool {
         &asts,
         &analyzed,
     )
-    .expect("the re-spelled union lowers");
+    .expect("the hermetic class row lowers");
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();
@@ -331,7 +374,7 @@ fn main(path: string, missing: string) -> bool {
     assert_eq!(
         vm.run("fallible_respelled", "main", &[good, absent]),
         Ok(FrameAnswer::one(Value::Bool(true))),
-        "the failure bit constructs the signature's own error member"
+        "each failure lands on the class member its discriminant names"
     );
     assert!(
         vm.objects().is_empty(),

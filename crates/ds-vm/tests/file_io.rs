@@ -2,15 +2,15 @@
 //! module's `world`-effect surface (`read_file`, `write_file`,
 //! `file_exists`, `fs_list`, `file_size`). Golden coverage: byte-exact
 //! string round trips through the two-word tag+payload spans, the
-//! `io_err` span shape on OS failure (both through CALL and through a
+//! io-class span shape on OS failure (both through CALL and through a
 //! tail call's reused frame), `file_exists` both ways, and the
 //! overlay-width pre-check that keeps a world side effect from running
 //! only for its call to trap on the result width.
 //!
 //! Layout conventions (the contract ds-lower targets): every fallible
 //! native's result is a uniform two-word span [BL-2] on the caller's
-//! argument slots 0 and 1 — word 0 the discriminant (`PLATFORM_IO_OK` /
-//! `PLATFORM_IO_ERR`), word 1 the payload — so a caller of one sizes its
+//! argument slots 0 and 1 — word 0 the discriminant (`PLATFORM_IO_OK`
+//! or the failure's io class), word 1 the payload — so a caller of one sizes its
 //! overlay area to two; the overlay slots declare `Raw` because the same
 //! words stage arguments first.
 
@@ -24,7 +24,7 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{PLATFORM_IO_ERR, PLATFORM_IO_OK},
+    native::{PLATFORM_IO_NOT_FOUND, PLATFORM_IO_OK},
     platform::{
         OP_FILE_EXISTS, OP_FILE_SIZE, OP_FS_LIST, OP_PRINTLN, OP_READ_FILE, OP_WRITE_FILE,
         Platform, STD_NAME,
@@ -94,7 +94,7 @@ fn read_text() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: PLATFORM_IO_ERR,
+            tag: PLATFORM_IO_NOT_FOUND,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -120,7 +120,7 @@ fn roundtrip() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: PLATFORM_IO_ERR,
+            tag: PLATFORM_IO_NOT_FOUND,
         },
         Uop::Jmpif {
             cond: 2,
@@ -134,7 +134,7 @@ fn roundtrip() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: PLATFORM_IO_ERR,
+            tag: PLATFORM_IO_NOT_FOUND,
         },
         Uop::Jmpif {
             cond: 2,
@@ -178,7 +178,7 @@ fn list_names() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: PLATFORM_IO_ERR,
+            tag: PLATFORM_IO_NOT_FOUND,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -201,7 +201,7 @@ fn size() -> FunctionDef {
         Uop::TagTest {
             dst: 2,
             src: 3,
-            tag: PLATFORM_IO_ERR,
+            tag: PLATFORM_IO_NOT_FOUND,
         },
         Uop::Jmpif { cond: 2, target: 7 },
         Uop::Mov { dst: 1, src: 4 },
@@ -331,7 +331,7 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     // the fixture halts on the tag word: the run result is the io_err tag
     assert_eq!(
         vm.run("io", "read_text", &args),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
 
     // through `ask` the payload reaches the caller: the OS error message
@@ -342,7 +342,7 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
     let args = [string(&mut vm, missing.to_str().unwrap())];
     assert_eq!(
         vm.run("io", "ask", &args),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
     let printed = String::from_utf8_lossy(vm.captured_output()).into_owned();
     assert!(
@@ -450,7 +450,7 @@ fn fs_lists_sorted_entry_names() {
     let args = [string(&mut vm, dir.path().join("nope").to_str().unwrap())];
     assert_eq!(
         vm.run("io", "list_names", &args),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
 }
 
@@ -468,7 +468,7 @@ fn file_size_reports_bytes_and_io_err() {
     );
     assert_eq!(
         vm.run("io", "size", &absent),
-        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_ERR)))
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
 }
 

@@ -13,7 +13,7 @@
 //! Layout conventions follow the file-IO fixtures: every fallible net
 //! native's result is the two-word tag+payload span on the caller's
 //! overlay slots 0 and 1 — the failure tags are the two error classes
-//! (`PLATFORM_NET_REFUSED`, `PLATFORM_NET_TIMEOUT`), success reuses
+//! (`PLATFORM_NET_TIMEOUT`/`PLATFORM_NET_REFUSED`/the floor classes), success reuses
 //! `PLATFORM_IO_OK` — and the overlay slots declare `Raw`. `net_close`
 //! answers the one-word inert unit.
 
@@ -33,7 +33,7 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT},
+    native::{PLATFORM_NET_OTHER, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT},
     platform::{
         Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform,
         STD_NAME,
@@ -309,10 +309,12 @@ fn stale_send() -> FunctionDef {
                 callee: k(1),
                 nargs: 2,
             },
+            // the stale handle's send fails as the net_other floor (an
+            // unknown connection names no class)
             Uop::TagTest {
                 dst: 4,
                 src: 5,
-                tag: PLATFORM_NET_REFUSED,
+                tag: PLATFORM_NET_OTHER,
             },
             Uop::Jmpif {
                 cond: 4,

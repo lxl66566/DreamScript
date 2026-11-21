@@ -220,9 +220,9 @@ fn parse() -> FunctionDef {
     ])
 }
 
-/// `(s: string) -> tag`: saves the span's tag word before the println
-/// call reuses the staging slot, prints the payload word (the parsed text
-/// never reaches this fixture's stdout; the input text does on failure),
+/// `(s: string) -> tag`: saves the span's tag word before the render
+/// reuses the staging slot, renders the payload word — the position the
+/// reader gave up at — through `str_int`, prints the rendered position,
 /// and returns the tag word.
 fn ask_parse() -> FunctionDef {
     def("ask_parse", &[Ref, Ref, Tag, Raw, Raw], 1, 2, &[
@@ -233,8 +233,11 @@ fn ask_parse() -> FunctionDef {
             nargs: 1,
         },
         Uop::Mov { dst: 2, src: 3 },
-        Uop::Mov { dst: 1, src: 4 },
-        Uop::Mov { dst: 3, src: 1 },
+        Uop::Mov { dst: 3, src: 4 },
+        Uop::Call {
+            callee: k(7),
+            nargs: 1,
+        },
         Uop::Call {
             callee: k(8),
             nargs: 1,
@@ -608,8 +611,9 @@ fn parse_int_answers_the_success_int_and_the_parse_err_span() {
         vm.run("st", "parse", &args),
         Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
     );
-    // and the payload reaches the caller: the failure payload names the
-    // input text, so the golden stdout is the input verbatim
+    // and the payload reaches the caller: the failure payload is the
+    // position the reader gave up at, so the rendered golden stdout is
+    // the offending offset ("not-a-number" stops at 0, "12x" at 2)
     let mut vm = Vm::new(st_registry());
     vm.capture_output();
     let args = [string(&mut vm, "not-a-number")];
@@ -617,7 +621,15 @@ fn parse_int_answers_the_success_int_and_the_parse_err_span() {
         vm.run("st", "ask_parse", &args),
         Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
     );
-    assert_eq!(vm.captured_output(), b"not-a-number\n");
+    assert_eq!(vm.captured_output(), b"0\n");
+    let mut vm = Vm::new(st_registry());
+    vm.capture_output();
+    let args = [string(&mut vm, "12x")];
+    assert_eq!(
+        vm.run("st", "ask_parse", &args),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_PARSE_ERR)))
+    );
+    assert_eq!(vm.captured_output(), b"2\n");
 }
 
 #[test]

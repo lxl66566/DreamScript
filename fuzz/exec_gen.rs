@@ -1468,7 +1468,7 @@ impl Gen<'_> {
     /// presence and absence roundtrips over the drawn element values.
     fn ep_json_derive(&mut self) {
         let (a, b) = (self.lit(10), self.lit_not(10, &[0]));
-        self.decl("tag parse_err");
+        self.decl("tag parse_err { pos: int }");
         self.decl(
             "enum json {\n  json_null\n  json_int { value: int }\n  json_array { items: \
              list[json] }\n  json_object { fields: map[string, json] }\n}",
@@ -1480,15 +1480,15 @@ impl Gen<'_> {
         );
         self.decl(
             "fn json_as_object (v: json) -> map[string, json] | parse_err {\n  match v {\n  \
-             json_object { fields } => fields,\n    _ => parse_err,\n  }\n}",
+             json_object { fields } => fields,\n    _ => parse_err(pos: 0),\n  }\n}",
         );
         self.decl(
             "fn json_as_array (v: json) -> list[json] | parse_err {\n  match v {\n    json_array \
-             { items } => items,\n    _ => parse_err,\n  }\n}",
+             { items } => items,\n    _ => parse_err(pos: 0),\n  }\n}",
         );
         self.decl(
             "fn json_as_int (v: json) -> int | parse_err {\n  match v {\n    json_int { value } \
-             => value,\n    _ => parse_err,\n  }\n}",
+             => value,\n    _ => parse_err(pos: 0),\n  }\n}",
         );
         self.decl("extern fn unwrap_or[t] (x: t?, y: t) -> t");
         self.decl("extern fn list_len[t] (xs: list[t]) -> int");

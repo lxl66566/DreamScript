@@ -19,6 +19,9 @@ pub trait Copyable { }
 pub enum net_err {
   timeout
   refused
+  addr_in_use
+  reset
+  net_other { msg: string }
 }
 
 pub struct net_handle: ~Copyable {
@@ -52,6 +55,9 @@ fn main(host: string, port: int) -> string {
   match reply {
     timeout => "timed out",
     refused => "refused",
+    addr_in_use => "addr in use",
+    reset => "reset",
+    net_other { msg } => "other",
     text => text
   }
 }
@@ -65,6 +71,9 @@ fn drop_closes(host: string, port: int) -> () {
   match send(conn, "ping") {
     timeout => (),
     refused => (),
+    addr_in_use => (),
+    reset => (),
+    net_other { msg } => (),
     _ => ()
   }
 }
@@ -92,6 +101,9 @@ fn recv_report(h: net_handle, max_bytes: int) -> string {
   match reply {
     timeout => "timed out",
     refused => "refused",
+    addr_in_use => "addr in use",
+    reset => "reset",
+    net_other { msg } => "other",
     text => text
   }
 }
@@ -115,6 +127,9 @@ fn send_report(h: net_handle, data: string) -> string {
   match send(h, data) {
     timeout => "timed out",
     refused => "refused",
+    addr_in_use => "addr in use",
+    reset => "reset",
+    net_other { msg } => "other",
     _ => "sent"
   }
 }

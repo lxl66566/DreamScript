@@ -68,6 +68,8 @@ impl FnLower<'_, '_, '_> {
                                 .cases
                                 .get(def)
                                 .is_some_and(|c| !matches!(c.payload, EnumPayload::None))
+                            || (self.analyzed.package.def(*def).kind == ds_check::DefKind::Tag
+                                && self.analyzed.decls.structs.contains_key(def))
                 )
             },
             Expr::Field { recv, name, .. } => match self.res.get(name.span) {

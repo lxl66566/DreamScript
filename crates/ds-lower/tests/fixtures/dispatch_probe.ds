@@ -11,8 +11,8 @@
 // sw: stage: run
 // show: stage: run
 // show_rev: stage: run
-// timeout: stage: run
-// refused: stage: run
+// stale: stage: run
+// refused_probe: stage: run
 // ready: stage: run
 // outcome: stage: run
 // brief: stage: run
@@ -52,14 +52,14 @@ fn show_rev(s: sw) -> () {
   }
 }
 
-tag timeout
-tag refused
+tag stale
+tag refused_probe
 tag ready
-type outcome = timeout | refused | ready
+type outcome = stale | refused_probe | ready
 
 fn brief(e: outcome) -> () {
   match e {
-    timeout | refused => println("net-err"),
+    stale | refused_probe => println("net-err"),
     ready => println("ready"),
   }
 }
@@ -136,8 +136,8 @@ fn main() -> () {
   show(off)
   show_rev(on)
   show_rev(off)
-  brief(timeout)
-  brief(refused)
+  brief(stale)
+  brief(refused_probe)
   brief(ready)
   println(describe("ok"))
   println(describe("bad"))

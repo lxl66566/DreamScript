@@ -153,8 +153,10 @@
 //! allocations meet only once a module needs 254 ids, at which point the
 //! tag id widens. `PLATFORM_IO_OK` marks every fallible native's success
 //! (the caller already knows which native it called, so one shared id
-//! disambiguates nothing); [`PLATFORM_IO_ERR`] marks IO failure, with the
-//! message `Ref` in the span's payload word.
+//! disambiguates nothing); an IO failure answers the io class
+//! discriminant of its error kind (the `io_err` alias's members, the
+//! 2026-11-21 failure-taxonomy ruling), with the message `Ref` in the
+//! span's payload word.
 //!
 //! The net ops (`crate::net`) answer the same convention over the
 //! failure taxonomy's error classes: success reuses `PLATFORM_IO_OK`,
@@ -191,8 +193,8 @@
 //! exactly as `read_file`'s row stands for `string | io_err`), and it
 //! answers the same uniform two-word span — [`PLATFORM_IO_OK`] with the
 //! parsed `int`, or [`PLATFORM_PARSE_ERR`] (the next id below `net_err`
-//! in the platform reservation's countdown) with the input text `Ref` in
-//! the payload word.
+//! in the platform reservation's countdown) with the position the reader
+//! gave up at in the payload word.
 //!
 //! # The list natives (indices 20-23)
 //!
@@ -395,7 +397,8 @@ pub const BUILTIN_TO_UPPER: u32 = 13;
 pub const BUILTIN_TO_LOWER: u32 = 14;
 /// `trim(s: string) -> string` (leading and trailing whitespace dropped).
 pub const BUILTIN_TRIM: u32 = 15;
-/// `parse_int(s: string) -> int | parse_err` (the input rides the error payload).
+/// `parse_int(s: string) -> int | parse_err` (the position the reader gave up at rides the error
+/// payload).
 pub const BUILTIN_PARSE_INT: u32 = 16;
 /// `split(s, sep: string) -> list[string]` (a list object of part refs).
 pub const BUILTIN_SPLIT: u32 = 17;
@@ -753,9 +756,6 @@ pub const BUILTIN_REPLACE: u32 = 86;
 /// top of the platform tag-id reservation both native modules share (see
 /// the module docs).
 pub const PLATFORM_IO_OK: u8 = u8::MAX;
-/// The failure discriminant: the `io_err` tag, payload word holding the
-/// OS-error message `Ref`.
-pub const PLATFORM_IO_ERR: u8 = u8::MAX - 1;
 /// The net natives' timeout-class failure discriminant: a bounded wait
 /// expired (the ambient `net_err` case `timeout`), the message `Ref` in
 /// the payload word. Reserved below the lowerer's claim-band pair in
@@ -768,11 +768,63 @@ pub const PLATFORM_NET_REFUSED: u8 = u8::MAX - 11;
 /// The utf8 decode failure discriminant: the `utf8_err` tag (the
 /// taxonomy's UTF-8 validation member — `parse_err` names document
 /// shape failures alone), the rejection message `Ref` in the payload
-/// word — the deepest id of the platform reservation's countdown.
+/// word.
 pub const PLATFORM_UTF8_ERR: u8 = u8::MAX - 12;
+
+// The io failure classes (the 2026-11-21 failure-taxonomy ruling): each
+// platform io failure lands on the class tag it names, the classes a
+// platform cannot discriminate portably folding into the `io_other`
+// floor — the OS message `Ref` rides the payload word on every class,
+// but only `io_other`'s member carries it out.
+/// The io class of `ErrorKind::NotFound` (`not_found`).
+pub const PLATFORM_IO_NOT_FOUND: u8 = u8::MAX - 13;
+/// The io class of `ErrorKind::PermissionDenied` (`permission_denied`).
+pub const PLATFORM_IO_PERMISSION_DENIED: u8 = u8::MAX - 14;
+/// The io class of `ErrorKind::AlreadyExists` (`already_exists`).
+pub const PLATFORM_IO_ALREADY_EXISTS: u8 = u8::MAX - 15;
+/// The io class of an expired bounded wait (`timed_out`).
+pub const PLATFORM_IO_TIMED_OUT: u8 = u8::MAX - 16;
+/// The io class of `ErrorKind::UnexpectedEof` (`unexpected_eof`).
+pub const PLATFORM_IO_UNEXPECTED_EOF: u8 = u8::MAX - 17;
+/// The `io_other` floor: every failure no io class names portably.
+pub const PLATFORM_IO_OTHER: u8 = u8::MAX - 18;
+
+/// Whether a platform discriminant is one of the io failure classes.
+#[must_use]
+pub fn is_io_class(tag: u8) -> bool {
+    matches!(
+        tag,
+        PLATFORM_IO_NOT_FOUND
+            | PLATFORM_IO_PERMISSION_DENIED
+            | PLATFORM_IO_ALREADY_EXISTS
+            | PLATFORM_IO_TIMED_OUT
+            | PLATFORM_IO_UNEXPECTED_EOF
+            | PLATFORM_IO_OTHER
+    )
+}
+
+/// Whether a platform discriminant is one of the net failure classes.
+#[must_use]
+pub fn is_net_class(tag: u8) -> bool {
+    matches!(
+        tag,
+        PLATFORM_NET_TIMEOUT
+            | PLATFORM_NET_REFUSED
+            | PLATFORM_NET_ADDR_IN_USE
+            | PLATFORM_NET_RESET
+            | PLATFORM_NET_OTHER
+    )
+}
+/// The net class of `ErrorKind::AddrInUse` (`addr_in_use`).
+pub const PLATFORM_NET_ADDR_IN_USE: u8 = u8::MAX - 19;
+/// The net class of a connection torn down mid-flight, reset or aborted
+/// (`reset`).
+pub const PLATFORM_NET_RESET: u8 = u8::MAX - 20;
+/// The `net_other` floor: every failure no net class names portably.
+pub const PLATFORM_NET_OTHER: u8 = u8::MAX - 21;
 /// The `parse_int` failure discriminant: the `parse_err` tag, one id
 /// below the retired `net_err` slot in the platform reservation's
-/// countdown; the payload word holds the input text `Ref`.
+/// countdown; the payload word holds the position the reader gave up at.
 pub const PLATFORM_PARSE_ERR: u8 = u8::MAX - 3;
 /// The `none` discriminant of a checked collection read (`list_get`): the
 /// `t | none` member callers extract, the next id below `parse_err` in the
@@ -1192,17 +1244,38 @@ fn parse_int_fn(
         },
         Err(_) => NativeResult::Tag {
             tag: PLATFORM_PARSE_ERR,
-            payload: Value::Ref(id),
+            payload: Value::I64(int_stop(text)),
         },
     })
 }
 
+/// The position an integer reader gives up at: the first char the
+/// grammar refuses, or the text's end when the shape held but the value
+/// did not (an overflow) or the digits are missing past the sign.
+fn int_stop(text: &str) -> i64 {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
+        i += 1;
+    }
+    let digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        // no digits at all: the reader stopped where the digits should
+        // have started (the empty text answers 0)
+        return i64::try_from(i).expect("the index fits i64");
+    }
+    // past the digits: either the first char the grammar refuses, or the
+    // end of a well-shaped text whose value overflowed
+    i += digits;
+    i64::try_from(i).expect("the index fits i64")
+}
+
 /// `parse_float(s: string) -> float | parse_err` — `parse_int`'s twin
 /// over the float slot: the correctly-rounded decimal reader, strict
-/// about spelling, answering `parse_err` with the input text as the
-/// payload on refusal. The @std json parser's float arm routes through
-/// here, so a parsed float carries the same bits any wider ecosystem
-/// reader would give it.
+/// about spelling, answering `parse_err` with the position it gave up at
+/// as the payload on refusal. The @std json parser's float arm routes
+/// through here, so a parsed float carries the same bits any wider
+/// ecosystem reader would give it.
 fn parse_float_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
@@ -1218,9 +1291,57 @@ fn parse_float_fn(
         },
         Err(_) => NativeResult::Tag {
             tag: PLATFORM_PARSE_ERR,
-            payload: Value::Ref(id),
+            payload: Value::I64(float_stop(text)),
         },
     })
+}
+
+/// The position a float reader gives up at: the first char the decimal
+/// grammar refuses (sign, mantissa digits with one dot, exponent), or
+/// the text's end when the shape held but the value did not. The
+/// non-decimal spellings (`inf`, `nan`) scan as their word prefixes.
+fn float_stop(text: &str) -> i64 {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
+        i += 1;
+    }
+    let lower: Vec<u8> = text.to_ascii_lowercase().as_bytes()[i..].to_vec();
+    for word in [b"inf".as_slice(), b"infinity".as_slice(), b"nan".as_slice()] {
+        if lower.len() >= word.len() && &lower[..word.len()] == word {
+            return i64::try_from(text.len()).expect("the index fits i64");
+        }
+    }
+    // where the mantissa's first digit was required: a text with no
+    // digit anywhere stops there (a bare dot is not a number)
+    let digits_at = i;
+    let mut mantissa = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+        mantissa += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            mantissa += 1;
+        }
+    }
+    if mantissa == 0 {
+        return i64::try_from(digits_at).expect("the index fits i64");
+    }
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
+            i += 1;
+        }
+        let exp_digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if exp_digits == 0 {
+            return i64::try_from(i).expect("the index fits i64");
+        }
+        i += exp_digits;
+    }
+    i64::try_from(i).expect("the index fits i64")
 }
 
 /// `char_of(code: int) -> char | none` — the codepoint→char reader:
@@ -4009,7 +4130,26 @@ fn str_bool_fn(
     }
 }
 
-/// The `io_err` span: the OS error rendered as `"<op> <path>: <error>"`.
+/// The io class of one OS failure: the `io_err` member the platform
+/// discriminant answers by error class — every kind the classes name
+/// lands on its tag, the rest folding into the `io_other` floor.
+#[must_use]
+pub(crate) fn io_class(err: &std::io::Error) -> u8 {
+    use std::io::ErrorKind;
+    match err.kind() {
+        ErrorKind::NotFound => PLATFORM_IO_NOT_FOUND,
+        ErrorKind::PermissionDenied => PLATFORM_IO_PERMISSION_DENIED,
+        ErrorKind::AlreadyExists => PLATFORM_IO_ALREADY_EXISTS,
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => PLATFORM_IO_TIMED_OUT,
+        ErrorKind::UnexpectedEof => PLATFORM_IO_UNEXPECTED_EOF,
+        _ => PLATFORM_IO_OTHER,
+    }
+}
+
+/// The `io_err` span: the failure's class discriminant with the OS
+/// error rendered as `"<op> <path>: <error>"` in the payload word (the
+/// message rides the `io_other` member alone; the other classes drop
+/// it at the re-span).
 pub(crate) fn io_err(
     heaps: &mut Heaps,
     op: &str,
@@ -4017,7 +4157,7 @@ pub(crate) fn io_err(
     err: &std::io::Error,
 ) -> NativeResult {
     NativeResult::Tag {
-        tag: PLATFORM_IO_ERR,
+        tag: io_class(err),
         payload: heaps.new_str(format!("{op} {path}: {err}")),
     }
 }
@@ -4917,6 +5057,53 @@ mod tests {
         }
     }
 
+    /// The io error-class mapping: every kind a class names lands on
+    /// its discriminant, and the kinds no io class names portably fold
+    /// into the `io_other` floor.
+    #[test]
+    fn io_classes_map_kinds_and_fold_the_floor() {
+        use std::io::ErrorKind;
+        let kind = |k: ErrorKind| io_class(&std::io::Error::from(k));
+        assert_eq!(kind(ErrorKind::NotFound), PLATFORM_IO_NOT_FOUND);
+        assert_eq!(
+            kind(ErrorKind::PermissionDenied),
+            PLATFORM_IO_PERMISSION_DENIED
+        );
+        assert_eq!(kind(ErrorKind::AlreadyExists), PLATFORM_IO_ALREADY_EXISTS);
+        assert_eq!(kind(ErrorKind::TimedOut), PLATFORM_IO_TIMED_OUT);
+        assert_eq!(kind(ErrorKind::WouldBlock), PLATFORM_IO_TIMED_OUT);
+        assert_eq!(kind(ErrorKind::UnexpectedEof), PLATFORM_IO_UNEXPECTED_EOF);
+        // no class names a directory read or a broken pipe portably
+        assert_eq!(kind(ErrorKind::IsADirectory), PLATFORM_IO_OTHER);
+        assert_eq!(kind(ErrorKind::BrokenPipe), PLATFORM_IO_OTHER);
+        assert_eq!(
+            io_class(&std::io::Error::other("negative length")),
+            PLATFORM_IO_OTHER
+        );
+    }
+
+    /// The parse readers' position payload: the offset the reader gave
+    /// up at — the first offending char, the end of a well-shaped but
+    /// overflowing text, and the sign-only stop.
+    #[test]
+    fn parse_positions_name_the_stop_offset() {
+        assert_eq!(int_stop("12x34"), 2);
+        assert_eq!(int_stop(""), 0);
+        assert_eq!(int_stop("-"), 1);
+        assert_eq!(int_stop("+7"), 2);
+        assert_eq!(
+            int_stop("9223372036854775808"),
+            19,
+            "the overflow stops at the end"
+        );
+        assert_eq!(float_stop("1.5x"), 3);
+        assert_eq!(float_stop("."), 0);
+        assert_eq!(float_stop("1e"), 2);
+        assert_eq!(float_stop("1e+"), 3);
+        assert_eq!(float_stop("inf"), 3);
+        assert_eq!(float_stop("-Inf"), 4);
+    }
+
     #[test]
     fn parse_int_answers_both_span_members() {
         let mut objects = Objects::new(FIBER_ROOT);
@@ -4941,9 +5128,9 @@ mod tests {
             ))]),
             Ok(NativeResult::Tag {
                 tag: PLATFORM_PARSE_ERR,
-                payload: Value::Ref(RefId::new(FIBER_ROOT, bad)),
+                payload: Value::I64(2),
             }),
-            "the failure payload names the input text"
+            "the failure payload is the position the reader gave up at"
         );
     }
 

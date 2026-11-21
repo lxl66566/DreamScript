@@ -43,11 +43,17 @@ fn main() -> () {
   match clean_pass() {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("clean kept ${n}")
   }
   match cut_pass() {
     timeout => println("t")
     refused => println("r")
+    addr_in_use => println("a")
+    reset => println("x")
+    net_other { msg } => println("o")
     n => println("cut kept ${n}")
   }
 }

@@ -18,7 +18,9 @@ use ds_diag::{Files, human};
 use ds_lower::{Lowered, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
-use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
+use ds_vm::{
+    FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native, native::PLATFORM_IO_NOT_FOUND,
+};
 
 /// Builds the module once per test VM: parse -> check -> lower -> write
 /// -> read back -> install. Both native tables must precede the loader's
@@ -116,7 +118,7 @@ fn a_failed_open_prints_the_message_and_halts_on_the_tag() {
     vm.capture_output();
     assert_eq!(
         vm.run("fsys_time", "fail_open", &[word]),
-        Ok(FrameAnswer::one(Value::Tag(native::PLATFORM_IO_ERR))),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND))),
         "the handler halts on the discriminant, the run result is the tag"
     );
     let out = String::from_utf8_lossy(vm.captured_output()).into_owned();

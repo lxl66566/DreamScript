@@ -17,7 +17,13 @@ tag bool
 tag string
 tag byte
 tag bytes
-tag io_err
+tag not_found
+tag permission_denied
+tag already_exists
+tag timed_out
+tag unexpected_eof
+tag io_other { msg: string }
+type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
 pub trait Copyable { }
 pub struct list[t]
 
@@ -78,7 +84,12 @@ fn fail_read(path: string) -> int {
   close_raw(f.fd)
   const cell = read_exact(f, 4)
   match cell {
-    io_err => -1,
+    not_found => -1,
+    permission_denied => -1,
+    already_exists => -1,
+    timed_out => -1,
+    unexpected_eof => -1,
+    io_other { msg } => -1,
     b => len(b),
   }
 }
@@ -87,7 +98,12 @@ fn fail_open(path: string) -> int {
   const f = open_file(path)
   const cell = read_exact(f, 4)
   match cell {
-    io_err => -1,
+    not_found => -1,
+    permission_denied => -1,
+    already_exists => -1,
+    timed_out => -1,
+    unexpected_eof => -1,
+    io_other { msg } => -1,
     b => len(b),
   }
 }

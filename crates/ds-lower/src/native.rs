@@ -29,19 +29,48 @@ pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 /// user package can collide.
 pub(crate) const EVIDENCE_MODULE: &str = "$evidence";
 
-/// The net failure classes a classed fallible native answers: each
-/// platform failure discriminant paired with the ambient `net_err` case
+/// The failure classes a classed fallible native answers: each platform
+/// failure discriminant paired with the ambient failure-taxonomy member
 /// name the call-site union carries — the error-class mapping (ruled
-/// 2026-11-12), each failure landing on the member the name names.
-/// Mirrors the VM's tag reservation, pinned by the drift test.
+/// 2026-11-12, widened to the alias class sets 2026-11-21), each failure
+/// landing on the member the name names. Mirrors the VM's tag
+/// reservation, pinned by the drift test.
 pub(crate) const NET_TIMEOUT: u8 = u8::MAX - 10;
 pub(crate) const NET_REFUSED: u8 = u8::MAX - 11;
-pub(crate) const NET_CLASSES: &[(u8, &str)] = &[(NET_TIMEOUT, "timeout"), (NET_REFUSED, "refused")];
-
-/// The utf8 decode failure discriminant: the taxonomy's `utf8_err` tag,
-/// one class alone so no member mapping rides — mirrors the VM's tag
-/// reservation, pinned by the drift test.
 pub(crate) const UTF8_ERR: u8 = u8::MAX - 12;
+pub(crate) const PARSE_ERR: u8 = u8::MAX - 3;
+pub(crate) const IO_NOT_FOUND: u8 = u8::MAX - 13;
+pub(crate) const IO_PERMISSION_DENIED: u8 = u8::MAX - 14;
+pub(crate) const IO_ALREADY_EXISTS: u8 = u8::MAX - 15;
+pub(crate) const IO_TIMED_OUT: u8 = u8::MAX - 16;
+pub(crate) const IO_UNEXPECTED_EOF: u8 = u8::MAX - 17;
+pub(crate) const IO_OTHER: u8 = u8::MAX - 18;
+pub(crate) const NET_ADDR_IN_USE: u8 = u8::MAX - 19;
+pub(crate) const NET_RESET: u8 = u8::MAX - 20;
+pub(crate) const NET_OTHER: u8 = u8::MAX - 21;
+/// The io classes: the `io_err` alias's member set, `io_other` the floor.
+pub(crate) const IO_CLASSES: &[(u8, &str)] = &[
+    (IO_NOT_FOUND, "not_found"),
+    (IO_PERMISSION_DENIED, "permission_denied"),
+    (IO_ALREADY_EXISTS, "already_exists"),
+    (IO_TIMED_OUT, "timed_out"),
+    (IO_UNEXPECTED_EOF, "unexpected_eof"),
+    (IO_OTHER, "io_other"),
+];
+/// The net classes: the `net_err` alias's member set, `net_other` the
+/// floor.
+pub(crate) const NET_CLASSES: &[(u8, &str)] = &[
+    (NET_TIMEOUT, "timeout"),
+    (NET_REFUSED, "refused"),
+    (NET_ADDR_IN_USE, "addr_in_use"),
+    (NET_RESET, "reset"),
+    (NET_OTHER, "net_other"),
+];
+/// The parse classes: `parse_err` alone, its member carrying the
+/// position payload.
+pub(crate) const PARSE_CLASSES: &[(u8, &str)] = &[(PARSE_ERR, "parse_err")];
+/// The utf8 classes: the one bare tag.
+pub(crate) const UTF8_CLASSES: &[(u8, &str)] = &[(UTF8_ERR, "utf8_err")];
 
 /// The builtin core's reserved module name, as pool FuncRefs address it.
 pub(crate) const BUILTIN_MODULE_NAME: &str = "builtin";
@@ -80,27 +109,24 @@ pub(crate) enum NativeShape {
     Total(SlotType),
     /// The two-word platform span: discriminant plus one payload word.
     /// The payload carries the success value; on failure the same word
-    /// holds the OS-error message `Ref`. `err_prefix` heads the printed
-    /// unhandled-failure line.
+    /// holds the class's failure value — the OS-error message `Ref` of an
+    /// io or net class, or the parse reader's position `I64`. Failure
+    /// answers one of the error-class discriminants in `classes`, each
+    /// landing on the union member the ambient name names (the
+    /// error-class mapping), so the call's checked union may flatten the
+    /// failure taxonomy's whole member set. `err_prefix` heads the
+    /// printed unhandled-failure line of a total spelling.
     Fallible {
         /// The success payload's word kind.
         payload: SlotType,
+        /// The failure payload's word kind: the message `Ref` of an
+        /// io/net class, or the position `I64` of the parse reader.
+        fail_payload: SlotType,
         /// The unhandled-failure message prefix, e.g. `io error: `.
         err_prefix: &'static str,
-    },
-    /// The two-word platform span of a classed fallible native: like
-    /// [`NativeShape::Fallible`] but failure answers one of the error-class
-    /// discriminants in [`NET_CLASSES`], each landing on the union member
-    /// the ambient case name names, so the call's checked union may
-    /// flatten the whole case set of the failure taxonomy's enum. Success
-    /// is the one payload word, or the unit value when the payload is the
-    /// inert unit word. `err_prefix` heads the printed unhandled-failure
-    /// line of a total spelling.
-    FallibleClassed {
-        /// The success payload's word kind.
-        payload: SlotType,
-        /// The unhandled-failure message prefix, e.g. `net error: `.
-        err_prefix: &'static str,
+        /// The error-class mapping: one discriminant per failure class,
+        /// paired with the ambient member name it lands on.
+        classes: &'static [(u8, &'static str)],
     },
     /// The two-word ok/none span of a checked collection read: word 0
     /// the discriminant (the platform IO_OK or NONE tag), word 1 the
@@ -253,7 +279,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 16,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
-            err_prefix: "parse error: ",
+            fail_payload: SlotType::I64,
+            err_prefix: "parse error: at position ",
+            classes: PARSE_CLASSES,
         },
     },
     Native {
@@ -262,7 +290,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 19,
         shape: NativeShape::Fallible {
             payload: SlotType::F64,
-            err_prefix: "parse error: ",
+            fail_payload: SlotType::I64,
+            err_prefix: "parse error: at position ",
+            classes: PARSE_CLASSES,
         },
     },
     Native {
@@ -386,7 +416,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 68,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "utf8 error: ",
+            classes: UTF8_CLASSES,
         },
     },
     Native {
@@ -592,7 +624,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 2,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -601,7 +635,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 3,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -616,7 +652,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 5,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref, // the list object
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -625,7 +663,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 6,
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -635,27 +675,33 @@ pub(crate) const NATIVES: &[Native] = &[
         // the net natives answer the failure classes: the classed shape
         // keeps the total ambient row on the shared printing-halt path
         // while a union row pairs by the class names
-        shape: NativeShape::FallibleClassed {
+        shape: NativeShape::Fallible {
             payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
             err_prefix: "net error: ",
+            classes: NET_CLASSES,
         },
     },
     Native {
         name: "net_send",
         module: NativeModule::Platform,
         index: 8,
-        shape: NativeShape::FallibleClassed {
+        shape: NativeShape::Fallible {
             payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
             err_prefix: "net error: ",
+            classes: NET_CLASSES,
         },
     },
     Native {
         name: "net_recv",
         module: NativeModule::Platform,
         index: 9,
-        shape: NativeShape::FallibleClassed {
+        shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "net error: ",
+            classes: NET_CLASSES,
         },
     },
     Native {
@@ -670,9 +716,11 @@ pub(crate) const NATIVES: &[Native] = &[
         name: "http_get",
         module: NativeModule::Platform,
         index: 11,
-        shape: NativeShape::FallibleClassed {
+        shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "net error: ",
+            classes: NET_CLASSES,
         },
     },
     Native {
@@ -684,9 +732,11 @@ pub(crate) const NATIVES: &[Native] = &[
         // no call site resolves it by name — a package wanting the
         // explicit op declares its own extern. The entry sits here so
         // the drift test pins the mirror against the VM tables.
-        shape: NativeShape::FallibleClassed {
+        shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "net error: ",
+            classes: NET_CLASSES,
         },
     },
     Native {
@@ -697,7 +747,9 @@ pub(crate) const NATIVES: &[Native] = &[
         // inline word (the struct's fd field)
         shape: NativeShape::Fallible {
             payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -706,7 +758,9 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 13,
         shape: NativeShape::Fallible {
             payload: SlotType::Ref,
+            fail_payload: SlotType::Ref,
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -761,8 +815,10 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Platform,
         index: 22,
         shape: NativeShape::Fallible {
-            payload: SlotType::I64, // the child's exit status
+            payload: SlotType::I64,      // the child's exit status
+            fail_payload: SlotType::Ref, // the OS error message of an io class
             err_prefix: "io error: ",
+            classes: IO_CLASSES,
         },
     },
     Native {
@@ -1165,9 +1221,7 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. }
-                | NativeShape::FallibleClassed { .. }
-                | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
                 // no monomorphic resident yet; the floor is the resident
                 // generic body's two list refs
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
@@ -1227,9 +1281,7 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. }
-                | NativeShape::FallibleClassed { .. }
-                | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
                 // the resident tag-less total answers two list refs; a
                 // wider fold joining the shape widens its own floor
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
@@ -1272,10 +1324,23 @@ mod drift {
         }
         assert_eq!(NURSERY_BOUNDARY_OK, ds_vm::native::NURSERY_BOUNDARY_OK);
         assert_eq!(NURSERY_BOUNDARY_ERR, ds_vm::native::NURSERY_BOUNDARY_ERR);
-        // the net failure classes mirror the VM's tag reservation
+        // the failure classes mirror the VM's tag reservation: every
+        // discriminant the class tables carry, one assertion per family
         assert_eq!(NET_TIMEOUT, ds_vm::native::PLATFORM_NET_TIMEOUT);
         assert_eq!(NET_REFUSED, ds_vm::native::PLATFORM_NET_REFUSED);
-        // the utf8 failure discriminant mirrors it the same way
         assert_eq!(UTF8_ERR, ds_vm::native::PLATFORM_UTF8_ERR);
+        assert_eq!(PARSE_ERR, ds_vm::native::PLATFORM_PARSE_ERR);
+        assert_eq!(IO_NOT_FOUND, ds_vm::native::PLATFORM_IO_NOT_FOUND);
+        assert_eq!(
+            IO_PERMISSION_DENIED,
+            ds_vm::native::PLATFORM_IO_PERMISSION_DENIED
+        );
+        assert_eq!(IO_ALREADY_EXISTS, ds_vm::native::PLATFORM_IO_ALREADY_EXISTS);
+        assert_eq!(IO_TIMED_OUT, ds_vm::native::PLATFORM_IO_TIMED_OUT);
+        assert_eq!(IO_UNEXPECTED_EOF, ds_vm::native::PLATFORM_IO_UNEXPECTED_EOF);
+        assert_eq!(IO_OTHER, ds_vm::native::PLATFORM_IO_OTHER);
+        assert_eq!(NET_ADDR_IN_USE, ds_vm::native::PLATFORM_NET_ADDR_IN_USE);
+        assert_eq!(NET_RESET, ds_vm::native::PLATFORM_NET_RESET);
+        assert_eq!(NET_OTHER, ds_vm::native::PLATFORM_NET_OTHER);
     }
 }

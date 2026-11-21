@@ -34,7 +34,9 @@
 use std::{fs::File, io};
 
 use crate::{
-    native::{NativeResult, OutputSink, PLATFORM_IO_ERR, PLATFORM_IO_OK, i64_arg, io_err, ref_arg},
+    native::{
+        NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_IO_OTHER, i64_arg, io_err, ref_arg,
+    },
     object::Heaps,
     value::Value,
     vm::Trap,
@@ -165,10 +167,11 @@ pub(crate) fn close_raw_fn(
 }
 
 /// A `read_exact` failure whose text is not an OS error (the guards and
-/// the unknown-handle refusal).
+/// the unknown-handle refusal): no kind names it, so it folds into the
+/// `io_other` floor.
 fn io_err_text(heaps: &mut Heaps, op: &str, path: &str, detail: &str) -> NativeResult {
     NativeResult::Tag {
-        tag: PLATFORM_IO_ERR,
+        tag: PLATFORM_IO_OTHER,
         payload: heaps.new_str(format!("{op} {path}: {detail}")),
     }
 }
@@ -176,6 +179,7 @@ fn io_err_text(heaps: &mut Heaps, op: &str, path: &str, detail: &str) -> NativeR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::PLATFORM_IO_UNEXPECTED_EOF;
 
     /// Runs `body` over a bare store on the root fiber and a captured
     /// sink: the natives under test never reach the split.
@@ -247,7 +251,7 @@ mod tests {
             let NativeResult::Tag { tag, .. } = closed else {
                 panic!("read_raw answers a span: {closed:?}");
             };
-            assert_eq!(tag, PLATFORM_IO_ERR);
+            assert_eq!(tag, PLATFORM_IO_OTHER);
             let _ = std::fs::remove_file(&path);
         });
     }
@@ -273,14 +277,14 @@ mod tests {
             else {
                 unreachable!("read_raw answers a span");
             };
-            assert_eq!(tag, PLATFORM_IO_ERR);
+            assert_eq!(tag, PLATFORM_IO_UNEXPECTED_EOF);
             let NativeResult::Tag { tag, .. } =
                 read_raw_fn(heaps, out, &[Value::I64(handle), Value::I64(READ_CAP + 1)])
                     .expect("the call traps nothing")
             else {
                 unreachable!("read_raw answers a span");
             };
-            assert_eq!(tag, PLATFORM_IO_ERR);
+            assert_eq!(tag, PLATFORM_IO_OTHER);
             let _ = std::fs::remove_file(&path);
         });
     }

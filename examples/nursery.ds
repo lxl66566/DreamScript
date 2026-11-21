@@ -26,6 +26,9 @@ fn fetch_all(urls: list[string]) -> int | net_err {
         match fetch_body(u) {
           timeout => cancel(timeout)
           refused => cancel(refused)
+          addr_in_use => cancel(addr_in_use)
+          reset => cancel(reset)
+          net_other { msg } => cancel(net_other(msg: msg))
           body => body
         }
       }
@@ -40,12 +43,18 @@ fn main() -> () {
   match fetch_all(good) {
     timeout => println("caught timeout")
     refused => println("caught refused")
+    addr_in_use => println("caught addr in use")
+    reset => println("caught reset")
+    net_other { msg } => println("caught other")
     n => println("kept ${n} bodies")
   }
   const bad = ["https://down.example", "https://slow.example"]
   match fetch_all(bad) {
     timeout => println("caught timeout")
     refused => println("caught refused")
+    addr_in_use => println("caught addr in use")
+    reset => println("caught reset")
+    net_other { msg } => println("caught other")
     n => println("kept ${n} bodies")
   }
 }

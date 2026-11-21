@@ -239,7 +239,11 @@ mod tests {
         let NativeResult::Tag { tag, .. } = refused else {
             panic!("a spawn failure answers the failure span: {refused:?}");
         };
-        assert_eq!(tag, crate::native::PLATFORM_IO_ERR);
+        assert_eq!(
+            tag,
+            crate::native::PLATFORM_IO_NOT_FOUND,
+            "a missing program answers the not-found io class"
+        );
     }
 
     /// `exit(code)` never answers: the clamped status rides the trap

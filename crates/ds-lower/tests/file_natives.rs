@@ -77,7 +77,7 @@ fn a_failed_read_prints_the_message_and_halts_on_the_tag() {
     vm.capture_output();
     assert_eq!(
         vm.run("file_natives", "fail_read", &staged),
-        Ok(FrameAnswer::one(Value::Tag(native::PLATFORM_IO_ERR))),
+        Ok(FrameAnswer::one(Value::Tag(native::PLATFORM_IO_NOT_FOUND))),
         "the handler halts on the discriminant, the run result is the tag"
     );
     let out = String::from_utf8_lossy(vm.captured_output()).into_owned();

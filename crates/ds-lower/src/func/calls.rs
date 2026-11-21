@@ -716,16 +716,23 @@ impl<'a> FnLower<'a, '_, '_> {
         // destructure below rebinds `span` to the callee path's own
         let call_span = *span;
         // A minted case constructor takes named arguments [B3]; named
-        // arguments on functions stay outside the M3 contract.
+        // arguments on functions stay outside the M3 contract. A
+        // payloaded tag constructs through the same call form.
         let case_ctor = match callee.as_ref() {
             Expr::Path { span, .. } => match self.res.get(*span) {
-                Some(Res::Def(def)) => self
-                    .analyzed
-                    .decls
-                    .cases
-                    .get(def)
-                    .filter(|c| !matches!(c.payload, EnumPayload::None))
-                    .map(|_| *def),
+                Some(Res::Def(def)) => {
+                    if let Some(case) = self.analyzed.decls.cases.get(def)
+                        && !matches!(case.payload, EnumPayload::None)
+                    {
+                        Some(*def)
+                    } else if self.analyzed.package.def(*def).kind == ds_check::DefKind::Tag
+                        && self.analyzed.decls.structs.contains_key(def)
+                    {
+                        Some(*def)
+                    } else {
+                        None
+                    }
+                },
                 _ => None,
             },
             _ => None,
@@ -1480,9 +1487,7 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Callee::Builtin(native) = target
             && matches!(
                 native.shape,
-                NativeShape::Fallible { .. }
-                    | NativeShape::Checked
-                    | NativeShape::FallibleClassed { .. }
+                NativeShape::Fallible { .. } | NativeShape::Checked
             )
         {
             return self.native_span_result(native, ty, tail, callee_span, &staged);
@@ -2249,10 +2254,7 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         if tail {
-            let (what, reason) = if matches!(
-                native.shape,
-                NativeShape::Fallible { .. } | NativeShape::FallibleClassed { .. }
-            ) {
+            let (what, reason) = if matches!(native.shape, NativeShape::Fallible { .. }) {
                 (
                     "a tail call to a fallible native",
                     "CALLT-to-fallible stays unsupported: the two-word platform span re-spans \
@@ -2270,17 +2272,20 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         if let NativeShape::Fallible {
             payload,
+            fail_payload,
             err_prefix,
+            classes,
         } = native.shape
         {
-            return self.fallible_native_result(native, ty, payload, err_prefix, staged);
-        }
-        if let NativeShape::FallibleClassed {
-            payload,
-            err_prefix,
-        } = native.shape
-        {
-            return self.classed_native_result(native, ty, payload, err_prefix, staged);
+            return self.fallible_native_result(
+                native,
+                ty,
+                payload,
+                fail_payload,
+                err_prefix,
+                classes,
+                staged,
+            );
         }
         self.checked_native_result(Callee::Builtin(native), ty, staged, staged.len())
     }
@@ -3584,9 +3589,6 @@ impl<'a> FnLower<'a, '_, '_> {
                 // their own tag-test paths; this generic copy never sees
                 // them
                 NativeShape::Fallible { .. } => Err(mismatch("a fallible native result")),
-                NativeShape::FallibleClassed { .. } => {
-                    Err(mismatch("a classed fallible native result"))
-                },
                 NativeShape::Checked => Err(mismatch("a checked-read native result")),
                 NativeShape::TotalByInstance => Err(mismatch("an instance-keyed native result")),
                 NativeShape::TotalByResultType => Err(mismatch("a result-keyed native result")),
@@ -3603,9 +3605,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 // type's words with no discriminant (partition's
                 // two-list tuple: two Ref words the destructuring binds)
                 NativeShape::TotalByResultType | NativeShape::TaglessTotal => self.shapes.words(ty),
-                NativeShape::Fallible { .. }
-                | NativeShape::FallibleClassed { .. }
-                | NativeShape::Checked => Err(mismatch("a generic builtin result")),
+                NativeShape::Fallible { .. } | NativeShape::Checked => {
+                    Err(mismatch("a generic builtin result"))
+                },
             },
             Callee::Evidence(_) | Callee::Foreign { .. } | Callee::Bound { .. } => {
                 self.shapes.words(ty)
@@ -3672,56 +3674,43 @@ impl<'a> FnLower<'a, '_, '_> {
 
     /// One fallible native call: the two-word platform span (discriminant
     /// at overlay word 0, payload at word 1) lands like any call result.
-    /// The success-typed ambient spelling types the call site as the
-    /// failure union itself, so the span re-spans into that union per
-    /// member ([`fn fallible_native_union`](Self::fallible_native_union));
-    /// a total spelling (the ambient's `fs_list`/`write_file` rows)
-    /// extracts the payload into the call's result temp, and failure
-    /// prints `<prefix><message>` through println and halts on the
-    /// discriminant — the M3 stand-in for the unhandled-failure handler
-    /// the `error` row has no source syntax for.
+    /// The success-typed union spelling types the call site as the
+    /// failure union itself (`string | io_err`, `int | parse_err`), so
+    /// the span re-spans into it per member over the error-class mapping
+    /// ([`fn classed_native_union`](Self::classed_native_union)); a total
+    /// spelling (the ambient's `fs_list`/`write_file` rows) extracts the
+    /// payload into the call's result temp, and failure prints
+    /// `<prefix><detail>` through println and halts on the discriminant
+    /// — the M3 stand-in for the unhandled-failure handler the `error`
+    /// row has no source syntax for.
     fn fallible_native_result(
         &mut self,
         native: &'static Native,
         ty: Ty,
         payload: SlotType,
+        fail_payload: SlotType,
         err_prefix: &'static str,
+        classes: &'static [(u8, &'static str)],
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
-            return self.fallible_native_union(native, ty, payload, staged);
+            return self.classed_native_union(native, ty, payload, fail_payload, classes, staged);
         }
-        self.fallible_total_result(native, ty, payload, err_prefix, staged)
-    }
-
-    /// One classed fallible native call: the same two-word platform span,
-    /// but failure answers one of the error-class discriminants, so the
-    /// success-typed union spelling may flatten the failure taxonomy's
-    /// whole case set as the error members
-    /// ([`fn classed_native_union`](Self::classed_native_union)); a total
-    /// spelling keeps the shared printing-halt path.
-    fn classed_native_result(
-        &mut self,
-        native: &'static Native,
-        ty: Ty,
-        payload: SlotType,
-        err_prefix: &'static str,
-        staged: &[SlotType],
-    ) -> Result<Place, LowerError> {
-        if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
-            return self.classed_native_union(native, ty, payload, staged);
-        }
-        self.fallible_total_result(native, ty, payload, err_prefix, staged)
+        self.fallible_total_result(native, ty, payload, fail_payload, err_prefix, staged)
     }
 
     /// The total spelling of a fallible native's span: extracts the
     /// payload into the call's result temp, and failure prints
-    /// `<prefix><message>` through println and halts on the discriminant.
+    /// `<prefix><detail>` through println and halts on the discriminant.
+    /// The failure detail is the span's word 1: the message `Ref` of an
+    /// io/net class, or the parse reader's position `I64`, rendered
+    /// through the `str_int` native before the concatenation.
     fn fallible_total_result(
         &mut self,
         native: &'static Native,
         ty: Ty,
         payload: SlotType,
+        fail_payload: SlotType,
         err_prefix: &'static str,
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
@@ -3733,7 +3722,7 @@ impl<'a> FnLower<'a, '_, '_> {
                  have no runtime shape yet",
             ));
         }
-        self.overlay_fallible(staged, payload);
+        self.overlay_fallible(staged, payload, fail_payload);
         let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
@@ -3762,11 +3751,33 @@ impl<'a> FnLower<'a, '_, '_> {
         let kidx = self.pool_str(err_prefix);
         self.kstr(prefix, kidx);
         let message = self.temp_word(SlotType::Ref)?;
-        self.emit(Op::Mov {
-            dst: Slot::body(message),
-            src: Slot::overlay(1),
-        });
-        self.rc.produced(message);
+        if fail_payload == SlotType::Ref {
+            self.emit(Op::Mov {
+                dst: Slot::body(message),
+                src: Slot::overlay(1),
+            });
+            self.rc.produced(message);
+        } else {
+            // the parse reader's failure word is the position `I64`:
+            // render it through the str_int native before concatenating
+            self.emit(Op::Mov {
+                dst: Slot::overlay(0),
+                src: Slot::overlay(1),
+            });
+            let render = crate::native::lookup("str_int").expect("the int renderer is covered");
+            let kidx = self.pool(self.funcref_const(Callee::Builtin(render)));
+            self.rc.native_open();
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: 1,
+            });
+            self.rc.native_done(&mut self.code);
+            self.emit(Op::Mov {
+                dst: Slot::body(message),
+                src: Slot::overlay(0),
+            });
+            self.rc.produced(message);
+        }
         let text = self.temp_word(SlotType::Ref)?;
         self.emit(Op::Data {
             op: DataOp::StrCat,
@@ -3809,146 +3820,6 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(Place { base, shape })
     }
 
-    /// One fallible native call over the success-typed ambient spelling:
-    /// the checked call type is the failure union itself (`string |
-    /// io_err`, `int | parse_err`), so the two-word platform span
-    /// re-spans into it — success constructs the payload member from
-    /// overlay word 1, failure the one unit-tag error member — the same
-    /// span-to-union discipline the checked reads use
-    /// ([`fn checked_native_result`](Self::checked_native_result)). The
-    /// union must carry exactly one member that holds the native's one
-    /// payload word and exactly one payload-less error member beside it
-    /// (the platform span answers one failure bit with no member
-    /// mapping, so the pairing is by the checked call-site union's
-    /// member shapes: the ambient's declaration owns the CLI-world
-    /// spelling, and any other host's own extern row owns its members).
-    /// The error member has no
-    /// field for the failure message, so a `Ref` payload's native-born
-    /// message count dies inside the failure arm; a scalar payload's
-    /// failure word is inert (parse_int hands back the staged input's
-    /// alias, a word the caller still owns and the arm never reads).
-    fn fallible_native_union(
-        &mut self,
-        native: &'static Native,
-        ty: Ty,
-        payload: SlotType,
-        staged: &[SlotType],
-    ) -> Result<Place, LowerError> {
-        let shape = self.shapes.shape(ty)?;
-        let Shape::Union(u) = &*shape else {
-            return Err(mismatch("a fallible native's union result"));
-        };
-        let success: Vec<_> = u
-            .members
-            .iter()
-            .filter(|m| m.fields.len() == 1 && m.fields[0].slot() == payload)
-            .collect();
-        let failure: Vec<_> = u.members.iter().filter(|m| m.fields.is_empty()).collect();
-        if success.len() + failure.len() != u.members.len() {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a fallible native call",
-                "the union's success member must be exactly the native's one payload word and \
-                 every other member a payload-less error tag; wider success values and \
-                 error-carried payloads have no re-span yet",
-            ));
-        }
-        let [ok] = success.as_slice() else {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a fallible native call",
-                "the union must carry exactly one member that holds the native's payload word",
-            ));
-        };
-        let [err] = failure.as_slice() else {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a fallible native call",
-                "the union must carry exactly one payload-less error member; the native answers \
-                 one failure discriminant",
-            ));
-        };
-        self.overlay_site(staged, &[SlotType::Tag, payload]);
-        // the failure path lands a message `Ref` in word 1 whatever the
-        // payload kind (io failures allocate one; parse_int hands back
-        // the staged input's alias), so the word's classification mixes
-        self.overlay_len = self.overlay_len.max(2);
-        if self.overlay.len() < self.overlay_len {
-            self.overlay.resize(self.overlay_len, HashSet::new());
-        }
-        self.overlay[1].insert(SlotType::Ref);
-        let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
-        self.emit(Op::Call {
-            callee: kidx,
-            nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
-        });
-        self.rc.native_done(&mut self.code);
-        let result = self.temp_span(ty)?;
-        let ok_lbl = self.label();
-        let join = self.label();
-        let cond = self.temp_word(SlotType::Bool)?;
-        self.emit(Op::TagTest {
-            dst: Slot::body(cond),
-            src: Slot::overlay(0),
-            tag: PLATFORM_IO_OK,
-        });
-        self.emit(Op::Jmpif {
-            cond: Slot::body(cond),
-            target: ok_lbl,
-        });
-        // path-fork: failure and ok each write the span with their own
-        // value
-        let base = self.rc.save();
-        let tag = self.shapes.tag_id(err.atom)?;
-        self.emit(Op::TagNew {
-            dst: Slot::body(result.base),
-            tag,
-        });
-        self.zero_init_member(result.base, &u.words, &err.fields)?;
-        if payload == SlotType::Ref {
-            // the failure message's native-born count has no member field
-            // to live in: adopt it off the overlay and drop it here
-            let message = self.temp_word(SlotType::Ref)?;
-            self.emit(Op::Mov {
-                dst: Slot::body(message),
-                src: Slot::overlay(1),
-            });
-            self.rc.produced(message);
-            self.rc.discard(&mut self.code, &[message]);
-        }
-        let arm_err = self.rc.take();
-        let err_jmp = self.code.len();
-        self.emit(Op::Jmp { target: join });
-        self.rc.restore(base);
-        self.bind_label(ok_lbl);
-        let tag = self.shapes.tag_id(ok.atom)?;
-        self.emit(Op::TagNew {
-            dst: Slot::body(result.base),
-            tag,
-        });
-        self.zero_init_member(result.base, &u.words, &ok.fields)?;
-        let [field] = ok.fields.as_slice() else {
-            return Err(mismatch("a fallible native's payload member"));
-        };
-        self.emit(Op::Mov {
-            dst: Slot::body(result.base + field.word),
-            src: Slot::overlay(1),
-        });
-        if field.slot() == SlotType::Ref {
-            self.rc.produced(result.base + field.word);
-        }
-        let arm_ok = self.rc.take();
-        let dying = self.rc.reconcile(&[(arm_err, false), (arm_ok, false)]);
-        if let [err, ok] = &dying[..] {
-            let mut epilogue = Vec::new();
-            Placement::emit_drops(&mut epilogue, err);
-            self.splice(epilogue, err_jmp);
-            self.arm_epilogue(ok);
-        }
-        self.bind_label(join);
-        Ok(result)
-    }
-
     /// The unit-value member: the arity-0 tuple atom [B3] — the `()` of
     /// a classed fallible native's unit-word success member, distinct
     /// from the payload-less class members (the unit tags).
@@ -3959,96 +3830,110 @@ impl<'a> FnLower<'a, '_, '_> {
         )
     }
 
-    /// One classed fallible native call over the success-typed ambient
-    /// spelling: like [`fn fallible_native_union`](Self::fallible_native_union)
-    /// but the checked call union may flatten the
-    /// failure taxonomy's whole case set as the error members — failure
-    /// answers one of the [`NET_CLASSES`] discriminants and lands on the
-    /// member the ambient case name names (the error-class mapping,
-    /// ruled 2026-11-12), so `?`, `.err`, is-narrowing, and match extract
-    /// a real enum case; success re-spans onto the one payload member, or
-    /// the unit value when the payload is the inert unit word
-    /// (`net_send`'s `()`). Every failure carries the message `Ref` in
-    /// word 1 whatever the payload kind, and the members carry no
-    /// payload field, so each failure arm adopts the message off the
-    /// overlay and drops it here.
+    /// One fallible native call over the success-typed union spelling:
+    /// the checked call type is the failure union itself (`string |
+    /// io_err`, `int | parse_err`), so the two-word platform span
+    /// re-spans into it — success constructs the payload member from
+    /// overlay word 1, failure the class member the discriminant's
+    /// error-class mapping names (each discriminant paired with the
+    /// ambient failure-taxonomy member it lands on; a bare member adopts
+    /// no word, a one-field member adopts word 1 as its payload — the
+    /// `io_other`/`net_other` message `Ref`, the `parse_err` position
+    /// `I64`). The union must carry every class member plus exactly one
+    /// success member holding the native's one payload word (the unit
+    /// value over the native's inert unit word, `net_send`'s `()`) —
+    /// the same span-to-union discipline the checked reads use
+    /// ([`fn checked_native_result`](Self::checked_native_result)). A
+    /// bare class member's native-born message count dies inside its
+    /// failure arm; a scalar failure word is inert.
     fn classed_native_union(
         &mut self,
         native: &'static Native,
         ty: Ty,
         payload: SlotType,
+        fail_payload: SlotType,
+        classes: &'static [(u8, &'static str)],
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         let shape = self.shapes.shape(ty)?;
         let Shape::Union(u) = &*shape else {
-            return Err(mismatch("a classed fallible native's union result"));
+            return Err(mismatch("a fallible native's union result"));
         };
-        let mut success: Vec<_> = u
+        // the class members the mapping names, each bare or carrying
+        // exactly the failure payload's one word
+        let mut class_members: Vec<(u8, &MemberShape)> = Vec::new();
+        for (tag, name) in classes {
+            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
+                let _ = name;
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a fallible native call",
+                    "the union must carry the failure taxonomy's members by their ambient names; \
+                     a differently named error set has no class mapping",
+                ));
+            };
+            let Some(member) = u.member(atom) else {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a fallible native call",
+                    "the union must carry the failure taxonomy's whole member set; every class \
+                     member the native answers must be a member",
+                ));
+            };
+            match member.fields.as_slice() {
+                [] => {},
+                [field] if field.slot() == fail_payload => {},
+                _ => {
+                    return Err(LowerError::unsupported(
+                        no_span(),
+                        "a fallible native call",
+                        "every class member is a bare tag, or carries exactly the class's one \
+                         failure payload word (the *_other message, the parse position)",
+                    ));
+                },
+            }
+            class_members.push((*tag, member));
+        }
+        let success: Vec<_> = u
             .members
             .iter()
+            .filter(|m| !class_members.iter().any(|(_, c)| c.atom == m.atom))
             .filter(|m| m.fields.len() == 1 && m.fields[0].slot() == payload)
             .collect();
+        let mut success = success;
         if success.is_empty() && payload == SlotType::I64 {
             success = u
                 .members
                 .iter()
+                .filter(|m| !class_members.iter().any(|(_, c)| c.atom == m.atom))
                 .filter(|m| self.is_unit_member(m.atom))
                 .collect();
         }
         let [ok] = success.as_slice() else {
             return Err(LowerError::unsupported(
                 no_span(),
-                "a classed fallible native call",
+                "a fallible native call",
                 "the union's success member must be exactly the native's one payload word, or the \
                  unit value over the native's inert unit word",
             ));
         };
-        let mut classes = Vec::with_capacity(NET_CLASSES.len());
-        for (tag, name) in NET_CLASSES {
-            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
-                return Err(LowerError::unsupported(
-                    no_span(),
-                    "a classed fallible native call",
-                    "the union must carry the failure taxonomy's error members by their ambient \
-                     case names (timeout, refused); a differently named error enum has no class \
-                     mapping",
-                ));
-            };
-            let Some(member) = u.member(atom) else {
-                return Err(LowerError::unsupported(
-                    no_span(),
-                    "a classed fallible native call",
-                    "the union must carry the failure taxonomy's whole case set; every class \
-                     member the native answers must be a member",
-                ));
-            };
-            if !member.fields.is_empty() {
-                return Err(LowerError::unsupported(
-                    no_span(),
-                    "a classed fallible native call",
-                    "every error member the failure discriminants map onto must be payload-less",
-                ));
-            }
-            classes.push((*tag, member));
-        }
-        if success.len() + classes.len() != u.members.len() {
+        if success.len() + class_members.len() != u.members.len() {
             return Err(LowerError::unsupported(
                 no_span(),
-                "a classed fallible native call",
+                "a fallible native call",
                 "the union must be exactly the success member plus the failure taxonomy's class \
-                 members; a wider union has no member mapping for the native's one failure \
-                 discriminant per class",
+                 members; a wider union has no member mapping for the native's failure classes",
             ));
         }
         self.overlay_site(staged, &[SlotType::Tag, payload]);
-        // the failure path lands a message `Ref` in word 1 whatever the
-        // payload kind (net failures allocate one), so the word's
-        // classification mixes
+        // the failure path lands its class payload in word 1 — a Ref
+        // message for the io/net classes, a position I64 for the parse
+        // reader — so the word's classification mixes
         self.overlay_len = self.overlay_len.max(2);
         if self.overlay.len() < self.overlay_len {
             self.overlay.resize(self.overlay_len, HashSet::new());
         }
-        self.overlay[1].insert(SlotType::Ref);
+        self.overlay[1].insert(fail_payload);
         let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
         self.emit(Op::Call {
             callee: kidx,
@@ -4070,9 +3955,9 @@ impl<'a> FnLower<'a, '_, '_> {
         });
         // path-fork dispatch: every class but the last jumps to its own
         // arm, the last class is the fall-through failure
-        let total = classes.len();
+        let total = class_members.len();
         let mut class_lbls = Vec::with_capacity(total.saturating_sub(1));
-        for (tag, _) in &classes[..total.saturating_sub(1)] {
+        for (tag, _) in &class_members[..total.saturating_sub(1)] {
             let cond = self.temp_word(SlotType::Bool)?;
             self.emit(Op::TagTest {
                 dst: Slot::body(cond),
@@ -4091,7 +3976,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let base = self.rc.save();
         let mut arm_jmps: Vec<usize> = Vec::with_capacity(total);
         let mut arm_states: Vec<State> = Vec::with_capacity(total);
-        for (index, (_, member)) in classes.iter().enumerate().rev() {
+        for (index, (_, member)) in class_members.iter().enumerate().rev() {
             if index != total - 1 {
                 self.bind_label(class_lbls[index]);
             }
@@ -4101,15 +3986,32 @@ impl<'a> FnLower<'a, '_, '_> {
                 tag,
             });
             self.zero_init_member(result.base, &u.words, &member.fields)?;
-            // the failure message's native-born count has no member field
-            // to live in: adopt it off the overlay and drop it here
-            let message = self.temp_word(SlotType::Ref)?;
-            self.emit(Op::Mov {
-                dst: Slot::body(message),
-                src: Slot::overlay(1),
-            });
-            self.rc.produced(message);
-            self.rc.discard(&mut self.code, &[message]);
+            match member.fields.as_slice() {
+                // the class's own payload word: the message Ref or the
+                // position I64, adopted off the overlay into the field
+                [field] => {
+                    self.emit(Op::Mov {
+                        dst: Slot::body(result.base + field.word),
+                        src: Slot::overlay(1),
+                    });
+                    if field.slot() == SlotType::Ref {
+                        self.rc.produced(result.base + field.word);
+                    }
+                },
+                // a bare member: the native-born message count has no
+                // member field to live in, so it dies inside the arm
+                _ => {
+                    if fail_payload == SlotType::Ref {
+                        let message = self.temp_word(SlotType::Ref)?;
+                        self.emit(Op::Mov {
+                            dst: Slot::body(message),
+                            src: Slot::overlay(1),
+                        });
+                        self.rc.produced(message);
+                        self.rc.discard(&mut self.code, &[message]);
+                    }
+                },
+            }
             arm_jmps.push(self.code.len());
             arm_states.push(self.rc.take());
             self.emit(Op::Jmp { target: join });
@@ -4153,15 +4055,18 @@ impl<'a> FnLower<'a, '_, '_> {
 
     /// Records the words a fallible native's result span lands on: word 0
     /// the discriminant plus the failure handler's println argument, word
-    /// 1 the success payload plus the failure message.
-    fn overlay_fallible(&mut self, staged: &[SlotType], payload: SlotType) {
+    /// 1 the success payload plus the failure class's payload (the
+    /// message `Ref`, or the parse reader's position `I64` — the render
+    /// staging it back through word 0 when it is the position).
+    fn overlay_fallible(&mut self, staged: &[SlotType], payload: SlotType, fail_payload: SlotType) {
         self.overlay_site(staged, &[SlotType::Tag, payload]);
         self.overlay_len = self.overlay_len.max(2);
         if self.overlay.len() < self.overlay_len {
             self.overlay.resize(self.overlay_len, HashSet::new());
         }
         self.overlay[0].insert(SlotType::Ref);
-        self.overlay[1].insert(SlotType::Ref);
+        self.overlay[0].insert(fail_payload);
+        self.overlay[1].insert(fail_payload);
     }
 
     /// One checked-read native call (`list_get`, `map_get`): the ok/none

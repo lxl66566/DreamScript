@@ -27,7 +27,7 @@ const DERIVES_AMBIENT: &str = concat!(
     "pub tag byte\n",
     "pub tag u32\n",
     "pub tag bytes\n",
-    "pub tag parse_err\n",
+    "pub tag parse_err { pos: int }\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub enum json {\n",

@@ -70,8 +70,8 @@ use std::{
 
 use crate::{
     native::{
-        NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT,
-        i64_arg, ref_arg,
+        NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NET_ADDR_IN_USE, PLATFORM_NET_OTHER,
+        PLATFORM_NET_REFUSED, PLATFORM_NET_RESET, PLATFORM_NET_TIMEOUT, i64_arg, ref_arg,
     },
     object::Heaps,
     value::Value,
@@ -230,16 +230,23 @@ fn normalize(err: io::Error, timeout: Duration) -> io::Error {
     }
 }
 
-/// The class of one net failure: the ambient `net_err` case the
-/// platform discriminant answers by error class (ruled 2026-11-12) — a
-/// bounded wait that expired is `timeout`, every other failure
-/// `refused`.
+/// The class of one net failure: the `net_err` member the platform
+/// discriminant answers by error class (ruled 2026-11-12, widened
+/// 2026-11-21 to the alias's whole class set) — every kind the classes
+/// name lands on its tag, the rest folding into the `net_other` floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NetClass {
-    /// A bounded wait expired (the `net_err` case `timeout`).
+    /// A bounded wait expired (the `net_err` member `timeout`).
     Timeout,
-    /// Every other failure (the `net_err` case `refused`).
+    /// The peer refused the connection (the `net_err` member `refused`).
     Refused,
+    /// The local address is already bound (`addr_in_use`).
+    AddrInUse,
+    /// A connection torn down mid-flight, reset or aborted (`reset`).
+    Reset,
+    /// Every failure no net class names portably (the `net_other`
+    /// floor, alone carrying the OS message).
+    Other,
 }
 
 impl NetClass {
@@ -249,18 +256,24 @@ impl NetClass {
         match self {
             Self::Timeout => PLATFORM_NET_TIMEOUT,
             Self::Refused => PLATFORM_NET_REFUSED,
+            Self::AddrInUse => PLATFORM_NET_ADDR_IN_USE,
+            Self::Reset => PLATFORM_NET_RESET,
+            Self::Other => PLATFORM_NET_OTHER,
         }
     }
 
-    /// The class of one rendered failure: a bounded wait that expired
-    /// (read, write, and connect timeouts) is `timeout`, every other
-    /// failure `refused`.
+    /// The class of one rendered failure: read, write, and connect
+    /// timeouts are `timeout`, a refused connection `refused`, a bound
+    /// address `addr_in_use`, a mid-flight teardown `reset`, and every
+    /// other failure the `net_other` floor.
     #[must_use]
     pub(crate) fn of(err: &io::Error) -> Self {
-        if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
-            Self::Timeout
-        } else {
-            Self::Refused
+        match err.kind() {
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => Self::Timeout,
+            ErrorKind::ConnectionRefused => Self::Refused,
+            ErrorKind::AddrInUse => Self::AddrInUse,
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => Self::Reset,
+            _ => Self::Other,
         }
     }
 }
@@ -541,8 +554,7 @@ mod tests {
 
     /// The timeout discipline: a never-answering socket yields the
     /// timeout detail, not the OS's EAGAIN rendering, and the class
-    /// mapping reads the timeout class off the rendered error — every
-    /// other kind stays the refused class.
+    /// mapping reads the timeout class off the rendered error.
     #[test]
     fn timeouts_render_as_timed_out() {
         let err = normalize(
@@ -551,11 +563,42 @@ mod tests {
         );
         assert_eq!(err.to_string(), "timed out after 250ms");
         assert_eq!(NetClass::of(&err), NetClass::Timeout);
-        let refused = normalize(
-            io::Error::from(ErrorKind::ConnectionRefused),
-            Duration::from_millis(250),
+    }
+
+    /// The widened error-class mapping (2026-11-21): every kind a class
+    /// names lands on its own discriminant, and the kinds no class names
+    /// portably fold into the `net_other` floor.
+    #[test]
+    fn net_classes_map_kinds_and_fold_the_floor() {
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::TimedOut)),
+            NetClass::Timeout
         );
-        assert_eq!(NetClass::of(&refused), NetClass::Refused);
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::ConnectionRefused)),
+            NetClass::Refused
+        );
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::AddrInUse)),
+            NetClass::AddrInUse
+        );
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::ConnectionReset)),
+            NetClass::Reset
+        );
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::ConnectionAborted)),
+            NetClass::Reset
+        );
+        // no class names a DNS miss or an unknown handle portably
+        assert_eq!(
+            NetClass::of(&io::Error::from(ErrorKind::NotFound)),
+            NetClass::Other
+        );
+        assert_eq!(
+            NetClass::of(&io::Error::other("unknown connection 7")),
+            NetClass::Other
+        );
     }
 
     /// An unknown handle is the same error everywhere a handle is used —

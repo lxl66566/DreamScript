@@ -792,7 +792,7 @@ fn the_from_json_family_refuses_its_carve_outs() {
 /// The decode walk's own frame ceiling: a wide target (a nested-derive
 /// member, a string, an optional member, two lists, two nested lists,
 /// and an optional list) synthesizes a `from_json` body whose frame
-/// needs 258 slots — two past the uop format's 256-slot cap — so
+/// needs 259 slots — three past the uop format's 256-slot cap — so
 /// lowering refuses with the standard frame-cap diagnostic while the
 /// checker stays clean (the width is a lowering fact, never a check
 /// error). The json face rides the episode-local vocabulary (bodied
@@ -803,7 +803,7 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
-        "tag parse_err\n",
+        "tag parse_err { pos: int }\n",
         "struct list[t]\n",
         "struct map[k, v]\n",
         "enum json {\n",
@@ -838,25 +838,25 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
         "fn json_as_int (v: json) -> int | parse_err {\n",
         "  match v {\n",
         "    json_int { value } => value,\n",
-        "    _ => parse_err,\n",
+        "    _ => parse_err(pos: 0),\n",
         "  }\n",
         "}\n",
         "fn json_as_string (v: json) -> string | parse_err {\n",
         "  match v {\n",
         "    json_string { value } => value,\n",
-        "    _ => parse_err,\n",
+        "    _ => parse_err(pos: 0),\n",
         "  }\n",
         "}\n",
         "fn json_as_array (v: json) -> list[json] | parse_err {\n",
         "  match v {\n",
         "    json_array { items } => items,\n",
-        "    _ => parse_err,\n",
+        "    _ => parse_err(pos: 0),\n",
         "  }\n",
         "}\n",
         "fn json_as_object (v: json) -> map[string, json] | parse_err {\n",
         "  match v {\n",
         "    json_object { fields } => fields,\n",
-        "    _ => parse_err,\n",
+        "    _ => parse_err(pos: 0),\n",
         "  }\n",
         "}\n",
         "#[derive(from_json)]\n",
@@ -895,7 +895,7 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
         name.contains("from_json"),
         "the refusing frame is the synthesized decode member: {name}"
     );
-    assert_eq!(need, 258, "the measured walk's slot count");
+    assert_eq!(need, 259, "the measured walk's slot count");
 }
 
 /// The to_json family refuses from_json's mirror classes at the

@@ -1234,15 +1234,10 @@ pub(crate) fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
 /// its head word.
 fn print_result(span: &FrameAnswer) {
     match span.as_slice() {
-        [Value::Tag(tag), ..] if *tag == native::PLATFORM_IO_ERR => {
+        [Value::Tag(tag), ..] if native::is_io_class(*tag) => {
             println!("halted on an unhandled io failure");
         },
-        [Value::Tag(tag), ..]
-            if matches!(
-                *tag,
-                native::PLATFORM_NET_TIMEOUT | native::PLATFORM_NET_REFUSED
-            ) =>
-        {
+        [Value::Tag(tag), ..] if native::is_net_class(*tag) => {
             println!("halted on an unhandled net failure");
         },
         [Value::Tag(tag), ..] if *tag == native::PLATFORM_PARSE_ERR => {

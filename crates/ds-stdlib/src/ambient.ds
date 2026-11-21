@@ -260,18 +260,33 @@ pub enum json {
   json_object { fields: map[string, json] }
 }
 
-// The failure taxonomy of the fallible natives: the platform tags the
-// runtime discriminants answer (io_err for the file surface, parse_err
-// for the pure readers, utf8_err for the string-bytes decode bridge —
-// never parse_err, which names document shape failures alone). net_err
-// keeps the record's own two-case shape.
-pub tag io_err
-pub tag parse_err
+// The failure taxonomy of the fallible natives (ruled 2026-11-21):
+// `io_err` and `net_err` are aliases over branchable unit tags, each
+// native failure landing on its class and the classes a platform cannot
+// discriminate portably folding into the `*_other` floors — which alone
+// carry the OS message string. Signatures spell the alias; `?` checks
+// membership by set containment. `parse_err` carries the position the
+// parse gave up at (the offset into the input document; a shape failure
+// over an already-decoded value answers 0, no position existing there),
+// and `utf8_err` stays one bare tag. never parse_err for the bytes
+// decode bridge — it names document shape failures alone.
+pub tag not_found
+pub tag permission_denied
+pub tag already_exists
+pub tag timed_out
+pub tag unexpected_eof
+pub tag io_other { msg: string }
+pub type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+
+pub tag timeout
+pub tag refused
+pub tag addr_in_use
+pub tag reset
+pub tag net_other { msg: string }
+pub type net_err = timeout | refused | addr_in_use | reset | net_other
+
+pub tag parse_err { pos: int }
 pub tag utf8_err
-pub enum net_err {
-  timeout
-  refused
-}
 
 // The file face: the package-owned linear handle over the fsys
 // capability. `open_file` answers this type directly (its one inline word is
@@ -603,26 +618,26 @@ fn has_dot_or_exp (s: string) -> bool {
   found
 }
 
-fn hex_digit (c: char | none) -> int | parse_err {
+fn hex_digit (c: char | none) -> int | none {
   var i = 0
   while i < 16 && char_at("0123456789abcdef", i) != c { i += 1 }
-  if i < 16 { i } else { parse_err }
+  if i < 16 { i } else { none }
 }
 
 fn hex4 (text: string, at: int) -> int | parse_err {
-  if at + 4 > len(text) { return parse_err }
+  if at + 4 > len(text) { return parse_err(pos: at) }
   const a = hex_digit(char_at(text, at))
-  if a is parse_err { return parse_err }
+  if a is none { return parse_err(pos: at) }
   const b = hex_digit(char_at(text, at + 1))
-  if b is parse_err { return parse_err }
+  if b is none { return parse_err(pos: at + 1) }
   const c = hex_digit(char_at(text, at + 2))
-  if c is parse_err { return parse_err }
+  if c is none { return parse_err(pos: at + 2) }
   const e = hex_digit(char_at(text, at + 3))
-  if e is parse_err { return parse_err }
+  if e is none { return parse_err(pos: at + 3) }
   a * 4096 + b * 256 + c * 16 + e
 }
 
-fn simple_escape (e: char) -> string | parse_err {
+fn simple_escape (e: char) -> string | none {
   if e == '"' { "\"" }
   else if e == '\\' { "\\" }
   else if e == '/' { "/" }
@@ -631,7 +646,7 @@ fn simple_escape (e: char) -> string | parse_err {
   else if e == 'n' { "\n" }
   else if e == 'r' { "\r" }
   else if e == 't' { "\t" }
-  else { parse_err }
+  else { none }
 }
 
 // One \u escape starting at `at` (the first hex digit): the four hex
@@ -646,14 +661,14 @@ fn json_unicode (text: string, at: int) -> str_step | parse_err {
       const low = hex4(text, at + 6)?
       if low >= 0xdc00 && low <= 0xdfff {
         const code = 65536 + (high - 0xd800) * 1024 + low - 0xdc00
-        const c = char_of(code).ok_or(parse_err)?
+        const c = char_of(code).ok_or(parse_err(pos: at))?
         str_step { value: c, next: at + 10 }
-      } else { parse_err }
-    } else { parse_err }
+      } else { parse_err(pos: at + 6) }
+    } else { parse_err(pos: at + 4) }
   } else if high >= 0xdc00 && high <= 0xdfff {
-    parse_err
+    parse_err(pos: at)
   } else {
-    const c = char_of(high).ok_or(parse_err)?
+    const c = char_of(high).ok_or(parse_err(pos: at))?
     str_step { value: c, next: at + 4 }
   }
 }
@@ -682,33 +697,34 @@ fn json_string_body (text: string, at: int) -> str_step | parse_err {
   var start = at
   while i < len(text) {
     const c = char_at(text, i)
-    if c is none { return parse_err }
+    if c is none { return parse_err(pos: i) }
     if c == '"' {
       if i > start { list_push(parts, substring(text, start, i).unwrap_or("")) }
       return str_step { value: join_empty(parts), next: i + 1 }
     } else if c == '\\' {
       const e = char_at(text, i + 1)
       if i > start { list_push(parts, substring(text, start, i).unwrap_or("")) }
-      if e is none { return parse_err }
+      if e is none { return parse_err(pos: i + 1) }
       if e == 'u' {
         const step = json_unicode(text, i + 2)
-        if step is parse_err { return parse_err }
+        if step is parse_err { return step }
         list_push(parts, step.value)
         i = step.next
         start = i
       } else {
-        const d = simple_escape(e)?
+        const d = simple_escape(e)
+        if d is none { return parse_err(pos: i + 1) }
         list_push(parts, d)
         i = i + 2
         start = i
       }
     } else if char_compare(c, ' ') < 0 {
-      return parse_err
+      return parse_err(pos: i)
     } else {
       i += 1
     }
   }
-  parse_err
+  parse_err(pos: len(text))
 }
 
 // The end of one number token per the JSON grammar, or `at` itself when
@@ -744,15 +760,15 @@ fn json_number_end (text: string, at: int) -> int {
 // through the correctly-rounded reader.
 fn json_number (text: string, at: int) -> json_step | parse_err {
   const end = json_number_end(text, at)
-  if end == at { return parse_err }
+  if end == at { return parse_err(pos: at) }
   const token = substring(text, at, end).unwrap_or("")
   if has_dot_or_exp(token) {
-    const f = parse_float(token)?
+    const f = map_err(parse_float(token), (e: parse_err) => parse_err(pos: at + e.pos))?
     json_step { value: json_float(value: f), next: end }
   } else {
     match parse_int(token) {
       parse_err => {
-        const f = parse_float(token)?
+        const f = map_err(parse_float(token), (e: parse_err) => parse_err(pos: at + e.pos))?
         json_step { value: json_float(value: f), next: end }
       }
       n => json_step { value: json_int(value: n), next: end }
@@ -763,7 +779,7 @@ fn json_number (text: string, at: int) -> json_step | parse_err {
 // One literal word (`true`, `false`, `null`), answering the position
 // past it.
 fn json_word (text: string, at: int, lit: string, v: json) -> json_step | parse_err {
-  if substring(text, at, at + len(lit)).unwrap_or("") == lit { json_step { value: v, next: at + len(lit) } } else { parse_err }
+  if substring(text, at, at + len(lit)).unwrap_or("") == lit { json_step { value: v, next: at + len(lit) } } else { parse_err(pos: at) }
 }
 
 fn json_array_body (text: string, at: int, depth: int) -> json_step | parse_err {
@@ -776,18 +792,18 @@ fn json_array_body (text: string, at: int, depth: int) -> json_step | parse_err 
   }
   while !done {
     const step = json_value(text, i, depth)
-    if step is parse_err { return parse_err }
+    if step is parse_err { return step }
     list_push(items, step.value)
     const after = json_ws(text, step.next)
-    if after >= len(text) { return parse_err }
+    if after >= len(text) { return parse_err(pos: after) }
     const c = char_at(text, after)
-    if c is none { return parse_err }
+    if c is none { return parse_err(pos: after) }
     if c == ']' {
       done = true
       i = after + 1
     } else if c == ',' {
       i = json_ws(text, after + 1)
-    } else { return parse_err }
+    } else { return parse_err(pos: after) }
   }
   json_step { value: json_array(items: items), next: i }
 }
@@ -801,39 +817,39 @@ fn json_object_body (text: string, at: int, depth: int) -> json_step | parse_err
     i = i + 1
   }
   while !done {
-    if i >= len(text) || char_at(text, i).unwrap_or('\0') != '"' { return parse_err }
+    if i >= len(text) || char_at(text, i).unwrap_or('\0') != '"' { return parse_err(pos: i) }
     const key = json_string_body(text, i + 1)
-    if key is parse_err { return parse_err }
+    if key is parse_err { return key }
     const colon = json_ws(text, key.next)
-    if colon >= len(text) || char_at(text, colon).unwrap_or('\0') != ':' { return parse_err }
+    if colon >= len(text) || char_at(text, colon).unwrap_or('\0') != ':' { return parse_err(pos: colon) }
     const step = json_value(text, colon + 1, depth)
-    if step is parse_err { return parse_err }
+    if step is parse_err { return step }
     map_set(fields, key.value, step.value)
     const after = json_ws(text, step.next)
-    if after >= len(text) { return parse_err }
+    if after >= len(text) { return parse_err(pos: after) }
     const c = char_at(text, after)
-    if c is none { return parse_err }
+    if c is none { return parse_err(pos: after) }
     if c == '}' {
       done = true
       i = after + 1
     } else if c == ',' {
       i = json_ws(text, after + 1)
-    } else { return parse_err }
+    } else { return parse_err(pos: after) }
   }
   json_step { value: json_object(fields: fields), next: i }
 }
 
 fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
-  if depth > 256 { return parse_err }
+  if depth > 256 { return parse_err(pos: at) }
   const i = json_ws(text, at)
-  if i >= len(text) { return parse_err }
+  if i >= len(text) { return parse_err(pos: i) }
   const c = char_at(text, i)
-  if c is none { return parse_err }
+  if c is none { return parse_err(pos: i) }
   if c == '{' { json_object_body(text, i + 1, depth + 1) }
   else if c == '[' { json_array_body(text, i + 1, depth + 1) }
   else if c == '"' {
     const s = json_string_body(text, i + 1)
-    if s is parse_err { return parse_err }
+    if s is parse_err { return s }
     json_step { value: json_string(value: s.value), next: s.next }
   }
   else if c == 't' { json_word(text, i, "true", json_bool(value: true)) }
@@ -843,17 +859,16 @@ fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
     const step = json_number(text, i)
     step
   }
-  else { parse_err }
+  else { parse_err(pos: i) }
 }
 
 // The JSON reader: one document answering its typed value, invalid text
-// answering parse_err (the bare tag — the offending position is not
-// carried).
+// answering parse_err carrying the offset the parse gave up at.
 pub fn parse_json (text: string) -> json | parse_err {
   const step = json_value(text, 0, 0)
-  if step is parse_err { return parse_err }
+  if step is parse_err { return step }
   const rest = json_ws(text, step.next)
-  if rest == len(text) { step.value } else { parse_err }
+  if rest == len(text) { step.value } else { parse_err(pos: rest) }
 }
 
 // The serializer's string escaping: a raw run between the specials, the
@@ -1000,42 +1015,42 @@ pub fn json_member (v: json, key: string) -> json | none {
 pub fn json_as_int (v: json) -> int | parse_err {
   match v {
     json_int { value } => value
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
 pub fn json_as_float (v: json) -> float | parse_err {
   match v {
     json_float { value } => value
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
 pub fn json_as_bool (v: json) -> bool | parse_err {
   match v {
     json_bool { value } => value
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
 pub fn json_as_string (v: json) -> string | parse_err {
   match v {
     json_string { value } => value
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
 pub fn json_as_array (v: json) -> list[json] | parse_err {
   match v {
     json_array { items } => items
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
 pub fn json_as_object (v: json) -> map[string, json] | parse_err {
   match v {
     json_object { fields } => fields
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
@@ -1047,9 +1062,9 @@ pub fn json_as_byte (v: json) -> byte | parse_err {
   match v {
     json_int { value } => {
       const b = byte_of(value)
-      if b is none { parse_err } else { b }
+      if b is none { parse_err(pos: 0) } else { b }
     }
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
@@ -1057,9 +1072,9 @@ pub fn json_as_u32 (v: json) -> u32 | parse_err {
   match v {
     json_int { value } => {
       const u = u32_of(value)
-      if u is none { parse_err } else { u }
+      if u is none { parse_err(pos: 0) } else { u }
     }
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
@@ -1068,10 +1083,10 @@ pub fn json_as_char (v: json) -> char | parse_err {
     json_string { value } => {
       if len(value) == 1 {
         const c = char_at(value, 0)
-        if c is none { parse_err } else { c }
-      } else { parse_err }
+        if c is none { parse_err(pos: 0) } else { c }
+      } else { parse_err(pos: 0) }
     }
-    _ => parse_err
+    _ => parse_err(pos: 0)
   }
 }
 
@@ -1085,7 +1100,7 @@ pub fn json_as_bytes (v: json) -> bytes | parse_err {
   var i = 0
   while i < list_len(items) {
     const b = json_as_byte(list_get(items, i).unwrap_or(json_null))
-    if b is parse_err { return parse_err }
+    if b is parse_err { return b }
     list_push(out, b)
     i += 1
   }

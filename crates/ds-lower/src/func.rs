@@ -31,11 +31,12 @@ use crate::{
     PlacedOp,
     error::LowerError,
     native::{
-        GENERIC_NATIVES, GenericNative, NET_CLASSES, NURSERY_BOUNDARY_ERR, Native, NativeShape,
-        PLATFORM_IO_OK,
+        GENERIC_NATIVES, GenericNative, NURSERY_BOUNDARY_ERR, Native, NativeShape, PLATFORM_IO_OK,
     },
     place::{AffineFacts, Hook, Owned, Placement, State},
-    shape::{MemberField, Shape, Shapes, SpanWords, StructShape, expr_members, shape_words},
+    shape::{
+        MemberField, MemberShape, Shape, Shapes, SpanWords, StructShape, expr_members, shape_words,
+    },
 };
 
 mod calls;
@@ -4777,6 +4778,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let answer = if mask != 0 {
             let words = self.shapes.words(self.ret_ty)?.clone();
             let fail = self.label();
+            // the bare delivery's landing label: bound at the whole-tag
+            // re-span below, targeted by the payloaded dispatch's
+            // fall-through skip
+            let bare = self.label();
             let disc = self.temp_word(SlotType::Bool)?;
             self.emit(Op::TagTest {
                 dst: Slot::body(disc),
@@ -4820,6 +4825,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     });
                     labels.push(label);
                 }
+                // a delivered member no payloaded arm claims is bare: the
+                // dispatch's fall-through must skip the payloaded arms
+                // straight to the bare path, never reading the flat
+                // payload words a bare delivery never staged
+                self.emit(Op::Jmp { target: bare });
                 let n = u8::try_from(words.len()).expect("span width fits u8");
                 let transferred: Vec<u8> = (0..n).map(|index| target.base + index).collect();
                 for ((_, _, fields), label) in payloaded.iter().zip(labels) {
@@ -4859,6 +4869,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // tag ids are module-wide, so the union's tag slot takes it
             // and the dead payload words zero-init (the construction
             // convention)
+            self.bind_label(bare);
             self.emit(Op::Mov {
                 dst: Slot::body(target.base),
                 src: Slot::overlay(1),

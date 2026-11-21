@@ -2628,8 +2628,13 @@ fn from_json_impl(
                     diags,
                 )?;
             }
-            let mut stmts = vec![guard_stmt(mint)];
-            let (rows, literal) = field_rows(&fields, "v", mint, &mut 0, diags)?;
+            // the shared failure value: one construction feeds every
+            // none-test's early return (the per-site spelling would
+            // mint a fresh payload span per field, past the frame slot
+            // cap on wide targets)
+            let fail = fresh_binder(&mut 0, "f");
+            let mut stmts = vec![fail_local(mint, &fail), guard_stmt(mint)];
+            let (rows, literal) = field_rows(&fields, "v", mint, &mut 0, &fail, diags)?;
             stmts.extend(rows);
             stmts.push(expr_stmt(Expr::Struct {
                 span: mint.span(),
@@ -2649,7 +2654,11 @@ fn from_json_impl(
             // Every payload mix decodes under the discriminator ruling
             // (the sole case from its bare shape, several from their own
             // member keys); the body's own refusal owns the empty enum.
-            let body = vec![expr_stmt(enum_decode_body(decl, mint, diags)?)];
+            let fail = fresh_binder(&mut 0, "f");
+            let body = vec![
+                fail_local(mint, &fail),
+                expr_stmt(enum_decode_body(decl, mint, &fail, diags)?),
+            ];
             Some(impl_item(
                 attr,
                 &decl.name,
@@ -2733,6 +2742,7 @@ fn field_rows(
     source: &str,
     mint: &mut Mint,
     fresh: &mut usize,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<Stmt>, Vec<FieldRow>)> {
     let mut stmts = Vec::with_capacity(fields.len() * 2);
@@ -2744,7 +2754,7 @@ fn field_rows(
         let read = fn_call(mint, "json_member", vec![source_read, key]);
         stmts.push(local(mint, &member, read, false));
         if !matches!(field.ty, Type::Optional { .. }) {
-            stmts.push(none_test(mint, &member));
+            stmts.push(none_test(mint, &member, fail));
         }
         let value = value_read(
             &field.ty,
@@ -2754,6 +2764,7 @@ fn field_rows(
             field.span,
             &field.name.name,
             "field",
+            fail,
             diags,
         )?;
         stmts.extend(value.0);
@@ -2782,6 +2793,7 @@ fn field_rows(
 /// the statement-position member row (to_json's mirror, since the
 /// array walk's statements spell no value-position else that carries
 /// them). Every other shape refuses at the attribute.
+#[allow(clippy::too_many_arguments)]
 fn value_read(
     ty: &Type,
     source: &str,
@@ -2790,11 +2802,12 @@ fn value_read(
     span: Span,
     part: &str,
     what: &str,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<Stmt>, Expr)> {
     match ty {
         Type::Paren { inner, .. } => {
-            value_read(inner, source, mint, fresh, span, part, what, diags)
+            value_read(inner, source, mint, fresh, span, part, what, fail, diags)
         },
         Type::Optional { inner, .. } => {
             if let Type::Path { path, args, .. } = paren_free(inner)
@@ -2802,7 +2815,9 @@ fn value_read(
                 && path.segments[0].name == "list"
                 && let [element] = args.as_slice()
             {
-                return optional_list_row(element, ty, source, mint, fresh, span, part, what, diags);
+                return optional_list_row(
+                    element, ty, source, mint, fresh, span, part, what, fail, diags,
+                );
             }
             let binder = fresh_binder(fresh, "o");
             let (els, staged_narrow) = optional_else(inner, source, mint, span, part, what, diags)?;
@@ -2825,7 +2840,7 @@ fn value_read(
                 // The recursive call answers its own error union into
                 // the if's union, so the wrong-shape narrow runs at
                 // statement position over the bound optional.
-                stmts.push(err_test(mint, &binder));
+                stmts.push(err_test(mint, &binder, fail));
             }
             Some((stmts, path_expr(&binder, mint.span())))
         },
@@ -2866,12 +2881,12 @@ fn value_read(
                 // the standard missing-member diagnostic.
                 let recv = path_expr(&only.name, mint.span());
                 let call = type_keyed_decode(mint, &recv, source);
-                return Some(member_decode(mint, fresh, call));
+                return Some(member_decode(mint, fresh, call, fail));
             }
             if only.name == "list"
                 && let [element] = args.as_slice()
             {
-                return list_read(element, source, mint, fresh, span, part, what, diags);
+                return list_read(element, source, mint, fresh, span, part, what, fail, diags);
             }
             // Every other application decodes through the applied
             // type's own member over the fn-type carrier (the
@@ -2881,7 +2896,7 @@ fn value_read(
                 ty: Box::new(minted_type(ty, mint)),
             };
             let call = type_keyed_decode(mint, &recv, source);
-            Some(member_decode(mint, fresh, call))
+            Some(member_decode(mint, fresh, call, fail))
         },
         _ => {
             diags.push(part_refused(
@@ -2981,11 +2996,12 @@ fn optional_list_row(
     span: Span,
     part: &str,
     what: &str,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<Stmt>, Expr)> {
     let binder = fresh_binder(fresh, "o");
     let inner = fresh_binder(fresh, "j");
-    let (rows, value) = list_read(element, &inner, mint, fresh, span, part, what, diags)?;
+    let (rows, value) = list_read(element, &inner, mint, fresh, span, part, what, fail, diags)?;
     let mut arm = rows;
     arm.push(assign(mint, &binder, value));
     let narrow = presence_narrow(mint, source, &inner, arm);
@@ -3031,6 +3047,7 @@ fn list_read(
     span: Span,
     part: &str,
     what: &str,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<Stmt>, Expr)> {
     let array = fresh_binder(fresh, "a");
@@ -3085,7 +3102,7 @@ fn list_read(
         }],
         trailing: None,
     };
-    let read = value_read(element, &at, mint, fresh, span, part, what, diags)?;
+    let read = value_read(element, &at, mint, fresh, span, part, what, fail, diags)?;
     let mut loop_body = vec![local(mint, &at, elem, false)];
     loop_body.extend(read.0);
     let out_read = path_expr(&out, mint.span());
@@ -3125,7 +3142,12 @@ fn list_read(
 /// payloaded cases each from the member its own name keys (the
 /// 2026-11-21 discriminator ruling), any other shape answering
 /// `parse_err`.
-fn enum_decode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic>) -> Option<Expr> {
+fn enum_decode_body(
+    decl: &EnumDecl,
+    mint: &mut Mint,
+    fail: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Expr> {
     if decl.cases.is_empty() {
         diags.push(part_refused(
             decl.span,
@@ -3144,12 +3166,12 @@ fn enum_decode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
     let mut fresh = 0;
     match payloaded.as_slice() {
         [] => {
-            let chain = name_chain(decl, mint)
+            let chain = name_chain(decl, mint, fail)
                 .expect("a non-empty enum with no payloaded case carries one");
-            Some(shape_switch(mint, &["json_string"], vec![chain]))
+            Some(shape_switch(mint, &["json_string"], vec![chain], fail))
         },
         [only] => {
-            let arm = Expr::Block(case_decode_arm(only, "v", mint, &mut fresh, diags)?);
+            let arm = Expr::Block(case_decode_arm(only, "v", mint, &mut fresh, fail, diags)?);
             // The sole payloaded case's bare shape names it: an object
             // for a struct payload, an array for a tuple payload.
             let shape = match only.payload {
@@ -3157,20 +3179,23 @@ fn enum_decode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                 EnumPayload::Tuple(_) => "json_array",
                 EnumPayload::None => unreachable!("the filter keeps payloaded cases alone"),
             };
-            match name_chain(decl, mint) {
-                Some(chain) => Some(shape_switch(mint, &["json_string", shape], vec![
-                    chain, arm,
-                ])),
-                None => Some(shape_switch(mint, &[shape], vec![arm])),
+            match name_chain(decl, mint, fail) {
+                Some(chain) => Some(shape_switch(
+                    mint,
+                    &["json_string", shape],
+                    vec![chain, arm],
+                    fail,
+                )),
+                None => Some(shape_switch(mint, &[shape], vec![arm], fail)),
             }
         },
         many => {
-            let probe = payload_probe(many, mint, &mut fresh, diags)?;
+            let probe = payload_probe(many, mint, &mut fresh, fail, diags)?;
             // The probe chain is the string test's else, never a case
             // arm: the members name the cases, so no json shape keys
             // the chain and shape_switch has no spelling for an open
             // else.
-            match name_chain(decl, mint) {
+            match name_chain(decl, mint, fail) {
                 Some(chain) => {
                     let cond = Expr::Is {
                         span: mint.span(),
@@ -3206,6 +3231,7 @@ fn case_decode_arm(
     source: &str,
     mint: &mut Mint,
     fresh: &mut usize,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<BlockExpr> {
     // One minted span shared by the construction's callee path and its
@@ -3239,6 +3265,7 @@ fn case_decode_arm(
                 source,
                 mint,
                 fresh,
+                fail,
                 diags,
             )?;
             stmts.extend(rows);
@@ -3292,6 +3319,7 @@ fn case_decode_arm(
                     item.span(),
                     &case.name.name,
                     "enum case",
+                    fail,
                     diags,
                 )?;
                 stmts.extend(read.0);
@@ -3325,11 +3353,15 @@ fn payload_probe(
     cases: &[&EnumCase],
     mint: &mut Mint,
     fresh: &mut usize,
+    fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Expr> {
     let mut chain = Expr::Block(BlockExpr {
         span: mint.span(),
-        stmts: vec![expr_stmt(path_expr("parse_err", mint.span()))],
+        stmts: vec![expr_stmt(Expr::Return {
+            span: mint.span(),
+            expr: Some(Box::new(path_expr(fail, mint.span()))),
+        })],
         trailing_trivia: Vec::new(),
     });
     for case in cases.iter().rev() {
@@ -3342,7 +3374,7 @@ fn payload_probe(
             expr: Box::new(path_expr(&member, mint.span())),
             ty: Box::new(name_type(mint, "none")),
         };
-        let decode = case_decode_arm(case, &member, mint, fresh, diags)?;
+        let decode = case_decode_arm(case, &member, mint, fresh, fail, diags)?;
         let probe = Expr::If {
             span: mint.span(),
             cond: Box::new(cond),
@@ -3360,7 +3392,7 @@ fn payload_probe(
 
 /// The unit cases' name chain: `v.value == "c1" { c1 } else if ... else
 /// { parse_err }`, `None` when the enum carries no unit case.
-fn name_chain(decl: &EnumDecl, mint: &mut Mint) -> Option<Expr> {
+fn name_chain(decl: &EnumDecl, mint: &mut Mint, fail: &str) -> Option<Expr> {
     let names: Vec<&str> = decl
         .cases
         .iter()
@@ -3370,7 +3402,7 @@ fn name_chain(decl: &EnumDecl, mint: &mut Mint) -> Option<Expr> {
     if names.is_empty() {
         return None;
     }
-    let mut chain = path_expr("parse_err", mint.span());
+    let mut chain = path_expr(fail, mint.span());
     for name in names.iter().rev() {
         let cond = Expr::Binary {
             span: mint.span(),
@@ -3400,8 +3432,8 @@ fn name_chain(decl: &EnumDecl, mint: &mut Mint) -> Option<Expr> {
 /// The value's shape match: one arm per named json case (`v is <case>`
 /// narrowing into the arm), the `parse_err` tail over every other
 /// shape.
-fn shape_switch(mint: &mut Mint, cases: &[&str], arms: Vec<Expr>) -> Expr {
-    let tail = path_expr("parse_err", mint.span());
+fn shape_switch(mint: &mut Mint, cases: &[&str], arms: Vec<Expr>, fail: &str) -> Expr {
+    let tail = path_expr(fail, mint.span());
     let mut chain = Expr::Block(BlockExpr {
         span: mint.span(),
         stmts: vec![expr_stmt(tail)],
@@ -3428,25 +3460,28 @@ fn shape_switch(mint: &mut Mint, cases: &[&str], arms: Vec<Expr>) -> Expr {
 
 /// One member's recursive decode staged as statements: the call bound,
 /// the `is parse_err` narrow returning early, the binder answering.
-fn member_decode(mint: &mut Mint, fresh: &mut usize, call: Expr) -> (Vec<Stmt>, Expr) {
+fn member_decode(mint: &mut Mint, fresh: &mut usize, call: Expr, fail: &str) -> (Vec<Stmt>, Expr) {
     let binder = fresh_binder(fresh, "r");
-    let stmts = vec![local(mint, &binder, call, false), err_test(mint, &binder)];
+    let stmts = vec![
+        local(mint, &binder, call, false),
+        err_test(mint, &binder, fail),
+    ];
     (stmts, path_expr(&binder, mint.span()))
 }
 
 /// `if <name> is none { return parse_err }` — the missing member's
 /// refusal.
-fn none_test(mint: &mut Mint, name: &str) -> Stmt {
-    narrow_test(mint, name, "none")
+fn none_test(mint: &mut Mint, name: &str, fail: &str) -> Stmt {
+    narrow_test(mint, name, "none", fail)
 }
 
 /// `if <name> is parse_err { return parse_err }` — the recursive
 /// decode's wrong-shape refusal.
-fn err_test(mint: &mut Mint, name: &str) -> Stmt {
-    narrow_test(mint, name, "parse_err")
+fn err_test(mint: &mut Mint, name: &str, fail: &str) -> Stmt {
+    narrow_test(mint, name, "parse_err", fail)
 }
 
-fn narrow_test(mint: &mut Mint, name: &str, member: &str) -> Stmt {
+fn narrow_test(mint: &mut Mint, name: &str, member: &str, fail: &str) -> Stmt {
     expr_stmt(Expr::If {
         span: mint.span(),
         cond: Box::new(Expr::Is {
@@ -3458,7 +3493,7 @@ fn narrow_test(mint: &mut Mint, name: &str, member: &str) -> Stmt {
             span: mint.span(),
             stmts: vec![expr_stmt(Expr::Return {
                 span: mint.span(),
-                expr: Some(Box::new(path_expr("parse_err", mint.span()))),
+                expr: Some(Box::new(path_expr(fail, mint.span()))),
             })],
             trailing_trivia: Vec::new(),
         },
@@ -4141,6 +4176,32 @@ fn fresh_binder(fresh: &mut usize, prefix: &str) -> String {
     let name = format!("{prefix}{fresh}");
     *fresh += 1;
     name
+}
+
+/// The decode walk's shared failure binding: one `parse_err` at its
+/// zero position (the decode reads already-decoded values, so no source
+/// position exists to name), read by every early return and tail.
+fn fail_local(mint: &mut Mint, name: &str) -> Stmt {
+    let init = parse_err_expr(mint);
+    local(mint, name, init, false)
+}
+
+/// A `parse_err` construction at its zero position: the decode walks
+/// read already-decoded values, so no source position exists to name.
+fn parse_err_expr(mint: &mut Mint) -> Expr {
+    Expr::Call {
+        span: mint.span(),
+        callee: Box::new(path_expr("parse_err", mint.span())),
+        args: vec![CallArg {
+            span: mint.span(),
+            name: Some(Ident {
+                span: mint.span(),
+                name: "pos".to_owned(),
+            }),
+            value: int_answer(mint, "0"),
+        }],
+        trailing: None,
+    }
 }
 
 /// A free-fn call over minted spans.

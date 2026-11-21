@@ -36,11 +36,11 @@ enum turn { left, right, spin { times: int } }
 // missing member or a wrong shape answering parse_err.
 fn spot_from_json(v: json) -> spot | parse_err {
   const name_j = json_member(v, "name")
-  if name_j is none { return parse_err }
+  if name_j is none { return parse_err(pos: 0) }
   const x_j = json_member(v, "x")
-  if x_j is none { return parse_err }
+  if x_j is none { return parse_err(pos: 0) }
   const y_j = json_member(v, "y")
-  if y_j is none { return parse_err }
+  if y_j is none { return parse_err(pos: 0) }
   spot { name: json_as_string(name_j)?, x: json_as_int(x_j)?, y: json_as_int(y_j)? }
 }
 
@@ -48,12 +48,12 @@ fn spot_from_json(v: json) -> spot | parse_err {
 // the payloaded case from the member its payload declares.
 fn turn_from_json(v: json) -> turn | parse_err {
   if v is json_string {
-    if v.value == "left" { left } else if v.value == "right" { right } else { parse_err }
+    if v.value == "left" { left } else if v.value == "right" { right } else { parse_err(pos: 0) }
   } else if v is json_object {
     const times_j = json_member(v, "times")
-    if times_j is none { return parse_err }
+    if times_j is none { return parse_err(pos: 0) }
     spin(times: json_as_int(times_j)?)
-  } else { parse_err }
+  } else { parse_err(pos: 0) }
 }
 
 fn readers() -> () {

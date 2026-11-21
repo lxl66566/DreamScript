@@ -17,7 +17,7 @@ tag string
 tag bool
 tag char
 tag my_err
-tag parse_err
+tag parse_err { pos: int }
 
 struct list[t]
 struct missing { name: string }

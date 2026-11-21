@@ -23,10 +23,7 @@ use ds_mod::{Module, ReadError, read};
 use ds_vm::{
     ArenaMisuse, ArenaPackError, FIBER_ROOT, FramePc, LoadError as VmLoadError, ModuleBuildError,
     ModuleRegistry, StagedSite, Trap, Value, Vm,
-    native::{
-        PLATFORM_IO_ERR, PLATFORM_NET_REFUSED, PLATFORM_NET_TIMEOUT, PLATFORM_NONE,
-        PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR,
-    },
+    native::{PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, is_io_class, is_net_class},
     platform::Platform,
 };
 
@@ -391,16 +388,12 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> 
         Ok(answer) => match answer.as_slice() {
             // the failure tags and the checked read's `none` member ride
             // the answer's head word
-            [Value::Tag(tag), ..] if *tag == PLATFORM_IO_ERR => Err(anyhow!(
+            [Value::Tag(tag), ..] if is_io_class(*tag) => Err(anyhow!(
                 "the run halted on an unhandled io failure (the message is on stdout)"
             )),
-            [Value::Tag(tag), ..]
-                if matches!(*tag, PLATFORM_NET_TIMEOUT | PLATFORM_NET_REFUSED) =>
-            {
-                Err(anyhow!(
-                    "the run halted on an unhandled net failure (the message is on stdout)"
-                ))
-            },
+            [Value::Tag(tag), ..] if is_net_class(*tag) => Err(anyhow!(
+                "the run halted on an unhandled net failure (the message is on stdout)"
+            )),
             [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => Err(anyhow!(
                 "the run halted on an unhandled parse failure (the message is on stdout)"
             )),
@@ -633,7 +626,7 @@ pub(crate) fn trap_error(vm: &Vm, trap: &Trap) -> Error {
     let frames = vm.backtrace();
     if !frames.is_empty() {
         message.push_str("\nbacktrace (innermost first):");
-        for frame in frames {
+        for frame in &frames {
             let _ = write!(message, "\n  {}::{} ", frame.module, frame.func);
             match frame.pc {
                 FramePc::At(pc) => {
