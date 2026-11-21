@@ -10,6 +10,10 @@ license.workspace      = true
 keywords.workspace     = true
 categories.workspace   = true
 
+[[bench]]
+harness = false
+name    = "probe"
+
 [dependencies]
 blake3.workspace    = true
 ds-diag             = { path = "../ds-diag" }
@@ -19,14 +23,10 @@ tempfile.workspace  = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# the load-walk composition test drives ds-vm's deps-first walk
-ds-vm.workspace     = true
 # the probe bench times the cache-probe shape over the provider seam
 criterion.workspace = true
-
-[[bench]]
-harness = false
-name    = "probe"
+# the load-walk composition test drives ds-vm's deps-first walk
+ds-vm.workspace     = true
 
 [lints]
 workspace = true

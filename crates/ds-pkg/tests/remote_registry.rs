@@ -149,7 +149,9 @@ fn resolve_over(
         fetches += 1;
         registry.fetch(name, version)
     });
-    let outcome = resolve(root, |name, version| provider.fetch(name, version));
+    let outcome = resolve(root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    });
     (outcome, fetches)
 }
 

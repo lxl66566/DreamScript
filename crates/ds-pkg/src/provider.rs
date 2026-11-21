@@ -1,21 +1,20 @@
 //! The store-backed provider seam: resolution's fetch interface
-//! answered from the content-addressed cache, misses filled by a
-//! caller-supplied remote fetch hook. Every answer carries the
-//! bundle's member identity beside its manifest, folded where the
-//! content was decoded, so a consumer keying a cache never loads and
-//! decodes the bundle again. The net natives stay out of scope here —
-//! the platform's tls capability serves https, but the remote side
-//! stays abstract: the registry client serves the hook — a local index
-//! root or a git remote's snapshot — the verified bundles installing
-//! through the store either way.
-
-use std::collections::BTreeMap;
+//! answered from the content-addressed store, each demand directed by
+//! the winning declarer's pin — one identity's file read, hashed, and
+//! decoded per demand, never a store-wide scan, the files their own
+//! index — misses filled by a caller-supplied remote fetch hook. Every
+//! answer carries the bundle's member identity beside its manifest,
+//! folded where the content was decoded, so a consumer keying a cache
+//! never loads and decodes the bundle again. The net natives stay out
+//! of scope here — the platform's tls capability serves https, but the
+//! remote side stays abstract: the registry client serves the hook — a
+//! local index root or a git remote's snapshot — the verified bundles
+//! installing through the store either way.
 
 use ds_diag::FileId;
 use ds_mod::Hash128;
 
 use crate::{
-    manifest::Manifest,
     package::Package,
     resolve::{Fetched, ProvidedPackage},
     store::Store,
@@ -52,30 +51,20 @@ pub enum Remote {
 /// so a cache-only provider needs no hook closure.
 type NoRemote = fn(&str, &Version) -> Remote;
 
-/// One indexed row: the manifest beside the member identity folded over
-/// the row's decoded bundle, the pair a demand's answer carries.
-type IndexedRow = (Manifest, Hash128);
-
-/// The demand index: the store's installed rows keyed by the manifest's
-/// self-described `(name, version)`, each identity carrying its row.
-/// A `(name, version)` self-described at two identities is registry
-/// drift; the lowest identity serves deterministically and resolution's
-/// pin validation refuses a wrong pick.
-type Index = BTreeMap<(String, Version), BTreeMap<Hash128, IndexedRow>>;
-
 /// The provider over the store: every demand answers from the installed
-/// rows first — a valid bundle is never fetched again, with or without a
-/// remote — and a miss falls to the remote hook, whose fetched content
-/// installs under its own identity before it serves. Without a hook the
-/// cache alone answers, its own knowledge setting the taxonomy (a name
-/// the store has installed at other versions reports unoffered with its
-/// highest, an unseen name unknown).
+/// bundle under the winning declarer's pin — the one identity's own
+/// file, read and validated per demand, so a valid bundle is never
+/// fetched again with or without a remote, a demand never pays for the
+/// bundles it does not name, and nothing memoizes: an install landing
+/// after the provider's first demand serves the next one, whatever
+/// process installed it. A miss falls to the remote hook, whose fetched
+/// content installs under its own identity before it serves. Without a
+/// hook the cache alone answers, its own knowledge setting the taxonomy
+/// (a name the store has installed at other versions reports unoffered
+/// with its highest, an unseen name unknown).
 pub struct StoreProvider<'store, F> {
     store: &'store Store,
     hook: Option<F>,
-    /// The store's rows, scanned lazily at the first demand and
-    /// extended by every install this provider lands.
-    index: Option<Index>,
 }
 
 impl<'store> StoreProvider<'store, NoRemote> {
@@ -83,11 +72,7 @@ impl<'store> StoreProvider<'store, NoRemote> {
     /// refuses.
     #[must_use]
     pub fn cached(store: &'store Store) -> Self {
-        Self {
-            store,
-            hook: None,
-            index: None,
-        }
+        Self { store, hook: None }
     }
 }
 
@@ -101,26 +86,18 @@ where
         Self {
             store,
             hook: Some(hook),
-            index: None,
         }
     }
 
-    /// One resolve-walk demand: the installed rows answer first, a miss
-    /// falls to the remote hook, and a fetched bundle installs before it
-    /// serves so a repeat demand never refetches.
-    pub fn fetch(&mut self, name: &str, version: &Version) -> Fetched {
-        self.ensure_index();
-        let index = self.index.as_ref().expect("the index is built");
-        if let Some(candidates) = index.get(&(name.to_owned(), *version)) {
-            let (identity, (manifest, member_identity)) = candidates
-                .iter()
-                .next()
-                .expect("a key holds at least one identity");
-            return Fetched::Found(ProvidedPackage {
-                manifest: manifest.clone(),
-                content_hash: *identity,
-                member_identity: *member_identity,
-            });
+    /// One resolve-walk demand, directed by the winning declarer's pin:
+    /// the installed bundle under the pin answers first — its own file,
+    /// validated by its own bytes, the manifest and member identity
+    /// folded where it decoded, no other installed bundle touched — a
+    /// miss falls to the remote hook, and a fetched bundle installs
+    /// before it serves so a repeat demand never refetches.
+    pub fn fetch(&mut self, name: &str, version: &Version, pin: Hash128) -> Fetched {
+        if let Some(served) = self.serve_installed(pin) {
+            return served;
         }
         let Some(hook) = self.hook.as_mut() else {
             return self.unserved(name);
@@ -133,32 +110,42 @@ where
         }
     }
 
-    /// Builds the demand index from the store's self-described rows if
-    /// no demand built it yet.
-    fn ensure_index(&mut self) {
-        if self.index.is_some() {
-            return;
-        }
-        let mut index: Index = BTreeMap::new();
-        for row in self.store.rows() {
-            index
-                .entry((row.manifest.name.clone(), row.manifest.version))
-                .or_default()
-                .insert(row.identity, (row.manifest, row.member_identity));
-        }
-        self.index = Some(index);
+    /// The installed bundle under the demand's pin, served only when
+    /// every step of its own validation passes: the file read, its hash
+    /// recomputed from its own bytes, the canonical decode, the
+    /// manifest read from the reserved member, and the member identity
+    /// folded — exactly the rows a store-wide scan would have indexed,
+    /// one file's worth of work. Any refusal — nothing installed under
+    /// the identity, drifted bytes, a decode the bundle refuses, a
+    /// manifest or member set that will not serve — answers [`None`]
+    /// and the demand falls to the fetch path: the remote hook's
+    /// install repairs the identity, and a hookless demand reports the
+    /// taxonomy.
+    fn serve_installed(&self, pin: Hash128) -> Option<Fetched> {
+        let package = self.store.load(pin).ok()??;
+        let manifest = package.manifest(FileId::new(0)).ok()?;
+        let member_identity = package.member_identity().ok()?;
+        Some(Fetched::Found(ProvidedPackage {
+            manifest,
+            content_hash: pin,
+            member_identity,
+        }))
     }
 
     /// The taxonomy of a demand nothing serves: a name the store has
     /// installed at other versions is unoffered with its highest, an
-    /// unseen name unknown.
+    /// unseen name unknown. The failing demand's path alone: resolution
+    /// treats every taxonomy answer as terminal, so this pass over the
+    /// installed rows runs at most once per resolution, never on a
+    /// serving path.
     fn unserved(&self, name: &str) -> Fetched {
-        let index = self.index.as_ref().expect("the index is built");
-        let best = index
-            .keys()
-            .filter(|(seen, _)| seen == name)
-            .map(|(_, version)| *version)
-            .next_back();
+        let best = self
+            .store
+            .rows()
+            .into_iter()
+            .filter(|row| row.manifest.name == name)
+            .map(|row| row.manifest.version)
+            .max();
         match best {
             Some(best) => Fetched::Unoffered { best: Some(best) },
             None => Fetched::UnknownName,
@@ -171,9 +158,9 @@ where
     /// whose member set cannot serve a compile refuses, never keys a
     /// cache), the content installs under its own identity — an
     /// install failure degrades to serving without caching, never a
-    /// wrong answer — and the row joins the index under the manifest's
-    /// own name and version, so the content the bundle is serves later
-    /// demands whatever name the fetch was asked under.
+    /// wrong answer — and the served answer carries the manifest's own
+    /// name and version, which resolution validates against the demand
+    /// and the pin.
     fn serve_fetched(&mut self, name: &str, package: &Package) -> Fetched {
         let Ok(manifest) = package.manifest(FileId::new(0)) else {
             return self.unserved(name);
@@ -187,13 +174,9 @@ where
             },
         };
         let identity = package.content_hash();
-        if self.store.install(package).is_ok() {
-            let index = self.index.get_or_insert_with(Index::new);
-            index
-                .entry((manifest.name.clone(), manifest.version))
-                .or_default()
-                .insert(identity, (manifest.clone(), member_identity));
-        }
+        // an install failure degrades to serving without caching: the
+        // next demand refetches rather than a wrong answer serving
+        let _ = self.store.install(package);
         Fetched::Found(ProvidedPackage {
             manifest,
             content_hash: identity,

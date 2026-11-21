@@ -133,7 +133,7 @@ fn diamond_picks_the_max_of_declared_minima() {
         ("right", "1.0.0"),
     ]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect("the diamond resolves");
     // max of declared minima: 1.2.0 wins, 1.1.0 never fetched
     assert_eq!(resolved.deps()["base"].version, Version::new(1, 2, 0));
@@ -164,7 +164,7 @@ fn minimal_versions_not_provider_latest() {
     let foo_20 = package_of(&manifest_of("foo", "2.0.0", &[]));
     let fixtures = graph(vec![foo_15, foo_20], vec![("foo", "1.5.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect("resolves at the declared minimum");
     assert_eq!(resolved.deps()["foo"].version, Version::new(1, 5, 0));
     assert!(
@@ -187,7 +187,7 @@ fn a_risen_demand_refetches_the_name_once_per_version() {
     )]));
     let fixtures = graph(vec![b_10, b_11, z], vec![("b", "1.0.0"), ("z", "1.0.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect("the raised demand resolves");
     assert_eq!(resolved.deps()["b"].version, Version::new(1, 1, 0));
     assert_eq!(registry.fetches, vec![
@@ -207,7 +207,7 @@ fn the_taxonomy_refuses() {
         Hash128::new([0x11; 16]),
     )]);
     let mut registry = Registry::new(&[]);
-    let error = resolve(&missing_root, |name, ver| registry.fetch(name, ver))
+    let error = resolve(&missing_root, |name, ver, _pin| registry.fetch(name, ver))
         .expect_err("unknown name refuses");
     assert_eq!(error, ResolveError::MissingPackage {
         name: "ghost".to_owned(),
@@ -219,7 +219,7 @@ fn the_taxonomy_refuses() {
     let old = package_of(&manifest_of("old", "0.9.0", &[]));
     let unsat = graph(vec![old], vec![("old", "2.0.0")]);
     let mut registry = Registry::new(&unsat.packages);
-    let error = resolve(&unsat.root, |name, ver| registry.fetch(name, ver))
+    let error = resolve(&unsat.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect_err("unoffered version refuses");
     assert_eq!(error, ResolveError::UnsatisfiableBound {
         name: "old".to_owned(),
@@ -240,8 +240,8 @@ fn the_taxonomy_refuses() {
     )
     .unwrap();
     let mut registry = Registry::new(&[real]);
-    let error =
-        resolve(&drifted, |name, ver| registry.fetch(name, ver)).expect_err("a wrong pin refuses");
+    let error = resolve(&drifted, |name, ver, _pin| registry.fetch(name, ver))
+        .expect_err("a wrong pin refuses");
     let ResolveError::HashMismatch { pinned, found, .. } = &error else {
         panic!("expected HashMismatch, got {error:?}")
     };
@@ -263,8 +263,8 @@ fn the_taxonomy_refuses() {
         ("x2", "1.0.0", x2.content_hash()),
     ]);
     let mut registry = Registry::new(&[shared, x1, x2]);
-    let error =
-        resolve(&root, |name, ver| registry.fetch(name, ver)).expect_err("conflicting pins refuse");
+    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
+        .expect_err("conflicting pins refuse");
     let ResolveError::HashMismatch { version, .. } = &error else {
         panic!("expected HashMismatch, got {error:?}")
     };
@@ -279,7 +279,7 @@ fn the_taxonomy_refuses() {
     let ca = manifest_of("ca", "1.0.0", &[("cb", "1.0.0", hash_b)]);
     let cb = manifest_of("cb", "1.0.0", &[("ca", "1.0.0", hash_a)]);
     let root = manifest_of("app", "1.0.0", &[("ca", "1.0.0", hash_a)]);
-    let error = resolve(&root, |name, _ver| match name {
+    let error = resolve(&root, |name, _ver, _pin| match name {
         "ca" => Fetched::Found(ProvidedPackage {
             manifest: ca.clone(),
             content_hash: hash_a,
@@ -304,7 +304,7 @@ fn the_taxonomy_refuses() {
         ("app", "1.0.0", Hash128::ZERO),
     ]);
     let mut registry = Registry::new(&[dep]);
-    let error = resolve(&self_root, |name, ver| registry.fetch(name, ver))
+    let error = resolve(&self_root, |name, ver, _pin| registry.fetch(name, ver))
         .expect_err("the root self-dep refuses");
     assert_eq!(error, ResolveError::Cycle {
         cycle: vec!["app".to_owned(), "app".to_owned()]
@@ -333,7 +333,7 @@ fn a_served_mismatch_is_the_demand_unserved() {
     };
     let root = manifest_of("app", "1.0.0", &[("swap", "1.0.0", other.content_hash())]);
     let mut fetches = Vec::new();
-    let error = resolve(&root, |name, ver| {
+    let error = resolve(&root, |name, ver, _pin| {
         fetches.push((name.to_owned(), *ver));
         match rows.get(name) {
             None => Fetched::UnknownName,
@@ -370,7 +370,7 @@ fn two_raises_before_the_fetch_read_one_demand() {
     )]));
     let fixtures = graph(vec![b_10, b_11, a, x], vec![("a", "1.0.0"), ("x", "1.0.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect("the co-raised demand resolves");
     assert_eq!(resolved.deps()["b"].version, Version::new(1, 1, 0));
     assert_eq!(registry.fetches, vec![
@@ -401,7 +401,7 @@ fn agreeing_pins_at_one_version_resolve() {
         ("right", "1.0.0"),
     ]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
         .expect("agreeing pins resolve");
     assert_eq!(resolved.deps()["shared"].version, Version::new(1, 0, 0));
     assert_eq!(resolved.deps()["shared"].content_hash, shared_hash);
@@ -424,7 +424,7 @@ fn content_under_another_name_is_the_demand_unserved() {
         member_identity: other.member_identity().unwrap(),
     };
     let root = manifest_of("app", "1.0.0", &[("swap", "1.0.0", other.content_hash())]);
-    let error = resolve(&root, |name, _ver| match name {
+    let error = resolve(&root, |name, _ver, _pin| match name {
         "swap" => Fetched::Found(row.clone()),
         _ => Fetched::UnknownName,
     })
@@ -447,8 +447,8 @@ fn a_resolved_dep_on_the_root_closes_a_cycle() {
     )]));
     let root = manifest_of("app", "1.0.0", &[("back", "1.0.0", back.content_hash())]);
     let mut registry = Registry::new(&[back]);
-    let error =
-        resolve(&root, |name, ver| registry.fetch(name, ver)).expect_err("the back edge refuses");
+    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
+        .expect_err("the back edge refuses");
     assert_eq!(error, ResolveError::Cycle {
         cycle: vec!["app".to_owned(), "back".to_owned(), "app".to_owned()]
     });
@@ -473,13 +473,13 @@ fn two_resolutions_produce_byte_identical_locks() {
     ]);
     let first = {
         let mut registry = Registry::new(&fixtures.packages);
-        resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+        resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
             .expect("resolves")
             .lock_bytes()
     };
     let second = {
         let mut registry = Registry::new(&fixtures.packages);
-        resolve(&fixtures.root, |name, ver| registry.fetch(name, ver))
+        resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
             .expect("resolves again")
             .lock_bytes()
     };
@@ -543,7 +543,7 @@ fn artifacts_fold_from_the_root_and_deps_under_one_name() {
         art,
     );
     let mut registry = Registry::new(&[lib]);
-    let resolved = resolve(&root, |name, ver| registry.fetch(name, ver)).expect("resolves");
+    let resolved = resolve(&root, |name, ver, _pin| registry.fetch(name, ver)).expect("resolves");
     let folded = resolved.artifacts();
     assert_eq!(folded.len(), 1);
     assert_eq!(folded["mymath"].ver, Version::new(1, 2, 0));
@@ -580,8 +580,8 @@ fn a_second_artifact_identity_under_one_name_refuses() {
         found,
     );
     let mut registry = Registry::new(&[lib]);
-    let error =
-        resolve(&root, |name, ver| registry.fetch(name, ver)).expect_err("the conflict refuses");
+    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
+        .expect_err("the conflict refuses");
     let ResolveError::ArtifactConflict {
         name,
         pinned: pin,
@@ -645,8 +645,8 @@ fn a_lifted_dep_retires_its_superseded_artifact_pin() {
         ("d", "1.0.0", d.content_hash()),
     ]);
     let mut registry = Registry::new(&[c_10, c_20, d]);
-    let resolved =
-        resolve(&root, |name, ver| registry.fetch(name, ver)).expect("the lifted diamond resolves");
+    let resolved = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
+        .expect("the lifted diamond resolves");
     assert_eq!(resolved.deps()["c"].version, Version::new(2, 0, 0));
     assert_eq!(resolved.artifacts()["libfoo"].hash, pin_2);
 }
@@ -668,7 +668,7 @@ fn an_artifact_edit_rekeys_the_lock() {
             hash,
         );
         let mut registry = Registry::new(&[]);
-        resolve(&root, |name, ver| registry.fetch(name, ver))
+        resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
             .expect("an artifact-only root resolves")
             .lock_bytes()
     };

@@ -14,9 +14,11 @@
 //! entry [`resolve_identities`] serves the cache probes — `ds info`'s
 //! prefix tier, the LSP's linked surfaces — the resolved graph's key
 //! inputs alone, the deps' member identities carried from the provider
-//! seam (folded where the provider decoded each bundle, so the probe
-//! loads and decodes no dep bundle), stopping ahead of the artifact
-//! installs and the graph assembly the run paths pay.
+//! seam (folded where the provider decoded each demanded bundle — one
+//! pinned file per demand, never a store-wide scan — so beyond the
+//! resolution walk itself a probe loads and decodes no dep bundle),
+//! stopping ahead of the artifact installs and the graph assembly the
+//! run paths pay.
 
 use std::{
     cell::RefCell,
@@ -122,9 +124,11 @@ pub(crate) struct GraphKeys {
 
 /// The resolution front `open` and [`resolve_identities`] share: the
 /// manifest read, the store and registry wiring, and the MVS graph
-/// resolution — everything the two entries answer before they part,
-/// the run paths continuing into the artifact installs, the member
-/// retention, and the graph's compile machinery.
+/// resolution (each demand carrying the winning declarer's pin, so the
+/// store serves the one pinned file per demand without scanning its
+/// installed rows) — everything the two entries answer before they
+/// part, the run paths continuing into the artifact installs, the
+/// member retention, and the graph's compile machinery.
 struct Front {
     /// The store the resolution served and the artifact installs land
     /// in.
@@ -174,14 +178,14 @@ fn resolve_front(entry: &Path) -> Result<Option<Front>> {
     let resolved = if let Some(registry) = &registry {
         let mut provider =
             StoreProvider::with_remote(&store, |name, ver| registry.fetch(name, ver));
-        resolve(&manifest, |name, ver| {
-            default_std_or(&store, &mut provider, name, ver)
+        resolve(&manifest, |name, ver, pin| {
+            default_std_or(&store, &mut provider, name, ver, pin)
         })
         .map_err(|error| refuse(&error, true))?
     } else {
         let mut provider = StoreProvider::cached(&store);
-        resolve(&manifest, |name, ver| {
-            default_std_or(&store, &mut provider, name, ver)
+        resolve(&manifest, |name, ver, pin| {
+            default_std_or(&store, &mut provider, name, ver, pin)
         })
         .map_err(|error| refuse(&error, false))?
     };
@@ -227,8 +231,9 @@ fn dep_members(store: &Store, resolved: &ds_pkg::Resolved) -> Result<Members> {
 }
 
 /// The resolved graph's per-dep identities, link-name keyed: the member
-/// folds the resolution seam carried out of the provider, one value for
-/// the light key entry and the run's graph alike.
+/// folds the resolution seam carried out of the provider — folded where
+/// the provider decoded the demand's pinned bundle — one value for the
+/// light key entry and the run's graph alike.
 fn identities_of(resolved: &ds_pkg::Resolved) -> Identities {
     resolved
         .deps()
@@ -560,6 +565,7 @@ fn default_std_or<F>(
     provider: &mut StoreProvider<'_, F>,
     name: &str,
     ver: &Version,
+    pin: Hash128,
 ) -> Fetched
 where
     F: FnMut(&str, &Version) -> ds_pkg::Remote,
@@ -567,7 +573,7 @@ where
     if name == ds_stdlib::STD_PACKAGE_NAME {
         return default_std(store, ver);
     }
-    provider.fetch(name, ver)
+    provider.fetch(name, ver, pin)
 }
 
 /// The default `@std` install answering one `(name, version)` demand:

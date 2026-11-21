@@ -332,10 +332,10 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
         "the warm run writes nothing"
     );
 
-    // the repin: new dep content ships as a version bump (the store
-    // serves the lowest identity for a pair), so both graph identities
-    // move and both artifact families re-key — the run over the new
-    // pins answers the new content, never the stale member artifact
+    // the repin: new dep content ships as a version bump, so both
+    // graph identities move and both artifact families re-key — the
+    // run over the new pins answers the new content, never the stale
+    // member artifact
     let deep_two = DEEP_MEMBER.replace("21", "22");
     let deep_two_manifest = "name = \"@deep\"\nversion = \"1.1.0\"\n".to_owned();
     let deep_two_dir = work.join("deep-two");

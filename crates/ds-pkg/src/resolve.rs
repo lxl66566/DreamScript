@@ -2,11 +2,14 @@
 //! declares a minimum version and pins the content hash of that version's
 //! package; demands unify by taking each name's maximum declared minimum,
 //! the provider answers name@version exactly (the load walk's provider
-//! discipline), the winning declarer's pin validates the fetched content,
-//! and the resolved graph — one version per name this round — serializes
-//! as the byte-stable lock. The graph's native artifacts fold the same
-//! way: one identity per artifact name, every declarer's pin agreeing,
-//! the manifest texts (artifacts inside) carrying them into the lock.
+//! discipline) with the winning declarer's pin riding the demand — the
+//! key a store-backed provider resolves straight from, no name-keyed
+//! index needed beside the content-addressed files — the same pin
+//! validating the fetched content, and the resolved graph — one version
+//! per name this round — serializing as the byte-stable lock. The
+//! graph's native artifacts fold the same way: one identity per artifact
+//! name, every declarer's pin agreeing, the manifest texts (artifacts
+//! inside) carrying them into the lock.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -309,7 +312,7 @@ impl Resolved {
 /// final graph carries a cross-package cycle.
 pub fn resolve(
     root: &Manifest,
-    mut fetch: impl FnMut(&str, &Version) -> Fetched,
+    mut fetch: impl FnMut(&str, &Version, Hash128) -> Fetched,
 ) -> Result<Resolved, ResolveError> {
     let mut walk = Walk {
         root: root.name.clone(),
@@ -329,7 +332,15 @@ pub fn resolve(
             .get(&name)
             .cloned()
             .expect("a queued name carries its demand");
-        match fetch(&name, &demanded) {
+        // the pin of the winning declared minimum rides the demand: the
+        // identity a store-backed provider reads directly and the same
+        // pin that validates whatever the fetch served
+        let (pinned, pinning) = walk
+            .pins
+            .get(&(name.clone(), demanded))
+            .cloned()
+            .expect("a demand carries the pin of its version");
+        match fetch(&name, &demanded, pinned) {
             Fetched::UnknownName => {
                 return Err(ResolveError::MissingPackage {
                     name,
@@ -364,11 +375,6 @@ pub fn resolve(
                 }
                 // the pin of the winning declared minimum validates the
                 // recorded content identity
-                let (pinned, pinning) = walk
-                    .pins
-                    .get(&(name.clone(), demanded))
-                    .cloned()
-                    .expect("a demand carries the pin of its version");
                 if provided.content_hash != pinned {
                     return Err(ResolveError::HashMismatch {
                         name: name.clone(),

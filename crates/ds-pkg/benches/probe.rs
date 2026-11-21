@@ -6,8 +6,10 @@
 //! The two benches differ only in the materialization: the per-dep
 //! bundle loads the store answered before the seam carried identities,
 //! and the seam-carried identities the probe reads today (the provider
-//! folds them where it decodes each row, so the probe's own work beyond
-//! resolution is the field read).
+//! folds them where it decodes each demand's pinned bundle, so the
+//! probe's own work beyond resolution is the field read — and the
+//! resolution under it reads one file per demand, never the installed
+//! population).
 
 use std::fmt::Write as _;
 
@@ -16,9 +18,10 @@ use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{Manifest, Package, Store, StoreProvider, resolve};
 
-/// The installed bundles the store holds: the probe's provider scans
-/// every row at its first demand, so the unrelated bundles price the
-/// scan.
+/// The installed bundles the store holds beside the root's deps: each
+/// demand's pin directs its own store read, so the unrelated bundles
+/// price nothing — the population stays so the fixture keeps the shape
+/// a store-wide scan used to price.
 const INSTALLED: usize = 64;
 
 /// The root's pinned deps: the per-probe per-dep work prices these.
@@ -78,8 +81,8 @@ fn fixture() -> (tempfile::TempDir, Store, Manifest) {
 /// member identity folds over the decoded members.
 fn probe_over_per_dep_loads(store: &Store, root: &Manifest) -> Vec<Hash128> {
     let mut provider = StoreProvider::cached(store);
-    let resolved =
-        resolve(root, |name, ver| provider.fetch(name, ver)).expect("the fixture resolves");
+    let resolved = resolve(root, |name, ver, pin| provider.fetch(name, ver, pin))
+        .expect("the fixture resolves");
     resolved
         .deps()
         .values()
@@ -105,8 +108,8 @@ fn probe_over_per_dep_loads(store: &Store, root: &Manifest) -> Vec<Hash128> {
 /// the seam's answer — no bundle loads, no member extraction.
 fn probe_over_the_seam(store: &Store, root: &Manifest) -> Vec<Hash128> {
     let mut provider = StoreProvider::cached(store);
-    let resolved =
-        resolve(root, |name, ver| provider.fetch(name, ver)).expect("the fixture resolves");
+    let resolved = resolve(root, |name, ver, pin| provider.fetch(name, ver, pin))
+        .expect("the fixture resolves");
     resolved
         .deps()
         .values()

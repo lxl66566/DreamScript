@@ -117,7 +117,9 @@ fn resolve_over(
         fetches += 1;
         registry.fetch(name, version)
     });
-    let outcome = resolve(root, |name, version| provider.fetch(name, version));
+    let outcome = resolve(root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    });
     (outcome, fetches)
 }
 
@@ -153,8 +155,10 @@ fn a_store_miss_fetches_verifies_and_installs() {
     let registry = Registry::open(&fixture.index);
     let mut provider =
         StoreProvider::with_remote(&store, |name, version| registry.fetch(name, version));
-    let cold = resolve(&fixture.root, |name, version| provider.fetch(name, version))
-        .expect("the second cold store resolves");
+    let cold = resolve(&fixture.root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    })
+    .expect("the second cold store resolves");
     assert_eq!(cold.lock_bytes(), resolved.lock_bytes());
 }
 
@@ -358,8 +362,10 @@ fn a_slashed_name_nests_as_its_own_segments() {
     let mut provider = StoreProvider::with_remote(&fixture.store, |name, version| {
         registry.fetch(name, version)
     });
-    let resolved = resolve(&root, |name, version| provider.fetch(name, version))
-        .expect("the slashed name resolves");
+    let resolved = resolve(&root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    })
+    .expect("the slashed name resolves");
     assert_eq!(
         resolved.deps()["acme/pipeline"].content_hash,
         nested.content_hash()
@@ -380,8 +386,10 @@ fn a_multi_version_row_file_serves_the_demanded_version() {
     let mut provider = StoreProvider::with_remote(&fixture.store, |name, version| {
         registry.fetch(name, version)
     });
-    let resolved = resolve(&root, |name, version| provider.fetch(name, version))
-        .expect("the demanded version resolves");
+    let resolved = resolve(&root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    })
+    .expect("the demanded version resolves");
     assert_eq!(resolved.deps()["lib"].version, Version::new(1, 2, 0));
     assert_eq!(resolved.deps()["lib"].content_hash, two.content_hash());
     // the other offering is never fetched: one demand, one fetch
@@ -393,8 +401,10 @@ fn a_multi_version_row_file_serves_the_demanded_version() {
         fetches.insert(name.to_owned(), *version);
         registry.fetch(name, version)
     });
-    resolve(&root, |name, version| provider.fetch(name, version))
-        .expect("the second cold store resolves");
+    resolve(&root, |name, version, pin| {
+        provider.fetch(name, version, pin)
+    })
+    .expect("the second cold store resolves");
     assert_eq!(
         fetches,
         BTreeMap::from([("lib".to_owned(), Version::new(1, 2, 0))])
