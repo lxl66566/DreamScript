@@ -24,7 +24,7 @@ fn guarded(n: int) -> int | net_err {
       spawn { i }
     }
   }
-  const kept = xs.list_len()
+  const kept = xs.len()
   kept
 }
 
@@ -42,6 +42,7 @@ fn guarded_cancel(n: int) -> int | net_err {
     }
   }
   0
+
 }
 
 fn mixed(n: int) -> int | net_err {
@@ -59,6 +60,7 @@ fn mixed(n: int) -> int | net_err {
     }
   }
   0
+
 }
 
 fn guarded_claim() -> int | net_err {
@@ -138,6 +140,7 @@ fn main() -> () {
     addr_in_use => println("a")
     reset => println("x")
     net_other { msg } => println("o")
-    xs => println("list ${xs.list_len()}")
+    xs => println("list ${xs.len()}")
+
   }
 }

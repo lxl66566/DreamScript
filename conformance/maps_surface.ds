@@ -36,7 +36,7 @@ fn counted() -> int {
   var m = map[int, string]()
   m.set(1, "one")
   m.set(2, "two")
-  const n = map_len(m)
+  const n = m.len()
   n
 }
 

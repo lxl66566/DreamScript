@@ -159,7 +159,7 @@ const PATTERN_DISPATCH_AMBIENT: &str = concat!(
 );
 
 /// Ambient stdlib stubs per the tuples_surface list: the primitives,
-/// the list type, and the one list length read the tuple items build
+/// the list type, and the free `len` the tuple item's count builds
 /// against.
 const TUPLES_AMBIENT: &str = concat!(
     "pub tag int\n",
@@ -167,12 +167,13 @@ const TUPLES_AMBIENT: &str = concat!(
     "pub tag bool\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
-    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
 );
 
 /// Ambient stdlib stubs for nursery_surface: the primitives, the shared
-/// list type with its mutation and read externs, the ambient-owned net
-/// failure taxonomy, and the generic cancel seam the nursery items name.
+/// list type with its mutation member and free reads, the ambient-owned
+/// net failure taxonomy, and the generic cancel seam the nursery items
+/// name.
 const NURSERY_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
@@ -182,7 +183,6 @@ const NURSERY_AMBIENT: &str = concat!(
     "  timeout\n",
     "  refused\n",
     "}\n",
-    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
     "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn str[t] (v: t) -> string\n",
     "pub extern fn println (msg: string) -> ()\n",
@@ -217,7 +217,8 @@ const TOPLEVEL_AMBIENT: &str = concat!(
 );
 
 /// Ambient stdlib stubs per the lists_surface list: the checked list
-/// reads the literal and the constructor build against.
+/// reads, the free count, and the joined-list member the literal and
+/// the constructor build against.
 const LISTS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
@@ -225,8 +226,7 @@ const LISTS_AMBIENT: &str = concat!(
     "pub tag bool\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
-    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
-    "pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]\n",
     "pub extern fn tail[t] (xs: list[t]) -> list[t]\n",
     "pub extern fn collect[t] (xs: list[t]) -> list[t]\n",
@@ -235,14 +235,15 @@ const LISTS_AMBIENT: &str = concat!(
     "impl[t] list[t] {\n",
     "  fn get (self, i: int) -> t | none\n",
     "  fn push (mut self, x: t) -> list[t]\n",
+    "  fn concat (self, other: list[t]) -> list[t]\n",
     "}\n",
 );
 
 /// Ambient stdlib stubs per the maps_surface list: the constructor, the
 /// inherent member spellings the builder calls and checked reads run
-/// through (the native seams' `set`/`get`/`keys` members), the entry
-/// count, the free `len` the member-count item spells, and the list the
-/// key face answers.
+/// through (the native seams' `set`/`get`/`keys` members), the free
+/// `len` the entry-count item spells, and the list the key face
+/// answers.
 const MAPS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
@@ -250,7 +251,6 @@ const MAPS_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct map[k, v]\n",
     "pub struct list[t]\n",
-    "pub extern fn map_len[k, v] (m: map[k, v]) -> int\n",
     "pub extern fn len[t] (xs: t) -> int\n",
     "impl[k, v] map[k, v] {\n",
     "  fn get (self, key: k) -> v | none\n",
@@ -295,13 +295,13 @@ const TRAIT_DEFAULTS_AMBIENT: &str = concat!(
 );
 
 /// Ambient stdlib stubs for records_lists: the ambient list surface the
-/// pushed records and checked reads build against.
+/// pushed records, checked reads, and free count build against.
 const RECORDS_LISTS_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
-    "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn println (msg: string) -> ()\n",
     "impl[t] list[t] {\n",
     "  fn get (self, i: int) -> t | none\n",

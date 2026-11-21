@@ -3,8 +3,9 @@
 // window and answering the receiver (a counted alias of it, the D2
 // no-hidden-copy discipline: the bound answer observes the receiver's
 // later mutations), `get` re-spanning the checked read's ok/none span
-// into the call's own union — with a tail-position `push` lowering in
-// place to answer its caller.
+// into the call's own union, `concat` answering the joined fresh list
+// over its own seam — with a tail-position `push` lowering in place to
+// answer its caller.
 
 tag int
 tag string
@@ -16,6 +17,7 @@ struct map[k, v]
 extern fn println (s: string) -> ()
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
 extern fn len[t] (xs: t) -> int
@@ -23,6 +25,7 @@ extern fn len[t] (xs: t) -> int
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
   fn push (mut self, x: t) -> list[t]
+  fn concat (self, other: list[t]) -> list[t]
 }
 
 impl[k, v] map[k, v] {
@@ -47,7 +50,8 @@ fn main() -> bool {
   const one = m.get("one")
   const nope = m.get("nope")
   const tail = grown()
-  len(g) == 2 && len(xs) == 2 &&
+  const joined = xs.concat([3])
+  len(g) == 2 && len(xs) == 2 && len(joined) == 3 &&
     hit.ok((x: int) => x).err((_: none) => 0) == 2 &&
     miss.ok((x: int) => x).err((_: none) => -1) == -1 &&
     one.ok((x: int) => x).err((_: none) => 0) == 1 &&

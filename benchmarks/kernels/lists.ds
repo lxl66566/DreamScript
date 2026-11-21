@@ -2,7 +2,7 @@
 // three-digit pieces joined by ';', grouped like strings.ds to bound
 // copying, the trailing separator chopped by a known-length substring),
 // split it once into N parts, then 120 rounds of checked get-member reads
-// checksummed with parse_int, and a bounded list_concat ladder: each
+// checksummed with parse_int, and a bounded concat ladder: each
 // concat copies both operands into a fresh list, so C = 32 concats of
 // the N-part list cost ~N*C^2/2 = 10M element words — C stays small so
 // the copy work dominates the ladder without blowing the time budget.
@@ -44,7 +44,7 @@ fn main() -> () {
   var acc: list[string] = parts
   var c: int = 0
   while c < 32 {
-    acc = list_concat(acc, parts)
+    acc = acc.concat(parts)
     c += 1
   }
   var total: int = 0

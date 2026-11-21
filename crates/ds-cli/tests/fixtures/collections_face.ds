@@ -16,6 +16,7 @@ fn main() -> () {
   println("len ${xs.len()} ${parts.len()} ${m.len()}")
   println("keys ${m.keys().len()}")
   println("csv ${parts.join(',')}")
-  println("empty ${list[int]().len()} ${map_len(map[string, int]())}")
+  println("empty ${list[int]().len()} ${map[string, int]().len()}")
+  println("concat ${list[int]().concat([5, 6]).len()}")
   println("get ${xs.get(1).unwrap_or(0)} ${m.get("two").unwrap_or(0)}")
 }

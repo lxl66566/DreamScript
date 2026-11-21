@@ -68,9 +68,9 @@ fn readers() -> () {
   const b = json_as_bool(one("true"))
   if b is parse_err { println("parse_err") } else { println("bool: ${b}") }
   const a = json_as_array(one("[1,2]"))
-  if a is parse_err { println("parse_err") } else { println("array: ${list_len(a)}") }
+  if a is parse_err { println("parse_err") } else { println("array: ${a.len()}") }
   const o = json_as_object(one("{\"k\":1}"))
-  if o is parse_err { println("parse_err") } else { println("object: ${map_len(o)}") }
+  if o is parse_err { println("parse_err") } else { println("object: ${o.len()}") }
   // The width readers (2026-11-19): byte and u32 as numbers (the encode
   // helper prints the number back, the widths carrying no literal
   // spelling), char as a one-character string, bytes as a number array.

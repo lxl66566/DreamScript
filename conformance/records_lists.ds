@@ -26,12 +26,12 @@ fn main() -> () {
   const missing = miss.ok((p: part) => p.label).err((_: none) => "absent")
   var total = 0
   var i = 0
-  while i < list_len(xs) {
+  while i < xs.len() {
     const p = part_at(xs, i)
     total += cost(p)
     i += 1
   }
-  println("count ${list_len(xs)} miss ${missing} total ${total}")
+  println("count ${xs.len()} miss ${missing} total ${total}")
   const first = part_at(xs, 0)
   println("first ${first.label} ${cost(first)}")
 }

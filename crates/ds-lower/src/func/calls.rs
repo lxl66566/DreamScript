@@ -757,7 +757,8 @@ impl<'a> FnLower<'a, '_, '_> {
             return self.map_ctor_call(args);
         }
         // A bodiless ambient collection member (`xs.get(i)`, `xs.push(x)`,
-        // `m.get(k)`, `m.set(k, v)`) routes to its native seam through the
+        // `xs.concat(ys)`, `m.get(k)`, `m.set(k, v)`) routes to its native
+        // seam through the
         // free-callee path below: the receiver feeds the first argument,
         // exactly like the retired free spelling's own call. `push`/`set`
         // additionally re-answer the receiver after the native's unit word
@@ -803,14 +804,59 @@ impl<'a> FnLower<'a, '_, '_> {
                             "only the first data parameter feeds the dot position [F3]",
                         ));
                     }
-                    (
-                        Some(*func),
-                        name.span,
-                        std::iter::once(&**recv)
-                            .chain(args.iter().map(|arg| &arg.value))
-                            .collect(),
-                        None,
-                    )
+                    // The F3 receiver fallback (2026-11-22): a free fn
+                    // that cannot take the receiver typed through the
+                    // method tier, so the checker's dispatch record at
+                    // the call span owns the lowering — the native
+                    // member seam first, then the resolved method body.
+                    let member_routed = native_member.is_some()
+                        || self
+                            .analyzed
+                            .checked
+                            .inherent_calls
+                            .contains_key(&call_span)
+                        || self.analyzed.checked.trait_calls.contains_key(&call_span);
+                    if member_routed {
+                        if let Some(member) = native_member {
+                            (
+                                Some(member.def),
+                                name.span,
+                                std::iter::once(&**recv)
+                                    .chain(args.iter().map(|arg| &arg.value))
+                                    .collect(),
+                                None,
+                            )
+                        } else {
+                            let candidates: Vec<_> = self
+                                .analyzed
+                                .package
+                                .method_candidates(&name.name)
+                                .collect();
+                            let dispatch = self.resolve_method_dispatch(
+                                call_span,
+                                name.span,
+                                Some(recv),
+                                &candidates,
+                            )?;
+                            (
+                                None,
+                                name.span,
+                                std::iter::once(&**recv)
+                                    .chain(args.iter().map(|arg| &arg.value))
+                                    .collect(),
+                                Some(dispatch),
+                            )
+                        }
+                    } else {
+                        (
+                            Some(*func),
+                            name.span,
+                            std::iter::once(&**recv)
+                                .chain(args.iter().map(|arg| &arg.value))
+                                .collect(),
+                            None,
+                        )
+                    }
                 },
                 Some(Res::Dot(DotRes::Methods { candidates })) => {
                     if let Some(member) = native_member {
@@ -2498,7 +2544,8 @@ impl<'a> FnLower<'a, '_, '_> {
     /// instance per declared bound under the receiver's substitution),
     /// which stage the body's evidence demands.
     /// The native seam a bodiless ambient collection member routes to:
-    /// `list`'s `get`/`push` and `map`'s `get`/`set` declare no ds body
+    /// `list`'s `get`/`push`/`concat` and `map`'s `get`/`set` declare no
+    /// ds body
     /// (an element-carrying generic member body has no static word kind),
     /// so the call lowers exactly like the native's own retired free
     /// spelling — the receiver feeding the first argument. `window`
@@ -2514,6 +2561,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let (native, window) = match (target.as_str(), member) {
             ("list", "get") => ("list_get", false),
             ("list", "push") => ("list_push", true),
+            ("list", "concat") => ("list_concat", false),
             ("map", "get") => ("map_get", false),
             ("map", "set") => ("map_set", true),
             _ => return None,

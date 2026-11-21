@@ -10,5 +10,5 @@ fn main() -> () {
   var m = map[string, int]()
   m.set("answer", 42)
   const sum = reduce(xs, 0, (a: int, b: int) => a + b)
-  println("result: ${sum} ${map_len(m)}")
+  println("result: ${sum} ${m.len()}")
 }

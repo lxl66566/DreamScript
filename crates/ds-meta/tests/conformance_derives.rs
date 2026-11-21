@@ -57,6 +57,7 @@ const DERIVES_AMBIENT: &str = concat!(
     "pub extern fn json_of_char (c: char) -> json\n",
     "pub extern fn json_of_bytes (b: bytes) -> json\n",
     "pub extern fn list_len[t] (xs: list[t]) -> int\n",
+    "pub extern fn len[t] (xs: t) -> int\n",
     "pub extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
     "pub extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",

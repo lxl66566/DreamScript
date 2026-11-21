@@ -43,7 +43,7 @@ enum parse_error { bad_number(string), missing_field(string) }
 type entry = map[string, string]
 ```
 
-The ambient predeclares the fallible-read taxonomy (`io_err`, `parse_err`, `net_err` as `timeout | refused`, `utf8_err`) beside `none`, the `json` family, and the `config` record the extraction example uses; redeclaring one is a duplicate-definition error.
+The ambient predeclares the fallible-read taxonomy (`io_err` and `net_err` as branchable class-tag aliases, `parse_err` carrying its position payload, `utf8_err`) beside `none`, the `json` family, and the `config` record the extraction example uses; redeclaring one is a duplicate-definition error.
 
 Construction is fixed per declaration: structs brace form only, enum cases call form only, unit tags bare, cross-spellings checker errors, and struct braces support punning.
 
@@ -69,7 +69,7 @@ type doc = doc_null | doc_bool | doc_num | doc_str | doc_obj
 
 fn port_of(j: doc) -> int | none | bad_port {
   if j is doc_obj {
-    const pv = j.fields.map_get("port")        // inferred: doc | none
+    const pv = j.fields.get("port")            // inferred: doc | none
     if pv is doc_num && pv.value >= 1 && pv.value <= 65535 { pv.value }
     else { bad_port { got: -1 } }
   } else {
@@ -80,7 +80,7 @@ fn port_of(j: doc) -> int | none | bad_port {
 
 Constructors (brace forms, bare tags, generic applications like `list[page]()`) live in the type namespace, functions in the value namespace: a struct `map` and a function `map` coexist, and a call-form name in both is an ambiguity error.
 
-Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `map_get` read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
+Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `get` read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
 
 ## Functions
 
@@ -113,7 +113,7 @@ const b = apply((x: int) => x * k, 4)   // so does a capturing closure
 const raised = [1, 2].map(inc)          // one combinator parameter, every callable
 ```
 
-UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first (a same-named free function owns the dot position even when its parameter types do not fit, so the member needs `trait::f(x)`), then trait methods, and true ambiguity a compile error. Capability parameters are named and excluded from the dot position, so `println(io, msg)` is never `msg.println()`.
+UFCS is universal and free: `x.f(a)` desugars to `f(x, a)` for any first-argument function, with no candidate search — free functions first, then trait methods, `trait::f(x)` the escape hatch, and true ambiguity a compile error. The free tier is a preference, not a claim: a free function whose first parameter cannot take the receiver's type never takes the call, the registered members serving instead, so a same-named free function and a member coexist over disjoint receivers. Capability parameters are named and excluded from the dot position, so `println(io, msg)` is never `msg.println()`.
 
 ```ts
 const n = "hello".len()        // desugars to len("hello")
@@ -166,7 +166,7 @@ fn report(total: int, failed: int) -> string {
 }
 ```
 
-Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `map_get`). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
+Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `get`). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
 
 ```ts
 fn drill() {
@@ -204,7 +204,7 @@ const cfg = load_config("app.cfg").err((e) => config { host: "localhost", port: 
 const port = cfg.port.unwrap_or(8080)                       // int? -> int, eager fallback
 const p2 = cfg.port.unwrap_or_else(() => 8081)              // lazy variant
 fn require_name(m: map[string, string]) -> string | parse_error {
-  map_get(m, "name").ok_or(missing_field("name"))?          // early exit with a new value
+  m.get("name").ok_or(missing_field("name"))?               // early exit with a new value
 }
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).ok((n: string) => n).err((e) => "?")}")
 ```
@@ -235,13 +235,13 @@ println("${size("x")} ${close(file { fd: 3 })}")
 
 ## Collections and iteration
 
-Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `list_get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
+Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
 
 ```ts
 var club = list[user]()
-club.list_push(user { name: "ada", age: 45 })                  // the whole span lands in place
-club.list_push(user { name: "bob", age: 15 })
-const cell = list_get(club, 0)                                 // user | none, the checked read
+club.push(user { name: "ada", age: 45 })                       // the whole span lands in place
+club.push(user { name: "bob", age: 15 })
+const cell = club.get(0)                                      // user | none, the checked read
 const who = cell.ok((u: user) => u.name).err((_: none) => "?")  // fields project out
 const grown = cons(user { name: "eve", age: 30 }, tail(club))   // cons and tail move whole spans
 const roster = collect(grown)                                   // the whole-list copy
@@ -255,7 +255,7 @@ Iteration is combinators (`map`, `filter`, `reduce`, and friends) plus `for`, ov
 var users = list[user]()
 var errors = list[parse_error]()
 for r in rows.map(parse_user) {
-  if r is parse_error { errors.list_push(r) } else { users.list_push(r) }
+  if r is parse_error { errors.push(r) } else { users.push(r) }
 }
 const total = users
   .filter((u) => u.age >= 18)
@@ -263,7 +263,7 @@ const total = users
   .reduce(0, (a, b) => a + b)
 ```
 
-`list[record]` and `list[(int, string)]` run end to end, whole word spans crossing each read, close (`cons`, `tail`, `collect`, `list_concat`), and combinator; union elements refuse at every read, so `rows.map(parse_user)` waits, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
+`list[record]` and `list[(int, string)]` run end to end, whole word spans crossing each read, close (`cons`, `tail`, `collect`, `xs.concat(ys)`), and combinator; union elements refuse at every read, so `rows.map(parse_user)` waits, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
 
 ## Traits and generics
 

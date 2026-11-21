@@ -66,14 +66,14 @@ fn float_rows() -> bool {
   var nans = map[float, int]()
   nans.set(n, 1)
   nans.set(n, 2)
-  const nan_rows = map_len(nans) == 1 && match nans.get(n) {
+  const nan_rows = nans.len() == 1 && match nans.get(n) {
     none => false
     v => v == 2
   }
   var zeros = map[float, int]()
   zeros.set(z, 1)
   zeros.set(nz, 2)
-  const zero_rows = map_len(zeros) == 2 && match zeros.get(z) {
+  const zero_rows = zeros.len() == 2 && match zeros.get(z) {
     none => false
     v => v == 1
   } && match zeros.get(nz) {

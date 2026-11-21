@@ -4260,7 +4260,31 @@ impl Bodies<'_> {
             Res::Dot(DotRes::Free { func, fed_param }) => {
                 // The receiver feeds the recorded parameter [F3]; only
                 // parameter 0 exists today (capability parameters have no
-                // syntax yet).
+                // syntax yet). The free tier keeps F3's preference, but a
+                // free fn whose first parameter cannot contain the
+                // receiver's type never claims the call (the 2026-11-22
+                // amendment): the registered method candidates serve it
+                // instead, so a member and a same-named free fn coexist
+                // over disjoint receivers.
+                if fed_param == 0 {
+                    let candidates: Vec<MethodId> =
+                        self.package.method_candidates(&name.name).collect();
+                    if !candidates.is_empty() {
+                        let recv_val = self.expr(recv, None);
+                        if !self.free_fn_takes_receiver(func, recv_val.ty) {
+                            return self.method_select_typed(
+                                recv,
+                                recv_val,
+                                name,
+                                &candidates,
+                                args,
+                                trailing,
+                                span,
+                            );
+                        }
+                        return self.call_def(func, Some(recv), args, trailing, span);
+                    }
+                }
                 let fed = (fed_param == 0).then_some(recv);
                 self.call_def(func, fed, args, trailing, span)
             },
@@ -4574,6 +4598,23 @@ impl Bodies<'_> {
         span: Span,
     ) -> Val {
         let recv_val = self.expr(recv, None);
+        self.method_select_typed(recv, recv_val, name, candidates, args, trailing, span)
+    }
+
+    /// The candidate selection over a receiver already typed once (the
+    /// free-tier fallback's entry): identical to [`Self::method_select`]
+    /// apart from the pre-typed receiver, whose second typing would
+    /// double every diagnostic an erroneous receiver already reported.
+    fn method_select_typed(
+        &mut self,
+        recv: &Expr,
+        recv_val: Val,
+        name: &Ident,
+        candidates: &[MethodId],
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Val {
         // Each survivor carries the resolution its trait branch solved:
         // the selected survivor hands its resolution to the dispatch
         // record and the member call, so the pair solves once.
@@ -4726,6 +4767,31 @@ impl Bodies<'_> {
             span,
             resolution.as_ref(),
         )
+    }
+
+    /// Whether a dot-call's free tier can take the receiver (the F3
+    /// amendment, 2026-11-22): the free fn keeps the preference when its
+    /// first parameter's solved type contains the receiver's type. A
+    /// missing signature or parameter, an unsolvable parameter type, or
+    /// an already-failed receiver keeps the free reading — the fallback
+    /// never widens an existing refusal.
+    fn free_fn_takes_receiver(&mut self, func: DefId, recv: Ty) -> bool {
+        let Some(sig) = self.decls.fns.get(&func).cloned() else {
+            return true;
+        };
+        let Some(param) = sig.params.first() else {
+            return true;
+        };
+        let Some(written) = param.ty.as_ref() else {
+            return true;
+        };
+        let Some(expected) = self.solve_here(written) else {
+            return true;
+        };
+        if self.decls.universe.is_empty(recv) {
+            return true;
+        }
+        self.decls.universe.contains(expected, recv)
     }
 
     /// Whether an inherent impl's owner accepts the receiver (F3): every

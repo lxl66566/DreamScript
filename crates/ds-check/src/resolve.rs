@@ -2305,6 +2305,9 @@ impl FileResolver<'_> {
                 "map_get" => "; the member spelling is `m.get(k)`",
                 "map_set" => "; the member spelling is `m.set(k, v)`",
                 "map_keys" => "; the member spelling is `m.keys()`",
+                "list_len" => "; the member spelling is `xs.len()`",
+                "list_concat" => "; the member spelling is `xs.concat(ys)`",
+                "map_len" => "; the member spelling is `m.len()`",
                 _ => "",
             };
             self.diags.push(

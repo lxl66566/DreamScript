@@ -212,8 +212,10 @@ impl bytes { fn default() -> bytes { bytes_of(list[byte]()) } }
 // parameter or answer spans the collection's own type variable has no
 // static word kind (the free generic fn's Raw-word shape is the free
 // tier's alone), so the element-carrying spellings keep their
-// `list_*`/`map_*` native seams and `len` answers through the free
-// generic's instance table; the ordered key face presents as a member.
+// `list_*`/`map_*` native seams — private below, VM-internal names the
+// user surface never spells — while `len` answers through the free
+// generic's instance table and the ordered key face presents as a
+// member.
 impl[k, v] map[k, v] {
   fn keys (self) -> list[k] { map_keys(self) }
   fn get (self, key: k) -> v | none
@@ -223,6 +225,7 @@ impl[k, v] map[k, v] {
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
   fn push (mut self, x: t) -> list[t]
+  fn concat (self, other: list[t]) -> list[t]
 }
 
 pub tag int
@@ -339,15 +342,15 @@ pub extern fn type_name (t: type) -> string
 pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 pub extern fn tail[t] (xs: list[t]) -> list[t]
-pub extern fn list_new[t] () -> list[t]
-pub extern fn list_len[t] (xs: list[t]) -> int
+extern fn list_new[t] () -> list[t]
+extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
-pub extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
+extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn map_new[k, v] () -> map[k, v]
 extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
-pub extern fn map_len[k, v] (m: map[k, v]) -> int
+extern fn map_len[k, v] (m: map[k, v]) -> int
 // The ordered key face: the map's entry order, one word per key — the
 // iteration seam the checked reads compose over (the value spans read
 // back through map_get).

@@ -40,7 +40,7 @@ fn unit_word() -> () {
 fn list_bearing() -> int {
   const l = ([1, 2], "two")
   const (xs, s) = l
-  const n = list_len(xs)
+  const n = xs.len()
   n
 }
 

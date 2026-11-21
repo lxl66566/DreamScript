@@ -3,7 +3,8 @@
 //! the `list[t]()`/`map[k, v]()` empty constructors, the inherent member
 //! spellings over the native seams (`xs.push(x)` and `m.set(k, v)`
 //! mutating in place and answering the collection, `xs.get(i)` and
-//! `m.get(k)` the checked reads), `xs.len()` through the free generic's
+//! `m.get(k)` the checked reads, `xs.concat(ys)` the joined list),
+//! `xs.len()` through the free generic's
 //! List instance, `m.keys()` through the ambient's inherent member over
 //! the map's ordered key face, and split/join over the one char
 //! separator — while a ds-bodied member over the collection's own type
@@ -61,6 +62,7 @@ fn the_member_spellings_run_over_the_ambient() {
             "keys 2\n",
             "csv alpha,beta,gamma\n",
             "empty 0 0\n",
+            "concat 2\n",
             "get 2 2\n",
             "0\n",
         )
@@ -90,6 +92,7 @@ fn built_module_reproduces_the_source_run() {
             "keys 2\n",
             "csv alpha,beta,gamma\n",
             "empty 0 0\n",
+            "concat 2\n",
             "get 2 2\n",
             "0\n",
         )
@@ -113,12 +116,16 @@ fn the_retired_prefix_spellings_refuse_naming_the_member() {
         "`map_set` is private to its defining file [G4]; the member spelling is `m.set(k, v)`",
         "`map_get` is private to its defining file [G4]; the member spelling is `m.get(k)`",
         "`map_keys` is private to its defining file [G4]; the member spelling is `m.keys()`",
+        "`list_len` is private to its defining file [G4]; the member spelling is `xs.len()`",
+        "`list_concat` is private to its defining file [G4]; the member spelling is \
+         `xs.concat(ys)`",
+        "`map_len` is private to its defining file [G4]; the member spelling is `m.len()`",
     ] {
         assert!(stderr.contains(retired), "the refusal: {stderr}");
     }
     assert_eq!(
         stderr.matches("is private to its defining file").count(),
-        6,
+        9,
         "every retired use refuses exactly once: {stderr}"
     );
 }

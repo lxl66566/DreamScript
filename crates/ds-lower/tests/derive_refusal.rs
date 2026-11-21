@@ -815,6 +815,7 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
         "}\n",
         "extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none\n",
         "extern fn list_len[t] (xs: list[t]) -> int\n",
+        "pub extern fn len[t] (xs: t) -> int\n",
         "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
         "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
         "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",

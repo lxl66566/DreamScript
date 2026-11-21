@@ -3110,7 +3110,7 @@ fn list_read(
     loop_body.push(assign_add(mint, &index));
     let index_cmp = path_expr(&index, mint.span());
     let array_len_arg = path_expr(&array, mint.span());
-    let array_len = fn_call(mint, "list_len", vec![array_len_arg]);
+    let array_len = member_call(array_len_arg, "len", vec![], mint);
     let cond = Expr::Binary {
         span: mint.span(),
         op: BinaryOp::Lt,

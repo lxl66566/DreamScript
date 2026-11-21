@@ -1,5 +1,6 @@
 //! The collection members end to end: the bodiless inherent members
-//! (`get`/`push` on the list, `get`/`set` on the map) route to their
+//! (`get`/`push`/`concat` on the list, `get`/`set` on the map) route to
+//! their
 //! native seams at lowering — the receiver feeds the native's first
 //! argument exactly like the retired free spelling's own call, the
 //! checked read re-spans its ok/none span into the call's union, and

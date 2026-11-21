@@ -3315,7 +3315,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
         "  for u in urls {\n",
         "    println(u)\n",
         "  }\n",
-        "  println(\"${c.host} ${c.retries} ${map_len(rows)} ${list_len(urls)}\")\n",
+        "  println(\"${c.host} ${c.retries} ${rows.len()} ${urls.len()}\")\n",
         "  0\n",
         "}\n",
     );
@@ -3493,7 +3493,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
             "  for u in urls {\n",
             "    println(u)\n",
             "  }\n",
-            "  println(\"${c.host} ${c.retries} ${map_len(rows)} ${list_len(urls)}\")\n",
+            "  println(\"${c.host} ${c.retries} ${rows.len()} ${urls.len()}\")\n",
             "  0\n",
             "}\n",
         ),
@@ -3617,7 +3617,7 @@ fn an_undeclaring_graph_keeps_the_merged_ambient_reading() {
         "  const cfg = config { host: \"localhost\", port: 8080, retries: 3 }\n",
         "  var rows: row = map[string, string]()\n",
         "  rows.set(\"a\", \"1\")\n",
-        "  println(\"${cfg.host} ${cfg.retries} ${map_len(rows)}\")\n",
+        "  println(\"${cfg.host} ${cfg.retries} ${rows.len()}\")\n",
         "  0\n",
         "}\n",
     );

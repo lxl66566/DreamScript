@@ -4,7 +4,7 @@
 // rebuilt by interpolation). One map of 5000 distinct keys is filled
 // (one set per key), read for 16 rounds of checked get over all
 // keys with the .ok/.err extraction, probed by 2000 missing keys, then
-// overwritten key-for-key (values replaced, map_len observed per set),
+// overwritten key-for-key (values replaced, the entry count observed per set),
 // and re-read once so the final checksum pins the overwritten values.
 // Every integer intermediate stays non-negative below 2^47.
 
@@ -37,7 +37,7 @@ fn main() -> () {
   var k: int = 0
   while k < 5000 {
     m.set("key-${k % 7}-${k}", k % 100)
-    n2 += map_len(m)
+    n2 += m.len()
     k += 1
   }
   var sum2: int = 0
@@ -47,5 +47,5 @@ fn main() -> () {
     sum2 += cell.ok((x: int) => x).err((_: none) => -1)
     w += 1
   }
-  println("result: ${sum} ${miss} ${map_len(m)} ${n2} ${sum2}")
+  println("result: ${sum} ${miss} ${m.len()} ${n2} ${sum2}")
 }

@@ -102,13 +102,13 @@ The stdlib ambient declares the vocabulary the corpus assumes, registered as a p
 - modules_hash_core.ds: `os` (build target) and the `c` namespace of C types and handles.
 - while_cond_refs.ds: `len` and `println`; the file owns its `guard` struct.
 - pattern_dispatch.ds: `read_file: (string) -> string | io_err` and `println`, both against the ambient taxonomy; the file declares its own `parse_config` extern over the ambient `config`.
-- lists_surface.ds: `list_len`/`list_concat`/`join` and the `get`/`push` members (the ambient list surface).
-- tuples_surface.ds: `list_len` (the one list read the list-bearing tuple item builds against; tuples themselves need no ambient).
-- maps_surface.ds: `map_len` and the `get`/`set`/`keys` members (the ambient map surface; the constructor spelling is `map[k, v]()`).
+- lists_surface.ds: `xs.len()`/`xs.concat(ys)`/`join` and the `get`/`push` members (the ambient list surface).
+- tuples_surface.ds: `xs.len()` (the one list read the list-bearing tuple item builds against; tuples themselves need no ambient).
+- maps_surface.ds: `m.len()` and the `get`/`set`/`keys` members (the ambient map surface; the constructor spelling is `map[k, v]()`).
 - inherent_impls.ds: the primitives alone; the file owns its receiver types and impls.
 - toplevel_consumption.ds: the primitives plus the `Copyable` marker; the file declares its own linear `blob` and `digest_of`, and the gate's ambient adds one consumer of the file's `far_seed` (the cross-file direction).
 - trait_defaults.ds: `len` and `println`; the file owns its trait, both impls, and the receiver types (the inherent impl included).
-- records_lists.ds: `list_len` and the `get`/`push` members (the ambient list surface) and `println`; the file owns its `part` struct.
+- records_lists.ds: `xs.len()` and the `get`/`push` members (the ambient list surface) and `println`; the file owns its `part` struct.
 - transitive_dispatch.ds: `println` beside the primitives and the `list` type; the file owns both traits and the four impls.
 - teardown_deinit.ds: the ambient-owned `net_err` taxonomy, the `cancel` seam, and `println`; the file owns its `resource`.
 - derives.ds: the ambient-owned `trait show` and `println` beside the primitives and the `Copyable` marker; the file owns its derives, receiver types, and the linear `res` the holder reject names.

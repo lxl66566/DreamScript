@@ -20,7 +20,7 @@ fn sum_ints() -> int {
   const xs = [1, 2, 3]
   var total: int = 0
   var i: int = 0
-  while i < list_len(xs) {
+  while i < xs.len() {
     const cell = xs.get(i)
     total += cell.ok((x: int) => x).err((_: none) => 0)
     i += 1
@@ -30,14 +30,14 @@ fn sum_ints() -> int {
 
 fn words_report() -> string {
   const words = ["alpha", "beta", "gamma"]
-  const joined = list_concat(words, ["delta"])
+  const joined = words.concat(["delta"])
   const first = joined.get(0)
   first.ok((w: string) => w).err((_: none) => "?")
 }
 
 fn empty_pages() -> int {
   const pages = list[page]()
-  const n = list_len(pages)
+  const n = pages.len()
   n
 }
 
@@ -47,7 +47,7 @@ fn fresh_ints() -> list[int] {
 
 fn seeds_total() -> int {
   const seeds: list[int] = [10, 20]
-  list_len(seeds) + list_len(fresh_ints())
+  seeds.len() + fresh_ints().len()
 }
 
 fn for_sum() -> int {
@@ -75,14 +75,14 @@ fn csv_line() -> string {
 
 // the copy closes carry whole record spans at the per-list stride: the
 // cons head stages its span, the first prepend fixes the empty list's
-// stride, and tail/collect/list_concat keep the source's
+// stride, and tail/collect/concat keep the source's
 fn cons_records() -> int {
   const empty = list[page]()
   const one = cons(page { url: "a" }, empty)
   const two = cons(page { url: "b" }, one)
-  const joined = list_concat(two, collect(two))
+  const joined = two.concat(collect(two))
   const rest = tail(two)
-  list_len(joined) * 10 + list_len(rest)
+  joined.len() * 10 + rest.len()
 }
 
 // iteration and membership bind the whole element span per step

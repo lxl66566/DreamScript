@@ -12,6 +12,9 @@ fn main() -> int {
   map_set(m, "two", 2)
   const one = map_get(m, "one")
   map_keys(m)
+  const counted = list_len(xs)
+  const joined = list_concat(xs, xs)
+  const entries = map_len(m)
   xs.list_push(4)
-  return len(xs) + len(m) + len(first.unwrap_or(0)) + one.unwrap_or(0)
+  return counted + entries + len(joined) + len(first.unwrap_or(0)) + one.unwrap_or(0)
 }
