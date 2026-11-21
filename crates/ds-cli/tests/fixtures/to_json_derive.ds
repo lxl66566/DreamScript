@@ -14,7 +14,7 @@
 // (the 2026-11-21 discriminator ruling). The
 // optional list field (the decode mirror's refusal) runs: the encode
 // walk's member rows are statement-position. The roundtrip rows pin
-// the from_json composition both ways over one declaration deriving
+// the from_json composition both ways over the declarations deriving
 // both families.
 
 #[derive(to_json)]
@@ -45,6 +45,16 @@ enum step { stay, walk(int, string) }
 #[derive(to_json)]
 enum bearing { plain, paired(int, int), named { label: string } }
 
+// The lone tuple-payload case: a sole tuple case encodes as its
+// positions' array, the single-arm member test lowering over the
+// sole-member gate (2026-11-21). No roundtrip row: passing a place
+// narrowed to a single-member enum's multi-word tuple payload into
+// a call reads every payload word past the first from offset 0 (a
+// narrowing-copy lowering defect), so the peek matches the narrowed
+// place directly, which reads the words right.
+#[derive(from_json, to_json)]
+enum solo { just(int, int) }
+
 #[derive(from_json, to_json)]
 struct rt { a: int, tag: string, xs: list[int], port: int? }
 
@@ -74,6 +84,20 @@ fn words_round (text: string) -> () {
   }
 }
 
+fn solo_peek (text: string) -> () {
+  const s = solo.from_json(doc(text))
+  if s is parse_err { println("parse_err") } else {
+    match s {
+      just(a, b) => println("peek ${a} ${b}"),
+    }
+  }
+}
+
+fn solo_rows () -> () {
+  const lj = just(3, 4)
+  println(solo.to_json(lj).to_json())
+}
+
 fn main() -> () {
   const c = cell { i: 12, f: 2.5, b: true, s: "arch" }
   println(cell.to_json(c).to_json())
@@ -101,6 +125,9 @@ fn main() -> () {
   println(bearing.to_json(pr).to_json())
   const nm = named(label: "q")
   println(bearing.to_json(nm).to_json())
+  solo_rows()
+  solo_peek("[5, 6]")
+  solo_peek("\"hi\"")
   rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": [1, 2], \"port\": 3}")
   rt_round("{\"a\": 7, \"tag\": \"t\", \"xs\": []}")
   rt_round("{\"tag\": \"t\", \"xs\": []}")

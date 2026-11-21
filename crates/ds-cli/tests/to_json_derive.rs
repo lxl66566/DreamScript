@@ -9,9 +9,9 @@
 //! construction, the optional member present and absent (absence
 //! leaving the member out), the optional list field (the decode
 //! mirror's refusal, statement-position here), the nested derive
-//! composition, the nested list walk, the enum target's unit and
-//! payload shapes, and the from_json roundtrip over one declaration
-//! deriving both families.
+//! composition, the nested list walk, the enum target's unit, payload,
+//! and lone tuple-payload shapes, and the from_json roundtrips over
+//! the declarations deriving both families.
 
 use std::{
     env, fs,
@@ -49,9 +49,11 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// list field absent and present, the enum's two unit shapes and its
 /// payload object, the discriminator ruling's encode rows (2026-11-21:
 /// two payloaded cases answering their own member keys, the sole tuple
-/// payload its bare array, a mixed enum's wrapped cases), the roundtrip
-/// rows (present optional kept, absent
-/// optional still absent, a missing required member refused), and the
+/// payload its bare array, a mixed enum's wrapped cases, the lone
+/// tuple-payload case its bare array and its decode peek), the
+/// roundtrip rows (present optional kept, absent optional still
+/// absent, a missing required member refused, the lone tuple case's
+/// peek and its wrong shape refused), and the
 /// width fields' rows (byte/u32 as numbers with their edges, char as
 /// its one-character string, bytes as a number array, and the
 /// constructed row over field reads of every width).
@@ -71,6 +73,9 @@ const GOLDEN: &str = concat!(
     "\"plain\"\n",
     "{\"paired\":[1,2]}\n",
     "{\"named\":{\"label\":\"q\"}}\n",
+    "[3,4]\n",
+    "peek 5 6\n",
+    "parse_err\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[1,2],\"port\":3}\n",
     "{\"a\":7,\"tag\":\"t\",\"xs\":[]}\n",
     "parse_err\n",

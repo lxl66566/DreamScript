@@ -79,9 +79,7 @@
 //! type spells no write (a tuple, a union, a shape the case vocabulary
 //! does not name), an optional nested inside a part (a `t?` list
 //! element, an optional payload field — the M3 member dispatch has no
-//! runtime contract for either), an enum with no cases, or a lone
-//! tuple-payload case (its single-arm member test rides the
-//! single-member scrutinee seam, not this encoding).
+//! runtime contract for either), or an enum with no cases.
 //! `==` refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
@@ -3957,22 +3955,6 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
             "enum",
             &decl.name.name,
             "an enum with no cases has no value to encode",
-        ));
-        return None;
-    }
-    if decl.cases.len() == 1 && matches!(decl.cases[0].payload, EnumPayload::Tuple(_)) {
-        // The single-arm member test a lone tuple case needs is outside
-        // the M3 contract (the single-member scrutinee seam), so the
-        // honest refusal stays until that seam lands — a struct payload
-        // arm needs no member test, and any second case gives the
-        // scrutinee its tags back.
-        diags.push(part_refused(
-            decl.cases[0].span,
-            "to_json",
-            "enum case",
-            &decl.cases[0].name.name,
-            "a lone tuple case's single-arm member test has no M3 lowering (the single-member \
-             scrutinee seam), so no encode walk can be built over it",
         ));
         return None;
     }
