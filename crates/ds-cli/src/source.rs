@@ -197,10 +197,10 @@ fn exports_of(
         };
         // A type declaration's per-target link fact is its word layout
         // over the surface's vocabulary: a flat non-generic struct, a
-        // non-generic enum's tag rows, each minted case's own row, a
-        // non-generic alias's resolved word, and a bodiless struct's
-        // opaque identity — every other type-namespace shape stays
-        // refused downstream.
+        // non-generic enum's tag rows, a lone tag's unit atom, each
+        // minted case's own row, a non-generic alias's resolved word,
+        // and a bodiless struct's opaque identity — every other
+        // type-namespace shape stays refused downstream.
         let ty = match def.kind {
             ds_check::DefKind::Struct => {
                 ds_check::TypeFact::of_struct(&analyzed.decls, id).map(std::sync::Arc::new)
@@ -222,6 +222,9 @@ fn exports_of(
             },
             ds_check::DefKind::TypeAlias => {
                 ds_check::TypeFact::of_alias(&analyzed.decls, id).map(std::sync::Arc::new)
+            },
+            ds_check::DefKind::Tag => {
+                ds_check::TypeFact::of_tag(&analyzed.decls, id).map(std::sync::Arc::new)
             },
             _ => None,
         };

@@ -1410,10 +1410,14 @@ fn the_widened_link_shapes_bind_at_the_walk() {
         "pub tag int\n",
         "pub tag string\n",
         "pub struct map[k, v]\n",
-        "import @std (row, config, response, urls)\n",
+        "import @std (row, config, response, urls, ping, hollow)\n",
         "\n",
         "fn take(c: config, r: response) -> int {\n",
         "  1\n",
+        "}\n",
+        "\n",
+        "fn warm(p: ping) -> ping {\n",
+        "  p\n",
         "}\n",
         "\n",
         "fn keys() -> row {\n",
@@ -1486,6 +1490,8 @@ fn the_widened_link_shapes_bind_at_the_walk() {
                 None,
             ),
             entry("response", Some(ds_check::TypeFact::Opaque), None),
+            entry("ping", Some(ds_check::TypeFact::Tag), None),
+            entry("hollow", Some(ds_check::TypeFact::Enum(Vec::new())), None),
             entry(
                 "urls",
                 None,
@@ -1521,6 +1527,8 @@ fn the_widened_link_shapes_bind_at_the_walk() {
     assert_eq!(kind_of("config"), DefKind::Struct);
     assert_eq!(kind_of("response"), DefKind::Struct);
     assert_eq!(kind_of("urls"), DefKind::Const);
+    assert_eq!(kind_of("ping"), DefKind::Tag);
+    assert_eq!(kind_of("hollow"), DefKind::Enum);
     let index = UseIndex::build(&resolutions);
     let (&row_def, _) = package
         .foreign()
@@ -1541,6 +1549,29 @@ fn the_widened_link_shapes_bind_at_the_walk() {
         index.def_uses(urls_def),
         [span_in(source, file, "const seen = urls", 0, "urls")],
         "the list const's use resolves onto the const def"
+    );
+    let (&ping_def, _) = package
+        .foreign()
+        .iter()
+        .find(|(_, entry)| entry.name == "ping")
+        .expect("ping registers");
+    let warm = "fn warm(p: ping) -> ping {";
+    let warm_ctx = span_of(source, file, warm, 0);
+    let warm_text = &source[warm_ctx.start as usize..warm_ctx.end as usize];
+    let warm_ret = warm_text
+        .rfind("ping")
+        .expect("the line carries two spellings");
+    assert_eq!(
+        index.def_uses(ping_def),
+        [
+            span_in(source, file, warm, 0, "ping"),
+            Span::new(
+                file,
+                warm_ctx.start + u32::try_from(warm_ret).unwrap(),
+                warm_ctx.start + u32::try_from(warm_ret + "ping".len()).unwrap(),
+            ),
+        ],
+        "the tag's parameter and return spellings resolve onto the def"
     );
 }
 

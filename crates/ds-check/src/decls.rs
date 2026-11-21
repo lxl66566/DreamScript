@@ -501,7 +501,8 @@ where
 /// so every later pass consumes the linked type like a local one and no
 /// second type kind exists — a struct's atom and field signature, an
 /// enum's case rows, a case's own atom, struct row, and case row, an
-/// alias's written body, an opaque struct's reserved atom. The
+/// alias's written body, an opaque struct's reserved atom, and a
+/// tag's unit atom. The
 /// word kinds resolve by name in this compile's own universe (the
 /// ambient's atoms), the same trust the const fact's scalar atom
 /// enjoys; the link pass's registration gates already proved the mint's
@@ -530,6 +531,9 @@ fn install_foreign_type(
         },
         crate::import::TypeFact::Opaque => {
             install_foreign_opaque(def, name, span, decls);
+        },
+        crate::import::TypeFact::Tag => {
+            install_foreign_tag(def, name, span, decls);
         },
     }
 }
@@ -743,6 +747,27 @@ fn install_foreign_opaque(def: DefId, name: &str, _span: Span, decls: &mut Decls
         fields: Vec::new(),
         linear: false,
     });
+    decls.foreign_type_names.insert(name.to_owned(), def);
+}
+
+/// The tag fact's mint: the unit atom a local `tag` declaration
+/// carries — no field signature, no case rows — plus the def tables
+/// and the name index, exactly the local products. The producer's
+/// tag-table row (when its own lowering minted one) seeds the
+/// consuming compile's table at lowering, so union-typed values cross
+/// under ids both modules agree on.
+fn install_foreign_tag(def: DefId, name: &str, _span: Span, decls: &mut Decls) {
+    let atom = match decls.universe.declare_tag(name) {
+        Ok(atom) => atom,
+        // a served prefix's replay already declared it; take the
+        // replayed atom and still install the rows below
+        Err(_) => match decls.atoms.get(&def) {
+            Some(&atom) => atom,
+            None => return,
+        },
+    };
+    decls.atoms.insert(def, atom);
+    decls.defs_of_atoms.insert(atom, def);
     decls.foreign_type_names.insert(name.to_owned(), def);
 }
 

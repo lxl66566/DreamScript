@@ -1158,11 +1158,11 @@ ratio = 0.5
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The const shapes with no literal fact and the type export keep their
-/// refusals at the same walk (G4): a computed const, a mutable binding,
-/// a type-namespace export, and the alias-qualified spellings — the
-/// const's call form, a computed const's value read, a private const, a
-/// missing name, a function value, and a type name in value position.
+/// The const shapes with no literal fact keep their refusals at the
+/// same walk (G4): a computed const, a mutable binding, and the
+/// alias-qualified spellings — the const's call form, a computed
+/// const's value read, a private const, a missing name, a function
+/// value, and a type name in value position.
 #[test]
 fn the_non_literal_const_tiers_refuse() {
     let (work, pkg_id) = facts_fixtures("tiers2");
@@ -1206,22 +1206,6 @@ version = \"0.1.0\"
 ",
             ),
             "its value is no literal fact",
-        ),
-        (
-            "type",
-            concat!(
-                "import @facts (point)
-",
-                "
-",
-                "fn main() -> int {
-",
-                "7
-",
-                "}
-",
-            ),
-            "layout and tag rows are the artifact round",
         ),
         (
             "alias-const",
@@ -1398,6 +1382,21 @@ version = \"1.0.0\"
         "    red => 0,\n",
         "    green => 1,\n",
         "    blue(n, _) => n,\n",
+        "  }\n",
+        "}\n",
+        "pub tag ping\n",
+        "pub tag pong\n",
+        "pub fn rally(n: int) -> ping | pong {\n",
+        "  if n > 0 {\n",
+        "    ping\n",
+        "  } else {\n",
+        "    pong\n",
+        "  }\n",
+        "}\n",
+        "pub fn point(p: ping | pong) -> int {\n",
+        "  match p {\n",
+        "    ping => 1,\n",
+        "    pong => 2,\n",
         "  }\n",
         "}\n",
         "pub enum trip {\n",
@@ -1815,17 +1814,95 @@ fn linked_enum_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A lone tag binds through its unit-atom fact (G4): the link walk
+/// registers the tag def exactly like a local `tag` declaration, so
+/// the consumer constructs, annotates, narrows, and matches over
+/// unions of linked tags, and a linked fn's union-typed signature
+/// spells — the values crossing both ways over the shared tag
+/// mapping the producer's rows seed.
+#[test]
+fn linked_tag_facts_bind_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-tags");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (ping, pong, rally, point)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const own: ping | pong = ping\n",
+            "  const ownhit = match own {\n",
+            "    ping => 1,\n",
+            "    pong => 2,\n",
+            "  }\n",
+            "  const producer = point(rally(5)) + point(rally(-1))\n",
+            "  const localmatch = match rally(3) {\n",
+            "    ping => 1,\n",
+            "    pong => 2,\n",
+            "  }\n",
+            "  const crossed: ping | pong = rally(2)\n",
+            "  var narrowed = 0\n",
+            "  if crossed is ping {\n",
+            "    narrowed = 4\n",
+            "  }\n",
+            "  const total = ownhit + producer + localmatch + narrowed\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the tag-facts run exits 0 (stderr: {err})");
+    // 1 (own construct + match) + 1 + 2 (the producer scores its
+    // own values both ways) + 1 (the consumer match over a
+    // producer value) + 4 (the is-narrowed member) = 9
+    assert_eq!(out, "9\n9\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// An empty linked enum binds its name alone (G4): the empty case
+/// rows ride the fact, so the selection lifts where the vocabulary
+/// refused it, the name entering the type namespace exactly like a
+/// local empty enum — uninhabited, no value crossing, every use
+/// keeping the local spelling's own solving refusal.
+#[test]
+fn an_empty_linked_enum_binds_its_name() {
+    let (work, pkg_id) = shapes_fixtures("shapes-empty");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @shapes (hollow)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  7\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the empty-enum selection binds (stderr: {err})");
+    assert_eq!(out, "7\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// The type shapes the vocabulary cannot spell and the names a local
 /// declaration or the consumer itself owns keep their refusals at the
-/// same walk (G4): an enum with a tuple payload, an empty enum, a
-/// generic enum, a generic struct, a linear struct, and a struct with a
-/// field outside the word vocabulary each carry no fact; the alias
-/// shapes outside the vocabulary — a body naming another alias, a
-/// generic alias, and a union body — carry none the same way; a
-/// locally declared spelling of a linked type name refuses both at the
-/// type's selection and at any linked signature naming it — the local
-/// would mis-shape every spelling — and a case selection whose enum
-/// refused the same way names its enum.
+/// same walk (G4): an enum with a tuple payload, a generic enum, a
+/// generic struct, a linear struct, and a struct with a field outside
+/// the word vocabulary each carry no fact; the alias shapes outside
+/// the vocabulary — a body naming another alias, a generic alias, and
+/// a union body — carry none the same way; a locally declared
+/// spelling of a linked type name refuses both at the type's
+/// selection and at any linked signature naming it — the local would
+/// mis-shape every spelling — and a case selection whose enum refused
+/// the same way names its enum.
 #[test]
 fn the_uncarried_type_shapes_refuse() {
     let (work, pkg_id) = shapes_fixtures("shapes-tiers");
@@ -1835,17 +1912,6 @@ fn the_uncarried_type_shapes_refuse() {
             "tuple-payload",
             concat!(
                 "import @shapes (trip)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "empty-enum",
-            concat!(
-                "import @shapes (hollow)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",

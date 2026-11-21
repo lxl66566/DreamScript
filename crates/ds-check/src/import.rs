@@ -186,11 +186,11 @@ fn parse_int(text: &str) -> Option<i64> {
 /// compile mints the same declaration products a local declaration
 /// would — one atom, one field signature, one AST-shaped row per
 /// declaration product. The vocabulary carries a flat struct's named
-/// fields, an enum's tag rows, a non-generic alias's resolved word, and
-/// a bodiless struct's opaque identity; every other type-namespace
-/// shape (a tag, a trait, a generic or linear declaration) and every
-/// field outside the vocabulary carries no fact and keeps its selection
-/// refused.
+/// fields, an enum's tag rows, a lone tag's unit atom, a non-generic
+/// alias's resolved word, and a bodiless struct's opaque identity; every
+/// other type-namespace shape (a trait, a generic or linear declaration)
+/// and every field outside the vocabulary carries no fact and keeps its
+/// selection refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeFact {
     /// A flat, non-generic struct: named fields over the word
@@ -199,12 +199,18 @@ pub enum TypeFact {
     /// surface fact this round.
     Struct(Vec<TypeField>),
     /// A non-generic enum: its tag rows, one per case, in declaration
-    /// order. A linear declaration carries no fact (the struct clause's
-    /// rule) and an empty enum carries none (uninhabited, nothing
-    /// crosses); every payload must spell in the vocabulary — a unit
-    /// case or a struct payload of word-shaped fields, a tuple payload
-    /// carrying no member names.
+    /// order — an empty enum rides its empty rows, so the name binds
+    /// uninhabited exactly like the local spelling. A linear declaration
+    /// carries no fact (the struct clause's rule); every payload must
+    /// spell in the vocabulary — a unit case or a struct payload of
+    /// word-shaped fields, a tuple payload carrying no member names.
     Enum(Vec<TypeCase>),
+    /// A lone tag: the unit atom a local `tag` declaration mints, the
+    /// name and identity alone — no layout, no case rows. Its values
+    /// cross through the shared tag mapping exactly like a unit case's:
+    /// the producer's tag-table row seeds the consuming compile's table
+    /// at lowering.
+    Tag,
     /// One case minted by a linked enum: the case's own entry in the
     /// type namespace, naming its enum so the consuming compile's case
     /// row maps back. Registers only beside its enum's registration.
@@ -393,10 +399,10 @@ impl TypeFact {
     }
 
     /// The fact one declared enum carries, when every case spells in the
-    /// vocabulary: non-generic, not linear, at least one case, every
-    /// payload a unit or a struct payload of word-shaped fields (the
-    /// tuple payload carries no member names). Everything else answers
-    /// `None` and keeps its selection refused.
+    /// vocabulary: non-generic, not linear, every payload a unit or a
+    /// struct payload of word-shaped fields (the tuple payload carries
+    /// no member names); an empty enum rides its empty rows. Everything
+    /// else answers `None` and keeps its selection refused.
     #[must_use]
     pub fn of_enum(
         package: &crate::resolve::Package,
@@ -404,7 +410,7 @@ impl TypeFact {
         def: crate::DefId,
     ) -> Option<Self> {
         let shape = decls.enums.get(&def)?;
-        if !shape.params.is_empty() || shape.linear || shape.cases.is_empty() {
+        if !shape.params.is_empty() || shape.linear {
             return None;
         }
         let mut out = Vec::with_capacity(shape.cases.len());
@@ -416,6 +422,20 @@ impl TypeFact {
             });
         }
         Some(Self::Enum(out))
+    }
+
+    /// The fact one declared tag carries: the unit atom's identity
+    /// alone. A tag restating the predeclared `none` (the universe's
+    /// distinguished unit atom) carries no fact — the consuming
+    /// compile's own `none` is that same atom, so the selection keeps
+    /// the reserved-name refusal the walk already spells.
+    #[must_use]
+    pub fn of_tag(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+        let atom = decls.atoms.get(&def).copied()?;
+        match decls.universe.atom_decl(atom).ok()?.kind {
+            crate::AtomKind::Unit if atom != crate::TypeId::NONE => Some(Self::Tag),
+            _ => None,
+        }
     }
 
     /// The fact one minted enum case carries: its enum's name and its
@@ -1124,9 +1144,11 @@ mod tests {
                 payload: super::CasePayload::Struct(blue),
             }))
         );
-        // the refusals: generic, empty, linear, a tuple payload, and a
-        // payload field outside the vocabulary
-        for refused in ["pair", "bare", "guard"] {
+        // an empty enum rides its empty rows; the refusals: generic,
+        // linear, a tuple payload, and a payload field outside the
+        // vocabulary
+        assert_eq!(enum_fact("bare"), Some(super::TypeFact::Enum(Vec::new())));
+        for refused in ["pair", "guard"] {
             assert_eq!(enum_fact(refused), None, "{refused} carries no fact");
         }
         assert_eq!(
@@ -1138,6 +1160,36 @@ mod tests {
             case_fact("one", "wide"),
             None,
             "a payload field outside the vocabulary carries no fact"
+        );
+    }
+
+    /// A lone tag's fact is its unit atom's identity; a tag restating
+    /// the predeclared `none` carries none.
+    #[test]
+    fn the_fact_is_the_tag_s_unit_atom() {
+        let source = concat!(
+            "pub tag mark\n",
+            "pub tag none\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("tag_fact.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let tag_fact = |name: &str| {
+            let def = analyzed
+                .package
+                .lookup_type(name)
+                .unwrap_or_else(|| panic!("{name} declares"));
+            super::TypeFact::of_tag(&analyzed.decls, def)
+        };
+        assert_eq!(tag_fact("mark"), Some(super::TypeFact::Tag));
+        assert_eq!(
+            tag_fact("none"),
+            None,
+            "a tag restating the predeclared none carries no fact"
         );
     }
 

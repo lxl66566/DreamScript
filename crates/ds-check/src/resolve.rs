@@ -1121,6 +1121,7 @@ impl Package {
                             .contains_key(&fact.enum_name)
                             .then_some(DefKind::Case),
                         Some(crate::import::TypeFact::Alias(..)) => Some(DefKind::TypeAlias),
+                        Some(crate::import::TypeFact::Tag) => Some(DefKind::Tag),
                         None => None,
                     };
                     let free = entry.name != "none"
