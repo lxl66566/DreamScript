@@ -62,6 +62,7 @@ fn the_file_time_face_runs_through_the_ambient() {
             "bytes 4 112\n",
             "total 8000\n",
             "clock true\n",
+            "mono true\n",
             "{\"a\":[1,true,null]}\n",
             "0\n",
         ),

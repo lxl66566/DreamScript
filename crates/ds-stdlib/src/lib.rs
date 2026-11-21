@@ -112,6 +112,8 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("read_raw", "fsys")
         .with("close_raw", "fsys")
         .with("time", "time")
+        .with("mono", "time")
+        .with("sleep", "time")
         .with("eprintln", "console")
         .with("eprint", "console")
         .with("read_line", "console")
@@ -132,7 +134,8 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 /// * `fsys`: the file readers, writers, and the handle face (`open_file`, `read_raw`, `close_raw`).
 /// * `net`: the TCP surface, its linear handle face (`net_connect` answering `net_handle`, the
 ///   ds-source `send`/`recv`/`close_conn` handlers over it), and `http_get`.
-/// * `time`: the clock op.
+/// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read) and the parking
+///   `sleep` (the 2026-11-21 timer ruling).
 /// * `proc`: the CLI process surface — string argv, the environment read, and process spawn.
 ///
 /// The table is built on first read and shared: a consumer that must own

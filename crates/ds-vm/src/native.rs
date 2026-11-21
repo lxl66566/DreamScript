@@ -358,7 +358,8 @@
 use std::{
     io::Write,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::LazyLock,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ds_abi::{SlotType, Staging};
@@ -4257,10 +4258,10 @@ pub(crate) fn fs_list_fn(
     })
 }
 
-/// `time() -> int`: the body behind the platform ABI's `time` op (the
-/// `time` capability's one op) — epoch nanoseconds, the duration since
-/// the Unix epoch clamped at zero before it. The minimal face: every
-/// richer clock (monotonic, zone-aware) layers over this word.
+/// `time() -> int`: the body behind the platform ABI's `time` op —
+/// epoch nanoseconds, the duration since the Unix epoch clamped at
+/// zero before it (the wall clock; durations measured over it bend
+/// with the host's own clock adjustments).
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn time_fn(
     _heaps: &mut Heaps,
@@ -4274,6 +4275,51 @@ pub(crate) fn time_fn(
     Ok(NativeResult::Word(Value::I64(
         i64::try_from(nanos).unwrap_or(i64::MAX),
     )))
+}
+
+/// The monotonic clock's origin: fixed at the process's first `mono`
+/// read, an arbitrary point whose only contract is that later reads
+/// never go backward — differences between two reads measure elapsed
+/// time, the absolute word carries no meaning.
+static MONO_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// `mono() -> int`: the body behind the platform ABI's `mono` op (the
+/// time face's timer capability, the 2026-11-21 ruling) — monotonic
+/// nanoseconds since the process-fixed origin, never moving backward
+/// and never bending with the host's wall-clock adjustments. The
+/// natural pair for `sleep`: a span measured over `mono` words is the
+/// span `sleep` waits.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn mono_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let nanos = MONO_ORIGIN.elapsed().as_nanos();
+    Ok(NativeResult::Word(Value::I64(
+        i64::try_from(nanos).unwrap_or(i64::MAX),
+    )))
+}
+
+/// `sleep(nanos: int) -> ()`: the body behind the platform ABI's
+/// `sleep` op — park the calling fiber for at least the requested
+/// nanoseconds (a negative span answers at once), the timer-only wait
+/// shape: no IO interest, the deadline wheel's firing the completion
+/// itself. Under no installed reactor the blocking twin sleeps the
+/// thread — the embedder's platform choice, never a language fact.
+pub(crate) fn sleep_fn(
+    _heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let nanos = i64_arg(args, 0)?;
+    let span = Duration::from_nanos(nanos.max(0) as u64);
+    if out.net().parking() {
+        let deadline = Instant::now() + span;
+        return Ok(NativeResult::Park(crate::sched::WorldWait::sleep(deadline)));
+    }
+    std::thread::sleep(span);
+    Ok(NativeResult::Word(Value::I64(0)))
 }
 
 pub(crate) fn file_size_fn(

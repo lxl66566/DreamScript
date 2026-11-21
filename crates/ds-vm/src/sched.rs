@@ -1,8 +1,8 @@
 //! The IO scheduler's data (the 2026-11-21 scheduler ruling): the wait
 //! table, the deadline wheel, and the FIFO run queue. A fiber parking
 //! on a world op records what it waits for (an IO readiness interest
-//! plus a bounded deadline — the net face's own wait bound, and the
-//! timer half of the discipline the time face's sleep op will ride);
+//! plus a bounded deadline — the net face's own wait bound — or the
+//! timer-only wait, the time face's sleep op riding the same wheel);
 //! the wake completes the parked op against the fiber's own store and
 //! stages the answer for delivery at the resume point, the fiber
 //! entering the run queue in wake order (FIFO fairness — the pure
@@ -50,6 +50,11 @@ pub enum WorldWait {
         data: Vec<u8>,
         deadline: Instant,
     },
+    /// `sleep(nanos)`: the timer-only wait — no IO interest, no
+    /// deregistration target, the wheel's own firing IS the
+    /// completion, answering the unit word (the time face's op, the
+    /// 2026-11-21 timer ruling).
+    Sleep { deadline: Instant },
 }
 
 impl WorldWait {
@@ -74,28 +79,41 @@ impl WorldWait {
         }
     }
 
+    /// A sleep wait's constructor: the requested span already folded
+    /// into its deadline, the wheel the only wake there is.
+    #[must_use]
+    pub fn sleep(deadline: Instant) -> Self {
+        Self::Sleep { deadline }
+    }
+
     /// The wait's deadline.
     #[must_use]
     pub fn deadline(&self) -> Instant {
         match self {
-            Self::Recv { deadline, .. } | Self::Send { deadline, .. } => *deadline,
+            Self::Recv { deadline, .. }
+            | Self::Send { deadline, .. }
+            | Self::Sleep { deadline } => *deadline,
         }
     }
 
-    /// The connection the wait names (its deregistration target).
+    /// The connection the wait names (its deregistration target),
+    /// `None` for the timer-only wait.
     #[must_use]
-    pub fn conn(&self) -> i64 {
+    pub fn conn(&self) -> Option<i64> {
         match self {
-            Self::Recv { conn, .. } | Self::Send { conn, .. } => *conn,
+            Self::Recv { conn, .. } | Self::Send { conn, .. } => Some(*conn),
+            Self::Sleep { .. } => None,
         }
     }
 
-    /// The direction the wait watches.
+    /// The direction the wait watches, `None` for the timer-only wait
+    /// (no IO interest stands).
     #[must_use]
-    pub fn direction(&self) -> Direction {
+    pub fn direction(&self) -> Option<Direction> {
         match self {
-            Self::Recv { .. } => Direction::Read,
-            Self::Send { .. } => Direction::Write,
+            Self::Recv { .. } => Some(Direction::Read),
+            Self::Send { .. } => Some(Direction::Write),
+            Self::Sleep { .. } => None,
         }
     }
 
@@ -106,13 +124,13 @@ impl WorldWait {
         match self {
             Self::Recv { .. } => "net_recv",
             Self::Send { .. } => "net_send",
+            Self::Sleep { .. } => "time_sleep",
         }
     }
 }
 
 /// One live wait: the parked fiber, the pending op, and the IO handle
-/// its interest registered (a timer-only wait carries none — the shape
-/// the time face's sleep op will take).
+/// its interest registered (a timer-only wait carries none).
 #[derive(Clone, Debug)]
 pub(crate) struct WaitEntry {
     pub(crate) fiber: FiberId,
@@ -243,5 +261,18 @@ mod tests {
             "the later deadline once due, stale-free"
         );
         assert_eq!(sched.next_deadline(), None);
+    }
+
+    /// The timer-only wait's shape: no connection to deregister, no
+    /// direction to watch, the deadline the whole of the wait.
+    #[test]
+    fn the_sleep_wait_names_no_io_interest() {
+        let at = Instant::now() + Duration::from_millis(5);
+        let wait = WorldWait::sleep(at);
+        assert_eq!(wait.deadline(), at);
+        assert_eq!(wait.conn(), None, "no deregistration target");
+        assert_eq!(wait.direction(), None, "no readiness direction");
+        assert_eq!(wait.op_name(), "time_sleep");
+        assert_eq!(wait, WorldWait::Sleep { deadline: at });
     }
 }

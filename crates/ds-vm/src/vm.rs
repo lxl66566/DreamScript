@@ -5394,12 +5394,11 @@ impl Vm {
     /// `WorldParked` state until a wake moves it to the run queue.
     pub(crate) fn register_wait(&mut self, fiber: FiberId, wait: WorldWait) {
         let op = wait.op_name();
-        let conn = wait.conn().to_string();
+        let conn = wait.conn().map(|conn| conn.to_string()).unwrap_or_default();
         let deadline = wait.deadline();
-        let direction = wait.direction();
-        let handle = self.out.net().raw_handle(wait.conn());
+        let handle = wait.conn().and_then(|conn| self.out.net().raw_handle(conn));
         let token = self.sched.mint();
-        if let Some(handle) = handle {
+        if let (Some(handle), Some(direction)) = (handle, wait.direction()) {
             let registered = match self.reactor.as_mut() {
                 Some(installed) => installed.driver().register(handle, direction, token),
                 None => Err(crate::reactor::ReactorError(
@@ -5482,7 +5481,18 @@ impl Vm {
             return;
         };
         let fiber = entry.fiber;
-        let conn = entry.wait.conn().to_string();
+        // the timer-only wait: the wheel's firing IS the op's completion
+        // — the unit word delivered at the parked site, no readiness to
+        // consume and no error span the op could answer
+        if matches!(entry.wait, WorldWait::Sleep { .. }) {
+            self.finish_wait(token, NativeResult::Word(Value::I64(0)));
+            return;
+        }
+        let conn = entry
+            .wait
+            .conn()
+            .map(|conn| conn.to_string())
+            .unwrap_or_default();
         let op = entry.wait.op_name();
         if entry.wait.deadline() <= Instant::now() {
             let bound = self.out.net().timeout();
@@ -5499,6 +5509,9 @@ impl Vm {
             return;
         }
         let result = match entry.wait {
+            // the timer-only wait completed at its own arm above; the
+            // arm keeps this match total
+            WorldWait::Sleep { .. } => unreachable!("the sleep completed at its own arm"),
             WorldWait::Recv { conn: id, max, .. } => {
                 let Some(event) = ready.filter(|event| event.read) else {
                     return;
@@ -5556,11 +5569,13 @@ impl Vm {
     /// The single-thread executor's wait: fire every expired deadline,
     /// then — while nothing is runnable — poll the reactor with the
     /// distance to the nearest deadline as the timeout, completing
-    /// whatever the events answer. The context releases first (the
-    /// pool slots hold every fiber's true store while the scheduler
-    /// runs). A reactor refusal fails every standing wait with its own
-    /// refusal span, so the program surfaces the failure through its
-    /// error channel; the stall guard answers
+    /// whatever the events answer; waits with no registered IO
+    /// interest (the sleep's timer-only shape) wait the nearest
+    /// deadline out on the thread instead, the wheel their whole wake.
+    /// The context releases first (the pool slots hold every fiber's
+    /// true store while the scheduler runs). A reactor refusal fails
+    /// every standing IO wait with its own refusal span, so the program
+    /// surfaces the failure through its error channel; the stall guard answers
     /// [`Trap::SchedulerDeadlock`] when nothing is runnable and
     /// nothing can wake.
     fn wait_world(&mut self) -> Result<(), Trap> {
@@ -5578,6 +5593,25 @@ impl Vm {
             }
             if !self.sched.can_wake() {
                 return Err(Trap::SchedulerDeadlock);
+            }
+            // no registered IO interest stands: the wheel alone wakes
+            // the waits that are left (a sleep parks with none, and a
+            // wait the reactor refused never gained one), so the
+            // thread waits the nearest deadline out — a broken or
+            // absent reactor cannot strand a timer
+            if !self
+                .sched
+                .waits
+                .values()
+                .any(|entry| entry.handle.is_some())
+            {
+                match self.sched.next_deadline() {
+                    Some(at) => {
+                        std::thread::sleep(at.saturating_duration_since(Instant::now()));
+                    },
+                    None => return Err(Trap::SchedulerDeadlock),
+                }
+                continue;
             }
             let Some(mut installed) = self.reactor.take() else {
                 return Err(Trap::SchedulerDeadlock);
@@ -5601,8 +5635,18 @@ impl Vm {
                         let Some(entry) = self.sched.waits.get(&token).cloned() else {
                             continue;
                         };
+                        // a sleep never touched the reactor: the wheel
+                        // still owes it, and the branch above answers a
+                        // reactor-less wait without one
+                        if matches!(entry.wait, WorldWait::Sleep { .. }) {
+                            continue;
+                        }
                         let detail = format!("reactor: {}", err.0);
-                        let conn = entry.wait.conn().to_string();
+                        let conn = entry
+                            .wait
+                            .conn()
+                            .map(|conn| conn.to_string())
+                            .unwrap_or_default();
                         let op = entry.wait.op_name();
                         let result = self.complete_in_store(entry.fiber, |heaps| {
                             crate::net::net_err(

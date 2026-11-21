@@ -21,7 +21,8 @@
 //! against the console-only face; a library embedder constructs a bare
 //! VM and installs nothing — no platform means no world surface — and
 //! a test embedder installs the subset it wants to serve. The `time`
-//! capability's op answers epoch nanoseconds.
+//! capability answers the wall clock, the monotonic clock, and the
+//! parking sleep (the 2026-11-21 timer ruling).
 
 use ds_abi::SlotType;
 
@@ -146,9 +147,13 @@ pub const OP_ENV: u32 = 21;
 pub const OP_PROC_RUN: u32 = 22;
 /// `exit`: proc (the `exit(code)` host member's deliberate-status seam).
 pub const OP_EXIT: u32 = 23;
+/// `mono`: time (the monotonic clock read, the 2026-11-21 timer ruling).
+pub const OP_MONO: u32 = 24;
+/// `sleep`: time (the parking sleep op over the timer-only wait shape).
+pub const OP_SLEEP: u32 = 25;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 24;
+pub const OP_COUNT: u32 = 26;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -190,6 +195,8 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "env",         capability: Capability::Proc,    params: &[SlotType::Ref],        result_words: 2, func: crate::proc::env_fn },
     Op { name: "proc_run",    capability: Capability::Proc,    params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::proc::proc_run_fn },
     Op { name: "exit",        capability: Capability::Proc,    params: &[SlotType::I64],       result_words: 1, func: crate::proc::exit_fn },
+    Op { name: "mono",        capability: Capability::Time,    params: &[],                    result_words: 1, func: crate::native::mono_fn },
+    Op { name: "sleep",       capability: Capability::Time,    params: &[SlotType::I64],       result_words: 1, func: crate::native::sleep_fn },
 ];
 
 macro_rules! unserved {
@@ -228,6 +235,8 @@ unserved!(unserved_op_20 at 20);
 unserved!(unserved_op_21 at 21);
 unserved!(unserved_op_22 at 22);
 unserved!(unserved_op_23 at 23);
+unserved!(unserved_op_24 at 24);
+unserved!(unserved_op_25 at 25);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -238,6 +247,7 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_12, unserved_op_13, unserved_op_14, unserved_op_15,
     unserved_op_16, unserved_op_17, unserved_op_18, unserved_op_19,
     unserved_op_20, unserved_op_21, unserved_op_22, unserved_op_23,
+    unserved_op_24, unserved_op_25,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -384,7 +394,11 @@ mod tests {
         assert_eq!(OPS[OP_ENV as usize].name, "env");
         assert_eq!(OPS[OP_PROC_RUN as usize].name, "proc_run");
         assert_eq!(OPS[OP_EXIT as usize].name, "exit");
-        assert_eq!(OPS.len(), 24);
+        assert_eq!(OPS[OP_MONO as usize].name, "mono");
+        assert_eq!(OPS[OP_MONO as usize].capability, Capability::Time);
+        assert_eq!(OPS[OP_SLEEP as usize].name, "sleep");
+        assert_eq!(OPS[OP_SLEEP as usize].capability, Capability::Time);
+        assert_eq!(OPS.len(), 26);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -425,6 +439,11 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses fsys");
         }
         assert!(!console.serves(OP_TIME), "a console platform refuses time");
+        assert!(!console.serves(OP_MONO), "a console platform refuses mono");
+        assert!(
+            !console.serves(OP_SLEEP),
+            "a console platform refuses sleep"
+        );
         for index in [OP_ARGS, OP_ENV, OP_PROC_RUN, OP_EXIT] {
             assert!(!console.serves(index), "a console platform refuses proc");
         }
@@ -439,7 +458,7 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 24);
+        assert_eq!(table.len(), 26);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }

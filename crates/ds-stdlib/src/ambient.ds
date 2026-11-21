@@ -490,9 +490,19 @@ pub extern fn file_size (path: string) -> int
 pub extern fn open_file (path: string) -> file_handle
 pub extern fn read_raw (fd: int, n: int) -> bytes | io_err
 pub extern fn close_raw (fd: int) -> ()
-// The clock: the `time` capability's one op, epoch nanoseconds (the
-// minimal face — a monotonic or zone-aware clock layers over this word).
+// The clock pair: `time` answers epoch nanoseconds (the wall clock —
+// durations measured over it bend with the host's clock adjustments),
+// `mono` monotonic nanoseconds since a process-fixed origin that never
+// moves backward, the word whose differences measure elapsed time.
 pub extern fn time () -> int
+pub extern fn mono () -> int
+// The parking sleep: parks the calling fiber for at least the given
+// nanoseconds (a negative span answering at once) — the timer-only
+// wait over the deadline wheel, the 2026-11-21 timer ruling; under no
+// installed reactor the blocking twin sleeps the thread. The promised
+// `timeout`/`firstof`/`interleave` combinators layer over this op as
+// ordinary library code.
+pub extern fn sleep (nanos: int) -> ()
 // The process face (the CLI process surface, 2026-11-21): `args`
 // answers the process arguments the host staged (`ds run`'s `--args`
 // words) as a list of strings, `env` reads one process environment

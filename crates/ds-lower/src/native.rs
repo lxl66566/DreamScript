@@ -830,6 +830,23 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 23,
         shape: NativeShape::Total(SlotType::I64),
     },
+    Native {
+        // the monotonic clock read: nanoseconds since a process-fixed
+        // origin, never moving backward
+        name: "mono",
+        module: NativeModule::Platform,
+        index: 24,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the parking sleep: the unit word on wake (the timer-only
+        // wait under an installed reactor, the thread's own sleep
+        // otherwise)
+        name: "sleep",
+        module: NativeModule::Platform,
+        index: 25,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.

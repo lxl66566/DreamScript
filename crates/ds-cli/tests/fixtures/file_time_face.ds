@@ -52,5 +52,12 @@ println("bytes ${read_probe("file_time_probe.txt").err((_: io_err) => "x")}")
 println("total ${sum_reads("file_time_probe.txt", 2000)}")
 const t1 = time()
 println("clock ${t0 <= t1 && t0 > 1700000000000000000}")
+// The timer capability (the 2026-11-21 ruling): the monotonic clock's
+// bracket around a parking sleep — the span over `mono` words covers
+// the request whether the host parks the fiber or blocks the thread.
+const m0 = mono()
+sleep(50000000)
+const m1 = mono()
+println("mono ${m1 >= m0 && m1 - m0 >= 50000000}")
 const j = parse_json(" { \"a\" : [ 1 , true , null ] } ")
 if j is parse_err { println("failed") } else { println(to_json(j)) }
