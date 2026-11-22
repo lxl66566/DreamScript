@@ -2,16 +2,17 @@
 //!
 //! The net ops of the platform ABI's fixed table (the table contract in
 //! `platform`'s module docs): `net_connect`, `net_send`,
-//! `net_recv`, `net_close`, and `http_get`. The fallible four answer with
-//! the uniform two-word tag+payload span [BL-2]
+//! `net_recv`, `net_close`, `http_get`, and the listener face
+//! `net_listen`/`net_accept`/`net_listener_close`. The fallible ops
+//! answer with the uniform two-word tag+payload span [BL-2]
 //! — the shared success marker on word 0, the payload on word 1 — and
 //! failures carry the class discriminant of the ambient `net_err` case
 //! they answer by error class (ruled 2026-11-12): a bounded wait that
 //! expired answers `timeout`, every other failure `refused`, the
 //! message `Ref` as payload shaped `"op target: detail"` like the file
-//! natives' `io_err` messages. `net_close` alone answers the inert unit
-//! word (the idempotent close seam the handle deinit pairs with,
-//! `close_raw`'s contract).
+//! natives' `io_err` messages. `net_close` and `net_listener_close`
+//! alone answer the inert unit word (the idempotent close seams the
+//! handle deinits pair with, `close_raw`'s contract).
 //!
 //! # Connection handles and lifetime
 //!
@@ -44,18 +45,20 @@
 //! # Parking discipline (the 2026-11-21 scheduler ruling)
 //!
 //! Installing a reactor on the VM ([`crate::Vm::install_reactor`]) flips
-//! the registered-connection surface to non-blocking and the two data
+//! the registered-connection surface to non-blocking and the data
 //! natives to parking: `net_recv`/`net_send` attempt the op once
 //! non-blocking and, when it would block, answer a park request the
 //! dispatcher registers with the scheduler — the fiber parks, the drive
 //! runs the next ready fiber, and the reactor's readiness (or the same
 //! configured timeout, restated as the wait's deadline) completes the op
-//! and delivers its answer at the parked site. Blocking stays the
+//! and delivers its answer at the parked site. `net_accept` parks the
+//! same way on the listener's own readability (a pending connection is
+//! readable), the wake performing the accept and registering the
+//! accepted stream like a connecting one. Blocking stays the
 //! embedder's platform choice: no reactor installed, the natives below
-//! block exactly as before. The parking surface is the handle face alone
-//! this round — `net_connect` and the `http_get` exchanges keep their
-//! bounded blocking waits (std cannot open a non-connecting socket), a
-//! boundary the item 76 server round revisits.
+//! block exactly as before. `net_connect` and the `http_get` exchanges
+//! keep their bounded blocking waits (std cannot open a non-connecting
+//! socket), the remaining boundary of the 2026-11-21 ruling.
 //!
 //! # Caps
 //!
@@ -79,7 +82,7 @@
 
 use std::{
     io::{self, ErrorKind, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::Arc,
     time::Duration,
 };
@@ -105,6 +108,11 @@ const HTTP_PORT: u16 = 80;
 
 /// The read size of the `http_get` response loop.
 const HTTP_CHUNK: usize = 8192;
+
+/// The poll interval of the blocking accept's bounded wait (std's
+/// listener carries no OS accept timeout, so the non-blocking socket
+/// polls to its deadline).
+const ACCEPT_POLL: Duration = Duration::from_millis(1);
 
 /// The VM-side connection table: the sockets `net_connect` opens, keyed by
 /// the monotonic handle ids it hands out. VM state, not heap state: the
@@ -139,6 +147,7 @@ impl Default for Connections {
 
 /// One non-blocking attempt's outcome: the completed (or failed) op, or
 /// the would-block the caller parks on.
+#[derive(Debug)]
 pub(crate) enum NetAttempt<T> {
     /// The op ran: its result, success or failure.
     Done(Result<T, io::Error>),
@@ -335,9 +344,184 @@ impl Connections {
     }
 }
 
+/// The server half's listener table: the sockets `net_listen` binds,
+/// keyed by the monotonic handle ids it hands out. The same lifetime
+/// rule as the connection table (see the module docs): VM state riding
+/// the output sink, the sink's drop closing every listener still open
+/// when the VM goes away. An accepted stream registers into the
+/// connection table like a connecting one, so the accepted connection
+/// owns the `net_handle` face in full — send, recv, and the closing
+/// deinit.
+#[derive(Debug)]
+pub(crate) struct Listeners {
+    bound: Vec<(i64, TcpListener)>,
+    next_id: i64,
+    timeout: Duration,
+    /// Whether the parking discipline owns `net_accept`: a reactor
+    /// installed on the VM flips this, and a bound listener answers
+    /// would-block to the thread — never a block.
+    parking: bool,
+}
+
+impl Default for Listeners {
+    fn default() -> Self {
+        Self {
+            bound: Vec::new(),
+            next_id: 0,
+            timeout: NET_TIMEOUT,
+            parking: false,
+        }
+    }
+}
+
+impl Listeners {
+    /// Bounds the blocking accept wait from now on (the connection
+    /// table's bound and this one set together, one `set_net_timeout`).
+    pub(crate) fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// The configured accept bound.
+    #[must_use]
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Flips `net_accept` to the parking discipline (a reactor was
+    /// installed on the VM): bound listeners go non-blocking now and
+    /// at every later bind.
+    pub(crate) fn enable_parking(&mut self) {
+        self.parking = true;
+        for (_, listener) in &mut self.bound {
+            let _ = listener.set_nonblocking(true);
+        }
+    }
+
+    /// Whether `net_accept` parks (a reactor is installed).
+    pub(crate) fn parking(&self) -> bool {
+        self.parking
+    }
+
+    /// Binds a listener on `host:port` without registering it: the
+    /// first address that resolves and binds wins, the last bind error
+    /// the report.
+    pub(crate) fn open(host: &str, port: u16) -> io::Result<TcpListener> {
+        let mut last = io::Error::new(ErrorKind::NotFound, "no address resolved");
+        for addr in (host, port).to_socket_addrs()? {
+            match TcpListener::bind(addr) {
+                Ok(listener) => return Ok(listener),
+                Err(err) => last = err,
+            }
+        }
+        Err(last)
+    }
+
+    /// Registers `listener` and answers its handle. Used by
+    /// `net_listen`.
+    pub(crate) fn register(&mut self, listener: TcpListener) -> i64 {
+        if self.parking {
+            // the reactor owns readiness: a bound listener answers
+            // would-block to the thread, never a block
+            let _ = listener.set_nonblocking(true);
+        }
+        let id = self.next_id;
+        self.next_id = id + 1;
+        self.bound.push((id, listener));
+        id
+    }
+
+    /// One non-blocking accept attempt on handle `lid`, `Park` when no
+    /// connection stands ready. The parked twin of [`Listeners::accept`].
+    pub(crate) fn try_accept(&mut self, lid: i64) -> NetAttempt<TcpStream> {
+        let timeout = self.timeout;
+        let Ok(listener) = self.listener(lid) else {
+            return NetAttempt::Done(Err(unknown_listener(lid)));
+        };
+        let _ = listener.set_nonblocking(true);
+        match listener.accept() {
+            Ok((stream, _)) => NetAttempt::Done(Ok(stream)),
+            Err(err) if err.kind() == ErrorKind::WouldBlock => NetAttempt::Park,
+            Err(err) => NetAttempt::Done(Err(normalize(err, timeout))),
+        }
+    }
+
+    /// The bounded blocking accept on handle `lid`: std's listener
+    /// carries no OS accept timeout, so the non-blocking socket polls
+    /// to the configured deadline — the same bound every blocking net
+    /// wait keeps, polled rather than waited because that is the only
+    /// portable shape.
+    pub(crate) fn accept(&mut self, lid: i64) -> io::Result<TcpStream> {
+        let timeout = self.timeout;
+        let listener = self.listener(lid)?;
+        let _ = listener.set_nonblocking(true);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            format!("timed out after {timeout:?}"),
+                        ));
+                    }
+                    std::thread::sleep(ACCEPT_POLL);
+                },
+                Err(err) => return Err(normalize(err, timeout)),
+            }
+        }
+    }
+
+    /// Closes handle `lid` and removes it from the table; later uses of
+    /// the handle answer "unknown listener". Total and idempotent: an
+    /// unknown handle is a no-op (the deinit pairing's contract).
+    pub(crate) fn close(&mut self, lid: i64) {
+        self.bound.retain(|(id, _)| *id != lid);
+    }
+
+    /// The OS-level handle of one bound listener, the reactor's
+    /// registration key; `None` for an unknown handle (the caller's
+    /// park then rides its deadline alone).
+    pub(crate) fn raw_handle(&mut self, lid: i64) -> Option<crate::reactor::IoHandle> {
+        let listener = self.listener(lid).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Some(crate::reactor::IoHandle(
+                u64::try_from(listener.as_raw_fd()).ok()?,
+            ))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            Some(crate::reactor::IoHandle(
+                u64::try_from(listener.as_raw_socket()).ok()?,
+            ))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
+    }
+
+    /// The listener of handle `lid`.
+    fn listener(&mut self, lid: i64) -> io::Result<&mut TcpListener> {
+        self.bound
+            .iter_mut()
+            .find(|(id, _)| *id == lid)
+            .map(|(_, listener)| listener)
+            .ok_or_else(|| unknown_listener(lid))
+    }
+}
+
 /// The "unknown connection" error, shared by every handle lookup.
 fn unknown(conn: i64) -> io::Error {
     io::Error::other(format!("unknown connection {conn}"))
+}
+
+/// The "unknown listener" error, shared by every listener lookup.
+fn unknown_listener(lid: i64) -> io::Error {
+    io::Error::other(format!("unknown listener {lid}"))
 }
 
 /// Renders a timed-out wait as its own detail instead of the OS's
@@ -676,6 +860,99 @@ pub(crate) fn net_close_fn(
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
+/// `net_listen(host: string, port: int) -> int | net_err`: binds a
+/// listener on `host:port` and answers its handle. The bound failure
+/// classes land on their tags (`addr_in_use` among them); the ambient
+/// declares the total `net_listener` spelling over this span, so a
+/// failed bind prints the net error line and halts (`net_connect`'s
+/// own printing-halt pairing).
+pub(crate) fn net_listen_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let host = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let port = i64_arg(args, 1)?;
+    let Some(port) = u16::try_from(port).ok() else {
+        return Ok(net_err(
+            heaps,
+            NetClass::Refused,
+            "net_listen",
+            &format!("{host}:{port}"),
+            "port out of range",
+        ));
+    };
+    let target = format!("{host}:{port}");
+    match Listeners::open(&host, port) {
+        Ok(listener) => Ok(ok(Value::I64(out.listeners().register(listener)))),
+        Err(err) => Ok(net_err(
+            heaps,
+            NetClass::of(&err),
+            "net_listen",
+            &target,
+            &err.to_string(),
+        )),
+    }
+}
+
+/// `net_accept(lid: int) -> int | net_err`: takes one pending
+/// connection off the bound listener, registering the accepted stream
+/// into the connection table so it owns the `net_handle` face in full.
+/// Under an installed reactor the accept parks on the listener's
+/// readability (the wake performing the accept); otherwise the wait
+/// blocks the thread, bounded by the configured net timeout.
+pub(crate) fn net_accept_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let lid = i64_arg(args, 0)?;
+    let target = lid.to_string();
+    if out.listeners().parking() {
+        return match out.listeners().try_accept(lid) {
+            NetAttempt::Done(Ok(stream)) => Ok(ok(Value::I64(out.net().register(stream)))),
+            NetAttempt::Done(Err(err)) => Ok(net_err(
+                heaps,
+                NetClass::of(&err),
+                "net_accept",
+                &target,
+                &err.to_string(),
+            )),
+            NetAttempt::Park => {
+                let deadline = std::time::Instant::now() + out.listeners().timeout();
+                Ok(NativeResult::Park(crate::sched::WorldWait::accept(
+                    lid, deadline,
+                )))
+            },
+        };
+    }
+    match out.listeners().accept(lid) {
+        Ok(stream) => Ok(ok(Value::I64(out.net().register(stream)))),
+        Err(err) => Ok(net_err(
+            heaps,
+            NetClass::of(&err),
+            "net_accept",
+            &target,
+            &err.to_string(),
+        )),
+    }
+}
+
+/// `net_listener_close(lid: int) -> ()`: the raw idempotent-close seam
+/// the `net_listener` deinit pairs with, `net_close`'s own contract.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn net_listener_close_fn(
+    _heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    if let Value::I64(lid) = args.first().copied().unwrap_or(Value::I64(0)) {
+        out.listeners().close(lid);
+    }
+    // the inert unit word
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
 /// `http_get(url: string) -> string | net_err`: the plain body a
 /// tls-omitting host serves — HTTP/1.0 over TCP only, an `https://` URL
 /// answered by the unprovided-capability `net_err`. See the module docs
@@ -828,5 +1105,68 @@ mod tests {
                 actual: SlotType::I64,
             })
         );
+        // net_accept(lid) and net_listen(host, port) name their own slots
+        // the same way
+        assert_eq!(
+            net_accept_fn(&mut heaps, &mut out, &[Value::Ref(RefId::new(
+                FIBER_ROOT, host
+            ))]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 0,
+                expected: SlotType::I64,
+                actual: SlotType::Ref,
+            })
+        );
+        assert_eq!(
+            net_listen_fn(&mut heaps, &mut out, &[Value::I64(1), Value::I64(80)]),
+            Err(Trap::SlotTypeMismatch {
+                slot: 0,
+                expected: SlotType::Ref,
+                actual: SlotType::I64,
+            })
+        );
+    }
+
+    /// The server half's spans: a port out of range answers the refused
+    /// class before any socket opens, a bind against a held port answers
+    /// the addr_in_use class, and an unknown listener is the same floor
+    /// every unknown handle is (the close of one the idempotent no-op).
+    #[test]
+    fn the_listener_table_names_its_classes() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<crate::fiber::Fiber> = Vec::new();
+        let mut claims: Vec<crate::claims::ClaimTable> = vec![crate::claims::ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let host = heaps.current().intern("127.0.0.1");
+        let held = TcpListener::bind("127.0.0.1:0").expect("the held probe");
+        let port = held.local_addr().expect("bound address").port();
+        let listen_tag =
+            |heaps: &mut Heaps, out: &mut OutputSink, port: i64| match net_listen_fn(heaps, out, &[
+                Value::Ref(RefId::new(FIBER_ROOT, host)),
+                Value::I64(port),
+            ]) {
+                Ok(NativeResult::Tag { tag, .. }) => tag,
+                other => panic!("the listen answered no span: {other:?}"),
+            };
+        assert_eq!(
+            listen_tag(&mut heaps, &mut out, 65536),
+            PLATFORM_NET_REFUSED,
+            "a port out of range names the refused class"
+        );
+        assert_eq!(
+            listen_tag(&mut heaps, &mut out, i64::from(port)),
+            PLATFORM_NET_ADDR_IN_USE,
+            "a held port names the addr_in_use class"
+        );
+        let mut listeners = Listeners::default();
+        match listeners.try_accept(7) {
+            NetAttempt::Done(Err(err)) => {
+                assert_eq!(err.to_string(), "unknown listener 7");
+                assert_eq!(NetClass::of(&err), NetClass::Other);
+            },
+            other => panic!("an unknown handle answers its own error: {other:?}"),
+        }
+        listeners.close(7);
     }
 }

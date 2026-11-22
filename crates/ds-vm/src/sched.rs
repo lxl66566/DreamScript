@@ -50,6 +50,11 @@ pub enum WorldWait {
         data: Vec<u8>,
         deadline: Instant,
     },
+    /// `net_accept(lid)`: the readable wake (a pending connection is
+    /// readable) performs the accept and answers the accepted
+    /// connection's handle, the stream registering into the connection
+    /// table like a connecting one.
+    Accept { listener: i64, deadline: Instant },
     /// `sleep(nanos)`: the timer-only wait — no IO interest, no
     /// deregistration target, the wheel's own firing IS the
     /// completion, answering the unit word (the time face's op, the
@@ -86,22 +91,34 @@ impl WorldWait {
         Self::Sleep { deadline }
     }
 
+    /// An accept wait's constructor (the listener's own handle rides
+    /// in; the deadline the configured net timeout restated).
+    #[must_use]
+    pub fn accept(listener: i64, deadline: Instant) -> Self {
+        Self::Accept { listener, deadline }
+    }
+
     /// The wait's deadline.
     #[must_use]
     pub fn deadline(&self) -> Instant {
         match self {
             Self::Recv { deadline, .. }
             | Self::Send { deadline, .. }
+            | Self::Accept { deadline, .. }
             | Self::Sleep { deadline } => *deadline,
         }
     }
 
-    /// The connection the wait names (its deregistration target),
-    /// `None` for the timer-only wait.
+    /// The handle id the wait names (its error-span target), `None`
+    /// for the timer-only wait. A recv or send names a connection; an
+    /// accept names the listener (its IO interest resolves through the
+    /// listener table, not the connection table — the registration
+    /// site dispatches on the shape).
     #[must_use]
     pub fn conn(&self) -> Option<i64> {
         match self {
             Self::Recv { conn, .. } | Self::Send { conn, .. } => Some(*conn),
+            Self::Accept { listener, .. } => Some(*listener),
             Self::Sleep { .. } => None,
         }
     }
@@ -111,7 +128,7 @@ impl WorldWait {
     #[must_use]
     pub fn direction(&self) -> Option<Direction> {
         match self {
-            Self::Recv { .. } => Some(Direction::Read),
+            Self::Recv { .. } | Self::Accept { .. } => Some(Direction::Read),
             Self::Send { .. } => Some(Direction::Write),
             Self::Sleep { .. } => None,
         }
@@ -124,6 +141,7 @@ impl WorldWait {
         match self {
             Self::Recv { .. } => "net_recv",
             Self::Send { .. } => "net_send",
+            Self::Accept { .. } => "net_accept",
             Self::Sleep { .. } => "time_sleep",
         }
     }

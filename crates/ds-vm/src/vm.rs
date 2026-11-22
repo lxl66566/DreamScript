@@ -2859,7 +2859,7 @@ impl Vm {
     /// executor ruled post-1.0. A host that installs nothing keeps the
     /// blocking natives: the same source, the embedder's choice.
     pub fn install_reactor(&mut self, reactor: Box<dyn Reactor>) {
-        self.out.net().enable_parking();
+        self.out.enable_net_parking();
         self.reactor = Some(InstalledReactor(reactor));
     }
 
@@ -5453,7 +5453,13 @@ impl Vm {
         let op = wait.op_name();
         let conn = wait.conn().map(|conn| conn.to_string()).unwrap_or_default();
         let deadline = wait.deadline();
-        let handle = wait.conn().and_then(|conn| self.out.net().raw_handle(conn));
+        // the wait's IO interest resolves through the table its handle
+        // names: the connection table for the data ops, the listener
+        // table for the accept
+        let handle = match &wait {
+            WorldWait::Accept { listener, .. } => self.out.listeners().raw_handle(*listener),
+            _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
+        };
         let token = self.sched.mint();
         if let (Some(handle), Some(direction)) = (handle, wait.direction()) {
             let registered = match self.reactor.as_mut() {
@@ -5617,6 +5623,31 @@ impl Vm {
                         }
                         return;
                     },
+                }
+            },
+            WorldWait::Accept { listener, .. } => {
+                let Some(event) = ready.filter(|event| event.read) else {
+                    return;
+                };
+                let _ = event;
+                match self.out.listeners().try_accept(listener) {
+                    // the accepted stream registers like a connecting
+                    // one, so the parked wake answers the connection
+                    // handle the caller's net_handle pairs with
+                    crate::net::NetAttempt::Done(Ok(stream)) => {
+                        let conn = self.out.net().register(stream);
+                        crate::net::ok(Value::I64(conn))
+                    },
+                    crate::net::NetAttempt::Done(Err(err)) => {
+                        let class = crate::net::NetClass::of(&err);
+                        let detail = err.to_string();
+                        self.complete_in_store(fiber, |heaps| {
+                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                        })
+                    },
+                    // spurious: the pending connection was consumed
+                    // elsewhere, the wait stands for the next poll
+                    crate::net::NetAttempt::Park => return,
                 }
             },
         };

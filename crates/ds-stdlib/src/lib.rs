@@ -134,7 +134,9 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 /// * `console`: the printing pair, the stderr twins, and the stdin read.
 /// * `fsys`: the file readers, writers, and the handle face (`open_file`, `read_raw`, `close_raw`).
 /// * `net`: the TCP surface, its linear handle face (`net_connect` answering `net_handle`, the
-///   ds-source `send`/`recv`/`close_conn` handlers over it), and `http_get`.
+///   ds-source `send`/`recv`/`close_conn` handlers over it), the server half (`net_listen`
+///   answering the `net_listener` handle with the ds-source `accept`/`close_listener` handlers over
+///   it), and `http_get`.
 /// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read) and the parking
 ///   `sleep` (the 2026-11-21 timer ruling).
 /// * `proc`: the CLI process surface — string argv, the environment read, and process spawn.
@@ -349,6 +351,9 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("net_send", error | world)
         .with("net_recv", error | world)
         .with("net_close", world)
+        .with("net_listen", error | world)
+        .with("net_accept", error | world)
+        .with("net_listener_close", world)
         .with("http_get", error | world)
         .with("open_file", error | world)
         .with("read_raw", error | world)
@@ -377,8 +382,9 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 ///
 /// * `error`: failure handed to the caller — the parse and IO readers.
 /// * `world`: the world-touching capability surface — IO, the file and net handle faces (the reads
-///   and connects fallible, the two idempotent close seams total), the clock, printing (stdout,
-///   stderr, stdin), and the process face (argv, the environment read, process spawn).
+///   and connects fallible, the idempotent close seams total — `close_raw`, `net_close`, and
+///   `net_listener_close`), the clock, printing (stdout, stderr, stdin), and the process face
+///   (argv, the environment read, process spawn).
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 /// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
 ///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
@@ -448,6 +454,9 @@ mod tests {
             "send",
             "recv",
             "close_conn",
+            "net_listen",
+            "accept",
+            "close_listener",
             "time",
             "parse_json",
         ] {
@@ -469,6 +478,7 @@ mod tests {
             "response",
             "file_handle",
             "net_handle",
+            "net_listener",
         ] {
             assert!(package.lookup_type(name).is_some(), "`{name}` is ambient");
         }

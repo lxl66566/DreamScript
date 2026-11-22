@@ -600,3 +600,38 @@ pub fn close_conn (h: net_handle) -> () {
 }
 
 
+
+// The net face's server half (the server surface round): the same
+// discipline as the connection half over the package-owned linear
+// `net_listener`, whose one inline word is the listener table's key.
+// `net_listen` answers this type directly — the total spelling for
+// `net_connect`'s own reason (the handle is deinit-carrying, so a union
+// member holding it refuses), so a failed bind prints the net error
+// line and halts — and `accept` is a ds-source handler over the raw
+// `net_accept` extern, reading the id word out the way `send`/`recv`
+// do (a native call cannot borrow a deinit-carrying argument) and
+// answering the connection half's own `net_handle`: the accepted
+// connection registers like a connecting one, so it owns that face in
+// full. `accept` keeps the total spelling for the same reason, so a
+// failed accept (the configured wait's bound expiring with no pending
+// connection among its classes) halts on the net error line too; a
+// non-halting accept needs a union member holding a deinit-carrying
+// handle, which C5 refuses (an open author question). The deinit
+// closes the listener (a binding dropped without an explicit
+// close_listener still ends clean), and `net_listener_close` is
+// idempotent because the deinit may fire on a handle the owner already
+// closed.
+pub struct net_listener: ~Copyable {
+  lid: int
+  deinit { net_listener_close(self.lid) }
+}
+pub extern fn net_listen (host: string, port: int) -> net_listener
+pub extern fn net_accept (lid: int) -> net_handle
+pub extern fn net_listener_close (lid: int) -> ()
+pub fn accept (l: net_listener) -> net_handle {
+  const conn = net_accept(l.lid)
+  conn
+}
+pub fn close_listener (l: net_listener) -> () {
+  net_listener_close(l.lid)
+}

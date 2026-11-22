@@ -42,7 +42,8 @@ pub enum Capability {
     Console,
     /// The file surface: the readers, writers, and `fs_list`.
     Fsys,
-    /// The TCP surface: connect/send/recv/close, `http_get`.
+    /// The TCP surface: connect/send/recv/close, the listener face
+    /// (listen/accept/listener-close), `http_get`.
     Net,
     /// The clock surface (no op exists yet).
     Time,
@@ -151,9 +152,17 @@ pub const OP_EXIT: u32 = 23;
 pub const OP_MONO: u32 = 24;
 /// `sleep`: time (the parking sleep op over the timer-only wait shape).
 pub const OP_SLEEP: u32 = 25;
+/// `net_listen`: net (binds a listener, answers its handle's word).
+pub const OP_NET_LISTEN: u32 = 26;
+/// `net_accept`: net (takes one pending connection, answers the
+/// accepted connection's handle's word; parks under a reactor).
+pub const OP_NET_ACCEPT: u32 = 27;
+/// `net_listener_close`: net (the raw idempotent-close seam the
+/// `net_listener` deinit pairs with, `net_close`'s contract).
+pub const OP_NET_LISTENER_CLOSE: u32 = 28;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 26;
+pub const OP_COUNT: u32 = 29;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -197,6 +206,9 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "exit",        capability: Capability::Proc,    params: &[SlotType::I64],       result_words: 1, func: crate::proc::exit_fn },
     Op { name: "mono",        capability: Capability::Time,    params: &[],                    result_words: 1, func: crate::native::mono_fn },
     Op { name: "sleep",       capability: Capability::Time,    params: &[SlotType::I64],       result_words: 1, func: crate::native::sleep_fn },
+    Op { name: "net_listen", capability: Capability::Net,     params: &[SlotType::Ref, SlotType::I64], result_words: 2, func: net::net_listen_fn },
+    Op { name: "net_accept",  capability: Capability::Net,     params: &[SlotType::I64],       result_words: 2, func: net::net_accept_fn },
+    Op { name: "net_listener_close", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_listener_close_fn },
 ];
 
 macro_rules! unserved {
@@ -237,6 +249,9 @@ unserved!(unserved_op_22 at 22);
 unserved!(unserved_op_23 at 23);
 unserved!(unserved_op_24 at 24);
 unserved!(unserved_op_25 at 25);
+unserved!(unserved_op_26 at 26);
+unserved!(unserved_op_27 at 27);
+unserved!(unserved_op_28 at 28);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -247,7 +262,8 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_12, unserved_op_13, unserved_op_14, unserved_op_15,
     unserved_op_16, unserved_op_17, unserved_op_18, unserved_op_19,
     unserved_op_20, unserved_op_21, unserved_op_22, unserved_op_23,
-    unserved_op_24, unserved_op_25,
+    unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
+    unserved_op_28,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -399,7 +415,19 @@ mod tests {
         assert_eq!(OPS[OP_MONO as usize].capability, Capability::Time);
         assert_eq!(OPS[OP_SLEEP as usize].name, "sleep");
         assert_eq!(OPS[OP_SLEEP as usize].capability, Capability::Time);
-        assert_eq!(OPS.len(), 26);
+        assert_eq!(OPS[OP_NET_LISTEN as usize].name, "net_listen");
+        assert_eq!(OPS[OP_NET_LISTEN as usize].capability, Capability::Net);
+        assert_eq!(OPS[OP_NET_ACCEPT as usize].name, "net_accept");
+        assert_eq!(OPS[OP_NET_ACCEPT as usize].capability, Capability::Net);
+        assert_eq!(
+            OPS[OP_NET_LISTENER_CLOSE as usize].name,
+            "net_listener_close"
+        );
+        assert_eq!(
+            OPS[OP_NET_LISTENER_CLOSE as usize].capability,
+            Capability::Net
+        );
+        assert_eq!(OPS.len(), 29);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -455,11 +483,14 @@ mod tests {
             OP_NET_CLOSE,
             OP_HTTP_GET,
             OP_HTTPS_GET,
+            OP_NET_LISTEN,
+            OP_NET_ACCEPT,
+            OP_NET_LISTENER_CLOSE,
         ] {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 26);
+        assert_eq!(table.len(), 29);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }
@@ -491,6 +522,9 @@ mod tests {
             OP_NET_RECV,
             OP_NET_CLOSE,
             OP_HTTP_GET,
+            OP_NET_LISTEN,
+            OP_NET_ACCEPT,
+            OP_NET_LISTENER_CLOSE,
             OP_TIME,
             OP_HTTPS_GET,
             OP_ARGS,

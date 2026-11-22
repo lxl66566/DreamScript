@@ -3890,6 +3890,9 @@ pub struct OutputSink {
     argv: Vec<String>,
     /// The connection table of the net natives.
     net: Connections,
+    /// The listener table of the net natives' server half
+    /// (`crate::net`).
+    listeners: crate::net::Listeners,
     /// The file-handle table of the fsys natives (`crate::fsys`).
     files: crate::fsys::Files,
 }
@@ -3925,6 +3928,7 @@ impl OutputSink {
             err_target: ErrTarget::Captured(Vec::new()),
             argv: Vec::new(),
             net: Connections::default(),
+            listeners: crate::net::Listeners::default(),
             files: crate::fsys::Files::default(),
         }
     }
@@ -3972,14 +3976,30 @@ impl OutputSink {
         &mut self.net
     }
 
+    /// The listener table of the net natives' server half.
+    pub(crate) fn listeners(&mut self) -> &mut crate::net::Listeners {
+        &mut self.listeners
+    }
+
     /// The file-handle table of the fsys natives (`crate::fsys`).
     pub(crate) fn files(&mut self) -> &mut crate::fsys::Files {
         &mut self.files
     }
 
-    /// Bounds every blocking net wait ([`crate::net`]).
+    /// Bounds every blocking net wait ([`crate::net`]) — the connect,
+    /// data, and accept waits together.
     pub(crate) fn set_net_timeout(&mut self, timeout: Duration) {
         self.net.set_timeout(timeout);
+        self.listeners.set_timeout(timeout);
+    }
+
+    /// Flips the net face to the parking discipline (a reactor was
+    /// installed on the VM): registered connections and bound
+    /// listeners go non-blocking, `net_recv`/`net_send`/`net_accept`
+    /// answering park requests on a would-block.
+    pub(crate) fn enable_net_parking(&mut self) {
+        self.net.enable_parking();
+        self.listeners.enable_parking();
     }
 
     /// Pins the TLS client of the net face's tls tier (`[crate::tls]`):

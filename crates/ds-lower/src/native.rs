@@ -869,6 +869,42 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 25,
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
+    Native {
+        // the listener face: `net_listen` and `net_accept` answer the
+        // two-word span (the bound/accepted handle's word on success,
+        // the net error class on failure), while the ambient declares
+        // the total spellings over the deinit-carrying `net_listener`
+        // and `net_handle` — the printing-halt pairing `net_connect`
+        // keeps, a failed bind or accept halting on the error line
+        name: "net_listen",
+        module: NativeModule::Platform,
+        index: 26,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
+            err_prefix: "net error: ",
+            classes: NET_CLASSES,
+        },
+    },
+    Native {
+        name: "net_accept",
+        module: NativeModule::Platform,
+        index: 27,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
+            err_prefix: "net error: ",
+            classes: NET_CLASSES,
+        },
+    },
+    Native {
+        // the raw idempotent-close seam (the `net_listener` deinit
+        // pairs with it, `net_close`'s contract)
+        name: "net_listener_close",
+        module: NativeModule::Platform,
+        index: 28,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.
