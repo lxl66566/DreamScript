@@ -2948,10 +2948,23 @@ impl Bodies<'_> {
                 .get(&def)
                 .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
         };
-        if !is_list(self) {
+        // the channel's construction (the 2026-11-21 shared-state
+        // ruling): the one type application that carries a value
+        // argument — the bound, `chan[int](4)` — because the payload
+        // type never reaches the code (every channel one Ref word) while
+        // the bound does
+        let is_chan = |this: &Self| {
+            head.name.as_str() == "chan"
+                && this
+                    .decls
+                    .structs
+                    .get(&def)
+                    .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
+        };
+        if !is_list(self) && !is_chan(self) {
             // Construction is fixed per declaration [B3]; every type
-            // application besides the list surface is the cross-spelling
-            // error.
+            // application besides the collection surface is the
+            // cross-spelling error.
             self.error(
                 ErrorCode::TypeMismatch,
                 format!(
@@ -2965,6 +2978,35 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         }
+        let chan_bound = if is_chan(self) {
+            if trailing.is_some() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "the channel constructor takes no trailing block".to_owned(),
+                    span,
+                    "trailing block",
+                );
+                self.solve_reported = true;
+                return Some(self.empty_val());
+            }
+            let [cap] = args else {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "the channel constructor takes the bound alone: `chan[t](n)`".to_owned(),
+                    span,
+                    "constructor arguments",
+                );
+                walk_args(self);
+                self.solve_reported = true;
+                return Some(self.empty_val());
+            };
+            let cap_val = self.expr(&cap.value, None);
+            let bound = self.named_ty(cap.value.span(), "int", "the channel bound");
+            self.expect_contains(cap_val, bound.ty, cap.value.span(), "the channel bound");
+            true
+        } else {
+            false
+        };
         if trailing.is_some() {
             self.error(
                 ErrorCode::TypeMismatch,
@@ -2975,7 +3017,7 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         }
-        if !args.is_empty() {
+        if !args.is_empty() && !chan_bound {
             self.error(
                 ErrorCode::TypeMismatch,
                 "the empty-list constructor takes no arguments; build with a list literal `[...]` \
@@ -3016,7 +3058,7 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         };
-        let ty = self.applied_list_ty(elem)?;
+        let ty = if chan_bound { self.applied_chan_ty(elem)? } else { self.applied_list_ty(elem)? };
         Some(Val {
             ty,
             diverges: false,
@@ -3189,6 +3231,14 @@ impl Bodies<'_> {
     /// The applied `list[t]` type over one element type.
     fn applied_list_ty(&mut self, elem: Ty) -> Option<Ty> {
         let def = self.package.lookup_type("list")?;
+        let ctor = self.decls.atoms.get(&def).copied()?;
+        let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
+        self.decls.universe.atom_ty(atom).ok()
+    }
+
+    /// The applied `chan[t]` type over the payload type.
+    fn applied_chan_ty(&mut self, elem: Ty) -> Option<Ty> {
+        let def = self.package.lookup_type("chan")?;
         let ctor = self.decls.atoms.get(&def).copied()?;
         let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
         self.decls.universe.atom_ty(atom).ok()

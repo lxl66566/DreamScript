@@ -176,6 +176,7 @@ pub fn comptime_module() -> Vec<NativeFunction> {
         variadic: false,
         result_words: 1,
         control: None,
+        channel: None,
         func,
     };
     vec![

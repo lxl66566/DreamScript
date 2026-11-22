@@ -253,6 +253,46 @@ enum Object {
     /// dense index words and loads a candidate key's payload only on a
     /// filter hit.
     Map(MapData),
+    /// A bounded channel (the 2026-11-21 shared-state ruling): one heap
+    /// object behind one `Ref` word on the creating fiber's store — the
+    /// one owning heap the ruling names — whose payload is the FIFO
+    /// buffer plus the scheduler's waiter queues. The buffered payload
+    /// words own one edge count each exactly like list elements (a
+    /// foreign element's inc posts through the pending queue); a parked
+    /// sender's staged payload owns none (the parked frame keeps its own
+    /// count, the parked-send discipline the net send wait set), so the
+    /// death cascade decs the buffer alone.
+    Chan(ChanData),
+}
+
+/// A channel's payload: the bound, the FIFO buffer, and the fibers
+/// parked on full and empty (the 2026-11-21 shared-state ruling). The
+/// waiter queues are scheduler state the channel itself owns — a send
+/// with room wakes the head receiver, a receive with stock wakes the
+/// head sender — so a wake needs no reactor interest and no deadline:
+/// the waking fiber is the parked one's resumer, and the executor's
+/// run queue carries the hand-off.
+#[derive(Debug)]
+pub(crate) struct ChanData {
+    /// The bound (`chan_new`'s capacity, always at least one).
+    pub(crate) cap: usize,
+    /// The buffered payload words, FIFO.
+    pub(crate) elems: VecDeque<Value>,
+    /// The parked senders in park order, each with its staged payload
+    /// word (the frame keeps the count; the entry is a borrow).
+    pub(crate) senders: VecDeque<ChanSender>,
+    /// The parked receivers in park order.
+    pub(crate) receivers: VecDeque<FiberId>,
+}
+
+/// One parked sender: the fiber and its staged payload word.
+#[derive(Debug)]
+pub(crate) struct ChanSender {
+    /// The parked sending fiber.
+    pub(crate) fiber: FiberId,
+    /// The payload word staged at park time (its count stays the
+    /// parked frame's).
+    pub(crate) payload: Value,
 }
 
 /// A map's payload: the keys, the flattened value words at a per-map
@@ -820,6 +860,90 @@ impl Objects {
         self.alloc(Object::List(ListData { elems, stride }))
     }
 
+    /// Allocates a fresh bounded channel of capacity `cap` (always at
+    /// least one — the constructor native refuses a smaller bound ahead
+    /// of the allocation), owned by the caller: the birth count is the
+    /// creating frame's, exactly a fresh list's.
+    pub fn alloc_chan(&mut self, cap: usize) -> u32 {
+        self.alloc(Object::Chan(ChanData {
+            cap,
+            elems: VecDeque::new(),
+            senders: VecDeque::new(),
+            receivers: VecDeque::new(),
+        }))
+    }
+
+    /// Deposits one payload word onto channel object `obj`'s buffer
+    /// tail: the buffer's store takes the word and, for a `Ref` word,
+    /// acquires the buffer's edge count exactly like a list element —
+    /// a local word through the store's own inc, a foreign word by
+    /// posting the inc to the pending queue for the router to drain
+    /// (C4's foreign-post funnel, the channel's cross-heap seam).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no channel.
+    pub fn chan_deposit(&mut self, obj: u32, word: Value) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::Chan(_)) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        if let Value::Ref(id) = word {
+            if id.fiber() == self.owner {
+                self.inc(id.id())?;
+            } else {
+                self.pending.push_back(ForeignOp::Inc(id));
+            }
+        }
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Chan(data) => {
+                data.elems.push_back(word);
+                Ok(())
+            },
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// Pops one payload word off channel object `obj`'s buffer head.
+    /// The popped word keeps the count it holds — the buffer's edge
+    /// count becomes the receiving frame's backing — so no count moves
+    /// here; the receiver's ledger takes the claim through the routed
+    /// face.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no channel.
+    pub fn chan_pop(&mut self, obj: u32) -> Result<Option<Value>, Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::Chan(_)) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Chan(data) => Ok(data.elems.pop_front()),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
+    /// The channel payload behind `obj`, shared, when the object is a
+    /// channel: `None` hands the caller a structured refusal for a
+    /// non-channel object, `Err` a freed id.
+    fn payload_chan(&self, obj: u32) -> Result<Option<&ChanData>, Trap> {
+        let header = self.header_of(obj)?;
+        match self.heap.payload::<Object>(header) {
+            Object::Chan(data) => Ok(Some(data)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The channel payload behind `obj`, exclusive.
+    fn payload_chan_mut(&mut self, obj: u32) -> Result<Option<&mut ChanData>, Trap> {
+        let header = self.header_of(obj)?;
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Chan(data) => Ok(Some(data)),
+            _ => Ok(None),
+        }
+    }
+
     /// `rc_inc` (C4): the reference in the slot naming `obj` gains one
     /// owner.
     ///
@@ -893,6 +1017,7 @@ impl Objects {
                     }
                     Vec::new()
                 },
+                Object::Chan(data) => std::mem::take(&mut data.elems).into(),
                 Object::Str(_) | Object::Bytes(_) => Vec::new(),
             };
             let words: &[Value] = if owned.is_empty() { &spill } else { &owned };
@@ -1262,7 +1387,10 @@ impl Objects {
                         }
                     }
                 },
-                Object::Str(_) | Object::Bytes(_) => {},
+                // a channel's buffered payload words never stage a
+                // callable in lowered code (the chan_send lowering
+                // refuses a closure payload like a collection element)
+                Object::Chan(_) | Object::Str(_) | Object::Bytes(_) => {},
             }
         }
         Ok(())
@@ -1963,6 +2091,100 @@ impl<'a> Heaps<'a> {
     pub(crate) fn push_list(&mut self, list: RefId, words: &[Value]) -> Result<(), Trap> {
         self.store(list)?.push_list(list.id(), words)?;
         self.settle(list.fiber())
+    }
+
+    /// Allocates a fresh bounded channel of capacity `cap` on the
+    /// running fiber's store — the creating fiber is the ruling's one
+    /// owning heap — the birth count claimed for the caller's frame.
+    pub(crate) fn alloc_chan(&mut self, cap: usize) -> Value {
+        let id = self.current.alloc_chan(cap);
+        self.claimed_alloc(id)
+    }
+
+    /// Whether channel `chan`'s buffer has room for one more payload
+    /// word, routed as a shared read.
+    pub(crate) fn chan_room(&mut self, chan: RefId) -> Result<bool, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan(chan.id())? {
+            Some(data) => Ok(data.elems.len() < data.cap),
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Deposits one payload word onto channel `chan`'s buffer tail,
+    /// routed: the mutation lands on the channel's store and a `Ref`
+    /// payload's edge count on the payload's own heap (the pending
+    /// funnel draining here).
+    pub(crate) fn chan_deposit(&mut self, chan: RefId, word: Value) -> Result<(), Trap> {
+        self.store(chan)?.chan_deposit(chan.id(), word)?;
+        self.settle(chan.fiber())
+    }
+
+    /// Pops one payload word off channel `chan`'s buffer head, routed.
+    /// No count moves: the buffer's edge count becomes the receiving
+    /// frame's backing, the claim taken through [`Heaps::adopt_claim`].
+    pub(crate) fn chan_pop(&mut self, chan: RefId) -> Result<Option<Value>, Trap> {
+        self.store(chan)?.chan_pop(chan.id())
+    }
+
+    /// Stages one parked sender onto channel `chan`, routed: the fiber
+    /// and its payload word enter the channel's sender queue with no
+    /// count traffic (the parked frame keeps its own count).
+    pub(crate) fn chan_park_sender(
+        &mut self,
+        chan: RefId,
+        fiber: FiberId,
+        payload: Value,
+    ) -> Result<(), Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => {
+                data.senders.push_back(ChanSender { fiber, payload });
+                Ok(())
+            },
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Stages one parked receiver onto channel `chan`, routed.
+    pub(crate) fn chan_park_receiver(&mut self, chan: RefId, fiber: FiberId) -> Result<(), Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => {
+                data.receivers.push_back(fiber);
+                Ok(())
+            },
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Pops the head parked sender off channel `chan`, routed — the
+    /// caller checks the fiber's state before using the payload.
+    pub(crate) fn chan_take_sender(&mut self, chan: RefId) -> Result<Option<ChanSender>, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => Ok(data.senders.pop_front()),
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Pops the head parked receiver off channel `chan`, routed — the
+    /// caller checks the fiber's state before staging its delivery.
+    pub(crate) fn chan_take_receiver(&mut self, chan: RefId) -> Result<Option<FiberId>, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => Ok(data.receivers.pop_front()),
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Adopts one existing count into `claimant`'s ledger with no count
+    /// mutation: the channel receive's transfer — the buffer's edge
+    /// count becomes the receiving frame's backing, so the frame's
+    /// later dec (or its death walk) releases exactly the count the
+    /// buffer held.
+    pub(crate) fn adopt_claim(&mut self, claimant: FiberId, word: RefId) {
+        self.ledger(claimant).acquire(word);
     }
 
     /// Resolves a map probe word for the map's store, the read funnels'

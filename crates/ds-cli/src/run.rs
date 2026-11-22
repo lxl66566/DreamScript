@@ -782,9 +782,13 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::OutOfFuel => "a budgeted drive ran past its step limit (the comptime fence's cap; a \
                             run drive carries none)"
             .to_owned(),
+        Trap::ChanCapacity { cap } => {
+            format!("chan_new refuses a bound below one: {cap}")
+        },
         Trap::SchedulerDeadlock => "the IO scheduler found nothing runnable and nothing able to \
-                                    wake (every fiber parked on a wait no reactor interest and no \
-                                    deadline answers)"
+                                    wake (every fiber parked on a wait no reactor interest, no \
+                                    deadline, and no live fiber answers — a channel every fiber \
+                                    waits on is the honest deadlock)"
             .to_owned(),
     }
 }

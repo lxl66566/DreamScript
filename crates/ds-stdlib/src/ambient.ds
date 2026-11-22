@@ -228,6 +228,16 @@ impl[t] list[t] {
   fn concat (self, other: list[t]) -> list[t]
 }
 
+// The channel face: the net handle's plain receiver discipline (the
+// word is a shared handle, the mutation the object's own state — D1's
+// one shared-state exception). `send` answers unit, `recv` the payload;
+// both park the calling fiber when the buffer cannot serve it, the
+// wake delivering at the parked call site.
+impl[t] chan[t] {
+  fn send (self, x: t) -> ()
+  fn recv (self) -> t
+}
+
 pub tag int
 pub tag float
 pub tag bool
@@ -246,6 +256,19 @@ pub tag u32
 
 pub struct list[t]
 pub struct map[k, v]
+// The bounded channel (the 2026-11-21 shared-state ruling): the one
+// inter-fiber shared-state vocabulary — no lock, mutex or atomic ever
+// enters the language. One opaque word behind one heap object on the
+// creating fiber's store (the one owning heap): the word copies into a
+// spawned child's captures exactly a list word's, `send` deposits one
+// payload word parking the sender on a full buffer, `recv` takes the
+// head parking the receiver on empty, and a payload crossing fibers
+// transfers its count through the claim ledger. The payload rides one
+// word in this round (a scalar or an ordinary reference word; a
+// multi-word or deinit-carrying payload refuses at the send), and a
+// channel every fiber has parked on is the honest deadlock: no sender,
+// no answer.
+pub struct chan[t]
 
 // The json value family, the typed face over the JSON grammar: one case
 // per grammar shape, the number split kept faithful (a token with a
@@ -358,6 +381,15 @@ extern fn map_len[k, v] (m: map[k, v]) -> int
 // iteration seam the checked reads and the inherent `keys` member
 // compose over (the value spans read back through the member route).
 extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
+// The bounded channel's native face: the construction is the type
+// application `chan[t](cap)` (the bound the one value argument the
+// collection construction form carries — the payload type never reaches
+// the code), so `chan_new` stays a private seam like `list_new`'s, and
+// `chan_send`/`chan_recv` the private seams behind the member spellings
+// above.
+extern fn chan_new[t] (cap: int) -> chan[t]
+extern fn chan_send[t] (ch: chan[t], x: t) -> ()
+extern fn chan_recv[t] (ch: chan[t]) -> t
 // The bytes collection's native face: `bytes_of` is the construction
 // seam (the `list[byte]` bridge in — one payload byte per element word),
 // `byte_list` the bridge back out (one word per byte), `byte_at`

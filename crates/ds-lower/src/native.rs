@@ -559,6 +559,28 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
+        // the bounded channel's seams (the 2026-11-21 shared-state
+        // ruling): the constructor answers the channel's Ref word, send
+        // the unit word, and recv's answer kind is the call's own
+        // result type's — the `reduce` keying, the payload's one word
+        name: "chan_new",
+        module: NativeModule::Builtin,
+        index: 87,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "chan_send",
+        module: NativeModule::Builtin,
+        index: 88,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        name: "chan_recv",
+        module: NativeModule::Builtin,
+        index: 89,
+        shape: NativeShape::TotalByResultType,
+    },
+    Native {
         name: "join",
         module: NativeModule::Builtin,
         index: 45,

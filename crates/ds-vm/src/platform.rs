@@ -352,6 +352,7 @@ pub fn platform_module(platform: &Platform) -> Vec<NativeFunction> {
                 variadic: false,
                 result_words: op.result_words,
                 control: None,
+                channel: None,
                 func,
             }
         })

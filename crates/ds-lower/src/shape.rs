@@ -89,7 +89,10 @@ fn primitive_slot(name: &str) -> Option<SlotType> {
 /// The heap-reference constructors: an application of one of these is a
 /// single RC'd object behind one Ref word — the list and map natives'
 /// objects.
-const HEAP_REFS: &[&str] = &["list", "map"];
+/// The runtime-owned heap-reference applications: one Ref word whose
+/// object the runtime owns (`list`, `map`, and the bounded `chan` of the
+/// 2026-11-21 shared-state ruling).
+const HEAP_REFS: &[&str] = &["list", "map", "chan"];
 
 /// One field of a value's span: the field's name (or `None` for a
 /// primitive member's own payload word), its consecutive word types, and

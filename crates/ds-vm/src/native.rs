@@ -752,6 +752,19 @@ pub const BUILTIN_INDEX_OF: u32 = 85;
 /// pass, the inserted text never re-scanned; the empty needle inserts
 /// `with` at every char boundary.
 pub const BUILTIN_REPLACE: u32 = 86;
+/// `chan_new(cap: int) -> chan[t]` — the bounded channel's construction
+/// seam (the 2026-11-21 shared-state ruling): a fresh channel object on
+/// the calling fiber's store, the one owning heap. Intercepted by the
+/// dispatcher like the control natives (the channel step needs the
+/// scheduler); the body is the never-run placeholder.
+pub const BUILTIN_CHAN_NEW: u32 = 87;
+/// `chan_send(ch: mut chan[t], x: t) -> ()` — deposit one payload word,
+/// parking on full. Intercepted; the body never runs from a `CALL` site.
+pub const BUILTIN_CHAN_SEND: u32 = 88;
+/// `chan_recv(ch: mut chan[t]) -> t` — take one payload word off the
+/// buffer head, parking on empty. Intercepted; the body never runs from
+/// a `CALL` site.
+pub const BUILTIN_CHAN_RECV: u32 = 89;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -892,6 +905,22 @@ pub enum ControlNative {
     ReplPark,
 }
 
+/// The channel natives (the 2026-11-21 shared-state ruling): like the
+/// control natives, the dispatcher intercepts them at `CALL` and `CALLT`
+/// sites — the channel step needs the scheduler's run queue and the
+/// pool's fiber states, which a native body never sees — so the table
+/// bodies are placeholders that refuse if some path ever runs them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelNative {
+    /// `chan_new(cap)`: allocate the channel object on the calling
+    /// fiber's store.
+    New,
+    /// `chan_send(ch, x)`: deposit or park on full.
+    Send,
+    /// `chan_recv(ch)`: take off the head or park on empty.
+    Recv,
+}
+
 /// A native's result: one word on the caller's overlay slot 0, a
 /// fallible native's two-word tag+payload span on overlay slots 0 and 1,
 /// the span channel — a discriminant plus a multi-word payload on
@@ -1025,6 +1054,10 @@ pub struct NativeFunction {
     /// Marks the two fiber-control natives the dispatcher intercepts at
     /// `CALL` sites [E2]; `None` for every ordinary native.
     pub control: Option<ControlNative>,
+    /// Marks the channel natives the dispatcher intercepts at `CALL`
+    /// and `CALLT` sites (the channel step is the dispatcher's, like
+    /// the control switch); `None` for every ordinary native.
+    pub channel: Option<ChannelNative>,
     /// The body.
     pub func: NativeFn,
 }
@@ -3175,6 +3208,7 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
         variadic: false,
         result_words: 1,
         control: None,
+        channel: None,
         func,
     }
 }
@@ -3224,6 +3258,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: str_int_fn,
         },
         NativeFunction {
@@ -3232,6 +3267,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: str_float_fn,
         },
         NativeFunction {
@@ -3240,6 +3276,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: str_bool_fn,
         },
         reserved_entry(builtin_reserved_5),
@@ -3254,6 +3291,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: substring_fn,
         },
         NativeFunction {
@@ -3262,6 +3300,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: concat_fn,
         },
         NativeFunction {
@@ -3270,6 +3309,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: to_upper_fn,
         },
         NativeFunction {
@@ -3278,6 +3318,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: to_lower_fn,
         },
         NativeFunction {
@@ -3286,6 +3327,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: trim_fn,
         },
         NativeFunction {
@@ -3294,6 +3336,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: parse_int_fn,
         },
         NativeFunction {
@@ -3302,6 +3345,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: split_fn,
         },
         NativeFunction {
@@ -3310,6 +3354,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: char_at_fn,
         },
         NativeFunction {
@@ -3322,6 +3367,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: parse_float_fn,
         },
         NativeFunction {
@@ -3330,6 +3376,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: list_new_fn,
         },
         reserved_entry(builtin_reserved_21),
@@ -3342,6 +3389,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: Some(ControlNative::Resume),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3350,6 +3398,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurseryJoin),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3358,6 +3407,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: true,
             result_words: 1,
             control: None,
+            channel: None,
             func: list_push_fn,
         },
         NativeFunction {
@@ -3366,6 +3416,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: map_new_fn,
         },
         reserved_entry(builtin_reserved_29),
@@ -3378,6 +3429,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: true,
             result_words: 1,
             control: None,
+            channel: None,
             func: map_set_fn,
         },
         reserved_entry(builtin_reserved_32),
@@ -3395,6 +3447,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurseryOpen),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3403,6 +3456,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: Some(ControlNative::NurserySpawn),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3411,6 +3465,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: Some(ControlNative::NurseryBoundary),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3423,6 +3478,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: true,
             result_words: 1,
             control: Some(ControlNative::NurseryCancel),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3431,6 +3487,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: join_fn,
         },
         reserved_entry(builtin_reserved_46),
@@ -3442,6 +3499,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: total_compare_fn,
         },
         NativeFunction {
@@ -3450,6 +3508,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: str_compare_fn,
         },
         NativeFunction {
@@ -3458,6 +3517,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: char_compare_fn,
         },
         NativeFunction {
@@ -3466,6 +3526,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: byte_compare_fn,
         },
         NativeFunction {
@@ -3474,6 +3535,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: str_hash_fn,
         },
         NativeFunction {
@@ -3482,6 +3544,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: float_hash_fn,
         },
         NativeFunction {
@@ -3490,6 +3553,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: char_hash_fn,
         },
         NativeFunction {
@@ -3501,6 +3565,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: true,
             result_words: 1,
             control: Some(ControlNative::ReplPark),
+            channel: None,
             func: fiber_control_bounce_fn,
         },
         reserved_entry(builtin_reserved_57), /* was parse_json; the reader lives in @std ds
@@ -3511,6 +3576,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: char_of_fn,
         },
         reserved_entry(builtin_reserved_59), /* was map_keys; the generic body lives in
@@ -3521,6 +3587,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: code_of_fn,
         },
         NativeFunction {
@@ -3529,6 +3596,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: bytes_of_fn,
         },
         NativeFunction {
@@ -3537,6 +3605,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: byte_list_fn,
         },
         NativeFunction {
@@ -3545,6 +3614,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: byte_at_fn,
         },
         NativeFunction {
@@ -3553,6 +3623,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: bytes_eq_fn,
         },
         NativeFunction {
@@ -3561,6 +3632,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: bytes_compare_fn,
         },
         NativeFunction {
@@ -3569,6 +3641,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: bytes_hash_fn,
         },
         NativeFunction {
@@ -3577,6 +3650,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: utf8_encode_fn,
         },
         NativeFunction {
@@ -3585,6 +3659,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: utf8_decode_fn,
         },
         NativeFunction {
@@ -3593,6 +3668,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: trap_fn,
         },
         NativeFunction {
@@ -3601,6 +3677,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: list_eq_fn,
         },
         NativeFunction {
@@ -3609,6 +3686,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: map_eq_fn,
         },
         NativeFunction {
@@ -3617,6 +3695,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: byte_of_fn,
         },
         NativeFunction {
@@ -3625,6 +3704,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: int_of_byte_fn,
         },
         NativeFunction {
@@ -3633,6 +3713,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: u32_of_fn,
         },
         NativeFunction {
@@ -3641,6 +3722,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: int_of_u32_fn,
         },
         NativeFunction {
@@ -3649,6 +3731,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: sqrt_fn,
         },
         NativeFunction {
@@ -3657,6 +3740,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: sin_fn,
         },
         NativeFunction {
@@ -3665,6 +3749,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: cos_fn,
         },
         NativeFunction {
@@ -3673,6 +3758,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: atan2_fn,
         },
         NativeFunction {
@@ -3681,6 +3767,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: floor_fn,
         },
         NativeFunction {
@@ -3689,6 +3776,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: ceil_fn,
         },
         NativeFunction {
@@ -3697,6 +3785,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: pow_fn,
         },
         NativeFunction {
@@ -3705,6 +3794,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: abs_fn,
         },
         NativeFunction {
@@ -3713,6 +3803,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: contains_fn,
         },
         NativeFunction {
@@ -3721,6 +3812,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 2,
             control: None,
+            channel: None,
             func: index_of_fn,
         },
         NativeFunction {
@@ -3729,13 +3821,53 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             variadic: false,
             result_words: 1,
             control: None,
+            channel: None,
             func: replace_fn,
+        },
+        NativeFunction {
+            name: "chan_new",
+            params: &[SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: Some(ChannelNative::New),
+            func: chan_refuse_fn,
+        },
+        NativeFunction {
+            name: "chan_send",
+            params: &[SlotType::Ref, SlotType::Raw],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: Some(ChannelNative::Send),
+            func: chan_refuse_fn,
+        },
+        NativeFunction {
+            name: "chan_recv",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: Some(ChannelNative::Recv),
+            func: chan_refuse_fn,
         },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_REPLACE, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_REPLACE as usize + 1);
+    // BUILTIN_CHAN_RECV, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_CHAN_RECV as usize + 1);
     fns
+}
+
+/// The channel natives' placeholder body: the dispatcher intercepts
+/// every `CALL` and `CALLT` site ahead of the body, so a body that runs
+/// names hand-assembled code that bypassed the interception — the same
+/// refusal the control natives' bounce carries, as a trap.
+fn chan_refuse_fn(
+    _heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Err(Trap::ReentrancyRefused)
 }
 
 /// The native convention's second host reference (beside the object
@@ -4442,7 +4574,10 @@ mod tests {
         assert_eq!(fns[BUILTIN_CONTAINS as usize].name, "contains");
         assert_eq!(fns[BUILTIN_INDEX_OF as usize].name, "index_of");
         assert_eq!(fns[BUILTIN_REPLACE as usize].name, "replace");
-        assert_eq!(fns.len(), BUILTIN_REPLACE as usize + 1);
+        assert_eq!(fns[BUILTIN_CHAN_NEW as usize].name, "chan_new");
+        assert_eq!(fns[BUILTIN_CHAN_SEND as usize].name, "chan_send");
+        assert_eq!(fns[BUILTIN_CHAN_RECV as usize].name, "chan_recv");
+        assert_eq!(fns.len(), BUILTIN_CHAN_RECV as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [

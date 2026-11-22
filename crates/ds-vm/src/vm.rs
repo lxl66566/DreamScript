@@ -79,8 +79,8 @@ use crate::{
     loader::{LoadError, StagedSite},
     module::{ModuleRegistry, ModuleVersion, VersionIdx},
     native::{
-        ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction, NativeResult,
-        OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
+        ChannelNative, ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction,
+        NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
     },
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::{Heaps, Objects},
@@ -361,11 +361,23 @@ pub enum Trap {
     ReentrancyRefused,
     /// The IO scheduler found nothing runnable and nothing waiting (the
     /// 2026-11-21 scheduler ruling's stall guard): every fiber is parked
-    /// on a world op that no reactor interest and no deadline can
-    /// answer — a contradiction, since a park registers one or the
-    /// other, so this trap names a scheduler bug, never a program
-    /// shape.
+    /// on a wait that no reactor interest and no deadline can answer.
+    /// A net wait always registers one or the other, so for those this
+    /// names a scheduler bug; a channel wait registers neither (the
+    /// waking peer is a fiber, and none can run), so a program whose
+    /// every fiber sits parked on a channel no live fiber can serve
+    /// deadlocks here by design — the honest degenerate the
+    /// shared-state ruling leaves: no sender, no answer.
     SchedulerDeadlock,
+    /// `chan_new(cap)` with a bound below one (the 2026-11-21
+    /// shared-state ruling): the bounded channel's buffer holds at
+    /// least one payload word — a zero-capacity rendezvous channel is a
+    /// combinator round over the timer capability, not the buffer's
+    /// degenerate.
+    ChanCapacity {
+        /// The refused bound.
+        cap: i64,
+    },
     /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
     /// payload is the error value's whole word span — word 0 the
     /// failing member's tag, the rest its payload words in declaration
@@ -942,12 +954,27 @@ impl InstalledReactor {
     }
 }
 
-/// One world op's park request: the parked fiber and the pending op.
+/// What one parked fiber waits for, net or channel: the driver routes
+/// the two kinds apart — a world wait registers with the scheduler
+/// (reactor interest plus a deadline), a channel wait registers in the
+/// channel's own waiter queue at park time and needs nothing from the
+/// driver (the waking peer is the parked fiber's resumer).
+pub(crate) enum ParkKind {
+    /// A net op's wait: the scheduler's registration payload.
+    World(WorldWait),
+    /// A channel op's park (the 2026-11-21 shared-state ruling): the
+    /// waiter already entered the channel's own data, so the driver only
+    /// continues the executor — no registration payload exists (the
+    /// waking peer is the parked fiber's resumer).
+    Chan,
+}
+
+/// One world op's park request: the parked fiber and what it waits for.
 pub(crate) struct WorldParkRequest {
     /// The fiber that parked (the drive ended on it).
     pub(crate) fiber: FiberId,
     /// What it waits for — the scheduler's registration payload.
-    pub(crate) wait: WorldWait,
+    pub(crate) kind: ParkKind,
 }
 
 /// A parked joiner's pending nursery drive: the join/boundary seam parked
@@ -1116,6 +1143,27 @@ enum DriveSeam {
     /// The host join/teardown faces: outcomes returned raw, no call site
     /// stands to answer.
     Face,
+}
+
+/// One channel step's outcome for the dispatch arms: the fast path's
+/// answer (overlaid like an ordinary native's) or the park request the
+/// arm routes through [`Vm::park_world`] or its tail twin.
+enum ChanStep {
+    /// The step answered: overlay like an ordinary native's result.
+    Answer(NativeResult),
+    /// The step parked the caller: the waiter already entered the
+    /// channel's own data; the arm performs the fiber park.
+    Park,
+}
+
+/// The channel step behind a `CALL` site for the dispatch arm: the
+/// answer overlaid and the drive advancing past the call, or the park
+/// outcome ending the drive.
+enum ChanOutcome {
+    /// The answer overlaid; advance past the call.
+    Answered,
+    /// The fiber parked; the drive ends with the event.
+    Parked(DriveOutcome),
 }
 
 /// The result of a control-native switch at a `CALL` site.
@@ -3746,7 +3794,9 @@ impl Vm {
                 // reactor like any blocking native would, the fiber
                 // never blocking the world out
                 Ok(DriveOutcome::WorldPark(req)) => {
-                    self.register_wait(req.fiber, req.wait);
+                    if let ParkKind::World(wait) = req.kind {
+                        self.register_wait(req.fiber, wait);
+                    }
                     match self.executor_continue(fiber) {
                         Ok(ExecutorStep::Continue((a, p))) => {
                             active = a;
@@ -4236,7 +4286,9 @@ impl Vm {
             // wait when every child stands parked (the pass loop in
             // `drive_frame_children`)
             Ok(DriveOutcome::WorldPark(req)) => {
-                self.register_wait(req.fiber, req.wait);
+                if let ParkKind::World(wait) = req.kind {
+                    self.register_wait(req.fiber, wait);
+                }
                 StepFlow::Quiet
             },
             Err((trap, _at)) => {
@@ -4501,10 +4553,15 @@ impl Vm {
             // no reactor wait stands between a first failure and its
             // siblings' cut (the 2026-11-12 amendment's parked-IO
             // extension); otherwise the reactor owns the gap (a stall
-            // guard failure raises the flag, the honest degenerate)
+            // guard failure raises the flag, the honest degenerate). A
+            // woken sibling counts too: a channel send mid-pass wakes a
+            // child the cursor already passed, so a staged delivery
+            // keeps the frame open for the next sweep's entry instead
+            // of consuming the nursery out from under a live child
             let waiting = frame.children.iter().any(|&child| {
                 self.pool[child.index()].nursery == Some(frame.nursery)
-                    && self.pool[child.index()].state == FiberState::WorldParked
+                    && (self.pool[child.index()].state == FiberState::WorldParked
+                        || self.sched.deliveries.contains_key(&child))
             });
             if !waiting {
                 return None;
@@ -5287,12 +5344,12 @@ impl Vm {
         &mut self,
         active: &Active,
         pc: CodePc,
-        wait: WorldWait,
+        kind: ParkKind,
     ) -> Result<DriveOutcome, (Trap, CodePc)> {
         self.park_current(active, CodePc(pc.0 + 1));
         let fiber = self.current;
         self.pool[fiber.index()].state = FiberState::WorldParked;
-        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }))
+        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, kind }))
     }
 
     /// Parks the running fiber on a world op at a `CALLT` site: the
@@ -5311,7 +5368,7 @@ impl Vm {
         active: &Active,
         pc: CodePc,
         boundary: usize,
-        wait: WorldWait,
+        kind: ParkKind,
     ) -> Result<DriveOutcome, (Trap, CodePc)> {
         let fp = self.callinfo[self.callinfo.len() - 1].fp;
         let meta = match self.stack[fp] {
@@ -5330,7 +5387,7 @@ impl Vm {
             self.park_current(active, CodePc(u32::MAX));
             let fiber = self.current;
             self.pool[fiber.index()].state = FiberState::WorldParked;
-            return Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }));
+            return Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, kind }));
         }
         let caller_at = self.callinfo.len() - 2;
         let caller_row = self.callinfo[caller_at].module;
@@ -5359,7 +5416,7 @@ impl Vm {
         self.park_current(&caller, meta.return_pc);
         let fiber = self.current;
         self.pool[fiber.index()].state = FiberState::WorldParked;
-        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }))
+        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, kind }))
     }
 
     /// Runs one completion step against a parked fiber's OWN store: the
@@ -6316,7 +6373,9 @@ impl Vm {
                 // the next ready fiber (FIFO), the reactor's wait
                 // bridging the gap when nothing is runnable
                 Ok(DriveOutcome::WorldPark(req)) => {
-                    self.register_wait(req.fiber, req.wait);
+                    if let ParkKind::World(wait) = req.kind {
+                        self.register_wait(req.fiber, wait);
+                    }
                     match self.executor_continue(FIBER_ROOT) {
                         Ok(ExecutorStep::Continue((a, p))) => {
                             active = a;
@@ -8816,6 +8875,16 @@ impl Vm {
                                             return Ok(DriveOutcome::Interlock(req))
                                         },
                                     }
+                                } else if let Some(channel) = nf.channel {
+                                    match self
+                                        .chan_switch(channel, &active, pc.0, fp, &f.layout)
+                                        .map_err(|e| (e, pc))?
+                                    {
+                                        ChanOutcome::Answered => {
+                                            pc.0 += 1;
+                                        },
+                                        ChanOutcome::Parked(event) => return Ok(event),
+                                    }
                                 } else {
                                     let mut heaps = Heaps::new(
                                         self.current,
@@ -8840,7 +8909,11 @@ impl Vm {
                                     // the instruction after the call
                                     let result = match result {
                                         NativeResult::Park(wait) => {
-                                            return self.park_world(&active, pc, wait)
+                                            return self.park_world(
+                                                &active,
+                                                pc,
+                                                ParkKind::World(wait),
+                                            )
                                         },
                                         other => other,
                                     };
@@ -8926,23 +8999,43 @@ impl Vm {
                                 if let Some(caller_area) = self.caller_arg_area() {
                                     check_native_overlay(caller_area, nf).map_err(|e| (e, pc))?;
                                 }
-                                let mut heaps = Heaps::new(
-                                    self.current,
-                                    &mut self.objects,
-                                    &mut self.pool,
-                                    &mut self.claims,
-                                    self.ctx_live,
-                                );
-                                invoke_native(
-                                    nf,
-                                    usize::from(nargs),
-                                    &mut self.stack,
-                                    &mut heaps,
-                                    &mut self.out,
-                                    &f.layout,
-                                    fp,
-                                )
-                                .map_err(|e| (e, pc))?
+                                if let Some(channel) = nf.channel {
+                                    // the channel step runs in place of
+                                    // the body; a park pops the frame
+                                    // exactly the net tail park would
+                                    match self
+                                        .chan_step(channel, fp, &f.layout)
+                                        .map_err(|e| (e, pc))?
+                                    {
+                                        ChanStep::Answer(result) => result,
+                                        ChanStep::Park => {
+                                            return self.park_world_tail(
+                                                &active,
+                                                pc,
+                                                boundary,
+                                                ParkKind::Chan,
+                                            )
+                                        },
+                                    }
+                                } else {
+                                    let mut heaps = Heaps::new(
+                                        self.current,
+                                        &mut self.objects,
+                                        &mut self.pool,
+                                        &mut self.claims,
+                                        self.ctx_live,
+                                    );
+                                    invoke_native(
+                                        nf,
+                                        usize::from(nargs),
+                                        &mut self.stack,
+                                        &mut heaps,
+                                        &mut self.out,
+                                        &f.layout,
+                                        fp,
+                                    )
+                                    .map_err(|e| (e, pc))?
+                                }
                             },
                             // A bound artifact's C symbol tail-calls in
                             // place (H5): the blocking call pins the fiber
@@ -8977,7 +9070,12 @@ impl Vm {
                         // answer delivering at the pending return
                         let result = match result {
                             NativeResult::Park(wait) => {
-                                return self.park_world_tail(&active, pc, boundary, wait)
+                                return self.park_world_tail(
+                                    &active,
+                                    pc,
+                                    boundary,
+                                    ParkKind::World(wait),
+                                )
                             },
                             other => other,
                         };
@@ -10127,6 +10225,162 @@ impl Vm {
             });
         }
         frames
+    }
+
+    /// One channel step (the 2026-11-21 shared-state ruling): the fast
+    /// paths run against the channel's own store through the router
+    /// (deposit, pop, the waiter queues), a full send or empty receive
+    /// parks the caller in the channel's waiter queue — the payload
+    /// word staged with no count move, the parked frame keeping its own
+    /// count exactly the net send wait's discipline — and a completed
+    /// hand-off wakes the parked peer through the scheduler's delivery
+    /// and run queue, the peer fiber itself the resumer (no reactor
+    /// interest, no deadline).
+    fn chan_step(
+        &mut self,
+        channel: ChannelNative,
+        fp: usize,
+        caller: &FrameLayout,
+    ) -> Result<ChanStep, Trap> {
+        match channel {
+            ChannelNative::New => {
+                let cap = control_i64(&self.stack, fp, caller, 0)?;
+                if cap < 1 {
+                    return Err(Trap::ChanCapacity { cap });
+                }
+                let cap = usize::try_from(cap).expect("a positive capacity fits usize");
+                let word = self.heaps().alloc_chan(cap);
+                Ok(ChanStep::Answer(NativeResult::Word(word)))
+            },
+            ChannelNative::Send => {
+                let Value::Ref(chan) = control_word(&self.stack, fp, caller, 0)? else {
+                    return Err(Trap::UnknownObject { obj: 0 });
+                };
+                let payload = control_word(&self.stack, fp, caller, 1)?;
+                let here = self.current;
+                if !self.heaps().chan_room(chan)? {
+                    self.heaps().chan_park_sender(chan, here, payload)?;
+                    return Ok(ChanStep::Park);
+                }
+                self.heaps().chan_deposit(chan, payload)?;
+                self.chan_release(chan)?;
+                Ok(ChanStep::Answer(NativeResult::Word(Value::I64(0))))
+            },
+            ChannelNative::Recv => {
+                let Value::Ref(chan) = control_word(&self.stack, fp, caller, 0)? else {
+                    return Err(Trap::UnknownObject { obj: 0 });
+                };
+                let here = self.current;
+                let Some(elem) = self.heaps().chan_pop(chan)? else {
+                    self.heaps().chan_park_receiver(chan, here)?;
+                    return Ok(ChanStep::Park);
+                };
+                if let Value::Ref(word) = elem {
+                    self.heaps().adopt_claim(here, word);
+                }
+                self.chan_refill(chan)?;
+                Ok(ChanStep::Answer(NativeResult::Word(elem)))
+            },
+        }
+    }
+
+    /// The channel switch behind a `CALL` site: the step runs, the
+    /// answer overlays argument slot 0, and a park ends the drive with
+    /// the world-park event (the resume point the instruction after the
+    /// call).
+    fn chan_switch(
+        &mut self,
+        channel: ChannelNative,
+        active: &Active,
+        pc: u32,
+        fp: usize,
+        caller: &FrameLayout,
+    ) -> Result<ChanOutcome, Trap> {
+        match self.chan_step(channel, fp, caller)? {
+            ChanStep::Answer(result) => {
+                overlay_native(result, &mut self.stack, caller, fp)?;
+                Ok(ChanOutcome::Answered)
+            },
+            ChanStep::Park => match self
+                .park_world(active, CodePc(pc), ParkKind::Chan)
+                .map_err(|(trap, _)| trap)?
+            {
+                event @ DriveOutcome::WorldPark(_) => Ok(ChanOutcome::Parked(event)),
+                _ => unreachable!("a park answers the park event"),
+            },
+        }
+    }
+
+    /// Hands one buffered payload word to the head live receiver after a
+    /// deposit: the buffer's edge count becomes the receiver's claim
+    /// (the ledger transfer, no count mutation), the delivery staged and
+    /// the receiver queued ready. Stale waiters — a nursery cancel cut
+    /// them, a release door took them — drop; their entry rode no count.
+    fn chan_release(&mut self, chan: RefId) -> Result<(), Trap> {
+        loop {
+            let Some(receiver) = self.heaps().chan_take_receiver(chan)? else {
+                return Ok(());
+            };
+            if self
+                .pool
+                .get(receiver.index())
+                .is_none_or(|f| f.state != FiberState::WorldParked)
+            {
+                continue;
+            }
+            let elem = self.heaps().chan_pop(chan)?;
+            let Some(elem) = elem else {
+                // a woken receiver parks only over an empty buffer and
+                // the deposit preceded, so this names hand-assembled
+                // waiter tangle; the receiver goes back empty-handed
+                self.heaps().chan_park_receiver(chan, receiver)?;
+                return Ok(());
+            };
+            if let Value::Ref(word) = elem {
+                self.heaps().adopt_claim(receiver, word);
+            }
+            self.wake_chan_waiter(receiver, NativeResult::Word(elem));
+            return Ok(());
+        }
+    }
+
+    /// Moves one parked sender's staged payload into the slot a receive
+    /// freed: the deposit takes the buffer's edge count on the payload's
+    /// own heap (the C4 funnel), the sender woken with the unit word.
+    /// Stale senders drop — the payload's count was the parked frame's
+    /// own, released by whoever cut it.
+    fn chan_refill(&mut self, chan: RefId) -> Result<(), Trap> {
+        loop {
+            let Some(sender) = self.heaps().chan_take_sender(chan)? else {
+                return Ok(());
+            };
+            if self
+                .pool
+                .get(sender.fiber.index())
+                .is_none_or(|f| f.state != FiberState::WorldParked)
+            {
+                continue;
+            }
+            self.heaps().chan_deposit(chan, sender.payload)?;
+            self.wake_chan_waiter(sender.fiber, NativeResult::Word(Value::I64(0)));
+            return Ok(());
+        }
+    }
+
+    /// Wakes one channel-parked fiber with `result`: the delivery and
+    /// run-queue push the net wake performs, minus the wait table (a
+    /// channel waiter registers in the channel's own data, never the
+    /// scheduler's — nothing to deregister, no deadline to cancel).
+    fn wake_chan_waiter(&mut self, fiber: FiberId, result: NativeResult) {
+        if self
+            .pool
+            .get(fiber.index())
+            .is_some_and(|f| f.state == FiberState::WorldParked)
+        {
+            self.pool[fiber.index()].state = FiberState::Suspended;
+            self.sched.deliveries.insert(fiber, result);
+            self.sched.push_ready(fiber);
+        }
     }
 }
 

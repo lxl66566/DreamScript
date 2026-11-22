@@ -365,17 +365,53 @@ impl<'a> FnLower<'a, '_, '_> {
                 "the head names no type; indexing is outside the lowered surface",
             ));
         };
-        let is_list = self
+        let one_param_fieldless = self
             .analyzed
             .decls
             .structs
             .get(&def)
             .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty());
-        if !is_list {
+        // the channel's construction (the 2026-11-21 shared-state
+        // ruling): the one type application carrying a value argument —
+        // the bound staged to `chan_new`, whose Ref answer the frame owns
+        if one_param_fieldless && head.name.as_str() == "chan" {
+            let [cap] = args else {
+                return Err(mismatch("the channel constructor's bound"));
+            };
+            // the checker contained the bound to int, so the value is
+            // the one i64 word its place names
+            let bound = self.value(&cap.value)?.place.base;
+            let native = crate::native::lookup("chan_new")
+                .expect("the channel surface is covered by the native table");
+            self.overlay_site(&[SlotType::I64], &[SlotType::Ref]);
+            self.rc.native_open();
+            self.emit(Op::Mov {
+                dst: Slot::overlay(0),
+                src: Slot::body(bound),
+            });
+            self.rc.staged_native(bound, false);
+            let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: 1,
+            });
+            self.rc.native_done(&mut self.code);
+            let chan = self.temp_word(SlotType::Ref)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(chan),
+                src: Slot::overlay(0),
+            });
+            self.rc.produced(chan);
+            return Ok(Place {
+                base: chan,
+                shape: PlaceShape::Word(SlotType::Ref),
+            });
+        }
+        if !one_param_fieldless {
             return Err(LowerError::unsupported(
                 span,
                 "a type-application constructor",
-                "only the list type constructs by type application [B3]",
+                "only the collection types construct by type application [B3]",
             ));
         }
         if !args.is_empty() {
@@ -1131,6 +1167,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // whether the call is a `map_set` whose key argument (position 1)
         // must stage exactly one word
         let map_set_key = matches!(target, Callee::Builtin(native) if native.name == "map_set");
+        // whether the call is a `chan_send` whose payload argument
+        // (position 1) must stage exactly one word — the channel's
+        // ledger hand-off shape
+        let chan_send_payload =
+            matches!(target, Callee::Builtin(native) if native.name == "chan_send");
         // stage: evaluate every argument to a place, then move its words
         // into the overlay area (argument evaluation may itself call)
         let mut staged: Vec<SlotType> = Vec::new();
@@ -1284,6 +1325,22 @@ impl<'a> FnLower<'a, '_, '_> {
                     };
                 }
                 self.guard_list_element(&arg_val, arg.span(), what)?;
+            }
+            // a chan_send payload stages exactly one word: the channel's
+            // hand-off moves one counted word through the claim ledger,
+            // so a wider payload type has no channel yet (the collection
+            // span seam owns that round)
+            if chan_send_payload && index == 1 {
+                let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
+                if addrs.len() != 1 {
+                    return Err(LowerError::unsupported(
+                        arg.span(),
+                        "a chan_send payload",
+                        "a channel payload lowers as one machine word (the hand-off moves a \
+                         single counted word through the claim ledger); multi-word payloads \
+                         arrive with the collection span seam",
+                    ));
+                }
             }
             // a map_set's key stages exactly one word: the probe
             // resolution and the row index hash whole words, so a wider
@@ -2564,6 +2621,8 @@ impl<'a> FnLower<'a, '_, '_> {
             ("list", "concat") => ("list_concat", false),
             ("map", "get") => ("map_get", false),
             ("map", "set") => ("map_set", true),
+            ("chan", "send") => ("chan_send", false),
+            ("chan", "recv") => ("chan_recv", false),
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;
@@ -3639,7 +3698,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 NativeShape::Fallible { .. } => Err(mismatch("a fallible native result")),
                 NativeShape::Checked => Err(mismatch("a checked-read native result")),
                 NativeShape::TotalByInstance => Err(mismatch("an instance-keyed native result")),
-                NativeShape::TotalByResultType => Err(mismatch("a result-keyed native result")),
+                // the call's own checked result type's words (`chan_recv`
+                // answering the payload type's one word)
+                NativeShape::TotalByResultType => self.shapes.words(ty),
                 NativeShape::TaglessTotal => Err(mismatch("a tag-less-total native result")),
             },
             Callee::Generic(generic) => match generic.shape {

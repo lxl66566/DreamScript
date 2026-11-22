@@ -621,7 +621,9 @@ impl Vm {
                 // installs no reactor by default, so this arm serves a
                 // reactor-installing embedder alone)
                 Ok(DriveOutcome::WorldPark(req)) => {
-                    self.register_wait(req.fiber, req.wait);
+                    if let crate::vm::ParkKind::World(wait) = req.kind {
+                        self.register_wait(req.fiber, wait);
+                    }
                     match self.executor_continue(FIBER_ROOT) {
                         Ok(ExecutorStep::Continue((a, p))) => {
                             active = a;
